@@ -360,13 +360,9 @@ impl ScopeApp {
             });
     }
 
-    /// Label for the symbol scope, matching the modulation in use.
+    /// Label for the symbol scope, as the modem itself reports it.
     fn symbol_label(&self) -> String {
-        if self.frame.constellation.is_empty() {
-            format!("{}FSK", self.frame.tones)
-        } else {
-            format!("{}PSK", self.frame.tones)
-        }
+        self.frame.symbol_label.to_string()
     }
 }
 

@@ -91,9 +91,13 @@ pub struct Frame {
     /// from zero is the margin the slicer had. This is the FSK counterpart of a
     /// constellation and is what the symbol scope plots.
     pub symbols: Vec<f32>,
-    /// How many tones the modulation uses, which sets how many arms the symbol
-    /// scope draws: 2 for Bell 103, 4 for a 4FSK mode.
+    /// How many tones or points the modulation uses, which sets how many arms
+    /// the symbol scope draws: 2 for Bell 103, 16 for V.22bis.
     pub tones: usize,
+    /// What to call the modulation on the symbol scope, such as "2FSK" or
+    /// "16QAM". The scope cannot infer it: a constellation could be phase or
+    /// quadrature amplitude modulation.
+    pub symbol_label: &'static str,
     /// Magnitude spectrum in dBFS, DC to Nyquist.
     pub spectrum_db: Vec<f32>,
     pub hz_per_bin: f64,
@@ -123,6 +127,7 @@ impl Frame {
             constellation: Vec::with_capacity(256),
             symbols: Vec::with_capacity(256),
             tones: 2,
+            symbol_label: "-",
             spectrum_db: vec![-120.0; spectrum_bins],
             hz_per_bin: sample_rate / (spectrum_bins as f64 * 2.0),
             rx_level_db: -120.0,

@@ -17,6 +17,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use datapump::Bell103Rx;
+use datapump::v22bis::{Channel, Receiver as V22bisRx};
 use line::AudioSink;
 use dsp::Spectrum;
 use telemetry::{CallState, Direction, Leds, Publisher};
@@ -68,13 +69,13 @@ impl Standard {
 
     /// True only where a receiver actually exists.
     pub fn has_receiver(self) -> bool {
-        matches!(self, Self::Bell103)
+        matches!(self, Self::Bell103 | Self::V22bis)
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Bell103 => "Bell 103",
-            Self::V22bis => "V.22bis (no receiver)",
+            Self::V22bis => "V.22bis",
             Self::V32bis => "V.32bis (no receiver)",
             Self::V34 => "V.34 (no receiver)",
             Self::V90 => "V.90 (no receiver)",
@@ -112,6 +113,125 @@ impl Default for Control {
             restart: AtomicBool::new(false),
             quit: AtomicBool::new(false),
             speed_pct: AtomicU32::new(100),
+        }
+    }
+}
+
+/// The pair of receivers for whichever modulation a capture holds.
+///
+/// A two-wire tap carries both directions at once, so each modulation needs one
+/// receiver per direction. Which band belongs to which end differs: Bell 103
+/// splits by tone pair and V.22bis by carrier, with the answering modem always
+/// on the higher of the two.
+enum Demod {
+    // Both boxed. A receiver carries filter state by the hundred taps, and the
+    // two modulations differ enough in size that an unboxed enum would be as
+    // large as its biggest arm whichever one is in use.
+    Bell103 { host: Box<Bell103Rx>, caller: Box<Bell103Rx> },
+    V22bis { host: Box<V22bisRx>, caller: Box<V22bisRx> },
+}
+
+impl Demod {
+    fn new(standard: Standard, fs: f64) -> Option<Self> {
+        match standard {
+            Standard::Bell103 => Some(Self::Bell103 {
+                host: Box::new(Bell103Rx::with_tones(2025.0, 2225.0, fs)),
+                caller: Box::new(Bell103Rx::with_tones(1070.0, 1270.0, fs)),
+            }),
+            Standard::V22bis => Some(Self::V22bis {
+                // The answering modem transmits the high channel, so listening
+                // to it means presenting as the calling modem.
+                host: Box::new(V22bisRx::new(Channel::Calling, fs)),
+                caller: Box::new(V22bisRx::new(Channel::Answering, fs)),
+            }),
+            _ => None,
+        }
+    }
+
+    fn feed(&mut self, x: f64, from_host: &mut Vec<u8>, from_caller: &mut Vec<u8>) {
+        match self {
+            Self::Bell103 { host, caller } => {
+                if let Some(b) = host.feed(x) {
+                    from_host.push(b);
+                }
+                if let Some(b) = caller.feed(x) {
+                    from_caller.push(b);
+                }
+            }
+            Self::V22bis { host, caller } => {
+                host.feed(x);
+                caller.feed(x);
+                from_host.extend(host.take_bytes());
+                from_caller.extend(caller.take_bytes());
+            }
+        }
+    }
+
+    /// One slicer margin per recovered bit, for the frequency-shift scope.
+    fn take_symbol(&mut self) -> Option<f32> {
+        match self {
+            Self::Bell103 { host, .. } => host.take_symbol().map(|v| v as f32),
+            Self::V22bis { .. } => None,
+        }
+    }
+
+    /// The latest constellation point, for the quadrature scope.
+    fn constellation(&self) -> Option<(f32, f32)> {
+        match self {
+            Self::Bell103 { .. } => None,
+            Self::V22bis { host, .. } => {
+                let (i, q) = host.constellation_point();
+                Some((i as f32, q as f32))
+            }
+        }
+    }
+
+    /// Trace for the baseband scope.
+    fn baseband(&self) -> f32 {
+        match self {
+            Self::Bell103 { host, .. } => host.level() as f32,
+            Self::V22bis { host, .. } => host.constellation_point().0 as f32,
+        }
+    }
+
+    /// Carrier present, as (host, caller).
+    fn carriers(&self) -> (bool, bool) {
+        match self {
+            Self::Bell103 { host, caller } => (host.carrier(), caller.carrier()),
+            Self::V22bis { host, caller } => {
+                // No explicit carrier detector yet, so a settled equaliser
+                // stands in as evidence of a signal worth believing.
+                (!host.equalizer_blind(), !caller.equalizer_blind())
+            }
+        }
+    }
+
+    fn level(&self) -> f64 {
+        match self {
+            Self::Bell103 { host, caller } => host.amplitude().max(caller.amplitude()),
+            Self::V22bis { host, caller } => host.level().max(caller.level()),
+        }
+    }
+
+    /// Mean distance from decisions, where the receiver can measure it.
+    fn residual(&self) -> Option<f32> {
+        match self {
+            Self::Bell103 { .. } => None,
+            Self::V22bis { host, .. } => Some(host.residual_error() as f32),
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Bell103 { .. } => "2FSK",
+            Self::V22bis { .. } => "16QAM",
+        }
+    }
+
+    fn tones(&self) -> usize {
+        match self {
+            Self::Bell103 { .. } => 2,
+            Self::V22bis { .. } => 16,
         }
     }
 }
@@ -225,8 +345,7 @@ fn run(
 
     // The originating modem hears the answering modem, and vice versa. Running
     // both gives each direction of a 2-wire capture.
-    let mut host = Bell103Rx::with_tones(2025.0, 2225.0, fs); // answer band
-    let mut caller = Bell103Rx::with_tones(1070.0, 1270.0, fs); // originate band
+    let mut demod = Demod::new(standard, fs);
     let mut host_line = LineAssembler::new(Direction::FromLine);
     let mut caller_line = LineAssembler::new(Direction::ToLine);
 
@@ -235,6 +354,9 @@ fn run(
     let mut baseband = Ring::new(SCOPE_LEN);
     let mut bins = vec![0.0f64; SPECTRUM_BINS];
     let mut symbols: VecDeque<f32> = VecDeque::with_capacity(SYMBOL_HISTORY);
+    let mut points: VecDeque<(f32, f32)> = VecDeque::with_capacity(SYMBOL_HISTORY);
+    let mut host_bytes: Vec<u8> = Vec::with_capacity(64);
+    let mut caller_bytes: Vec<u8> = Vec::with_capacity(64);
     // Batched once per tick rather than per sample, to keep the monitor off the
     // hot loop.
     let mut monitor_block: Vec<f32> = Vec::with_capacity(4096);
@@ -259,8 +381,8 @@ fn run(
             tx_bytes = 0;
             connected_since = None;
             symbols.clear();
-            host = Bell103Rx::with_tones(2025.0, 2225.0, fs);
-            caller = Bell103Rx::with_tones(1070.0, 1270.0, fs);
+            points.clear();
+            demod = Demod::new(standard, fs);
             tx.log(Direction::Note, "restarted");
             clock = Instant::now();
             carry = 0.0;
@@ -293,25 +415,37 @@ fn run(
             pos += 1;
 
             // Only run the receiver where one exists for this modulation.
-            if decoding {
-                if let Some(b) = host.feed(x) {
+            if let Some(d) = demod.as_mut() {
+                host_bytes.clear();
+                caller_bytes.clear();
+                d.feed(x, &mut host_bytes, &mut caller_bytes);
+                for &b in &host_bytes {
                     rx_bytes += 1;
                     host_line.push(b, &tx);
                     rx_block.push(b);
                 }
-                // One entry per recovered bit, taken at the bit centre: the
-                // slicer margin the symbol scope plots.
-                if let Some(sym) = host.take_symbol() {
-                    if symbols.len() == SYMBOL_HISTORY {
-                        symbols.pop_front();
-                    }
-                    symbols.push_back(sym as f32);
-                }
-                if let Some(b) = caller.feed(x) {
+                for &b in &caller_bytes {
                     tx_bytes += 1;
                     caller_line.push(b, &tx);
                 }
-                baseband.push(host.level() as f32);
+                // One entry per recovered bit, for the frequency-shift scope.
+                if let Some(sym) = d.take_symbol() {
+                    if symbols.len() == SYMBOL_HISTORY {
+                        symbols.pop_front();
+                    }
+                    symbols.push_back(sym);
+                }
+                // One point per symbol, for the quadrature scope. Only taken
+                // when it changes, so a motionless constellation is not filled
+                // with copies of a single point.
+                if let Some(p) = d.constellation()
+                    && points.back() != Some(&p) {
+                        if points.len() == SYMBOL_HISTORY {
+                            points.pop_front();
+                        }
+                        points.push_back(p);
+                    }
+                baseband.push(d.baseband());
             }
 
             spectrum.push(x);
@@ -331,7 +465,9 @@ fn run(
             }
         }
 
-        let carrier = decoding && (host.carrier() || caller.carrier());
+        let (host_carrier, caller_carrier) =
+            demod.as_ref().map(Demod::carriers).unwrap_or((false, false));
+        let carrier = host_carrier || caller_carrier;
         if carrier && connected_since.is_none() {
             connected_since = Some(Instant::now());
         }
@@ -343,8 +479,8 @@ fn run(
             }
             // Without a receiver there is no band filter to take a level from,
             // so measure the raw line instead.
-            let level = if decoding {
-                host.amplitude().max(caller.amplitude())
+            let level = if let Some(d) = demod.as_ref() {
+                d.level()
             } else {
                 let n = waveform.data.len();
                 (waveform.data.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>()
@@ -377,14 +513,22 @@ fn run(
                 f.bit_rate = if carrier { standard.bit_rate() } else { None };
                 f.rx_bytes = rx_bytes;
                 f.tx_bytes = tx_bytes;
-                f.tones = 2; // Bell 103 is binary FSK: one axis, two arms.
+                f.tones = demod.as_ref().map(Demod::tones).unwrap_or(2);
+                f.symbol_label = demod.as_ref().map(Demod::label).unwrap_or("-");
+                f.snr_db = demod.as_ref().and_then(Demod::residual).map(|e| {
+                    // Report the decision margin as a decibel figure, so a
+                    // tighter constellation reads as a larger number.
+                    -20.0 * (e.max(1e-3)).log10()
+                });
                 f.symbols.clear();
                 f.symbols.extend(symbols.iter().copied());
+                f.constellation.clear();
+                f.constellation.extend(points.iter().copied());
                 f.leds = Leds {
                     mr: true,
                     tr: true,
-                    sd: decoding && caller.carrier(),
-                    rd: decoding && host.carrier(),
+                    sd: caller_carrier,
+                    rd: host_carrier,
                     cd: carrier,
                     oh: pos < samples.len(),
                     aa: false,
@@ -427,10 +571,10 @@ mod tests {
     }
 
     #[test]
-    fn only_bell_103_claims_a_receiver() {
+    fn only_implemented_modulations_claim_a_receiver() {
         assert!(Standard::Bell103.has_receiver());
+        assert!(Standard::V22bis.has_receiver());
         for s in [
-            Standard::V22bis,
             Standard::V32bis,
             Standard::V34,
             Standard::V90,
@@ -443,13 +587,31 @@ mod tests {
 
     #[test]
     fn labels_say_plainly_when_there_is_no_receiver() {
-        // The display must not imply it is demodulating something it cannot.
+        // The display must not imply it is demodulating something it cannot,
+        // nor disclaim one it can.
         assert_eq!(Standard::Bell103.label(), "Bell 103");
-        for s in [Standard::V22bis, Standard::V32bis, Standard::V34] {
+        assert_eq!(Standard::V22bis.label(), "V.22bis");
+        for s in [Standard::V32bis, Standard::V34, Standard::V90, Standard::V92] {
             assert!(
                 s.label().contains("no receiver"),
                 "{s:?} label {:?} does not say so",
                 s.label()
+            );
+        }
+        // Every label that disclaims a receiver must match a standard that
+        // really has none, and the other way round.
+        for s in [
+            Standard::Bell103,
+            Standard::V22bis,
+            Standard::V32bis,
+            Standard::V34,
+            Standard::V90,
+            Standard::V92,
+        ] {
+            assert_eq!(
+                s.has_receiver(),
+                !s.label().contains("no receiver"),
+                "{s:?} label and capability disagree"
             );
         }
     }
