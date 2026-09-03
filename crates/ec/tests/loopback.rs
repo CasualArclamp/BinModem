@@ -268,3 +268,157 @@ fn addressing_distinguishes_commands_from_responses() {
     assert_eq!(c.lapm.state(), State::Connected);
     assert_eq!(d.lapm.state(), State::Connected);
 }
+
+// -- the complete stack ------------------------------------------------------
+
+/// One end running compression on top of error control, as a real modem does.
+struct FullStack {
+    end: End,
+    encoder: ec::v42bis::Encoder,
+    decoder: ec::v42bis::Decoder,
+    plain: Vec<u8>,
+}
+
+impl FullStack {
+    fn new(role: Role, params: ec::v42bis::Params) -> Self {
+        Self {
+            end: End::new(role, Params::default()),
+            encoder: ec::v42bis::Encoder::new(params),
+            decoder: ec::v42bis::Decoder::new(params),
+            plain: Vec::new(),
+        }
+    }
+
+    /// Compress, then hand the result to LAPM.
+    fn send(&mut self, data: &[u8]) {
+        let mut compressed = Vec::new();
+        self.encoder.encode(data, &mut compressed);
+        self.encoder.flush(&mut compressed);
+        self.end.lapm.send_data(&compressed);
+    }
+
+    /// Decompress whatever error control has delivered.
+    fn collect(&mut self) {
+        if self.end.received.is_empty() {
+            return;
+        }
+        let wire = std::mem::take(&mut self.end.received);
+        self.decoder.decode(&wire, &mut self.plain).expect("decompression failed");
+    }
+}
+
+fn settle_stack(a: &mut FullStack, b: &mut FullStack) {
+    settle(&mut a.end, &mut b.end);
+    a.collect();
+    b.collect();
+}
+
+#[test]
+fn compression_over_error_control_round_trips() {
+    let params = ec::v42bis::Params::default();
+    let mut a = FullStack::new(Role::Originator, params);
+    let mut b = FullStack::new(Role::Answerer, params);
+    a.end.lapm.connect();
+    settle_stack(&mut a, &mut b);
+
+    let text: Vec<u8> = b"Welcome to the board. Please log in.\r\n"
+        .iter()
+        .copied()
+        .cycle()
+        .take(20_000)
+        .collect();
+    a.send(&text);
+    settle_stack(&mut a, &mut b);
+    assert_eq!(b.plain, text);
+}
+
+#[test]
+fn compression_survives_a_damaged_link() {
+    // The whole point of the two layers together: compression cannot tolerate a
+    // single lost octet, so error control has to make the link clean first.
+    let params = ec::v42bis::Params::default();
+    let mut a = FullStack::new(Role::Originator, params);
+    let mut b = FullStack::new(Role::Answerer, params);
+    a.end.lapm.connect();
+    settle_stack(&mut a, &mut b);
+
+    let text: Vec<u8> = b"the quick brown fox jumps over the lazy dog "
+        .iter()
+        .copied()
+        .cycle()
+        .take(30_000)
+        .collect();
+    a.send(&text);
+
+    settle_with(&mut a.end, &mut b.end, |bits, burst| {
+        let mut out = bits.to_vec();
+        if burst % 4 == 2 && out.len() > 128 {
+            let i = out.len() / 2;
+            out[i] = !out[i];
+        }
+        out
+    });
+    a.collect();
+    b.collect();
+    assert_eq!(b.plain, text, "a damaged link corrupted the compressed stream");
+}
+
+#[test]
+fn the_link_carries_less_than_it_delivers() {
+    // Compression should mean fewer octets on the wire than the DTE handed over.
+    let params = ec::v42bis::Params::default();
+    let mut a = FullStack::new(Role::Originator, params);
+    let mut b = FullStack::new(Role::Answerer, params);
+    a.end.lapm.connect();
+    settle_stack(&mut a, &mut b);
+
+    let text: Vec<u8> = b"MAIN MENU\r\n[1] Messages\r\n[2] Files\r\n[3] Doors\r\n"
+        .iter()
+        .copied()
+        .cycle()
+        .take(40_000)
+        .collect();
+
+    let mut compressed = Vec::new();
+    let mut encoder = ec::v42bis::Encoder::new(params);
+    encoder.encode(&text, &mut compressed);
+    encoder.flush(&mut compressed);
+
+    a.send(&text);
+    settle_stack(&mut a, &mut b);
+    assert_eq!(b.plain, text);
+    assert!(
+        compressed.len() < text.len() / 4,
+        "{} bytes of menu text compressed to {}",
+        text.len(),
+        compressed.len()
+    );
+}
+
+#[test]
+fn negotiation_settles_the_parameters_both_ends_use() {
+    use ec::xid::{Compression, Xid};
+
+    // One end wants a big dictionary, the other only the minimum.
+    let initiator = Xid {
+        codewords: Some(4096),
+        max_string: Some(32),
+        compression: Some(Compression::Both),
+        ..Xid::proposal(Compression::Both)
+    };
+    let responder = Xid::proposal(Compression::Both);
+    let agreed = initiator.resolve(&responder);
+    let params = agreed.v42bis_params().expect("compression should be on");
+
+    // Both ends must build the same dictionary from the settled values.
+    let mut a = FullStack::new(Role::Originator, params);
+    let mut b = FullStack::new(Role::Answerer, params);
+    a.end.lapm.connect();
+    settle_stack(&mut a, &mut b);
+
+    let text: Vec<u8> = b"negotiated parameters ".iter().copied().cycle().take(12_000).collect();
+    a.send(&text);
+    settle_stack(&mut a, &mut b);
+    assert_eq!(b.plain, text);
+    assert_eq!(params.n2, ec::v42bis::DEFAULT_N2, "the lower value should win");
+}

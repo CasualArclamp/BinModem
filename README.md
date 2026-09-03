@@ -20,9 +20,9 @@ decodes a real captured call, a V.250 AT command layer, and a live scope.
 | `telemetry` - frame publishing, transcript log, raw line-data channel | working |
 | `terminal` - ANSI/CP437 screen emulator for BBS use | working |
 | `gui` - waterfall, spectrum, symbol scope, faceplate, audio monitor, console | working |
-| `ec` - V.42 HDLC framing, LAPM, V.42bis compression | partial |
+| `ec` - V.42 HDLC, LAPM, V.42bis compression, XID negotiation | partial |
 | `line` - WAV reader, audio output | working |
-| XID negotiation, V.42 detection phase, live audio input, DTE binding, V.22bis and above | not started |
+| V.42 detection phase, live audio input, DTE binding, V.22bis and above | not started |
 
 ## Running it
 
