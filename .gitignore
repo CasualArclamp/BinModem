@@ -1,0 +1,7 @@
+target/
+*.wav
+!tests/vectors/*.wav
+captures/
+.venv/
+__pycache__/
+docs/specs/*.pdf
