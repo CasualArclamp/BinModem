@@ -24,16 +24,28 @@ decodes a real captured call, a V.250 AT command layer, and a live scope.
 | `line` - WAV reader, audio output | working |
 | LAPM state machine, V.42bis, live audio input, DTE binding, V.22bis and above | not started |
 
-## Scope
+## Running it
 
-```bash
-cargo run -p gui
+Double-click `run.bat`, or from a shell:
+
+```powershell
+.un.ps1
 ```
 
-Replays a golden vector in real time through the receiver: waterfall, spectrum,
-ARDOP-style symbol scope, LED faceplate and a decoded transcript of both
-directions. "Listen" plays the line audio out of a chosen output device. Pass a
-path to run a different capture.
+It offers a menu of the captures, builds, and launches. `-Vector v34-33600`
+picks one directly, `-List` shows what is available, `-Dev` builds the debug
+profile. `run.sh` does the same from Git Bash or Linux. Failing that,
+`cargo run -p gui --release -- tests/vectors/bell103-300.wav` works directly.
+
+Only the Bell 103 capture decodes to text so far; the rest still show their
+handshakes on the waterfall, which is worth watching in its own right - the
+V.34 probing tones are clearly visible around six seconds in.
+
+## Scope
+
+The window carries a waterfall, spectrum, ARDOP-style symbol scope, LED
+faceplate and a decoded transcript of both directions of the 2-wire tap.
+"Listen" plays the line audio out of a chosen output device.
 
 The lower panel carries a BBS terminal wired to the AT interpreter. Click it and
 type: `AT` answers `OK`, `ATD` any number replays the capture and renders the
