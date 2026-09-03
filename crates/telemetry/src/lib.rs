@@ -177,6 +177,15 @@ pub struct LogEntry {
     pub at: Duration,
     pub direction: Direction,
     pub text: String,
+    /// Monotonic identity, so a reader can ask for what it has not seen without
+    /// counting entries. Counting breaks once the bounded log starts evicting.
+    pub seq: u64,
+    /// False while characters may still be appended to this line.
+    ///
+    /// A 300 bps line delivers about thirty characters a second, and waiting
+    /// for a terminator before showing anything makes the display feel dead.
+    /// An incomplete entry is shown as it grows.
+    pub complete: bool,
 }
 
 #[derive(Debug)]
@@ -191,6 +200,7 @@ struct Shared {
     rx_data: Mutex<VecDeque<u8>>,
     rx_capacity: usize,
     seq: AtomicU64,
+    log_seq: AtomicU64,
     /// Counts frames dropped because the reader held the lock.
     dropped: AtomicU64,
     started: Instant,
@@ -219,6 +229,7 @@ pub fn channel(scope_len: usize, spectrum_bins: usize, sample_rate: f64) -> (Pub
         // output, small enough that a runaway sender cannot grow without bound.
         rx_capacity: 64 * 1024,
         seq: AtomicU64::new(0),
+        log_seq: AtomicU64::new(0),
         dropped: AtomicU64::new(0),
         started: Instant::now(),
     });
@@ -247,13 +258,50 @@ impl Publisher {
         }
     }
 
-    /// Append a transcript line. Called from the control thread, not the audio
-    /// callback, so blocking briefly here is acceptable.
+    /// Append a complete transcript line. Called from the control thread, not
+    /// the audio callback, so blocking briefly here is acceptable.
     pub fn log(&self, direction: Direction, text: impl Into<String>) {
+        self.push_entry(direction, text.into(), true);
+    }
+
+    /// Append characters to the line in progress, starting one if there is none.
+    ///
+    /// Lets a reader watch a line build up rather than waiting for its
+    /// terminator. A new line is started when the previous entry came from a
+    /// different direction, so the two sides of a conversation stay separate.
+    pub fn log_partial(&self, direction: Direction, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        if let Ok(mut log) = self.shared.log.lock()
+            && let Some(last) = log.back_mut()
+            && !last.complete
+            && last.direction == direction
+        {
+            last.text.push_str(text);
+            return;
+        }
+        self.push_entry(direction, text.to_string(), false);
+    }
+
+    /// Mark the line in progress finished, so the next character starts a new one.
+    pub fn log_end(&self, direction: Direction) {
+        if let Ok(mut log) = self.shared.log.lock()
+            && let Some(last) = log.back_mut()
+            && !last.complete
+            && last.direction == direction
+        {
+            last.complete = true;
+        }
+    }
+
+    fn push_entry(&self, direction: Direction, text: String, complete: bool) {
         let entry = LogEntry {
             at: self.shared.started.elapsed(),
             direction,
-            text: text.into(),
+            text,
+            seq: self.shared.log_seq.fetch_add(1, Ordering::Relaxed) + 1,
+            complete,
         };
         if let Ok(mut log) = self.shared.log.lock() {
             if log.len() == self.shared.log_capacity {
@@ -314,12 +362,15 @@ impl Subscriber {
             .unwrap_or_default()
     }
 
-    /// Transcript entries added since `after` entries were already seen.
-    pub fn log_since(&self, after: usize) -> Vec<LogEntry> {
+    /// Transcript entries newer than `seq`.
+    ///
+    /// Identified by sequence rather than by count, because the log is bounded
+    /// and a count becomes wrong as soon as eviction starts.
+    pub fn log_after(&self, seq: u64) -> Vec<LogEntry> {
         self.shared
             .log
             .lock()
-            .map(|l| l.iter().skip(after).cloned().collect())
+            .map(|l| l.iter().filter(|e| e.seq > seq).cloned().collect())
             .unwrap_or_default()
     }
 
@@ -438,14 +489,57 @@ mod tests {
     }
 
     #[test]
-    fn log_since_returns_only_new_entries() {
+    fn log_after_returns_only_newer_entries() {
         let (tx, rx) = channel(8, 4, 8000.0);
         tx.log(Direction::Note, "a");
-        let seen = rx.log_len();
+        let seen = rx.log().last().unwrap().seq;
         tx.log(Direction::Note, "b");
-        let new = rx.log_since(seen);
+        let new = rx.log_after(seen);
         assert_eq!(new.len(), 1);
         assert_eq!(new[0].text, "b");
+    }
+
+    #[test]
+    fn a_partial_line_grows_in_place() {
+        let (tx, rx) = channel(8, 4, 8000.0);
+        for c in ["W", "e", "l", "c", "o", "m", "e"] {
+            tx.log_partial(Direction::FromLine, c);
+        }
+        let log = rx.log();
+        assert_eq!(log.len(), 1, "each character should not make its own entry");
+        assert_eq!(log[0].text, "Welcome");
+        assert!(!log[0].complete, "still growing");
+
+        tx.log_end(Direction::FromLine);
+        assert!(rx.log()[0].complete);
+        tx.log_partial(Direction::FromLine, "next");
+        assert_eq!(rx.log().len(), 2, "a finished line should not be extended");
+    }
+
+    #[test]
+    fn the_other_direction_starts_its_own_line() {
+        let (tx, rx) = channel(8, 4, 8000.0);
+        tx.log_partial(Direction::FromLine, "host");
+        tx.log_partial(Direction::ToLine, "user");
+        tx.log_partial(Direction::FromLine, "more");
+        let log = rx.log();
+        assert_eq!(log.len(), 3, "interleaved directions must not merge");
+        assert_eq!(log[0].text, "host");
+        assert_eq!(log[2].text, "more");
+    }
+
+    #[test]
+    fn sequence_numbers_survive_eviction() {
+        // The log is bounded, so counting entries goes wrong once it wraps;
+        // sequence numbers do not.
+        let (tx, rx) = channel(8, 4, 8000.0);
+        for i in 0..2500 {
+            tx.log(Direction::Note, format!("{i}"));
+        }
+        let log = rx.log();
+        assert_eq!(log.len(), 2000);
+        assert_eq!(log.last().unwrap().seq, 2500);
+        assert_eq!(rx.log_after(2499).len(), 1);
     }
 
     #[test]

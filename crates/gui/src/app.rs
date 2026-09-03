@@ -29,6 +29,9 @@ pub struct ScopeApp {
     waterfall: Waterfall,
     log: Vec<LogEntry>,
     last_seq: u64,
+    /// Sequence of the newest transcript line known to be finished. Anything
+    /// after it may still be growing and is re-read each frame.
+    frozen_seq: u64,
     follow_log: bool,
     // Monitoring. The cpal stream is not Send on Windows, so it has to live on
     // the thread that created it: this one.
@@ -58,6 +61,7 @@ impl ScopeApp {
             waterfall: Waterfall::new(WATERFALL_W, WATERFALL_H),
             log: Vec::new(),
             last_seq: 0,
+            frozen_seq: 0,
             follow_log: true,
             sink,
             monitor: None,
@@ -192,8 +196,16 @@ impl ScopeApp {
             self.waterfall
                 .push_row(&self.frame.spectrum_db, self.frame.hz_per_bin);
         }
-        let new = self.rx.log_since(self.log.len());
-        self.log.extend(new);
+        // Only the final line can still be growing, so re-read from there
+        // rather than treating everything already copied as settled.
+        let tail = self.rx.log_after(self.frozen_seq);
+        self.log.retain(|e| e.seq <= self.frozen_seq);
+        self.log.extend(tail);
+        self.frozen_seq = match self.log.last() {
+            Some(e) if e.complete => e.seq,
+            _ if self.log.len() >= 2 => self.log[self.log.len() - 2].seq,
+            _ => self.frozen_seq,
+        };
 
         // Everything the far end sent goes to the terminal verbatim.
         let data = self.rx.take_line_data();
@@ -312,6 +324,7 @@ impl ScopeApp {
             ui.checkbox(&mut self.follow_log, "follow");
             if ui.small_button("clear").clicked() {
                 self.log.clear();
+                self.frozen_seq = self.rx.log_len() as u64;
             }
         });
         egui::ScrollArea::vertical()

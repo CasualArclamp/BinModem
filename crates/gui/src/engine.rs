@@ -116,34 +116,39 @@ impl Default for Control {
     }
 }
 
-/// Accumulates received bytes into transcript lines.
+/// Groups received bytes into transcript lines.
+///
+/// Characters are published the instant they are decoded rather than held back
+/// until a terminator arrives. At 300 bps a line takes seconds to come in, and
+/// waiting for its end makes a live session look frozen.
 struct LineAssembler {
     direction: Direction,
-    buffer: Vec<u8>,
+    width: usize,
 }
 
 impl LineAssembler {
     fn new(direction: Direction) -> Self {
-        Self { direction, buffer: Vec::new() }
+        Self { direction, width: 0 }
     }
 
     fn push(&mut self, byte: u8, tx: &Publisher) {
-        // Flush on either terminator, and swallow the paired one so CRLF does
-        // not produce an empty second line.
+        // Either terminator ends the line, and the paired one is swallowed so
+        // CRLF does not produce an empty second line.
         if byte == b'\r' || byte == b'\n' {
-            self.flush(tx);
-        } else {
-            self.buffer.push(byte);
-            if self.buffer.len() >= 160 {
-                self.flush(tx);
-            }
+            self.end(tx);
+            return;
+        }
+        tx.log_partial(self.direction, &telemetry::render_bytes(&[byte]));
+        self.width += 1;
+        if self.width >= 160 {
+            self.end(tx);
         }
     }
 
-    fn flush(&mut self, tx: &Publisher) {
-        if !self.buffer.is_empty() {
-            tx.log_bytes(self.direction, &self.buffer);
-            self.buffer.clear();
+    fn end(&mut self, tx: &Publisher) {
+        if self.width > 0 {
+            tx.log_end(self.direction);
+            self.width = 0;
         }
     }
 }
@@ -319,8 +324,8 @@ fn run(
         tx.line_data(&rx_block);
 
         if pos >= samples.len() {
-            host_line.flush(&tx);
-            caller_line.flush(&tx);
+            host_line.end(&tx);
+            caller_line.end(&tx);
             if control.running.swap(false, Ordering::Relaxed) {
                 tx.log(Direction::Note, "end of capture");
             }
@@ -447,5 +452,61 @@ mod tests {
                 s.label()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod transcript_tests {
+    use super::*;
+
+    #[test]
+    fn characters_appear_before_the_line_ends() {
+        // The point of the change: at 300 bps a line takes seconds, so it has
+        // to be visible while it is still arriving.
+        let (tx, rx) = telemetry::channel(8, 4, 16000.0);
+        let mut line = LineAssembler::new(Direction::FromLine);
+        for b in b"Welcome" {
+            line.push(*b, &tx);
+        }
+        let log = rx.log();
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].text, "Welcome");
+        assert!(!log[0].complete, "line is still arriving");
+    }
+
+    #[test]
+    fn a_terminator_completes_the_line_without_starting_an_empty_one() {
+        let (tx, rx) = telemetry::channel(8, 4, 16000.0);
+        let mut line = LineAssembler::new(Direction::FromLine);
+        for b in b"login:\r\n" {
+            line.push(*b, &tx);
+        }
+        let log = rx.log();
+        assert_eq!(log.len(), 1, "CRLF should not produce a second, empty line");
+        assert_eq!(log[0].text, "login:");
+        assert!(log[0].complete);
+    }
+
+    #[test]
+    fn successive_lines_are_separate_entries() {
+        let (tx, rx) = telemetry::channel(8, 4, 16000.0);
+        let mut line = LineAssembler::new(Direction::FromLine);
+        for b in b"one\r\ntwo\r\n" {
+            line.push(*b, &tx);
+        }
+        let log = rx.log();
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0].text, "one");
+        assert_eq!(log[1].text, "two");
+    }
+
+    #[test]
+    fn an_over_long_line_is_broken_rather_than_growing_without_limit() {
+        let (tx, rx) = telemetry::channel(8, 4, 16000.0);
+        let mut line = LineAssembler::new(Direction::FromLine);
+        for _ in 0..400 {
+            line.push(b'x', &tx);
+        }
+        assert!(rx.log().len() >= 2, "a runaway line should be wrapped");
     }
 }
