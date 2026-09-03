@@ -206,6 +206,47 @@ fn a_modem_that_hears_nothing_gives_up() {
     assert_eq!(status, Status::Failed);
 }
 
+#[test]
+fn a_hybrid_puts_our_own_signal_over_the_far_one_and_it_still_connects() {
+    // A two-wire line is joined to the four-wire innards of a modem by a
+    // hybrid transformer, which is never perfectly balanced: some of what we
+    // transmit comes straight back at us. Twelve decibels down is ordinary.
+    // Meanwhile the far end has crossed the network and arrives twenty down.
+    // Our own echo is therefore the loudest thing on the line by eight
+    // decibels, and the receiver has to work under it.
+    //
+    // For V.22bis nothing special is needed, because the two directions are in
+    // different bands and the filter that separates them removes the echo as a
+    // side effect of removing the far channel. That is only true of a modem
+    // duplexed by frequency; V.32 and above share the band and have to cancel
+    // the echo instead.
+    const ECHO: f64 = 0.251; // -12 dB
+    const FAR: f64 = 0.1; //  -20 dB
+
+    let mut calling = Modem::new(Role::Calling);
+    let mut answering = Modem::new(Role::Answering);
+    for _ in 0..(8.0 * FS) as usize {
+        let (from_calling, from_answering) = (calling.out, answering.out);
+        calling.rx.feed(from_answering * FAR + from_calling * ECHO);
+        calling.hs.step(&mut calling.tx, &mut calling.rx);
+        calling.out = calling.tx.next_sample();
+
+        answering.rx.feed(from_calling * FAR + from_answering * ECHO);
+        answering.hs.step(&mut answering.tx, &mut answering.rx);
+        answering.out = answering.tx.next_sample();
+    }
+    assert_eq!(
+        calling.hs.status(),
+        Status::Connected(Rate::Bps2400),
+        "the calling end did not get through its own echo"
+    );
+    assert_eq!(
+        answering.hs.status(),
+        Status::Connected(Rate::Bps2400),
+        "the answering end did not get through its own echo"
+    );
+}
+
 /// Find `needle` in `haystack` at any bit offset, since a receiver has no way
 /// to know where the far end considered a byte to begin.
 fn contains_at_any_bit_offset(haystack: &[u8], needle: &[u8]) -> bool {
