@@ -14,15 +14,15 @@ decodes a real captured call, a V.250 AT command layer, and a live scope.
 
 | Layer | State |
 |---|---|
-| `dsp` - biquads, Butterworth design, NCO, FSK discriminator, FFT/spectrum | working |
-| `datapump` - Bell 103 / V.21 receiver, async framing | working |
+| `dsp` - biquads, Butterworth, NCO, FSK, FFT, pulse shaping, timing recovery | working |
+| `datapump` - Bell 103 / V.21 receiver, V.22bis transmit and receive | working |
 | `at` - V.250 command parsing, S-parameters, result codes, escape sequence | working |
 | `telemetry` - frame publishing, transcript log, raw line-data channel | working |
 | `terminal` - ANSI/CP437 screen emulator for BBS use | working |
 | `gui` - waterfall, spectrum, symbol scope, faceplate, audio monitor, console | working |
 | `ec` - V.42 detection, HDLC, LAPM, V.42bis, XID negotiation | working |
 | `line` - WAV reader, audio output | working |
-| Live audio input, DTE binding, V.22bis and above | not started |
+| V.22bis handshake, live audio input, DTE binding, V.32bis and above | not started |
 
 ## Running it
 

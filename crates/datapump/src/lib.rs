@@ -6,6 +6,8 @@
 
 pub mod bell103;
 pub mod framing;
+pub mod v22bis;
 
 pub use bell103::{Bell103Rx, Role};
 pub use framing::AsyncFramer;
+pub use v22bis::{Channel, Receiver as V22bisRx, Transmitter as V22bisTx};
