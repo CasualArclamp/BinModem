@@ -11,7 +11,7 @@
 //! degrees. The last two bits pick one of four points inside the new quadrant
 //! (Figure 2).
 
-use dsp::{ComplexFir, Gardner, Nco, bandpass, rrc_at, rrc_taps};
+use dsp::{ComplexFir, Equalizer, Gardner, Nco, bandpass, rrc_at, rrc_taps};
 use dsp::filter::{Cascade, OnePole};
 
 /// Modulation rate (V.22bis 2.5.1).
@@ -282,6 +282,9 @@ pub struct Receiver {
     phase: f64,
     frequency: f64,
     agc: OnePole,
+    equalizer: Equalizer,
+    /// Symbols seen, so adaptation can wait for the other loops.
+    symbols: u64,
     quadrant: Option<u8>,
     descrambler: Scrambler,
     bits: Vec<bool>,
@@ -296,9 +299,11 @@ impl Receiver {
         let sps = fs / BAUD;
         // The signal occupies the carrier plus half the symbol rate scaled by
         // the roll-off, so a little over 500 Hz either side.
-        // Wide and gentle: its only job is to keep the far channel and any
-        // out-of-band noise from overloading the gain control, so it must stay
-        // clear of the signal band where it would distort the pulse.
+        // Wide and gentle. A steeper filter tightened around the channel was
+        // tried and made things worse in both directions: its group delay
+        // distorts the pulse more than the adjacent channel it removes costs.
+        // Selectivity has to come from the matched filter, or from cancelling
+        // our own transmitter, rather than from brute filtering here.
         let half = BAUD * (1.0 + ROLLOFF) / 2.0 + 260.0;
         Self {
             band: bandpass(2, (carrier - half).max(120.0), carrier + half, fs),
@@ -311,7 +316,15 @@ impl Receiver {
             previous_filtered: (0.0, 0.0),
             phase: 0.0,
             frequency: 0.0,
-            agc: OnePole::new(0.050, fs / sps),
+            // Started at the target so the first symbols do not see a
+            // division by nearly zero.
+            agc: OnePole::starting_at(CONSTELLATION_MEAN_POWER, 0.050, fs / sps),
+            // Fed unit-power symbols, so the textbook constant-modulus target
+            // applies unchanged. Its gradient goes as the cube of the
+            // magnitude, so handing it the raw scale where mean power is ten
+            // would make every update a thousand times too large.
+            equalizer: Equalizer::new(21, 1.32),
+            symbols: 0,
             quadrant: None,
             descrambler: Scrambler::new(),
             bits: Vec::new(),
@@ -376,13 +389,14 @@ impl Receiver {
             (symbol.0 * c - symbol.1 * s) * gain,
             (symbol.0 * s + symbol.1 * c) * gain,
         );
-        self.last_symbol = point;
-
-        let decision = nearest_point(point);
+        // The carrier loop works on the unequalised symbol. Putting it after
+        // the equaliser would add that filter's delay inside the loop, and a
+        // loop with ten symbols of delay in it will not stay stable.
+        let coarse = nearest_point(point);
         // Decision-directed phase error: the angle between what arrived and
         // what it should have been.
-        let error = (point.1 * decision.0 - point.0 * decision.1)
-            / (decision.0 * decision.0 + decision.1 * decision.1 + 1e-9);
+        let error = (point.1 * coarse.0 - point.0 * coarse.1)
+            / (coarse.0 * coarse.0 + coarse.1 * coarse.1 + 1e-9);
         self.last_error = error;
         // A second-order loop, so a residual frequency offset is also removed.
         // V.22bis 2.6 requires tolerating up to seven hertz.
@@ -390,6 +404,30 @@ impl Receiver {
         self.frequency = self.frequency.clamp(-0.02, 0.02);
         self.phase += -0.008 * error + self.frequency;
         self.phase -= self.phase.floor();
+
+        // Equalise, then slice. A real line smears the constellation far
+        // beyond what a sixteen-point decision can survive.
+        let normalized = (point.0 / CONSTELLATION_RMS, point.1 / CONSTELLATION_RMS);
+        let equalized = self.equalizer.equalize(normalized);
+        let scaled = (
+            equalized.0 * CONSTELLATION_RMS,
+            equalized.1 * CONSTELLATION_RMS,
+        );
+        let decision = nearest_point(scaled);
+        // Hold the equaliser still until gain control and the carrier loop have
+        // settled. Adapting against the acquisition transient teaches it
+        // nonsense that it then has to unlearn.
+        self.symbols += 1;
+        if self.symbols > 64 {
+            self.equalizer.adapt(
+                equalized,
+                (
+                    decision.0 / CONSTELLATION_RMS,
+                    decision.1 / CONSTELLATION_RMS,
+                ),
+            );
+        }
+        self.last_symbol = scaled;
 
         let quadrant = quadrant_of(decision);
         let Some(previous) = self.quadrant.replace(quadrant) else {
@@ -436,6 +474,17 @@ impl Receiver {
     /// Residual carrier phase error, as a measure of lock quality.
     pub fn phase_error(&self) -> f64 {
         self.last_error
+    }
+
+    /// Mean distance between equalised symbols and their decisions. Small means
+    /// a clean, well-equalised constellation.
+    pub fn residual_error(&self) -> f64 {
+        self.equalizer.error()
+    }
+
+    /// True while the equaliser is still adapting blind.
+    pub fn equalizer_blind(&self) -> bool {
+        self.equalizer.is_blind()
     }
 
     pub fn level(&self) -> f64 {

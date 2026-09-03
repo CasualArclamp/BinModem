@@ -14,7 +14,7 @@ decodes a real captured call, a V.250 AT command layer, and a live scope.
 
 | Layer | State |
 |---|---|
-| `dsp` - biquads, Butterworth, NCO, FSK, FFT, pulse shaping, timing recovery | working |
+| `dsp` - biquads, Butterworth, NCO, FSK, FFT, shaping, timing, equaliser | working |
 | `datapump` - Bell 103 / V.21 receiver, V.22bis transmit and receive | working |
 | `at` - V.250 command parsing, S-parameters, result codes, escape sequence | working |
 | `telemetry` - frame publishing, transcript log, raw line-data channel | working |
@@ -22,7 +22,7 @@ decodes a real captured call, a V.250 AT command layer, and a live scope.
 | `gui` - waterfall, spectrum, symbol scope, faceplate, audio monitor, console | working |
 | `ec` - V.42 detection, HDLC, LAPM, V.42bis, XID negotiation | working |
 | `line` - WAV reader, audio output | working |
-| V.22bis handshake, live audio input, DTE binding, V.32bis and above | not started |
+| V.22bis handshake and capture decode, live audio, DTE binding, V.32bis+ | not started |
 
 ## Running it
 

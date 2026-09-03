@@ -9,12 +9,14 @@
 //! whose `modulate(bits) -> samples` / `demodulate(samples) -> bits` shape
 //! forced every loop to re-acquire on each block.
 
+pub mod equalizer;
 pub mod fft;
 pub mod filter;
 pub mod fsk;
 pub mod nco;
 pub mod shaping;
 
+pub use equalizer::Equalizer;
 pub use fft::{Fft, Spectrum};
 pub use filter::{Biquad, Cascade, OnePole, bandpass, butter_highpass, butter_lowpass};
 pub use fsk::FskDetector;

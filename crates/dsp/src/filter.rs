@@ -113,6 +113,15 @@ impl OnePole {
     pub fn new(tau: f64, fs: f64) -> Self {
         Self { a: (-1.0 / (tau * fs)).exp(), y: 0.0 }
     }
+
+    /// Start from `initial` rather than zero.
+    ///
+    /// Matters wherever the smoothed value is a divisor: a gain control that
+    /// starts at zero produces an enormous gain for its first few inputs, which
+    /// is long enough to destabilise anything adapting downstream.
+    pub fn starting_at(initial: f64, tau: f64, fs: f64) -> Self {
+        Self { a: (-1.0 / (tau * fs)).exp(), y: initial }
+    }
     #[inline]
     pub fn process(&mut self, x: f64) -> f64 {
         self.y = self.a * self.y + (1.0 - self.a) * x;
