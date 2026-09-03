@@ -962,6 +962,7 @@ dependencies = [
  "at",
  "datapump",
  "dsp",
+ "ec",
  "eframe",
  "line",
  "telemetry",

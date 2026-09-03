@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use datapump::Bell103Rx;
 use datapump::v22bis::{Channel, Receiver as V22bisRx};
+use ec::hdlc::{Decoder, Fcs};
 use line::AudioSink;
 use dsp::Spectrum;
 use telemetry::{CallState, Direction, Leds, Publisher};
@@ -117,6 +118,74 @@ impl Default for Control {
     }
 }
 
+/// Turns a recovered bit stream into something worth putting on the screen.
+///
+/// A V.22bis call may run error control or may not, and nothing in the
+/// modulation says which. Under V.42 the bits are HDLC frames whose contents
+/// are the only readable part; without it they are the characters themselves.
+/// Showing the wrong one fills the transcript with noise, so decide by
+/// evidence: hold the raw bytes back briefly, and if a frame check sequence
+/// holds in the meantime, throw them away and follow the frames instead. A
+/// call with no error control gives up nothing but that short wait.
+struct Sift {
+    decoder: Decoder,
+    framed: bool,
+    /// Raw bytes held while it is still an open question.
+    held: Vec<u8>,
+    /// Bits pending, most significant first, for the raw reading.
+    bits: Vec<bool>,
+}
+
+/// How long to wait for a frame before concluding there is no error control.
+/// A quarter of a second at 1200 bit/s, which is far longer than the gap
+/// between the flags that open a link.
+const SIFT_PATIENCE: usize = 40;
+
+impl Sift {
+    fn new() -> Self {
+        Self {
+            decoder: Decoder::new(Fcs::Bits16),
+            framed: false,
+            held: Vec::new(),
+            bits: Vec::new(),
+        }
+    }
+
+    /// Offer the bits recovered from one sample; append anything readable.
+    fn feed(&mut self, bits: Vec<bool>, out: &mut Vec<u8>) {
+        for bit in bits {
+            if let Some(Ok(frame)) = self.decoder.feed(bit) {
+                if !self.framed {
+                    // Error control is running after all: what was held back
+                    // was the handshake, and is not text.
+                    self.framed = true;
+                    self.held.clear();
+                    self.bits.clear();
+                }
+                // Address and control first, then the information field. Only
+                // frames that carry one have anything to show.
+                if frame.len() > 2 && frame[1] & 1 == 0 {
+                    out.extend_from_slice(&frame[2..]);
+                }
+            }
+            if self.framed {
+                continue;
+            }
+            self.bits.push(bit);
+            if self.bits.len() == 8 {
+                let byte = self
+                    .bits
+                    .drain(..)
+                    .fold(0u8, |acc, b| (acc << 1) | u8::from(b));
+                self.held.push(byte);
+            }
+        }
+        if !self.framed && self.held.len() >= SIFT_PATIENCE {
+            out.append(&mut self.held);
+        }
+    }
+}
+
 /// The pair of receivers for whichever modulation a capture holds.
 ///
 /// A two-wire tap carries both directions at once, so each modulation needs one
@@ -128,7 +197,12 @@ enum Demod {
     // two modulations differ enough in size that an unboxed enum would be as
     // large as its biggest arm whichever one is in use.
     Bell103 { host: Box<Bell103Rx>, caller: Box<Bell103Rx> },
-    V22bis { host: Box<V22bisRx>, caller: Box<V22bisRx> },
+    V22bis {
+        host: Box<V22bisRx>,
+        caller: Box<V22bisRx>,
+        host_sift: Box<Sift>,
+        caller_sift: Box<Sift>,
+    },
 }
 
 impl Demod {
@@ -143,6 +217,8 @@ impl Demod {
                 // to it means presenting as the calling modem.
                 host: Box::new(V22bisRx::new(Channel::Calling, fs)),
                 caller: Box::new(V22bisRx::new(Channel::Answering, fs)),
+                host_sift: Box::new(Sift::new()),
+                caller_sift: Box::new(Sift::new()),
             }),
             _ => None,
         }
@@ -158,11 +234,11 @@ impl Demod {
                     from_caller.push(b);
                 }
             }
-            Self::V22bis { host, caller } => {
+            Self::V22bis { host, caller, host_sift, caller_sift } => {
                 host.feed(x);
                 caller.feed(x);
-                from_host.extend(host.take_bytes());
-                from_caller.extend(caller.take_bytes());
+                host_sift.feed(host.take_bits(), from_host);
+                caller_sift.feed(caller.take_bits(), from_caller);
             }
         }
     }
@@ -198,18 +274,14 @@ impl Demod {
     fn carriers(&self) -> (bool, bool) {
         match self {
             Self::Bell103 { host, caller } => (host.carrier(), caller.carrier()),
-            Self::V22bis { host, caller } => {
-                // No explicit carrier detector yet, so a settled equaliser
-                // stands in as evidence of a signal worth believing.
-                (!host.equalizer_blind(), !caller.equalizer_blind())
-            }
+            Self::V22bis { host, caller, .. } => (host.carrier(), caller.carrier()),
         }
     }
 
     fn level(&self) -> f64 {
         match self {
             Self::Bell103 { host, caller } => host.amplitude().max(caller.amplitude()),
-            Self::V22bis { host, caller } => host.level().max(caller.level()),
+            Self::V22bis { host, caller, .. } => host.level().max(caller.level()),
         }
     }
 
@@ -561,6 +633,92 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Everything an encoder has queued.
+    fn drain(encoder: &mut ec::hdlc::Encoder) -> Vec<bool> {
+        std::iter::from_fn(|| encoder.next_bit()).collect()
+    }
+
+    /// Bits of one byte, most significant first.
+    fn bits_of(bytes: &[u8]) -> Vec<bool> {
+        bytes
+            .iter()
+            .flat_map(|b| (0..8).rev().map(move |i| b & (1 << i) != 0))
+            .collect()
+    }
+
+    #[test]
+    fn a_call_without_error_control_shows_its_characters() {
+        let mut sift = Sift::new();
+        let mut out = Vec::new();
+        // More than the patience, so the wait ends and the bytes appear.
+        let text = b"the quick brown fox jumps over the lazy dog, twice over";
+        sift.feed(bits_of(text), &mut out);
+        assert_eq!(out, text, "held back a call that was never framed");
+    }
+
+    #[test]
+    fn a_framed_call_shows_the_contents_of_its_frames() {
+        let mut encoder = ec::hdlc::Encoder::new(Fcs::Bits16);
+        encoder.idle(16);
+        // Address, then an information control field with the low bit clear.
+        let mut frame = vec![0x01u8, 0x00];
+        frame.extend_from_slice(b"Welcome to the host");
+        encoder.frame(&frame);
+        encoder.idle(16);
+
+        let mut sift = Sift::new();
+        let mut out = Vec::new();
+        sift.feed(drain(&mut encoder), &mut out);
+        assert_eq!(
+            String::from_utf8_lossy(&out),
+            "Welcome to the host",
+            "frame contents did not come through"
+        );
+    }
+
+    #[test]
+    fn the_handshake_before_a_frame_is_not_shown_as_text() {
+        // What precedes error control is a negotiation, not characters, and
+        // putting it on the screen is how the transcript filled with noise.
+        let mut encoder = ec::hdlc::Encoder::new(Fcs::Bits16);
+        let mut frame = vec![0x01u8, 0x00];
+        frame.extend_from_slice(b"readable");
+        encoder.frame(&frame);
+
+        let mut sift = Sift::new();
+        let mut out = Vec::new();
+        // Well under the patience, so nothing has been published yet.
+        sift.feed(bits_of(&[0x5a; 8]), &mut out);
+        assert!(out.is_empty(), "published {out:02x?} before deciding");
+        sift.feed(drain(&mut encoder), &mut out);
+        assert_eq!(String::from_utf8_lossy(&out), "readable");
+    }
+
+    #[test]
+    fn the_real_v22bis_call_reaches_the_transcript() {
+        // The whole path the screen sees: demodulate, deframe, and read. The
+        // receiver has its own vector test; this one is about what the two
+        // together put in front of the user, which before the deframing step
+        // was the scrambled contents of the handshake.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tests/vectors/v22bis-2400.wav"
+        );
+        let wav = line::wav::read(path).expect("read V.22bis vector");
+        let mut demod = Demod::new(Standard::V22bis, wav.sample_rate as f64)
+            .expect("V.22bis is demodulated");
+        let (mut host, mut caller) = (Vec::new(), Vec::new());
+        for s in wav.mono() {
+            demod.feed(s as f64, &mut host, &mut caller);
+        }
+        let text = String::from_utf8_lossy(&host).into_owned();
+        assert!(
+            text.contains("Welcome to phl6-dial1.popsite.net"),
+            "the host greeting never reached the transcript; got {text:?}"
+        );
+        assert_eq!(demod.bit_rate(), 1200, "both modems settle on 1200 bit/s");
+    }
 
     #[test]
     fn standards_are_identified_from_the_vector_name() {

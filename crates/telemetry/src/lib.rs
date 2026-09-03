@@ -595,6 +595,13 @@ mod tests {
                 tx.publish(|f| f.rx_bytes = i);
                 tx.log(Direction::Note, format!("{i}"));
             }
+            // Publishing may be skipped when the reader holds the lock, and
+            // that is the intended behaviour because the next frame
+            // supersedes the one lost. There is no next frame after the last,
+            // so this one has to be insisted on; without that the test asks
+            // for a guarantee the channel does not make and fails whenever
+            // the final write happens to collide with a read.
+            while !tx.publish(|f| f.rx_bytes = 999) {}
         });
         let mut frame = Frame::new(0, 0, 0.0);
         for _ in 0..1000 {

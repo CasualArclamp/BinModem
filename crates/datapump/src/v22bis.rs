@@ -114,6 +114,19 @@ const MAX_GAIN: f64 = 400.0;
 /// gain control is aiming at.
 const SQUELCH: f64 = 1.0e-7;
 
+/// Received level at which a carrier is declared present, and the lower level
+/// at which it is declared gone again.
+///
+/// V.22bis 6.5.2 puts these at -43 dBm and -48 dBm, five decibels apart so
+/// that a signal hovering at the threshold does not chatter. The decibels are
+/// referred to a milliwatt on the line, which a recording carries no
+/// calibration for, so the figures here are in whatever units the line hands
+/// us and keep the five decibels. They sit some 26 dB below the level of the
+/// captures and 40 dB above their silence, which is margin enough for a file;
+/// a live line will want calibrating against a known tone.
+const CARRIER_ON: f64 = 1.0e-3;
+const CARRIER_OFF: f64 = 5.62e-4;
+
 /// Rotate a first-quadrant point into `quadrant` (0 to 3, anticlockwise).
 fn rotate(point: (f64, f64), quadrant: u8) -> (f64, f64) {
     match quadrant & 3 {
@@ -351,6 +364,8 @@ pub struct Receiver {
     last_symbol: (f64, f64),
     last_error: f64,
     level: OnePole,
+    /// Whether a carrier is present, with hysteresis.
+    carrier: bool,
 }
 
 impl Receiver {
@@ -413,6 +428,7 @@ impl Receiver {
             last_symbol: (0.0, 0.0),
             last_error: 0.0,
             level: OnePole::new(0.020, fs),
+            carrier: false,
         }
     }
 
@@ -427,8 +443,14 @@ impl Receiver {
         // Butterworth in the same position was not.
         let (cos, sin) = self.nco.step();
         let selected = self.select.process((sample * cos, sample * -sin));
-        self.level
+        let level = self
+            .level
             .process((selected.0 * selected.0 + selected.1 * selected.1).sqrt());
+        self.carrier = if self.carrier {
+            level > CARRIER_OFF
+        } else {
+            level > CARRIER_ON
+        };
         let filtered = self.matched.process(selected);
 
         let previous = std::mem::replace(&mut self.previous_filtered, filtered);
@@ -533,7 +555,6 @@ impl Receiver {
         // four clusters at one radius rather than sixteen at three. Decoding a
         // 1200 signal as though it were 2400 yields two real bits followed by
         // two meaningless ones, which descrambles into convincing noise.
-        self.decisions += 1;
         // Judge by radius, not by which point index was decided.
         //
         // With only four points in use the carrier loop has stable lock points
@@ -566,9 +587,36 @@ impl Receiver {
         // mean power held at ten, a single ring contributes nothing to the
         // variance and three rings at two, ten and eighteen contribute
         // thirty-two before any noise at all.
+        //
+        // Only while there is something to judge. Gain control drives its
+        // output to the same mean power whether it is given a signal or the
+        // silence after a hangup, so the variance of amplified silence is a
+        // perfectly convincing measurement of nothing. Left ungated the rate
+        // shown on screen changed the moment the call ended.
+        //
+        // The condition is not really silence but resolvability: a
+        // constellation the receiver cannot resolve cannot be counted, whether
+        // it is falling apart because the carrier is going away at the end of
+        // a call or because it has not yet been acquired at the start of one.
+        // Carrier detection answers it, and answers quickly: the equaliser's
+        // running error would do as a measure of resolvability but it is an
+        // average a hundred symbols long, and a carrier goes away in thirty.
+        // Judged by that, the last thing a call did before ending was change
+        // its rate.
+        //
+        // Throw away a part-gathered window rather than carrying it across the
+        // gap, since half a window of a call ending and half of the next one
+        // beginning describes neither.
         let magnitude_squared = point.0 * point.0 + point.1 * point.1;
-        self.power_sum += magnitude_squared;
-        self.power_squared_sum += magnitude_squared * magnitude_squared;
+        if self.carrier {
+            self.decisions += 1;
+            self.power_sum += magnitude_squared;
+            self.power_squared_sum += magnitude_squared * magnitude_squared;
+        } else {
+            self.decisions = 0;
+            self.power_sum = 0.0;
+            self.power_squared_sum = 0.0;
+        }
         if self.decisions >= 128 {
             let n = f64::from(self.decisions);
             let mean = self.power_sum / n;
@@ -627,6 +675,11 @@ impl Receiver {
 
     /// Mean distance between equalised symbols and their decisions. Small means
     /// a clean, well-equalised constellation.
+    /// Whether a carrier is present (V.22bis 6.5.2).
+    pub fn carrier(&self) -> bool {
+        self.carrier
+    }
+
     pub fn residual_error(&self) -> f64 {
         self.equalizer.error()
     }
@@ -794,6 +847,48 @@ mod tests {
     /// constellation's mean power. Eight of the sixteen points share it:
     /// (3,1), (1,3) and their rotations.
     const V22_MAGNITUDE_SQUARED: f64 = 10.0;
+
+    #[test]
+    fn the_carrier_detector_follows_the_signal_and_holds_between() {
+        let fs = 16_000.0;
+        let mut tx = Transmitter::new(Channel::Calling, fs);
+        let mut rx = Receiver::new(Channel::Answering, fs);
+        tx.push_bytes(&[0x55; 200]);
+
+        assert!(!rx.carrier(), "carrier claimed before anything arrived");
+        for _ in 0..(fs as usize / 5) {
+            rx.feed(tx.next_sample());
+        }
+        assert!(rx.carrier(), "carrier not detected while one is present");
+
+        // Silence, and it goes away again rather than latching.
+        for _ in 0..(fs as usize / 5) {
+            rx.feed(0.0);
+        }
+        assert!(!rx.carrier(), "carrier still claimed after the line went quiet");
+    }
+
+    #[test]
+    fn the_carrier_detector_does_not_chatter_at_its_threshold() {
+        // Five decibels of hysteresis, so a signal sitting on the boundary
+        // holds whichever state it is in rather than flickering.
+        let fs = 16_000.0;
+        let mut tx = Transmitter::new(Channel::Calling, fs);
+        let mut rx = Receiver::new(Channel::Answering, fs);
+        tx.push_bytes(&[0x55; 400]);
+        for _ in 0..(fs as usize / 5) {
+            rx.feed(tx.next_sample());
+        }
+        assert!(rx.carrier());
+
+        // Between the two thresholds: too quiet to acquire, loud enough to hold.
+        let between = (CARRIER_ON + CARRIER_OFF) / 2.0;
+        let scale = between / rx.level();
+        for _ in 0..(fs as usize / 5) {
+            rx.feed(tx.next_sample() * scale);
+        }
+        assert!(rx.carrier(), "dropped a carrier still above the lower threshold");
+    }
 
     #[test]
     fn slicing_at_1200_only_offers_the_four_points_in_use() {
