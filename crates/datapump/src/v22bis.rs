@@ -11,6 +11,8 @@
 //! degrees. The last two bits pick one of four points inside the new quadrant
 //! (Figure 2).
 
+pub mod handshake;
+
 use dsp::filter::OnePole;
 use dsp::{ComplexFir, Equalizer, Gardner, Nco, fir_lowpass, rrc_at, rrc_taps};
 
@@ -212,6 +214,35 @@ impl Scrambler {
     }
 }
 
+/// What the transmitter puts on the line when it has no data to send.
+///
+/// The handshake of V.22bis 6.3.1 is conducted entirely in these: neither
+/// modem sends anything resembling data until it is over, and each recognises
+/// what the other can do purely by which of them it hears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Signal {
+    /// Nothing at all. The calling modem begins here and stays silent until
+    /// it has heard the answering modem (6.3.1.1.1 a).
+    Silent,
+    /// The answering tone of V.25, 2100 Hz.
+    AnswerTone,
+    /// Binary 1 with the scrambler bypassed. Every dibit is 11, so the
+    /// constellation turns 270 degrees each symbol and the line carries a
+    /// single tone 150 Hz below the carrier.
+    UnscrambledOnes,
+    /// The repetitive double dibit of 00 and 11 (6.3.1.1.1 b), which is how a
+    /// modem says it can work at 2400. A V.22 modem, which cannot, never sends
+    /// it and does not look for it.
+    DoubleDibit,
+    /// Scrambled binary 1: what fills the line for the last part of the
+    /// handshake, and between one byte of data and the next.
+    #[default]
+    ScrambledOnes,
+}
+
+/// Frequency of the V.25 answering tone.
+pub const ANSWER_TONE: f64 = 2100.0;
+
 /// V.22bis transmitter.
 ///
 /// The pulse is evaluated at arbitrary offsets rather than read from a tap
@@ -229,6 +260,13 @@ pub struct Transmitter {
     /// Position within the current symbol period, in symbols.
     phase: f64,
     pending: Vec<bool>,
+    /// What to send when nothing is queued.
+    signal: Signal,
+    /// Generator for the answering tone, which does not go through the
+    /// modulator at all.
+    answer: Nco,
+    /// Alternates the two halves of the double dibit pattern.
+    dibit_high: bool,
 }
 
 impl Transmitter {
@@ -250,7 +288,28 @@ impl Transmitter {
             history: vec![(0.0, 0.0); 2 * SPAN + 1],
             phase: 0.0,
             pending: Vec::new(),
+            signal: Signal::default(),
+            answer: Nco::new(ANSWER_TONE, fs),
+            dibit_high: false,
         }
+    }
+
+    /// What to send when nothing is queued.
+    pub fn set_signal(&mut self, signal: Signal) {
+        self.signal = signal;
+    }
+
+    pub fn signal(&self) -> Signal {
+        self.signal
+    }
+
+    pub fn rate(&self) -> Rate {
+        self.rate
+    }
+
+    /// Change signalling rate part way through, as the handshake does.
+    pub fn set_rate(&mut self, rate: Rate) {
+        self.rate = rate;
     }
 
     pub fn carrier(&self) -> f64 {
@@ -274,20 +333,43 @@ impl Transmitter {
     /// (V.22bis 2.5.2.1 and 2.5.2.2).
     fn next_symbol(&mut self) -> (f64, f64) {
         let mut bits = [false; 4];
-        for slot in bits.iter_mut().take(self.rate.bits_per_symbol()) {
-            let bit = if self.pending.is_empty() {
-                // Idle fills with ones, as the handshake does.
-                true
-            } else {
-                self.pending.remove(0)
+        // The two unscrambled signals are patterns of dibits rather than of
+        // data, so they go round the scrambler rather than through it. Its
+        // state does not advance either: nothing has been scrambled.
+        let unscrambled = self.pending.is_empty()
+            && matches!(self.signal, Signal::UnscrambledOnes | Signal::DoubleDibit);
+        if unscrambled {
+            let dibit = match self.signal {
+                // Binary 1 is the dibit 11 throughout.
+                Signal::UnscrambledOnes => 0b11,
+                // Alternating 00 and 11 (6.3.1.1.1 b).
+                _ => {
+                    self.dibit_high = !self.dibit_high;
+                    if self.dibit_high { 0b11 } else { 0b00 }
+                }
             };
-            *slot = self.scrambler.scramble(bit);
+            bits[0] = dibit & 0b10 != 0;
+            bits[1] = dibit & 0b01 != 0;
+        } else {
+            for slot in bits.iter_mut().take(self.rate.bits_per_symbol()) {
+                let bit = if self.pending.is_empty() {
+                    // Idle fills with ones, which is what the last part of the
+                    // handshake sends and what keeps a data connection up.
+                    true
+                } else {
+                    self.pending.remove(0)
+                };
+                *slot = self.scrambler.scramble(bit);
+            }
         }
         let change = QUADRANT_CHANGE[usize::from(bits[0]) << 1 | usize::from(bits[1])];
         self.quadrant = (self.quadrant + change) & 3;
         let index = match self.rate {
             // At 1200 the point is fixed and only the quadrant carries data.
             Rate::Bps1200 => V22_POINT,
+            // So it is for the unscrambled patterns, which are always sent at
+            // 1200 whatever rate the connection is heading for.
+            Rate::Bps2400 if unscrambled => V22_POINT,
             Rate::Bps2400 => usize::from(bits[2]) << 1 | usize::from(bits[3]),
         };
         rotate(QUADRANT_POINTS[index], self.quadrant)
@@ -295,6 +377,19 @@ impl Transmitter {
 
     /// Produce one line sample.
     pub fn next_sample(&mut self) -> f64 {
+        // Two of the signals are not modulation at all.
+        if self.pending.is_empty() {
+            match self.signal {
+                Signal::Silent => return 0.0,
+                Signal::AnswerTone => {
+                    let (cos, _) = self.answer.step();
+                    // At the same power as the constellation carries, so a
+                    // level detector reads the two alike.
+                    return cos;
+                }
+                _ => {}
+            }
+        }
         // Advance the symbol clock, pulling a new symbol when it wraps.
         self.phase += BAUD / self.fs;
         while self.phase >= 1.0 {
@@ -332,6 +427,35 @@ impl Transmitter {
     }
 }
 
+/// What the receiver hears, in the terms the handshake is conducted in.
+///
+/// Detection works on the quadrant changes rather than on the waveform,
+/// because that is where the difference actually lives. Unscrambled binary 1
+/// turns the same way every symbol; the double dibit alternates between two
+/// turns; scrambled binary 1 turns unpredictably but descrambles back to ones.
+///
+/// The last two cannot be told apart by their descrambled output alone. A
+/// self-synchronising descrambler adds a bit to two of its predecessors, so a
+/// stream of ones that never went through a scrambler comes out as ones just
+/// the same. Only the raw turns separate them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pattern {
+    /// Nothing recognised, which includes data.
+    None,
+    UnscrambledOnes,
+    DoubleDibit,
+    ScrambledOnes,
+}
+
+/// Symbols a pattern must hold for before it is believed.
+///
+/// The shortest thing the handshake has to measure is the 100 ms of double
+/// dibit in 6.3.1.1.1 b), which is 60 symbols at 600 baud. A twelfth of that
+/// is short enough to see it and long enough that data does not imitate it:
+/// five turns of scrambled data agreeing by chance is a one in a thousand
+/// event, and it has to survive being asked again.
+const PATTERN_SYMBOLS: u32 = 5;
+
 /// V.22bis receiver.
 #[derive(Debug)]
 pub struct Receiver {
@@ -366,6 +490,11 @@ pub struct Receiver {
     level: OnePole,
     /// Whether a carrier is present, with hysteresis.
     carrier: bool,
+    /// Runs of each handshake signal, in symbols.
+    unscrambled_run: u32,
+    dibit_run: u32,
+    scrambled_run: u32,
+    previous_change: u8,
 }
 
 impl Receiver {
@@ -429,6 +558,10 @@ impl Receiver {
             last_error: 0.0,
             level: OnePole::new(0.020, fs),
             carrier: false,
+            unscrambled_run: 0,
+            dibit_run: 0,
+            scrambled_run: 0,
+            previous_change: 4,
         }
     }
 
@@ -640,8 +773,23 @@ impl Receiver {
             trailing & 0b10 != 0,
             trailing & 0b01 != 0,
         ];
+
+        // Handshake signals, recognised from the turn just made.
+        //
+        // Unscrambled binary 1 is the dibit 11 every time, which is a turn of
+        // 270 degrees; the double dibit alternates 00 and 11, which alternates
+        // turns of 90 and 270. Both are sent at 1200 whatever rate is being
+        // negotiated, so only the leading dibit is ever looked at.
+        self.unscrambled_run = if change == 3 { self.unscrambled_run + 1 } else { 0 };
+        let alternating = change != self.previous_change
+            && (change == 1 || change == 3)
+            && (self.previous_change == 1 || self.previous_change == 3);
+        self.dibit_run = if alternating { self.dibit_run + 1 } else { 0 };
+        self.previous_change = change;
+
         for &bit in all.iter().take(self.rate.bits_per_symbol()) {
             let out = self.descrambler.descramble(bit);
+            self.scrambled_run = if out { self.scrambled_run + 1 } else { 0 };
             self.bits.push(out);
         }
     }
@@ -675,6 +823,37 @@ impl Receiver {
 
     /// Mean distance between equalised symbols and their decisions. Small means
     /// a clean, well-equalised constellation.
+    /// Fix the signalling rate, when something else knows it.
+    ///
+    /// The handshake does: it negotiated the thing. Left to itself the
+    /// receiver works the rate out from the shape of the constellation, which
+    /// is what a recording of somebody else's call demands but is slower and
+    /// less certain than being told.
+    pub fn set_rate(&mut self, rate: Rate) {
+        self.rate = rate;
+        self.decisions = 0;
+        self.power_sum = 0.0;
+        self.power_squared_sum = 0.0;
+    }
+
+    /// Which handshake signal is on the line, if any.
+    ///
+    /// Unscrambled binary 1 is reported ahead of scrambled, because it also
+    /// descrambles to ones and the raw turns are what distinguish it.
+    pub fn pattern(&self) -> Pattern {
+        if !self.carrier {
+            Pattern::None
+        } else if self.unscrambled_run >= PATTERN_SYMBOLS {
+            Pattern::UnscrambledOnes
+        } else if self.dibit_run >= PATTERN_SYMBOLS {
+            Pattern::DoubleDibit
+        } else if self.scrambled_run >= PATTERN_SYMBOLS * 2 {
+            Pattern::ScrambledOnes
+        } else {
+            Pattern::None
+        }
+    }
+
     /// Whether a carrier is present (V.22bis 6.5.2).
     pub fn carrier(&self) -> bool {
         self.carrier
@@ -847,6 +1026,83 @@ mod tests {
     /// constellation's mean power. Eight of the sixteen points share it:
     /// (3,1), (1,3) and their rotations.
     const V22_MAGNITUDE_SQUARED: f64 = 10.0;
+
+    /// Send one signal for `ms` and report what the far end made of it.
+    fn hear(signal: Signal, rate: Rate, ms: f64) -> Pattern {
+        let fs = 16_000.0;
+        let mut tx = Transmitter::at_rate(Channel::Calling, rate, fs);
+        let mut rx = Receiver::new(Channel::Answering, fs);
+        tx.set_signal(signal);
+        for _ in 0..(fs * ms / 1000.0) as usize {
+            rx.feed(tx.next_sample());
+        }
+        rx.pattern()
+    }
+
+    #[test]
+    fn each_handshake_signal_is_recognised_for_what_it_is() {
+        // Long enough to acquire and then hold: the handshake never asks about
+        // anything shorter than the 100 ms double dibit.
+        for rate in [Rate::Bps1200, Rate::Bps2400] {
+            assert_eq!(
+                hear(Signal::UnscrambledOnes, rate, 500.0),
+                Pattern::UnscrambledOnes,
+                "unscrambled ones at {rate:?}"
+            );
+            assert_eq!(
+                hear(Signal::DoubleDibit, rate, 500.0),
+                Pattern::DoubleDibit,
+                "double dibit at {rate:?}"
+            );
+            assert_eq!(
+                hear(Signal::ScrambledOnes, rate, 500.0),
+                Pattern::ScrambledOnes,
+                "scrambled ones at {rate:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn silence_is_not_mistaken_for_a_signal() {
+        assert_eq!(hear(Signal::Silent, Rate::Bps1200, 500.0), Pattern::None);
+    }
+
+    #[test]
+    fn unscrambled_ones_are_not_reported_as_scrambled() {
+        // They descramble to ones as well, so only the turns separate them.
+        // Reporting the wrong one would have the calling modem believe the
+        // handshake was further along than it is.
+        assert_eq!(
+            hear(Signal::UnscrambledOnes, Rate::Bps1200, 500.0),
+            Pattern::UnscrambledOnes
+        );
+    }
+
+    #[test]
+    fn the_answer_tone_is_at_2100_hertz() {
+        let fs = 16_000.0;
+        let mut tx = Transmitter::new(Channel::Answering, fs);
+        tx.set_signal(Signal::AnswerTone);
+        let n = 16_000usize;
+        let samples: Vec<f64> = (0..n).map(|_| tx.next_sample()).collect();
+        let at = |f: f64| {
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (i, &s) in samples.iter().enumerate() {
+                let w = std::f64::consts::TAU * f * i as f64 / fs;
+                re += s * w.cos();
+                im -= s * w.sin();
+            }
+            (re * re + im * im).sqrt() / n as f64
+        };
+        let wanted = at(ANSWER_TONE);
+        for other in [1800.0, 2000.0, 2200.0, 2400.0] {
+            assert!(
+                at(other) < wanted / 100.0,
+                "{other} Hz carries {:.4} against {wanted:.4} at the answer tone",
+                at(other)
+            );
+        }
+    }
 
     #[test]
     fn the_carrier_detector_follows_the_signal_and_holds_between() {
