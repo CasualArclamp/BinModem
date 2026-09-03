@@ -12,12 +12,34 @@ const FS: f64 = 16_000.0;
 ///
 /// `lead_in` bytes of filler go first, giving the loops time to settle.
 fn loopback(payload: &[u8], lead_in: usize, channel: Channel) -> Vec<u8> {
+    loopback_with(payload, lead_in, channel, 0, FS)
+}
+
+/// As `loopback`, but the signal arrives `quiet` samples in, and the receiver
+/// believes the line runs at `rx_fs`.
+///
+/// Both are things a real call decides for us. Nothing says a carrier will
+/// start on a sample boundary convenient to the receiver, and two modems keep
+/// their own clocks.
+fn loopback_with(
+    payload: &[u8],
+    lead_in: usize,
+    channel: Channel,
+    quiet: usize,
+    rx_fs: f64,
+) -> Vec<u8> {
     let mut tx = Transmitter::new(channel, FS);
     let peer = match channel {
         Channel::Calling => Channel::Answering,
         Channel::Answering => Channel::Calling,
     };
-    let mut rx = Receiver::new(peer, FS);
+    let mut rx = Receiver::new(peer, rx_fs);
+
+    let mut out = Vec::new();
+    for _ in 0..quiet {
+        rx.feed(0.0);
+        out.extend(rx.take_bytes());
+    }
 
     tx.push_bytes(&vec![0x55; lead_in]);
     tx.push_bytes(payload);
@@ -26,7 +48,6 @@ fn loopback(payload: &[u8], lead_in: usize, channel: Channel) -> Vec<u8> {
 
     let symbols = (lead_in + payload.len() + 32) * 2;
     let samples = (symbols as f64 * FS / BAUD).ceil() as usize;
-    let mut out = Vec::new();
     for _ in 0..samples {
         rx.feed(tx.next_sample());
         out.extend(rx.take_bytes());
@@ -216,12 +237,51 @@ fn the_two_rates_carry_the_same_average_power() {
     slow.push_bytes(&vec![0x6b; 600]);
     fast.push_bytes(&vec![0x6b; 600]);
     let n = 40_000;
-    let power = |tx: &mut Transmitter| {
-        (0..n).map(|_| tx.next_sample().powi(2)).sum::<f64>() / n as f64
-    };
+    let power =
+        |tx: &mut Transmitter| (0..n).map(|_| tx.next_sample().powi(2)).sum::<f64>() / n as f64;
     let (a, b) = (power(&mut slow), power(&mut fast));
     assert!(
         (a / b - 1.0).abs() < 0.05,
         "1200 carries {a:.5} and 2400 carries {b:.5}"
     );
+}
+
+#[test]
+fn the_signal_may_arrive_at_any_moment() {
+    // Symbol timing has to be *acquired*, not assumed. Delaying the carrier by
+    // a fraction of a symbol moves the instant the receiver is looking for, and
+    // twenty-six samples covers a whole symbol at 600 baud on a 16 kHz line.
+    //
+    // This is the test an earlier receiver would have failed. Its timing loop
+    // could only creep, so it sampled wherever the group delay of the filters
+    // ahead of it happened to leave it, and whether that worked was decided by
+    // how long those filters were rather than by anything it did.
+    let payload = b"acquired from a standing start";
+    for quiet in 0..27 {
+        let got = loopback_with(payload, 96, Channel::Calling, quiet, FS);
+        assert!(
+            contains_at_any_bit_offset(&got, payload),
+            "not acquired when the carrier started {quiet} samples in"
+        );
+    }
+}
+
+#[test]
+fn the_two_clocks_need_not_agree() {
+    // V.22bis 2.6 allows the carrier, and with it the symbol clock, to be out
+    // by a hundred parts per million. Twice that is asked for here, so the
+    // requirement is met with room to spare rather than exactly.
+    //
+    // Measured, the receiver holds from -300 to +400 ppm, and the limit does
+    // not move with the length of the transfer: past it acquisition costs one
+    // slipped symbol and everything after is offset, rather than the clocks
+    // slowly drifting apart. The asymmetry is unexplained.
+    let payload: Vec<u8> = (0..400).map(|i| (i % 251) as u8).collect();
+    for ppm in [-200.0, -100.0, 100.0, 200.0] {
+        let got = loopback_with(&payload, 96, Channel::Calling, 0, FS * (1.0 + ppm / 1e6));
+        assert!(
+            contains_at_any_bit_offset(&got, &payload),
+            "lost the payload with the clocks {ppm} ppm apart"
+        );
+    }
 }

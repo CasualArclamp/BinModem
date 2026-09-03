@@ -21,4 +21,4 @@ pub use fft::{Fft, Spectrum};
 pub use filter::{Biquad, Cascade, OnePole, bandpass, butter_highpass, butter_lowpass};
 pub use fsk::FskDetector;
 pub use nco::Nco;
-pub use shaping::{ComplexFir, Fir, Gardner, rrc_at, rrc_taps};
+pub use shaping::{ComplexFir, Fir, Gardner, fir_lowpass, rrc_at, rrc_taps};

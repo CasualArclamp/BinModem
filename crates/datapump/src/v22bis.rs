@@ -11,8 +11,8 @@
 //! degrees. The last two bits pick one of four points inside the new quadrant
 //! (Figure 2).
 
-use dsp::{ComplexFir, Equalizer, Gardner, Nco, bandpass, rrc_at, rrc_taps};
-use dsp::filter::{Cascade, OnePole};
+use dsp::filter::OnePole;
+use dsp::{ComplexFir, Equalizer, Gardner, Nco, fir_lowpass, rrc_at, rrc_taps};
 
 /// Modulation rate (V.22bis 2.5.1).
 pub const BAUD: f64 = 600.0;
@@ -327,8 +327,9 @@ impl Transmitter {
 /// V.22bis receiver.
 #[derive(Debug)]
 pub struct Receiver {
-    band: Cascade,
     nco: Nco,
+    /// Channel selection, applied at baseband after downconversion.
+    select: ComplexFir,
     matched: ComplexFir,
     gardner: Gardner,
     /// Samples until the next timing instant.
@@ -361,19 +362,35 @@ impl Receiver {
         let sps = fs / BAUD;
         // The signal occupies the carrier plus half the symbol rate scaled by
         // the roll-off, so a little over 500 Hz either side.
-        // Wide and gentle. A steeper filter tightened around the channel was
-        // tried and made things worse in both directions: its group delay
-        // distorts the pulse more than the adjacent channel it removes costs.
-        // Selectivity has to come from the matched filter, or from cancelling
-        // our own transmitter, rather than from brute filtering here.
-        let half = BAUD * (1.0 + ROLLOFF) / 2.0 + 260.0;
+        // Channel selection happens at baseband, with a linear-phase filter.
+        //
+        // The two directions very nearly abut: the low channel reaches 1725 Hz
+        // and the high one starts at 1875. Once downconverted, the far channel
+        // lands from 675 Hz upwards while ours ends at 525. An earlier attempt
+        // used a steep Butterworth on the passband and made matters worse,
+        // which was read at the time as selectivity costing more than it
+        // bought. That was the wrong conclusion: the fault was not steepness
+        // but phase. A Butterworth delays different frequencies by different
+        // amounts and smears the pulse, while a symmetric finite impulse
+        // response delays them all equally and can be as sharp as wanted.
+        //
+        // Four hundred taps put the passband edge at 525 Hz within a hundredth
+        // of a decibel and hold the whole of the far channel, which begins at
+        // 675 Hz once downconverted, at least 55 dB down. The twelve
+        // milliseconds of delay that buys sits in no feedback loop.
         Self {
-            band: bandpass(2, (carrier - half).max(120.0), carrier + half, fs),
             nco: Nco::new(carrier, fs),
+            select: ComplexFir::new(fir_lowpass(600.0, 401, fs)),
             matched: ComplexFir::new(rrc_taps(sps, ROLLOFF, SPAN)),
-            // A gentle timing loop: there is nothing to chase in a matched
-            // pair of clocks, and a slow loop rides out amplitude noise.
-            gardner: Gardner::new(sps, 0.005),
+            // The timing loop has to *acquire*, not merely track. An earlier
+            // gain of 0.005 could shift the sampling instant by five
+            // thousandths of a sample per symbol, so over a whole call it
+            // never travelled the half symbol that separates the worst
+            // starting phase from the right one. It sampled wherever the group
+            // delay of the filters ahead of it happened to land, and passed
+            // its tests only because that guess was lucky. This gain crosses a
+            // half symbol in a few tens of symbols.
+            gardner: Gardner::new(sps, 0.1),
             countdown: sps / 2.0,
             previous_filtered: (0.0, 0.0),
             phase: 0.0,
@@ -403,19 +420,18 @@ impl Receiver {
 
     /// Feed one line sample. Recovered bits accumulate; drain with `take_bits`.
     pub fn feed(&mut self, sample: f64) {
-        let x = self.band.process(sample);
-        self.level.process(x.abs());
-
-        // Down-convert to baseband by the conjugate carrier, then filter with
-        // the matched root-raised-cosine and nothing else.
+        // Down-convert by the conjugate carrier, select the channel, then apply
+        // the matched root-raised-cosine.
         //
-        // No extra low-pass: a matched pair of root-raised-cosine filters is
-        // free of intersymbol interference only if nothing further shapes the
-        // pulse, and a Butterworth in the same path destroys exactly that
-        // property. The matched filter already rejects both the image at twice
-        // the carrier and the neighbouring channel.
+        // Both filters are linear phase, so the matched pair still meets the
+        // Nyquist criterion and the pulse arrives undistorted. That is what
+        // makes it safe to put real selectivity here, which an earlier
+        // Butterworth in the same position was not.
         let (cos, sin) = self.nco.step();
-        let filtered = self.matched.process((x * cos, x * -sin));
+        let selected = self.select.process((sample * cos, sample * -sin));
+        self.level
+            .process((selected.0 * selected.0 + selected.1 * selected.1).sqrt());
+        let filtered = self.matched.process(selected);
 
         let previous = std::mem::replace(&mut self.previous_filtered, filtered);
         let before = self.countdown;
@@ -597,7 +613,6 @@ impl Receiver {
     pub fn rate(&self) -> Rate {
         self.rate
     }
-
 
     pub fn level(&self) -> f64 {
         self.level.value()

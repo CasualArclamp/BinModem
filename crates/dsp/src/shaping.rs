@@ -51,6 +51,40 @@ pub fn rrc_at(t: f64, beta: f64) -> f64 {
     num / den
 }
 
+/// Linear-phase low-pass taps: a windowed sinc of `taps` length.
+///
+/// Linear phase is the point. A Butterworth of the same sharpness delays
+/// different frequencies by different amounts, and that group-delay distortion
+/// smears a pulse worse than the adjacent channel it was meant to remove. A
+/// symmetric finite impulse response delays every frequency equally, so it can
+/// be made as steep as wanted and still leave the pulse shape intact.
+///
+/// A Hamming window gives about 53 dB of stopband rejection with a transition
+/// roughly `3.3 * fs / taps` wide.
+pub fn fir_lowpass(cutoff: f64, taps: usize, fs: f64) -> Vec<f64> {
+    let n = taps | 1; // odd, for a true centre and exact linear phase
+    let mid = (n / 2) as f64;
+    let omega = 2.0 * PI * cutoff / fs;
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f64 - mid;
+        // sinc, with its removable singularity at the centre.
+        let ideal = if t.abs() < 1e-9 {
+            omega / PI
+        } else {
+            (omega * t).sin() / (PI * t)
+        };
+        let window = 0.54 - 0.46 * (2.0 * PI * i as f64 / (n - 1) as f64).cos();
+        out.push(ideal * window);
+    }
+    // Unit gain at zero frequency, so the filter neither lifts nor drops the level.
+    let sum: f64 = out.iter().sum();
+    for tap in &mut out {
+        *tap /= sum;
+    }
+    out
+}
+
 /// A real finite impulse response filter with a sliding history.
 #[derive(Debug, Clone)]
 pub struct Fir {
@@ -136,9 +170,13 @@ impl ComplexFir {
 pub struct Gardner {
     /// Samples per symbol, which need not be a whole number.
     sps: f64,
-    /// Fractional position of the next sample to take.
+    /// Correction added to the next half-symbol interval.
     phase: f64,
     gain: f64,
+    /// Accumulated correction, which learns a difference between the two
+    /// clocks rather than merely reacting to the present error.
+    integral: f64,
+    integral_gain: f64,
     /// Previous symbol and the midpoint before it.
     previous: (f64, f64),
     midpoint: (f64, f64),
@@ -150,11 +188,22 @@ pub struct Gardner {
 }
 
 impl Gardner {
+    /// `gain` is in samples of correction per unit of normalised error, and
+    /// governs how quickly the loop finds the symbol instant from a standing
+    /// start. It has to be large enough to cross half a symbol during
+    /// acquisition: too small a value leaves the loop sampling wherever the
+    /// group delay of the preceding filters happened to put it, which looks
+    /// like working whenever that guess is lucky.
     pub fn new(sps: f64, gain: f64) -> Self {
         Self {
             sps,
             phase: 0.0,
             gain,
+            integral: 0.0,
+            // A hundredth of the proportional gain: slow enough that it plays
+            // no part in acquisition, and only settles afterwards on whatever
+            // standing offset is left.
+            integral_gain: gain / 100.0,
             previous: (0.0, 0.0),
             midpoint: (0.0, 0.0),
             at_symbol: true,
@@ -192,7 +241,19 @@ impl Gardner {
         let power = sample.0 * sample.0 + sample.1 * sample.1;
         self.mean_power += 0.02 * (power - self.mean_power);
         self.last_error = (error / (self.mean_power + 1e-9)).clamp(-1.0, 1.0);
-        self.phase = (-self.gain * self.last_error).clamp(-self.sps / 4.0, self.sps / 4.0);
+
+        // Two terms, because there are two things to correct. Shortening or
+        // lengthening the interval moves every later instant, so the
+        // proportional term alone already removes a standing offset in the
+        // sampling phase. What it cannot remove is a difference in clock rate:
+        // against that it settles at whatever error is needed to hold the
+        // correction, and once that error costs more than half a symbol the
+        // receiver slips one. The integral holds the correction on its own, so
+        // the error it is holding can go to nothing.
+        self.integral = (self.integral - self.integral_gain * self.last_error)
+            .clamp(-self.sps / 8.0, self.sps / 8.0);
+        self.phase =
+            (-self.gain * self.last_error + self.integral).clamp(-self.sps / 4.0, self.sps / 4.0);
         self.previous = sample;
         Some(sample)
     }
@@ -261,6 +322,151 @@ mod tests {
         for k in 1..=4 {
             let at = full[centre + k * sps].abs() / peak;
             assert!(at < 0.02, "symbol {k} away carries {at} of the peak");
+        }
+    }
+
+    /// A raised cosine: the pulse a matched pair of root-raised-cosines makes,
+    /// and the one whose samples are free of intersymbol interference.
+    fn raised_cosine(t: f64, beta: f64) -> f64 {
+        let sinc = if t.abs() < 1e-12 {
+            1.0
+        } else {
+            (PI * t).sin() / (PI * t)
+        };
+        let denominator = 1.0 - (2.0 * beta * t).powi(2);
+        if denominator.abs() < 1e-9 {
+            // Removable singularity at t = 1/2beta.
+            return sinc * PI / 4.0;
+        }
+        sinc * (PI * beta * t).cos() / denominator
+    }
+
+    /// Sample a pulse train through a Gardner loop, returning what it took at
+    /// each symbol instant. `offset` displaces the start, in symbols.
+    fn acquire(gain: f64, offset: f64, count: usize) -> Vec<f64> {
+        let sps = 16.0;
+        let beta = 0.75;
+        // A repeating but not trivially periodic pattern, so the loop sees
+        // transitions to work from without the sequence helping it.
+        let symbols: Vec<f64> = (0..count + 16)
+            .map(|i: usize| if (i * 7 + i / 3).is_multiple_of(2) { 1.0 } else { -1.0 })
+            .collect();
+        let at = |t: f64| -> f64 {
+            symbols
+                .iter()
+                .enumerate()
+                .map(|(k, &a)| a * raised_cosine(t / sps - k as f64, beta))
+                .sum()
+        };
+
+        let mut gardner = Gardner::new(sps, gain);
+        let mut taken = Vec::new();
+        // Start eight symbols in so the train is established, plus the offset
+        // under test.
+        let mut t = 8.0 * sps + offset * sps;
+        while taken.len() < count {
+            let next = gardner.interval();
+            if let Some(s) = gardner.feed((at(t), 0.0)) {
+                taken.push(s.0);
+            }
+            t += next;
+        }
+        taken
+    }
+
+    #[test]
+    fn the_timing_loop_finds_the_symbol_instant_from_any_phase() {
+        // Half a symbol out is the worst case, and the one a receiver lands in
+        // whenever the filters ahead of it happen to delay by an odd multiple
+        // of half a symbol period. A loop that cannot cross that distance is
+        // not recovering timing at all; it is trusting its group delay.
+        for &offset in &[0.0, 0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9] {
+            let taken = acquire(0.1, offset, 600);
+            let settled = &taken[400..];
+            let worst = settled
+                .iter()
+                .map(|s| (1.0 - s.abs()).abs())
+                .fold(0.0f64, f64::max);
+            assert!(
+                worst < 0.2,
+                "started {offset} of a symbol out and settled {worst} from the peak"
+            );
+        }
+    }
+
+    #[test]
+    fn the_timing_loop_travels_far_enough_to_acquire() {
+        // What went wrong before was quantitative, so state the quantity. At
+        // 0.005 the correction could move the instant by five thousandths of a
+        // sample per symbol, which over an entire call never covers the eight
+        // samples of a half symbol at sixteen per symbol.
+        let sps = 16.0;
+        let mut gardner = Gardner::new(sps, 0.1);
+        // Hold the detector at full-scale error and see how far the instant
+        // moves. Alternating symbols give a change of two either way, and a
+        // midpoint of the same sign as that change keeps the error positive
+        // throughout instead of averaging itself away.
+        let mut travelled = 0.0;
+        let mut sign = 1.0;
+        for _ in 0..200 {
+            sign = -sign;
+            gardner.feed((sign, 0.0));
+            gardner.feed((sign, 0.0));
+            // Two half-symbol intervals make up each symbol.
+            travelled += (gardner.interval() - sps / 2.0).abs() * 2.0;
+        }
+        assert!(
+            travelled > sps / 2.0,
+            "two hundred symbols moved the instant {travelled} samples,              short of the {} needed to cross half a symbol",
+            sps / 2.0
+        );
+    }
+
+    #[test]
+    fn a_linear_phase_lowpass_passes_its_band_and_rejects_beyond() {
+        let fs = 16_000.0;
+        // The configuration the V.22bis receiver actually uses, so this test
+        // guards the choice rather than a filter nothing builds.
+        let taps = fir_lowpass(600.0, 401, fs);
+        let response = |freq: f64| {
+            let mut f = Fir::new(taps.clone());
+            let n = 4000;
+            let mut peak: f64 = 0.0;
+            for i in 0..n {
+                // Cosine, so direct current is a constant rather than
+                // identically zero.
+                let y = f.process((2.0 * PI * freq * i as f64 / fs).cos());
+                if i > n / 2 {
+                    peak = peak.max(y.abs());
+                }
+            }
+            peak
+        };
+        // Flat across the signal band, which is what keeps the pulse intact.
+        // A 75 per cent roll-off at 600 baud reaches exactly 525 Hz, so the
+        // edge has to pass unweakened, not merely nearly so.
+        for hz in [0.0, 200.0, 400.0, 525.0] {
+            let g = response(hz);
+            assert!((g - 1.0).abs() < 0.02, "{hz} Hz passed at {g}");
+        }
+        // The other direction occupies 675 Hz upwards once downconverted, its
+        // lowest edge abutting our highest. Rejection has to start there, not
+        // somewhere convenient above it.
+        for hz in [675.0, 800.0, 1000.0, 1200.0, 1500.0] {
+            let db = 20.0 * response(hz).log10();
+            assert!(db < -50.0, "{hz} Hz only rejected by {db:.1} dB");
+        }
+    }
+
+    #[test]
+    fn a_symmetric_filter_has_linear_phase() {
+        // Symmetry is what linear phase means, and it is what a Butterworth
+        // cannot offer at any order.
+        let taps = fir_lowpass(600.0, 101, 16_000.0);
+        assert_eq!(taps.len() % 2, 1);
+        for i in 0..taps.len() / 2 {
+            let (a, b) = (taps[i], taps[taps.len() - 1 - i]);
+            assert!((a - b).abs() < 1e-12, "asymmetric at {i}: {a} against {b}");
         }
     }
 
