@@ -3,6 +3,7 @@
 //! Usage: `modem-scope [path-to-wav]`, defaulting to the Bell 103 golden vector.
 
 mod app;
+mod console;
 mod engine;
 mod scopes;
 

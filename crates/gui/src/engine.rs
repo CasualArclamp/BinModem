@@ -153,6 +153,8 @@ fn run(
     // Batched once per tick rather than per sample, to keep the monitor off the
     // hot loop.
     let mut monitor_block: Vec<f32> = Vec::with_capacity(4096);
+    // Raw bytes for the terminal, kept separate from the rendered transcript.
+    let mut rx_block: Vec<u8> = Vec::with_capacity(256);
 
     let mut pos = 0usize;
     let mut rx_bytes = 0u64;
@@ -196,6 +198,7 @@ fn run(
         let count = (count as usize).min((fs * 0.25) as usize);
 
         monitor_block.clear();
+        rx_block.clear();
         for _ in 0..count {
             if pos >= samples.len() {
                 break;
@@ -207,6 +210,7 @@ fn run(
             if let Some(b) = host.feed(x) {
                 rx_bytes += 1;
                 host_line.push(b, &tx);
+                rx_block.push(b);
             }
             // One entry per recovered bit, taken at the bit centre: the slicer
             // margin the symbol scope plots.
@@ -231,6 +235,7 @@ fn run(
         // Feed the monitor exactly what the demodulator saw, so what you hear
         // is the signal being decoded rather than a separate playback path.
         sink.push(&monitor_block);
+        tx.line_data(&rx_block);
 
         if pos >= samples.len() {
             host_line.flush(&tx);

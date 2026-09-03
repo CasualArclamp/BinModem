@@ -7,8 +7,16 @@ use eframe::egui::{self, Color32, FontId, RichText};
 use line::{AudioSink, Monitor};
 use telemetry::{Direction, Frame, LogEntry, Subscriber};
 
+use crate::console::{self, Console, Mode};
 use crate::engine::{Control, FFT_SIZE, SCOPE_LEN, SPECTRUM_BINS};
 use crate::scopes::{self, Waterfall};
+
+/// Which view fills the lower panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    Terminal,
+    Transcript,
+}
 
 const WATERFALL_W: usize = 720;
 const WATERFALL_H: usize = 260;
@@ -30,6 +38,10 @@ pub struct ScopeApp {
     chosen_device: usize,
     audio_error: Option<String>,
     sample_rate: f64,
+    console: Console,
+    tab: Tab,
+    font_size: f32,
+    last_repaint: std::time::Instant,
 }
 
 impl ScopeApp {
@@ -53,6 +65,58 @@ impl ScopeApp {
             chosen_device: 0,
             audio_error: None,
             sample_rate,
+            console: Console::new(),
+            tab: Tab::Terminal,
+            font_size: 14.0,
+            last_repaint: std::time::Instant::now(),
+        }
+    }
+
+    /// Carry out what the AT layer asked for.
+    fn perform(&mut self, actions: Vec<at::Action>) {
+        for action in actions {
+            match action {
+                at::Action::Dial(number) => {
+                    // There is no transmitter yet, so a dial replays the
+                    // capture: the far end of this call is the recording.
+                    self.control.restart.store(true, Ordering::Relaxed);
+                    self.control.running.store(true, Ordering::Relaxed);
+                    self.console.connect("300");
+                    self.console
+                        .term
+                        .feed_bytes(format!("[replaying capture for {number}]
+").as_bytes());
+                }
+                at::Action::Answer => {
+                    self.control.restart.store(true, Ordering::Relaxed);
+                    self.control.running.store(true, Ordering::Relaxed);
+                    self.console.connect("300");
+                }
+                at::Action::HangUp => {
+                    self.control.running.store(false, Ordering::Relaxed);
+                    if self.console.mode == Mode::Online {
+                        self.console.disconnect(at::result::ResultCode::NoCarrier);
+                    }
+                }
+                at::Action::ReturnOnline => self.console.resume_online(),
+                at::Action::OffHook
+                | at::Action::ResetProfile(_)
+                | at::Action::FactoryDefaults(_) => {}
+            }
+        }
+    }
+
+    fn terminal_pane(&mut self, ui: &mut egui::Ui) {
+        let response = console::view(ui, &self.console.term, self.font_size);
+        if response.clicked() {
+            response.request_focus();
+        }
+        if response.has_focus() {
+            let typed = console::keys_to_bytes(ui);
+            if !typed.is_empty() {
+                let actions = self.console.typed(&typed);
+                self.perform(actions);
+            }
         }
     }
 
@@ -130,6 +194,28 @@ impl ScopeApp {
         }
         let new = self.rx.log_since(self.log.len());
         self.log.extend(new);
+
+        // Everything the far end sent goes to the terminal verbatim.
+        let data = self.rx.take_line_data();
+        if !data.is_empty() {
+            self.console.line_rx(&data);
+        }
+
+        // There is no transmitter yet, so anything typed while online is echoed
+        // locally instead of going down the line. Draining it also stops the
+        // queue growing without bound. This goes away once the datapump can
+        // transmit and the far end does the echoing.
+        let outbound = self.console.take_tx();
+        if !outbound.is_empty() {
+            self.console.term.feed_bytes(&outbound);
+        }
+
+        // The escape sequence is timed, so the guard needs real elapsed time.
+        let dt = self.last_repaint.elapsed().as_millis().min(1000) as u32;
+        self.last_repaint = std::time::Instant::now();
+        if self.console.idle(dt) {
+            self.console.notice("[escaped to command state; ATO to resume]");
+        }
     }
 
     fn controls(&mut self, ui: &mut egui::Ui) {
@@ -311,10 +397,43 @@ impl eframe::App for ScopeApp {
                 self.status(ui);
             });
 
-        egui::Panel::bottom("log")
+        egui::Panel::bottom("lower")
             .resizable(true)
-            .default_size(180.0)
-            .show(ui, |ui| self.transcript(ui));
+            .default_size(420.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.tab, Tab::Terminal, "terminal");
+                    ui.selectable_value(&mut self.tab, Tab::Transcript, "transcript");
+                    ui.separator();
+                    match self.console.mode {
+                        Mode::Command => ui.label(
+                            RichText::new("command state").monospace().color(
+                                Color32::from_rgb(150, 160, 175),
+                            ),
+                        ),
+                        Mode::Online => ui.label(
+                            RichText::new("online").monospace().color(
+                                Color32::from_rgb(90, 220, 130),
+                            ),
+                        ),
+                    };
+                    if self.tab == Tab::Terminal {
+                        ui.separator();
+                        ui.add(
+                            egui::Slider::new(&mut self.font_size, 9.0..=22.0).text("font"),
+                        );
+                    }
+                });
+                ui.separator();
+                match self.tab {
+                    Tab::Terminal => {
+                        egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
+                            self.terminal_pane(ui)
+                        });
+                    }
+                    Tab::Transcript => self.transcript(ui),
+                }
+            });
 
         egui::CentralPanel::default().show(ui, |ui| {
             ui.label(RichText::new("waterfall  (0 - 4000 Hz)").strong());

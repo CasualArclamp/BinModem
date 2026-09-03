@@ -184,6 +184,12 @@ struct Shared {
     frame: Mutex<Frame>,
     log: Mutex<VecDeque<LogEntry>>,
     log_capacity: usize,
+    /// Bytes recovered from the far end, for a terminal to render.
+    ///
+    /// Separate from the transcript because a terminal needs the raw stream,
+    /// escape sequences intact, not lines rendered for human reading.
+    rx_data: Mutex<VecDeque<u8>>,
+    rx_capacity: usize,
     seq: AtomicU64,
     /// Counts frames dropped because the reader held the lock.
     dropped: AtomicU64,
@@ -208,6 +214,10 @@ pub fn channel(scope_len: usize, spectrum_bins: usize, sample_rate: f64) -> (Pub
         frame: Mutex::new(Frame::new(scope_len, spectrum_bins, sample_rate)),
         log: Mutex::new(VecDeque::new()),
         log_capacity: 2000,
+        rx_data: Mutex::new(VecDeque::new()),
+        // A screenful many times over: enough that a UI stall cannot lose BBS
+        // output, small enough that a runaway sender cannot grow without bound.
+        rx_capacity: 64 * 1024,
         seq: AtomicU64::new(0),
         dropped: AtomicU64::new(0),
         started: Instant::now(),
@@ -253,6 +263,24 @@ impl Publisher {
         }
     }
 
+    /// Hand bytes recovered from the far end to whatever is rendering them.
+    ///
+    /// Oldest are dropped if the reader falls far enough behind to fill the
+    /// buffer, which loses screen content rather than stalling the receiver.
+    pub fn line_data(&self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        if let Ok(mut q) = self.shared.rx_data.lock() {
+            for &b in bytes {
+                if q.len() >= self.shared.rx_capacity {
+                    q.pop_front();
+                }
+                q.push_back(b);
+            }
+        }
+    }
+
     /// Log bytes, rendering control characters readably.
     pub fn log_bytes(&self, direction: Direction, bytes: &[u8]) {
         if bytes.is_empty() {
@@ -292,6 +320,15 @@ impl Subscriber {
             .log
             .lock()
             .map(|l| l.iter().skip(after).cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Take everything received from the far end since the last call.
+    pub fn take_line_data(&self) -> Vec<u8> {
+        self.shared
+            .rx_data
+            .lock()
+            .map(|mut q| q.drain(..).collect())
             .unwrap_or_default()
     }
 
@@ -409,6 +446,23 @@ mod tests {
         let new = rx.log_since(seen);
         assert_eq!(new.len(), 1);
         assert_eq!(new[0].text, "b");
+    }
+
+    #[test]
+    fn line_data_round_trips_in_order() {
+        let (tx, rx) = channel(8, 4, 8000.0);
+        tx.line_data(b"Welcome");
+        tx.line_data(b" to the BBS");
+        assert_eq!(rx.take_line_data(), b"Welcome to the BBS");
+        assert!(rx.take_line_data().is_empty(), "draining should empty it");
+    }
+
+    #[test]
+    fn line_data_preserves_escape_sequences_verbatim() {
+        // A terminal needs the raw stream; the transcript is the rendered view.
+        let (tx, rx) = channel(8, 4, 8000.0);
+        tx.line_data(b"[2J[1;1HX");
+        assert_eq!(rx.take_line_data(), b"[2J[1;1HX");
     }
 
     #[test]

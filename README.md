@@ -17,8 +17,9 @@ decodes a real captured call, a V.250 AT command layer, and a live scope.
 | `dsp` - biquads, Butterworth design, NCO, FSK discriminator, FFT/spectrum | working |
 | `datapump` - Bell 103 / V.21 receiver, async framing | working |
 | `at` - V.250 command parsing, S-parameters, result codes, escape sequence | working |
-| `telemetry` - lock-free-ish frame publishing and transcript log | working |
-| `gui` - waterfall, spectrum, symbol scope, faceplate, audio monitor | working |
+| `telemetry` - frame publishing, transcript log, raw line-data channel | working |
+| `terminal` - ANSI/CP437 screen emulator for BBS use | working |
+| `gui` - waterfall, spectrum, symbol scope, faceplate, audio monitor, console | working |
 | `line` - WAV reader, audio output | working |
 | Live audio input, V.42/V.42bis, DTE binding, V.22bis and above | not started |
 
@@ -32,6 +33,11 @@ Replays a golden vector in real time through the receiver: waterfall, spectrum,
 ARDOP-style symbol scope, LED faceplate and a decoded transcript of both
 directions. "Listen" plays the line audio out of a chosen output device. Pass a
 path to run a different capture.
+
+The lower panel carries a BBS terminal wired to the AT interpreter. Click it and
+type: `AT` answers `OK`, `ATD` any number replays the capture and renders the
+decoded session, `+++` escapes back to command state. ANSI colour, cursor
+control and CP437 box drawing are all handled, so period art renders correctly.
 
 ## Build
 

@@ -960,6 +960,7 @@ dependencies = [
  "eframe",
  "line",
  "telemetry",
+ "terminal",
 ]
 
 [[package]]
@@ -2262,6 +2263,10 @@ dependencies = [
 
 [[package]]
 name = "telemetry"
+version = "0.1.0"
+
+[[package]]
+name = "terminal"
 version = "0.1.0"
 
 [[package]]
