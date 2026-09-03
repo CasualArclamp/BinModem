@@ -713,4 +713,37 @@ mod demod_tests {
             .fold(0.0f32, f32::max);
         assert!(spread > 0.1, "points are all at the origin: largest {spread}");
     }
+
+    /// The scope starts at the beginning of the capture, not part way in: the
+    /// answer tone and the near-silence before it are part of what the receiver
+    /// has to survive.
+    #[test]
+    fn v22bis_points_stay_finite_from_the_start_of_a_capture() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/vectors/v22bis-2400.wav");
+        let wav = line::wav::read(path).expect("vector");
+        let fs = wav.sample_rate as f64;
+        let mono = wav.mono();
+        let mut d = Demod::new(Standard::V22bis, fs).expect("V.22bis has a receiver");
+
+        let mut host_bytes = Vec::new();
+        let mut caller_bytes = Vec::new();
+        let mut first_bad: Option<usize> = None;
+        for (n, &s) in mono.iter().enumerate() {
+            host_bytes.clear();
+            caller_bytes.clear();
+            d.feed(s as f64, &mut host_bytes, &mut caller_bytes);
+            if let Some(p) = d.constellation()
+                && (!p.0.is_finite() || !p.1.is_finite())
+                && first_bad.is_none()
+            {
+                first_bad = Some(n);
+            }
+        }
+        assert!(
+            first_bad.is_none(),
+            "constellation went non-finite at sample {} ({:.2}s in)",
+            first_bad.unwrap(),
+            first_bad.unwrap() as f64 / fs
+        );
+    }
 }

@@ -73,6 +73,13 @@ pub const CONSTELLATION_RMS: f64 = 3.162_277_660_168_379_5; // sqrt(10)
 /// Mean power of the sixteen points, which is the square of the above.
 pub const CONSTELLATION_MEAN_POWER: f64 = 10.0;
 
+/// Ceiling on receiver gain, so silence cannot be amplified into nonsense.
+const MAX_GAIN: f64 = 400.0;
+
+/// Symbol power below which the signal is treated as absent, relative to what
+/// gain control is aiming at.
+const SQUELCH: f64 = 1.0e-7;
+
 /// Rotate a first-quadrant point into `quadrant` (0 to 3, anticlockwise).
 fn rotate(point: (f64, f64), quadrant: u8) -> (f64, f64) {
     match quadrant & 3 {
@@ -379,8 +386,15 @@ impl Receiver {
         // Matching power to power keeps the decision boundaries where the
         // slicer expects them.
         let power = symbol.0 * symbol.0 + symbol.1 * symbol.1;
-        let mean_power = self.agc.process(power).max(1e-12);
-        let gain = (CONSTELLATION_MEAN_POWER / mean_power).sqrt();
+        let mean_power = self.agc.process(power);
+        // Bound the gain. Between calls a capture contains answer tones,
+        // silence before the carrier and silence after the hangup, and during
+        // those the mean power falls towards zero. An unbounded gain then sends
+        // the symbol to infinity, which the equaliser turns into NaN within a
+        // few symbols and never recovers from.
+        let gain = (CONSTELLATION_MEAN_POWER / mean_power.max(1e-9))
+            .sqrt()
+            .clamp(0.0, MAX_GAIN);
 
         // Rotate by the tracked carrier phase.
         let turn = self.phase * std::f64::consts::TAU;
@@ -418,7 +432,9 @@ impl Receiver {
         // settled. Adapting against the acquisition transient teaches it
         // nonsense that it then has to unlearn.
         self.symbols += 1;
-        if self.symbols > 64 {
+        // Nothing worth learning from silence or from a steady answer tone,
+        // and plenty to unlearn afterwards.
+        if self.symbols > 64 && mean_power > SQUELCH {
             self.equalizer.adapt(
                 equalized,
                 (

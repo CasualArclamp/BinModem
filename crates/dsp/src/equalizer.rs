@@ -96,9 +96,21 @@ impl Equalizer {
         out
     }
 
+    /// Largest tap energy tolerated before the filter is considered lost.
+    ///
+    /// A constant-modulus update grows with the cube of the magnitude, so once
+    /// it starts running away it reaches infinity in a few symbols and every
+    /// value downstream becomes a quiet NaN. Catching it is far better than
+    /// letting a display draw nothing and give no reason.
+    const MAX_TAP_ENERGY: f64 = 1.0e4;
+
     /// Adapt towards `decision`, the constellation point `output` should have
     /// been. Call once per equalised symbol.
     pub fn adapt(&mut self, output: (f64, f64), decision: (f64, f64)) {
+        if !output.0.is_finite() || !output.1.is_finite() {
+            self.reset();
+            return;
+        }
         let dd_error = (output.0 - decision.0, output.1 - decision.1);
         let magnitude = (dd_error.0 * dd_error.0 + dd_error.1 * dd_error.1).sqrt();
         self.error_average += 0.01 * (magnitude - self.error_average);
@@ -125,6 +137,12 @@ impl Equalizer {
         for (tap, sample) in self.taps.iter_mut().zip(self.history.iter()) {
             tap.0 -= step * (error.0 * sample.0 + error.1 * sample.1);
             tap.1 -= step * (error.1 * sample.0 - error.0 * sample.1);
+        }
+
+        // Start again rather than carry on into infinity.
+        let energy: f64 = self.taps.iter().map(|t| t.0 * t.0 + t.1 * t.1).sum();
+        if !energy.is_finite() || energy > Self::MAX_TAP_ENERGY {
+            self.reset();
         }
     }
 
