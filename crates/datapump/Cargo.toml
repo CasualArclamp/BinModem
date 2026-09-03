@@ -8,6 +8,7 @@ license.workspace    = true
 dsp = { path = "../dsp" }
 
 [dev-dependencies]
+ec = { path = "../ec" }
 line = { path = "../line" }
 
 [lints]

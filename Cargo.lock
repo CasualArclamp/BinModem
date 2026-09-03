@@ -460,6 +460,7 @@ name = "datapump"
 version = "0.1.0"
 dependencies = [
  "dsp",
+ "ec",
  "line",
 ]
 

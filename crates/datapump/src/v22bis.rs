@@ -59,11 +59,6 @@ impl Rate {
 /// Index of the point V.22 uses at 1200 bit/s.
 const V22_POINT: usize = 0b01;
 
-/// Squared magnitude of that point, which is also the constellation's mean
-/// power. Four of the sixteen points share it: (3,1), (1,3) and their
-/// rotations.
-const V22_MAGNITUDE_SQUARED: f64 = 10.0;
-
 /// Which channel this modem transmits in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Channel {
@@ -346,9 +341,11 @@ pub struct Receiver {
     quadrant: Option<u8>,
     /// Rate in use, once enough symbols have been seen to tell.
     rate: Rate,
-    /// Decisions seen, and how many landed on the point V.22 uses.
+    /// Symbols seen since the rate was last judged, and the first two moments
+    /// of their power, which is what tells the two rates apart.
     decisions: u32,
-    v22_points: u32,
+    power_sum: f64,
+    power_squared_sum: f64,
     descrambler: Scrambler,
     bits: Vec<bool>,
     last_symbol: (f64, f64),
@@ -409,7 +406,8 @@ impl Receiver {
             // says otherwise.
             rate: Rate::Bps2400,
             decisions: 0,
-            v22_points: 0,
+            power_sum: 0.0,
+            power_squared_sum: 0.0,
             descrambler: Scrambler::new(),
             bits: Vec::new(),
             last_symbol: (0.0, 0.0),
@@ -482,7 +480,7 @@ impl Receiver {
         // The carrier loop works on the unequalised symbol. Putting it after
         // the equaliser would add that filter's delay inside the loop, and a
         // loop with ten symbols of delay in it will not stay stable.
-        let coarse = nearest_point(point);
+        let coarse = nearest_point(point, self.rate);
         // Decision-directed phase error: the angle between what arrived and
         // what it should have been.
         let error = (point.1 * coarse.0 - point.0 * coarse.1)
@@ -503,7 +501,7 @@ impl Receiver {
             equalized.0 * CONSTELLATION_RMS,
             equalized.1 * CONSTELLATION_RMS,
         );
-        let decision = nearest_point(scaled);
+        let decision = nearest_point(scaled, self.rate);
         // Hold the equaliser still until gain control and the carrier loop have
         // settled. Adapting against the acquisition transient teaches it
         // nonsense that it then has to unlearn.
@@ -545,18 +543,47 @@ impl Receiver {
         // point so the loop is perfectly content to sit there. The quadrant is
         // preserved, so the data decodes either way, but the point index does
         // not survive. The radius does.
-        let magnitude_squared = decision.0 * decision.0 + decision.1 * decision.1;
-        if (magnitude_squared - V22_MAGNITUDE_SQUARED).abs() < 0.5 {
-            self.v22_points += 1;
-        }
+        // Measure what arrived, not what was decided. The decision is made
+        // against whichever rate is currently believed, so judging by it lets a
+        // wrong belief confirm itself; the radius of the received point owes
+        // nothing to that belief, nor to where the carrier loop has settled,
+        // since rotating a ring does not change it. At 1200 every symbol sits
+        // on the ring at root ten. At 2400 half of the sixteen points do, and
+        // the rest are at root two or root eighteen.
+        //
+        // Take it from before the equaliser, where gain control has just set
+        // the mean power to ten and the radius means what it says. Measured
+        // after, an equaliser that has collapsed the constellation reports
+        // small radii, the rate reads as 2400, the slicer then offers sixteen
+        // points to a signal with four, and the wrong decisions keep the
+        // equaliser collapsed. The receiver had no way out of that.
+        //
+        // Judge by how much the power varies, not by how near each symbol
+        // comes to root ten. A line distorts the constellation enough that
+        // individual symbols wander well off their ring while the shape of the
+        // whole is still plain, so asking of each symbol whether it is close
+        // enough answers a harder question than the one that matters. With the
+        // mean power held at ten, a single ring contributes nothing to the
+        // variance and three rings at two, ten and eighteen contribute
+        // thirty-two before any noise at all.
+        let magnitude_squared = point.0 * point.0 + point.1 * point.1;
+        self.power_sum += magnitude_squared;
+        self.power_squared_sum += magnitude_squared * magnitude_squared;
         if self.decisions >= 128 {
-            self.rate = if self.v22_points * 10 >= self.decisions * 9 {
+            let n = f64::from(self.decisions);
+            let mean = self.power_sum / n;
+            let variance = (self.power_squared_sum / n - mean * mean).max(0.0);
+            // Relative to the mean power, so nothing depends on the scale.
+            // A single ring measures about a tenth on a real line; three rings
+            // measure a third before noise widens them further.
+            self.rate = if variance < 0.16 * mean * mean {
                 Rate::Bps1200
             } else {
                 Rate::Bps2400
             };
             self.decisions = 0;
-            self.v22_points = 0;
+            self.power_sum = 0.0;
+            self.power_squared_sum = 0.0;
         }
 
         let all = [
@@ -626,15 +653,42 @@ impl Receiver {
 }
 
 /// The constellation point nearest `p`.
-fn nearest_point(p: (f64, f64)) -> (f64, f64) {
-    // The sixteen points are the odd coordinates from -3 to 3, so rounding to
-    // the nearest odd value in each axis finds the closest without a search.
-    let snap = |v: f64| {
-        let odd = ((v - 1.0) / 2.0).round() * 2.0 + 1.0;
-        odd.clamp(-3.0, 3.0)
-    };
-    (snap(p.0), snap(p.1))
+fn nearest_point(p: (f64, f64), rate: Rate) -> (f64, f64) {
+    match rate {
+        // At 1200 bit/s only four points are ever sent, one to a quadrant, and
+        // the slicer has to know that. Offered all sixteen it will decide
+        // points that were never transmitted, and since the carrier loop takes
+        // its error from that decision it then has somewhere false to settle:
+        // the ring at radius root ten can be rotated onto itself, and the
+        // points at radius root two and root eighteen sit either side of the
+        // real one at an angle it can also sit at. On a real call the
+        // constellation came out doubled, every point split into a pair the
+        // loop dithered between, and the equaliser went on to adapt against
+        // decisions that were wrong half the time.
+        Rate::Bps1200 => {
+            // The four points are (3,1) turned into each quadrant, so their
+            // boundaries fall 45 degrees away from each: turn the point by
+            // that much and the ordinary quadrant test applies.
+            const COS: f64 = 2.0 / SQRT_5;
+            const SIN: f64 = 1.0 / SQRT_5;
+            let turned = (p.0 * COS - p.1 * SIN, p.0 * SIN + p.1 * COS);
+            rotate(QUADRANT_POINTS[V22_POINT], quadrant_of(turned))
+        }
+        // The sixteen points are the odd coordinates from -3 to 3, so rounding
+        // to the nearest odd value in each axis finds the closest without a
+        // search.
+        Rate::Bps2400 => {
+            let snap = |v: f64| {
+                let odd = ((v - 1.0) / 2.0).round() * 2.0 + 1.0;
+                odd.clamp(-3.0, 3.0)
+            };
+            (snap(p.0), snap(p.1))
+        }
+    }
 }
+
+/// Root of five, for turning a point by the angle of (2,1).
+const SQRT_5: f64 = 2.236_067_977_499_79;
 
 /// Recover the last two bits of a quadbit from a decided point.
 fn point_bits(point: (f64, f64), quadrant: u8) -> u8 {
@@ -728,11 +782,43 @@ mod tests {
 
     #[test]
     fn slicing_snaps_to_the_nearest_point() {
-        assert_eq!(nearest_point((0.9, 1.1)), (1.0, 1.0));
-        assert_eq!(nearest_point((2.7, -3.4)), (3.0, -3.0));
-        assert_eq!(nearest_point((-1.2, 2.6)), (-1.0, 3.0));
+        let at = |p| nearest_point(p, Rate::Bps2400);
+        assert_eq!(at((0.9, 1.1)), (1.0, 1.0));
+        assert_eq!(at((2.7, -3.4)), (3.0, -3.0));
+        assert_eq!(at((-1.2, 2.6)), (-1.0, 3.0));
         // Beyond the constellation, clamp rather than run away.
-        assert_eq!(nearest_point((9.0, -9.0)), (3.0, -3.0));
+        assert_eq!(at((9.0, -9.0)), (3.0, -3.0));
+    }
+
+    /// Squared magnitude of the point V.22 uses, which is also the
+    /// constellation's mean power. Eight of the sixteen points share it:
+    /// (3,1), (1,3) and their rotations.
+    const V22_MAGNITUDE_SQUARED: f64 = 10.0;
+
+    #[test]
+    fn slicing_at_1200_only_offers_the_four_points_in_use() {
+        let at = |p| nearest_point(p, Rate::Bps1200);
+        // The point itself, and each of its turns into the other quadrants.
+        for quadrant in 0..4 {
+            let point = rotate(QUADRANT_POINTS[V22_POINT], quadrant);
+            assert_eq!(at(point), point, "quadrant {quadrant}");
+            // Nudged, and still decided the same way.
+            assert_eq!(at((point.0 * 0.8, point.1 * 1.3)), point);
+        }
+        // Points a 2400 slicer would have chosen are never returned, however
+        // close the arriving symbol comes to them.
+        for probe in [(1.0, 1.0), (3.0, 3.0), (1.0, 3.0), (-3.0, -3.0)] {
+            let decided = at(probe);
+            let magnitude = decided.0 * decided.0 + decided.1 * decided.1;
+            assert!(
+                (magnitude - V22_MAGNITUDE_SQUARED).abs() < 1e-9,
+                "{probe:?} decided as {decided:?}, off the ring at root ten"
+            );
+        }
+        // The boundary sits midway between neighbouring points, 45 degrees
+        // from each, not on the axes.
+        assert_eq!(at((3.0, 1.0)), (3.0, 1.0));
+        assert_eq!(at((0.5, 3.0)), rotate(QUADRANT_POINTS[V22_POINT], 1));
     }
 
     #[test]
