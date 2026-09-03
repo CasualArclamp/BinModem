@@ -20,16 +20,17 @@ decodes a real captured call, a V.250 AT command layer, and a live scope.
 | `telemetry` - frame publishing, transcript log, raw line-data channel | working |
 | `terminal` - ANSI/CP437 screen emulator for BBS use | working |
 | `gui` - waterfall, spectrum, symbol scope, faceplate, audio monitor, console | working |
-| `ec` - V.42 HDLC framing, CRC-16/CRC-32 | partial |
+| `ec` - V.42 HDLC framing, LAPM frames and state machine | partial |
 | `line` - WAV reader, audio output | working |
-| LAPM state machine, V.42bis, live audio input, DTE binding, V.22bis and above | not started |
+| V.42bis, XID negotiation, live audio input, DTE binding, V.22bis and above | not started |
 
 ## Running it
 
 Double-click `run.bat`, or from a shell:
 
 ```powershell
-.un.ps1
+.
+un.ps1
 ```
 
 It offers a menu of the captures, builds, and launches. `-Vector v34-33600`
