@@ -606,3 +606,33 @@ mod tests {
         assert_eq!(rx.log_len(), 1000);
     }
 }
+
+#[cfg(test)]
+mod constellation_tests {
+    use super::*;
+
+    /// The scope drew an empty constellation while the engine was producing
+    /// points, so pin the hop between them.
+    #[test]
+    fn constellation_points_survive_the_channel() {
+        let (tx, rx) = channel(64, 32, 16000.0);
+        let sent: Vec<(f32, f32)> = (0..80)
+            .map(|i| (i as f32 * 0.01 - 0.4, 0.3 - i as f32 * 0.005))
+            .collect();
+        tx.publish(|f| {
+            f.tones = 16;
+            f.symbol_label = "16QAM";
+            f.constellation.clear();
+            f.constellation.extend(sent.iter().copied());
+        });
+
+        // A reader starts from a frame sized for a different modulation, which
+        // is exactly what the scope does.
+        let mut frame = Frame::new(64, 32, 16000.0);
+        assert!(frame.constellation.is_empty());
+        assert!(rx.read(&mut frame));
+        assert_eq!(frame.tones, 16);
+        assert_eq!(frame.symbol_label, "16QAM");
+        assert_eq!(frame.constellation, sent, "points did not cross the channel");
+    }
+}

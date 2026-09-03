@@ -672,3 +672,45 @@ mod transcript_tests {
         assert!(rx.log().len() >= 2, "a runaway line should be wrapped");
     }
 }
+
+#[cfg(test)]
+mod demod_tests {
+    use super::*;
+
+    /// The scope showed an empty constellation while bytes were flowing, so
+    /// pin the path that feeds it.
+    #[test]
+    fn v22bis_produces_moving_constellation_points() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/vectors/v22bis-2400.wav");
+        let wav = line::wav::read(path).expect("vector");
+        let fs = wav.sample_rate as f64;
+        let mono = wav.mono();
+        let mut d = Demod::new(Standard::V22bis, fs).expect("V.22bis has a receiver");
+
+        let mut host_bytes = Vec::new();
+        let mut caller_bytes = Vec::new();
+        let mut points: Vec<(f32, f32)> = Vec::new();
+        // Well into the data, as the engine would be by then.
+        for &s in mono.iter().skip((6.0 * fs) as usize).take((4.0 * fs) as usize) {
+            host_bytes.clear();
+            caller_bytes.clear();
+            d.feed(s as f64, &mut host_bytes, &mut caller_bytes);
+            if let Some(p) = d.constellation()
+                && points.last() != Some(&p)
+            {
+                points.push(p);
+            }
+        }
+        assert!(!points.is_empty(), "no constellation points at all");
+        assert!(
+            points.len() > 1000,
+            "only {} points from four seconds of 600 baud",
+            points.len()
+        );
+        let spread = points
+            .iter()
+            .map(|p| (p.0 * p.0 + p.1 * p.1).sqrt())
+            .fold(0.0f32, f32::max);
+        assert!(spread > 0.1, "points are all at the origin: largest {spread}");
+    }
+}

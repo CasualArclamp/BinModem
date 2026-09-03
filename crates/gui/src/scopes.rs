@@ -317,20 +317,28 @@ pub fn symbol_scope(
             centre.x + re.clamp(-1.4, 1.4) * radius,
             centre.y - im.clamp(-1.4, 1.4) * radius,
         );
-        let fade = 0.30 + 0.70 * (i as f32 / m as f32);
+        let fade = 0.45 + 0.55 * (i as f32 / m as f32);
         let magnitude = (re * re + im * im).sqrt().min(1.0);
-        painter.circle_filled(p, 1.8, margin_colour(magnitude).gamma_multiply(fade));
+        painter.circle_filled(p, 2.4, margin_colour(magnitude).gamma_multiply(fade));
     }
 
-    if let Some(q) = quality {
-        painter.text(
-            pos2(rect.left() + 6.0, rect.bottom() - 4.0),
-            Align2::LEFT_BOTTOM,
-            format!("{label} Quality: {q}"),
-            FontId::monospace(11.0),
-            margin_colour(q as f32 / 100.0),
-        );
-    }
+    // Always say something. A silent, empty scope gives no way to tell a modem
+    // that is not decoding from a display that is not being fed.
+    let (text, colour) = match quality {
+        Some(q) => (format!("{label} Quality: {q}"), margin_colour(q as f32 / 100.0)),
+        None if !constellation.is_empty() => (
+            format!("{label}  {} points", constellation.len()),
+            Color32::from_rgb(150, 160, 175),
+        ),
+        None => (format!("{label}  no symbols"), Color32::from_rgb(120, 100, 100)),
+    };
+    painter.text(
+        pos2(rect.left() + 6.0, rect.bottom() - 4.0),
+        Align2::LEFT_BOTTOM,
+        text,
+        FontId::monospace(11.0),
+        colour,
+    );
     frame_border(&painter, rect);
 }
 
