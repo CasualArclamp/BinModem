@@ -18,6 +18,9 @@ pub struct AsyncFramer {
     prev: f64,
     /// Characters whose stop bit was not mark.
     pub framing_errors: u64,
+    /// Level of the most recently sampled data bit, for display. Set at each
+    /// bit centre and cleared when read, so a scope sees one entry per bit.
+    sampled: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +43,7 @@ impl AsyncFramer {
             value: 0,
             prev: 1.0,
             framing_errors: 0,
+            sampled: None,
         }
     }
 
@@ -78,6 +82,7 @@ impl AsyncFramer {
                 // Bit n is sampled at its centre: 1.5 bit times past the edge,
                 // then one bit time per bit after that.
                 if self.since_edge >= self.sps * (1.5 + self.next_bit as f64) {
+                    self.sampled = Some(level);
                     self.value |= u32::from(level > 0.0) << self.next_bit; // LSB first
                     self.next_bit += 1;
                     if self.next_bit >= self.data_bits {
@@ -101,9 +106,16 @@ impl AsyncFramer {
         out
     }
 
+    /// Level of the data bit sampled on this call, if one was. Cleared by
+    /// reading, so a display receives exactly one value per recovered bit.
+    pub fn take_sampled(&mut self) -> Option<f64> {
+        self.sampled.take()
+    }
+
     pub fn reset(&mut self) {
         self.state = State::Idle;
         self.prev = 1.0;
+        self.sampled = None;
     }
 }
 

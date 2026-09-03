@@ -48,6 +48,8 @@ pub const BAUD: f64 = 300.0;
 pub struct Bell103Rx {
     detector: FskDetector,
     framer: AsyncFramer,
+    last_level: f64,
+    symbol: Option<f64>,
 }
 
 impl Bell103Rx {
@@ -63,6 +65,8 @@ impl Bell103Rx {
         Self {
             detector: FskDetector::new(space, mark, BAUD, fs),
             framer: AsyncFramer::new(BAUD, fs, 8),
+            last_level: 0.0,
+            symbol: None,
         }
     }
 
@@ -70,12 +74,36 @@ impl Bell103Rx {
     #[inline]
     pub fn feed(&mut self, sample: f64) -> Option<u8> {
         let level = self.detector.feed(sample);
+        self.last_level = level;
         let carrier = self.detector.carrier();
-        self.framer.feed(level, carrier)
+        let out = self.framer.feed(level, carrier);
+        self.symbol = self.framer.take_sampled();
+        out
+    }
+
+    /// Discriminator level of the bit sampled on the last `feed`, if any.
+    ///
+    /// One value per recovered bit, taken at the bit centre. This is what the
+    /// symbol scope plots: distance from zero is the slicer's decision margin.
+    pub fn take_symbol(&mut self) -> Option<f64> {
+        self.symbol.take()
     }
 
     pub fn carrier(&self) -> bool {
         self.detector.carrier()
+    }
+
+    /// Most recent discriminator output: `+1` is a mark, `-1` a space.
+    ///
+    /// This is what an eye diagram is drawn from, and the only meaningful scope
+    /// for FSK — there is no constellation to plot.
+    pub fn level(&self) -> f64 {
+        self.last_level
+    }
+
+    /// Received signal envelope in this band, for a level meter.
+    pub fn amplitude(&self) -> f64 {
+        self.detector.level()
     }
 
     pub fn framing_errors(&self) -> u64 {

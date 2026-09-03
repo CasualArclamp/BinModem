@@ -9,15 +9,29 @@ the milestone ladder.
 
 ## Status
 
-Foundation. Streaming DSP primitives and a Bell 103 receiver that decodes a real
-captured call.
+Milestone 1, the skeleton. A streaming DSP core, a Bell 103 receiver that
+decodes a real captured call, a V.250 AT command layer, and a live scope.
 
 | Layer | State |
 |---|---|
-| `dsp` — biquads, Butterworth design, NCO, FSK discriminator | working |
-| `datapump` — Bell 103 / V.21 receiver, async framing | working |
-| `line` — WAV reader | working |
-| Live audio, AT layer, V.42, DTE binding, V.22bis and above | not started |
+| `dsp` - biquads, Butterworth design, NCO, FSK discriminator, FFT/spectrum | working |
+| `datapump` - Bell 103 / V.21 receiver, async framing | working |
+| `at` - V.250 command parsing, S-parameters, result codes, escape sequence | working |
+| `telemetry` - lock-free-ish frame publishing and transcript log | working |
+| `gui` - waterfall, spectrum, symbol scope, faceplate, audio monitor | working |
+| `line` - WAV reader, audio output | working |
+| Live audio input, V.42/V.42bis, DTE binding, V.22bis and above | not started |
+
+## Scope
+
+```bash
+cargo run -p gui
+```
+
+Replays a golden vector in real time through the receiver: waterfall, spectrum,
+ARDOP-style symbol scope, LED faceplate and a decoded transcript of both
+directions. "Listen" plays the line audio out of a chosen output device. Pass a
+path to run a different capture.
 
 ## Build
 
