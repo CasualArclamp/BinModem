@@ -6,6 +6,7 @@
 pub mod frame;
 pub mod hdlc;
 pub mod lapm;
+pub mod v42bis;
 
 pub use frame::{Address, Frame, Kind, Role};
 pub use lapm::{Cause, Event, Lapm, Params, State};
