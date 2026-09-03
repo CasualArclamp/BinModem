@@ -28,6 +28,73 @@ pub const SPECTRUM_BINS: usize = FFT_SIZE / 2;
 /// the cluster spread without smearing the display with ancient history.
 pub const SYMBOL_HISTORY: usize = 80;
 
+/// Which standard a capture holds, and whether we can yet demodulate it.
+///
+/// Running the Bell 103 receiver against a V.22bis capture produces confident
+/// nonsense: a plausible byte count, a plausible quality figure, and none of it
+/// real. Naming the standard up front means the display can say what it is
+/// actually doing rather than reporting noise as data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standard {
+    Bell103,
+    V22bis,
+    V32bis,
+    V34,
+    V90,
+    V92,
+    Unknown,
+}
+
+impl Standard {
+    /// Identify from the vector's file name.
+    pub fn from_name(name: &str) -> Self {
+        let n = name.to_ascii_lowercase();
+        if n.contains("bell103") {
+            Self::Bell103
+        } else if n.contains("v22bis") {
+            Self::V22bis
+        } else if n.contains("v32bis") {
+            Self::V32bis
+        } else if n.contains("v34") {
+            Self::V34
+        } else if n.contains("v90") {
+            Self::V90
+        } else if n.contains("v92") {
+            Self::V92
+        } else {
+            Self::Unknown
+        }
+    }
+
+    /// True only where a receiver actually exists.
+    pub fn has_receiver(self) -> bool {
+        matches!(self, Self::Bell103)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Bell103 => "Bell 103",
+            Self::V22bis => "V.22bis (no receiver)",
+            Self::V32bis => "V.32bis (no receiver)",
+            Self::V34 => "V.34 (no receiver)",
+            Self::V90 => "V.90 (no receiver)",
+            Self::V92 => "V.92 (no receiver)",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    pub fn bit_rate(self) -> Option<u32> {
+        match self {
+            Self::Bell103 => Some(300),
+            Self::V22bis => Some(2400),
+            Self::V32bis => Some(14400),
+            Self::V34 => Some(33600),
+            Self::V90 | Self::V92 => Some(56000),
+            Self::Unknown => None,
+        }
+    }
+}
+
 /// Shared controls the UI writes and the engine reads.
 #[derive(Debug)]
 pub struct Control {
@@ -122,8 +189,9 @@ pub fn spawn(
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
 
+    let standard = Standard::from_name(&name);
     Ok(thread::spawn(move || {
-        run(samples, fs, name, tx, control, sink);
+        run(samples, fs, name, standard, tx, control, sink);
     }))
 }
 
@@ -131,12 +199,24 @@ fn run(
     samples: Vec<f32>,
     fs: f64,
     name: String,
+    standard: Standard,
     tx: Publisher,
     control: Arc<Control>,
     sink: Arc<AudioSink>,
 ) {
     tx.log(Direction::Note, format!("loaded {name} ({:.1}s at {fs:.0} Hz)", samples.len() as f64 / fs));
-    tx.log(Direction::Note, "Bell 103: originate 1070/1270, answer 2025/2225");
+    if standard.has_receiver() {
+        tx.log(Direction::Note, "Bell 103: originate 1070/1270, answer 2025/2225");
+    } else {
+        tx.log(
+            Direction::Note,
+            format!(
+                "{} is not implemented yet - showing waterfall, spectrum and level only",
+                standard.label().split(" (").next().unwrap_or("this modulation")
+            ),
+        );
+    }
+    let decoding = standard.has_receiver();
 
     // The originating modem hears the answering modem, and vice versa. Running
     // both gives each direction of a 2-wire capture.
@@ -207,29 +287,30 @@ fn run(
             monitor_block.push(samples[pos]);
             pos += 1;
 
-            if let Some(b) = host.feed(x) {
-                rx_bytes += 1;
-                host_line.push(b, &tx);
-                rx_block.push(b);
-            }
-            // One entry per recovered bit, taken at the bit centre: the slicer
-            // margin the symbol scope plots.
-            if let Some(sym) = host.take_symbol() {
-                if symbols.len() == SYMBOL_HISTORY {
-                    symbols.pop_front();
+            // Only run the receiver where one exists for this modulation.
+            if decoding {
+                if let Some(b) = host.feed(x) {
+                    rx_bytes += 1;
+                    host_line.push(b, &tx);
+                    rx_block.push(b);
                 }
-                symbols.push_back(sym as f32);
-            }
-            if let Some(b) = caller.feed(x) {
-                tx_bytes += 1;
-                caller_line.push(b, &tx);
+                // One entry per recovered bit, taken at the bit centre: the
+                // slicer margin the symbol scope plots.
+                if let Some(sym) = host.take_symbol() {
+                    if symbols.len() == SYMBOL_HISTORY {
+                        symbols.pop_front();
+                    }
+                    symbols.push_back(sym as f32);
+                }
+                if let Some(b) = caller.feed(x) {
+                    tx_bytes += 1;
+                    caller_line.push(b, &tx);
+                }
+                baseband.push(host.level() as f32);
             }
 
             spectrum.push(x);
             waveform.push(x as f32);
-            // Show whichever band currently has a carrier; the host side is the
-            // more interesting one for this capture.
-            baseband.push(host.level() as f32);
         }
 
         // Feed the monitor exactly what the demodulator saw, so what you hear
@@ -245,7 +326,7 @@ fn run(
             }
         }
 
-        let carrier = host.carrier() || caller.carrier();
+        let carrier = decoding && (host.carrier() || caller.carrier());
         if carrier && connected_since.is_none() {
             connected_since = Some(Instant::now());
         }
@@ -255,7 +336,16 @@ fn run(
             if spectrum.ready() {
                 spectrum.magnitudes_db(&mut bins);
             }
-            let level = host.amplitude().max(caller.amplitude());
+            // Without a receiver there is no band filter to take a level from,
+            // so measure the raw line instead.
+            let level = if decoding {
+                host.amplitude().max(caller.amplitude())
+            } else {
+                let n = waveform.data.len();
+                (waveform.data.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>()
+                    / n as f64)
+                    .sqrt()
+            };
             let level_db = 20.0 * (level + 1e-9).log10();
 
             tx.publish(|f| {
@@ -268,15 +358,18 @@ fn run(
                 f.hz_per_bin = fs / FFT_SIZE as f64;
                 f.rx_level_db = level_db as f32;
                 f.carrier = carrier;
-                f.state = if pos >= samples.len() {
+                f.state = if pos >= samples.len() || !decoding {
+                    // With no receiver there is nothing to be connected to;
+                    // saying "negotiating" would imply progress that is not
+                    // happening.
                     CallState::Idle
                 } else if carrier {
                     CallState::Connected
                 } else {
                     CallState::Negotiating
                 };
-                f.modulation = "Bell 103";
-                f.bit_rate = carrier.then_some(300);
+                f.modulation = standard.label();
+                f.bit_rate = if carrier { standard.bit_rate() } else { None };
                 f.rx_bytes = rx_bytes;
                 f.tx_bytes = tx_bytes;
                 f.tones = 2; // Bell 103 is binary FSK: one axis, two arms.
@@ -285,8 +378,8 @@ fn run(
                 f.leds = Leds {
                     mr: true,
                     tr: true,
-                    sd: caller.carrier(),
-                    rd: host.carrier(),
+                    sd: decoding && caller.carrier(),
+                    rd: decoding && host.carrier(),
                     cd: carrier,
                     oh: pos < samples.len(),
                     aa: false,
@@ -298,5 +391,61 @@ fn run(
         }
 
         thread::sleep(Duration::from_millis(4));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standards_are_identified_from_the_vector_name() {
+        for (name, want) in [
+            ("bell103-300.wav", Standard::Bell103),
+            ("v22bis-2400.wav", Standard::V22bis),
+            ("v32bis-14400.wav", Standard::V32bis),
+            ("v34-33600.wav", Standard::V34),
+            ("v90-56k.wav", Standard::V90),
+            ("v92-56k.wav", Standard::V92),
+            ("something-else.wav", Standard::Unknown),
+        ] {
+            assert_eq!(Standard::from_name(name), want, "{name}");
+        }
+    }
+
+    #[test]
+    fn the_bis_variants_are_not_mistaken_for_their_base_standard() {
+        // "v32bis" contains neither "v34" nor a bare "v32" test, but the
+        // ordering of the checks still has to put the longer name first.
+        assert_eq!(Standard::from_name("v32bis-14400.wav"), Standard::V32bis);
+        assert_eq!(Standard::from_name("v22bis-2400.wav"), Standard::V22bis);
+    }
+
+    #[test]
+    fn only_bell_103_claims_a_receiver() {
+        assert!(Standard::Bell103.has_receiver());
+        for s in [
+            Standard::V22bis,
+            Standard::V32bis,
+            Standard::V34,
+            Standard::V90,
+            Standard::V92,
+            Standard::Unknown,
+        ] {
+            assert!(!s.has_receiver(), "{s:?} should not claim a receiver");
+        }
+    }
+
+    #[test]
+    fn labels_say_plainly_when_there_is_no_receiver() {
+        // The display must not imply it is demodulating something it cannot.
+        assert_eq!(Standard::Bell103.label(), "Bell 103");
+        for s in [Standard::V22bis, Standard::V32bis, Standard::V34] {
+            assert!(
+                s.label().contains("no receiver"),
+                "{s:?} label {:?} does not say so",
+                s.label()
+            );
+        }
     }
 }

@@ -122,16 +122,21 @@ fn frame_border(painter: &Painter, rect: Rect) {
 }
 
 /// Vertical lines at the Bell 103 tones, so the eye can find them instantly.
+///
+/// The tones of a pair sit 200 Hz apart, which is only a few pixels wide, so
+/// the labels are staggered vertically. Drawn on one line they overlap into an
+/// unreadable smear.
 fn paint_tone_markers(painter: &Painter, rect: Rect, with_text: bool) {
-    for (hz, name, colour) in MARKERS {
+    for (i, (hz, name, colour)) in MARKERS.iter().enumerate() {
         let x = rect.left() + rect.width() * (*hz / DISPLAY_HZ) as f32;
         painter.line_segment(
             [pos2(x, rect.top()), pos2(x, rect.bottom())],
             Stroke::new(1.0, colour.gamma_multiply(0.55)),
         );
         if with_text {
+            let row = (i % 2) as f32;
             painter.text(
-                pos2(x + 3.0, rect.top() + 2.0),
+                pos2(x + 3.0, rect.top() + 2.0 + row * 11.0),
                 Align2::LEFT_TOP,
                 name,
                 FontId::monospace(9.0),

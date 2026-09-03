@@ -3,6 +3,8 @@
 //! What `CONNECT 33600/V42BIS` actually reports, and a prerequisite for
 //! credible interoperation with real modems.
 
+pub mod frame;
 pub mod hdlc;
 
+pub use frame::{Address, Frame, Kind, Role};
 pub use hdlc::{Crc16, Crc32, Decoder, Encoder, Fcs, FrameError};
