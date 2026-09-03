@@ -5,3 +5,4 @@ captures/
 .venv/
 __pycache__/
 docs/specs/*.pdf
+docs/specs/text/
