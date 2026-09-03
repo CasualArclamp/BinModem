@@ -161,3 +161,67 @@ fn the_receiver_reports_a_settled_constellation() {
         "constellation point at {magnitude}, so gain control is off"
     );
 }
+
+// -- 1200 bit/s (V.22bis 2.5.2.2) --------------------------------------------
+
+use datapump::v22bis::Rate;
+
+fn loopback_at(payload: &[u8], lead_in: usize, rate: Rate) -> (Vec<u8>, Rate) {
+    let mut tx = Transmitter::at_rate(Channel::Calling, rate, FS);
+    let mut rx = Receiver::new(Channel::Answering, FS);
+    tx.push_bytes(&vec![0x55; lead_in]);
+    tx.push_bytes(payload);
+    tx.push_bytes(&[0x55; 64]);
+
+    // At 1200 a symbol carries half as much, so twice as many are needed.
+    let bits = (lead_in + payload.len() + 64) * 8;
+    let symbols = bits / rate.bits_per_symbol();
+    let samples = (symbols as f64 * FS / BAUD).ceil() as usize;
+    let mut out = Vec::new();
+    for _ in 0..samples {
+        rx.feed(tx.next_sample());
+        out.extend(rx.take_bytes());
+    }
+    (out, rx.rate())
+}
+
+#[test]
+fn twelve_hundred_bits_per_second_round_trips() {
+    let payload = b"V.22 compatibility mode carries this at 1200.";
+    let (got, _) = loopback_at(payload, 160, Rate::Bps1200);
+    assert!(
+        contains_at_any_bit_offset(&got, payload),
+        "payload not recovered at 1200 bit/s"
+    );
+}
+
+#[test]
+fn the_receiver_works_out_which_rate_is_in_use() {
+    // Decoding 1200 as though it were 2400 gives two real bits and two
+    // meaningless ones, which descrambles into convincing noise rather than an
+    // obvious failure. The constellation is what distinguishes them: four
+    // clusters at one radius against sixteen at three.
+    let (_, detected) = loopback_at(b"rate detection", 200, Rate::Bps1200);
+    assert_eq!(detected, Rate::Bps1200, "should have fallen back to 1200");
+
+    let (_, detected) = loopback_at(b"rate detection", 200, Rate::Bps2400);
+    assert_eq!(detected, Rate::Bps2400, "should have stayed at 2400");
+}
+
+#[test]
+fn the_two_rates_carry_the_same_average_power() {
+    // V.22bis 2.5.2.2 picks the 01 point for 1200 precisely so this holds.
+    let mut slow = Transmitter::at_rate(Channel::Calling, Rate::Bps1200, FS);
+    let mut fast = Transmitter::at_rate(Channel::Calling, Rate::Bps2400, FS);
+    slow.push_bytes(&vec![0x6b; 600]);
+    fast.push_bytes(&vec![0x6b; 600]);
+    let n = 40_000;
+    let power = |tx: &mut Transmitter| {
+        (0..n).map(|_| tx.next_sample().powi(2)).sum::<f64>() / n as f64
+    };
+    let (a, b) = (power(&mut slow), power(&mut fast));
+    assert!(
+        (a / b - 1.0).abs() < 0.05,
+        "1200 carries {a:.5} and 2400 carries {b:.5}"
+    );
+}

@@ -25,6 +25,45 @@ pub const ROLLOFF: f64 = 0.75;
 /// Pulse span in symbols.
 const SPAN: usize = 8;
 
+/// Signalling rate (V.22bis 2.5.1). Both run at 600 baud.
+///
+/// At 2400 the four bits of a quadbit split into a quadrant change and a point
+/// within that quadrant. At 1200 a dibit gives only the quadrant change, and
+/// the point transmitted is always the one labelled 01, which V.22bis 2.5.2.2
+/// nominates "irrespective of the quadrant concerned" for compatibility with
+/// V.22. Its magnitude is the root of ten, the root-mean-square of the whole
+/// constellation, so both rates carry the same average power.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rate {
+    Bps1200,
+    Bps2400,
+}
+
+impl Rate {
+    /// Data bits carried by each symbol.
+    pub fn bits_per_symbol(self) -> usize {
+        match self {
+            Self::Bps1200 => 2,
+            Self::Bps2400 => 4,
+        }
+    }
+
+    pub fn bits_per_second(self) -> u32 {
+        match self {
+            Self::Bps1200 => 1200,
+            Self::Bps2400 => 2400,
+        }
+    }
+}
+
+/// Index of the point V.22 uses at 1200 bit/s.
+const V22_POINT: usize = 0b01;
+
+/// Squared magnitude of that point, which is also the constellation's mean
+/// power. Four of the sixteen points share it: (3,1), (1,3) and their
+/// rotations.
+const V22_MAGNITUDE_SQUARED: f64 = 10.0;
+
 /// Which channel this modem transmits in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Channel {
@@ -173,6 +212,7 @@ impl Scrambler {
 pub struct Transmitter {
     fs: f64,
     carrier: f64,
+    rate: Rate,
     nco: Nco,
     scrambler: Scrambler,
     quadrant: u8,
@@ -185,10 +225,15 @@ pub struct Transmitter {
 
 impl Transmitter {
     pub fn new(channel: Channel, fs: f64) -> Self {
+        Self::at_rate(channel, Rate::Bps2400, fs)
+    }
+
+    pub fn at_rate(channel: Channel, rate: Rate, fs: f64) -> Self {
         let carrier = channel.transmit_carrier();
         Self {
             fs,
             carrier,
+            rate,
             nco: Nco::new(carrier, fs),
             scrambler: Scrambler::new(),
             // V.22bis encodes a change of quadrant, so any starting quadrant
@@ -217,10 +262,11 @@ impl Transmitter {
         }
     }
 
-    /// Map the next quadbit to a constellation point (V.22bis 2.5.2.1).
+    /// Map the next dibit or quadbit to a constellation point
+    /// (V.22bis 2.5.2.1 and 2.5.2.2).
     fn next_symbol(&mut self) -> (f64, f64) {
-        let mut quad = [false; 4];
-        for slot in &mut quad {
+        let mut bits = [false; 4];
+        for slot in bits.iter_mut().take(self.rate.bits_per_symbol()) {
             let bit = if self.pending.is_empty() {
                 // Idle fills with ones, as the handshake does.
                 true
@@ -229,10 +275,14 @@ impl Transmitter {
             };
             *slot = self.scrambler.scramble(bit);
         }
-        let change = QUADRANT_CHANGE[usize::from(quad[0]) << 1 | usize::from(quad[1])];
+        let change = QUADRANT_CHANGE[usize::from(bits[0]) << 1 | usize::from(bits[1])];
         self.quadrant = (self.quadrant + change) & 3;
-        let point = QUADRANT_POINTS[usize::from(quad[2]) << 1 | usize::from(quad[3])];
-        rotate(point, self.quadrant)
+        let index = match self.rate {
+            // At 1200 the point is fixed and only the quadrant carries data.
+            Rate::Bps1200 => V22_POINT,
+            Rate::Bps2400 => usize::from(bits[2]) << 1 | usize::from(bits[3]),
+        };
+        rotate(QUADRANT_POINTS[index], self.quadrant)
     }
 
     /// Produce one line sample.
@@ -293,6 +343,11 @@ pub struct Receiver {
     /// Symbols seen, so adaptation can wait for the other loops.
     symbols: u64,
     quadrant: Option<u8>,
+    /// Rate in use, once enough symbols have been seen to tell.
+    rate: Rate,
+    /// Decisions seen, and how many landed on the point V.22 uses.
+    decisions: u32,
+    v22_points: u32,
     descrambler: Scrambler,
     bits: Vec<bool>,
     last_symbol: (f64, f64),
@@ -333,6 +388,11 @@ impl Receiver {
             equalizer: Equalizer::new(21, 1.32),
             symbols: 0,
             quadrant: None,
+            // Assume the faster rate and fall back once the constellation
+            // says otherwise.
+            rate: Rate::Bps2400,
+            decisions: 0,
+            v22_points: 0,
             descrambler: Scrambler::new(),
             bits: Vec::new(),
             last_symbol: (0.0, 0.0),
@@ -454,12 +514,42 @@ impl Receiver {
         let leading = CHANGE_TO_BITS[change as usize];
         let trailing = point_bits(decision, quadrant);
 
-        for bit in [
+        // Tell the two rates apart by where the points land. At 1200 every
+        // symbol sits on the single point V.22 uses, so the constellation shows
+        // four clusters at one radius rather than sixteen at three. Decoding a
+        // 1200 signal as though it were 2400 yields two real bits followed by
+        // two meaningless ones, which descrambles into convincing noise.
+        self.decisions += 1;
+        // Judge by radius, not by which point index was decided.
+        //
+        // With only four points in use the carrier loop has stable lock points
+        // the full constellation does not. Rotating the ring at radius root ten
+        // by 53 degrees lands it exactly on the other ring at the same radius,
+        // taking (3,1) to (1,3), and every point is still a legal constellation
+        // point so the loop is perfectly content to sit there. The quadrant is
+        // preserved, so the data decodes either way, but the point index does
+        // not survive. The radius does.
+        let magnitude_squared = decision.0 * decision.0 + decision.1 * decision.1;
+        if (magnitude_squared - V22_MAGNITUDE_SQUARED).abs() < 0.5 {
+            self.v22_points += 1;
+        }
+        if self.decisions >= 128 {
+            self.rate = if self.v22_points * 10 >= self.decisions * 9 {
+                Rate::Bps1200
+            } else {
+                Rate::Bps2400
+            };
+            self.decisions = 0;
+            self.v22_points = 0;
+        }
+
+        let all = [
             leading & 0b10 != 0,
             leading & 0b01 != 0,
             trailing & 0b10 != 0,
             trailing & 0b01 != 0,
-        ] {
+        ];
+        for &bit in all.iter().take(self.rate.bits_per_symbol()) {
             let out = self.descrambler.descramble(bit);
             self.bits.push(out);
         }
@@ -502,6 +592,12 @@ impl Receiver {
     pub fn equalizer_blind(&self) -> bool {
         self.equalizer.is_blind()
     }
+
+    /// The signalling rate the constellation says is in use.
+    pub fn rate(&self) -> Rate {
+        self.rate
+    }
+
 
     pub fn level(&self) -> f64 {
         self.level.value()

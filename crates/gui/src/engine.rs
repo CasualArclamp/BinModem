@@ -234,6 +234,15 @@ impl Demod {
             Self::V22bis { .. } => 16,
         }
     }
+
+    /// The rate actually in use, which for V.22bis the receiver works out from
+    /// the constellation rather than being told.
+    fn bit_rate(&self) -> u32 {
+        match self {
+            Self::Bell103 { .. } => 300,
+            Self::V22bis { host, .. } => host.rate().bits_per_second(),
+        }
+    }
 }
 
 /// Groups received bytes into transcript lines.
@@ -510,7 +519,13 @@ fn run(
                     CallState::Negotiating
                 };
                 f.modulation = standard.label();
-                f.bit_rate = if carrier { standard.bit_rate() } else { None };
+                f.bit_rate = if carrier {
+                    // Report what the receiver found, not what the
+                    // capture's name promised.
+                    demod.as_ref().map(Demod::bit_rate).or_else(|| standard.bit_rate())
+                } else {
+                    None
+                };
                 f.rx_bytes = rx_bytes;
                 f.tx_bytes = tx_bytes;
                 f.tones = demod.as_ref().map(Demod::tones).unwrap_or(2);
