@@ -41,7 +41,7 @@ mod private_pi {
 /// spells nothing alongside the `4` and `2` that follow. V.42bis Annex A
 /// Table A-1 gives `01010110`, which is `V`. The latter is plainly right and is
 /// what implementations use, so the V.42 text appears to be in error.
-pub const PARAMETER_SET_V42: [u8; 3] = [b'V', b'4', b'2'];
+pub const PARAMETER_SET_V42: [u8; 3] = *b"V42";
 
 /// Bits of the HDLC optional functions mask that V.42 12.2.2 Note 1 names.
 ///
@@ -348,7 +348,11 @@ fn push_subfield(out: &mut Vec<u8>, gi: u8, params: &[u8]) {
     out.extend_from_slice(params);
 }
 
-fn take_param(field: &[u8]) -> Result<Option<(u8, &[u8], &[u8])>, XidError> {
+/// One parameter taken off the front of a field: its identifier, its value,
+/// and whatever follows it.
+type Parameter<'a> = (u8, &'a [u8], &'a [u8]);
+
+fn take_param(field: &[u8]) -> Result<Option<Parameter<'_>>, XidError> {
     if field.is_empty() {
         return Ok(None);
     }
