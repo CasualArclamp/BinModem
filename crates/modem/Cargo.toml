@@ -8,6 +8,7 @@ license.workspace = true
 at       = { path = "../at" }
 datapump = { path = "../datapump" }
 ec       = { path = "../ec" }
+line     = { path = "../line" }
 
 [lints]
 workspace = true

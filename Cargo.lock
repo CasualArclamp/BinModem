@@ -1275,6 +1275,7 @@ dependencies = [
  "at",
  "datapump",
  "ec",
+ "line",
 ]
 
 [[package]]

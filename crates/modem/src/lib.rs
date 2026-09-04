@@ -474,3 +474,30 @@ impl Modem {
         });
     }
 }
+
+/// Scale a recording so that it fits, and report what it was scaled by.
+///
+/// A modem's output is not bounded by one. The pulse shaping sums the tails of
+/// several symbols, so the peak runs well above the average, and two modems on
+/// one pair sum again on top of that: a V.22bis call between two of these
+/// reaches about one and a half. Written to a sixteen-bit file as it stands,
+/// every one of those peaks comes back clipped, and every measurement made
+/// from the file afterwards is of something else.
+///
+/// The level is not information. A real line delivers whatever it delivers,
+/// which is why a receiver has gain control at all, so scaling a recording to
+/// fit loses nothing that was in it.
+pub fn fit_to_scale(samples: &mut [f32], target: f32) -> f32 {
+    let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    if peak <= 0.0 {
+        return 1.0;
+    }
+    let gain = target / peak;
+    if gain >= 1.0 {
+        return 1.0;
+    }
+    for s in samples.iter_mut() {
+        *s *= gain;
+    }
+    gain
+}
