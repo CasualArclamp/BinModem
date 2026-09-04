@@ -81,8 +81,10 @@ impl ScopeApp {
         for action in actions {
             match action {
                 at::Action::Dial(number) => {
-                    // There is no transmitter yet, so a dial replays the
-                    // capture: the far end of this call is the recording.
+                    // A dial here replays the capture: what this window is for
+                    // is looking at a recording of a call, so the far end is
+                    // the recording. Placing a real one is the `modem` crate's
+                    // business and wants a line to place it down.
                     self.control.restart.store(true, Ordering::Relaxed);
                     self.control.running.store(true, Ordering::Relaxed);
                     self.console.connect("300");
@@ -103,7 +105,14 @@ impl ScopeApp {
                     }
                 }
                 at::Action::ReturnOnline => self.console.resume_online(),
-                at::Action::OffHook
+                // Settings that apply to the next call rather than this one.
+                // The interpreter has already recorded them; the scope has no
+                // call of its own to apply them to, since what it is looking at
+                // is a recording of somebody else's.
+                at::Action::SelectModulation(_)
+                | at::Action::SelectErrorControl(_)
+                | at::Action::SelectCompression(_)
+                | at::Action::OffHook
                 | at::Action::ResetProfile(_)
                 | at::Action::FactoryDefaults(_) => {}
             }

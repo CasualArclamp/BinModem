@@ -326,3 +326,147 @@ fn deferred_result_codes_can_be_emitted_later() {
         "\r\nCONNECT 33600/V42BIS\r\n"
     );
 }
+
+// -- the capabilities +GCAP advertises --------------------------------------
+
+/// Terminate a command line, as a DTE does.
+const CR: &str = "\r";
+
+#[test]
+fn every_command_gcap_names_is_answered() {
+    // V.250 6.1.9. A DCE that lists a command it does not implement is worse
+    // than one that lists nothing at all, because a DTE will believe it and
+    // configure itself around a capability that is not there.
+    let mut it = quiet_dce();
+    let (out, _) = send(&mut it, &format!("AT+GCAP{CR}"));
+    let listed: Vec<String> = out
+        .lines()
+        .find(|l| l.contains("+GCAP:"))
+        .expect("no +GCAP response")
+        .split(':')
+        .nth(1)
+        .unwrap()
+        .split(',')
+        .map(|s| s.trim().to_owned())
+        .collect();
+    assert!(!listed.is_empty());
+    for name in listed {
+        let (out, _) = send(&mut it, &format!("AT{name}=?{CR}"));
+        assert!(
+            !out.contains("ERROR"),
+            "+GCAP names {name} but {name}=? answers {out:?}"
+        );
+    }
+}
+
+#[test]
+fn modulation_selection_accepts_what_it_advertises() {
+    let mut it = quiet_dce();
+    let (out, _) = send(&mut it, &format!("AT+MS=?{CR}"));
+    let offered = out
+        .lines()
+        .find(|l| l.contains("+MS:"))
+        .expect("no +MS test response")
+        .to_owned();
+    for carrier in ["V22B", "V32"] {
+        assert!(offered.contains(carrier), "+MS=? does not offer {carrier}");
+        let (out, actions) = send(&mut it, &format!("AT+MS={carrier}{CR}"));
+        assert!(out.contains("OK"), "+MS={carrier} answered {out:?}");
+        assert!(
+            matches!(&actions[..], [Action::SelectModulation(m)] if m.carrier == carrier),
+            "+MS={carrier} produced {actions:?}"
+        );
+    }
+}
+
+#[test]
+fn a_modulation_that_is_not_offered_is_refused() {
+    // Accepting one and then using something else is how a terminal ends up
+    // believing a connection is something it is not. B103 is the pointed case:
+    // there is a Bell 103 demodulator in this project and no transmitter, so a
+    // Bell 103 call cannot be originated however much of one can be decoded.
+    let mut it = quiet_dce();
+    for refused in ["V90", "B103"] {
+        let (out, actions) = send(&mut it, &format!("AT+MS={refused}{CR}"));
+        assert!(out.contains("ERROR"), "+MS={refused} answered {out:?}");
+        assert!(actions.is_empty());
+    }
+    let (out, actions) = send(&mut it, &format!("AT+MS=V90{CR}"));
+    assert!(out.contains("ERROR"), "+MS=V90 answered {out:?}");
+    assert!(actions.is_empty());
+}
+
+#[test]
+fn reading_back_a_modulation_gives_what_was_set() {
+    let mut it = quiet_dce();
+    send(&mut it, &format!("AT+MS=V32,0,1200,4800{CR}"));
+    let (out, _) = send(&mut it, &format!("AT+MS?{CR}"));
+    assert!(out.contains("+MS: V32,0,1200,4800"), "read back {out:?}");
+}
+
+#[test]
+fn error_control_selection_follows_table_20() {
+    let mut it = quiet_dce();
+    // 3 is V.42 with the detection phase, which is the default.
+    let (_, actions) = send(&mut it, &format!("AT+ES=3,0{CR}"));
+    let Some(Action::SelectErrorControl(e)) = actions.first() else {
+        panic!("no action from +ES: {actions:?}");
+    };
+    assert!(e.wanted() && e.detect() && !e.required());
+
+    // 2 asks for V.42 but without the detection phase.
+    let (_, actions) = send(&mut it, &format!("AT+ES=2,0{CR}"));
+    let Some(Action::SelectErrorControl(e)) = actions.first() else {
+        panic!("no action");
+    };
+    assert!(e.wanted() && !e.detect());
+
+    // 0 is direct mode: no error control at all.
+    let (_, actions) = send(&mut it, &format!("AT+ES=0{CR}"));
+    let Some(Action::SelectErrorControl(e)) = actions.first() else {
+        panic!("no action");
+    };
+    assert!(!e.wanted());
+
+    // A fallback of 2 or more requires it, and hangs up without it.
+    let (_, actions) = send(&mut it, &format!("AT+ES=3,2{CR}"));
+    let Some(Action::SelectErrorControl(e)) = actions.first() else {
+        panic!("no action");
+    };
+    assert!(e.required());
+}
+
+#[test]
+fn the_alternative_protocol_is_refused_rather_than_pretended_at() {
+    // Table 20 value 4 is the alternative protocol, meaning MNP, which this
+    // DCE does not implement. Accepting it would have a terminal expect a
+    // protocol that never appears.
+    let mut it = quiet_dce();
+    let (out, actions) = send(&mut it, &format!("AT+ES=4{CR}"));
+    assert!(out.contains("ERROR"), "+ES=4 answered {out:?}");
+    assert!(actions.is_empty());
+}
+
+#[test]
+fn compression_can_be_turned_off_and_on() {
+    let mut it = quiet_dce();
+    let (out, actions) = send(&mut it, &format!("AT+DS=0{CR}"));
+    assert!(out.contains("OK"), "{out:?}");
+    assert_eq!(actions, vec![Action::SelectCompression(false)]);
+    let (_, actions) = send(&mut it, &format!("AT+DS=3{CR}"));
+    assert_eq!(actions, vec![Action::SelectCompression(true)]);
+
+    let (out, _) = send(&mut it, &format!("AT+DS?{CR}"));
+    assert!(out.contains("+DS: 3"), "read back {out:?}");
+}
+
+#[test]
+fn fclass_reports_data_and_only_data() {
+    // Facsimile is a different recommendation and is not implemented, so
+    // claiming class 1 or 2 would be a lie a fax program would act on.
+    let mut it = quiet_dce();
+    let (out, _) = send(&mut it, &format!("AT+FCLASS=?{CR}"));
+    assert!(out.contains("+FCLASS: (0)"), "{out:?}");
+    let (out, _) = send(&mut it, &format!("AT+FCLASS=1{CR}"));
+    assert!(out.contains("ERROR"), "claimed a fax class: {out:?}");
+}

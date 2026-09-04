@@ -299,3 +299,99 @@ fn what_is_typed_while_dialling_is_not_treated_as_a_command() {
         "an ATH typed during the dial was obeyed"
     );
 }
+
+#[test]
+fn ms_chooses_which_modulation_the_call_uses() {
+    // V.250 6.4.1. Both ends have to be told, because a modulation is not
+    // negotiated across the whole set: V.22bis and V.32 do not share a
+    // handshake and a modem listening for one hears nothing of the other.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "AT+MS=V32");
+    Pair::type_at(&mut p.caller, "AT+MS=V32");
+    p.run(0.01);
+    assert!(p.caller_saw().contains("OK"), "{:?}", p.caller_saw());
+
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(12.0);
+
+    assert_eq!(p.caller.state(), State::Data, "the V.32 caller never connected");
+    assert_eq!(p.host.state(), State::Data, "the V.32 host never connected");
+    assert_eq!(p.caller.rate(), Some(4800), "not the V.32 rate");
+    assert!(
+        p.caller_saw().contains("4800"),
+        "CONNECT did not report the V.32 rate: {:?}",
+        p.caller_saw()
+    );
+}
+
+#[test]
+fn a_v32_call_carries_data_both_ways() {
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "AT+MS=V32");
+    Pair::type_at(&mut p.caller, "AT+MS=V32");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(14.0);
+    assert_eq!(p.caller.state(), State::Data);
+
+    p.at_caller.clear();
+    p.at_host.clear();
+    for b in b"cactus
+" {
+        p.caller.feed_dte(*b);
+    }
+    for b in b"Password:" {
+        p.host.feed_dte(*b);
+    }
+    p.run(4.0);
+    assert!(
+        p.host_saw().contains("cactus"),
+        "the host saw {:?}",
+        p.host_saw()
+    );
+    assert!(
+        p.caller_saw().contains("Password:"),
+        "the caller saw {:?}",
+        p.caller_saw()
+    );
+}
+
+#[test]
+fn turning_compression_off_is_obeyed() {
+    // AT+DS=0. Error control stays, and only the compression goes.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "AT+DS=0");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(12.0);
+    assert!(p.caller.error_controlled(), "lost error control as well");
+    assert!(
+        !p.caller.compressing() && !p.host.compressing(),
+        "compression was used after being turned off"
+    );
+}
+
+#[test]
+fn turning_error_control_off_is_obeyed() {
+    // AT+ES=0 is direct mode: no V.42 at all, and the characters go down the
+    // line with nothing but their own start and stop bits.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "AT+ES=0");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(12.0);
+    assert_eq!(p.caller.state(), State::Data);
+    assert!(!p.caller.error_controlled(), "V.42 ran after +ES=0");
+
+    p.at_host.clear();
+    for b in b"cactus" {
+        p.caller.feed_dte(*b);
+    }
+    p.run(3.0);
+    assert!(
+        p.host_saw().contains("cactus"),
+        "direct mode carried {:?}",
+        p.host_saw()
+    );
+}

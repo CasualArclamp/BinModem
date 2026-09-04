@@ -1023,6 +1023,26 @@ impl Modem {
         self.rx.take_bytes()
     }
 
+    /// Bits recovered from the line.
+    ///
+    /// What sits above a data pump under V.42 wants bits rather than bytes:
+    /// the frames say where the octet boundaries are and the pump has no
+    /// business guessing at them.
+    pub fn take_bits(&mut self) -> Vec<bool> {
+        self.rx.take_bits()
+    }
+
+    /// Queue bits for transmission.
+    pub fn send_bits(&mut self, bits: &[bool]) {
+        self.tx.push_bits(bits);
+    }
+
+    /// How many are still waiting to go out, so that whatever is feeding this
+    /// knows when to hand over more.
+    pub fn pending_bits(&self) -> usize {
+        self.tx.pending_bits()
+    }
+
     pub fn constellation_point(&self) -> (f64, f64) {
         self.rx.constellation_point()
     }

@@ -23,8 +23,9 @@
 use at::escape::EscapeDetector;
 use at::result::ResultCode;
 use at::{Action, Interpreter};
-use datapump::v22bis;
 use datapump::AsyncBits;
+use datapump::v22bis;
+use datapump::v32;
 use ec::stack::Phase;
 use ec::xid::Compression;
 use ec::{Params, Role as EcRole, Stack};
@@ -61,6 +62,86 @@ pub enum Ended {
     NoAnswer,
 }
 
+/// The line side, whichever modulation is in use.
+///
+/// The two are shaped alike on purpose: a sample in, a sample out, a status,
+/// and bits either way. What sits above them has no business knowing which is
+/// which, and the only place that decides is `+MS`.
+#[derive(Debug)]
+enum Pump {
+    /// V.22bis: two directions in two halves of the band, 1200 or 2400 bit/s.
+    V22bis(Box<v22bis::handshake::Modem>),
+    /// V.32: both directions in the whole band at once, 4800 bit/s, with the
+    /// echo canceller that makes that possible.
+    V32(Box<v32::startup::Modem>),
+}
+
+impl Pump {
+    fn step(&mut self, line: f64) -> f64 {
+        match self {
+            Self::V22bis(m) => m.step(line),
+            Self::V32(m) => m.step(line),
+        }
+    }
+
+    /// Whether the handshake is still going, has finished, or has given up.
+    fn status(&self) -> Progress {
+        match self {
+            Self::V22bis(m) => match m.status() {
+                v22bis::handshake::Status::Negotiating => Progress::Negotiating,
+                v22bis::handshake::Status::Connected(r) => {
+                    Progress::Connected(r.bits_per_second())
+                }
+                v22bis::handshake::Status::Failed => Progress::Failed,
+            },
+            Self::V32(m) => match m.status() {
+                v32::startup::Status::Negotiating => Progress::Negotiating,
+                v32::startup::Status::Connected(rate) => Progress::Connected(rate),
+                v32::startup::Status::Failed => Progress::Failed,
+            },
+        }
+    }
+
+    fn carrier(&self) -> bool {
+        match self {
+            Self::V22bis(m) => m.carrier(),
+            // V.32's start-up measures the line rather than watching a carrier
+            // detector, and once it has connected the receiver's own is what
+            // says the far end is still there.
+            Self::V32(_) => true,
+        }
+    }
+
+    fn take_bits(&mut self) -> Vec<bool> {
+        match self {
+            Self::V22bis(m) => m.take_bits(),
+            Self::V32(m) => m.take_bits(),
+        }
+    }
+
+    fn send_bits(&mut self, bits: &[bool]) {
+        match self {
+            Self::V22bis(m) => m.send_bits(bits),
+            Self::V32(m) => m.send_bits(bits),
+        }
+    }
+
+    fn pending_bits(&self) -> usize {
+        match self {
+            Self::V22bis(m) => m.pending_bits(),
+            Self::V32(m) => m.pending_bits(),
+        }
+    }
+}
+
+/// How far a handshake has got, in terms neither modulation owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Progress {
+    Negotiating,
+    Connected(u32),
+    Failed,
+}
+
 /// One modem.
 #[derive(Debug)]
 pub struct Modem {
@@ -69,7 +150,9 @@ pub struct Modem {
     state: State,
     fs: f64,
     /// The line side, once off hook.
-    pump: Option<v22bis::handshake::Modem>,
+    pump: Option<Pump>,
+    /// The rate the handshake settled on.
+    rate: u32,
     /// Error control over it, once connected.
     ec: Option<Stack>,
     /// Whether error control is wanted at all. Without it the connection is
@@ -93,6 +176,7 @@ impl Modem {
             state: State::Command,
             fs,
             pump: None,
+            rate: 0,
             ec: None,
             want_error_control: true,
             role: Role::Calling,
@@ -117,7 +201,12 @@ impl Modem {
 
     /// The rate agreed, once there is a connection.
     pub fn rate(&self) -> Option<u32> {
-        self.pump.as_ref().map(|p| p.rate().bits_per_second())
+        (self.rate > 0).then_some(self.rate)
+    }
+
+    /// The modulation in use, by the name `+MS` knows it as.
+    pub fn modulation(&self) -> &str {
+        &self.at.modulation.carrier
     }
 
     /// Whether error control is running on the current call.
@@ -214,8 +303,9 @@ impl Modem {
     fn advance_handshake(&mut self) {
         let Some(pump) = self.pump.as_ref() else { return };
         match pump.status() {
-            v22bis::handshake::Status::Negotiating => {}
-            v22bis::handshake::Status::Connected(rate) => {
+            Progress::Negotiating => {}
+            Progress::Connected(rate) => {
+                self.rate = rate;
                 self.state = State::Data;
                 self.escape.reset();
                 if self.want_error_control {
@@ -227,7 +317,9 @@ impl Modem {
                     // Offer compression in both directions and let the far end
                     // decide. What runs is the intersection, so offering more
                     // than the far end can do costs nothing.
-                    stack.offer_compression(Compression::Both);
+                    if self.at.compression {
+                        stack.offer_compression(Compression::Both);
+                    }
                     self.ec = Some(stack);
                 }
                 // V.250 6.2.7: with X at 1 or above the CONNECT carries the
@@ -236,11 +328,11 @@ impl Modem {
                 let code = if self.at.config.x == 0 {
                     ResultCode::Connect
                 } else {
-                    ResultCode::ConnectText(format!("{}", rate.bits_per_second()))
+                    ResultCode::ConnectText(format!("{rate}"))
                 };
                 self.at.emit(code);
             }
-            v22bis::handshake::Status::Failed => self.end_call(Ended::NoAnswer),
+            Progress::Failed => self.end_call(Ended::NoAnswer),
         }
     }
 
@@ -319,6 +411,16 @@ impl Modem {
                         self.at.emit(ResultCode::Error);
                     }
                 }
+                Action::SelectModulation(_) | Action::SelectCompression(_) => {
+                    // Both take effect on the next call, so there is nothing
+                    // to do now beyond acknowledging: the interpreter has
+                    // already recorded what was asked for.
+                    self.at.emit(ResultCode::Ok);
+                }
+                Action::SelectErrorControl(e) => {
+                    self.want_error_control = e.wanted();
+                    self.at.emit(ResultCode::Ok);
+                }
                 Action::ResetProfile(_) | Action::FactoryDefaults(_) => {
                     if self.pump.is_some() {
                         self.end_call(Ended::LocalRequest);
@@ -331,18 +433,36 @@ impl Modem {
 
     fn place_call(&mut self, role: Role) {
         self.role = role;
-        let hs_role = match role {
-            Role::Calling => v22bis::handshake::Role::Calling,
-            Role::Answering => v22bis::handshake::Role::Answering,
-        };
-        self.pump = Some(v22bis::handshake::Modem::new(hs_role, self.fs));
+        self.pump = Some(match self.at.modulation.carrier.as_str() {
+            "V32" => {
+                let hs_role = match role {
+                    Role::Calling => v32::startup::Role::Calling,
+                    Role::Answering => v32::startup::Role::Answering,
+                };
+                // Offer what this receiver can actually demodulate. Offering
+                // 9600 and then failing to read it would be worse than not
+                // offering it.
+                let offer = v32::startup::rate_signal(true, false);
+                Pump::V32(Box::new(v32::startup::Modem::new(hs_role, offer, self.fs)))
+            }
+            _ => {
+                let hs_role = match role {
+                    Role::Calling => v22bis::handshake::Role::Calling,
+                    Role::Answering => v22bis::handshake::Role::Answering,
+                };
+                Pump::V22bis(Box::new(v22bis::handshake::Modem::new(hs_role, self.fs)))
+            }
+        });
+        self.rate = 0;
         self.ec = None;
         self.outbound.clear();
+        self.async_bits.reset();
         self.state = State::Handshaking;
     }
 
     fn end_call(&mut self, why: Ended) {
         self.pump = None;
+        self.rate = 0;
         self.ec = None;
         self.outbound.clear();
         self.escape.reset();

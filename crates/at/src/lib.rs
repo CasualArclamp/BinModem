@@ -31,6 +31,63 @@ pub enum Action {
     ResetProfile(u8),
     /// `AT&F<n>` — restore factory configuration `n`.
     FactoryDefaults(u8),
+    /// `AT+MS=` — which modulation to use on the next call (V.250 6.4.1).
+    SelectModulation(Modulation),
+    /// `AT+ES=` — how error control should be attempted (V.250 6.5.1).
+    SelectErrorControl(ErrorControl),
+    /// `AT+DS=` — whether to negotiate V.42bis (V.250 6.6.1).
+    SelectCompression(bool),
+}
+
+/// What `+MS` asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Modulation {
+    /// One of the names in V.250 Table 13, or a manufacturer's own.
+    pub carrier: String,
+    /// Whether the DCE may fall back to another modulation on its own.
+    pub automode: bool,
+    pub min_rate: u32,
+    pub max_rate: u32,
+}
+
+/// What `+ES` asked for, in the terms of V.250 Table 20.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ErrorControl {
+    /// `<orig_rqst>`: 0 direct, 1 buffered only, 2 V.42 without the detection
+    /// phase, 3 V.42 with it.
+    pub request: u8,
+    /// `<orig_fbk>`: 0 and 1 make error control optional, 2 and above require
+    /// it and hang up if it cannot be established.
+    pub fallback: u8,
+}
+
+impl ErrorControl {
+    /// Whether V.42 should be attempted at all.
+    pub fn wanted(self) -> bool {
+        self.request >= 2
+    }
+
+    /// Whether the detection phase of V.42 7.2.1 should be run.
+    ///
+    /// Skipping it is what `<orig_rqst>` of 2 means: a DTE that already knows
+    /// the far end does V.42 can save the three quarters of a second the
+    /// detection phase costs.
+    pub fn detect(self) -> bool {
+        self.request >= 3
+    }
+
+    /// Whether to hang up if error control cannot be established.
+    pub fn required(self) -> bool {
+        self.fallback >= 2
+    }
+}
+
+impl Default for ErrorControl {
+    fn default() -> Self {
+        // V.42 with the detection phase, and a connection without it is still
+        // acceptable, which is what almost every modem shipped configured for.
+        Self { request: 3, fallback: 0 }
+    }
 }
 
 impl Action {
@@ -132,6 +189,19 @@ pub struct Interpreter {
     pub fmt: Formatter,
     pub config: Config,
     pub identity: Identity,
+    /// Modulations this DCE can actually use, most capable first.
+    ///
+    /// Held rather than hard-coded because what a DCE can do is a property of
+    /// the thing underneath it, and a command interpreter that guessed would
+    /// be advertising capabilities the modem does not have. Which is precisely
+    /// what `+GCAP` was doing until these commands existed.
+    pub modulations: Vec<String>,
+    /// What `+MS` last selected.
+    pub modulation: Modulation,
+    /// What `+ES` last selected.
+    pub error_control: ErrorControl,
+    /// What `+DS` last selected: whether V.42bis may be negotiated.
+    pub compression: bool,
     state: LineState,
     body: Vec<u8>,
     last_body: Vec<u8>,
@@ -153,6 +223,21 @@ impl Interpreter {
             fmt: Formatter::default(),
             config: Config::default(),
             identity: Identity::default(),
+            // What this DCE can originate, which is not the same as what it
+            // can receive: there is a Bell 103 demodulator here and no Bell
+            // 103 transmitter, so B103 is deliberately absent. Plain V.22 is
+            // absent for the opposite reason, that V.22bis at 1200 bit/s is
+            // V.22 and answering to both names would be two entries for one
+            // thing.
+            modulations: ["V32", "V22B"].iter().map(|s| (*s).to_owned()).collect(),
+            modulation: Modulation {
+                carrier: "V22B".into(),
+                automode: true,
+                min_rate: 300,
+                max_rate: 4800,
+            },
+            error_control: ErrorControl::default(),
+            compression: true,
             state: LineState::Idle,
             body: Vec::new(),
             last_body: Vec::new(),
@@ -397,6 +482,152 @@ impl Interpreter {
         }
     }
 
+    /// `+FCLASS` — which service class is in use (V.250 6.1.10).
+    ///
+    /// Zero is data, and it is the only one here: facsimile is a different
+    /// recommendation and this DCE does not implement it.
+    fn fclass(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
+        match op {
+            ExtOp::Read => {
+                self.fmt.info("+FCLASS: 0", &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Test => {
+                self.fmt.info("+FCLASS: (0)", &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Set(v) if v.trim() == "0" => Ok(None),
+            _ => Err(ResultCode::Error),
+        }
+    }
+
+    /// `+MS` — modulation selection (V.250 6.4.1).
+    fn modulation_select(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
+        match op {
+            ExtOp::Read => {
+                let m = &self.modulation;
+                let text = format!(
+                    "+MS: {},{},{},{}",
+                    m.carrier,
+                    u8::from(m.automode),
+                    m.min_rate,
+                    m.max_rate
+                );
+                self.fmt.info(&text, &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Test => {
+                let text = format!(
+                    "+MS: ({}),(0,1),(300-4800),(300-4800)",
+                    self.modulations.join(",")
+                );
+                self.fmt.info(&text, &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Set(value) => {
+                let mut parts = value.split(',');
+                let carrier = parts.next().unwrap_or("").trim().to_ascii_uppercase();
+                if !self.modulations.contains(&carrier) {
+                    // V.250 5.4.2: a subparameter outside the range the DCE
+                    // reported for it is an error, and reporting one thing in
+                    // +MS=? and accepting another is how a DTE ends up
+                    // believing a connection is something it is not.
+                    return Err(ResultCode::Error);
+                }
+                let number = |p: Option<&str>, default: u32| -> Result<u32, ResultCode> {
+                    match p.map(str::trim) {
+                        None | Some("") => Ok(default),
+                        Some(v) => v.parse().map_err(|_| ResultCode::Error),
+                    }
+                };
+                let automode = number(parts.next(), 1)?;
+                if automode > 1 {
+                    return Err(ResultCode::Error);
+                }
+                let min_rate = number(parts.next(), 300)?;
+                let max_rate = number(parts.next(), 4800)?;
+                if min_rate > max_rate {
+                    return Err(ResultCode::Error);
+                }
+                self.modulation = Modulation {
+                    carrier,
+                    automode: automode == 1,
+                    min_rate,
+                    max_rate,
+                };
+                Ok(Some(Action::SelectModulation(self.modulation.clone())))
+            }
+            ExtOp::Execute => Err(ResultCode::Error),
+        }
+    }
+
+    /// `+ES` — error control selection (V.250 6.5.1, Table 20).
+    fn error_control_select(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
+        match op {
+            ExtOp::Read => {
+                let e = self.error_control;
+                let text = format!("+ES: {},{}", e.request, e.fallback);
+                self.fmt.info(&text, &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Test => {
+                // Only the values this DCE can actually honour. The
+                // alternative protocol of 4 is MNP, which is not implemented.
+                self.fmt
+                    .info("+ES: (0-3),(0-3),(0-3)", &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Set(value) => {
+                let mut parts = value.split(',');
+                let number = |p: Option<&str>, default: u8| -> Result<u8, ResultCode> {
+                    match p.map(str::trim) {
+                        None | Some("") => Ok(default),
+                        Some(v) => v.parse().map_err(|_| ResultCode::Error),
+                    }
+                };
+                let request = number(parts.next(), 3)?;
+                let fallback = number(parts.next(), 0)?;
+                if request > 3 || fallback > 3 {
+                    return Err(ResultCode::Error);
+                }
+                self.error_control = ErrorControl { request, fallback };
+                Ok(Some(Action::SelectErrorControl(self.error_control)))
+            }
+            ExtOp::Execute => Err(ResultCode::Error),
+        }
+    }
+
+    /// `+DS` — data compression selection (V.250 6.6.1).
+    fn compression_select(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
+        match op {
+            ExtOp::Read => {
+                let text = format!("+DS: {},0,512,6", u8::from(self.compression) * 3);
+                self.fmt.info(&text, &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Test => {
+                self.fmt
+                    .info("+DS: (0,3),(0),(512),(6)", &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Set(value) => {
+                let first = value.split(',').next().unwrap_or("").trim();
+                // Table 22: 0 is no compression, 3 is both directions. The
+                // one-directional values are not offered, because V.42bis is
+                // negotiated as a pair and offering half of it would be a
+                // promise this DCE cannot keep.
+                let on = match first {
+                    "" | "3" => true,
+                    "0" => false,
+                    _ => return Err(ResultCode::Error),
+                };
+                self.compression = on;
+                Ok(Some(Action::SelectCompression(on)))
+            }
+            ExtOp::Execute => Err(ResultCode::Error),
+        }
+    }
+
     fn extended(&mut self, name: &str, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
         // V.250 6.1.4 to 6.1.9. These are all read-only identification actions,
         // so Execute and Read behave alike and Test reports support.
@@ -406,7 +637,14 @@ impl Interpreter {
             "GMR" => self.identity.revision.clone(),
             "GSN" => self.identity.serial.clone(),
             // V.250 6.1.9: the list of capability commands this DCE supports.
+            // Everything named here is answered below; a DCE that lists a
+            // command it does not implement is worse than one that lists
+            // nothing, because a DTE will believe it.
             "GCAP" => "+GCAP: +FCLASS,+MS,+ES,+DS".into(),
+            "FCLASS" => return self.fclass(op),
+            "MS" => return self.modulation_select(op),
+            "ES" => return self.error_control_select(op),
+            "DS" => return self.compression_select(op),
             _ => return Err(ResultCode::Error),
         };
         match op {
