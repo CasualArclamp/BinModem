@@ -16,6 +16,7 @@ pub mod filter;
 pub mod fsk;
 pub mod nco;
 pub mod shaping;
+pub mod tone;
 
 pub use echo::EchoCanceller;
 pub use equalizer::Equalizer;
@@ -24,3 +25,4 @@ pub use filter::{Biquad, Cascade, OnePole, bandpass, butter_highpass, butter_low
 pub use fsk::FskDetector;
 pub use nco::Nco;
 pub use shaping::{ComplexFir, Fir, Gardner, fir_lowpass, rrc_at, rrc_taps};
+pub use tone::{ReversalDetector, ToneDetector};
