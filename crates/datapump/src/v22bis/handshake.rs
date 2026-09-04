@@ -11,7 +11,7 @@
 //! Driven a sample at a time, like everything else here. Each step reads what
 //! the receiver is hearing and sets what the transmitter is sending.
 
-use super::{Pattern, Rate, Receiver, Signal, Transmitter};
+use super::{Channel, Pattern, Rate, Receiver, Signal, Transmitter};
 
 /// Which end of the call this is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,5 +253,79 @@ impl Handshake {
     fn settle(&mut self, rx: &mut Receiver, rate: Rate) {
         rx.set_rate(rate);
         self.enter(State::Connected(rate));
+    }
+}
+
+/// One end of a V.22bis call: transmitter, receiver and handshake together.
+///
+/// The three have to be stepped in lockstep and in the right order, and there
+/// is only one right order, so putting them behind one call removes a way of
+/// getting it wrong. It also gives V.22bis the same shape as V.32, which
+/// matters because what sits above them should not have to care which is in
+/// use.
+#[derive(Debug)]
+pub struct Modem {
+    tx: Transmitter,
+    rx: Receiver,
+    hs: Handshake,
+}
+
+impl Modem {
+    pub fn new(role: Role, fs: f64) -> Self {
+        // A channel is named for the end that uses it and says both what that
+        // end transmits in and what it listens to: the calling modem transmits
+        // low and receives high, the answering modem the reverse.
+        let channel = match role {
+            Role::Calling => Channel::Calling,
+            Role::Answering => Channel::Answering,
+        };
+        Self {
+            tx: Transmitter::at_rate(channel, Rate::Bps1200, fs),
+            rx: Receiver::new(channel, fs),
+            hs: Handshake::new(role, fs),
+        }
+    }
+
+    /// Take one sample from the line and give back the one to put on it.
+    pub fn step(&mut self, line: f64) -> f64 {
+        self.rx.feed(line);
+        self.hs.step(&mut self.tx, &mut self.rx);
+        self.tx.next_sample()
+    }
+
+    pub fn status(&self) -> Status {
+        self.hs.status()
+    }
+
+    pub fn rate(&self) -> Rate {
+        self.rx.rate()
+    }
+
+    pub fn carrier(&self) -> bool {
+        self.rx.carrier()
+    }
+
+    /// Bits recovered from the line.
+    pub fn take_bits(&mut self) -> Vec<bool> {
+        self.rx.take_bits()
+    }
+
+    /// Queue bits for transmission.
+    pub fn send_bits(&mut self, bits: &[bool]) {
+        self.tx.push_bits(bits);
+    }
+
+    /// How many are still waiting to go out, so that whatever is feeding this
+    /// knows when to hand over more.
+    pub fn pending_bits(&self) -> usize {
+        self.tx.pending_bits()
+    }
+
+    pub fn constellation_point(&self) -> (f64, f64) {
+        self.rx.constellation_point()
+    }
+
+    pub fn residual_error(&self) -> f64 {
+        self.rx.residual_error()
     }
 }

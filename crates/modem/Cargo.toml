@@ -1,0 +1,13 @@
+[package]
+name    = "modem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+at       = { path = "../at" }
+datapump = { path = "../datapump" }
+ec       = { path = "../ec" }
+
+[lints]
+workspace = true

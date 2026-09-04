@@ -1269,6 +1269,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "modem"
+version = "0.1.0"
+dependencies = [
+ "at",
+ "datapump",
+ "ec",
+]
+
+[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
