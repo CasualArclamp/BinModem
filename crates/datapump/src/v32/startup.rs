@@ -15,7 +15,7 @@
 //! adds, which is what the echo canceller needs to know how far back to look.
 
 use super::{Mode, Receiver, Signal, Transmitter};
-use dsp::{EchoCanceller, ReversalDetector, ToneDetector};
+use dsp::{EchoCanceller, EchoFinder, Reflection, ReversalDetector, ToneDetector};
 
 /// Half the symbol rate: where an alternating pattern puts its sidebands.
 const OFFSET: f64 = super::BAUD / 2.0;
@@ -372,6 +372,16 @@ mod timing {
     pub const SEGMENT_S_BAR: u64 = 16;
     /// Segment 3, at its shortest (5.2.3 gives 1280 to 8192).
     pub const SEGMENT_TRN: u64 = 1280;
+    /// Segment 3 on a line long enough to reflect as well as attenuate.
+    ///
+    /// Note 3 to 5.4.2 says the training segment "is suitable for training the
+    /// echo canceller in the transmitting modem", and allows a longer sequence
+    /// still if one is wanted. One is wanted here. A network reflection has to
+    /// be found before the taps that cancel it can be placed, and then those
+    /// taps have to converge, and both have to happen inside the one stretch
+    /// of the start-up the far end is silent for. The shortest segment allowed
+    /// is half a second, which is enough for one of those jobs.
+    pub const SEGMENT_TRN_LONG: u64 = 4096;
     /// Scrambled ones before data may flow (5.4.1 e, 5.4.2).
     pub const SETTLE: u64 = 128;
     /// Nothing recognisable for this long and the attempt is abandoned. The
@@ -443,7 +453,8 @@ pub struct Startup {
     /// either counts once and the other is ignored for a while afterwards.
     low_reversals: ReversalDetector,
     high_reversals: ReversalDetector,
-    reversal_quiet: u64,
+    carrier_quiet: u64,
+    sideband_quiet: u64,
     rates: RateDetector,
     /// Samples until the next symbol boundary.
     countdown: f64,
@@ -461,8 +472,9 @@ pub struct Startup {
     /// Whether a training segment has been sent yet. Only the first is a
     /// window the echo canceller can learn anything from.
     trained: bool,
-    /// Held until the next symbol boundary, where the machine can act on it.
-    pending_reversal: bool,
+    /// Held until the next symbol boundary, where the machine can act on them.
+    pending_carrier_reversal: bool,
+    pending_sideband_reversal: bool,
     pending_sequence: Option<u16>,
     /// What this modem offers, and what has been settled on.
     offer: u16,
@@ -483,7 +495,8 @@ impl Startup {
             carrier_reversals: ReversalDetector::new(super::CARRIER, 60.0, AUDIBLE, fs),
             low_reversals: ReversalDetector::new(super::CARRIER - OFFSET, 60.0, AUDIBLE, fs),
             high_reversals: ReversalDetector::new(super::CARRIER + OFFSET, 60.0, AUDIBLE, fs),
-            reversal_quiet: 0,
+            carrier_quiet: 0,
+            sideband_quiet: 0,
             rates: RateDetector::new(),
             countdown: sps,
             sps,
@@ -494,7 +507,8 @@ impl Startup {
             held: 0,
             carrier_peak: 0.0,
             trained: false,
-            pending_reversal: false,
+            pending_carrier_reversal: false,
+            pending_sideband_reversal: false,
             pending_sequence: None,
             offer,
             agreed: 0,
@@ -542,6 +556,21 @@ impl Startup {
         matches!(self.state, State::SendTrn) && !self.trained
     }
 
+    /// How long the training segment is being sent for, in symbols.
+    ///
+    /// 5.2.3 allows anything from 1280 to 8192, and which end of that to use
+    /// is decided by the round trip already measured: a line short enough that
+    /// everything reflected comes back inside the near taps has only one job
+    /// to do here, and a longer one has two.
+    pub fn training_symbols(&self) -> u64 {
+        let near = (ECHO_SPAN_MS * super::BAUD / 1000.0) as u64;
+        if self.round_trip > near {
+            timing::SEGMENT_TRN_LONG
+        } else {
+            timing::SEGMENT_TRN
+        }
+    }
+
     /// Which step of the procedure this end is on, for diagnostics and for
     /// anything that wants to show progress.
     pub fn phase(&self) -> &'static str {
@@ -585,26 +614,33 @@ impl Startup {
         // very rarely on one of this machine's symbol boundaries. Both are
         // therefore latched until the next one: the state machine runs a
         // symbol at a time, and anything not held for it is simply lost.
-        let reversal = {
-            let a = self.carrier_reversals.feed(line);
-            let b = self.low_reversals.feed(line);
-            let c = self.high_reversals.feed(line);
-            let any = a || b || c;
-            if self.reversal_quiet > 0 {
-                self.reversal_quiet -= 1;
-                false
-            } else if any {
-                // Both sidebands belong to the one signal and turn together.
-                self.reversal_quiet = (self.sps * 16.0) as u64;
-                true
-            } else {
-                false
-            }
-        };
+        //
+        // The carrier and the sidebands are kept apart rather than run
+        // together, because which of them a modem should be listening to
+        // depends on which end of the call it is. A calling modem repeats one
+        // state, which puts everything at 1800 Hz and nothing at the
+        // sidebands; an answering modem alternates, which does the exact
+        // reverse. Each therefore listens where its own signal is not, and is
+        // deaf to its own reflection by construction — the same trick
+        // `Listener::classify` relies on, and it has to be the same here.
+        //
+        // Watching both at once looks harmless and is not. A modem hears its
+        // own hybrid at once and the far end after the length of the line, so
+        // whichever of the two came back first stopped the clock, and it was
+        // always the hybrid. Both ends duly measured a round trip of zero on a
+        // line hundreds of miles long, and did it in a way nothing caught,
+        // because a test line with no echo on it has nothing else to hear.
+        let at_carrier = self.carrier_reversals.feed(line);
+        // Both sidebands belong to the one signal and turn together.
+        let at_low = self.low_reversals.feed(line);
+        let at_high = self.high_reversals.feed(line);
+        let carrier = self.gate(at_carrier, true);
+        let sidebands = self.gate(at_low || at_high, false);
 
         // Bits arriving feed the rate detector while there is still a rate to
         // agree; afterwards they are the caller's, as data.
-        self.pending_reversal |= reversal;
+        self.pending_carrier_reversal |= carrier;
+        self.pending_sideband_reversal |= sidebands;
         if !matches!(self.state, State::Connected(_) | State::Failed) {
             for bit in rx.take_bits() {
                 if let Some(s) = self.rates.feed(bit) {
@@ -618,14 +654,15 @@ impl Startup {
             return self.status();
         }
         self.countdown += self.sps;
-        let reversal = std::mem::take(&mut self.pending_reversal);
+        let carrier = std::mem::take(&mut self.pending_carrier_reversal);
+        let sidebands = std::mem::take(&mut self.pending_sideband_reversal);
         let sequence = self.pending_sequence.take();
         self.symbols += 1;
         self.total += 1;
         if let Some(t) = self.timer.as_mut() {
             *t += 1;
         }
-        self.advance(reversal, sequence, tx);
+        self.advance(carrier, sidebands, sequence, tx);
         if !matches!(self.state, State::Connected(_) | State::Failed)
             && self.total >= timing::PATIENCE
         {
@@ -634,10 +671,37 @@ impl Startup {
         self.status()
     }
 
+    /// Report a reversal at most once, and not again for a while.
+    ///
+    /// A phase reversal is an event in a signal that goes on either side of
+    /// it, and a detector watching for one has no way to tell a second event
+    /// from its own recovery from the first.
+    fn gate(&mut self, fired: bool, is_carrier: bool) -> bool {
+        let quiet = if is_carrier {
+            &mut self.carrier_quiet
+        } else {
+            &mut self.sideband_quiet
+        };
+        if *quiet > 0 {
+            *quiet -= 1;
+            false
+        } else if fired {
+            *quiet = (self.sps * 16.0) as u64;
+            true
+        } else {
+            false
+        }
+    }
+
     /// One symbol of the state machine.
+    ///
+    /// The two reversals are separate arguments rather than one, so that a
+    /// state has to say which signal it is listening to. The far end's is the
+    /// only right answer, and it is a different one at each end of the call.
     fn advance(
         &mut self,
-        reversal: bool,
+        carrier_reversal: bool,
+        sideband_reversal: bool,
         sequence: Option<u16>,
         tx: &mut Transmitter,
     ) {
@@ -674,7 +738,10 @@ impl Startup {
             }
             State::Aa => {
                 tx.set_signal(Signal::StateA);
-                if reversal {
+                // The far end is alternating, so its reversal is in the
+                // sidebands. This end is repeating a state, which puts nothing
+                // there at all.
+                if sideband_reversal {
                     // The far end has turned its alternation over. Start the
                     // clock and owe it a reversal of our own in 64 symbols.
                     self.timer = Some(0);
@@ -688,7 +755,7 @@ impl Startup {
                 }
             }
             State::Cc => {
-                if reversal {
+                if sideband_reversal {
                     // Our reversal has come back, so stop the clock.
                     self.round_trip = self.measured();
                     tx.set_signal(Signal::Silent);
@@ -742,7 +809,10 @@ impl Startup {
             }
             State::Ca => {
                 self.note_carrier();
-                if reversal {
+                // The far end is repeating a state, so its reversal is in the
+                // bare carrier at 1800 Hz. This end is alternating, which
+                // suppresses the carrier and leaves that place empty.
+                if carrier_reversal {
                     self.round_trip = self.measured();
                     self.enter(State::CaToAc);
                 }
@@ -807,7 +877,7 @@ impl Startup {
                 }
             }
             State::SendTrn => {
-                if self.symbols >= timing::SEGMENT_TRN {
+                if self.symbols >= self.training_symbols() {
                     self.trained = true;
                     self.rates.reset();
                     tx.set_signal(Signal::Rate(self.offer));
@@ -963,6 +1033,17 @@ pub struct Modem {
     rx: Receiver,
     startup: Startup,
     echo: EchoCanceller,
+    /// Looks for the network's reflection while the line is quiet enough to
+    /// find it. Dropped once it has answered.
+    finder: Option<EchoFinder>,
+    /// Samples spent looking, and how many to spend.
+    searched: usize,
+    search_for: usize,
+    /// What the search turned up, kept for diagnostics: the number is the
+    /// difference between a canceller that works on a long line and one that
+    /// does not, and there is no way to see it from outside.
+    reflection: Option<Reflection>,
+    fs: f64,
     /// The return loss as training ended, which is the last moment it means
     /// anything: with both ends talking the meter compares everything heard
     /// against everything left, and the far end is in both.
@@ -970,14 +1051,27 @@ pub struct Modem {
     was_training: bool,
 }
 
-/// How far back the echo canceller looks, in milliseconds.
+/// How far back the first run of taps looks, in milliseconds.
 ///
-/// Enough for the reflection off a hybrid, which is immediate, and for a
-/// little of what the network adds behind it. A long connection can put an
-/// echo much further back than this; the round trip the start-up measures is
-/// what would say how much further, and sizing the canceller from it is the
-/// obvious next thing to do with that number.
+/// The reflection off a hybrid, which is immediate, and a little of what the
+/// network adds behind it.
 const ECHO_SPAN_MS: f64 = 8.0;
+
+/// How much line the second run of taps covers, in milliseconds.
+///
+/// A network reflection is one path among many rather than one impedance step,
+/// so it arrives smeared rather than as a copy. This is what that smearing is
+/// allowed to be; anything longer is taps modelling nothing.
+const FAR_SPAN_MS: f64 = 4.0;
+
+/// Weakest reflection worth a second run of taps.
+///
+/// Under this it is not clear there is a reflection at all. The search takes
+/// the largest of some hundreds of candidates, and the largest of hundreds of
+/// numbers that should all be zero is not zero; a bar has to sit above what
+/// that alone produces. Above it, the reflection is within about 8 dB of the
+/// far modem, which is close enough to be worth removing.
+const FAINTEST: f64 = 0.15;
 
 impl Modem {
     /// `offer` is the rate signal this modem sends, from [`rate_signal`].
@@ -988,6 +1082,11 @@ impl Modem {
             rx,
             startup: Startup::new(role, offer, fs),
             echo: EchoCanceller::new((ECHO_SPAN_MS * fs / 1000.0) as usize, 0.5),
+            finder: None,
+            searched: 0,
+            search_for: 0,
+            reflection: None,
+            fs,
             trained_loss: 0.0,
             was_training: false,
         }
@@ -999,6 +1098,27 @@ impl Modem {
         // what is left. Its own history remembers how long ago each sample
         // was sent, so the caller need not.
         let sent = self.tx.last_sample();
+
+        // The training segment is the only stretch of the start-up where the
+        // line carries our own signal and nothing else, so it is the only
+        // chance to find out where the line puts it back as well as what shape
+        // it comes back in. The first half goes on finding it and the second
+        // on cancelling it.
+        if self.startup.training_echo() && !self.was_training {
+            self.begin_search();
+        }
+        if let Some(finder) = self.finder.as_mut() {
+            // What arrived, rather than what the canceller left of it: the
+            // near echo it removes is nowhere near the delays being searched,
+            // and this way the search does not depend on how the near taps are
+            // getting on.
+            finder.feed(sent, line);
+            self.searched += 1;
+            if self.searched >= self.search_for {
+                self.place_far_taps();
+            }
+        }
+
         let cleaned = self.echo.process(sent, line);
 
         // Adapt only while this end is transmitting its training segment,
@@ -1022,6 +1142,63 @@ impl Modem {
             self.startup.step(cleaned, &mut self.tx, &mut self.rx);
         }
         self.tx.next_sample()
+    }
+
+    /// Start looking for a network reflection, if there is anywhere for one to
+    /// be that the near taps do not already cover.
+    ///
+    /// The round trip measured during the start-up is what bounds the search.
+    /// Nothing can come back later than that, so the delays past it need not
+    /// be considered, and on a short line there is nothing to consider at all.
+    ///
+    /// The bound is the measurement plus the width of the taps being placed,
+    /// and it needs the slack to be in that direction rather than the other:
+    /// searching too far costs arithmetic during a stretch where there is time
+    /// for it, and searching too close in misses the reflection entirely. What
+    /// slack there is turns out to be spare, because the measurement errs
+    /// long — 81 symbols against a true 80 on a clean line, 106 against 96
+    /// on one where the returning signal is weak enough to slow the detector
+    /// down, which is the error the subtraction models least well.
+    fn begin_search(&mut self) {
+        let first = self.echo.span();
+        let last = self.round_trip_samples() + self.far_taps();
+        if last <= first {
+            return;
+        }
+        self.finder = Some(EchoFinder::new(first, last));
+        self.searched = 0;
+        self.search_for =
+            (self.startup.training_symbols() as f64 / 2.0 * self.fs / super::BAUD) as usize;
+    }
+
+    /// Put the second run of taps where the search says the reflection is.
+    fn place_far_taps(&mut self) {
+        let Some(finder) = self.finder.take() else {
+            return;
+        };
+        let Some(found) = finder.best().filter(|f| f.strength >= FAINTEST) else {
+            return;
+        };
+        // Centred on the reflection rather than starting at it: what comes
+        // back is the signal through whatever the line did to it, and that
+        // spreads either side of where the bulk of it lands.
+        let taps = self.far_taps();
+        let offset = found.delay.saturating_sub(taps / 2).max(self.echo.span());
+        self.echo.watch_far_echo(offset, taps);
+        self.reflection = Some(found);
+    }
+
+    fn far_taps(&self) -> usize {
+        (FAR_SPAN_MS * self.fs / 1000.0) as usize
+    }
+
+    fn round_trip_samples(&self) -> usize {
+        (self.startup.round_trip() as f64 * self.fs / super::BAUD) as usize
+    }
+
+    /// The network reflection the canceller went looking for, if it found one.
+    pub fn reflection(&self) -> Option<Reflection> {
+        self.reflection
     }
 
     pub fn status(&self) -> Status {

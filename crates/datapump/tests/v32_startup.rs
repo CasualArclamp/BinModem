@@ -142,6 +142,14 @@ fn the_round_trip_is_measured_and_the_line_delay_comes_out_of_it() {
     // back; what is left after taking off the 64 symbols the far end owes is
     // the time the line adds. An echo canceller needs it to know how far back
     // to look for a reflection.
+    //
+    // The hybrid has to be here. Without it each modem hears only the far end
+    // and the measurement cannot go wrong; with it each modem also hears its
+    // own reversal come straight back, which arrives first and is the wrong
+    // one to stop the clock on. Both ends did exactly that, and read a round
+    // trip of zero on a line hundreds of miles long, for as long as this test
+    // ran on a line that could not reflect.
+    const HYBRID: f64 = 0.251;
     let delay_symbols = 40usize;
     let delay = (delay_symbols as f64 * FS / BAUD) as usize;
 
@@ -152,8 +160,8 @@ fn the_round_trip_is_measured_and_the_line_delay_comes_out_of_it() {
     let mut to_answering = vec![0.0; delay];
 
     for i in 0..(20.0 * FS) as usize {
-        let heard_by_calling = to_calling[i % delay];
-        let heard_by_answering = to_answering[i % delay];
+        let heard_by_calling = to_calling[i % delay] + HYBRID * calling.out;
+        let heard_by_answering = to_answering[i % delay] + HYBRID * answering.out;
         to_calling[i % delay] = answering.out;
         to_answering[i % delay] = calling.out;
 
