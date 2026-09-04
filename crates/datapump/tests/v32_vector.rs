@@ -13,11 +13,16 @@
 //! turns, so it puts out the bare carrier at 1800 Hz, which is what 5.4.2 has
 //! the answering modem listen for. A modem alternating states A and C reverses
 //! phase every symbol, which is double sideband with the carrier suppressed:
-//! 1200 Hz either side of 1800, or exactly the "600 Hz and 3000 Hz" that
-//! 5.4.1 has the calling modem listen for. Both are in the capture, the second
-//! standing 46 dB above everything between the two sidebands. Had A and C been
-//! a quarter turn apart rather than half, the energy would have been a single
-//! tone at 1200 or 2400 Hz instead, and there is none at either.
+//! 1200 Hz either side of 1800, or exactly the "600 Hz and 3000 Hz" that 5.4.1
+//! has the calling modem listen for. Both are in the capture.
+//!
+//! The second is the one that pins the geometry, and what it turns on is the
+//! suppression rather than the sidebands. Any alternation between two states
+//! puts energy 1200 Hz either side, because any alternation repeats every two
+//! symbols; what decides whether anything is left in the middle is whether the
+//! two states average to nothing. Only an antipodal pair does. States a quarter
+//! turn apart would leave the carrier standing 3 dB above each sideband, and
+//! measured, the whole band between the two sidebands sits 46 dB below them.
 //!
 //! The conditioning signal of 5.2 would have said the same thing about states
 //! A and B, and could not be found: it falls in the part of the start-up where
@@ -184,9 +189,12 @@ fn the_start_up_carries_the_tones_clause_5_4_names() {
 
     // Alternating two antipodal states is phase reversal at half the symbol
     // rate, which is double sideband with the carrier suppressed: energy at
-    // 600 and at 3000, and nothing in between. States a quarter turn apart
-    // would put a single tone at 1200 or 2400 instead, which is exactly where
-    // a misreading of the figure would show up.
+    // 600 and at 3000 and nothing in between. The suppression is the whole
+    // test. Sidebands 1200 Hz out would appear for any alternation at all,
+    // since any alternation repeats every two symbols; what says the two
+    // states are opposite is that they average to nothing, and a pair a
+    // quarter turn apart would leave the carrier standing 3 dB above each
+    // sideband instead.
     assert!(
         low > 4.0 * between && high > 4.0 * between,
         "the sidebands at 600 and 3000 Hz ({low:.4}, {high:.4}) do not stand          clear of the band between them ({between:.4}), so states A and C are          not half a turn apart"

@@ -78,11 +78,14 @@ impl Mode {
 ///
 /// One point to a quadrant, all at the root of ten, ninety degrees apart, and
 /// arranged so that C is the negative of A and D the negative of B. That last
-/// is not decoration: the conditioning signal of 5.2 is an alternation between
+/// is not decoration. The conditioning signal of 5.2 is an alternation between
 /// A and B followed by an alternation between C and D, written S and S-bar,
-/// and the bar means what it says. The receiver takes its time reference from
-/// the moment the signal inverts, which only exists because the second pair is
-/// the first pair negated.
+/// and the bar means what it says: the receiver takes its time reference from
+/// the moment the signal inverts, which exists only because the second pair is
+/// the first pair negated. The start-up of 5.4 then leans on the same fact
+/// from the other side, alternating A with C so that the two cancel and leave
+/// the carrier suppressed, which is what makes 600 and 3000 Hz the only things
+/// on the line.
 const STATES: [(f64, f64); 4] = [
     (-3.0, -1.0), // A
     (1.0, -3.0),  // B
@@ -119,16 +122,6 @@ const MAX_GAIN: f64 = 400.0;
 /// it is declared gone. Five decibels apart, as V.22bis 6.5.2 asks for.
 const CARRIER_ON: f64 = 1.0e-3;
 const CARRIER_OFF: f64 = 5.62e-4;
-
-/// Turn a point through whole quadrants.
-fn rotate(point: (f64, f64), quadrant: u8) -> (f64, f64) {
-    match quadrant & 3 {
-        0 => point,
-        1 => (-point.1, point.0),
-        2 => (-point.0, -point.1),
-        _ => (point.1, -point.0),
-    }
-}
 
 /// Which of the four states a received point is nearest.
 ///
@@ -200,6 +193,57 @@ impl Scrambler {
     }
 }
 
+/// Encoding for the TRN segment after its first 256 symbols (Table 5).
+const TRN_STATES: [usize; 4] = [STATE_A, STATE_B, STATE_C, STATE_D];
+
+/// What the transmitter puts on the line.
+///
+/// The start-up of 5.4 is made of these. The first several are not data at all
+/// but fixed patterns of constellation states, chosen for what they look like
+/// on the line rather than for what they carry: a repeated state is the bare
+/// carrier, and an alternation between opposite states is that carrier
+/// suppressed, leaving a pair of sidebands half the symbol rate apart. Each
+/// modem knows the other by which of these it hears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Signal {
+    /// Nothing. 5.4.1 has the calling modem cease transmitting partway
+    /// through, and the drop is how the answering modem knows to move on.
+    Silent,
+    /// The answering tone of V.25, 2100 Hz (5.1).
+    AnswerTone,
+    /// State A repeated: the carrier alone, at 1800 Hz. Called AA in Figure 4.
+    StateA,
+    /// State C repeated. The change from AA to CC is a phase reversal, which
+    /// is the mark 5.4.1 times against.
+    StateC,
+    /// Alternating A and C: carrier suppressed, sidebands at 600 and 3000 Hz.
+    AlternateAC,
+    /// The same alternation begun on the other state, so that the change from
+    /// AC to CA is again a reversal (5.4.2).
+    AlternateCA,
+    /// Segment 1 of the conditioning signal (5.2.1): A alternating with B.
+    ConditioningS,
+    /// Segment 2 (5.2.2): C alternating with D, which is segment 1 negated.
+    ConditioningSbar,
+    /// Segment 3 (5.2.3): scrambled ones at 4800 with the differential
+    /// encoding disabled, for training the far equaliser and the near echo
+    /// canceller.
+    Trn,
+    /// A rate signal: the 16 bits of Table 6 or 7, repeated, scrambled and
+    /// differentially encoded (5.3).
+    Rate(u16),
+    /// Scrambled binary ones, which is what fills a connection between one
+    /// byte of data and the next.
+    #[default]
+    ScrambledOnes,
+}
+
+/// Frequency of the V.25 answering tone.
+pub const ANSWER_TONE: f64 = 2100.0;
+
+/// Symbols of TRN sent as A or C before Table 5 takes over (5.2.3).
+pub const TRN_BINARY_SYMBOLS: u32 = 256;
+
 /// V.32 transmitter at 4800 bit/s.
 #[derive(Debug)]
 pub struct Transmitter {
@@ -212,6 +256,14 @@ pub struct Transmitter {
     /// Position within the current symbol period, in symbols.
     phase: f64,
     pending: Vec<bool>,
+    signal: Signal,
+    /// Generator for the answering tone, which is not modulation.
+    answer: Nco,
+    /// Symbols sent since the current signal began, for the patterns that
+    /// alternate and for the change of encoding partway through TRN.
+    tick: u64,
+    /// Position in the repeating rate sequence.
+    rate_bit: u32,
 }
 
 impl Transmitter {
@@ -224,7 +276,34 @@ impl Transmitter {
             history: vec![(0.0, 0.0); 2 * SPAN + 1],
             phase: 0.0,
             pending: Vec::new(),
+            signal: Signal::default(),
+            answer: Nco::new(ANSWER_TONE, fs),
+            tick: 0,
+            rate_bit: 0,
         }
+    }
+
+    /// What to send. Changing it restarts the pattern.
+    pub fn set_signal(&mut self, signal: Signal) {
+        if signal == self.signal {
+            return;
+        }
+        self.signal = signal;
+        self.tick = 0;
+        self.rate_bit = 0;
+        if signal == Signal::Trn {
+            // 5.2.3: the scrambler starts from all zeros for the segment.
+            self.scrambler.reset();
+        }
+    }
+
+    pub fn signal(&self) -> Signal {
+        self.signal
+    }
+
+    /// The state last put on the line, as an index into the four.
+    pub fn state(&self) -> usize {
+        self.quadrant as usize
     }
 
     pub fn push_bits(&mut self, bits: &[bool]) {
@@ -243,23 +322,85 @@ impl Transmitter {
         self.pending.len()
     }
 
-    /// Map the next dibit to a signal state (2.4.2).
-    fn next_symbol(&mut self) -> (f64, f64) {
-        let mut dibit = [false; 2];
-        for slot in &mut dibit {
-            let bit = if self.pending.is_empty() {
-                true
-            } else {
-                self.pending.remove(0)
-            };
-            *slot = self.scrambler.scramble(bit);
-        }
+    /// Choose the next state to transmit.
+    ///
+    /// Turning state A through whole quadrants gives B, C and D in order, so
+    /// the quadrant number and the index of the state are the same thing, and
+    /// the differential coding of 2.4.2 lands on a point without a table.
+    fn next_state(&mut self) -> usize {
+        let tick = self.tick;
+        self.tick += 1;
+        let alternate = |even, odd| if tick.is_multiple_of(2) { even } else { odd };
+        let state = match self.signal {
+            Signal::Silent | Signal::AnswerTone => return self.quadrant as usize,
+            Signal::StateA => STATE_A,
+            Signal::StateC => STATE_C,
+            Signal::AlternateAC => alternate(STATE_A, STATE_C),
+            Signal::AlternateCA => alternate(STATE_C, STATE_A),
+            Signal::ConditioningS => alternate(STATE_A, STATE_B),
+            Signal::ConditioningSbar => alternate(STATE_C, STATE_D),
+            Signal::Trn => {
+                // 5.2.3: scrambled ones with the differential encoding
+                // disabled. For the first 256 symbols the leading bit of each
+                // dibit chooses between A and C; after that the whole dibit
+                // chooses, by Table 5.
+                let first = self.scrambler.scramble(true);
+                let second = self.scrambler.scramble(true);
+                if tick < u64::from(TRN_BINARY_SYMBOLS) {
+                    if first { STATE_C } else { STATE_A }
+                } else {
+                    TRN_STATES[usize::from(first) << 1 | usize::from(second)]
+                }
+            }
+            Signal::Rate(sequence) => {
+                // 5.3: the 16 bits repeat, scrambled, and are differentially
+                // encoded as data is.
+                let mut dibit = [false; 2];
+                for slot in &mut dibit {
+                    let bit = sequence & (1 << (15 - self.rate_bit)) != 0;
+                    self.rate_bit = (self.rate_bit + 1) % 16;
+                    *slot = self.scrambler.scramble(bit);
+                }
+                return self.turn(dibit);
+            }
+            Signal::ScrambledOnes => {
+                let mut dibit = [false; 2];
+                for slot in &mut dibit {
+                    let bit = if self.pending.is_empty() {
+                        true
+                    } else {
+                        self.pending.remove(0)
+                    };
+                    *slot = self.scrambler.scramble(bit);
+                }
+                return self.turn(dibit);
+            }
+        };
+        self.quadrant = state as u8;
+        state
+    }
+
+    /// Apply the differential quadrant coding of Table 1 and land on a state.
+    fn turn(&mut self, dibit: [bool; 2]) -> usize {
         let change = QUADRANT_CHANGE[usize::from(dibit[0]) << 1 | usize::from(dibit[1])];
         self.quadrant = (self.quadrant + change) & 3;
-        rotate(STATES[STATE_A], self.quadrant)
+        self.quadrant as usize
+    }
+
+    fn next_symbol(&mut self) -> (f64, f64) {
+        STATES[self.next_state()]
     }
 
     pub fn next_sample(&mut self) -> f64 {
+        // Two of the signals are not modulation at all.
+        match self.signal {
+            Signal::Silent => return 0.0,
+            Signal::AnswerTone => {
+                let (cos, _) = self.answer.step();
+                return cos;
+            }
+            _ => {}
+        }
         self.phase += BAUD / self.fs;
         while self.phase >= 1.0 {
             self.phase -= 1.0;
@@ -474,6 +615,21 @@ impl Receiver {
 mod tests {
     use super::*;
 
+    /// Turn a point through whole quadrants.
+    ///
+    /// Only the tests need this. The transmitter turns by adding to an index
+    /// instead, which it can do because the four states are exactly the
+    /// quarter turns of the first: the invariant that makes that legitimate is
+    /// what the test below checks.
+    fn rotate(point: (f64, f64), quadrant: u8) -> (f64, f64) {
+        match quadrant & 3 {
+            0 => point,
+            1 => (-point.1, point.0),
+            2 => (-point.0, -point.1),
+            _ => (point.1, -point.0),
+        }
+    }
+
     #[test]
     fn the_four_states_are_a_quarter_turn_apart_at_one_radius() {
         for (i, &(re, im)) in STATES.iter().enumerate() {
@@ -483,7 +639,9 @@ mod tests {
                 "state {i} is at radius {r}"
             );
         }
-        // Each is the one before it turned a quarter.
+        // Each is the one before it turned a quarter, which is what lets the
+        // transmitter treat the quadrant number and the index of the state as
+        // the same thing.
         for i in 0..4 {
             let turned = rotate(STATES[i], 1);
             assert_eq!(
