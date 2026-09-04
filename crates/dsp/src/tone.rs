@@ -97,15 +97,30 @@ pub struct ReversalDetector {
     count: u32,
     /// Slow envelope of the amplitude, for deciding the tone is there.
     envelope: OnePole,
+    latency: u32,
 }
 
 impl ReversalDetector {
-    /// `threshold` is the amplitude the tone must reach to be believed at all,
-    /// and `confirm` the number of samples a reversal must persist for.
-    pub fn new(freq: f64, bandwidth: f64, threshold: f64, confirm: u32, fs: f64) -> Self {
-        // Three time constants of the detector: settled, but far short of the
-        // quarter turn seven hertz would need a thirty-sixth of a second for.
-        let delay = ((3.0 / (std::f64::consts::TAU * bandwidth.max(1.0))) * fs).ceil() as usize;
+    /// `threshold` is the amplitude the tone must reach to be believed at all.
+    ///
+    /// Everything else follows from the bandwidth, and has to: the comparison
+    /// is between the phasor now and the phasor a fixed time ago, and those
+    /// two are only opposed during the stretch that begins once the new phase
+    /// has settled and ends once the old one has fallen out of the window. Set
+    /// the delay too short, or ask for the opposition to persist too long, and
+    /// that stretch closes up entirely. The first attempt at this had them
+    /// within a factor of two of each other and left a window twenty-one
+    /// samples wide for a condition that had to hold for sixty-four.
+    pub fn new(freq: f64, bandwidth: f64, threshold: f64, fs: f64) -> Self {
+        let tau = fs / (std::f64::consts::TAU * bandwidth.max(1.0));
+        // Six time constants back: the old phase is still there long after the
+        // new one has arrived. Seven hertz of carrier offset turns forty
+        // degrees in that time, which is nowhere near the hundred and thirty
+        // five a reversal has to reach.
+        let delay = (6.0 * tau).ceil() as usize;
+        // And one for the opposition to persist, which sits comfortably inside
+        // the three and a half the two conditions leave open.
+        let confirm = tau.ceil() as u32;
         Self {
             tone: ToneDetector::new(freq, bandwidth, fs),
             history: VecDeque::from(vec![None; delay.max(1)]),
@@ -116,7 +131,29 @@ impl ReversalDetector {
             quiet: 0,
             count: 0,
             envelope: OnePole::new(0.100, fs),
+            // While the average still holds some of the old phase, the
+            // phasor is the new one less what is left of the old: a mix that
+            // goes as 1 - 2exp(-t/tau) and therefore changes sign at tau ln 2.
+            // Opposition begins there, and has to hold for a further tau.
+            latency: ((std::f64::consts::LN_2 + 1.0) * tau).round() as u32,
         }
+    }
+
+    /// How long after a reversal the detector reports it, in samples.
+    ///
+    /// While the average still holds some of the old phase, the phasor is the
+    /// new phase less what remains of the old, which goes as 1 - 2exp(-t/tau)
+    /// and so changes sign at tau ln 2. That is when the two directions become
+    /// opposed, and the opposition then has to hold for a further tau before
+    /// it is believed.
+    ///
+    /// Anything measuring an interval between two reversals it detected itself
+    /// carries this twice, once at each end. V.32's round-trip measurement is
+    /// exactly such an interval, and at the bandwidths used here the two
+    /// together come to some fifty symbol periods, which is most of the answer
+    /// on a short line.
+    pub fn latency(&self) -> u32 {
+        self.latency
     }
 
     /// Feed one sample. Returns true on the sample a reversal is confirmed.
@@ -242,7 +279,7 @@ mod tests {
         // the count wrong would mean measuring the wrong interval.
         let at = [4000usize, 9000];
         let samples = reversing(3000.0, 0.3, &at, 14_000);
-        let mut d = ReversalDetector::new(3000.0, 50.0, 0.05, 64, FS);
+        let mut d = ReversalDetector::new(3000.0, 50.0, 0.05, FS);
         let mut found = Vec::new();
         for (i, &x) in samples.iter().enumerate() {
             if d.feed(x) {
@@ -252,12 +289,15 @@ mod tests {
         assert_eq!(found.len(), 2, "found reversals at {found:?}");
         for (got, want) in found.iter().zip(at.iter()) {
             // The detector cannot report a reversal before its averaging has
-            // caught up with it, so it is always late, by about the settling
-            // time of the filter.
+            // caught up with it, so it is always late. How late is what
+            // `latency` claims, and anything measuring an interval between two
+            // detections has to take that off twice.
             let late = *got as i64 - *want as i64;
+            let claimed = i64::from(d.latency());
             assert!(
-                (0..1200).contains(&late),
-                "a reversal at {want} was reported at {got}, {late} samples out"
+                (late - claimed).abs() < claimed / 8,
+                "a reversal at {want} was reported at {got}, {late} samples \
+                 late, against the {claimed} claimed"
             );
         }
     }
@@ -265,7 +305,7 @@ mod tests {
     #[test]
     fn a_steady_tone_produces_no_reversals() {
         let samples = reversing(1800.0, 0.3, &[], 20_000);
-        let mut d = ReversalDetector::new(1800.0, 50.0, 0.05, 64, FS);
+        let mut d = ReversalDetector::new(1800.0, 50.0, 0.05, FS);
         for x in samples {
             assert!(!d.feed(x));
         }
@@ -278,7 +318,7 @@ mod tests {
         // turns the phasor right round every seventh of a second. A detector
         // that compared against a fixed direction would call that a reversal
         // several times a second.
-        let mut d = ReversalDetector::new(1800.0, 50.0, 0.05, 64, FS);
+        let mut d = ReversalDetector::new(1800.0, 50.0, 0.05, FS);
         for i in 0..(FS as usize * 3) {
             d.feed(0.3 * (TAU * 1807.0 * i as f64 / FS).cos());
         }
@@ -294,7 +334,7 @@ mod tests {
     fn silence_clears_the_reference_rather_than_reversing() {
         // A tone that stops and starts again has not turned over, and 5.4.1
         // has the calling modem cease transmitting partway through.
-        let mut d = ReversalDetector::new(1800.0, 50.0, 0.05, 64, FS);
+        let mut d = ReversalDetector::new(1800.0, 50.0, 0.05, FS);
         for i in 0..8000 {
             d.feed(0.3 * (TAU * 1800.0 * i as f64 / FS).cos());
         }

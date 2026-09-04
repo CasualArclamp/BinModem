@@ -113,7 +113,7 @@ fn the_change_between_the_two_alternations_is_a_phase_reversal() {
     // the change did not produce one there would be nothing to measure.
     let mut tx = Transmitter::new(Mode::Answer, FS);
     tx.set_signal(Signal::AlternateAC);
-    let mut d = ReversalDetector::new(CARRIER + OFFSET, 50.0, 0.05, 64, FS);
+    let mut d = ReversalDetector::new(CARRIER + OFFSET, 50.0, 0.05, FS);
     let mut at = Vec::new();
     for i in 0..(FS as usize) {
         // Change over halfway through, on a symbol boundary.
@@ -141,7 +141,7 @@ fn the_change_from_a_repeated_state_to_its_opposite_is_a_reversal() {
     // terminals shall be 64 plus or minus 2 symbol periods".
     let mut tx = Transmitter::new(Mode::Call, FS);
     tx.set_signal(Signal::StateA);
-    let mut d = ReversalDetector::new(CARRIER, 50.0, 0.05, 64, FS);
+    let mut d = ReversalDetector::new(CARRIER, 50.0, 0.05, FS);
     let mut at = Vec::new();
     for i in 0..(FS as usize) {
         if i == FS as usize / 2 {

@@ -20,6 +20,8 @@
 //! 14 400 rates add more points and, in their trellis-coded forms, a
 //! convolutional code over them.
 
+pub mod startup;
+
 use dsp::filter::OnePole;
 use dsp::{ComplexFir, Equalizer, Gardner, Nco, fir_lowpass, rrc_at, rrc_taps};
 
@@ -42,6 +44,13 @@ pub const ROLLOFF: f64 = 0.25;
 
 /// Symbols each side of centre in the shaping filter.
 const SPAN: usize = 6;
+
+/// Symbols between a state being chosen and its pulse appearing on the line.
+///
+/// The shaper centres each pulse on a symbol that has already arrived, so the
+/// output runs this far behind. It is part of what any measurement of the
+/// round trip actually measures, at both ends, and has to come off.
+pub const SHAPING_DELAY: u64 = SPAN as u64;
 
 /// Which end of the call this modem is.
 ///
@@ -259,9 +268,11 @@ pub struct Transmitter {
     signal: Signal,
     /// Generator for the answering tone, which is not modulation.
     answer: Nco,
-    /// Symbols sent since the current signal began, for the patterns that
-    /// alternate and for the change of encoding partway through TRN.
+    /// Symbols sent, ever. Free-running on purpose: see [`Self::set_signal`].
     tick: u64,
+    /// Symbols sent since the current signal began, for TRN's change of
+    /// encoding partway through.
+    since_change: u64,
     /// Position in the repeating rate sequence.
     rate_bit: u32,
 }
@@ -279,17 +290,31 @@ impl Transmitter {
             signal: Signal::default(),
             answer: Nco::new(ANSWER_TONE, fs),
             tick: 0,
+            since_change: 0,
             rate_bit: 0,
         }
     }
 
-    /// What to send. Changing it restarts the pattern.
+    /// What to send.
+    ///
+    /// The symbol count is deliberately *not* restarted, and everything that
+    /// alternates counts from it. Restarting it would make the change from one
+    /// alternating pattern to another a reversal only half the time, since
+    /// A,C,A,C followed by a fresh C,A,C,A gives a doubled state at the join
+    /// only if the join falls on the right parity; on the other parity the two
+    /// run straight on and nothing happens at all.
+    ///
+    /// This is what 5.4.2 is guarding when it requires the alternations to
+    /// last "an even number of symbol intervals", and 5.2 depends on the same
+    /// thing: segment 2 of the conditioning signal is segment 1 negated, which
+    /// it only is if the two are counted from the same place. The reversal at
+    /// the join is the time reference the far receiver sets its clock by.
     pub fn set_signal(&mut self, signal: Signal) {
         if signal == self.signal {
             return;
         }
         self.signal = signal;
-        self.tick = 0;
+        self.since_change = 0;
         self.rate_bit = 0;
         if signal == Signal::Trn {
             // 5.2.3: the scrambler starts from all zeros for the segment.
@@ -329,7 +354,9 @@ impl Transmitter {
     /// the differential coding of 2.4.2 lands on a point without a table.
     fn next_state(&mut self) -> usize {
         let tick = self.tick;
+        let since_change = self.since_change;
         self.tick += 1;
+        self.since_change += 1;
         let alternate = |even, odd| if tick.is_multiple_of(2) { even } else { odd };
         let state = match self.signal {
             Signal::Silent | Signal::AnswerTone => return self.quadrant as usize,
@@ -346,7 +373,7 @@ impl Transmitter {
                 // chooses, by Table 5.
                 let first = self.scrambler.scramble(true);
                 let second = self.scrambler.scramble(true);
-                if tick < u64::from(TRN_BINARY_SYMBOLS) {
+                if since_change < u64::from(TRN_BINARY_SYMBOLS) {
                     if first { STATE_C } else { STATE_A }
                 } else {
                     TRN_STATES[usize::from(first) << 1 | usize::from(second)]
