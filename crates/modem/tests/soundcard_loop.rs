@@ -145,6 +145,30 @@ fn the_cable_is_found_at_a_single_crossing_rather_than_the_round_trip() {
 }
 
 #[test]
+fn a_loopback_short_enough_to_need_no_far_taps_works_too() {
+    // The other end of the range, and the one that was hardest to see. Four
+    // milliseconds is inside the near taps, so nothing goes looking for a
+    // reflection and there is nothing for the second run of taps to do -- and
+    // it still failed, because the receiver was being held still only in its
+    // equaliser while its timing loop, carrier loop and gain went on tracking
+    // the modem's own echo. Nothing about that is particular to a long line;
+    // the long line only made it visible.
+    let mut cable = Cable::new("V32", 64);
+    cable.run(25.0);
+    assert!(
+        cable.up(),
+        "the caller stopped at {} and the host at {}",
+        cable.caller.line_phase(),
+        cable.host.line_phase()
+    );
+    assert_eq!(
+        cable.caller.reflection(),
+        None,
+        "went looking for a reflection the near taps already cover"
+    );
+}
+
+#[test]
 fn v22bis_still_goes_through_it_without_needing_any_of_that() {
     // The control. V.22bis puts the two directions in separate bands, so the
     // filter that selects the far one throws the echo away with the near one
@@ -194,4 +218,22 @@ fn trace() {
         cable.host.reflection(),
         cable.host.echo_return_loss()
     );
+}
+
+#[test]
+#[ignore]
+fn sweep_the_crossing() {
+    // What the delay actually is on a given machine depends on buffer sizes
+    // nothing here chooses. This says how much of that range works.
+    for crossing in [64, 160, 320, 480, 700, 900, 1200, 1600, 2000] {
+        let mut cable = Cable::new("V32", crossing);
+        cable.run(30.0);
+        println!(
+            "{crossing:>5} samples ({:>5.1} ms): {:>13} / {:>13}  reflection {:?}",
+            crossing as f64 / FS * 1000.0,
+            cable.caller.line_phase(),
+            cable.host.line_phase(),
+            cable.caller.reflection().map(|r| (r.delay, (r.strength * 100.0).round() / 100.0)),
+        );
+    }
 }

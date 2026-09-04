@@ -185,6 +185,7 @@ pub struct Gardner {
     last_error: f64,
     /// Running mean symbol power, used to normalise the error.
     mean_power: f64,
+    adapting: bool,
 }
 
 impl Gardner {
@@ -209,12 +210,25 @@ impl Gardner {
             at_symbol: true,
             last_error: 0.0,
             mean_power: 1.0,
+            adapting: true,
         }
     }
 
     /// Interval to the next sample, in samples.
     pub fn interval(&self) -> f64 {
         self.sps / 2.0 + self.phase
+    }
+
+    /// Whether the loop is being corrected.
+    ///
+    /// Held still, it goes on producing symbols at the interval it had found
+    /// and simply stops looking for a better one. That is what a receiver
+    /// wants while the far end is silent: the only thing on the line then is
+    /// its own transmission, and a timing loop that locks onto its own echo
+    /// has found a clock that is real, is not the one it needs, and will not
+    /// be given up easily afterwards.
+    pub fn set_adapting(&mut self, adapting: bool) {
+        self.adapting = adapting;
     }
 
     /// Offer a sample taken at the interval this returned last time.
@@ -238,6 +252,13 @@ impl Gardner {
         // the instantaneous power turns an ordinary amplitude change into a
         // huge apparent timing error and the loop thrashes. Clamping keeps a
         // single outlier from throwing the sampling instant across a symbol.
+        if !self.adapting {
+            // Still keep the symbols coming and the history moving; only the
+            // correction stops.
+            self.previous = sample;
+            return Some(sample);
+        }
+
         let power = sample.0 * sample.0 + sample.1 * sample.1;
         self.mean_power += 0.02 * (power - self.mean_power);
         self.last_error = (error / (self.mean_power + 1e-9)).clamp(-1.0, 1.0);
@@ -522,6 +543,59 @@ mod tests {
         assert!(
             late < early,
             "timing error did not settle: {early} at the start, {late} at the end"
+        );
+    }
+
+    #[test]
+    fn a_loop_held_still_keeps_the_instant_it_had_and_stops_looking() {
+        // What a receiver needs while the far end is silent. Everything on the
+        // line then is its own transmission, and a timing loop is perfectly
+        // capable of locking onto that: it is a real clock, it is not the one
+        // the receiver needs, and having found it the loop will not give it up
+        // when the far end comes back.
+        //
+        // A V.32 modem is silent for a second and a half of its own start-up
+        // and transmitting for two more, so this is not a rare corner. The
+        // calling modem lost a receiver it had already locked exactly this
+        // way, and looked for all the world like an echo canceller fault.
+        let sps = 6.0;
+        let settled = Gardner::new(sps, 0.1);
+        let mut held = Gardner::new(sps, 0.1);
+        held.set_adapting(false);
+
+        // Feed it something with plenty of transitions and a timing error in
+        // it. A loop that is adapting will move; one held still will not.
+        let mut moved = 0;
+        for i in 0..2000 {
+            let x = if (i / 3) % 2 == 0 { 0.8 } else { -0.8 };
+            held.feed((x, x * 0.3));
+            if (held.interval() - settled.interval()).abs() > 1.0e-12 {
+                moved += 1;
+            }
+        }
+        assert_eq!(moved, 0, "the interval moved on a loop held still");
+
+        // And it goes on producing symbols while it is held: a receiver that
+        // stopped delivering would have nothing to hand the descrambler when
+        // the far end returned, and no state to carry across.
+        let mut symbols = 0;
+        for i in 0..100 {
+            let x = if (i / 3) % 2 == 0 { 0.8 } else { -0.8 };
+            if held.feed((x, 0.0)).is_some() {
+                symbols += 1;
+            }
+        }
+        assert_eq!(symbols, 50, "symbols stopped coming out");
+
+        // Let go and it works again.
+        held.set_adapting(true);
+        for i in 0..2000 {
+            let x = if (i / 3) % 2 == 0 { 0.8 } else { -0.8 };
+            held.feed((x, x * 0.3));
+        }
+        assert!(
+            (held.interval() - settled.interval()).abs() > 1.0e-9,
+            "the loop stayed frozen after being let go"
         );
     }
 }

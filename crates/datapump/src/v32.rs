@@ -562,7 +562,16 @@ impl Receiver {
 
     fn on_symbol(&mut self, symbol: (f64, f64)) {
         let power = symbol.0 * symbol.0 + symbol.1 * symbol.1;
-        let mean_power = self.agc.process(power);
+        // Every loop in here is held still together, not just the equaliser.
+        // A receiver that goes on gaining, timing and tracking carrier while
+        // the far end is silent does all three on its own echo, and a carrier
+        // loop wound onto the wrong signal does not unwind: the frequency term
+        // is an integrator, and what it has learned it keeps.
+        let mean_power = if self.adapting {
+            self.agc.process(power)
+        } else {
+            self.agc.value()
+        };
         let gain = (CONSTELLATION_MEAN_POWER / mean_power.max(1e-9))
             .sqrt()
             .clamp(0.0, MAX_GAIN);
@@ -579,11 +588,16 @@ impl Receiver {
         let coarse = STATES[nearest_state(point)];
         let error = (point.1 * coarse.0 - point.0 * coarse.1)
             / (coarse.0 * coarse.0 + coarse.1 * coarse.1 + 1e-9);
-        // Second order, so the seven hertz of offset 2.1 allows for is removed
-        // rather than merely tracked.
-        self.frequency += -1.5e-5 * error;
-        self.frequency = self.frequency.clamp(-0.02, 0.02);
-        self.phase += -0.008 * error + self.frequency;
+        if self.adapting {
+            // Second order, so the seven hertz of offset 2.1 allows for is
+            // removed rather than merely tracked.
+            self.frequency = (self.frequency - 1.5e-5 * error).clamp(-0.02, 0.02);
+            self.phase -= 0.008 * error;
+        }
+        // The offset already found goes on being taken out even while the loop
+        // is held still. It belongs to the far end's oscillator, which does not
+        // stop running when the far end stops talking.
+        self.phase += self.frequency;
         self.phase -= self.phase.floor();
 
         let normalized = (point.0 / CONSTELLATION_RMS, point.1 / CONSTELLATION_RMS);
@@ -668,6 +682,7 @@ impl Receiver {
     /// whatever it learned into the rest of the call.
     pub fn set_adapting(&mut self, adapting: bool) {
         self.adapting = adapting;
+        self.gardner.set_adapting(adapting);
     }
 
     pub fn level(&self) -> f64 {

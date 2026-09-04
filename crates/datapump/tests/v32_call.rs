@@ -311,12 +311,15 @@ fn trace_cable() {
     // The sound-card loopback at the data pump level, where the receiver can
     // be seen: both modems summed onto one wire and heard by both, delayed.
     use std::collections::VecDeque;
-    const CROSSING: usize = 700;
+    let crossing: usize = std::env::var("V32_CROSSING")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(700);
     const HEADROOM: f64 = 0.45;
     let offer = rate_signal(true, false);
     let mut calling = Modem::new(Role::Calling, offer, FS);
     let mut answering = Modem::new(Role::Answering, offer, FS);
-    let mut wire: VecDeque<f64> = VecDeque::from(vec![0.0; CROSSING]);
+    let mut wire: VecDeque<f64> = VecDeque::from(vec![0.0; crossing]);
     let (mut cp, mut ap) = ("", "");
     for i in 0..(25.0 * FS) as usize {
         let heard = wire.pop_front().unwrap_or(0.0);
