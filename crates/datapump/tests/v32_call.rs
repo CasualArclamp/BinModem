@@ -304,3 +304,35 @@ fn the_second_run_of_taps_is_what_makes_the_long_line_work() {
         );
     }
 }
+
+#[test]
+#[ignore]
+fn trace_cable() {
+    // The sound-card loopback at the data pump level, where the receiver can
+    // be seen: both modems summed onto one wire and heard by both, delayed.
+    use std::collections::VecDeque;
+    const CROSSING: usize = 700;
+    const HEADROOM: f64 = 0.45;
+    let offer = rate_signal(true, false);
+    let mut calling = Modem::new(Role::Calling, offer, FS);
+    let mut answering = Modem::new(Role::Answering, offer, FS);
+    let mut wire: VecDeque<f64> = VecDeque::from(vec![0.0; CROSSING]);
+    let (mut cp, mut ap) = ("", "");
+    for i in 0..(25.0 * FS) as usize {
+        let heard = wire.pop_front().unwrap_or(0.0);
+        let a = calling.step(heard);
+        let b = answering.step(heard);
+        wire.push_back((a + b) * HEADROOM);
+        let changed = calling.phase() != cp || answering.phase() != ap;
+        if changed || i % (FS as usize / 2) == 0 {
+            cp = calling.phase();
+            ap = answering.phase();
+            println!(
+                "{:>7.3}s  call {cp:>12} err {:>6.3}   answer {ap:>12} err {:>6.3}",
+                i as f64 / FS,
+                calling.residual_error(),
+                answering.residual_error(),
+            );
+        }
+    }
+}

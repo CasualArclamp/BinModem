@@ -15,7 +15,10 @@
 //! adds, which is what the echo canceller needs to know how far back to look.
 
 use super::{Mode, Receiver, Signal, Transmitter};
-use dsp::{EchoCanceller, EchoFinder, Reflection, ReversalDetector, ToneDetector};
+use dsp::{EchoCanceller, EchoFinder, ReversalDetector, ToneDetector};
+// Part of this module's surface: `Modem::reflection` hands one back, and what
+// is above a data pump should not have to reach past it to name the type.
+pub use dsp::Reflection;
 
 /// Half the symbol rate: where an alternating pattern puts its sidebands.
 const OFFSET: f64 = super::BAUD / 2.0;
@@ -554,6 +557,52 @@ impl Startup {
     /// against the 0.07 the other end managed on the same call.
     pub fn training_echo(&self) -> bool {
         matches!(self.state, State::SendTrn) && !self.trained
+    }
+
+    /// Whether the far end is required to be silent just now.
+    ///
+    /// True through the whole of this modem's own first conditioning sequence
+    /// and not merely its training segment. Everything on the line then is our
+    /// own echo, so a receiver that goes on adapting through it is adapting to
+    /// the wrong signal, and an equaliser and a carrier loop that have settled
+    /// on a modem's own transmission have settled somewhere it will not easily
+    /// leave.
+    ///
+    /// That is not hypothetical either. The calling modem trains its receiver
+    /// on the answering modem's first conditioning signal and had it locked, a
+    /// residual error of 0.013; it then began its own conditioning sequence,
+    /// spent it converging onto its own echo instead, and sat at 0.5 for the
+    /// rest of the call, unable to read the R3 it was waiting for. The
+    /// answering modem, which is silent while it listens, never had the
+    /// problem, which is what made it look like an echo canceller fault.
+    ///
+    /// Deliberately narrower than [`training_echo`](Self::training_echo),
+    /// which is TRN alone. Both are windows where the line carries nothing but
+    /// us, but the echo canceller wants only the part of it with no pattern:
+    /// S and S-bar repeat every two symbols, and a filter learned from a
+    /// periodic reference is one of the many that explain that period and
+    /// almost certainly not the one the line is.
+    pub fn far_end_quiet(&self) -> bool {
+        if matches!(self.state, State::Connected(_)) {
+            // The listener below is only fed while the start-up is running, so
+            // its answer goes stale the moment this connects. Data state has
+            // its own reasons to keep adapting and none to stop.
+            return false;
+        }
+        if matches!(
+            self.state,
+            State::PreRoll | State::SendS | State::SendSBar | State::SendTrn
+        ) && !self.trained
+        {
+            return true;
+        }
+        // Or the line simply has nothing on it, which the start-up leaves it
+        // with more than once: between one modem finishing a sequence and the
+        // other reacting there is a round trip of silence, and an adaptive
+        // receiver let loose on silence does not stay where it was put. The
+        // calling modem lost a residual error of 0.013 to 0.46 in the 68 ms
+        // between starting R2 and the answer arriving.
+        self.listener.classify() == Heard::Nothing
     }
 
     /// How long the training segment is being sent for, in symbols.
@@ -1126,10 +1175,11 @@ impl Modem {
         // Adapting through the far end would have the canceller try to explain
         // it as an echo of us, which it is not, and unlearn what it knows.
         let training = self.startup.training_echo();
-        // The equaliser is held still over the same stretch the canceller is
-        // let loose on, and for the same reason: what is on the line then is
-        // this modem's own echo and nothing else.
-        self.rx.set_adapting(!training);
+        // The equaliser is held still for the same reason the canceller is let
+        // loose, and over a longer stretch: what is on the line through the
+        // whole of our own conditioning sequence is this modem's own echo, and
+        // there is nothing in it for a receiver to learn.
+        self.rx.set_adapting(!self.startup.far_end_quiet());
         if self.was_training && !training {
             self.trained_loss = self.echo.echo_return_loss();
         }

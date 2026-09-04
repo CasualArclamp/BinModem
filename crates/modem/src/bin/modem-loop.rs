@@ -16,6 +16,14 @@
 //! What this cannot do is reach another machine. For that the output has to
 //! go to a softphone's microphone and the input come from its speaker, which
 //! is two cables, because one cable can only be pointed one way.
+//!
+//! It is a strange two-wire line all the same. A hybrid reflects in a
+//! millisecond or two; a sound card puts everything back tens of milliseconds
+//! later, at full strength, having been through two rate conversions on the
+//! way. That is nearer a satellite hop than a local loop, and it is why V.32
+//! needs the second run of echo canceller taps to work here at all: the first
+//! run reaches back eight milliseconds and the reflection is nowhere near
+//! that. The numbers printed at the end say whether it found it.
 
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
@@ -161,13 +169,28 @@ fn main() -> ExitCode {
     );
     if let Some(rt) = caller.round_trip_symbols() {
         // 2400 baud, so a symbol is a little over four hundred microseconds.
-        // This is the number that decides whether V.32 has any chance here: an
-        // echo canceller reaches back a fixed distance, and a reflection
-        // further away than that cannot be cancelled at all.
+        // This is what bounds the search for the reflection below: nothing can
+        // come back later than the line takes to carry it there and back.
         println!(
             "round trip, as the caller measured it: {rt} symbols, about {:.0} ms",
             rt as f64 / 2400.0 * 1000.0
         );
+    }
+    match caller.reflection() {
+        // The number that says whether the echo canceller is pointed at
+        // anything. A cable puts back everything written to it, once, after
+        // however long the buffering takes, so the reflection here should be
+        // most of what arrives and should sit at half the round trip: the
+        // measurement counts a trip to the far end and back, and a loopback
+        // returns our own signal after one crossing rather than two.
+        Some(r) => println!(
+            "the caller found its own signal coming back {} samples later, \
+             about {:.0} ms, at {:.2} of everything arriving",
+            r.delay,
+            r.delay as f64 / FS * 1000.0,
+            r.strength
+        ),
+        None => println!("the caller found no reflection to cancel"),
     }
     if let Some(loss) = caller.echo_return_loss() {
         println!("echo return loss at the caller: {loss:.1} dB");

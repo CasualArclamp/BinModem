@@ -246,6 +246,18 @@ impl Modem {
         }
     }
 
+    /// Where the line puts our own signal back, if the handshake went looking.
+    ///
+    /// Worth reporting on a real line, because it is the one number that says
+    /// whether the echo canceller is pointed at anything: taps placed where
+    /// the reflection is not are taps modelling nothing.
+    pub fn reflection(&self) -> Option<datapump::v32::startup::Reflection> {
+        match self.pump.as_ref() {
+            Some(Pump::V32(m)) => m.reflection(),
+            _ => None,
+        }
+    }
+
     /// Whether error control is running on the current call.
     pub fn error_controlled(&self) -> bool {
         self.ec.as_ref().is_some_and(Stack::is_connected)
