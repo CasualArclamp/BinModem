@@ -15,13 +15,22 @@
 //! adds, which is what the echo canceller needs to know how far back to look.
 
 use super::{Mode, Receiver, Signal, Transmitter};
-use dsp::{ReversalDetector, ToneDetector};
+use dsp::{EchoCanceller, ReversalDetector, ToneDetector};
 
 /// Half the symbol rate: where an alternating pattern puts its sidebands.
 const OFFSET: f64 = super::BAUD / 2.0;
 
 /// Level below which the line is carrying nothing.
-const QUIET: f64 = 0.02;
+///
+/// A modem has to work across the range of levels the network delivers, which
+/// is some 34 dB between a short local call and a long one. This sits below
+/// the bottom of that: a signal arriving 20 dB down, which is ordinary once it
+/// has crossed a network, reads about twelve times this.
+const QUIET: f64 = 0.005;
+
+/// Amplitude a tone must reach before its phase is worth watching, on the same
+/// footing as [`QUIET`].
+const AUDIBLE: f64 = 0.008;
 
 /// How far a spectral line must stand above the average level of the whole
 /// signal before it counts as standing there.
@@ -93,15 +102,42 @@ impl Listener {
         self.power.process(x.abs());
     }
 
-    /// Amplitude of the bare carrier, which 5.4.2 watches for a drop in.
+    /// Amplitude of the bare carrier, which 5.4.2 watches for and then
+    /// watches for a drop in.
     pub fn carrier_amplitude(&self) -> f64 {
         self.carrier.amplitude()
+    }
+
+    /// Amplitude of the weaker of the two sidebands, which is what 5.4.1 has
+    /// the calling modem listen for as "600 Hz and 3000 Hz".
+    pub fn sideband_amplitude(&self) -> f64 {
+        self.low.amplitude().min(self.high.amplitude())
+    }
+
+    /// Amplitude of the answering tone (5.1).
+    pub fn answer_amplitude(&self) -> f64 {
+        self.answer.amplitude()
     }
 
     pub fn level(&self) -> f64 {
         self.power.value()
     }
 
+    /// What the line is carrying, judged by which lines stand above the level
+    /// of the whole signal.
+    ///
+    /// Only usable when the modem's own echo is either absent or cancelled.
+    /// Everything here is a ratio to the total, and an uncancelled echo is
+    /// part of that total: a modem sending a bare carrier and hearing it come
+    /// back off the hybrid will find the carrier standing proud of everything
+    /// else and conclude the far end is sending one.
+    ///
+    /// The start-up avoids depending on it until then, and can, because the
+    /// signals of its half-duplex opening are in different places: a modem
+    /// repeating a state puts everything at 1800 Hz and listens at 600 and
+    /// 3000, and the modem alternating states does the exact reverse. Each is
+    /// deaf to its own echo by construction rather than by cancelling it,
+    /// which is what lets the exchange happen before anything is trained.
     pub fn classify(&self) -> Heard {
         let level = self.power.value();
         if level < QUIET {
@@ -215,17 +251,29 @@ pub fn offered_rate(s: u16) -> u32 {
     }
 }
 
-/// Finds the repeated 16-bit sequences a rate signal is made of (5.3.1).
+/// Finds the 16-bit sequences a rate exchange is made of (5.3).
 ///
-/// The stream carries no framing, so the sequence has to be found in it: the
-/// requirement is two consecutive identical sixteens whose synchronising bits
-/// are in the right places, which is enough that data is very unlikely to
-/// imitate one by accident.
+/// The stream carries no framing, so the boundary has to be found in it.
+/// 5.3.1 gives the rule: two consecutive identical sixteens with their
+/// synchronising bits in the right places, which data is very unlikely to
+/// imitate by accident. That fixes the boundary as well as identifying the
+/// signal, and everything after can be read off it directly.
+///
+/// Reading it off matters, because the sequence that ends the exchange is sent
+/// exactly once. 5.3.2 has a modem "first complete the transmission of the
+/// current 16-bit rate sequence, and then transmit one 16-bit sequence E", so
+/// a detector that insisted on seeing every sequence twice would see every
+/// rate signal and never the thing that ends them. It would also be looking
+/// for a repetition that cannot occur, since what follows E is data.
 #[derive(Debug, Default)]
 pub struct RateDetector {
     /// The last thirty-two bits seen, newest at the bottom.
     window: u32,
     filled: u32,
+    /// Whether the 16-bit boundary has been found.
+    locked: bool,
+    /// Bits since that boundary.
+    since: u32,
 }
 
 impl RateDetector {
@@ -233,25 +281,42 @@ impl RateDetector {
         Self::default()
     }
 
-    /// Offer one received bit. Yields a sequence once two identical ones have
-    /// arrived back to back.
+    /// Offer one received bit. Yields each complete sequence once the boundary
+    /// between them is known.
     pub fn feed(&mut self, bit: bool) -> Option<u16> {
         self.window = (self.window << 1) | u32::from(bit);
         self.filled = (self.filled + 1).min(32);
+
+        if self.locked {
+            self.since += 1;
+            if self.since < 16 {
+                return None;
+            }
+            self.since = 0;
+            return Some(self.window as u16);
+        }
+
         if self.filled < 32 {
             return None;
         }
         let first = (self.window >> 16) as u16;
-        let second = self.window as u16;
-        if first != second {
+        if first != self.window as u16 {
             return None;
         }
-        (is_rate_signal(first) || is_end_signal(first)).then_some(first)
+        if !is_rate_signal(first) && !is_end_signal(first) {
+            return None;
+        }
+        // The pair ends on this bit, so the boundary is here.
+        self.locked = true;
+        self.since = 0;
+        Some(first)
     }
 
     pub fn reset(&mut self) {
         self.window = 0;
         self.filled = 0;
+        self.locked = false;
+        self.since = 0;
     }
 }
 
@@ -375,6 +440,9 @@ pub struct Startup {
     held: u64,
     /// Amplitude of the incoming carrier while it was up, for spotting a drop.
     carrier_peak: f64,
+    /// Whether a training segment has been sent yet. Only the first is a
+    /// window the echo canceller can learn anything from.
+    trained: bool,
     /// Held until the next symbol boundary, where the machine can act on it.
     pending_reversal: bool,
     pending_sequence: Option<u16>,
@@ -394,9 +462,9 @@ impl Startup {
                 Role::Answering => State::AnswerTone,
             },
             listener: Listener::new(fs),
-            carrier_reversals: ReversalDetector::new(super::CARRIER, 60.0, 0.05, fs),
-            low_reversals: ReversalDetector::new(super::CARRIER - OFFSET, 60.0, 0.05, fs),
-            high_reversals: ReversalDetector::new(super::CARRIER + OFFSET, 60.0, 0.05, fs),
+            carrier_reversals: ReversalDetector::new(super::CARRIER, 60.0, AUDIBLE, fs),
+            low_reversals: ReversalDetector::new(super::CARRIER - OFFSET, 60.0, AUDIBLE, fs),
+            high_reversals: ReversalDetector::new(super::CARRIER + OFFSET, 60.0, AUDIBLE, fs),
             reversal_quiet: 0,
             rates: RateDetector::new(),
             countdown: sps,
@@ -407,6 +475,7 @@ impl Startup {
             round_trip: 0,
             held: 0,
             carrier_peak: 0.0,
+            trained: false,
             pending_reversal: false,
             pending_sequence: None,
             offer,
@@ -432,6 +501,27 @@ impl Startup {
     /// line's reflection of our own signal can be.
     pub fn round_trip(&self) -> u64 {
         self.round_trip
+    }
+
+    /// Whether this end is sending the training segment, which is the one
+    /// stretch of the start-up the far end is required to be silent through
+    /// and therefore the only time an echo canceller can learn anything.
+    ///
+    /// Note 3 to 5.4.2 says as much: the TRN segment "is suitable for training
+    /// the echo canceller in the transmitting modem", and allows a separate
+    /// sequence before the conditioning signal if a longer one is wanted.
+    ///
+    /// Only the first one, though. The answering modem sends a conditioning
+    /// signal twice, and the second time the calling modem is still sending
+    /// R2 over the top of it: 5.4.1 has that continue "until an incoming rate
+    /// signal R3 is detected", which cannot arrive until the conditioning
+    /// signal it follows is over. Adapting through that has the canceller try
+    /// to explain the far end as an echo of us and throw away everything it
+    /// learned in the first segment, when the line really was quiet. Left in,
+    /// it cost the answering modem its receiver: a residual error of 0.55
+    /// against the 0.07 the other end managed on the same call.
+    pub fn training_echo(&self) -> bool {
+        matches!(self.state, State::SendTrn) && !self.trained
     }
 
     /// Which step of the procedure this end is on, for diagnostics and for
@@ -545,9 +635,22 @@ impl Startup {
                 // alternating tones on their own: note 1 to 5.4.2 allows the
                 // second, since the answering tone may have been truncated or
                 // never sent at all on a national connection.
+                //
+                // The tones are looked for where they are rather than by
+                // classifying the whole line, which is what the rest of this
+                // phase does too and for the reason given on `classify`.
+                // The sidebands have to stand above the answering tone as well
+                // as above the floor. A one-pole detector 900 Hz from a tone
+                // still passes a fortieth of it, and a fortieth of the
+                // answering tone is well clear of any absolute threshold worth
+                // having: without this the calling modem hears the answer as
+                // its own cue and starts transmitting over it immediately.
+                let sidebands = self.listener.sideband_amplitude();
+                let tones =
+                    sidebands > AUDIBLE && sidebands > self.listener.answer_amplitude();
                 let heard_enough = self.hold(heard == Heard::AnswerTone)
                     >= timing::HEARD_ANSWER_TONE;
-                if heard == Heard::Alternation || heard_enough {
+                if tones || heard_enough {
                     self.enter(State::Aa);
                 }
             }
@@ -604,27 +707,30 @@ impl Startup {
                 }
             }
             State::Ac => {
-                // 5.4.2: an even number of symbols, at least 128, and the
-                // calling modem's carrier heard for 64.
-                if heard == Heard::Carrier {
-                    self.carrier_peak = self.carrier_peak.max(self.listener.carrier_amplitude());
-                }
-                let long_enough = self.symbols >= timing::MIN_ALTERNATION && self.symbols.is_multiple_of(2);
-                if long_enough && self.hold(heard == Heard::Carrier) >= timing::HEARD_CARRIER {
+                // 5.4.2: an even number of symbols, at least 128, and "an
+                // incoming tone has been detected at 1800 Hz for 64 symbol
+                // periods". Looked for at 1800 Hz exactly, where this modem's
+                // own alternation puts nothing at all, so its echo of itself
+                // cannot be mistaken for the far end.
+                self.note_carrier();
+                let long_enough =
+                    self.symbols >= timing::MIN_ALTERNATION && self.symbols.is_multiple_of(2);
+                let tone = self.listener.carrier_amplitude() > AUDIBLE;
+                if long_enough && self.hold(tone) >= timing::HEARD_CARRIER {
                     self.timer = Some(0);
                     tx.set_signal(Signal::AlternateCA);
                     self.enter(State::Ca);
                 }
             }
             State::Ca => {
-                self.carrier_peak = self.carrier_peak.max(self.listener.carrier_amplitude());
+                self.note_carrier();
                 if reversal {
                     self.round_trip = self.measured();
                     self.enter(State::CaToAc);
                 }
             }
             State::CaToAc => {
-                self.carrier_peak = self.carrier_peak.max(self.listener.carrier_amplitude());
+                self.note_carrier();
                 if self.symbols >= timing::RESPONSE {
                     tx.set_signal(Signal::AlternateAC);
                     self.enter(State::AcAgain);
@@ -684,6 +790,7 @@ impl Startup {
             }
             State::SendTrn => {
                 if self.symbols >= timing::SEGMENT_TRN {
+                    self.trained = true;
                     self.rates.reset();
                     tx.set_signal(Signal::Rate(self.offer));
                     self.enter(State::SendRate);
@@ -759,6 +866,13 @@ impl Startup {
         }
     }
 
+    /// Remember how loud the calling modem's carrier has been, so that its
+    /// going away can be recognised as a drop rather than against a threshold
+    /// that would have to be told what the line is scaled to.
+    fn note_carrier(&mut self) {
+        self.carrier_peak = self.carrier_peak.max(self.listener.carrier_amplitude());
+    }
+
     /// What the clock says the line adds, once everything else is taken off.
     ///
     /// Four things sit between the two events the clock is started and stopped
@@ -801,6 +915,122 @@ impl Startup {
             self.held = 0;
         }
         self.held
+    }
+}
+
+/// A complete V.32 modem: one end of a call, on a two-wire line.
+///
+/// Ties together the four things that have to run at once and cannot be run
+/// separately. The transmitter and receiver share a band, so the receiver
+/// hears the transmitter; the echo canceller removes that, but only once it
+/// has been trained, and the only time it can be trained is while the far end
+/// is required to be silent; and knowing when that is means following the
+/// start-up. Each of those is testable on its own and none of them is much use
+/// on its own.
+#[derive(Debug)]
+pub struct Modem {
+    tx: Transmitter,
+    rx: Receiver,
+    startup: Startup,
+    echo: EchoCanceller,
+    /// The return loss as training ended, which is the last moment it means
+    /// anything: with both ends talking the meter compares everything heard
+    /// against everything left, and the far end is in both.
+    trained_loss: f64,
+    was_training: bool,
+}
+
+/// How far back the echo canceller looks, in milliseconds.
+///
+/// Enough for the reflection off a hybrid, which is immediate, and for a
+/// little of what the network adds behind it. A long connection can put an
+/// echo much further back than this; the round trip the start-up measures is
+/// what would say how much further, and sizing the canceller from it is the
+/// obvious next thing to do with that number.
+const ECHO_SPAN_MS: f64 = 8.0;
+
+impl Modem {
+    /// `offer` is the rate signal this modem sends, from [`rate_signal`].
+    pub fn new(role: Role, offer: u16, fs: f64) -> Self {
+        let (tx, rx) = endpoints(role, fs);
+        Self {
+            tx,
+            rx,
+            startup: Startup::new(role, offer, fs),
+            echo: EchoCanceller::new((ECHO_SPAN_MS * fs / 1000.0) as usize, 0.5),
+            trained_loss: 0.0,
+            was_training: false,
+        }
+    }
+
+    /// Take one sample from the line and give back the one to put on it.
+    pub fn step(&mut self, line: f64) -> f64 {
+        // The canceller is told what went out and what came back, and returns
+        // what is left. Its own history remembers how long ago each sample
+        // was sent, so the caller need not.
+        let sent = self.tx.last_sample();
+        let cleaned = self.echo.process(sent, line);
+
+        // Adapt only while this end is transmitting its training segment,
+        // which is the one stretch the far end is required to be quiet for.
+        // Adapting through the far end would have the canceller try to explain
+        // it as an echo of us, which it is not, and unlearn what it knows.
+        let training = self.startup.training_echo();
+        if self.was_training && !training {
+            self.trained_loss = self.echo.echo_return_loss();
+        }
+        self.was_training = training;
+        self.echo.set_adapting(training);
+
+        if matches!(self.startup.status(), Status::Connected(_)) {
+            self.rx.feed(cleaned);
+        } else {
+            self.startup.step(cleaned, &mut self.tx, &mut self.rx);
+        }
+        self.tx.next_sample()
+    }
+
+    pub fn status(&self) -> Status {
+        self.startup.status()
+    }
+
+    pub fn phase(&self) -> &'static str {
+        self.startup.phase()
+    }
+
+    /// The round trip the start-up measured, in symbol intervals.
+    pub fn round_trip(&self) -> u64 {
+        self.startup.round_trip()
+    }
+
+    /// How much of its own echo the modem was removing when it finished
+    /// training, in decibels.
+    ///
+    /// Taken then because that is the last moment the figure means anything.
+    /// The meter is the ratio of everything heard to everything left, and once
+    /// the far end is talking it is in both, so the number falls towards the
+    /// ratio of echo to far signal however well the cancelling is going.
+    pub fn echo_return_loss(&self) -> f64 {
+        self.trained_loss
+    }
+
+    /// Queue data for transmission. Only meaningful once connected.
+    pub fn send(&mut self, bytes: &[u8]) {
+        self.tx.push_bytes(bytes);
+    }
+
+    pub fn take_bytes(&mut self) -> Vec<u8> {
+        self.rx.take_bytes()
+    }
+
+    pub fn constellation_point(&self) -> (f64, f64) {
+        self.rx.constellation_point()
+    }
+
+    /// Mean distance of the received symbols from the decisions made about
+    /// them, which is how well the receiver is doing.
+    pub fn residual_error(&self) -> f64 {
+        self.rx.residual_error()
     }
 }
 

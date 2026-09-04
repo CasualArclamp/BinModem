@@ -275,6 +275,8 @@ pub struct Transmitter {
     since_change: u64,
     /// Position in the repeating rate sequence.
     rate_bit: u32,
+    /// The sample most recently produced, for the echo canceller.
+    last_sample: f64,
 }
 
 impl Transmitter {
@@ -292,6 +294,7 @@ impl Transmitter {
             tick: 0,
             since_change: 0,
             rate_bit: 0,
+            last_sample: 0.0,
         }
     }
 
@@ -418,7 +421,21 @@ impl Transmitter {
         STATES[self.next_state()]
     }
 
+    /// The sample most recently put on the line.
+    ///
+    /// An echo canceller needs it: what comes back is a filtered copy of what
+    /// went out, and the only way to subtract it is to be handed the original.
+    pub fn last_sample(&self) -> f64 {
+        self.last_sample
+    }
+
     pub fn next_sample(&mut self) -> f64 {
+        let sample = self.produce();
+        self.last_sample = sample;
+        sample
+    }
+
+    fn produce(&mut self) -> f64 {
         // Two of the signals are not modulation at all.
         match self.signal {
             Signal::Silent => return 0.0,
