@@ -15,6 +15,7 @@ pub mod fft;
 pub mod filter;
 pub mod fsk;
 pub mod nco;
+pub mod resample;
 pub mod shaping;
 pub mod tone;
 
@@ -24,5 +25,6 @@ pub use fft::{Fft, Spectrum};
 pub use filter::{Biquad, Cascade, OnePole, bandpass, butter_highpass, butter_lowpass};
 pub use fsk::FskDetector;
 pub use nco::Nco;
+pub use resample::Resampler;
 pub use shaping::{ComplexFir, Fir, Gardner, fir_lowpass, rrc_at, rrc_taps};
 pub use tone::{ReversalDetector, ToneDetector};

@@ -286,30 +286,42 @@ impl RateDetector {
     pub fn feed(&mut self, bit: bool) -> Option<u16> {
         self.window = (self.window << 1) | u32::from(bit);
         self.filled = (self.filled + 1).min(32);
-
-        if self.locked {
-            self.since += 1;
-            if self.since < 16 {
-                return None;
-            }
-            self.since = 0;
-            return Some(self.window as u16);
-        }
-
         if self.filled < 32 {
             return None;
         }
-        let first = (self.window >> 16) as u16;
-        if first != self.window as u16 {
-            return None;
+        let group = self.window as u16;
+        let previous = (self.window >> 16) as u16;
+
+        // 5.3.1: two identical sixteens with the synchronising bits in place.
+        // Checked at every position rather than only until a boundary is first
+        // found, because a boundary found in noise will never match the real
+        // thing, and a detector that could not change its mind stayed wrong
+        // for the rest of the call.
+        if group == previous && is_rate_signal(group) {
+            self.locked = true;
+            self.since = 0;
+            return Some(group);
         }
-        if !is_rate_signal(first) && !is_end_signal(first) {
-            return None;
+
+        // The sequence that ends the exchange is sent exactly once (5.3.2), so
+        // it cannot be asked to repeat. Accepting a lone group is only safe
+        // once the boundary is known: the synchronising bits are seven of
+        // sixteen, so one group in a hundred and twenty-eight of anything at
+        // all matches them, and a detector that accepted lone groups at an
+        // unknown boundary finds a rate signal in scrambled data within a
+        // second. That is exactly what happened, and what it cost was a modem
+        // deciding it had heard R1 partway through the far end's training
+        // segment and answering over the top of it.
+        if self.locked {
+            self.since += 1;
+            if self.since >= 16 {
+                self.since = 0;
+                if is_end_signal(group) {
+                    return Some(group);
+                }
+            }
         }
-        // The pair ends on this bit, so the boundary is here.
-        self.locked = true;
-        self.since = 0;
-        Some(first)
+        None
     }
 
     pub fn reset(&mut self) {
@@ -346,6 +358,12 @@ mod timing {
     pub const MIN_ALTERNATION: u64 = 128;
     /// The incoming carrier must be heard this long first (5.4.2).
     pub const HEARD_CARRIER: u64 = 64;
+    /// Shortest a rate signal may be sent for.
+    ///
+    /// 5.3.1 identifies one by two identical sixteen-bit sequences, so four of
+    /// them is twice what a far end needs to see and still only thirteen
+    /// milliseconds.
+    pub const MIN_RATE_SIGNAL: u64 = 32;
     /// Silence after the amplitude drop (5.4.2).
     pub const GAP: u64 = 16;
     /// Segment 1 of the conditioning signal (5.2.1).
@@ -797,40 +815,53 @@ impl Startup {
                 }
             }
             State::SendRate => {
-                // The answering modem comes through here twice, and what it
-                // is waiting for differs. The first time it is sending R1,
-                // and 5.4.2 has it stop when the calling modem's conditioning
-                // signal arrives, not when a rate does; the second time it is
-                // sending R3 and waits to be closed out with an E. Having
-                // agreed a rate already is what tells the two apart.
-                if self.role == Role::Answering
-                    && self.agreed == 0
-                    && self.hold(heard == Heard::Conditioning) >= timing::HEARD_CARRIER
-                {
-                    tx.set_signal(Signal::Silent);
-                    self.enter(State::AfterR1);
+                // A rate signal has to be sent long enough to be recognised.
+                // 5.3.1 asks for two identical sixteens, so anything shorter
+                // than a few of them cannot be detected however good the line
+                // is: the answering modem was leaving this state six
+                // milliseconds after entering it, having sent twenty-eight
+                // bits of a thing that takes thirty-two to identify, and the
+                // calling modem never saw an R3 at all.
+                if self.symbols < timing::MIN_RATE_SIGNAL {
                     return;
                 }
-                match sequence {
-                    Some(s) if is_end_signal(s) => {
-                        // The far end has closed the exchange out. Answer in
-                        // kind and settle at what it named.
-                        if self.agreed == 0 {
-                            self.agreed = offered_rate(s);
+                match self.role {
+                    // 5.4.2: the first time through, the answering modem is
+                    // sending R1 and is waiting for the calling modem's
+                    // conditioning signal, not for a rate. The second time it
+                    // is sending R3 and waits to be closed out with an E.
+                    // Having agreed a rate already is what tells them apart.
+                    Role::Answering if self.agreed == 0 => {
+                        if self.hold(heard == Heard::Conditioning) >= timing::HEARD_CARRIER {
+                            tx.set_signal(Signal::Silent);
+                            self.enter(State::AfterR1);
                         }
-                        tx.set_signal(Signal::Rate(end_signal(self.offer)));
-                        self.enter(State::SendEnd);
                     }
-                    Some(s) if is_rate_signal(s) => {
+                    Role::Answering => {
+                        if let Some(s) = sequence.filter(|&s| is_end_signal(s)) {
+                            if self.agreed == 0 {
+                                self.agreed = offered_rate(s);
+                            }
+                            tx.set_signal(Signal::Rate(end_signal(self.offer)));
+                            self.enter(State::SendEnd);
+                        }
+                    }
+                    // 5.4.1: "Transmission of R2 shall continue until an
+                    // incoming rate signal R3 is detected."
+                    Role::Calling => {
+                        let Some(s) = sequence else { return };
+                        if !is_rate_signal(s) && !is_end_signal(s) {
+                            return;
+                        }
                         let theirs = offered_rate(s);
                         if theirs == 0 {
                             // Table 6: no rate at all is a call to clear down.
                             self.state = State::Failed;
                             return;
                         }
-                        // 5.4.1: R2 excludes anything R1 did not offer, and
-                        // R3 anything R2 did not, so each step down the chain
-                        // is the lesser of what the two ends can do.
+                        // Each step down the chain is the lesser of what the
+                        // two ends can do: R2 excludes anything R1 did not
+                        // offer, and R3 anything R2 did not.
                         let mine = offered_rate(self.offer);
                         self.agreed = if self.agreed == 0 {
                             theirs.min(mine)
@@ -840,7 +871,6 @@ impl Startup {
                         tx.set_signal(Signal::Rate(end_signal(self.offer)));
                         self.enter(State::SendEnd);
                     }
-                    _ => {}
                 }
             }
             State::SendEnd => {
@@ -976,6 +1006,10 @@ impl Modem {
         // Adapting through the far end would have the canceller try to explain
         // it as an echo of us, which it is not, and unlearn what it knows.
         let training = self.startup.training_echo();
+        // The equaliser is held still over the same stretch the canceller is
+        // let loose on, and for the same reason: what is on the line then is
+        // this modem's own echo and nothing else.
+        self.rx.set_adapting(!training);
         if self.was_training && !training {
             self.trained_loss = self.echo.echo_return_loss();
         }

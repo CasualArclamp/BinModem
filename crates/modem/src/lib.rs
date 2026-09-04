@@ -132,6 +132,22 @@ impl Pump {
             Self::V32(m) => m.pending_bits(),
         }
     }
+
+    /// Which step of the handshake the line is on, for anything that wants to
+    /// show progress or work out where one stalled.
+    fn phase(&self) -> &'static str {
+        match self {
+            // V.22bis negotiates by timing rather than by a sequence of named
+            // steps, so there is nothing finer to report than whether it is
+            // still going.
+            Self::V22bis(m) => match m.status() {
+                v22bis::handshake::Status::Negotiating => "negotiating",
+                v22bis::handshake::Status::Connected(_) => "connected",
+                v22bis::handshake::Status::Failed => "failed",
+            },
+            Self::V32(m) => m.phase(),
+        }
+    }
 }
 
 /// How far a handshake has got, in terms neither modulation owns.
@@ -207,6 +223,27 @@ impl Modem {
     /// The modulation in use, by the name `+MS` knows it as.
     pub fn modulation(&self) -> &str {
         &self.at.modulation.carrier
+    }
+
+    /// Which step of the handshake the line is on.
+    pub fn line_phase(&self) -> &'static str {
+        self.pump.as_ref().map_or("on hook", Pump::phase)
+    }
+
+    /// The round trip the handshake measured, where it measures one.
+    pub fn round_trip_symbols(&self) -> Option<u64> {
+        match self.pump.as_ref() {
+            Some(Pump::V32(m)) => Some(m.round_trip()),
+            _ => None,
+        }
+    }
+
+    /// How much of its own echo the line is removing, in decibels.
+    pub fn echo_return_loss(&self) -> Option<f64> {
+        match self.pump.as_ref() {
+            Some(Pump::V32(m)) => Some(m.echo_return_loss()),
+            _ => None,
+        }
     }
 
     /// Whether error control is running on the current call.

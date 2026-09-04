@@ -496,6 +496,8 @@ pub struct Receiver {
     last_symbol: (f64, f64),
     level: OnePole,
     carrier: bool,
+    /// Whether the equaliser may learn from what is arriving.
+    adapting: bool,
 }
 
 impl Receiver {
@@ -525,6 +527,7 @@ impl Receiver {
             last_symbol: (0.0, 0.0),
             level: OnePole::new(0.020, fs),
             carrier: false,
+            adapting: true,
         }
     }
 
@@ -593,7 +596,7 @@ impl Receiver {
         let decision = STATES[state];
 
         self.symbols += 1;
-        if self.symbols > 64 && self.carrier {
+        if self.symbols > 64 && self.carrier && self.adapting {
             self.equalizer.adapt(
                 equalized,
                 (
@@ -648,6 +651,23 @@ impl Receiver {
 
     pub fn carrier(&self) -> bool {
         self.carrier
+    }
+
+    /// Whether the equaliser may learn from what is arriving.
+    ///
+    /// It must not while this modem is sending its training segment. The far
+    /// end is required to be silent through that, which is the whole point of
+    /// it, so everything heard is this modem's own echo and everything the
+    /// equaliser learns is about a path the far end's signal will never take.
+    ///
+    /// The two ends are not equally exposed to getting this wrong. After its
+    /// training segment the answering modem falls silent and has a clear
+    /// stretch of the far end's conditioning signal to correct itself on; the
+    /// calling modem goes straight into sending its rate signal and keeps
+    /// sending until answered, so it never has a quiet moment and carries
+    /// whatever it learned into the rest of the call.
+    pub fn set_adapting(&mut self, adapting: bool) {
+        self.adapting = adapting;
     }
 
     pub fn level(&self) -> f64 {
