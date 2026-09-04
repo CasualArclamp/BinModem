@@ -24,6 +24,9 @@ use at::escape::EscapeDetector;
 use at::result::ResultCode;
 use at::{Action, Interpreter};
 use datapump::v22bis;
+use datapump::AsyncBits;
+use ec::stack::Phase;
+use ec::xid::Compression;
 use ec::{Params, Role as EcRole, Stack};
 
 /// Which end of the call this modem is.
@@ -75,6 +78,9 @@ pub struct Modem {
     role: Role,
     /// Bytes waiting to go down the line, held while the link comes up.
     outbound: Vec<u8>,
+    /// Start-stop framing for a connection without error control, where
+    /// nothing else says where one character ends and the next begins.
+    async_bits: AsyncBits,
     /// Milliseconds since the last tick, accumulated from samples.
     elapsed_samples: f64,
 }
@@ -91,6 +97,7 @@ impl Modem {
             want_error_control: true,
             role: Role::Calling,
             outbound: Vec::new(),
+            async_bits: AsyncBits::new(8),
             elapsed_samples: 0.0,
         }
     }
@@ -118,6 +125,11 @@ impl Modem {
         self.ec.as_ref().is_some_and(Stack::is_connected)
     }
 
+    /// Whether V.42bis was agreed, which needs both ends to have offered it.
+    pub fn compressing(&self) -> bool {
+        self.ec.as_ref().is_some_and(Stack::compressing)
+    }
+
     /// Bytes for the terminal.
     pub fn take_dte(&mut self) -> Vec<u8> {
         let mut out = self.at.take_output();
@@ -125,8 +137,14 @@ impl Modem {
             match self.ec.as_mut() {
                 Some(ec) => out.extend(ec.take_received()),
                 None => {
+                    // Without error control there are no frames, so the
+                    // characters are found by their own start and stop bits.
                     if let Some(pump) = self.pump.as_mut() {
-                        out.extend(bits_to_bytes(&pump.take_bits()));
+                        for bit in pump.take_bits() {
+                            if let Some(c) = self.async_bits.feed(bit) {
+                                out.push(c);
+                            }
+                        }
                     }
                 }
             }
@@ -206,10 +224,10 @@ impl Modem {
                         Role::Answering => EcRole::Answerer,
                     };
                     let mut stack = Stack::new(role, Params::default());
-                    // The originator asks; the answerer waits to be asked.
-                    if self.role == Role::Calling {
-                        stack.connect();
-                    }
+                    // Offer compression in both directions and let the far end
+                    // decide. What runs is the intersection, so offering more
+                    // than the far end can do costs nothing.
+                    stack.offer_compression(Compression::Both);
                     self.ec = Some(stack);
                 }
                 // V.250 6.2.7: with X at 1 or above the CONNECT carries the
@@ -231,6 +249,13 @@ impl Modem {
         if !pump.carrier() {
             self.end_call(Ended::CarrierLost);
             return;
+        }
+        // A far end that does not do error control is a perfectly ordinary far
+        // end, and V.42 7.2.1 exists to find that out rather than to fail on
+        // it. Once the detection phase has said so there is nothing for the
+        // stack to do, and the characters go down the line as they are.
+        if self.ec.as_ref().is_some_and(|e| e.phase() == Phase::Transparent) {
+            self.ec = None;
         }
         match self.ec.as_mut() {
             Some(ec) => {
@@ -254,12 +279,17 @@ impl Modem {
                 }
             }
             None => {
+                // Each character wrapped in a start and a stop bit (V.14), so
+                // that the far end can find where it begins. A synchronous
+                // line carries bits whether or not anything is sending, and
+                // nothing else in an unprotected connection marks the
+                // boundaries.
                 if !self.outbound.is_empty() {
                     let queued = std::mem::take(&mut self.outbound);
-                    let bits: Vec<bool> = queued
-                        .iter()
-                        .flat_map(|b| (0..8).rev().map(move |i| b & (1 << i) != 0))
-                        .collect();
+                    let mut bits = Vec::new();
+                    for byte in queued {
+                        bits.extend(self.async_bits.encode(byte));
+                    }
                     pump.send_bits(&bits);
                 }
             }
@@ -323,17 +353,4 @@ impl Modem {
             Ended::NoAnswer => ResultCode::NoAnswer,
         });
     }
-}
-
-/// Pack recovered bits into whole octets, most significant first.
-///
-/// Only for a connection with no error control, where the bit stream has no
-/// framing of its own and the byte boundary is wherever the receiver happened
-/// to start. Under V.42 the frames say where the boundaries are.
-fn bits_to_bytes(bits: &[bool]) -> Vec<u8> {
-    bits.as_chunks::<8>()
-        .0
-        .iter()
-        .map(|c| c.iter().fold(0u8, |acc, &b| (acc << 1) | u8::from(b)))
-        .collect()
 }

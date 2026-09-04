@@ -148,6 +148,46 @@ fn error_control_comes_up_on_its_own() {
 }
 
 #[test]
+fn compression_is_agreed_without_either_terminal_asking() {
+    // V.42bis is negotiated in XID during the connection, and what runs is the
+    // intersection of the two offers. Neither terminal is consulted.
+    let mut p = connect();
+    p.run(3.0);
+    assert!(p.caller.compressing(), "the caller is not compressing");
+    assert!(p.host.compressing(), "the host is not compressing");
+}
+
+#[test]
+fn a_far_end_without_error_control_still_carries_data() {
+    // The case V.42 7.2.1 exists for. A modem that treated a far end without
+    // error control as a failure would refuse connections that work perfectly
+    // well, which is most of what was answering telephones when V.42 was new.
+    let mut p = Pair::new();
+    p.host.set_error_control(false);
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(12.0);
+
+    assert_eq!(p.caller.state(), State::Data, "the caller never connected");
+    assert_eq!(p.host.state(), State::Data, "the host never connected");
+    assert!(
+        !p.caller.error_controlled(),
+        "error control was agreed with an end that does not do it"
+    );
+
+    p.at_host.clear();
+    for b in b"cactus" {
+        p.caller.feed_dte(*b);
+    }
+    p.run(3.0);
+    assert!(
+        p.host_saw().contains("cactus"),
+        "an unprotected connection carried {:?}",
+        p.host_saw()
+    );
+}
+
+#[test]
 fn the_escape_sequence_returns_to_command_state_without_dropping_the_call() {
     // V.250 6.1.4. The point of the guard time either side is that a file
     // containing three plusses must not drop the call carrying it, which is

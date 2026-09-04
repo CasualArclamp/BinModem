@@ -176,3 +176,179 @@ mod tests {
         }
     }
 }
+
+/// Start-stop character framing carried over a synchronous bit stream (V.14).
+///
+/// A modem's line is synchronous: bits go out at the symbol rate whether or
+/// not anything wants to send one. A terminal is asynchronous: it sends
+/// characters when it has them, each announced by a start bit and closed by a
+/// stop bit, and says nothing in between. V.14 is the conversion, and without
+/// it the far end has a stream of bits and no idea where one character ends
+/// and the next begins.
+///
+/// The framing is what makes the boundary findable. Idle is mark, so the
+/// falling edge into a start bit is unmistakable, and every character
+/// re-synchronises on its own: a receiver that joins a call halfway through
+/// needs to find one start bit and is then in step.
+///
+/// What is not done here is the part V.14 is really about. The two clocks are
+/// never quite equal, so over a long transfer the asynchronous side delivers
+/// slightly more or fewer characters than the synchronous side has room for,
+/// and V.14 5.2 recovers the difference by deleting or inserting stop bits.
+/// That matters between two independently clocked machines and not at all
+/// between two ends of one program.
+#[derive(Debug, Clone)]
+pub struct AsyncBits {
+    data_bits: u32,
+    state: BitState,
+    /// Bits of the character gathered so far, and how many.
+    value: u32,
+    have: u32,
+    /// Characters whose stop bit was not mark.
+    errors: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BitState {
+    /// Waiting for a start bit, which is the only space in an idle line.
+    Idle,
+    Data,
+    Stop,
+}
+
+impl AsyncBits {
+    pub fn new(data_bits: u32) -> Self {
+        Self {
+            data_bits: data_bits.clamp(5, 8),
+            state: BitState::Idle,
+            value: 0,
+            have: 0,
+            errors: 0,
+        }
+    }
+
+    /// Wrap one character: a start bit, the data least significant first, and
+    /// a stop bit.
+    pub fn encode(&self, byte: u8) -> Vec<bool> {
+        let mut out = Vec::with_capacity(self.data_bits as usize + 2);
+        out.push(false);
+        for i in 0..self.data_bits {
+            out.push(byte & (1 << i) != 0);
+        }
+        out.push(true);
+        out
+    }
+
+    /// Feed one received bit, yielding a character when one completes.
+    pub fn feed(&mut self, bit: bool) -> Option<u8> {
+        match self.state {
+            BitState::Idle => {
+                if !bit {
+                    self.state = BitState::Data;
+                    self.value = 0;
+                    self.have = 0;
+                }
+                None
+            }
+            BitState::Data => {
+                if bit {
+                    self.value |= 1 << self.have;
+                }
+                self.have += 1;
+                if self.have == self.data_bits {
+                    self.state = BitState::Stop;
+                }
+                None
+            }
+            BitState::Stop => {
+                self.state = BitState::Idle;
+                if bit {
+                    Some(self.value as u8)
+                } else {
+                    // The stop bit was not mark, so the framing was wrong
+                    // somewhere and the character cannot be trusted. Dropping
+                    // it and hunting for the next start bit is what a UART
+                    // does and recovers within a character or two.
+                    self.errors += 1;
+                    None
+                }
+            }
+        }
+    }
+
+    /// Characters discarded because their stop bit was not mark.
+    pub fn framing_errors(&self) -> u64 {
+        self.errors
+    }
+
+    pub fn reset(&mut self) {
+        self.state = BitState::Idle;
+        self.value = 0;
+        self.have = 0;
+    }
+}
+
+#[cfg(test)]
+mod async_bits_tests {
+    use super::AsyncBits;
+
+    #[test]
+    fn characters_survive_the_round_trip() {
+        let framer = AsyncBits::new(8);
+        let mut back = AsyncBits::new(8);
+        let mut out = Vec::new();
+        for byte in b"Welcome to phl6-dial1" {
+            for bit in framer.encode(*byte) {
+                if let Some(c) = back.feed(bit) {
+                    out.push(c);
+                }
+            }
+        }
+        assert_eq!(out, b"Welcome to phl6-dial1");
+    }
+
+    #[test]
+    fn a_receiver_joining_halfway_finds_the_boundary() {
+        // The reason for start bits. A synchronous line hands over a stream
+        // with no marks in it, and where a character begins is not something
+        // the receiver can be told.
+        let framer = AsyncBits::new(8);
+        let mut bits: Vec<bool> = Vec::new();
+        // Idle first, which is what the receiver joins in the middle of.
+        bits.extend(std::iter::repeat_n(true, 13));
+        for byte in b"cactus" {
+            bits.extend(framer.encode(*byte));
+        }
+        let mut back = AsyncBits::new(8);
+        let out: Vec<u8> = bits.iter().filter_map(|&b| back.feed(b)).collect();
+        assert_eq!(out, b"cactus");
+    }
+
+    #[test]
+    fn idle_produces_no_characters() {
+        let mut back = AsyncBits::new(8);
+        for _ in 0..1000 {
+            assert_eq!(back.feed(true), None);
+        }
+    }
+
+    #[test]
+    fn a_bad_stop_bit_costs_one_character_and_no_more() {
+        // A UART recovers by hunting for the next start bit, and so does this:
+        // one character is lost and the rest arrive.
+        let framer = AsyncBits::new(8);
+        let mut bits: Vec<bool> = Vec::new();
+        bits.extend(framer.encode(b'a'));
+        let mut broken = framer.encode(b'b');
+        let last = broken.len() - 1;
+        broken[last] = false;
+        bits.extend(broken);
+        bits.extend(std::iter::repeat_n(true, 4));
+        bits.extend(framer.encode(b'c'));
+
+        let mut back = AsyncBits::new(8);
+        let out: Vec<u8> = bits.iter().filter_map(|&b| back.feed(b)).collect();
+        assert_eq!(out, b"ac");
+        assert_eq!(back.framing_errors(), 1);
+    }
+}
