@@ -109,3 +109,40 @@ fn the_rate_in_use_is_reported_as_1200() {
         }
     }
 }
+
+/// Almost nothing on this call is decoded wrongly.
+///
+/// Counting frames that fail their check sequence is the strictest measure
+/// available, since a single wrong bit anywhere in a frame fails it, and the
+/// answer for both directions is one.
+///
+/// Counting everything the deframer rejects would give a much worse-looking
+/// number and a wrong one. Most of what it rejects on the low channel is the
+/// seven contiguous ones that mean an abort, which is also what an idle line
+/// carries: the caller of this call typed nothing after logging in, so the low
+/// channel is idle for most of its length and being told so is correct.
+#[test]
+fn the_frames_that_arrive_are_not_corrupted() {
+    let wav = line::wav::read(VECTOR).expect("read V.22bis vector");
+    let fs = wav.sample_rate as f64;
+    for channel in [Channel::Calling, Channel::Answering] {
+        let mut rx = Receiver::new(channel, fs);
+        let mut decoder = Decoder::new(Fcs::Bits16);
+        let (mut good, mut failed) = (0usize, 0usize);
+        for s in wav.mono() {
+            rx.feed(s as f64);
+            for bit in rx.take_bits() {
+                match decoder.feed(bit) {
+                    Some(Ok(_)) => good += 1,
+                    Some(Err(ec::hdlc::FrameError::BadFcs)) => failed += 1,
+                    _ => {}
+                }
+            }
+        }
+        assert!(good >= 4, "{channel:?} recovered only {good} frames");
+        assert!(
+            failed <= 1,
+            "{channel:?} had {failed} frames fail their check sequence"
+        );
+    }
+}
