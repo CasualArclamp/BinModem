@@ -19,29 +19,14 @@
 //! the echo is of a signal we know exactly: we sent it. What is unknown is only
 //! what the line did to it on the way back, and that is a filter, which can be
 //! learned by trying one and seeing what is left.
+//!
+//! There are two of them, and they are nowhere near each other. The hybrid
+//! reflects at once; the network reflects from wherever the impedance
+//! changes, which on a long connection is tens of milliseconds away. So the
+//! canceller is in two pieces, and the second cannot be placed until
+//! something has found out where to place it.
 
 use std::collections::VecDeque;
-
-/// Adaptive canceller for a modem's own echo.
-///
-/// Adapts by normalised least mean squares: each sample, the taps move along
-/// the reference in proportion to what is left over. Normalising by the power
-/// of the reference is what makes the step size mean the same thing at every
-/// signal level, so one setting works on a loud line and a quiet one.
-#[derive(Debug, Clone)]
-pub struct EchoCanceller {
-    /// The estimated echo path, most recent sample first.
-    taps: Vec<f64>,
-    /// What we transmitted, most recent first, the same length as the taps.
-    history: VecDeque<f64>,
-    step: f64,
-    /// Energy currently inside the filter, kept exactly rather than averaged.
-    energy: f64,
-    adapting: bool,
-    /// Running powers of what arrived and what is left, for the return loss.
-    heard: f64,
-    residue: f64,
-}
 
 /// Guards the division when the line is silent.
 const FLOOR: f64 = 1.0e-9;
@@ -51,28 +36,143 @@ const FLOOR: f64 = 1.0e-9;
 /// enough to follow a signal starting.
 const POWER_TRACK: f64 = 0.01;
 
+/// One run of taps, and how far back from the present it begins.
+#[derive(Debug, Clone)]
+struct Segment {
+    offset: usize,
+    taps: Vec<f64>,
+    /// Energy currently inside this run, kept exactly rather than averaged.
+    energy: f64,
+}
+
+impl Segment {
+    fn new(offset: usize, taps: usize) -> Self {
+        Self {
+            offset,
+            taps: vec![0.0; taps],
+            energy: 0.0,
+        }
+    }
+
+    /// How far back the last of these taps reaches.
+    fn end(&self) -> usize {
+        self.offset + self.taps.len()
+    }
+
+    /// The part of the echo this run accounts for.
+    fn echo(&self, history: &VecDeque<f64>) -> f64 {
+        self.taps
+            .iter()
+            .enumerate()
+            .map(|(i, t)| t * history[self.offset + i])
+            .sum()
+    }
+
+    /// Take in the sample that has just entered the window and let go of the
+    /// one that has just left it, so the energy stays exact.
+    fn shift(&mut self, history: &VecDeque<f64>) {
+        let entering = history[self.offset];
+        let leaving = history[self.end()];
+        self.energy += entering * entering - leaving * leaving;
+        self.energy = self.energy.max(0.0);
+    }
+
+    fn adapt(&mut self, history: &VecDeque<f64>, gain: f64) {
+        for (i, tap) in self.taps.iter_mut().enumerate() {
+            *tap += gain * history[self.offset + i];
+        }
+    }
+
+    /// Count the energy from scratch, for when the window has just been placed
+    /// somewhere it has never been.
+    fn recount(&mut self, history: &VecDeque<f64>) {
+        self.energy = (self.offset..self.end())
+            .map(|i| history[i] * history[i])
+            .sum();
+    }
+}
+
+/// Adaptive canceller for a modem's own echo.
+///
+/// Adapts by normalised least mean squares: each sample, the taps move along
+/// the reference in proportion to what is left over. Normalising by the power
+/// of the reference is what makes the step size mean the same thing at every
+/// signal level, so one setting works on a loud line and a quiet one.
+///
+/// The taps come in two runs rather than one. The hybrid's reflection arrives
+/// at once and is modelled from the first sample; the network's arrives from
+/// wherever the line changes impedance, which on a long connection is tens of
+/// milliseconds later, with nothing whatever in between. Spanning both with
+/// one continuous filter would mean carrying a thousand taps to model two
+/// hundred, and paying for the empty ones twice: once in arithmetic, and once
+/// in the adaptation noise every idle tap adds to the residue. Least mean
+/// squares also converges more slowly the more taps it carries, and the
+/// training segment it has to converge inside is fixed.
+#[derive(Debug, Clone)]
+pub struct EchoCanceller {
+    /// The hybrid's own reflection, which comes back immediately.
+    near: Segment,
+    /// The network's, placed once something has worked out where it is.
+    far: Option<Segment>,
+    /// What we transmitted, most recent first, one longer than the taps reach
+    /// so that each run can see the sample falling out of its far end.
+    history: VecDeque<f64>,
+    step: f64,
+    adapting: bool,
+    /// Running powers of what arrived and what is left, for the return loss.
+    heard: f64,
+    residue: f64,
+}
+
 impl EchoCanceller {
-    /// `taps` should span the whole echo path in samples, delay included.
+    /// `taps` should span the near echo in samples.
     ///
     /// Too short and the tail it cannot reach is left uncancelled; too long
     /// and every extra tap adds its own adaptation noise while modelling
-    /// nothing. The near echo of a hybrid arrives within a millisecond or two.
-    /// A network reflection can be tens of milliseconds behind, and is what
-    /// sets the length.
+    /// nothing. The near echo of a hybrid arrives within a millisecond or two,
+    /// and that is all this is for: a network reflection is a long way behind
+    /// it and belongs to [`watch_far_echo`](Self::watch_far_echo).
     ///
     /// `step` between 0 and 2 is stable, but only in theory and only without
     /// noise. Something around a tenth converges in a few thousand samples and
     /// leaves the taps quiet once it has.
     pub fn new(taps: usize, step: f64) -> Self {
         Self {
-            taps: vec![0.0; taps],
-            history: VecDeque::from(vec![0.0; taps]),
+            near: Segment::new(0, taps),
+            far: None,
+            history: VecDeque::from(vec![0.0; taps + 1]),
             step,
-            energy: 0.0,
             adapting: true,
             heard: 0.0,
             residue: 0.0,
         }
+    }
+
+    /// Put a second run of taps `delay` samples back, for a reflection that
+    /// arrives from further away than the near ones reach.
+    ///
+    /// The delay has to come from somewhere, and a modem has two ways of
+    /// getting it. V.32's start-up measures the round trip outright (5.4), and
+    /// nothing can return later than that. Within that bound the reflection
+    /// can be found by [`EchoFinder`], which is the more useful of the two
+    /// because a bound is not an address.
+    ///
+    /// Anything already learned about the near echo is kept.
+    pub fn watch_far_echo(&mut self, delay: usize, taps: usize) {
+        let mut far = Segment::new(delay, taps);
+        self.history.resize(self.near.end().max(far.end()) + 1, 0.0);
+        far.recount(&self.history);
+        self.far = Some(far);
+    }
+
+    /// Where the second run of taps sits, if there is one.
+    pub fn far_echo(&self) -> Option<(usize, usize)> {
+        self.far.as_ref().map(|f| (f.offset, f.taps.len()))
+    }
+
+    /// How far back the canceller can see, in samples.
+    pub fn span(&self) -> usize {
+        self.near.end().max(self.far.as_ref().map_or(0, Segment::end))
     }
 
     /// Whether the taps are being updated.
@@ -97,7 +197,7 @@ impl EchoCanceller {
     /// what came back in. Returns what is left once the echo is accounted for,
     /// which is the far end plus whatever the canceller has not learned yet.
     pub fn process(&mut self, transmitted: f64, received: f64) -> f64 {
-        // Keep the energy in the filter exactly, by adding what came in and
+        // Keep the energy under each run exactly, by adding what came in and
         // taking off what fell out the end.
         //
         // A running average of the reference power will not do here, however
@@ -106,17 +206,15 @@ impl EchoCanceller {
         // spends much of its time away from its own average. Filtering noise
         // to a thousand hertz was enough: the canceller diverged completely,
         // and reported a return loss of minus two hundred decibels.
-        let dropped = self.history.pop_back().unwrap_or(0.0);
+        self.history.pop_back();
         self.history.push_front(transmitted);
-        self.energy += transmitted * transmitted - dropped * dropped;
-        self.energy = self.energy.max(0.0);
+        self.near.shift(&self.history);
+        if let Some(far) = self.far.as_mut() {
+            far.shift(&self.history);
+        }
 
-        let echo: f64 = self
-            .taps
-            .iter()
-            .zip(self.history.iter())
-            .map(|(t, x)| t * x)
-            .sum();
+        let echo = self.near.echo(&self.history)
+            + self.far.as_ref().map_or(0.0, |f| f.echo(&self.history));
         let left = received - echo;
 
         // Track what arrived and what is left, for the return loss.
@@ -128,9 +226,16 @@ impl EchoCanceller {
             // residue with respect to each tap is the reference at that tap's
             // delay, so moving every tap along its own sample by the same
             // fraction of the residue reduces it.
-            let gain = self.step * left / (self.energy + FLOOR);
-            for (tap, x) in self.taps.iter_mut().zip(self.history.iter()) {
-                *tap += gain * x;
+            //
+            // The two runs share one division, by the energy under both of
+            // them together. They are one filter with a hole in it rather than
+            // two filters, and normalising each by its own energy would let
+            // the pair take a step twice the size of the one that is stable.
+            let energy = self.near.energy + self.far.as_ref().map_or(0.0, |f| f.energy);
+            let gain = self.step * left / (energy + FLOOR);
+            self.near.adapt(&self.history, gain);
+            if let Some(far) = self.far.as_mut() {
+                far.adapt(&self.history, gain);
             }
         }
         left
@@ -156,19 +261,118 @@ impl EchoCanceller {
 
     /// Forget everything learned.
     pub fn reset(&mut self) {
-        self.taps.iter_mut().for_each(|t| *t = 0.0);
+        self.near.taps.iter_mut().for_each(|t| *t = 0.0);
+        self.near.energy = 0.0;
+        if let Some(far) = self.far.as_mut() {
+            far.taps.iter_mut().for_each(|t| *t = 0.0);
+            far.energy = 0.0;
+        }
         self.history.iter_mut().for_each(|x| *x = 0.0);
-        self.energy = 0.0;
         self.heard = 0.0;
         self.residue = 0.0;
     }
 
+    /// How many taps there are, over both runs.
     pub fn len(&self) -> usize {
-        self.taps.len()
+        self.near.taps.len() + self.far.as_ref().map_or(0, |f| f.taps.len())
     }
 
     pub fn is_empty(&self) -> bool {
-        self.taps.is_empty()
+        self.len() == 0
+    }
+}
+
+/// Where a reflection of our own signal is coming back from.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Reflection {
+    /// Delay in samples between sending it and hearing it again.
+    pub delay: usize,
+    /// How much of what arrives it accounts for, between nothing and one.
+    ///
+    /// A line that returns a clean copy of what was sent and nothing else
+    /// reads one, whatever it attenuates the copy by. Everything else on the
+    /// line — the near echo, the far modem, noise — is in the denominator and
+    /// not the numerator, so this falls as the reflection becomes a smaller
+    /// share of what is heard.
+    pub strength: f64,
+}
+
+/// Finds how far away a reflection of our own signal is.
+///
+/// V.32's start-up measures the round trip (5.4) because the echo canceller
+/// needs to know where to look, but what that gives is a bound rather than an
+/// address: a reflection comes from wherever the line changes impedance, which
+/// can be anywhere along it. Guessing has a real cost, because a run of taps
+/// placed where the echo is not models nothing at all.
+///
+/// What settles it is that the signal being reflected is one we know exactly.
+/// Comparing what arrives against every delay at once, over a stretch where
+/// the far end is silent, leaves the delays that explain nothing hovering
+/// around zero and the one that explains the echo standing above them.
+///
+/// This wants a signal with no pattern in it. The start-up's tones and
+/// alternations are periodic, and a periodic reference matches equally well at
+/// every delay a whole number of periods away, so it says nothing about which
+/// one is right. The training segment is scrambled, and is therefore both the
+/// only stretch quiet enough to measure in and the only one with the shape to
+/// measure with.
+#[derive(Debug, Clone)]
+pub struct EchoFinder {
+    /// What we transmitted, most recent first, reaching back to the last
+    /// candidate delay.
+    history: VecDeque<f64>,
+    /// How well each candidate explains what is arriving, from `first` up.
+    scores: Vec<f64>,
+    first: usize,
+    /// Energies of the two signals, to put the scores on a scale that depends
+    /// neither on how loud the line is nor on how long we have listened.
+    reference: f64,
+    arriving: f64,
+}
+
+impl EchoFinder {
+    /// Look for a reflection between `first` and `last` samples back.
+    ///
+    /// `first` should be past the near taps: the hybrid's reflection is the
+    /// loudest thing on the line during training and would win every time, and
+    /// it is already covered.
+    pub fn new(first: usize, last: usize) -> Self {
+        let last = last.max(first);
+        Self {
+            history: VecDeque::from(vec![0.0; last + 1]),
+            scores: vec![0.0; last - first + 1],
+            first,
+            reference: 0.0,
+            arriving: 0.0,
+        }
+    }
+
+    /// Offer one sample of what went out and what came back.
+    pub fn feed(&mut self, transmitted: f64, received: f64) {
+        self.history.pop_back();
+        self.history.push_front(transmitted);
+        self.reference += transmitted * transmitted;
+        self.arriving += received * received;
+        for (i, score) in self.scores.iter_mut().enumerate() {
+            *score += received * self.history[self.first + i];
+        }
+    }
+
+    /// The strongest reflection found, if the line carried enough to say.
+    pub fn best(&self) -> Option<Reflection> {
+        if self.reference < FLOOR || self.arriving < FLOOR {
+            return None;
+        }
+        let scale = (self.reference * self.arriving).sqrt();
+        let (i, score) = self
+            .scores
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.abs().total_cmp(&b.1.abs()))?;
+        Some(Reflection {
+            delay: self.first + i,
+            strength: score.abs() / scale,
+        })
     }
 }
 
@@ -378,6 +582,134 @@ mod tests {
         for _ in 0..1000 {
             assert_eq!(ec.process(0.0, 0.0), 0.0);
         }
-        assert!(ec.taps.iter().all(|t| t.abs() < 1.0e-12));
+        assert!(ec.near.taps.iter().all(|t| t.abs() < 1.0e-12));
+    }
+
+    /// A near reflection off the hybrid and a far one off the network, with
+    /// nothing at all in between: what a long connection actually looks like,
+    /// and the shape one continuous filter is the wrong answer to.
+    fn split_path(far: usize) -> Vec<f64> {
+        let mut response = vec![0.0; far + 8];
+        response[2] = 0.25;
+        response[3] = 0.1;
+        response[far] = 0.18;
+        response[far + 1] = -0.06;
+        response
+    }
+
+    #[test]
+    fn a_second_run_of_taps_reaches_an_echo_the_first_cannot() {
+        const FAR: usize = 500;
+
+        let run = |place: Option<usize>| {
+            let mut path = Path::new(split_path(FAR));
+            let mut ec = EchoCanceller::new(32, 0.5);
+            if let Some(delay) = place {
+                ec.watch_far_echo(delay, 32);
+            }
+            for &x in &noise(120_000) {
+                let heard = path.echo(x);
+                ec.process(x, heard);
+            }
+            ec.echo_return_loss()
+        };
+
+        // Near taps alone: the reflection they cannot reach is most of what is
+        // left, and no amount of adapting will help, because the samples that
+        // would explain it fell out of the filter long ago.
+        let near_only = run(None);
+        assert!(
+            near_only < 12.0,
+            "near taps alone removed {near_only:.1} dB, which is more than \
+             they can reach"
+        );
+
+        let both = run(Some(FAR - 8));
+        assert!(
+            both > 40.0,
+            "with the second run placed on it, only {both:.1} dB removed"
+        );
+    }
+
+    #[test]
+    fn the_finder_says_how_far_away_the_reflection_is() {
+        const FAR: usize = 640;
+        let mut path = Path::new(split_path(FAR));
+        let mut finder = EchoFinder::new(128, 1024);
+        for &x in &noise(40_000) {
+            let heard = path.echo(x);
+            finder.feed(x, heard);
+        }
+        let found = finder.best().expect("nothing found on a line with an echo");
+        assert_eq!(
+            found.delay, FAR,
+            "put the reflection {} samples from where it is",
+            found.delay as i64 - FAR as i64
+        );
+        // 0.52 measured: the far reflection against everything arriving, which
+        // includes the near one and is dominated by it.
+        assert!(
+            found.strength > 0.2,
+            "found it, but only {:.2} of what arrives",
+            found.strength
+        );
+    }
+
+    #[test]
+    fn the_finder_is_not_distracted_by_the_hybrid() {
+        // The near echo is the loudest thing on the line during training and
+        // would win every search that could see it. It is also already
+        // covered, so the search starts past it.
+        let mut path = Path::new(split_path(300));
+        let mut finder = EchoFinder::new(64, 512);
+        for &x in &noise(40_000) {
+            let heard = path.echo(x);
+            finder.feed(x, heard);
+        }
+        assert_eq!(finder.best().map(|f| f.delay), Some(300));
+    }
+
+    #[test]
+    fn a_silent_line_gives_the_finder_nothing_to_report() {
+        let mut finder = EchoFinder::new(16, 64);
+        for _ in 0..1000 {
+            finder.feed(0.0, 0.0);
+        }
+        assert_eq!(finder.best(), None);
+    }
+
+    #[test]
+    fn placing_the_far_taps_keeps_what_the_near_ones_learned() {
+        // This happens partway through the training segment, which is the only
+        // stretch of the start-up quiet enough to learn anything in. Throwing
+        // away the near model to make room for the far one would spend half
+        // that stretch twice.
+        let near = vec![0.0, 0.0, 0.25, 0.1, -0.05];
+        let mut path = Path::new(near.clone());
+        let mut ec = EchoCanceller::new(16, 0.5);
+        let sent = noise(40_000);
+        for &x in &sent {
+            let heard = path.echo(x);
+            ec.process(x, heard);
+        }
+        let before = ec.echo_return_loss();
+        assert!(before > 40.0, "did not converge: {before:.1} dB");
+
+        ec.watch_far_echo(400, 32);
+        ec.set_adapting(false);
+        ec.reset_meters();
+        let mut path = Path::new(near);
+        for &x in &sent[..4_000] {
+            let heard = path.echo(x);
+            ec.process(x, heard);
+        }
+        let after = ec.echo_return_loss();
+        assert!(
+            after > before - 3.0,
+            "the near taps went from {before:.1} dB to {after:.1} dB just by \
+             putting a second run behind them"
+        );
+        assert_eq!(ec.far_echo(), Some((400, 32)));
+        assert_eq!(ec.span(), 432);
     }
 }

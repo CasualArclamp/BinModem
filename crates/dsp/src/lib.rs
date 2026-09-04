@@ -19,7 +19,7 @@ pub mod resample;
 pub mod shaping;
 pub mod tone;
 
-pub use echo::EchoCanceller;
+pub use echo::{EchoCanceller, EchoFinder, Reflection};
 pub use equalizer::Equalizer;
 pub use fft::{Fft, Spectrum};
 pub use filter::{Biquad, Cascade, OnePole, bandpass, butter_highpass, butter_lowpass};
