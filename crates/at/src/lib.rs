@@ -223,13 +223,15 @@ impl Interpreter {
             fmt: Formatter::default(),
             config: Config::default(),
             identity: Identity::default(),
-            // What this DCE can originate, which is not the same as what it
-            // can receive: there is a Bell 103 demodulator here and no Bell
-            // 103 transmitter, so B103 is deliberately absent. Plain V.22 is
-            // absent for the opposite reason, that V.22bis at 1200 bit/s is
-            // V.22 and answering to both names would be two entries for one
-            // thing.
-            modulations: ["V32", "V22B"].iter().map(|s| (*s).to_owned()).collect(),
+            // What this DCE can originate. Plain V.22 is absent because
+            // V.22bis at 1200 bit/s *is* V.22, and answering to both names
+            // would be two entries for one thing. V.21 is absent because the
+            // tones implemented are Bell 103's, and a modem that claimed V.21
+            // and whistled at 1270 Hz would be lying to whoever asked.
+            modulations: ["V32", "V22B", "B103"]
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
             modulation: Modulation {
                 carrier: "V22B".into(),
                 automode: true,

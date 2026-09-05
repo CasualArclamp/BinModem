@@ -56,7 +56,7 @@ fn main() -> ExitCode {
             "--seconds" => seconds = value().parse().unwrap_or(seconds),
             "--help" | "-h" => {
                 println!(
-                    "modem-loop --in <device> --out <device> [--carrier V22B|V32] \
+                    "modem-loop --in <device> --out <device> [--carrier B103|V22B|V32] \
                      [--seconds <n>]\n\
                      \n\
                      Places a call between two modems through the sound card. Point\n\

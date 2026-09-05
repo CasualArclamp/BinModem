@@ -18,7 +18,7 @@ and the COM port that would let Windows dial it.
 |---|---|
 | `dsp` - biquads, Butterworth, NCO, FSK, FFT, shaping, timing, equaliser | working |
 | `dsp` - split echo canceller, reflection finder, arbitrary-ratio resampler | working |
-| `datapump` - Bell 103 / V.21 receiver | working |
+| `datapump` - Bell 103 at 300, transmit and receive, with its call setup | working |
 | `datapump` - V.22bis at 1200 and 2400, with its handshake | working |
 | `datapump` - V.32 at 4800 and 9600, with echo cancellation and its start-up | working |
 | `ec` - V.42 detection, HDLC, LAPM, V.42bis, XID negotiation | working |
@@ -33,8 +33,13 @@ and the COM port that would let Windows dial it.
 
 A real V.22bis call has been placed through a virtual audio cable end to end,
 connecting in 5.5 s and carrying data over V.42. V.32 does the same in
-simulation across every loopback delay from 4 to 125 ms, and has not yet been
-tried on hardware.
+simulation across every loopback delay from 4 to 125 ms, and 300 bit/s does it
+in 1.7 s with no handshake to speak of; neither has yet been tried on hardware.
+
+Reaching anything outside this machine needs a second virtual cable, so the
+output can go to a softphone's microphone while the input comes from its
+speaker. One cable loops back on itself, which makes a fine two-wire line and
+is no use for a call.
 
 ## Running it
 

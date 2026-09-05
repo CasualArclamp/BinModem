@@ -24,6 +24,7 @@ use at::escape::EscapeDetector;
 use at::result::ResultCode;
 use at::{Action, Interpreter};
 use datapump::AsyncBits;
+use datapump::bell103;
 use datapump::v22bis;
 use datapump::v32;
 use ec::stack::Phase;
@@ -74,6 +75,8 @@ enum Pump {
     /// V.32: both directions in the whole band at once, 4800 or 9600 bit/s,
     /// with the echo canceller that makes that possible.
     V32(Box<v32::startup::Modem>),
+    /// Bell 103: 300 bit/s, two tones a direction, and nothing else at all.
+    Bell103(Box<bell103::Modem>),
 }
 
 impl Pump {
@@ -81,6 +84,7 @@ impl Pump {
         match self {
             Self::V22bis(m) => m.step(line),
             Self::V32(m) => m.step(line),
+            Self::Bell103(m) => m.step(line),
         }
     }
 
@@ -99,6 +103,11 @@ impl Pump {
                 v32::startup::Status::Connected(rate) => Progress::Connected(rate),
                 v32::startup::Status::Failed => Progress::Failed,
             },
+            Self::Bell103(m) => match m.status() {
+                bell103::Status::Negotiating => Progress::Negotiating,
+                bell103::Status::Connected(rate) => Progress::Connected(rate),
+                bell103::Status::Failed => Progress::Failed,
+            },
         }
     }
 
@@ -109,6 +118,7 @@ impl Pump {
             // detector, and once it has connected the receiver's own is what
             // says the far end is still there.
             Self::V32(_) => true,
+            Self::Bell103(m) => m.carrier(),
         }
     }
 
@@ -116,6 +126,7 @@ impl Pump {
         match self {
             Self::V22bis(m) => m.take_bits(),
             Self::V32(m) => m.take_bits(),
+            Self::Bell103(m) => m.take_bits(),
         }
     }
 
@@ -123,6 +134,7 @@ impl Pump {
         match self {
             Self::V22bis(m) => m.send_bits(bits),
             Self::V32(m) => m.send_bits(bits),
+            Self::Bell103(m) => m.send_bits(bits),
         }
     }
 
@@ -130,6 +142,7 @@ impl Pump {
         match self {
             Self::V22bis(m) => m.pending_bits(),
             Self::V32(m) => m.pending_bits(),
+            Self::Bell103(m) => m.pending_bits(),
         }
     }
 
@@ -146,6 +159,7 @@ impl Pump {
                 v22bis::handshake::Status::Failed => "failed",
             },
             Self::V32(m) => m.phase(),
+            Self::Bell103(m) => m.line_phase(),
         }
     }
 }
@@ -357,7 +371,16 @@ impl Modem {
                 self.rate = rate;
                 self.state = State::Data;
                 self.escape.reset();
-                if self.want_error_control {
+                // Bell 103 is asynchronous all the way down: its line format
+                // *is* start-stop framing, and its receiver finds the frames
+                // by re-synchronising on each start bit rather than by holding
+                // a bit clock. V.42 wants a synchronous bit pipe underneath it
+                // and would hand this one HDLC, which the framer would take
+                // apart into characters that were never there. So error
+                // control is off at 300 bit/s -- which is also how anyone ever
+                // dialled a board at 300 bit/s.
+                let framed = matches!(pump, Pump::Bell103(_));
+                if self.want_error_control && !framed {
                     let role = match self.role {
                         Role::Calling => EcRole::Originator,
                         Role::Answering => EcRole::Answerer,
@@ -497,6 +520,13 @@ impl Modem {
                 // so B8 of the rate signal stays clear.
                 let offer = v32::startup::rate_signal(true, true);
                 Pump::V32(Box::new(v32::startup::Modem::new(hs_role, offer, self.fs)))
+            }
+            "B103" => {
+                let hs_role = match role {
+                    Role::Calling => bell103::Role::Originate,
+                    Role::Answering => bell103::Role::Answer,
+                };
+                Pump::Bell103(Box::new(bell103::Modem::new(hs_role, self.fs)))
             }
             _ => {
                 let hs_role = match role {

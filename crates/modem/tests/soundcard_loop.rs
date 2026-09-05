@@ -240,3 +240,28 @@ fn sweep_the_crossing() {
         );
     }
 }
+
+#[test]
+fn three_hundred_baud_goes_through_it_as_well() {
+    // What a board from 1985 would hear. Bell 103 puts the two directions
+    // 750 Hz apart, so a cable that hands each modem its own signal back at
+    // full strength is of no interest to either: the band filter throws the
+    // echo away with the half of the spectrum it lives in.
+    let mut cable = Cable::new("B103", CROSSING);
+    cable.run(8.0);
+    assert!(
+        cable.up(),
+        "the caller stopped at {} and the host at {}",
+        cable.caller.line_phase(),
+        cable.host.line_phase()
+    );
+    assert_eq!(cable.caller.rate(), Some(300));
+
+    let banner = "\r\nThe Dead Zone BBS\r\nLogin: ";
+    for b in banner.bytes() {
+        cable.host.feed_dte(b);
+    }
+    cable.run(3.0);
+    let seen = String::from_utf8_lossy(&cable.at_caller).into_owned();
+    assert!(seen.contains(banner), "the banner did not arrive: {seen:?}");
+}

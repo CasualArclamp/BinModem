@@ -382,18 +382,21 @@ fn modulation_selection_accepts_what_it_advertises() {
 #[test]
 fn a_modulation_that_is_not_offered_is_refused() {
     // Accepting one and then using something else is how a terminal ends up
-    // believing a connection is something it is not. B103 is the pointed case:
-    // there is a Bell 103 demodulator in this project and no transmitter, so a
-    // Bell 103 call cannot be originated however much of one can be decoded.
+    // believing a connection is something it is not. V21 is the pointed case:
+    // the 300 bit/s tones implemented here are Bell 103's, and a modem that
+    // answered to V21 and then whistled at 1270 Hz would be lying to whoever
+    // asked. V90 is simply not implemented at all.
     let mut it = quiet_dce();
-    for refused in ["V90", "B103"] {
+    for refused in ["V90", "V21", "V34"] {
         let (out, actions) = send(&mut it, &format!("AT+MS={refused}{CR}"));
         assert!(out.contains("ERROR"), "+MS={refused} answered {out:?}");
         assert!(actions.is_empty());
     }
-    let (out, actions) = send(&mut it, &format!("AT+MS=V90{CR}"));
-    assert!(out.contains("ERROR"), "+MS=V90 answered {out:?}");
-    assert!(actions.is_empty());
+    // And the three that are.
+    for offered in ["B103", "V22B", "V32"] {
+        let (out, _) = send(&mut it, &format!("AT+MS={offered}{CR}"));
+        assert!(out.contains("OK"), "+MS={offered} answered {out:?}");
+    }
 }
 
 #[test]

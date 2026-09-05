@@ -397,3 +397,51 @@ fn turning_error_control_off_is_obeyed() {
         p.host_saw()
     );
 }
+
+#[test]
+fn a_bell_103_call_carries_a_bbs_session() {
+    // The oldest thing this modem can do, and the one a board from 1985 would
+    // recognise. No error control, no compression, no negotiation to speak
+    // of: the answering end whistles, the calling end whistles back, and
+    // whatever is typed goes down the line as start-stop characters.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "AT+MS=B103");
+    Pair::type_at(&mut p.caller, "AT+MS=B103");
+    p.run(0.01);
+    assert!(p.caller_saw().contains("OK"), "{:?}", p.caller_saw());
+
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(5.0);
+
+    assert_eq!(p.caller.state(), State::Data, "the 300 bit/s caller never connected");
+    assert_eq!(p.host.state(), State::Data, "the 300 bit/s host never connected");
+    assert_eq!(p.caller.rate(), Some(300));
+    assert!(
+        p.caller_saw().contains("300"),
+        "CONNECT did not report the rate: {:?}",
+        p.caller_saw()
+    );
+    // Nothing from 1985 has heard of V.42, and this pump could not carry it
+    // if it had: the line format is already start-stop.
+    assert!(!p.caller.error_controlled());
+
+    let banner = "\r\nThe Dead Zone BBS\r\nLogin: ";
+    for b in banner.bytes() {
+        p.host.feed_dte(b);
+    }
+    Pair::type_at(&mut p.caller, "guest");
+    // Thirty characters a second, so this takes a moment.
+    p.run(3.0);
+
+    assert!(
+        p.caller_saw().contains(banner),
+        "the banner did not come through: {:?}",
+        p.caller_saw()
+    );
+    assert!(
+        p.host_saw().contains("guest\r"),
+        "the login did not go down the line: {:?}",
+        p.host_saw()
+    );
+}
