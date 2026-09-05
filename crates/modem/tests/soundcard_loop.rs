@@ -116,6 +116,9 @@ fn a_v32_call_goes_through_a_sound_card_loopback() {
         seen.contains(greeting),
         "connected, but the greeting did not come through: {seen:?}"
     );
+    // And at the faster of the two rates V.32 offers, over a line that reflects
+    // everything back at full strength forty-four milliseconds later.
+    assert_eq!(cable.caller.rate(), Some(9600));
 }
 
 #[test]
