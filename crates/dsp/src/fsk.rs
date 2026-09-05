@@ -26,7 +26,18 @@ pub struct FskDetector {
     deviation: f64,
     fast_env: OnePole,
     slow_env: OnePole,
+    carrier: bool,
 }
+
+/// Level at which a carrier is declared present, and the lower level at which
+/// it is declared gone.
+///
+/// Five decibels apart, as V.22bis 6.5.2 asks for, and deliberately the same
+/// pair the V.22bis receiver uses: both measure the magnitude of a
+/// band-filtered complex baseband, so they are the same quantity on the same
+/// scale and there is no reason for them to disagree.
+const CARRIER_ON: f64 = 1.0e-3;
+const CARRIER_OFF: f64 = 5.62e-4;
 
 impl FskDetector {
     /// `f_space` and `f_mark` are the two signalling tones; `baud` sets the
@@ -56,6 +67,7 @@ impl FskDetector {
             deviation,
             fast_env: OnePole::new(0.005, fs),
             slow_env: OnePole::new(0.250, fs),
+            carrier: false,
         }
     }
 
@@ -77,8 +89,13 @@ impl FskDetector {
         self.prev_q = q;
 
         let mag = (i * i + q * q).sqrt();
-        self.fast_env.process(mag);
+        let level = self.fast_env.process(mag);
         self.slow_env.process(mag);
+        self.carrier = if self.carrier {
+            level > CARRIER_OFF
+        } else {
+            level > CARRIER_ON
+        };
 
         // atan2(0,0) returns 0, which reads as band centre: correct when idle.
         let hz = im.atan2(re) * self.fs / std::f64::consts::TAU;
@@ -87,11 +104,21 @@ impl FskDetector {
 
     /// True while a carrier is present in this band.
     ///
-    /// Compares a 5 ms envelope against a 250 ms average, so it tracks level
-    /// changes across a call instead of relying on an absolute threshold.
+    /// An absolute level with hysteresis, which sounds unambitious beside
+    /// something that adapts to the line, and is the only thing that works.
+    ///
+    /// This used to compare a 5 ms envelope against a 250 ms one, on the
+    /// reasoning that a ratio needs no threshold and so handles any line
+    /// level. What it actually does is answer yes to every steady signal
+    /// there is: the two envelopes of anything steady are equal, and equal
+    /// passes every ratio test that is not one. The only floor under it was
+    /// -80 dB, which no real line has ever been quieter than. So it found a
+    /// carrier in the noise on an idle line, and a 300 bit/s modem duly
+    /// reported CONNECT to a far end that had not said anything at all, then
+    /// NO CARRIER the moment the noise moved. The test it passed fed it
+    /// digital silence, which is the one quiet thing a line never is.
     pub fn carrier(&self) -> bool {
-        let slow = self.slow_env.value();
-        slow > 1e-4 && self.fast_env.value() > 0.35 * slow
+        self.carrier
     }
 
     pub fn level(&self) -> f64 {
@@ -172,5 +199,61 @@ mod tests {
             det.feed(x);
         }
         assert!(det.carrier(), "missed a strong carrier");
+    }
+
+    #[test]
+    fn a_line_with_nothing_on_it_but_noise_has_no_carrier() {
+        // The case the test above misses, and the one that matters. A real
+        // line is never digitally silent: there is a noise floor, and on
+        // anything carried over a network there is comfort noise put there
+        // deliberately. A detector that only knows how to compare the signal
+        // against itself says yes to all of it.
+        let (fs, baud) = (16000.0, 300.0);
+        let mut det = FskDetector::new(2025.0, 2225.0, baud, fs);
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut noise = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            // About -46 dBFS, which is an ordinary quiet line and far above
+            // anything that should read as a carrier.
+            ((state >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0) * 0.005
+        };
+        for _ in 0..(fs as usize) {
+            det.feed(noise());
+        }
+        // The noise has to be loud enough that the old detector would have
+        // called it a carrier, or this test proves nothing at all: its only
+        // floor was 1e-4, and everything above that passed.
+        assert!(
+            det.level() > 1.0e-4,
+            "the noise here reads {:.2e}, which is too quiet to be the test it              is meant to be",
+            det.level()
+        );
+        assert!(
+            !det.carrier(),
+            "found a carrier in the noise on an idle line, at a level of {:.2e}",
+            det.level()
+        );
+    }
+
+    #[test]
+    fn carrier_detect_holds_on_through_a_dip() {
+        // Hysteresis, as V.22bis 6.5.2 asks for: five decibels between the
+        // level that declares a carrier and the level that gives up on one.
+        // Without the gap a signal sitting near the threshold chatters, and
+        // every drop resets the framing.
+        let (fs, baud) = (16000.0, 300.0);
+        let mut det = FskDetector::new(2025.0, 2225.0, baud, fs);
+        let strong = fsk(&[1; 200], 2025.0, 2225.0, baud, fs);
+        for &x in &strong {
+            det.feed(x);
+        }
+        assert!(det.carrier());
+        // Down four decibels, which is inside the hysteresis.
+        for &x in &strong {
+            det.feed(x * 0.63);
+        }
+        assert!(det.carrier(), "gave up on a carrier that only dipped");
     }
 }

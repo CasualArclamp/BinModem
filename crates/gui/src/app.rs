@@ -475,6 +475,18 @@ impl ScopeApp {
                     .color(Color32::from_rgb(140, 150, 165)),
             );
         }
+
+        // Nothing to do with the level on the line: this is how loud it is in
+        // the room, and a handshake at full scale through headphones is
+        // genuinely unpleasant.
+        let mut volume = self.sink.volume();
+        if ui
+            .add(egui::Slider::new(&mut volume, 0.0..=1.0).text("volume"))
+            .on_hover_text("How loud the monitor plays. The line is not affected")
+            .changed()
+        {
+            self.sink.set_volume(volume);
+        }
         if let Some(err) = &self.audio_error {
             ui.label(RichText::new(err).color(Color32::from_rgb(235, 100, 90)));
         }

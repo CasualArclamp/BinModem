@@ -5,7 +5,7 @@
 //! so the rate conversion and drift handling here are not throwaway.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -26,6 +26,10 @@ pub struct AudioSink {
     overruns: AtomicU64,
     /// Callbacks that found too little data: the monitor is starved.
     underruns: AtomicU64,
+    /// Playback gain, as an f32 in its bit pattern. Applied where the samples
+    /// leave rather than where they arrive, so turning it down takes effect
+    /// now instead of a buffer's worth of audio later.
+    volume: AtomicU32,
 }
 
 impl AudioSink {
@@ -38,7 +42,21 @@ impl AudioSink {
             capacity,
             overruns: AtomicU64::new(0),
             underruns: AtomicU64::new(0),
+            volume: AtomicU32::new(0.5f32.to_bits()),
         }
+    }
+
+    /// How loud to play what passes through, between nothing and one.
+    ///
+    /// A modem handshake at full scale through headphones is genuinely
+    /// unpleasant, and the level that suits listening has nothing to do with
+    /// the level the line wants.
+    pub fn volume(&self) -> f32 {
+        f32::from_bits(self.volume.load(Ordering::Relaxed))
+    }
+
+    pub fn set_volume(&self, volume: f32) {
+        self.volume.store(volume.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 
     pub fn enabled(&self) -> bool {
@@ -186,6 +204,9 @@ pub fn listen(
                     pending.extend_from_slice(&extra);
                 }
 
+                // Read once per block rather than per sample: it changes when
+                // somebody moves a slider, which is not often.
+                let volume = sink.volume();
                 for frame in out.chunks_mut(channels as usize) {
                     let i = pos as usize;
                     let sample = if i + 1 < pending.len() {
@@ -195,7 +216,7 @@ pub fn listen(
                         0.0
                     };
                     for slot in frame.iter_mut() {
-                        *slot = sample;
+                        *slot = sample * volume;
                     }
                     pos += step;
                 }
