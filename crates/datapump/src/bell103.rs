@@ -412,6 +412,20 @@ impl Modem {
         self.tx.pending_bits()
     }
 
+    /// Characters the line itself lost: recovered with their stop bit in the
+    /// wrong place, and dropped.
+    ///
+    /// This is the count that means something at 300 bit/s. What sits above a
+    /// data pump frames characters too, but for this one that is a round trip
+    /// through bytes we recovered ourselves and is lossless by construction,
+    /// so its count is always zero and says nothing at all. The losses happen
+    /// here, on the line, where a bit goes astray and takes a whole character
+    /// with it -- and if the character it takes is the escape a board's colour
+    /// sequences begin with, what is left gets drawn on the screen as text.
+    pub fn framing_errors(&self) -> u64 {
+        self.rx.framing_errors()
+    }
+
     /// Discriminator output, which is the only scope FSK has.
     pub fn level(&self) -> f64 {
         self.rx.level()

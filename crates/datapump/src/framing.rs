@@ -285,6 +285,10 @@ impl AsyncBits {
         self.state = BitState::Idle;
         self.value = 0;
         self.have = 0;
+        // Including the count. It belongs to a call: carrying it into the next
+        // one makes a fresh link look like it inherited somebody else's
+        // trouble, and makes any rate worked out from it wrong at the start.
+        self.errors = 0;
     }
 }
 

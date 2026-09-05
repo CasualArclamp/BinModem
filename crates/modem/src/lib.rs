@@ -170,6 +170,17 @@ impl Pump {
         }
     }
 
+    /// Characters the line lost, where the pump is the one that frames them.
+    fn line_framing_errors(&self) -> Option<u64> {
+        match self {
+            Self::Bell103(m) => Some(m.framing_errors()),
+            // The synchronous pumps hand up a bit stream and have no idea
+            // where a character begins, so the framing is done above them and
+            // the count belongs there.
+            _ => None,
+        }
+    }
+
     /// The discriminator reading at the centre of each recovered bit.
     fn take_symbol(&mut self) -> Option<f64> {
         match self {
@@ -430,7 +441,14 @@ impl Modem {
     /// that lost a packet arrive dozens at a time with nothing in between. The
     /// two want completely different answers and look identical in the text.
     pub fn framing_errors(&self) -> u64 {
-        self.async_bits.framing_errors()
+        // Wherever the framing actually happens. Bell 103 finds characters on
+        // the line itself and hands them up already framed, so asking the
+        // layer above would always answer zero -- it is being handed a round
+        // trip through bytes we recovered ourselves, which cannot fail.
+        self.pump
+            .as_ref()
+            .and_then(Pump::line_framing_errors)
+            .unwrap_or_else(|| self.async_bits.framing_errors())
     }
 
     /// Whether error control is running on the current call.

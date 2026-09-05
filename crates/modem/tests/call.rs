@@ -655,3 +655,39 @@ fn a_line_feed_after_the_dial_does_not_abort_it() {
         "a trailing line feed dropped the call"
     );
 }
+
+#[test]
+fn a_clean_300_bit_link_reports_no_bad_frames() {
+    // Bell 103 recovers characters on the line, by their own start and stop
+    // bits, and then hands them up as bits for the layer above to frame again.
+    // That round trip is lossless by construction: what goes in is a character
+    // and what comes out is the same character wrapped the same way. So on a
+    // line with nothing wrong with it the count has to be zero, and if it is
+    // not then the fault is in the handing over rather than in the line, which
+    // is a distinction no amount of staring at corrupted text will make.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "AT+MS=B103");
+    Pair::type_at(&mut p.caller, "AT+MS=B103");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(5.0);
+    assert_eq!(p.caller.state(), State::Data, "never connected");
+
+    // Something with every byte value in it, including the escape that a
+    // board's colour sequences begin with.
+    let payload: Vec<u8> = (0..=255u8).collect();
+    for b in &payload {
+        p.host.feed_dte(*b);
+    }
+    // 256 characters at thirty a second.
+    p.run(10.0);
+
+    assert_eq!(
+        p.caller.framing_errors(),
+        0,
+        "{} characters lost between the line and the terminal on a clean link",
+        p.caller.framing_errors()
+    );
+    let saw = &p.at_caller[p.at_caller.len().saturating_sub(payload.len())..];
+    assert_eq!(saw, &payload[..], "the bytes came back changed");
+}
