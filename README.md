@@ -56,7 +56,13 @@ picks one directly, `-List` shows what is available, `-Dev` builds the debug
 profile. `run.sh` does the same from Git Bash or Linux. Failing that,
 `cargo run -p gui --release -- tests/vectors/bell103-300.wav` works directly.
 
-To put a modem of your own on a real line instead of watching a recording:
+To put a modem of your own on a real line instead of watching a recording,
+the easy way is `run.ps1 -Live` (or `run.bat -Live`): it builds, offers a menu
+of the machine's audio devices with a virtual cable picked by default, and
+offers to start a second modem on the same line so there is something to dial.
+`-Carrier B103|V22B|V32` chooses the modulation for both ends.
+
+By hand:
 
 ```powershell
 modem-scope --devices
