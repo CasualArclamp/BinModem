@@ -57,6 +57,9 @@ pub enum State {
 pub enum Ended {
     /// The terminal asked, with `ATH`.
     LocalRequest,
+    /// The terminal typed something while the call was being placed, which
+    /// V.250 5.6.1 makes an instruction to give up on it.
+    Aborted,
     /// The far end went away.
     CarrierLost,
     /// The handshake never completed.
@@ -248,6 +251,14 @@ enum Progress {
     Failed,
 }
 
+/// How long after dialling a character is taken as an instruction to stop.
+///
+/// V.250 5.6.1: "characters transmitted during the first 125 milliseconds
+/// after transmission of the termination character shall be ignored (to allow
+/// for the DTE to append additional control characters such as line feed after
+/// the command line termination character)".
+const ABORT_GUARD_MS: u32 = 125;
+
 /// One modem.
 #[derive(Debug)]
 pub struct Modem {
@@ -272,6 +283,8 @@ pub struct Modem {
     async_bits: AsyncBits,
     /// Milliseconds since the last tick, accumulated from samples.
     elapsed_samples: f64,
+    /// Milliseconds since the call was placed, for the guard in V.250 5.6.1.
+    since_dial_ms: u32,
 }
 
 impl Modem {
@@ -289,6 +302,7 @@ impl Modem {
             outbound: Vec::new(),
             async_bits: AsyncBits::new(8),
             elapsed_samples: 0.0,
+            since_dial_ms: 0,
         }
     }
 
@@ -446,10 +460,18 @@ impl Modem {
                 self.run_actions();
             }
             State::Handshaking => {
-                // V.250 6.3.1: what arrives while a call is being placed is
-                // not a command and is not data either. Dropping it is right;
-                // holding it would deliver a burst of stale typing the moment
-                // the connection came up.
+                // V.250 5.6.1, and the abortability clause of the D command:
+                // a single character from the terminal while a call is being
+                // placed is an instruction to give up on it, and the modem
+                // "disconnects from the line in an orderly manner".
+                //
+                // Not for the first eighth of a second, though. The character
+                // that ended the command line is very often followed by a line
+                // feed, and a terminal that appended one would otherwise be
+                // hanging up on itself the instant it dialled.
+                if self.since_dial_ms >= ABORT_GUARD_MS {
+                    self.end_call(Ended::Aborted);
+                }
             }
             State::Data => {
                 // The escape detector sees everything, because the sequence
@@ -485,6 +507,9 @@ impl Modem {
 
     /// Time passing, which drives the escape guard and V.42's timers.
     pub fn tick(&mut self, ms: u32) {
+        if self.state == State::Handshaking {
+            self.since_dial_ms = self.since_dial_ms.saturating_add(ms);
+        }
         if let Some(ec) = self.ec.as_mut() {
             ec.tick(ms);
         }
@@ -639,6 +664,7 @@ impl Modem {
 
     fn place_call(&mut self, role: Role) {
         self.role = role;
+        self.since_dial_ms = 0;
         self.pump = Some(match self.at.modulation.carrier.as_str() {
             "V32" => {
                 let hs_role = match role {
@@ -698,6 +724,8 @@ impl Modem {
         self.state = State::Command;
         self.at.emit(match why {
             Ended::LocalRequest => ResultCode::Ok,
+            // 6.3.1: what a dial that did not get there reports.
+            Ended::Aborted => ResultCode::NoCarrier,
             Ended::CarrierLost => ResultCode::NoCarrier,
             Ended::NoAnswer => ResultCode::NoAnswer,
         });

@@ -284,19 +284,31 @@ fn a_call_to_nobody_gives_up_and_says_so() {
 
 #[test]
 fn what_is_typed_while_dialling_is_not_treated_as_a_command() {
-    // V.250 6.3.1. A terminal that types during a dial must not have it
-    // parsed, and must not have it delivered as a burst the moment the
-    // connection comes up either.
+    // A terminal that types during a dial must not have it parsed, and must
+    // not have it delivered as a burst the moment a connection comes up
+    // either. What it does instead is stop the dial: V.250 5.6.1, and the
+    // abortability clause of the D command.
+    //
+    // The distinction is visible in what comes back. A parsed ATH would
+    // answer OK; an aborted dial answers NO CARRIER, and the T and the H
+    // never reach a parser at all.
     let mut p = Pair::new();
     Pair::type_at(&mut p.host, "ATA");
     Pair::type_at(&mut p.caller, "ATD5551234");
     p.run(0.5);
+    let before = p.caller_saw().len();
     Pair::type_at(&mut p.caller, "ATH");
-    p.run(9.5);
-    assert_eq!(
-        p.caller.state(),
-        State::Data,
-        "an ATH typed during the dial was obeyed"
+    p.run(1.0);
+
+    assert_eq!(p.caller.state(), State::Command, "carried on dialling");
+    let after = &p.caller_saw()[before..];
+    assert!(
+        after.contains("NO CARRIER"),
+        "did not report the dial as abandoned: {after:?}"
+    );
+    assert!(
+        !after.contains("OK"),
+        "the ATH was parsed as a command: {after:?}"
     );
 }
 
@@ -594,4 +606,52 @@ fn report_levels() {
             peak / rms
         );
     }
+}
+
+#[test]
+fn typing_during_a_call_attempt_gives_up_on_it() {
+    // V.250 5.6.1 and the abortability clause of the D command: a single
+    // character from the terminal while a call is being placed is an
+    // instruction to stop, and the modem "disconnects from the line in an
+    // orderly manner". Dropping those characters instead leaves a terminal
+    // with no way back from a handshake that is not going to finish, short of
+    // waiting out the whole patience of the modem, which is a minute.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(1.0);
+    assert_eq!(p.caller.state(), State::Handshaking, "never went off hook");
+
+    p.caller.feed_dte(b'x');
+    p.run(0.05);
+    assert_eq!(p.caller.state(), State::Command, "went on regardless");
+    assert!(
+        p.caller_saw().contains("NO CARRIER"),
+        "said nothing about giving up: {:?}",
+        p.caller_saw()
+    );
+
+    // And the terminal is answered again straight away, which is the point.
+    Pair::type_at(&mut p.caller, "AT");
+    p.run(0.05);
+    assert!(
+        p.caller_saw().ends_with("OK\r\n"),
+        "would not talk afterwards: {:?}",
+        p.caller_saw()
+    );
+}
+
+#[test]
+fn a_line_feed_after_the_dial_does_not_abort_it() {
+    // The reason 5.6.1 puts an eighth of a second in front of the rule: a
+    // terminal that ends its lines with a return and a line feed would
+    // otherwise be hanging up on itself the instant it dialled.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.caller.feed_dte(b'\n');
+    p.run(0.05);
+    assert_eq!(
+        p.caller.state(),
+        State::Handshaking,
+        "a trailing line feed dropped the call"
+    );
 }
