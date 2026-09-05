@@ -27,7 +27,8 @@ and the COM port that would let Windows dial it.
 | `line` - WAV reader and writer, full-duplex audio | working |
 | `telemetry` - frame publishing, transcript log, raw line-data channel | working |
 | `terminal` - ANSI/CP437 screen emulator for BBS use | working |
-| `gui` - waterfall, spectrum, symbol scope, faceplate, audio monitor, console | replays captures only |
+| `gui` - waterfall, spectrum, symbol scope, faceplate, audio monitor, console | working |
+| `gui --live` - a modem on a real line, with the terminal wired to it | working |
 | V.32 trellis coding, V.32bis, V.34 | not started |
 | DTE binding: a COM port for Windows Dial-Up Networking | not started |
 
@@ -54,6 +55,18 @@ It offers a menu of the captures, builds, and launches. `-Vector v34-33600`
 picks one directly, `-List` shows what is available, `-Dev` builds the debug
 profile. `run.sh` does the same from Git Bash or Linux. Failing that,
 `cargo run -p gui --release -- tests/vectors/bell103-300.wav` works directly.
+
+To put a modem of your own on a real line instead of watching a recording:
+
+```powershell
+modem-scope --devices
+modem-scope --live --in "<input device>" --out "<output device>"
+```
+
+The terminal in the window is then the modem's DTE. Type `AT` and it answers
+`OK`; `AT+MS=B103` or `V22B` or `V32` chooses the modulation; `ATD` dials and
+`+++` escapes back to command state. The scopes show the call as it happens
+rather than a recording of somebody else's.
 
 Only the Bell 103 capture decodes to text so far; the rest still show their
 handshakes on the waterfall, which is worth watching in its own right - the

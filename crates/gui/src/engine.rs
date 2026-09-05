@@ -355,24 +355,24 @@ impl LineAssembler {
 }
 
 /// A fixed-capacity ring the scopes are drawn from.
-struct Ring {
-    data: Vec<f32>,
+pub struct Ring {
+    pub data: Vec<f32>,
     write: usize,
 }
 
 impl Ring {
-    fn new(len: usize) -> Self {
+    pub fn new(len: usize) -> Self {
         Self { data: vec![0.0; len], write: 0 }
     }
 
     #[inline]
-    fn push(&mut self, x: f32) {
+    pub fn push(&mut self, x: f32) {
         self.data[self.write] = x;
         self.write = (self.write + 1) % self.data.len();
     }
 
     /// Copy out oldest-first.
-    fn copy_into(&self, out: &mut [f32]) {
+    pub fn copy_into(&self, out: &mut [f32]) {
         let n = self.data.len();
         for (i, slot) in out.iter_mut().enumerate().take(n) {
             *slot = self.data[(self.write + i) % n];

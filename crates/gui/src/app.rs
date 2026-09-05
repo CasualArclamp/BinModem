@@ -9,7 +9,24 @@ use telemetry::{Direction, Frame, LogEntry, Subscriber};
 
 use crate::console::{self, Console, Mode};
 use crate::engine::{Control, FFT_SIZE, SCOPE_LEN, SPECTRUM_BINS};
+use crate::live;
 use crate::scopes::{self, Waterfall};
+
+/// Where what is on the scope comes from.
+pub enum Source {
+    /// A recording of a call someone else placed. It can be watched, paused
+    /// and slowed down, and nothing typed at it can have any effect.
+    Capture,
+    /// A modem of our own on a real line. The terminal below is its DTE: what
+    /// is typed goes to the modem, and the modem answers for itself.
+    Live(Arc<live::Keyboard>),
+}
+
+impl Source {
+    fn is_live(&self) -> bool {
+        matches!(self, Self::Live(_))
+    }
+}
 
 /// Which view fills the lower panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +59,7 @@ pub struct ScopeApp {
     audio_error: Option<String>,
     sample_rate: f64,
     console: Console,
+    source: Source,
     tab: Tab,
     font_size: f32,
     last_repaint: std::time::Instant,
@@ -53,6 +71,7 @@ impl ScopeApp {
         control: Arc<Control>,
         sink: Arc<AudioSink>,
         sample_rate: f64,
+        source: Source,
     ) -> Self {
         Self {
             rx,
@@ -70,6 +89,7 @@ impl ScopeApp {
             audio_error: None,
             sample_rate,
             console: Console::new(),
+            source,
             tab: Tab::Terminal,
             font_size: 14.0,
             last_repaint: std::time::Instant::now(),
@@ -127,8 +147,17 @@ impl ScopeApp {
         if response.has_focus() {
             let typed = console::keys_to_bytes(ui);
             if !typed.is_empty() {
-                let actions = self.console.typed(&typed);
-                self.perform(actions);
+                match &self.source {
+                    // Straight to the modem, which has an AT interpreter of
+                    // its own and will echo, answer, and decide for itself
+                    // what is a command and what is data. Nothing is parsed
+                    // on this side of the line.
+                    Source::Live(keyboard) => keyboard.type_bytes(&typed),
+                    Source::Capture => {
+                        let actions = self.console.typed(&typed);
+                        self.perform(actions);
+                    }
+                }
             }
         }
     }
@@ -216,16 +245,29 @@ impl ScopeApp {
             _ => self.frozen_seq,
         };
 
-        // Everything the far end sent goes to the terminal verbatim.
         let data = self.rx.take_line_data();
+        if self.source.is_live() {
+            // Everything the modem says, whether that is an OK of its own or
+            // a byte off the line. It keeps the command and online states and
+            // runs its own escape timer, so this side only follows along far
+            // enough to label which one it is in.
+            if !data.is_empty() {
+                self.console.feed_screen(&data);
+            }
+            self.console
+                .follow(self.frame.state == telemetry::CallState::Connected);
+            self.last_repaint = std::time::Instant::now();
+            return;
+        }
+
+        // Everything the far end sent goes to the terminal verbatim.
         if !data.is_empty() {
             self.console.line_rx(&data);
         }
 
-        // There is no transmitter yet, so anything typed while online is echoed
-        // locally instead of going down the line. Draining it also stops the
-        // queue growing without bound. This goes away once the datapump can
-        // transmit and the far end does the echoing.
+        // A capture has no far end to echo what is typed at it, so it is
+        // echoed locally. Draining it also stops the queue growing without
+        // bound.
         let outbound = self.console.take_tx();
         if !outbound.is_empty() {
             self.console.term.feed_bytes(&outbound);
@@ -241,30 +283,42 @@ impl ScopeApp {
 
     fn controls(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            let running = self.control.running.load(Ordering::Relaxed);
-            if ui.button(if running { "Pause" } else { "Play" }).clicked() {
-                self.control.running.store(!running, Ordering::Relaxed);
-            }
-            if ui.button("Restart").clicked() {
-                self.control.restart.store(true, Ordering::Relaxed);
-                self.control.running.store(true, Ordering::Relaxed);
-                self.log.clear();
-            }
+            // A live line cannot be paused, restarted or slowed down. It is
+            // happening, at the rate the sound card is happening at, and a
+            // control that pretended otherwise would be lying about it.
+            if self.source.is_live() {
+                ui.label(
+                    RichText::new("live line")
+                        .monospace()
+                        .color(Color32::from_rgb(90, 220, 130)),
+                );
+            } else {
+                let running = self.control.running.load(Ordering::Relaxed);
+                if ui.button(if running { "Pause" } else { "Play" }).clicked() {
+                    self.control.running.store(!running, Ordering::Relaxed);
+                }
+                if ui.button("Restart").clicked() {
+                    self.control.restart.store(true, Ordering::Relaxed);
+                    self.control.running.store(true, Ordering::Relaxed);
+                    self.log.clear();
+                }
 
-            ui.separator();
-            let mut speed = self.control.speed_pct.load(Ordering::Relaxed) as f32 / 100.0;
-            if ui
-                .add(
-                    egui::Slider::new(&mut speed, 0.1..=4.0)
-                        .logarithmic(true)
-                        .text("speed")
-                        .suffix("x"),
-                )
-                .changed()
-            {
-                self.control
-                    .speed_pct
-                    .store((speed * 100.0) as u32, Ordering::Relaxed);
+                ui.separator();
+                let mut speed =
+                    self.control.speed_pct.load(Ordering::Relaxed) as f32 / 100.0;
+                if ui
+                    .add(
+                        egui::Slider::new(&mut speed, 0.1..=4.0)
+                            .logarithmic(true)
+                            .text("speed")
+                            .suffix("x"),
+                    )
+                    .changed()
+                {
+                    self.control
+                        .speed_pct
+                        .store((speed * 100.0) as u32, Ordering::Relaxed);
+                }
             }
 
             ui.separator();

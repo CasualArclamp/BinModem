@@ -124,6 +124,22 @@ impl Console {
         }
     }
 
+    /// Put bytes on the screen whatever state this console thinks it is in.
+    ///
+    /// For a live call there is no state to be in here. The modem on the other
+    /// side of the window owns the command and online distinction and answers
+    /// for itself, right down to echoing what was typed, so everything it says
+    /// goes to the screen exactly as it arrives and nothing is interpreted on
+    /// the way.
+    pub fn feed_screen(&mut self, bytes: &[u8]) {
+        self.term.feed_bytes(bytes);
+    }
+
+    /// Follow a modem that is keeping the state instead of keeping it here.
+    pub fn follow(&mut self, online: bool) {
+        self.mode = if online { Mode::Online } else { Mode::Command };
+    }
+
     /// Report a completed connection and enter online state.
     pub fn connect(&mut self, detail: &str) {
         self.emit(ResultCode::ConnectText(detail.into()));

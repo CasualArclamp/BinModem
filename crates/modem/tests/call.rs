@@ -445,3 +445,68 @@ fn a_bell_103_call_carries_a_bbs_session() {
         p.host_saw()
     );
 }
+
+#[test]
+fn a_scope_can_see_what_the_modem_is_doing() {
+    // Everything the live window puts on screen comes through these, and none
+    // of it is visible from the terminal side, which sees a CONNECT and a rate
+    // and nothing else. If they lie, the scope lies.
+    let mut p = Pair::new();
+    assert!(!p.caller.off_hook(), "on hook before a call");
+    assert_eq!(p.caller.standard(), "V.22bis", "the default modulation");
+    assert_eq!(p.caller.constellation_point(), None, "a point with no call");
+
+    Pair::type_at(&mut p.host, "AT+MS=V32");
+    Pair::type_at(&mut p.caller, "AT+MS=V32");
+    p.run(0.01);
+    assert_eq!(p.caller.standard(), "V.32", "+MS did not change what is reported");
+
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(0.5);
+    assert!(p.caller.off_hook(), "still on hook while dialling");
+    // The start-up runs entirely in the four states whatever rate is being
+    // negotiated, so a scope watching it should see four.
+    assert_eq!(p.caller.states(), 4);
+
+    p.run(13.0);
+    assert_eq!(p.caller.state(), State::Data, "never connected");
+    assert_eq!(p.caller.rate(), Some(9600));
+    // And sixteen once the rate exchange has settled on 9600.
+    assert_eq!(p.caller.states(), 16);
+    assert_eq!(p.caller.shape(), "16QAM");
+    assert!(p.caller.carrier(), "connected with no carrier");
+    let point = p.caller.constellation_point().expect("no point once connected");
+    let radius = point.0.hypot(point.1);
+    assert!(
+        (0.5..2.0).contains(&radius),
+        "the constellation is at radius {radius:.2}, so the scope would draw it \
+         off the edge or in a dot"
+    );
+    let error = p.caller.residual_error().expect("no residual error");
+    assert!(error < 0.3, "residual error {error:.2} on a clean line");
+    // FSK has no constellation and QAM has no discriminator: each modulation
+    // offers the scope the one it actually has.
+    assert_eq!(p.caller.discriminator(), None);
+}
+
+#[test]
+fn a_three_hundred_baud_scope_gets_an_eye_and_not_a_constellation() {
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "AT+MS=B103");
+    Pair::type_at(&mut p.caller, "AT+MS=B103");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(5.0);
+    assert_eq!(p.caller.state(), State::Data);
+    assert_eq!(p.caller.standard(), "Bell 103");
+    assert_eq!(p.caller.shape(), "2FSK");
+    assert_eq!(p.caller.states(), 2);
+    assert_eq!(p.caller.constellation_point(), None, "FSK has no constellation");
+    let level = p.caller.discriminator().expect("no discriminator");
+    assert!(
+        level > 0.5,
+        "an idle line sits at mark, so the discriminator should read near +1, \
+         not {level:.2}"
+    );
+}

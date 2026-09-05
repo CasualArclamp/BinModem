@@ -416,6 +416,14 @@ impl Modem {
     pub fn level(&self) -> f64 {
         self.rx.level()
     }
+
+    /// The discriminator reading at the centre of each recovered bit.
+    ///
+    /// One value per bit rather than per sample, which is what an eye is drawn
+    /// from: distance from zero is the slicer's margin on that decision.
+    pub fn take_symbol(&mut self) -> Option<f64> {
+        self.rx.take_symbol()
+    }
 }
 
 #[cfg(test)]

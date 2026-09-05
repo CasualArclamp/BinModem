@@ -146,6 +146,82 @@ impl Pump {
         }
     }
 
+    /// The point the receiver last decided on, where the modulation has one.
+    ///
+    /// Frequency shift keying does not: what it decides is which of two tones
+    /// arrived, and a scope for that is an eye rather than a constellation.
+    fn constellation_point(&self) -> Option<(f64, f64)> {
+        match self {
+            Self::V22bis(m) => Some(m.constellation_point()),
+            Self::V32(m) => Some(m.constellation_point()),
+            Self::Bell103(_) => None,
+        }
+    }
+
+    /// Discriminator output for the modulations whose scope is that eye, where
+    /// `+1` is a mark and `-1` a space.
+    fn discriminator(&self) -> Option<f64> {
+        match self {
+            Self::Bell103(m) => Some(m.level()),
+            _ => None,
+        }
+    }
+
+    /// The discriminator reading at the centre of each recovered bit.
+    fn take_symbol(&mut self) -> Option<f64> {
+        match self {
+            Self::Bell103(m) => m.take_symbol(),
+            _ => None,
+        }
+    }
+
+    /// Mean distance from the decisions being made, which is how well the
+    /// receiver is doing.
+    fn residual_error(&self) -> Option<f64> {
+        match self {
+            Self::V22bis(m) => Some(m.residual_error()),
+            Self::V32(m) => Some(m.residual_error()),
+            Self::Bell103(_) => None,
+        }
+    }
+
+    /// How many states the modulation has, for a scope to size itself by.
+    fn states(&self) -> usize {
+        match self {
+            Self::V22bis(m) => match m.status() {
+                v22bis::handshake::Status::Connected(v22bis::Rate::Bps2400) => 16,
+                _ => 4,
+            },
+            // Four during the whole start-up and at 4800; sixteen once the
+            // rate exchange has settled on 9600 (2.4.1.1).
+            Self::V32(m) => match m.status() {
+                v32::startup::Status::Connected(9600) => 16,
+                _ => 4,
+            },
+            Self::Bell103(_) => 2,
+        }
+    }
+
+    /// Short name for the signal shape, as a faceplate would print it.
+    fn shape(&self) -> &'static str {
+        match self {
+            Self::V22bis(_) | Self::V32(_) => match self.states() {
+                16 => "16QAM",
+                _ => "4PSK",
+            },
+            Self::Bell103(_) => "2FSK",
+        }
+    }
+
+    /// The name of the modulation itself.
+    fn standard(&self) -> &'static str {
+        match self {
+            Self::V22bis(_) => "V.22bis",
+            Self::V32(_) => "V.32",
+            Self::Bell103(_) => "Bell 103",
+        }
+    }
+
     /// Which step of the handshake the line is on, for anything that wants to
     /// show progress or work out where one stalled.
     fn phase(&self) -> &'static str {
@@ -258,6 +334,64 @@ impl Modem {
             Some(Pump::V32(m)) => Some(m.echo_return_loss()),
             _ => None,
         }
+    }
+
+    /// The point the receiver last decided on, for a constellation scope.
+    pub fn constellation_point(&self) -> Option<(f64, f64)> {
+        self.pump.as_ref().and_then(Pump::constellation_point)
+    }
+
+    /// Discriminator output, for the modulations whose scope is an eye.
+    pub fn discriminator(&self) -> Option<f64> {
+        self.pump.as_ref().and_then(Pump::discriminator)
+    }
+
+    /// One discriminator reading per recovered bit, taken at the bit centre.
+    pub fn take_symbol(&mut self) -> Option<f64> {
+        self.pump.as_mut().and_then(Pump::take_symbol)
+    }
+
+    /// How far the received points are sitting from the decisions made about
+    /// them, which is the one number that says whether a call is healthy.
+    pub fn residual_error(&self) -> Option<f64> {
+        self.pump.as_ref().and_then(Pump::residual_error)
+    }
+
+    /// How many states the modulation in use has.
+    pub fn states(&self) -> usize {
+        self.pump.as_ref().map_or(2, Pump::states)
+    }
+
+    /// Short name for the signal shape: "16QAM", "2FSK" and so on.
+    pub fn shape(&self) -> &'static str {
+        self.pump.as_ref().map_or("-", Pump::shape)
+    }
+
+    /// The modulation in use, or the one the next call will use.
+    pub fn standard(&self) -> &'static str {
+        match self.pump.as_ref() {
+            Some(p) => p.standard(),
+            None => match self.at.modulation.carrier.as_str() {
+                "V32" => "V.32",
+                "B103" => "Bell 103",
+                _ => "V.22bis",
+            },
+        }
+    }
+
+    /// Whether the line is off hook, which is to say there is a call on it.
+    pub fn off_hook(&self) -> bool {
+        self.pump.is_some()
+    }
+
+    /// Whether the far end's carrier is present.
+    pub fn carrier(&self) -> bool {
+        self.pump.as_ref().is_some_and(Pump::carrier)
+    }
+
+    /// Whether this end placed the call or took it.
+    pub fn role(&self) -> Role {
+        self.role
     }
 
     /// Where the line puts our own signal back, if the handshake went looking.

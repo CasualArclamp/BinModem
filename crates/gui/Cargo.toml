@@ -13,6 +13,7 @@ dsp       = { path = "../dsp" }
 datapump  = { path = "../datapump" }
 ec        = { path = "../ec" }
 line      = { path = "../line" }
+modem     = { path = "../modem" }
 telemetry = { path = "../telemetry" }
 at        = { path = "../at" }
 terminal  = { path = "../terminal" }
