@@ -47,8 +47,7 @@ is no use for a call.
 Double-click `run.bat`, or from a shell:
 
 ```powershell
-.
-un.ps1
+.\run.ps1
 ```
 
 It offers a menu of the captures, builds, and launches. `-Vector v34-33600`
@@ -57,10 +56,17 @@ profile. `run.sh` does the same from Git Bash or Linux. Failing that,
 `cargo run -p gui --release -- tests/vectors/bell103-300.wav` works directly.
 
 To put a modem of your own on a real line instead of watching a recording,
-the easy way is `run.ps1 -Live` (or `run.bat -Live`): it builds, offers a menu
-of the machine's audio devices with a virtual cable picked by default, and
+double-click **`run-live.bat`** (or `./run-live.sh`). It builds, offers a menu
+of the machine's audio devices with a virtual cable picked out by default, and
 offers to start a second modem on the same line so there is something to dial.
-`-Carrier B103|V22B|V32` chooses the modulation for both ends.
+Pass a modulation to set both ends: `run-live.bat -Carrier V32`, or
+`./run-live.sh V32`.
+
+One cable is right for that. What comes back from a cable is what was written
+to it, summed with whatever else is writing, which is a two-wire pair with two
+modems across it. Reaching anything *outside* the machine is the part that
+needs a second cable, so the output can go to a softphone's microphone while
+the input comes from its speaker.
 
 By hand:
 
@@ -82,12 +88,7 @@ possible board:
 modem-answer --in "<input device>" --out "<output device>" --carrier V22B
 ```
 
-One cable is right for this. What comes back from it is what was written to
-it, summed with whatever else is writing, which is a two-wire pair with two
-modems across it. Reaching anything *outside* the machine is the part that
-needs a second cable.
-
-Only the Bell 103 capture decodes to text so far; the rest still show their
+The Bell 103 and V.22bis captures decode to text; the rest still show their
 handshakes on the waterfall, which is worth watching in its own right - the
 V.34 probing tones are clearly visible around six seconds in.
 
