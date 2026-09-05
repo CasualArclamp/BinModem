@@ -519,6 +519,19 @@ impl ScopeApp {
             if !data.is_empty() {
                 self.console.feed_screen(&data);
             }
+            // Some of what arrives is a question rather than something to
+            // draw, and a board that asks one and hears nothing concludes it
+            // is talking to a teletype. Only while there is a call, though:
+            // in command state this would go to the AT interpreter, which
+            // would rightly make nothing of it.
+            if self.frame.state == telemetry::CallState::Connected
+                && let Source::Live(session) = &self.source
+            {
+                let reply = self.console.term.take_reply();
+                if !reply.is_empty() {
+                    session.type_bytes(&reply);
+                }
+            }
             self.console
                 .follow(self.frame.state == telemetry::CallState::Connected);
             self.last_repaint = std::time::Instant::now();

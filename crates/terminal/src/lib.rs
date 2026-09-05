@@ -95,6 +95,15 @@ pub struct Terminal {
     pub cursor_visible: bool,
     /// Set when BEL arrives; the UI clears it after reacting.
     pub bell: bool,
+    /// Bytes the terminal owes the far end, waiting to be sent.
+    ///
+    /// A terminal is not only a screen. Some sequences are questions, and a
+    /// board that asks one and hears nothing draws its own conclusion: the
+    /// near-universal test for whether a caller can do ANSI is to ask where
+    /// the cursor is and see whether anything comes back. Answer and you get
+    /// colour; stay silent and you get "Graphics Mode -> 0" and forty years
+    /// of ASCII art you cannot see.
+    reply: Vec<u8>,
 }
 
 impl Default for Terminal {
@@ -124,6 +133,7 @@ impl Terminal {
             autowrap: true,
             cursor_visible: true,
             bell: false,
+            reply: Vec::new(),
         }
     }
 
@@ -332,6 +342,22 @@ impl Terminal {
             b'm' => self.select_graphic_rendition(),
             b's' => self.saved = Some((self.row, self.col, self.attr)),
             b'u' => self.restore_cursor(),
+            // Device status report. 6 asks where the cursor is; anything
+            // else that a board sends here is asking whether the terminal is
+            // alive at all.
+            b'n' => match self.param(0, 0) {
+                6 => {
+                    let (row, col) = (self.row + 1, self.col + 1);
+                    self.answer(format!("[{row};{col}R"));
+                }
+                5 => self.answer("[0n".to_owned()),
+                _ => {}
+            },
+            // Device attributes: what kind of terminal is this. The answer is
+            // the one a VT100 with no options gives, which is what every
+            // terminal program pretending to be one has said ever since and
+            // what a board is expecting to be able to parse.
+            b'c' if self.param(0, 0) == 0 => self.answer("[?1;0c".to_owned()),
             b'h' | b'l' => {
                 let set = final_byte == b'h';
                 if self.private {
@@ -344,6 +370,26 @@ impl Terminal {
             }
             _ => {}
         }
+    }
+
+    /// Queue an escape sequence to go back to the far end.
+    ///
+    /// Capped, because the far end controls how many questions it asks and
+    /// nothing here controls how quickly they are collected. At 300 bit/s a
+    /// reply takes twenty milliseconds to send, so a board that asked
+    /// faster than that could otherwise grow this without limit.
+    fn answer(&mut self, csi: String) {
+        const LIMIT: usize = 256;
+        if self.reply.len() + csi.len() + 1 > LIMIT {
+            return;
+        }
+        self.reply.push(0x1b);
+        self.reply.extend_from_slice(csi.as_bytes());
+    }
+
+    /// Take what the terminal owes the far end. Draining leaves it empty.
+    pub fn take_reply(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.reply)
     }
 
     fn select_graphic_rendition(&mut self) {
@@ -842,4 +888,63 @@ mod tests {
         assert_eq!(lines[1], "║BBS║");
         assert_eq!(t.cell(1, 1).attr.fg, 2, "the B should be green");
     }
+    #[test]
+    fn a_cursor_report_is_answered_with_where_the_cursor_is() {
+        // The question every board asks to find out whether it is talking to
+        // something that can do ANSI. Answer it and you get colour; say
+        // nothing and you get told "Graphics Mode -> 0" and the art is wasted.
+        let mut t = Terminal::new(80, 25);
+        t.feed_bytes(b"hello");
+        t.feed_bytes(b"\x1b[6n");
+        // One-based, row then column, which puts this at column six.
+        assert_eq!(t.take_reply(), b"\x1b[1;6R");
+        assert!(t.take_reply().is_empty(), "answered the same question twice");
+    }
+
+    #[test]
+    fn the_question_itself_is_not_printed() {
+        // It is a question, not text. A terminal that drew it would put
+        // "[6n" in the middle of the board's own sentence.
+        let mut t = Terminal::new(80, 25);
+        t.feed_bytes(b"Detecting\x1b[6n emulation");
+        let line: String = (0..80).map(|c| t.cell(0, c).ch).collect();
+        assert!(
+            line.starts_with("Detecting emulation"),
+            "the probe was drawn on the screen: {line:?}"
+        );
+    }
+
+    #[test]
+    fn a_cursor_report_follows_the_cursor() {
+        let mut t = Terminal::new(80, 25);
+        t.feed_bytes(b"\x1b[12;40H\x1b[6n");
+        assert_eq!(t.take_reply(), b"\x1b[12;40R");
+    }
+
+    #[test]
+    fn the_terminal_says_what_it_is_when_asked() {
+        let mut t = Terminal::new(80, 25);
+        t.feed_bytes(b"\x1b[c");
+        assert_eq!(t.take_reply(), b"\x1b[?1;0c");
+    }
+
+    #[test]
+    fn a_terminal_nobody_asks_anything_owes_nothing() {
+        let mut t = Terminal::new(80, 25);
+        t.feed_bytes(b"ordinary text\r\nand more\x1b[2J\x1b[1;1H");
+        assert!(t.take_reply().is_empty());
+    }
+
+    #[test]
+    fn an_unanswered_pile_of_questions_stops_growing() {
+        // The far end decides how often to ask and this end decides how often
+        // to collect, and those are not the same clock. At 300 bit/s a reply
+        // takes twenty milliseconds to put on the line.
+        let mut t = Terminal::new(80, 25);
+        for _ in 0..1000 {
+            t.feed_bytes(b"\x1b[6n");
+        }
+        assert!(t.take_reply().len() <= 256);
+    }
+
 }
