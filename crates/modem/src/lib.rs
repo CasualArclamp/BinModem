@@ -667,7 +667,19 @@ impl Modem {
                     Role::Calling => v22bis::handshake::Role::Calling,
                     Role::Answering => v22bis::handshake::Role::Answering,
                 };
-                Pump::V22bis(Box::new(v22bis::handshake::Modem::new(hs_role, self.fs)))
+                // +MS carries a maximum rate and it is not decoration. The
+                // sixteen points of 2400 need about 20 dB of signal to noise
+                // to be told apart and the four of 1200 need about 13, so on
+                // a line that cannot give the first, 2400 is not the faster
+                // connection but the one that carries nothing.
+                let ceiling = if self.at.modulation.max_rate >= 2400 {
+                    v22bis::Rate::Bps2400
+                } else {
+                    v22bis::Rate::Bps1200
+                };
+                Pump::V22bis(Box::new(v22bis::handshake::Modem::at_most(
+                    hs_role, ceiling, self.fs,
+                )))
             }
         });
         self.rate = 0;

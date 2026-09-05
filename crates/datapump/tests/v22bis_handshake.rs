@@ -260,3 +260,50 @@ fn contains_at_any_bit_offset(haystack: &[u8], needle: &[u8]) -> bool {
         .collect();
     bits.windows(want.len()).any(|w| w == want.as_slice())
 }
+
+#[test]
+fn a_ceiling_of_1200_is_never_asked_past() {
+    // What +MS puts a maximum rate there for, and the reason it matters was
+    // measured on a real line: 17 dB of signal to noise, where the sixteen
+    // points of 2400 want better than 20 and the four of 1200 want about 13.
+    // At 2400 that line connected and carried nothing but errors.
+    //
+    // 6.3.1.1 settles at 1200 unless both ends ask for more, so honouring a
+    // ceiling is a matter of never making the offer.
+    use datapump::v22bis::handshake::Modem as Pump;
+    let mut calling = Pump::at_most(Role::Calling, Rate::Bps1200, FS);
+    let mut answering = Pump::new(Role::Answering, FS);
+    let (mut a, mut b) = (0.0, 0.0);
+    for _ in 0..(12.0 * FS) as usize {
+        let (pa, pb) = (a, b);
+        a = calling.step(pb);
+        b = answering.step(pa);
+    }
+    assert_eq!(
+        calling.status(),
+        Status::Connected(Rate::Bps1200),
+        "the capped end went faster than it was allowed"
+    );
+    assert_eq!(
+        answering.status(),
+        Status::Connected(Rate::Bps1200),
+        "the far end went to 2400 on its own"
+    );
+}
+
+#[test]
+fn without_a_ceiling_the_pair_still_reach_2400() {
+    // The control: capping has to be something asked for, not something that
+    // happens.
+    use datapump::v22bis::handshake::Modem as Pump;
+    let mut calling = Pump::new(Role::Calling, FS);
+    let mut answering = Pump::new(Role::Answering, FS);
+    let (mut a, mut b) = (0.0, 0.0);
+    for _ in 0..(12.0 * FS) as usize {
+        let (pa, pb) = (a, b);
+        a = calling.step(pb);
+        b = answering.step(pa);
+    }
+    assert_eq!(calling.status(), Status::Connected(Rate::Bps2400));
+    assert_eq!(answering.status(), Status::Connected(Rate::Bps2400));
+}

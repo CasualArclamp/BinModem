@@ -99,10 +99,26 @@ pub struct Handshake {
     /// still sending its own offer, so the fact has to be remembered rather
     /// than merely acted on.
     offered_2400: bool,
+    /// The fastest this end is willing to go.
+    ///
+    /// A modem is not obliged to want everything it can do. 16 points at
+    /// 2400 need something like 20 dB of signal to noise to be told apart;
+    /// four at 1200 need about 13. On a line that cannot give the first, the
+    /// faster rate is not faster, it is a connection that carries nothing --
+    /// which is exactly what a 17 dB line gave, byte after byte of it. So
+    /// `+MS` can put a ceiling on this, and the way to honour it is simply
+    /// never to make the offer: 6.3.1.1 settles at 1200 unless both ends ask
+    /// for more.
+    ceiling: Rate,
 }
 
 impl Handshake {
     pub fn new(role: Role, fs: f64) -> Self {
+        Self::at_most(role, Rate::Bps2400, fs)
+    }
+
+    /// One that will never ask for more than `ceiling`.
+    pub fn at_most(role: Role, ceiling: Rate, fs: f64) -> Self {
         Self {
             role,
             state: match role {
@@ -114,6 +130,7 @@ impl Handshake {
             step: 1.0 / fs,
             held: 0.0,
             offered_2400: false,
+            ceiling,
         }
     }
 
@@ -152,14 +169,14 @@ impl Handshake {
                 // 6.3.1.1.2 a): unscrambled binary 1 at 1200, and listen.
                 tx.set_rate(Rate::Bps1200);
                 tx.set_signal(Signal::UnscrambledOnes);
-                if heard == Pattern::DoubleDibit {
+                if heard == Pattern::DoubleDibit && self.wants_2400() {
                     // 6.3.1.1.2 b): the far end can do 2400. Answer in kind.
                     self.offered_2400 = true;
                     self.enter(State::OfferingDoubleDibit);
                 } else if self.hold(heard == Pattern::ScrambledOnes) >= timing::HEARD_SCRAMBLED {
                     // Scrambled ones and never the double dibit: a V.22 modem,
                     // so the connection settles at 1200.
-                    self.settle(rx, Rate::Bps1200);
+                    self.settle(tx, rx, Rate::Bps1200);
                 }
             }
 
@@ -175,14 +192,21 @@ impl Handshake {
                 // 6.3.1.1.1 b): a further 456 ms of silence before answering.
                 tx.set_signal(Signal::Silent);
                 if self.elapsed >= timing::PAUSE {
-                    self.enter(State::OfferingDoubleDibit);
+                    // Held to 1200 there is nothing to offer, and the way to
+                    // say so is to say nothing: go straight to what a modem
+                    // that cannot do 2400 would have sent.
+                    self.enter(if self.wants_2400() {
+                        State::OfferingDoubleDibit
+                    } else {
+                        State::Scrambled1200
+                    });
                 }
             }
 
             State::OfferingDoubleDibit => {
                 tx.set_rate(Rate::Bps1200);
                 tx.set_signal(Signal::DoubleDibit);
-                if heard == Pattern::DoubleDibit {
+                if heard == Pattern::DoubleDibit && self.wants_2400() {
                     self.offered_2400 = true;
                 }
                 if self.elapsed >= timing::DOUBLE_DIBIT {
@@ -193,13 +217,13 @@ impl Handshake {
             State::Scrambled1200 => {
                 tx.set_rate(Rate::Bps1200);
                 tx.set_signal(Signal::ScrambledOnes);
-                if heard == Pattern::DoubleDibit {
+                if heard == Pattern::DoubleDibit && self.wants_2400() {
                     self.offered_2400 = true;
                 }
                 if self.offered_2400 {
                     self.enter(State::Rising2400);
                 } else if self.hold(heard == Pattern::ScrambledOnes) >= timing::HEARD_SCRAMBLED {
-                    self.settle(rx, Rate::Bps1200);
+                    self.settle(tx, rx, Rate::Bps1200);
                 }
             }
 
@@ -216,7 +240,7 @@ impl Handshake {
             State::Settling2400 => {
                 tx.set_signal(Signal::ScrambledOnes);
                 if self.elapsed >= timing::SETTLE_2400 {
-                    self.settle(rx, Rate::Bps2400);
+                    self.settle(tx, rx, Rate::Bps2400);
                 }
             }
 
@@ -250,7 +274,27 @@ impl Handshake {
         self.held = 0.0;
     }
 
-    fn settle(&mut self, rx: &mut Receiver, rate: Rate) {
+    /// Whether this end will ask for 2400 at all.
+    fn wants_2400(&self) -> bool {
+        self.ceiling == Rate::Bps2400
+    }
+
+    /// The handshake is over: fix the rate at both ends and start sending
+    /// what a connected modem sends.
+    ///
+    /// The signal has to be set here because a connected modem is never
+    /// visited again -- `State::Connected` does nothing, deliberately, since
+    /// what goes out from then on is data. Whatever signal the handshake left
+    /// behind is what it would otherwise keep sending for the rest of the
+    /// call, and an answering modem that settled at 1200 straight out of
+    /// 6.3.1.1.2 a) was doing exactly that: unscrambled ones, for ever, while
+    /// the calling modem waited for the scrambled ones that were never coming.
+    fn settle(&mut self, tx: &mut Transmitter, rx: &mut Receiver, rate: Rate) {
+        tx.set_rate(rate);
+        // Scrambled binary 1 is both the end of the handshake and what fills
+        // the line between one byte and the next, so this is the same thing
+        // the modem will go on doing once there is data.
+        tx.set_signal(Signal::ScrambledOnes);
         rx.set_rate(rate);
         self.enter(State::Connected(rate));
     }
@@ -272,6 +316,15 @@ pub struct Modem {
 
 impl Modem {
     pub fn new(role: Role, fs: f64) -> Self {
+        Self::at_most(role, Rate::Bps2400, fs)
+    }
+
+    /// One that will go no faster than `ceiling`.
+    ///
+    /// What `+MS` puts a maximum rate there for. On a line too noisy to tell
+    /// sixteen points apart, 2400 is not a faster connection, it is a
+    /// connection that carries nothing.
+    pub fn at_most(role: Role, ceiling: Rate, fs: f64) -> Self {
         // A channel is named for the end that uses it and says both what that
         // end transmits in and what it listens to: the calling modem transmits
         // low and receives high, the answering modem the reverse.
@@ -282,7 +335,7 @@ impl Modem {
         Self {
             tx: Transmitter::at_rate(channel, Rate::Bps1200, fs),
             rx: Receiver::new(channel, fs),
-            hs: Handshake::new(role, fs),
+            hs: Handshake::at_most(role, ceiling, fs),
         }
     }
 
