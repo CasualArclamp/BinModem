@@ -19,7 +19,7 @@
 //! worth doing wherever the wiring allows it.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -88,6 +88,16 @@ struct Shared {
     incoming: Mutex<VecDeque<f32>>,
     /// Samples still to be thrown away while the path settles.
     settling: Mutex<usize>,
+    /// Whether the input has finished settling and is handing samples over.
+    ///
+    /// The output waits for it. Until the input delivers, the modem is not
+    /// being stepped and so has nothing whatever to say, and a cushion spent
+    /// covering that silence is a cushion that has been used up by the time
+    /// the call it was for begins. Which is what happened: a quarter second of
+    /// settling put two dozen holes in the line, all of them in the opening
+    /// moments of the handshake, which is the one stretch where a far end has
+    /// nothing to fall back on and no error control yet to hide them.
+    delivering: AtomicBool,
     /// Waiting to go to the line, at the modem's rate.
     outgoing: Mutex<VecDeque<f32>>,
     counters: Counters,
@@ -186,6 +196,7 @@ impl Duplex {
         let shared = Arc::new(Shared {
             incoming: Mutex::new(VecDeque::with_capacity(BUFFER)),
             settling: Mutex::new(SETTLE),
+            delivering: AtomicBool::new(false),
             outgoing: Mutex::new(VecDeque::from(vec![0.0; PRIME])),
             counters: Counters::default(),
         });
@@ -215,6 +226,9 @@ impl Duplex {
                             && *n > 0
                         {
                             *n -= 1;
+                            if *n == 0 {
+                                capture.delivering.store(true, Ordering::Relaxed);
+                            }
                             continue;
                         }
                         if queue.len() >= BUFFER {
@@ -242,6 +256,15 @@ impl Duplex {
                 out_config.config(),
                 move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     let frames = out.len() / out_channels;
+                    if !playback.delivering.load(Ordering::Relaxed) {
+                        // The input has not started, so the modem has not been
+                        // stepped, so there is nothing to send and silence is
+                        // the correct thing to send. Not a fault, and not
+                        // something to spend the cushion on: leaving the queue
+                        // alone keeps it full for the moment it is wanted.
+                        out.fill(0.0);
+                        return;
+                    }
                     // Convert past what this callback needs, so that a lock
                     // missed next time is already covered. The writer holds
                     // this mutex for a whole block at a time, so missing it is
