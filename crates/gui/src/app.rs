@@ -102,7 +102,10 @@ impl ScopeApp {
             chosen_device: 0,
             audio_error: None,
             sample_rate,
-            console: Console::new(),
+            // A live console is a dumb terminal onto a modem that
+            // answers for itself; a capture console has to pretend to
+            // be one, so they open with different things to say.
+            console: if source.is_live() { Console::live() } else { Console::new() },
             source,
             line_inputs: inputs,
             line_outputs: outputs,
@@ -317,6 +320,46 @@ impl ScopeApp {
             }
             if let Some(err) = &state.error {
                 ui.label(RichText::new(err).color(Color32::from_rgb(235, 100, 90)));
+            }
+
+            // Transmit level. On a real line this is not decoration: too low
+            // and the far end cannot hear the modem over what the network
+            // adds, too high and something in between clips or pulls its gain
+            // control down over the whole call. In decibels because that is
+            // how line levels are talked about everywhere else.
+            let mut db = 20.0 * session.drive().max(1.0e-4).log10();
+            if ui
+                .add(
+                    egui::Slider::new(&mut db, -30.0..=0.0)
+                        .text("drive")
+                        .suffix(" dB"),
+                )
+                .on_hover_text("How hard to drive the line, relative to what the modem hands over")
+                .changed()
+            {
+                session.set_drive(10.0f32.powf(db / 20.0));
+            }
+            if state.open {
+                // The number the slider is for. Above about a decibel down
+                // the peaks are into the top of the scale and anything
+                // digital between here and the far end will flatten them.
+                let peak_db = 20.0 * state.tx_peak.max(1.0e-4).log10();
+                let hot = state.tx_peak > 0.89;
+                ui.label(
+                    RichText::new(format!("peak {peak_db:>5.1} dBFS"))
+                        .monospace()
+                        .color(if hot {
+                            Color32::from_rgb(235, 100, 90)
+                        } else {
+                            Color32::from_rgb(140, 150, 165)
+                        }),
+                )
+                .on_hover_text(
+                    "Loudest sample going out. Frequency shift keying sits at its \
+                     peak permanently; a shaped constellation goes nearly three \
+                     times above its own average, so the same drive is not the \
+                     same peak",
+                );
             }
         });
 
@@ -723,7 +766,7 @@ impl eframe::App for ScopeApp {
         egui::CentralPanel::default().show(ui, |ui| {
             ui.label(RichText::new("waterfall  (0 - 4000 Hz)").strong());
             let available = (ui.available_height() - 150.0).max(140.0);
-            self.waterfall.paint(ui, available * 0.60);
+            self.waterfall.paint(ui, available * 0.60, self.frame.modulation);
             ui.add_space(6.0);
             ui.label(RichText::new("spectrum").strong());
             scopes::spectrum(
@@ -733,6 +776,7 @@ impl eframe::App for ScopeApp {
                 (available * 0.40).max(90.0),
                 self.waterfall.floor_db,
                 self.waterfall.ceiling_db,
+                self.frame.modulation,
             );
             ui.add_space(6.0);
             ui.label(RichText::new("discriminator  (answer band)").strong());

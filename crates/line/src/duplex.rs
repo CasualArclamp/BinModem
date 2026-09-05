@@ -33,6 +33,25 @@ use dsp::Resampler;
 /// trip.
 const BUFFER: usize = 4096;
 
+/// Silence put in front of the modem's own output, in modem samples.
+///
+/// Without it the output queue is fed exactly as fast as it is drained, so it
+/// sits at zero and every scheduling hiccup is a hole in the transmitted
+/// signal. That is not a theoretical worry: on a real call this ran dry on
+/// essentially every callback, some five thousand of them, and what went out
+/// on the line was mostly silence with a modem in the gaps. Nothing can
+/// negotiate through that.
+///
+/// Sixty-four milliseconds is a few output callbacks' worth, which is enough
+/// to absorb the writer being late without putting a noticeable delay in the
+/// line. It does become part of the round trip, which is why it is not larger:
+/// an echo canceller has to reach back over it.
+const PRIME: usize = 1024;
+
+/// How far past the current callback to convert while the queue is in hand,
+/// in output samples. One ordinary callback's worth.
+const RESERVE: usize = 2048;
+
 /// Input to throw away before handing any over, in modem samples.
 ///
 /// A quarter of a second. Neither the device nor the rate conversion produces
@@ -167,7 +186,7 @@ impl Duplex {
         let shared = Arc::new(Shared {
             incoming: Mutex::new(VecDeque::with_capacity(BUFFER)),
             settling: Mutex::new(SETTLE),
-            outgoing: Mutex::new(VecDeque::with_capacity(BUFFER)),
+            outgoing: Mutex::new(VecDeque::from(vec![0.0; PRIME])),
             counters: Counters::default(),
         });
 
@@ -223,23 +242,30 @@ impl Duplex {
                 out_config.config(),
                 move |out: &mut [f32], _: &cpal::OutputCallbackInfo| {
                     let frames = out.len() / out_channels;
-                    let mut dry = false;
-                    {
-                        let mut queue = playback.outgoing.try_lock().ok();
-                        if queue.is_none() {
+                    // Convert past what this callback needs, so that a lock
+                    // missed next time is already covered. The writer holds
+                    // this mutex for a whole block at a time, so missing it is
+                    // ordinary rather than exceptional, and treating every
+                    // miss as silence would put holes in the signal for no
+                    // reason at all.
+                    match playback.outgoing.try_lock() {
+                        Ok(mut queue) => {
+                            while ready.len() < frames + RESERVE {
+                                let Some(next) = queue.pop_front() else { break };
+                                produced.clear();
+                                up.process(f64::from(next), &mut produced);
+                                ready.extend(produced.iter().copied());
+                            }
+                        }
+                        Err(_) => {
                             playback.counters.contended.fetch_add(1, Ordering::Relaxed);
                         }
-                        while ready.len() < frames {
-                            let next = queue.as_mut().and_then(|q| q.pop_front());
-                            if next.is_none() {
-                                dry = true;
-                            }
-                            produced.clear();
-                            up.process(f64::from(next.unwrap_or(0.0)), &mut produced);
-                            ready.extend(produced.iter().copied());
-                        }
                     }
-                    if dry {
+                    if ready.len() < frames {
+                        // Genuinely nothing to send. Silence is the honest
+                        // thing to put out -- a far end hears a dropout, which
+                        // is what error control is for -- but it is a fault
+                        // and is counted as one.
                         playback.counters.underruns.fetch_add(1, Ordering::Relaxed);
                     }
                     for frame in out.chunks_mut(out_channels) {

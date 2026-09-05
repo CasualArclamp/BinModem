@@ -510,3 +510,88 @@ fn a_three_hundred_baud_scope_gets_an_eye_and_not_a_constellation() {
          not {level:.2}"
     );
 }
+
+/// Root mean square and peak of a second of one modulation, once it is up.
+fn level_of(carrier: &str, seconds: f64) -> (f64, f64) {
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, &format!("AT+MS={carrier}"));
+    Pair::type_at(&mut p.caller, &format!("AT+MS={carrier}"));
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(seconds);
+    assert_eq!(p.caller.state(), State::Data, "{carrier} never connected");
+
+    // Measure the caller alone, with something to say, so the figure is a
+    // modem carrying data rather than one idling.
+    for b in b"the quick brown fox jumps over the lazy dog " {
+        p.caller.feed_dte(*b);
+    }
+    let (mut sum, mut peak, mut n) = (0.0f64, 0.0f64, 0u32);
+    let (mut a, mut b) = (p.from_caller, p.from_host);
+    for _ in 0..(FS as usize) {
+        let out = p.caller.step(b);
+        b = p.host.step(a);
+        a = out;
+        p.caller.take_dte();
+        p.host.take_dte();
+        sum += out * out;
+        peak = peak.max(out.abs());
+        n += 1;
+    }
+    ((sum / f64::from(n)).sqrt(), peak)
+}
+
+#[test]
+fn every_modulation_goes_out_at_the_same_level() {
+    // A real modem transmits at a level the network expects and does not
+    // change it because the modulation changed, so neither does this one. It
+    // is also what makes a single drive control on the line honest: one
+    // setting has to mean the same power whichever of these is running.
+    let mut measured = Vec::new();
+    for (carrier, seconds) in [("B103", 5.0), ("V22B", 10.0), ("V32", 14.0)] {
+        let (rms, peak) = level_of(carrier, seconds);
+        println!("{carrier:>5}: rms {rms:.3}  peak {peak:.3}  crest {:.2}", peak / rms);
+        measured.push((carrier, rms, peak));
+    }
+    let quietest = measured.iter().map(|m| m.1).fold(f64::MAX, f64::min);
+    let loudest = measured.iter().map(|m| m.1).fold(0.0, f64::max);
+    assert!(
+        20.0 * (loudest / quietest).log10() < 1.0,
+        "the modulations differ by more than a decibel: {measured:?}"
+    );
+
+    // What they do differ in, enormously, is how peaky they are at that same
+    // power. Frequency shift keying has a constant envelope and sits at its
+    // peak permanently; a shaped constellation goes nearly three times above
+    // its own average. Anything choosing a transmit level has to leave room
+    // for the worst of them or the peaks are simply flattened, and a receiver
+    // trains happily on a clipped constellation because every outer point has
+    // moved inwards together.
+    let crest = |name: &str| {
+        let m = measured.iter().find(|m| m.0 == name).expect("not measured");
+        m.2 / m.1
+    };
+    assert!(
+        (1.35..1.50).contains(&crest("B103")),
+        "constant envelope should crest at the root of two, not {:.2}",
+        crest("B103")
+    );
+    assert!(
+        crest("V32") > 2.5,
+        "a shaped constellation crests far above its average, not at {:.2}",
+        crest("V32")
+    );
+}
+
+#[test]
+#[ignore]
+fn report_levels() {
+    for (carrier, seconds) in [("B103", 5.0), ("V22B", 10.0), ("V32", 14.0)] {
+        let (rms, peak) = level_of(carrier, seconds);
+        println!(
+            "{carrier:>5}: rms {rms:.3} ({:>6.2} dB)   peak {peak:.3}   crest {:.2}",
+            20.0 * rms.log10(),
+            peak / rms
+        );
+    }
+}

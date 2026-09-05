@@ -12,7 +12,7 @@
 //! one step, and what it hands back goes out. Nothing here paces itself against
 //! a wall clock, because the sound card already is one.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -52,6 +52,15 @@ pub struct LineState {
     pub error: Option<String>,
     /// Samples the modem was not there to take. Any at all is a fault.
     pub dropped: u64,
+    /// Loudest sample put on the line lately, as a fraction of full scale.
+    ///
+    /// Worth watching, because the modulations differ enormously in how peaky
+    /// they are at the same average power. Frequency shift keying has a
+    /// constant envelope and sits at its peak permanently; a shaped
+    /// constellation spends most of its time well below one and then goes
+    /// nearly three times higher than its own average. A drive setting that
+    /// suits one clips the other.
+    pub tx_peak: f32,
 }
 
 /// The one thing the window and the line thread share.
@@ -65,14 +74,50 @@ pub struct LineState {
 /// The audio streams themselves cannot cross: on Windows a cpal stream is not
 /// `Send` and has to live on the thread that made it. That is the whole reason
 /// the line is opened by request rather than handed over.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Session {
     typed: Mutex<Vec<u8>>,
     request: Mutex<Option<Request>>,
     state: Mutex<LineState>,
+    /// How hard to drive the line, as an f32 in its bit pattern.
+    drive: AtomicU32,
 }
 
+impl Default for Session {
+    fn default() -> Self {
+        Self {
+            typed: Mutex::default(),
+            request: Mutex::default(),
+            state: Mutex::default(),
+            drive: AtomicU32::new(DEFAULT_DRIVE.to_bits()),
+        }
+    }
+}
+
+/// How hard to drive the line by default, as a multiple of what the modem
+/// hands over.
+///
+/// Six decibels of headroom. Pulse shaping puts the peak of a modem well above
+/// its own average, so a modem written out at unity clips on the peaks, and a
+/// clipped constellation is one whose outer points have all moved inwards
+/// together -- which is to say a receiver that will train happily on a
+/// constellation that is not the one being sent.
+const DEFAULT_DRIVE: f32 = 0.5;
+
 impl Session {
+    /// How hard the line is being driven.
+    pub fn drive(&self) -> f32 {
+        f32::from_bits(self.drive.load(Ordering::Relaxed))
+    }
+
+    /// Set it. A real modem has a transmit level and it is not decoration:
+    /// too low and the far end cannot hear it over the noise the network adds,
+    /// too high and everything between here and there clips or turns its
+    /// automatic gain control down on the whole call.
+    pub fn set_drive(&self, drive: f32) {
+        self.drive.store(drive.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
     pub fn type_bytes(&self, bytes: &[u8]) {
         if let Ok(mut q) = self.typed.lock() {
             q.extend_from_slice(bytes);
@@ -155,6 +200,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     let mut to_line: Vec<f32> = Vec::with_capacity(4096);
     let mut rx_bytes = 0u64;
     let mut tx_bytes = 0u64;
+    let mut tx_peak = 0.0f32;
     let mut typed_recently = Instant::now() - Duration::from_secs(1);
     let mut heard_recently = typed_recently;
     let mut last_state = State::Command;
@@ -235,9 +281,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         }
 
         to_line.clear();
+        let drive = session.drive();
         for &s in &from_line {
             let heard = f64::from(s);
-            to_line.push(modem.step(heard) as f32);
+            to_line.push(modem.step(heard) as f32 * drive);
 
             if let Some(sym) = modem.take_symbol() {
                 if symbols.len() == SYMBOL_HISTORY {
@@ -261,6 +308,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             waveform.push(s);
         }
         audio.transmit(&to_line);
+        // Decays rather than resets, so a peak stays up long enough to read
+        // instead of flickering past between repaints.
+        let block_peak = to_line.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        tx_peak = (tx_peak * 0.90).max(block_peak);
         // What the monitor plays is what the modem heard, so the ear and the
         // scopes are looking at the same thing.
         sink.push(&from_line);
@@ -369,6 +420,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             let dropped = audio.dropped_in();
             if let Ok(mut state) = session.state.lock() {
                 state.dropped = dropped;
+                state.tx_peak = tx_peak;
             }
         }
     }

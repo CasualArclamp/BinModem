@@ -56,6 +56,18 @@ impl Default for Console {
 }
 
 impl Console {
+    /// A console for a live line, whose modem answers for itself.
+    pub fn live() -> Self {
+        let mut console = Self::new();
+        console.term = Terminal::new(terminal::DEFAULT_COLS, terminal::DEFAULT_ROWS);
+        console.term.feed_bytes(b"dialupmodem2\r\n");
+        console.term.feed_bytes(
+            b"Open a line above, then AT+MS to choose a modulation and ATD or ATA."
+        );
+        console.term.feed_bytes(b"\r\n\r\n");
+        console
+    }
+
     pub fn new() -> Self {
         let mut at = Interpreter::new();
         // A terminal renders the echo itself only if the modem sends it, so

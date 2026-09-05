@@ -14,13 +14,48 @@ const GRID: Color32 = Color32::from_rgb(40, 46, 56);
 const TRACE: Color32 = Color32::from_rgb(120, 220, 160);
 const LABEL: Color32 = Color32::from_rgb(150, 160, 175);
 
-/// Bell 103 tone markers, drawn over the waterfall and spectrum.
-pub const MARKERS: &[(f64, &str, Color32)] = &[
-    (1070.0, "1070 O-space", Color32::from_rgb(90, 150, 240)),
-    (1270.0, "1270 O-mark", Color32::from_rgb(90, 150, 240)),
-    (2025.0, "2025 A-space", Color32::from_rgb(240, 170, 90)),
-    (2225.0, "2225 A-mark", Color32::from_rgb(240, 170, 90)),
+/// Blue for whatever the calling modem puts on the line, orange for the
+/// answering modem, so the two directions can be told apart at a glance.
+const CALLING: Color32 = Color32::from_rgb(90, 150, 240);
+const ANSWERING: Color32 = Color32::from_rgb(240, 170, 90);
+/// A line both directions share, which V.32 onwards is the whole point of.
+const SHARED: Color32 = Color32::from_rgb(160, 140, 230);
+
+const BELL103: &[(f64, &str, Color32)] = &[
+    (1070.0, "1070 O-space", CALLING),
+    (1270.0, "1270 O-mark", CALLING),
+    (2025.0, "2025 A-space", ANSWERING),
+    (2225.0, "2225 A-mark", ANSWERING),
 ];
+
+const V22BIS: &[(f64, &str, Color32)] = &[
+    (1200.0, "1200 calling", CALLING),
+    (2400.0, "2400 answering", ANSWERING),
+];
+
+const V32: &[(f64, &str, Color32)] = &[
+    // Both directions on the one carrier, which is why V.32 needs an echo
+    // canceller where V.22bis needs only a filter.
+    (1800.0, "1800 carrier", SHARED),
+    // Where the start-up puts its sidebands when it alternates states: the
+    // carrier suppressed and these two left standing (5.4).
+    (600.0, "600 sideband", SHARED),
+    (3000.0, "3000 sideband", SHARED),
+];
+
+/// Where to draw tone markers for the modulation actually in use.
+///
+/// Drawn from the modulation the modem reports rather than fixed, because a
+/// marker in the wrong place is worse than none: it invites the eye to read
+/// energy that is somewhere else as being where the label says.
+pub fn markers(modulation: &str) -> &'static [(f64, &'static str, Color32)] {
+    match modulation {
+        "Bell 103" => BELL103,
+        "V.22bis" => V22BIS,
+        "V.32" | "V.32bis" => V32,
+        _ => &[],
+    }
+}
 
 /// Map a normalised magnitude to a waterfall colour.
 ///
@@ -87,7 +122,7 @@ impl Waterfall {
         }
     }
 
-    pub fn paint(&mut self, ui: &mut Ui, height: f32) {
+    pub fn paint(&mut self, ui: &mut Ui, height: f32, modulation: &str) {
         let texture = self.texture.get_or_insert_with(|| {
             ui.ctx()
                 .load_texture("waterfall", self.image.clone(), TextureOptions::LINEAR)
@@ -101,7 +136,7 @@ impl Waterfall {
             Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
             Color32::WHITE,
         );
-        paint_tone_markers(&painter, rect, false);
+        paint_tone_markers(&painter, rect, false, modulation);
         frame_border(&painter, rect);
     }
 }
@@ -121,13 +156,14 @@ fn frame_border(painter: &Painter, rect: Rect) {
     );
 }
 
-/// Vertical lines at the Bell 103 tones, so the eye can find them instantly.
+/// Vertical lines at the tones the modulation in use lives on, so the eye can
+/// find them instantly.
 ///
-/// The tones of a pair sit 200 Hz apart, which is only a few pixels wide, so
-/// the labels are staggered vertically. Drawn on one line they overlap into an
+/// Bell 103's tones sit 200 Hz apart, which is only a few pixels wide, so the
+/// labels are staggered vertically. Drawn on one line they overlap into an
 /// unreadable smear.
-fn paint_tone_markers(painter: &Painter, rect: Rect, with_text: bool) {
-    for (i, (hz, name, colour)) in MARKERS.iter().enumerate() {
+fn paint_tone_markers(painter: &Painter, rect: Rect, with_text: bool, modulation: &str) {
+    for (i, (hz, name, colour)) in markers(modulation).iter().enumerate() {
         let x = rect.left() + rect.width() * (*hz / DISPLAY_HZ) as f32;
         painter.line_segment(
             [pos2(x, rect.top()), pos2(x, rect.bottom())],
@@ -147,7 +183,15 @@ fn paint_tone_markers(painter: &Painter, rect: Rect, with_text: bool) {
 }
 
 /// Instantaneous spectrum, drawn as a filled trace.
-pub fn spectrum(ui: &mut Ui, bins: &[f32], hz_per_bin: f64, height: f32, floor: f32, ceiling: f32) {
+pub fn spectrum(
+    ui: &mut Ui,
+    bins: &[f32],
+    hz_per_bin: f64,
+    height: f32,
+    floor: f32,
+    ceiling: f32,
+    modulation: &str,
+) {
     let (rect, painter) = allocate(ui, height);
     painter.rect_filled(rect, 0.0, BACKDROP);
 
@@ -166,7 +210,7 @@ pub fn spectrum(ui: &mut Ui, bins: &[f32], hz_per_bin: f64, height: f32, floor: 
         );
         db -= 20.0;
     }
-    paint_tone_markers(&painter, rect, true);
+    paint_tone_markers(&painter, rect, true, modulation);
 
     let w = rect.width() as usize;
     let mut points = Vec::with_capacity(w);
