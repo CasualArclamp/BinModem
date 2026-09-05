@@ -13,12 +13,21 @@
 //! and one has to be subtracted instead. That is what [`dsp::EchoCanceller`]
 //! is for, and it is why the two arrived together.
 //!
-//! Only 4800 bit/s is implemented here. At that rate the scrambled data is
-//! taken two bits at a time and differentially encoded into a quadrant (2.4.2
-//! with Table 1), one point to a quadrant, which makes it structurally the
-//! same problem as V.22bis at 1200 and the right place to start. The 9600 and
-//! 14 400 rates add more points and, in their trellis-coded forms, a
-//! convolutional code over them.
+//! 4800 and 9600 bit/s are implemented. At 4800 the scrambled data is taken
+//! two bits at a time and differentially encoded into a quadrant (2.4.2 with
+//! Table 1), one point to a quadrant. At 9600 it is taken four at a time: the
+//! first two do the same job and the other two choose between four points
+//! inside that quadrant (2.4.1.1). Twice the data at the same 2400 baud, and
+//! nothing else about the modem changes -- the same scrambler, the same
+//! differential coding, the same start-up conducted entirely in the four
+//! states, and even the same mean power for the gain control to hold.
+//!
+//! What is not implemented is the other 9600, the trellis-coded alternative
+//! of 2.4.1.2, which spends a redundant bit on a convolutional code over
+//! thirty-two points and buys about four decibels with it. It is optional:
+//! 1 e) requires every modem offering 9600 to be able to fall back on the
+//! sixteen-state alternative, so this interworks. B8 of the rate signal is
+//! what advertises it, and stays clear here.
 
 pub mod startup;
 
@@ -108,7 +117,58 @@ pub const STATE_B: usize = 1;
 pub const STATE_C: usize = 2;
 pub const STATE_D: usize = 3;
 
+/// The four points of one quadrant, chosen by the two bits that are *not*
+/// differentially encoded: Q3 and Q4 of 2.4.1.1, which is what carries 9600
+/// bit/s where 4800 carries only the quadrant.
+///
+/// Reading this out of the Recommendation takes some care. The extracted text
+/// of Table 3 has lost the sign of every coordinate — it renders the whole
+/// table negative, "-0" included — and a constellation read off that would be
+/// wrong in a way no test of our own two ends could ever notice. What survives
+/// the extraction is the magnitudes, and those turn out to be enough: every
+/// one of the sixteen points sits at a combination of 1 and 3, so its quadrant
+/// supplies the signs and nothing is left to guess.
+///
+/// Table 3 gives four Q3Q4-to-magnitude patterns, one per quadrant, and they
+/// are one pattern turned through quarter circles. They have to be. A
+/// differentially coded receiver resolves the constellation only up to a
+/// quarter turn, so Q3 and Q4 must read the same whichever way up it lands.
+///
+/// That leaves exactly one thing undetermined — which of a quadrant's four
+/// points is the one 4800 bit/s uses — and Figure 1 settles it. Each of the
+/// letters A, B, C and D is followed by a code two columns to its right: 0001,
+/// 0101, 1101, 1001. All four end in 01. With that anchor the whole thing
+/// falls out, and reproduces both the magnitudes of Table 3 and the
+/// left-to-right order of all sixteen labels in Figure 1.
+const WITHIN_QUADRANT: [(f64, f64); 4] = [
+    (-1.0, -1.0), // Q3 Q4 = 0 0
+    (-3.0, -1.0), // 0 1 — state A, and the point every lower rate keeps to
+    (-1.0, -3.0), // 1 0
+    (-3.0, -3.0), // 1 1
+];
+
+/// The one of the four that the start-up and 4800 bit/s use.
+const WITHIN_4800: usize = 1;
+
+/// Turn a point through whole quarter circles.
+const fn rotate(p: (f64, f64), quarters: usize) -> (f64, f64) {
+    match quarters & 3 {
+        0 => p,
+        1 => (-p.1, p.0),
+        2 => (-p.0, -p.1),
+        _ => (p.1, -p.0),
+    }
+}
+
+/// The point for a quadrant and a choice within it (Figure 1).
+fn signal_point(state: usize, within: usize) -> (f64, f64) {
+    rotate(WITHIN_QUADRANT[within], state)
+}
+
 /// Root mean square of the constellation, which is one radius here.
+///
+/// The same for four points and for sixteen, which is not luck: the sixteen
+/// average 2, 10, 10 and 18 in equal numbers, and the four are all 10.
 pub const CONSTELLATION_RMS: f64 = 3.162_277_660_168_379_5;
 
 /// Mean power of the constellation.
@@ -152,6 +212,33 @@ fn nearest_state(p: (f64, f64)) -> usize {
     };
     // A sits in the third quadrant, so the count starts from there.
     (from_a + 2) & 3
+}
+
+/// Which of the sixteen points a received one is nearest, as a quadrant and a
+/// choice within it.
+///
+/// Searched rather than sliced. The points do lie on a grid that could be
+/// quantised coordinate by coordinate, but sixteen distances at 2400 baud is
+/// nothing, and this stays right if the constellation ever stops being one.
+fn nearest_point(p: (f64, f64)) -> (usize, usize) {
+    let mut best = (0, 0);
+    let mut nearest = f64::INFINITY;
+    for state in 0..4 {
+        for within in 0..4 {
+            let q = signal_point(state, within);
+            let away = (p.0 - q.0).powi(2) + (p.1 - q.1).powi(2);
+            if away < nearest {
+                nearest = away;
+                best = (state, within);
+            }
+        }
+    }
+    best
+}
+
+/// How many bits a symbol carries at a given rate (2.4.1 and 2.4.2).
+fn bits_per_symbol(bits_per_second: u32) -> u32 {
+    if bits_per_second >= 9600 { 4 } else { 2 }
 }
 
 /// The self-synchronising scrambler of clause 4.
@@ -275,6 +362,11 @@ pub struct Transmitter {
     since_change: u64,
     /// Position in the repeating rate sequence.
     rate_bit: u32,
+    /// Which of the quadrant's four points the current symbol is on. Only
+    /// 9600 bit/s ever moves it off the one the start-up uses.
+    within: usize,
+    /// Bits carried by each symbol: two at 4800, four at 9600.
+    bits: u32,
     /// The sample most recently produced, for the echo canceller.
     last_sample: f64,
 }
@@ -294,8 +386,21 @@ impl Transmitter {
             tick: 0,
             since_change: 0,
             rate_bit: 0,
+            within: WITHIN_4800,
+            bits: 2,
             last_sample: 0.0,
         }
+    }
+
+    /// Change the rate the data itself is coded at.
+    ///
+    /// 5.4 puts this at one exact moment: the E sequence a modem sends says
+    /// what the scrambled ones immediately following it are coded at, so the
+    /// transmitter changes as it stops sending E and not before. Everything
+    /// earlier -- the conditioning signal, the training segment, the rate
+    /// exchange -- is two bits to the symbol whatever is being negotiated.
+    pub fn set_data_rate(&mut self, bits_per_second: u32) {
+        self.bits = bits_per_symbol(bits_per_second);
     }
 
     /// What to send.
@@ -360,6 +465,8 @@ impl Transmitter {
         let since_change = self.since_change;
         self.tick += 1;
         self.since_change += 1;
+        // Everything but data sits on the point the four states are made of.
+        self.within = WITHIN_4800;
         let alternate = |even, odd| if tick.is_multiple_of(2) { even } else { odd };
         let state = match self.signal {
             Signal::Silent | Signal::AnswerTone => return self.quadrant as usize,
@@ -394,8 +501,12 @@ impl Transmitter {
                 return self.turn(dibit);
             }
             Signal::ScrambledOnes => {
-                let mut dibit = [false; 2];
-                for slot in &mut dibit {
+                // 2.4.1: the scrambled stream is divided into groups of four,
+                // of which the first two are differentially encoded into the
+                // quadrant and the second two choose a point inside it. At
+                // 4800 the group is two long and the point is fixed (2.4.2).
+                let mut group = [false; 4];
+                for slot in group.iter_mut().take(self.bits as usize) {
                     let bit = if self.pending.is_empty() {
                         true
                     } else {
@@ -403,7 +514,10 @@ impl Transmitter {
                     };
                     *slot = self.scrambler.scramble(bit);
                 }
-                return self.turn(dibit);
+                if self.bits == 4 {
+                    self.within = usize::from(group[2]) << 1 | usize::from(group[3]);
+                }
+                return self.turn([group[0], group[1]]);
             }
         };
         self.quadrant = state as u8;
@@ -418,7 +532,8 @@ impl Transmitter {
     }
 
     fn next_symbol(&mut self) -> (f64, f64) {
-        STATES[self.next_state()]
+        let state = self.next_state();
+        signal_point(state, self.within)
     }
 
     /// The sample most recently put on the line.
@@ -498,6 +613,8 @@ pub struct Receiver {
     carrier: bool,
     /// Whether the equaliser may learn from what is arriving.
     adapting: bool,
+    /// Bits each arriving symbol carries: two at 4800, four at 9600.
+    carried: u32,
 }
 
 impl Receiver {
@@ -528,7 +645,19 @@ impl Receiver {
             level: OnePole::new(0.020, fs),
             carrier: false,
             adapting: true,
+            carried: 2,
         }
+    }
+
+    /// Change the rate the arriving data is coded at.
+    ///
+    /// A different moment from the transmitter's, and 5.4 is explicit about
+    /// which: "When the modem detects an incoming 16-bit E sequence ... it
+    /// shall condition itself to receive data at the rate and with the coding
+    /// indicated by the E sequence." The far end changes as it finishes
+    /// sending that E, so the two land on the same place in the stream.
+    pub fn set_data_rate(&mut self, bits_per_second: u32) {
+        self.carried = bits_per_symbol(bits_per_second);
     }
 
     pub fn feed(&mut self, sample: f64) {
@@ -584,8 +713,16 @@ impl Receiver {
         );
 
         // The carrier loop works on the unequalised symbol, so the equaliser's
-        // delay stays outside it.
-        let coarse = STATES[nearest_state(point)];
+        // delay stays outside it. The decision has to be over whichever
+        // constellation is in use: sixteen points read against the four would
+        // put the error at a quarter of a turn for a point sitting exactly
+        // where it belongs.
+        let coarse = if self.carried == 4 {
+            let (state, within) = nearest_point(point);
+            signal_point(state, within)
+        } else {
+            STATES[nearest_state(point)]
+        };
         let error = (point.1 * coarse.0 - point.0 * coarse.1)
             / (coarse.0 * coarse.0 + coarse.1 * coarse.1 + 1e-9);
         if self.adapting {
@@ -606,8 +743,12 @@ impl Receiver {
             equalized.0 * CONSTELLATION_RMS,
             equalized.1 * CONSTELLATION_RMS,
         );
-        let state = nearest_state(scaled);
-        let decision = STATES[state];
+        let (state, within) = if self.carried == 4 {
+            nearest_point(scaled)
+        } else {
+            (nearest_state(scaled), WITHIN_4800)
+        };
+        let decision = signal_point(state, within);
 
         self.symbols += 1;
         if self.symbols > 64 && self.carrier && self.adapting {
@@ -629,7 +770,15 @@ impl Receiver {
         };
         let change = (quadrant + 4 - previous) & 3;
         let dibit = CHANGE_TO_DIBIT[change as usize];
-        for bit in [dibit & 0b10 != 0, dibit & 0b01 != 0] {
+        // 2.4.1 in reverse: the quadrant carries the first two bits of the
+        // group and the point within it the other two, in that order.
+        let group = [
+            dibit & 0b10 != 0,
+            dibit & 0b01 != 0,
+            within & 0b10 != 0,
+            within & 0b01 != 0,
+        ];
+        for &bit in group.iter().take(self.carried as usize) {
             let out = self.descrambler.descramble(bit);
             self.bits.push(out);
         }
@@ -693,21 +842,6 @@ impl Receiver {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Turn a point through whole quadrants.
-    ///
-    /// Only the tests need this. The transmitter turns by adding to an index
-    /// instead, which it can do because the four states are exactly the
-    /// quarter turns of the first: the invariant that makes that legitimate is
-    /// what the test below checks.
-    fn rotate(point: (f64, f64), quadrant: u8) -> (f64, f64) {
-        match quadrant & 3 {
-            0 => point,
-            1 => (-point.1, point.0),
-            2 => (-point.0, -point.1),
-            _ => (point.1, -point.0),
-        }
-    }
 
     #[test]
     fn the_four_states_are_a_quarter_turn_apart_at_one_radius() {
@@ -816,5 +950,137 @@ mod tests {
             longest = longest.max(run);
         }
         assert!(longest < 30, "a run of {longest} identical bits got through");
+    }
+
+    /// Which quadrant Y1Y2 names, from the codes Figure 1 puts against the
+    /// four letters: A is 0001, B 0101, C 1101, D 1001.
+    fn quadrant_of(y1: u8, y2: u8) -> usize {
+        match (y1, y2) {
+            (0, 0) => STATE_A,
+            (0, 1) => STATE_B,
+            (1, 1) => STATE_C,
+            _ => STATE_D,
+        }
+    }
+
+    #[test]
+    fn the_sixteen_points_have_the_magnitudes_table_3_gives_them() {
+        // The check that the constellation was read correctly out of a text
+        // extraction that lost every sign in the table. These are the |Re| and
+        // |Im| columns of Table 3, nonredundant coding, in the order the table
+        // lists them: Y1 Y2 Q3 Q4 counting up from 0000. Nothing here depends
+        // on a sign, which is the point -- the signs are the quadrant's, and
+        // the quadrant comes from Y1Y2.
+        const TABLE_3: [(f64, f64); 16] = [
+            (1.0, 1.0), (3.0, 1.0), (1.0, 3.0), (3.0, 3.0), // Y1Y2 = 00
+            (1.0, 1.0), (1.0, 3.0), (3.0, 1.0), (3.0, 3.0), // 01
+            (1.0, 1.0), (1.0, 3.0), (3.0, 1.0), (3.0, 3.0), // 10
+            (1.0, 1.0), (3.0, 1.0), (1.0, 3.0), (3.0, 3.0), // 11
+        ];
+        for (row, want) in TABLE_3.iter().enumerate() {
+            let (y1, y2) = ((row >> 3) as u8 & 1, (row >> 2) as u8 & 1);
+            let within = row & 0b11;
+            let got = signal_point(quadrant_of(y1, y2), within);
+            assert_eq!(
+                (got.0.abs(), got.1.abs()),
+                *want,
+                "Y1Y2Q3Q4 = {y1}{y2}{:02b} came out at {got:?}",
+                within
+            );
+        }
+    }
+
+    #[test]
+    fn the_points_sit_in_the_quadrant_their_first_two_bits_name() {
+        // The other half of the reading. Table 3 gives magnitudes; the signs
+        // have to come from somewhere, and they come from the quadrant Y1Y2
+        // names, which is the same quadrant 4800 bit/s would have landed in.
+        for y1 in 0..2u8 {
+            for y2 in 0..2u8 {
+                let state = quadrant_of(y1, y2);
+                let corner = STATES[state];
+                for within in 0..4 {
+                    let p = signal_point(state, within);
+                    assert_eq!(
+                        (p.0.signum(), p.1.signum()),
+                        (corner.0.signum(), corner.1.signum()),
+                        "{y1}{y2} with Q3Q4 {within:02b} left its quadrant"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_state_is_the_same_point_at_both_rates() {
+        // 2.4.2 and the caption to Figure 1: the four states of 4800 bit/s are
+        // a subset of the sixteen, and are the ones the whole start-up is
+        // conducted in. If these ever came apart, a 9600 connection would
+        // train on one constellation and carry data on another.
+        for (state, &point) in STATES.iter().enumerate() {
+            assert_eq!(signal_point(state, WITHIN_4800), point);
+        }
+    }
+
+    #[test]
+    fn the_labelling_survives_a_quarter_turn() {
+        // Why the within-quadrant labelling has to rotate with the quadrant
+        // rather than being fixed in the plane. A differentially coded
+        // receiver resolves the constellation only up to a quarter turn, so if
+        // Q3 and Q4 did not turn with it, a receiver that happened to land a
+        // quadrant out would read every one of them wrong while the
+        // differential decoding of Q1 and Q2 carried on perfectly.
+        for state in 0..4 {
+            for within in 0..4 {
+                assert_eq!(
+                    rotate(signal_point(state, within), 1),
+                    signal_point((state + 1) & 3, within)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_sixteen_points_are_the_grid_and_are_all_different() {
+        use std::collections::BTreeSet;
+        let mut seen = BTreeSet::new();
+        for state in 0..4 {
+            for within in 0..4 {
+                let (re, im) = signal_point(state, within);
+                assert!(
+                    [1.0, 3.0].contains(&re.abs()) && [1.0, 3.0].contains(&im.abs()),
+                    "({re}, {im}) is not on the grid Table 3 describes"
+                );
+                seen.insert((re as i64, im as i64));
+            }
+        }
+        assert_eq!(seen.len(), 16, "two labels landed on one point");
+    }
+
+    #[test]
+    fn the_sixteen_have_the_same_mean_power_as_the_four() {
+        // Which is why the receiver's gain control needs no telling about the
+        // rate: it is holding the same number either way.
+        let mut total = 0.0;
+        for state in 0..4 {
+            for within in 0..4 {
+                let (re, im) = signal_point(state, within);
+                total += re * re + im * im;
+            }
+        }
+        assert!((total / 16.0 - CONSTELLATION_MEAN_POWER).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_point_is_decided_as_the_one_it_is() {
+        for state in 0..4 {
+            for within in 0..4 {
+                let p = signal_point(state, within);
+                assert_eq!(nearest_point(p), (state, within));
+                // And still, nudged a third of the way to a neighbour.
+                let nudged = (p.0 + 0.6, p.1 - 0.6);
+                assert_eq!(nearest_point(nudged), (state, within));
+            }
+        }
     }
 }

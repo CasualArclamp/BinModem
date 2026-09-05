@@ -9,20 +9,32 @@ the milestone ladder.
 
 ## Status
 
-Milestone 1, the skeleton. A streaming DSP core, a Bell 103 receiver that
-decodes a real captured call, a V.250 AT command layer, and a live scope.
+The skeleton is complete: a call can be placed from `ATD`, negotiated, brought
+up over a real sound card, and carried with error control, and it comes back
+out of the far end's `take_dte`. What is missing is speed - V.32bis and V.34 -
+and the COM port that would let Windows dial it.
 
 | Layer | State |
 |---|---|
 | `dsp` - biquads, Butterworth, NCO, FSK, FFT, shaping, timing, equaliser | working |
-| `datapump` - Bell 103 / V.21 receiver, V.22bis transmit and receive | working |
+| `dsp` - split echo canceller, reflection finder, arbitrary-ratio resampler | working |
+| `datapump` - Bell 103 / V.21 receiver | working |
+| `datapump` - V.22bis at 1200 and 2400, with its handshake | working |
+| `datapump` - V.32 at 4800 and 9600, with echo cancellation and its start-up | working |
+| `ec` - V.42 detection, HDLC, LAPM, V.42bis, XID negotiation | working |
 | `at` - V.250 command parsing, S-parameters, result codes, escape sequence | working |
+| `modem` - the whole of one: AT to line, V.250 states, V.42 over either pump | working |
+| `line` - WAV reader and writer, full-duplex audio | working |
 | `telemetry` - frame publishing, transcript log, raw line-data channel | working |
 | `terminal` - ANSI/CP437 screen emulator for BBS use | working |
-| `gui` - waterfall, spectrum, symbol scope, faceplate, audio monitor, console | working |
-| `ec` - V.42 detection, HDLC, LAPM, V.42bis, XID negotiation | working |
-| `line` - WAV reader, audio output | working |
-| V.22bis handshake and capture decode, live audio, DTE binding, V.32bis+ | not started |
+| `gui` - waterfall, spectrum, symbol scope, faceplate, audio monitor, console | replays captures only |
+| V.32 trellis coding, V.32bis, V.34 | not started |
+| DTE binding: a COM port for Windows Dial-Up Networking | not started |
+
+A real V.22bis call has been placed through a virtual audio cable end to end,
+connecting in 5.5 s and carrying data over V.42. V.32 does the same in
+simulation across every loopback delay from 4 to 125 ms, and has not yet been
+tried on hardware.
 
 ## Running it
 

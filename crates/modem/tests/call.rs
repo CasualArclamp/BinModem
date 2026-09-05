@@ -317,9 +317,11 @@ fn ms_chooses_which_modulation_the_call_uses() {
 
     assert_eq!(p.caller.state(), State::Data, "the V.32 caller never connected");
     assert_eq!(p.host.state(), State::Data, "the V.32 host never connected");
-    assert_eq!(p.caller.rate(), Some(4800), "not the V.32 rate");
+    // Both ends offer 4800 and 9600, and the rate exchange settles on the
+    // better of what both can do.
+    assert_eq!(p.caller.rate(), Some(9600), "not the V.32 rate");
     assert!(
-        p.caller_saw().contains("4800"),
+        p.caller_saw().contains("9600"),
         "CONNECT did not report the V.32 rate: {:?}",
         p.caller_saw()
     );

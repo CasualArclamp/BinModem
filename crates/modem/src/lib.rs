@@ -71,8 +71,8 @@ pub enum Ended {
 enum Pump {
     /// V.22bis: two directions in two halves of the band, 1200 or 2400 bit/s.
     V22bis(Box<v22bis::handshake::Modem>),
-    /// V.32: both directions in the whole band at once, 4800 bit/s, with the
-    /// echo canceller that makes that possible.
+    /// V.32: both directions in the whole band at once, 4800 or 9600 bit/s,
+    /// with the echo canceller that makes that possible.
     V32(Box<v32::startup::Modem>),
 }
 
@@ -488,10 +488,14 @@ impl Modem {
                     Role::Calling => v32::startup::Role::Calling,
                     Role::Answering => v32::startup::Role::Answering,
                 };
-                // Offer what this receiver can actually demodulate. Offering
-                // 9600 and then failing to read it would be worse than not
-                // offering it.
-                let offer = v32::startup::rate_signal(true, false);
+                // Offer what this receiver can actually demodulate, and no
+                // more: offering a rate and then failing to read it is worse
+                // than never offering it. Both of these are read here --
+                // 4800 by 2.4.2 and 9600 by the nonredundant coding of
+                // 2.4.1.1, which is the alternative every V.32 modem is
+                // required to be able to fall back on. Trellis coding is not,
+                // so B8 of the rate signal stays clear.
+                let offer = v32::startup::rate_signal(true, true);
                 Pump::V32(Box::new(v32::startup::Modem::new(hs_role, offer, self.fs)))
             }
             _ => {

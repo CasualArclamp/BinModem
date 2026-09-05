@@ -339,3 +339,103 @@ fn trace_cable() {
         }
     }
 }
+
+/// Run a call with an offer at each end and report what happened.
+///
+/// Returns the rate agreed, the bits per second the calling end actually
+/// recovered once settled, and what each terminal received.
+fn exchange(calling: u16, answering: u16, payload: &[u8]) -> (u32, f64, Vec<u8>, Vec<u8>) {
+    let mut caller = Modem::new(Role::Calling, calling, FS);
+    let mut host = Modem::new(Role::Answering, answering, FS);
+    let (mut from_caller, mut from_host) = (0.0, 0.0);
+    let (mut at_caller, mut at_host) = (Vec::new(), Vec::new());
+    let (mut sent, mut settled) = (false, f64::NAN);
+    let (mut counting_from, mut counted) = (f64::NAN, 0usize);
+
+    for i in 0..(40.0 * FS) as usize {
+        let (a, b) = (from_caller, from_host);
+        from_caller = caller.step(b * FAR + a * ECHO);
+        from_host = host.step(a * FAR + b * ECHO);
+        let now = i as f64 / FS;
+
+        // One drain, used for both jobs: take_bits and take_bytes share a
+        // buffer, so calling both leaves the second with nothing.
+        let arrived = caller.take_bytes();
+        let bits = arrived.len() * 8;
+        at_caller.extend(arrived);
+        at_host.extend(host.take_bytes());
+
+        let up = matches!(caller.status(), Status::Connected(_))
+            && matches!(host.status(), Status::Connected(_));
+        if up && settled.is_nan() {
+            settled = now;
+        }
+        // Count over a whole second, starting once both ends have settled and
+        // are sending scrambled ones, which run at the agreed rate like data.
+        if up && now > settled + 0.5 {
+            if counting_from.is_nan() {
+                counting_from = now;
+            } else if now < counting_from + 1.0 {
+                counted += bits;
+            }
+        }
+        if up && !sent && now > settled + 1.5 {
+            sent = true;
+            caller.send(payload);
+            host.send(payload);
+        }
+    }
+
+    let rate = match caller.status() {
+        Status::Connected(r) => r,
+        other => panic!("the call did not connect: {other:?}"),
+    };
+    (rate, counted as f64, at_caller, at_host)
+}
+
+#[test]
+fn nine_thousand_six_hundred_carries_four_bits_to_the_symbol() {
+    // 2.4.1.1: the scrambled stream in groups of four, two differentially
+    // encoded into the quadrant and two choosing a point inside it. Twice the
+    // data at the same 2400 baud, which is the whole of what the extra twelve
+    // points buy.
+    let both = rate_signal(true, true);
+    let payload = b"the quick brown fox jumps over the lazy dog, 0123456789";
+    let (rate, bits, at_caller, at_host) = exchange(both, both, payload);
+
+    assert_eq!(rate, 9600, "the two ends did not settle on the faster rate");
+    assert!(
+        (9000.0..10_200.0).contains(&bits),
+        "the line carried {bits:.0} bit/s, which is not 9600"
+    );
+    assert!(
+        contains_at_any_bit_offset(&at_host, payload),
+        "the answering end did not receive what was sent at 9600"
+    );
+    assert!(
+        contains_at_any_bit_offset(&at_caller, payload),
+        "the calling end did not receive what was sent at 9600"
+    );
+}
+
+#[test]
+fn a_far_end_that_can_only_do_4800_gets_4800() {
+    // 5.3: each rate signal narrows what the last one offered, and R3 settles
+    // it. The E that follows has to carry what was settled rather than what
+    // was offered -- Table 7 says its rate bits "relate to the transmission of
+    // scrambled binary ones immediately following signal E" -- because it is
+    // the E that tells the far end how to demodulate what comes next. A modem
+    // that put its whole offer in E would tell this one to read 9600 off a
+    // line carrying 4800.
+    let payload = b"login: cactus";
+    let (rate, bits, at_caller, at_host) =
+        exchange(rate_signal(true, true), rate_signal(true, false), payload);
+
+    assert_eq!(rate, 4800, "the faster end did not come down to the slower");
+    assert!(
+        (4400.0..5200.0).contains(&bits),
+        "the line carried {bits:.0} bit/s, which is not 4800"
+    );
+    assert!(contains_at_any_bit_offset(&at_host, payload));
+    assert!(contains_at_any_bit_offset(&at_caller, payload));
+}

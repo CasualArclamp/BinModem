@@ -219,6 +219,17 @@ pub fn rate_signal(bits_4800: bool, bits_9600: bool) -> u16 {
     s
 }
 
+/// A rate signal offering exactly one rate (Table 6).
+///
+/// R1 and R2 say everything a modem can do. E says the one thing that was
+/// settled on, and only that: Table 7 has its rate bits "relate to the
+/// transmission of scrambled binary ones immediately following signal E". A
+/// modem that put its whole offer in E would tell a far end that had agreed to
+/// 4800 to start receiving at 9600.
+pub fn rate_signal_for(bits_per_second: u32) -> u16 {
+    rate_signal(bits_per_second == 4800, bits_per_second == 9600)
+}
+
 /// The E sequence that ends a rate exchange (Table 7).
 ///
 /// The same as a rate signal except that B0 to B3 are ones, which is the only
@@ -475,6 +486,18 @@ pub struct Startup {
     /// Whether a training segment has been sent yet. Only the first is a
     /// window the echo canceller can learn anything from.
     trained: bool,
+    /// Whether an incoming E sequence has been seen, which ends the rate
+    /// exchange for good.
+    ///
+    /// It has to be latched, and not because a false detection is unlikely
+    /// enough to ignore. What follows E is scrambled ones, and scrambled ones
+    /// descramble to ones: sixteen of those in a row satisfy every
+    /// synchronising bit an E sequence has and offer every rate in Table 6 at
+    /// once. So it is not a rare collision but a certainty, arriving every
+    /// sixteen bits from the moment the exchange ends. Left running, the
+    /// detector conditioned a 4800 connection to receive at 9600 and the data
+    /// never arrived.
+    heard_end: bool,
     /// Held until the next symbol boundary, where the machine can act on them.
     pending_carrier_reversal: bool,
     pending_sideband_reversal: bool,
@@ -500,6 +523,7 @@ impl Startup {
             high_reversals: ReversalDetector::new(super::CARRIER + OFFSET, 60.0, AUDIBLE, fs),
             carrier_quiet: 0,
             sideband_quiet: 0,
+            heard_end: false,
             rates: RateDetector::new(),
             countdown: sps,
             sps,
@@ -691,7 +715,13 @@ impl Startup {
         self.pending_carrier_reversal |= carrier;
         self.pending_sideband_reversal |= sidebands;
         if !matches!(self.state, State::Connected(_) | State::Failed) {
+            // Drained either way, so that nothing accumulates in the receiver
+            // to be handed up as data later; fed to the detector only while
+            // there is still a rate exchange going on.
             for bit in rx.take_bits() {
+                if self.heard_end {
+                    continue;
+                }
                 if let Some(s) = self.rates.feed(bit) {
                     self.pending_sequence = Some(s);
                 }
@@ -703,6 +733,18 @@ impl Startup {
             return self.status();
         }
         self.countdown += self.sps;
+        // 5.4: "When the modem detects an incoming 16-bit E sequence ... it
+        // shall condition itself to receive data at the rate and with the
+        // coding indicated by the E sequence." Handled here rather than in the
+        // state machine because it is not a step of the procedure: it can
+        // arrive in more than one state, and what it changes is the
+        // demodulator rather than anything the machine is doing.
+        if self.expecting_end()
+            && let Some(e) = self.pending_sequence.filter(|&s| is_end_signal(s))
+        {
+            self.heard_end = true;
+            rx.set_data_rate(offered_rate(e));
+        }
         let carrier = std::mem::take(&mut self.pending_carrier_reversal);
         let sidebands = std::mem::take(&mut self.pending_sideband_reversal);
         let sequence = self.pending_sequence.take();
@@ -711,13 +753,37 @@ impl Startup {
         if let Some(t) = self.timer.as_mut() {
             *t += 1;
         }
-        self.advance(carrier, sidebands, sequence, tx);
+        self.advance(carrier, sidebands, sequence, tx, rx);
         if !matches!(self.state, State::Connected(_) | State::Failed)
             && self.total >= timing::PATIENCE
         {
             self.state = State::Failed;
         }
         self.status()
+    }
+
+    /// Whether an E sequence could legitimately arrive just now.
+    ///
+    /// 5.3.2 sends exactly one E, so a detector cannot ask it to repeat the
+    /// way it asks a rate signal to, and seven fixed bits out of sixteen is
+    /// all that separates one from scrambled data. That comes up about once a
+    /// second at 4800 bit/s, so the only thing keeping the exchange honest is
+    /// not listening for an E until the procedure is due to produce one.
+    fn expecting_end(&self) -> bool {
+        if self.agreed == 0 {
+            return false;
+        }
+        match self.role {
+            // 5.4.1: the calling modem answers R3 with an E of its own, and
+            // only from then on is there one coming back.
+            Role::Calling => matches!(self.state, State::SendEnd | State::Settling),
+            // 5.4.2: the answering modem sends R3 until the calling modem
+            // closes the exchange, so it is waiting for one the whole time.
+            Role::Answering => matches!(
+                self.state,
+                State::SendRate | State::SendEnd | State::Settling
+            ),
+        }
     }
 
     /// Report a reversal at most once, and not again for a while.
@@ -753,6 +819,7 @@ impl Startup {
         sideband_reversal: bool,
         sequence: Option<u16>,
         tx: &mut Transmitter,
+        rx: &mut Receiver,
     ) {
         let heard = self.listener.classify();
         match self.state {
@@ -961,17 +1028,26 @@ impl Startup {
                             if self.agreed == 0 {
                                 self.agreed = offered_rate(s);
                             }
-                            tx.set_signal(Signal::Rate(end_signal(self.offer)));
+                            tx.set_signal(Signal::Rate(end_signal(rate_signal_for(
+                                self.agreed,
+                            ))));
                             self.enter(State::SendEnd);
                         }
                     }
                     // 5.4.1: "Transmission of R2 shall continue until an
                     // incoming rate signal R3 is detected."
                     Role::Calling => {
-                        let Some(s) = sequence else { return };
-                        if !is_rate_signal(s) && !is_end_signal(s) {
+                        // "until an incoming rate signal R3 is detected", and
+                        // a rate signal only. An E cannot arrive here: the
+                        // answering modem sends R3 until this end closes the
+                        // exchange, so this end goes first. Accepting one
+                        // anyway looks like tolerance and is not, because a
+                        // lone E is what scrambled data imitates most easily,
+                        // and the far end's training segment is on the line
+                        // for the whole of this wait.
+                        let Some(s) = sequence.filter(|&s| is_rate_signal(s)) else {
                             return;
-                        }
+                        };
                         let theirs = offered_rate(s);
                         if theirs == 0 {
                             // Table 6: no rate at all is a call to clear down.
@@ -987,7 +1063,9 @@ impl Startup {
                         } else {
                             self.agreed.min(theirs)
                         };
-                        tx.set_signal(Signal::Rate(end_signal(self.offer)));
+                        tx.set_signal(Signal::Rate(end_signal(rate_signal_for(
+                            self.agreed,
+                        ))));
                         self.enter(State::SendEnd);
                     }
                 }
@@ -996,6 +1074,13 @@ impl Startup {
                 // 5.3.2: one complete sixteen-bit sequence, which is eight
                 // symbols at two bits each.
                 if self.symbols >= 8 {
+                    // 5.4: the E just finished says what the scrambled ones
+                    // that follow it are coded at, so this is the moment the
+                    // transmitter changes rate and not one symbol earlier.
+                    // Everything before it -- conditioning signal, training
+                    // segment, both rate exchanges -- is two bits to the
+                    // symbol whatever was being negotiated.
+                    tx.set_data_rate(self.agreed);
                     tx.set_signal(Signal::ScrambledOnes);
                     self.enter(State::Settling);
                 }
@@ -1005,9 +1090,12 @@ impl Startup {
                     self.agreed = offered_rate(s);
                 }
                 if self.symbols >= timing::SETTLE {
-                    // Only 4800 is demodulated here, so anything else agreed
-                    // would be a rate this modem cannot actually receive.
                     let rate = if self.agreed == 0 { 4800 } else { self.agreed };
+                    // The far end changed rate as it finished its own E, which
+                    // was at least a hundred and twenty symbols ago whichever
+                    // end this is. If that E went unheard, this is the last
+                    // chance to end up demodulating what is actually arriving.
+                    rx.set_data_rate(rate);
                     self.state = State::Connected(rate);
                 }
             }
