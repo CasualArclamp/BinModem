@@ -19,7 +19,7 @@ pub enum Source {
     Capture,
     /// A modem of our own on a real line. The terminal below is its DTE: what
     /// is typed goes to the modem, and the modem answers for itself.
-    Live(Arc<live::Keyboard>),
+    Live(Arc<live::Session>),
 }
 
 impl Source {
@@ -60,6 +60,13 @@ pub struct ScopeApp {
     sample_rate: f64,
     console: Console,
     source: Source,
+    /// The line side of a live call: which devices are picked in the boxes,
+    /// and which modulation the next call will use.
+    line_inputs: Vec<String>,
+    line_outputs: Vec<String>,
+    chosen_input: usize,
+    chosen_output: usize,
+    carrier: usize,
     tab: Tab,
     font_size: f32,
     last_repaint: std::time::Instant,
@@ -73,6 +80,13 @@ impl ScopeApp {
         sample_rate: f64,
         source: Source,
     ) -> Self {
+        let inputs = line::input_devices();
+        let outputs = line::output_devices();
+        let pick = |names: &[String], want: &str| {
+            names.iter().position(|n| n.contains(want)).unwrap_or(0)
+        };
+        let chosen_in = pick(&inputs, "CABLE Output");
+        let chosen_out = pick(&outputs, "CABLE Input");
         Self {
             rx,
             control,
@@ -90,6 +104,13 @@ impl ScopeApp {
             sample_rate,
             console: Console::new(),
             source,
+            line_inputs: inputs,
+            line_outputs: outputs,
+            // A virtual cable is almost always the right answer, so it starts
+            // selected where there is one.
+            chosen_input: chosen_in,
+            chosen_output: chosen_out,
+            carrier: 1,
             tab: Tab::Terminal,
             font_size: 14.0,
             last_repaint: std::time::Instant::now(),
@@ -152,7 +173,7 @@ impl ScopeApp {
                     // its own and will echo, answer, and decide for itself
                     // what is a command and what is data. Nothing is parsed
                     // on this side of the line.
-                    Source::Live(keyboard) => keyboard.type_bytes(&typed),
+                    Source::Live(session) => session.type_bytes(&typed),
                     Source::Capture => {
                         let actions = self.console.typed(&typed);
                         self.perform(actions);
@@ -183,6 +204,195 @@ impl ScopeApp {
                 self.audio_error = Some(e);
             }
         }
+    }
+
+    /// Modulations the modem will accept, in the order the box shows them.
+    const CARRIERS: [(&'static str, &'static str); 3] = [
+        ("B103", "Bell 103 - 300 bit/s"),
+        ("V22B", "V.22bis - 1200 or 2400"),
+        ("V32", "V.32 - 4800 or 9600"),
+    ];
+
+    /// Choosing the line, and driving the call on it.
+    ///
+    /// The buttons do nothing the keyboard could not: each one types the
+    /// command it is named after. That is not a shortcut taken, it is the only
+    /// honest way to build them — the modem has one interface, and a button
+    /// that reached past it into the state machine would be able to ask for
+    /// things a terminal could not, and would drift from what the terminal
+    /// sees the moment either changed.
+    fn line_controls(&mut self, ui: &mut egui::Ui) {
+        let Source::Live(session) = &self.source else { return };
+        let session = Arc::clone(session);
+        let state = session.state();
+
+        // Follow the line rather than the boxes. A line opened from the
+        // command line was never chosen here, and a box showing something
+        // other than what is open is a box that will reopen the wrong device
+        // the moment anything else on this row is touched.
+        if state.open {
+            if let Some(i) = self.line_inputs.iter().position(|n| *n == state.input) {
+                self.chosen_input = i;
+            }
+            if let Some(i) = self.line_outputs.iter().position(|n| *n == state.output) {
+                self.chosen_output = i;
+            }
+        }
+
+        ui.horizontal_wrapped(|ui| {
+            let dim = Color32::from_rgb(140, 150, 165);
+            ui.label(RichText::new("line").monospace().color(dim));
+
+            let before = (self.chosen_input, self.chosen_output);
+            egui::ComboBox::from_id_salt("line-input")
+                .width(230.0)
+                .selected_text(
+                    self.line_inputs
+                        .get(self.chosen_input)
+                        .map(String::as_str)
+                        .unwrap_or("no input devices"),
+                )
+                .show_ui(ui, |ui| {
+                    for (i, name) in self.line_inputs.iter().enumerate() {
+                        ui.selectable_value(&mut self.chosen_input, i, name);
+                    }
+                });
+            egui::ComboBox::from_id_salt("line-output")
+                .width(230.0)
+                .selected_text(
+                    self.line_outputs
+                        .get(self.chosen_output)
+                        .map(String::as_str)
+                        .unwrap_or("no output devices"),
+                )
+                .show_ui(ui, |ui| {
+                    for (i, name) in self.line_outputs.iter().enumerate() {
+                        ui.selectable_value(&mut self.chosen_output, i, name);
+                    }
+                });
+
+            let picked = (self.chosen_input, self.chosen_output);
+            let have_both =
+                !self.line_inputs.is_empty() && !self.line_outputs.is_empty();
+            // Changing a device while the line is open moves the call onto the
+            // new one, which is what picking it means.
+            if picked != before && state.open && have_both {
+                session.open(
+                    &self.line_inputs[self.chosen_input],
+                    &self.line_outputs[self.chosen_output],
+                );
+            }
+
+            if state.open {
+                if ui.button("Close").on_hover_text("Put the line down").clicked() {
+                    session.close();
+                }
+            } else if ui
+                .add_enabled(have_both, egui::Button::new("Open"))
+                .on_hover_text("Open these two devices as one two-wire line")
+                .clicked()
+            {
+                session.open(
+                    &self.line_inputs[self.chosen_input],
+                    &self.line_outputs[self.chosen_output],
+                );
+            }
+
+            if state.open {
+                ui.label(
+                    RichText::new(format!("{} / {} Hz", state.input_rate, state.output_rate))
+                        .monospace()
+                        .color(dim),
+                );
+                if state.dropped > 0 {
+                    // Not a warning to be dismissed. Timing recovery cannot
+                    // know a sample went missing and reads the gap as the
+                    // clock having moved.
+                    ui.label(
+                        RichText::new(format!("{} samples lost", state.dropped))
+                            .monospace()
+                            .color(Color32::from_rgb(235, 100, 90)),
+                    );
+                }
+            }
+            if let Some(err) = &state.error {
+                ui.label(RichText::new(err).color(Color32::from_rgb(235, 100, 90)));
+            }
+        });
+
+        ui.horizontal_wrapped(|ui| {
+            let dim = Color32::from_rgb(140, 150, 165);
+            ui.label(RichText::new("call").monospace().color(dim));
+
+            let before = self.carrier;
+            egui::ComboBox::from_id_salt("carrier")
+                .width(180.0)
+                .selected_text(Self::CARRIERS[self.carrier].1)
+                .show_ui(ui, |ui| {
+                    for (i, (_, label)) in Self::CARRIERS.iter().enumerate() {
+                        ui.selectable_value(&mut self.carrier, i, *label);
+                    }
+                });
+            if self.carrier != before {
+                // Both ends have to agree: a modem listening for one of these
+                // hears nothing whatever of the others.
+                session.type_bytes(
+                    format!("AT+MS={}\r", Self::CARRIERS[self.carrier].0).as_bytes(),
+                );
+            }
+
+            let online = self.frame.state == telemetry::CallState::Connected;
+            let on_hook = self.frame.state == telemetry::CallState::Idle;
+
+            if ui
+                .add_enabled(on_hook, egui::Button::new("Originate"))
+                .on_hover_text(
+                    "ATD - be the calling modem. The softphone places the call; \
+                     this only decides which end of it this is",
+                )
+                .clicked()
+            {
+                session.type_bytes(b"ATD\r");
+            }
+            if ui
+                .add_enabled(on_hook, egui::Button::new("Answer"))
+                .on_hover_text("ATA - be the answering modem, and go first")
+                .clicked()
+            {
+                session.type_bytes(b"ATA\r");
+            }
+            // Two steps out of data state, and the button says which one it is
+            // on. A modem in data state is not listening for commands at all:
+            // the escape has to come first, and it wants a second of quiet
+            // either side, so this is deliberately two clicks and not one.
+            if online {
+                if ui
+                    .button("Escape")
+                    .on_hover_text(
+                        "+++ - back to command state without dropping the call. \
+                         Wants a second of quiet either side, so give it a moment",
+                    )
+                    .clicked()
+                {
+                    session.type_bytes(b"+++");
+                }
+            } else if ui
+                .add_enabled(!on_hook, egui::Button::new("Hang up"))
+                .on_hover_text("ATH - put the line down")
+                .clicked()
+            {
+                session.type_bytes(b"ATH\r");
+            }
+            ui.label(
+                RichText::new(self.frame.state.label())
+                    .monospace()
+                    .color(if online {
+                        Color32::from_rgb(90, 220, 130)
+                    } else {
+                        dim
+                    }),
+            );
+        });
     }
 
     fn audio_controls(&mut self, ui: &mut egui::Ui) {
@@ -282,6 +492,9 @@ impl ScopeApp {
     }
 
     fn controls(&mut self, ui: &mut egui::Ui) {
+        // The line and the call come first: on a live window they are the
+        // controls that matter and the rest is instrumentation.
+        self.line_controls(ui);
         ui.horizontal_wrapped(|ui| {
             // A live line cannot be paused, restarted or slowed down. It is
             // happening, at the rate the sound card is happening at, and a

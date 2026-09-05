@@ -10,12 +10,14 @@
 //!   modem-scope                                  the Bell 103 golden vector
 //!   modem-scope <path.wav>                       any capture
 //!   modem-scope --devices                        what audio this machine has
-//!   modem-scope --live --in <dev> --out <dev>    a modem on that line
+//!   modem-scope --live                           a modem, line chosen in the window
+//!   modem-scope --live --in <dev> --out <dev>    and opened straight away
 //! ```
 //!
-//! Both device names are required for `--live` and neither defaults. The
-//! default output on a desktop machine is whatever the speakers are plugged
-//! into, and a handshake played through speakers is no use to anyone.
+//! Neither device defaults, and `--live` on its own opens with no line rather
+//! than guessing at one. The default output on a desktop machine is whatever
+//! the speakers are plugged into, and a handshake played through speakers is
+//! no use to anyone.
 
 mod app;
 mod console;
@@ -75,7 +77,8 @@ fn parse() -> Result<Option<Args>, String> {
                 println!(
                     "modem-scope [path.wav]                        replay a capture\n\
                      modem-scope --devices                         list audio devices\n\
-                     modem-scope --live --in <dev> --out <dev>     a modem on a real line"
+                     modem-scope --live                            a modem, line chosen in the window\n\
+                     modem-scope --live --in <dev> --out <dev>     and opened straight away"
                 );
                 return Ok(None);
             }
@@ -85,8 +88,11 @@ fn parse() -> Result<Option<Args>, String> {
             other => args.path = Some(PathBuf::from(other)),
         }
     }
-    if args.live && (args.input.is_none() || args.output.is_none()) {
-        return Err("--live needs both --in and --out; see --devices".into());
+    // --in and --out are optional now: without them the window opens with no
+    // line and the devices are chosen there. Naming one and not the other is
+    // still a mistake worth catching.
+    if args.input.is_some() != args.output.is_some() {
+        return Err("--in and --out go together; see --devices".into());
     }
     Ok(Some(args))
 }
@@ -109,16 +115,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sink = Arc::new(AudioSink::new((sample_rate * 0.25) as usize));
 
     let (engine, source) = if args.live {
-        let keyboard = Arc::new(live::Keyboard::default());
-        let handle = live::spawn(
-            args.input.unwrap(),
-            args.output.unwrap(),
-            tx,
-            control.clone(),
-            keyboard.clone(),
-            sink.clone(),
-        )?;
-        (handle, Source::Live(keyboard))
+        let session = Arc::new(live::Session::default());
+        // Named devices open straight away; without them the window opens with
+        // the modem on the desk and no line in it, and the line panel is where
+        // one gets chosen.
+        if let (Some(input), Some(output)) = (&args.input, &args.output) {
+            session.open(input, output);
+        }
+        let handle = live::spawn(tx, control.clone(), session.clone(), sink.clone());
+        (handle, Source::Live(session))
     } else {
         let path = args.path.unwrap_or_else(default_vector);
         (

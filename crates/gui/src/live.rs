@@ -31,86 +31,116 @@ use crate::engine::{Control, FFT_SIZE, Ring, SCOPE_LEN, SPECTRUM_BINS, SYMBOL_HI
 /// converted to and from this inside [`line::Duplex`].
 const FS: f64 = 16_000.0;
 
-/// What the terminal has typed and the line has not yet taken.
-///
-/// The UI thread writes and the line thread reads. A mutex rather than a
-/// channel because the interesting operation is "take everything", and because
-/// a keystroke queue that has fallen behind is a bug rather than a thing to
-/// buffer around.
-#[derive(Debug, Default)]
-pub struct Keyboard {
-    typed: Mutex<Vec<u8>>,
+/// What the window has asked the line to do.
+#[derive(Debug, Clone)]
+enum Request {
+    Open { input: String, output: String },
+    Close,
 }
 
-impl Keyboard {
+/// What the line is doing, for the window to show.
+#[derive(Debug, Clone, Default)]
+pub struct LineState {
+    pub open: bool,
+    pub input: String,
+    pub output: String,
+    /// Rates the two devices are actually running at, which are rarely the
+    /// modem's and are converted on the way through.
+    pub input_rate: u32,
+    pub output_rate: u32,
+    /// Why the last attempt to open failed, if it did.
+    pub error: Option<String>,
+    /// Samples the modem was not there to take. Any at all is a fault.
+    pub dropped: u64,
+}
+
+/// The one thing the window and the line thread share.
+///
+/// Everything crossing between them is here: what has been typed, what the
+/// line has been asked to do, and what it is doing. Mutexes rather than
+/// channels because every one of these is "the current value" or "take what
+/// there is" rather than a stream to be buffered — a keystroke queue that has
+/// fallen behind is a bug, not something to grow.
+///
+/// The audio streams themselves cannot cross: on Windows a cpal stream is not
+/// `Send` and has to live on the thread that made it. That is the whole reason
+/// the line is opened by request rather than handed over.
+#[derive(Debug, Default)]
+pub struct Session {
+    typed: Mutex<Vec<u8>>,
+    request: Mutex<Option<Request>>,
+    state: Mutex<LineState>,
+}
+
+impl Session {
     pub fn type_bytes(&self, bytes: &[u8]) {
         if let Ok(mut q) = self.typed.lock() {
             q.extend_from_slice(bytes);
         }
     }
 
-    fn take(&self) -> Vec<u8> {
+    /// Ask for the line to be opened on these two devices.
+    ///
+    /// Replaces any line already open, which is what changing a device in the
+    /// window means.
+    pub fn open(&self, input: &str, output: &str) {
+        self.ask(Request::Open {
+            input: input.to_owned(),
+            output: output.to_owned(),
+        });
+    }
+
+    /// Put the line down. The modem stays: `AT` still answers `OK`.
+    pub fn close(&self) {
+        self.ask(Request::Close);
+    }
+
+    pub fn state(&self) -> LineState {
+        self.state.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    fn ask(&self, request: Request) {
+        if let Ok(mut slot) = self.request.lock() {
+            *slot = Some(request);
+        }
+    }
+
+    fn take_request(&self) -> Option<Request> {
+        self.request.lock().ok().and_then(|mut r| r.take())
+    }
+
+    fn take_typed(&self) -> Vec<u8> {
         self.typed.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default()
+    }
+
+    fn set_state(&self, state: LineState) {
+        if let Ok(mut slot) = self.state.lock() {
+            *slot = state;
+        }
     }
 }
 
-/// Open the line and start a modem on it.
+/// Start the modem. It has no line until the window gives it one.
 ///
-/// Both device names are required and neither defaults. The default output on
+/// There is no device here and no default, deliberately. The default output on
 /// a desktop machine is whatever the speakers are plugged into, and a modem
 /// handshake played through speakers is both useless and unpleasant.
 pub fn spawn(
-    input: String,
-    output: String,
     tx: Publisher,
     control: Arc<Control>,
-    keyboard: Arc<Keyboard>,
+    session: Arc<Session>,
     sink: Arc<AudioSink>,
-) -> Result<JoinHandle<()>, String> {
-    // The audio streams are opened on the thread that will own them, because
-    // that is where they have to live; the result comes back here so a bad
-    // device name is an error at start-up rather than a silent nothing.
-    let (ready, opened) = std::sync::mpsc::channel();
-    let handle = thread::spawn(move || {
-        let audio = match line::Duplex::open(Some(&input), Some(&output), FS) {
-            Ok(a) => {
-                let _ = ready.send(Ok(format!(
-                    "line open: out {} at {} Hz, in {} at {} Hz",
-                    a.output_device, a.output_rate, a.input_device, a.input_rate
-                )));
-                a
-            }
-            Err(e) => {
-                let _ = ready.send(Err(e));
-                return;
-            }
-        };
-        run(audio, tx, control, keyboard, sink);
-    });
-
-    match opened.recv() {
-        Ok(Ok(_note)) => Ok(handle),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err("the line thread stopped before it opened anything".into()),
-    }
+) -> JoinHandle<()> {
+    thread::spawn(move || run(tx, control, session, sink))
 }
 
-fn run(
-    audio: line::Duplex,
-    tx: Publisher,
-    control: Arc<Control>,
-    keyboard: Arc<Keyboard>,
-    sink: Arc<AudioSink>,
-) {
-    tx.log(
-        Direction::Note,
-        format!(
-            "line open: out {} at {} Hz, in {} at {} Hz",
-            audio.output_device, audio.output_rate, audio.input_device, audio.input_rate
-        ),
-    );
-    tx.log(Direction::Note, "type AT commands; ATD to dial, +++ to escape");
+fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<AudioSink>) {
+    tx.log(Direction::Note, "modem ready; choose a line and open it");
+    tx.log(Direction::Note, "type AT commands; ATD to dial, ATA to answer, +++ to escape");
 
+    // Opened and closed on request, and never handed across a thread: on
+    // Windows a cpal stream is not Send and has to stay where it was made.
+    let mut audio: Option<line::Duplex> = None;
     let mut modem = Modem::new(FS);
     let mut spectrum = Spectrum::new(FFT_SIZE, FS);
     let mut waveform = Ring::new(SCOPE_LEN);
@@ -133,11 +163,52 @@ fn run(
     let mut next_publish = Instant::now();
 
     while !control.quit.load(Ordering::Relaxed) {
+        if let Some(request) = session.take_request() {
+            // Dropping the old one stops its streams, which has to happen
+            // before the new ones open on the same device.
+            audio = None;
+            let mut state = LineState::default();
+            match request {
+                Request::Open { input, output } => {
+                    match line::Duplex::open(Some(&input), Some(&output), FS) {
+                        Ok(open) => {
+                            tx.log(
+                                Direction::Note,
+                                format!(
+                                    "line open: out {} at {} Hz, in {} at {} Hz",
+                                    open.output_device,
+                                    open.output_rate,
+                                    open.input_device,
+                                    open.input_rate
+                                ),
+                            );
+                            state = LineState {
+                                open: true,
+                                input: open.input_device.clone(),
+                                output: open.output_device.clone(),
+                                input_rate: open.input_rate,
+                                output_rate: open.output_rate,
+                                ..LineState::default()
+                            };
+                            audio = Some(open);
+                        }
+                        Err(e) => {
+                            tx.log(Direction::Note, format!("could not open the line: {e}"));
+                            state.error = Some(e);
+                        }
+                    }
+                }
+                Request::Close => tx.log(Direction::Note, "line closed"),
+            }
+            session.set_state(state);
+        }
+
         // Everything the terminal has typed since last time. This goes in
-        // whether or not the line has samples for us: a modem answers `AT`
-        // with `OK` while completely idle, and a terminal that had to wait for
-        // audio before its own modem would talk to it would feel broken.
-        let typed = keyboard.take();
+        // whether or not there is a line at all: a modem answers `AT` with
+        // `OK` sitting on a desk with nothing plugged into it, and a terminal
+        // that had to wait for audio before its own modem would talk to it
+        // would feel broken.
+        let typed = session.take_typed();
         if !typed.is_empty() {
             typed_recently = Instant::now();
             tx_bytes += typed.len() as u64;
@@ -145,6 +216,12 @@ fn run(
                 modem.feed_dte(*b);
             }
         }
+
+        let Some(audio) = audio.as_ref() else {
+            drain_dte(&mut modem, &tx, &mut rx_bytes, &mut heard_recently);
+            thread::sleep(Duration::from_millis(8));
+            continue;
+        };
 
         from_line.clear();
         audio.receive(&mut from_line);
@@ -248,7 +325,13 @@ fn run(
                     State::Command if modem.off_hook() => CallState::OffHook,
                     State::Command => CallState::Idle,
                     State::Handshaking => CallState::Negotiating,
-                    State::Data | State::OnlineCommand => CallState::Connected,
+                    State::Data => CallState::Connected,
+                    // The call is still up; the terminal has stepped back to
+                    // talking to the modem rather than through it. Off hook is
+                    // exactly what that is, and keeping it separate from
+                    // connected is what lets anything watching tell whether an
+                    // escape has already happened.
+                    State::OnlineCommand => CallState::OffHook,
                 };
                 f.modulation = modem.standard();
                 f.bit_rate = rate;
@@ -277,15 +360,17 @@ fn run(
                     ec: modem.error_controlled(),
                 };
             });
-        }
-    }
 
-    let lost = audio.dropped_in();
-    if lost > 0 {
-        tx.log(
-            Direction::Note,
-            format!("{lost} samples lost coming in: the line outran the modem"),
-        );
+            // A line that loses samples is one the modem is not keeping up
+            // with, and timing recovery has no way to know a sample went
+            // missing: it reads the gap as the clock having moved. Worth
+            // showing while it is happening rather than in a summary nobody
+            // reads.
+            let dropped = audio.dropped_in();
+            if let Ok(mut state) = session.state.lock() {
+                state.dropped = dropped;
+            }
+        }
     }
 }
 
