@@ -68,6 +68,19 @@ The terminal in the window is then the modem's DTE. Type `AT` and it answers
 `+++` escapes back to command state. The scopes show the call as it happens
 rather than a recording of somebody else's.
 
+To have something to dial, run `modem-answer` on the same cable. It puts a
+second modem on the line, answers, and echoes what is typed like the simplest
+possible board:
+
+```powershell
+modem-answer --in "<input device>" --out "<output device>" --carrier V22B
+```
+
+One cable is right for this. What comes back from it is what was written to
+it, summed with whatever else is writing, which is a two-wire pair with two
+modems across it. Reaching anything *outside* the machine is the part that
+needs a second cable.
+
 Only the Bell 103 capture decodes to text so far; the rest still show their
 handshakes on the waterfall, which is worth watching in its own right - the
 V.34 probing tones are clearly visible around six seconds in.
