@@ -30,6 +30,16 @@ pub struct AudioSink {
     /// leave rather than where they arrive, so turning it down takes effect
     /// now instead of a buffer's worth of audio later.
     volume: AtomicU32,
+    /// Whether enough has arrived to start playing.
+    ///
+    /// A monitor that plays the first sample the moment it arrives then has to
+    /// wait for the next one, and that wait is a gap. Filled by a thread and
+    /// emptied by a callback that share no clock, it never gets ahead on its
+    /// own: it sits at empty and every scheduling hiccup is a click, about ten
+    /// a second, which is what a call through this sounded like. So it fills
+    /// before it starts, and goes back to filling if it is ever emptied,
+    /// rather than clicking along the bottom.
+    primed: AtomicBool,
 }
 
 impl AudioSink {
@@ -43,6 +53,7 @@ impl AudioSink {
             overruns: AtomicU64::new(0),
             underruns: AtomicU64::new(0),
             volume: AtomicU32::new(0.5f32.to_bits()),
+            primed: AtomicBool::new(false),
         }
     }
 
@@ -65,8 +76,11 @@ impl AudioSink {
 
     pub fn set_enabled(&self, on: bool) {
         self.enabled.store(on, Ordering::Relaxed);
-        if !on && let Ok(mut b) = self.buf.lock() {
-            b.clear();
+        if !on {
+            self.primed.store(false, Ordering::Relaxed);
+            if let Ok(mut b) = self.buf.lock() {
+                b.clear();
+            }
         }
     }
 
@@ -92,12 +106,23 @@ impl AudioSink {
     fn drain(&self, out: &mut [f32]) -> usize {
         match self.buf.try_lock() {
             Ok(mut b) => {
+                if !self.primed.load(Ordering::Relaxed) {
+                    // A third of the buffer, which at the usual quarter second
+                    // is eighty milliseconds of cushion. Latency nobody
+                    // listening to a modem will notice, against a click every
+                    // callback, which everybody does.
+                    if b.len() < self.capacity / 3 {
+                        return 0;
+                    }
+                    self.primed.store(true, Ordering::Relaxed);
+                }
                 let n = out.len().min(b.len());
                 for slot in out.iter_mut().take(n) {
                     *slot = b.pop_front().unwrap_or(0.0);
                 }
                 if n < out.len() {
                     self.underruns.fetch_add(1, Ordering::Relaxed);
+                    self.primed.store(false, Ordering::Relaxed);
                 }
                 n
             }
@@ -253,13 +278,49 @@ mod tests {
     }
 
     #[test]
-    fn samples_come_back_in_order() {
+    fn nothing_plays_until_enough_has_arrived_to_play_from() {
+        // Three samples is not a cushion, it is three samples: play them and
+        // the next callback finds nothing, which is a click. A monitor filled
+        // by a thread and emptied by a callback that share no clock has to
+        // get ahead before it starts, or it never gets ahead at all.
         let sink = AudioSink::new(64);
         sink.set_enabled(true);
         sink.push(&[1.0, 2.0, 3.0]);
         let mut out = [0.0; 3];
-        assert_eq!(sink.drain(&mut out), 3);
-        assert_eq!(out, [1.0, 2.0, 3.0]);
+        assert_eq!(sink.drain(&mut out), 0, "started on three samples");
+        assert_eq!(out, [0.0; 3], "put something on the wire anyway");
+    }
+
+    #[test]
+    fn samples_come_back_in_order() {
+        let sink = AudioSink::new(64);
+        sink.set_enabled(true);
+        // Past the third of the buffer it fills to before starting.
+        sink.push(&[9.0; 22]);
+        sink.push(&[1.0, 2.0, 3.0]);
+        let mut out = [0.0; 22];
+        assert_eq!(sink.drain(&mut out), 22);
+        assert_eq!(out, [9.0; 22]);
+        let mut rest = [0.0; 3];
+        assert_eq!(sink.drain(&mut rest), 3);
+        assert_eq!(rest, [1.0, 2.0, 3.0], "came back out of order");
+    }
+
+    #[test]
+    fn running_dry_stops_it_playing_until_it_has_filled_again() {
+        // Otherwise it clicks along the bottom of an empty buffer, once a
+        // callback, for as long as the source is behind.
+        let sink = AudioSink::new(64);
+        sink.set_enabled(true);
+        sink.push(&[1.0; 32]);
+        // Asked for more than there is, which is the moment it fell behind.
+        let mut out = [0.0; 40];
+        assert_eq!(sink.drain(&mut out), 32);
+        assert_eq!(sink.underruns(), 1);
+
+        sink.push(&[2.0; 3]);
+        let mut short = [0.0; 3];
+        assert_eq!(sink.drain(&mut short), 0, "played from an empty buffer");
     }
 
     #[test]
@@ -277,9 +338,10 @@ mod tests {
     fn a_short_read_is_recorded_as_an_underrun() {
         let sink = AudioSink::new(64);
         sink.set_enabled(true);
-        sink.push(&[1.0, 2.0]);
-        let mut out = [0.0; 8];
-        assert_eq!(sink.drain(&mut out), 2);
+        // Enough to start playing, then asked for more than is there.
+        sink.push(&[1.0; 24]);
+        let mut out = [0.0; 32];
+        assert_eq!(sink.drain(&mut out), 24);
         assert_eq!(sink.underruns(), 1);
     }
 

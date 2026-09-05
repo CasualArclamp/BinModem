@@ -290,6 +290,22 @@ impl ScopeApp {
                 if ui.button("Close").on_hover_text("Put the line down").clicked() {
                     session.close();
                 }
+                // Both directions, kept apart. What makes a call worth
+                // keeping is usually not obvious until it has gone wrong.
+                let recording = session.recording();
+                let label = match state.recording {
+                    Some(secs) => format!("Stop  {secs:.0} s"),
+                    None => "Record".to_owned(),
+                };
+                if ui
+                    .selectable_label(recording, label)
+                    .on_hover_text(
+                        "Keep the call as a stereo file: what arrived on one                          channel, what was sent on the other, so it can be run                          through a receiver again afterwards",
+                    )
+                    .clicked()
+                {
+                    session.set_recording(!recording);
+                }
             } else if ui
                 .add_enabled(have_both, egui::Button::new("Open"))
                 .on_hover_text("Open these two devices as one two-wire line")
@@ -307,6 +323,16 @@ impl ScopeApp {
                         .monospace()
                         .color(dim),
                 );
+                if state.underruns > 0 {
+                    ui.label(
+                        RichText::new(format!("{} gaps sent", state.underruns))
+                            .monospace()
+                            .color(Color32::from_rgb(235, 100, 90)),
+                    )
+                    .on_hover_text(
+                        "Times the line had nothing to send and sent silence.                          The far end hears a dropout",
+                    );
+                }
                 if state.dropped > 0 {
                     // Not a warning to be dismissed. Timing recovery cannot
                     // know a sample went missing and reads the gap as the
@@ -320,6 +346,13 @@ impl ScopeApp {
             }
             if let Some(err) = &state.error {
                 ui.label(RichText::new(err).color(Color32::from_rgb(235, 100, 90)));
+            }
+            if let Some(path) = &state.recorded_to {
+                ui.label(
+                    RichText::new(path)
+                        .monospace()
+                        .color(Color32::from_rgb(120, 200, 150)),
+                );
             }
 
             // Transmit level. On a real line this is not decoration: too low

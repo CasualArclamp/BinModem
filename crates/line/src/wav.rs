@@ -27,6 +27,21 @@ impl Wav {
             .collect()
     }
 
+    /// One channel on its own, counting from zero.
+    ///
+    /// The counterpart of `mono` and the opposite intention. Averaging is
+    /// right for a file whose channels are the same tap twice; it is exactly
+    /// wrong for a recording of a live call, whose two channels are the two
+    /// directions and whose whole value is that they were never added
+    /// together.
+    pub fn channel(&self, index: usize) -> Vec<f32> {
+        let ch = self.channels.max(1) as usize;
+        if index >= ch {
+            return Vec::new();
+        }
+        self.samples.iter().skip(index).step_by(ch).copied().collect()
+    }
+
     pub fn duration_secs(&self) -> f64 {
         self.samples.len() as f64 / (self.sample_rate as f64 * self.channels as f64)
     }
@@ -100,7 +115,26 @@ pub fn read<P: AsRef<Path>>(path: P) -> io::Result<Wav> {
 /// lives within about 40 dB, and the thing at the far end is a telephone
 /// network that will do far worse to it than quantising ever could.
 pub fn write<P: AsRef<Path>>(path: P, samples: &[f32], sample_rate: u32) -> io::Result<()> {
+    write_channels(path, samples, 1, sample_rate)
+}
+
+/// Write interleaved 16-bit PCM with `channels` channels.
+///
+/// Two channels is what a recording of a live call wants, and not for stereo:
+/// one carries what arrived and the other what was sent at the same instant.
+/// Kept apart, a capture can be replayed through a receiver as many times as
+/// it takes, with the other half of the conversation there to check the answer
+/// against. Summed into one, that is gone -- which is exactly the difficulty
+/// with a two-wire capture of somebody else's call, where both directions
+/// arrive already added together and no amount of filtering can undo it.
+pub fn write_channels<P: AsRef<Path>>(
+    path: P,
+    samples: &[f32],
+    channels: u16,
+    sample_rate: u32,
+) -> io::Result<()> {
     let data_bytes = samples.len() * 2;
+    let block_align = u32::from(channels) * 2;
     let mut out = Vec::with_capacity(44 + data_bytes);
 
     out.extend_from_slice(b"RIFF");
@@ -110,10 +144,10 @@ pub fn write<P: AsRef<Path>>(path: P, samples: &[f32], sample_rate: u32) -> io::
     out.extend_from_slice(b"fmt ");
     out.extend_from_slice(&16u32.to_le_bytes()); // chunk size
     out.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    out.extend_from_slice(&1u16.to_le_bytes()); // one channel
+    out.extend_from_slice(&channels.to_le_bytes());
     out.extend_from_slice(&sample_rate.to_le_bytes());
-    out.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // bytes per second
-    out.extend_from_slice(&2u16.to_le_bytes()); // block align
+    out.extend_from_slice(&(sample_rate * block_align).to_le_bytes()); // bytes per second
+    out.extend_from_slice(&(block_align as u16).to_le_bytes());
     out.extend_from_slice(&16u16.to_le_bytes()); // bits per sample
 
     out.extend_from_slice(b"data");
@@ -164,5 +198,46 @@ mod write_tests {
         assert!(back.samples[0] > 0.9, "wrapped to {}", back.samples[0]);
         assert!(back.samples[1] < -0.9, "wrapped to {}", back.samples[1]);
         let _ = fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod stereo_tests {
+    use super::*;
+
+    #[test]
+    fn two_channels_survive_being_written_and_read_apart() {
+        // The recording of a live call is only worth having if the direction
+        // that arrived and the direction that was sent come back separately.
+        // Averaged together they are a two-wire tap, which is the thing that
+        // cannot be undone.
+        let dir = std::env::temp_dir().join("dialupmodem2-wav-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("stereo.wav");
+
+        let heard: Vec<f32> = (0..1000).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
+        let sent: Vec<f32> = (0..1000).map(|i| (i as f32 * 0.03).cos() * 0.25).collect();
+        let mut interleaved = Vec::with_capacity(2000);
+        for (h, s) in heard.iter().zip(sent.iter()) {
+            interleaved.push(*h);
+            interleaved.push(*s);
+        }
+        write_channels(&path, &interleaved, 2, 16_000).expect("write");
+
+        let back = read(&path).expect("read");
+        assert_eq!(back.channels, 2);
+        assert_eq!(back.sample_rate, 16_000);
+        assert_eq!(back.duration_secs(), 1000.0 / 16_000.0);
+
+        // Sixteen bits, so exact equality is not on offer; one part in a
+        // thousand is far tighter than anything a receiver would notice.
+        for (got, want) in back.channel(0).iter().zip(heard.iter()) {
+            assert!((got - want).abs() < 1.0e-3, "left channel: {got} vs {want}");
+        }
+        for (got, want) in back.channel(1).iter().zip(sent.iter()) {
+            assert!((got - want).abs() < 1.0e-3, "right channel: {got} vs {want}");
+        }
+        assert!(back.channel(2).is_empty(), "invented a third channel");
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -12,7 +12,7 @@
 //! one step, and what it hands back goes out. Nothing here paces itself against
 //! a wall clock, because the sound card already is one.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -52,6 +52,14 @@ pub struct LineState {
     pub error: Option<String>,
     /// Samples the modem was not there to take. Any at all is a fault.
     pub dropped: u64,
+    /// Times the line had nothing to send and sent silence instead. The one
+    /// that decides whether a call works, and quite separate from the monitor
+    /// running dry, which only decides whether it sounds nice in the room.
+    pub underruns: u64,
+    /// Seconds of call recorded so far, if a recording is running.
+    pub recording: Option<f64>,
+    /// Where the last recording was written.
+    pub recorded_to: Option<String>,
     /// Loudest sample put on the line lately, as a fraction of full scale.
     ///
     /// Worth watching, because the modulations differ enormously in how peaky
@@ -81,6 +89,8 @@ pub struct Session {
     state: Mutex<LineState>,
     /// How hard to drive the line, as an f32 in its bit pattern.
     drive: AtomicU32,
+    /// Whether to keep what goes past, for looking at afterwards.
+    recording: AtomicBool,
 }
 
 impl Default for Session {
@@ -90,6 +100,7 @@ impl Default for Session {
             request: Mutex::default(),
             state: Mutex::default(),
             drive: AtomicU32::new(DEFAULT_DRIVE.to_bits()),
+            recording: AtomicBool::new(false),
         }
     }
 }
@@ -108,6 +119,16 @@ impl Session {
     /// How hard the line is being driven.
     pub fn drive(&self) -> f32 {
         f32::from_bits(self.drive.load(Ordering::Relaxed))
+    }
+
+    /// Whether the call is being kept.
+    pub fn recording(&self) -> bool {
+        self.recording.load(Ordering::Relaxed)
+    }
+
+    /// Start or stop keeping it. Stopping writes the file.
+    pub fn set_recording(&self, on: bool) {
+        self.recording.store(on, Ordering::Relaxed);
     }
 
     /// Set it. A real modem has a transmit level and it is not decoration:
@@ -200,6 +221,14 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     let mut to_line: Vec<f32> = Vec::with_capacity(4096);
     let mut rx_bytes = 0u64;
     let mut tx_bytes = 0u64;
+    // What arrived and what was sent, interleaved, so the two stay lined up
+    // sample for sample. That pairing is the whole value of the thing: a
+    // capture of somebody else's two-wire call has both directions already
+    // summed and no filter can pull them apart again, whereas this can be run
+    // through a receiver as many times as it takes with the other half of the
+    // conversation there to check the answer against.
+    let mut recording: Vec<f32> = Vec::new();
+    let mut was_recording = false;
     let mut tx_peak = 0.0f32;
     let mut typed_recently = Instant::now() - Duration::from_secs(1);
     let mut heard_recently = typed_recently;
@@ -308,6 +337,39 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             waveform.push(s);
         }
         audio.transmit(&to_line);
+
+        let recording_now = session.recording();
+        if recording_now {
+            if !was_recording {
+                recording.clear();
+                tx.log(Direction::Note, "recording");
+            }
+            // Half an hour at sixteen thousand samples a second in two
+            // channels is a hundred and fifteen megabytes, which is where
+            // this stops rather than filling the machine. A modem call worth
+            // looking at is over in minutes.
+            const LIMIT: usize = 16_000 * 2 * 60 * 30;
+            if recording.len() < LIMIT {
+                for (heard, sent) in from_line.iter().zip(to_line.iter()) {
+                    recording.push(*heard);
+                    recording.push(*sent);
+                }
+            }
+        } else if was_recording {
+            let seconds = recording.len() as f64 / 2.0 / FS;
+            match save(&recording) {
+                Ok(path) => {
+                    tx.log(Direction::Note, format!("kept {seconds:.1} s as {path}"));
+                    if let Ok(mut state) = session.state.lock() {
+                        state.recorded_to = Some(path);
+                    }
+                }
+                Err(e) => tx.log(Direction::Note, format!("could not write it: {e}")),
+            }
+            recording = Vec::new();
+        }
+        was_recording = recording_now;
+
         // Decays rather than resets, so a peak stays up long enough to read
         // instead of flickering past between repaints.
         let block_peak = to_line.iter().fold(0.0f32, |m, s| m.max(s.abs()));
@@ -418,12 +480,33 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             // showing while it is happening rather than in a summary nobody
             // reads.
             let dropped = audio.dropped_in();
+            let underruns = audio.underruns();
             if let Ok(mut state) = session.state.lock() {
                 state.dropped = dropped;
+                state.underruns = underruns;
                 state.tx_peak = tx_peak;
+                state.recording = recording_now
+                    .then(|| recording.len() as f64 / 2.0 / FS);
             }
         }
     }
+}
+
+/// Write a recording out, and say where it went.
+///
+/// Named by the clock rather than by anything about the call, because what
+/// makes one of these worth keeping is usually not known until afterwards.
+fn save(samples: &[f32]) -> Result<String, String> {
+    let dir = std::path::Path::new("captures");
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = dir.join(format!("live-{stamp}.wav"));
+    // Two channels: what arrived, and what was sent at the same instant.
+    line::wav::write_channels(&path, samples, 2, FS as u32).map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
 }
 
 /// Hand the terminal everything the modem has to say.
