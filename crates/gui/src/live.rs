@@ -56,6 +56,11 @@ pub struct LineState {
     /// that decides whether a call works, and quite separate from the monitor
     /// running dry, which only decides whether it sounds nice in the room.
     pub underruns: u64,
+    /// Characters that arrived with their stop bit in the wrong place, and how
+    /// fast that is happening. A steady trickle is noise on the line; a burst
+    /// is a network that dropped something, and they want different answers.
+    pub framing_errors: u64,
+    pub framing_errors_per_second: f64,
     /// Seconds of call recorded so far, if a recording is running.
     pub recording: Option<f64>,
     /// Where the last recording was written.
@@ -230,6 +235,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     let mut recording: Vec<f32> = Vec::new();
     let mut was_recording = false;
     let mut tx_peak = 0.0f32;
+    let (mut errors_before, mut errors_at) = (0u64, Instant::now());
     let mut typed_recently = Instant::now() - Duration::from_secs(1);
     let mut heard_recently = typed_recently;
     let mut last_state = State::Command;
@@ -487,6 +493,15 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 state.tx_peak = tx_peak;
                 state.recording = recording_now
                     .then(|| recording.len() as f64 / 2.0 / FS);
+                let errors = modem.framing_errors();
+                let since = errors_at.elapsed().as_secs_f64();
+                if since >= 1.0 {
+                    state.framing_errors_per_second =
+                        (errors - errors_before) as f64 / since;
+                    errors_before = errors;
+                    errors_at = Instant::now();
+                }
+                state.framing_errors = errors;
             }
         }
     }

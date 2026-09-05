@@ -333,6 +333,19 @@ impl ScopeApp {
                         "Times the line had nothing to send and sent silence.                          The far end hears a dropout",
                     );
                 }
+                if state.framing_errors > 0 {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} bad frames ({:.0}/s)",
+                            state.framing_errors, state.framing_errors_per_second
+                        ))
+                        .monospace()
+                        .color(Color32::from_rgb(230, 180, 90)),
+                    )
+                    .on_hover_text(
+                        "Characters whose stop bit was in the wrong place. A few                          a second is noise on the line; dozens at once with quiet                          in between is a network dropping packets, which only                          error control hides",
+                    );
+                }
                 if state.dropped > 0 {
                     // Not a warning to be dismissed. Timing recovery cannot
                     // know a sample went missing and reads the gap as the

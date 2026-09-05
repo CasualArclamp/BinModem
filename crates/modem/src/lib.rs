@@ -420,6 +420,19 @@ impl Modem {
         }
     }
 
+    /// Characters whose stop bit was not where it should have been.
+    ///
+    /// Only meaningful on a connection with no error control, which is the
+    /// only kind that puts start-stop framing on the line. It is the cheapest
+    /// measure of how a link is really doing, and more than that it says what
+    /// *kind* of trouble it is in: errors from noise arrive evenly, a few a
+    /// second, for as long as the noise lasts, while errors from a network
+    /// that lost a packet arrive dozens at a time with nothing in between. The
+    /// two want completely different answers and look identical in the text.
+    pub fn framing_errors(&self) -> u64 {
+        self.async_bits.framing_errors()
+    }
+
     /// Whether error control is running on the current call.
     pub fn error_controlled(&self) -> bool {
         self.ec.as_ref().is_some_and(Stack::is_connected)
