@@ -46,6 +46,14 @@ pub struct Modulation {
     pub carrier: String,
     /// Whether the DCE may fall back to another modulation on its own.
     pub automode: bool,
+    /// The lowest and highest line rates the connection may use.
+    ///
+    /// Zero in either is not a rate. 6.4.1: "if unspecified (set to 0), they
+    /// are determined by the modulation means selected in the `<carrier>` and
+    /// `<automode>` settings" -- so zero is the absence of a limit, and
+    /// anything comparing against these has to know that. An earlier default
+    /// of 4800 here was a number nobody had asked for, and it quietly held
+    /// V.32 to its slower rate for every terminal that had not said otherwise.
     pub min_rate: u32,
     pub max_rate: u32,
 }
@@ -235,8 +243,8 @@ impl Interpreter {
             modulation: Modulation {
                 carrier: "V22B".into(),
                 automode: true,
-                min_rate: 300,
-                max_rate: 4800,
+                min_rate: 0,
+                max_rate: 0,
             },
             error_control: ErrorControl::default(),
             compression: true,
@@ -546,9 +554,10 @@ impl Interpreter {
                 if automode > 1 {
                     return Err(ResultCode::Error);
                 }
-                let min_rate = number(parts.next(), 300)?;
-                let max_rate = number(parts.next(), 4800)?;
-                if min_rate > max_rate {
+                // Omitted is unspecified, which is zero, which is no limit.
+                let min_rate = number(parts.next(), 0)?;
+                let max_rate = number(parts.next(), 0)?;
+                if max_rate != 0 && min_rate > max_rate {
                     return Err(ResultCode::Error);
                 }
                 self.modulation = Modulation {

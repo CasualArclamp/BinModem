@@ -32,7 +32,7 @@ and the COM port that would let Windows dial it.
 | `v8` - the CM/JM/CI/CJ messages and the mode selection between them | working |
 | `v8` - ANSam, told from V.25's plain answering tone by its modulation | working |
 | `datapump::v8` - the V.21 channels and the clause 8 procedure on them | working |
-| `v8` - wiring into the modem, so ATD negotiates before it starts | not started |
+| `modem` - V.8 before every call, chosen by V.250's automode | working |
 | `gui` - waterfall, spectrum, symbol scope, faceplate, audio monitor, console | working |
 | `gui --live` - a modem on a real line, with the terminal wired to it | working |
 | `gui --telnet` - the terminal alone, on a board over a socket | working |
@@ -92,6 +92,12 @@ answers and `+++` escapes back to command state. The buttons above do exactly
 those and nothing else — the modem has one interface, and a button that reached
 past it would be able to ask for things a terminal could not. The scopes show
 the call as it happens rather than a recording of somebody else's.
+
+An ordinary `ATD` now negotiates before it starts. V.250 6.4.1 names the
+mechanism — `<automode>` "enables or disables automatic modulation negotiation
+(e.g., Annex A/V.32 bis or ITU-T Rec. V.8)" — and it is on by default, so the
+two ends exchange call menus over V.21 and both enter the same modulation
+instead of each guessing. `AT+MS=V22B,0` turns it off and means what it says.
 
 **Advanced** beside the modulation box opens the rest of `AT+MS` — V.250
 6.4.1's other three subparameters — as toggles and boxes rather than something

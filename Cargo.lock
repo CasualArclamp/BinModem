@@ -1280,6 +1280,7 @@ dependencies = [
  "datapump",
  "ec",
  "line",
+ "v8",
 ]
 
 [[package]]

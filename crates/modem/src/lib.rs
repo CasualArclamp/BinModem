@@ -27,6 +27,8 @@ use datapump::AsyncBits;
 use datapump::bell103;
 use datapump::v22bis;
 use datapump::v32;
+use datapump::v8 as v8line;
+use v8::{CallFunction, Modulation, Modulations};
 use ec::stack::Phase;
 use ec::xid::Compression;
 use ec::{Params, Role as EcRole, Stack};
@@ -117,10 +119,13 @@ impl Pump {
     fn carrier(&self) -> bool {
         match self {
             Self::V22bis(m) => m.carrier(),
-            // V.32's start-up measures the line rather than watching a carrier
-            // detector, and once it has connected the receiver's own is what
-            // says the far end is still there.
-            Self::V32(_) => true,
+            // V.32's start-up measures the line rather than watching a
+            // carrier detector, but once connected the receiver has one and it
+            // is the only thing that will notice the far end hanging up.
+            // Answering `true` here meant a V.32 call never ended: the near end
+            // went back to command state and the far end sat in data for ever,
+            // waiting for a carrier that had gone before it started waiting.
+            Self::V32(m) => m.carrier(),
             Self::Bell103(m) => m.carrier(),
         }
     }
@@ -296,6 +301,14 @@ pub struct Modem {
     elapsed_samples: f64,
     /// Milliseconds since the call was placed, for the guard in V.250 5.6.1.
     since_dial_ms: u32,
+    /// The V.8 negotiation, while one is running.
+    ///
+    /// It comes before the data pump and instead of it. Every modem
+    /// Recommendation's start-up assumes both ends already agree which one is
+    /// being followed, and nothing in any of them says so; V.8 is the
+    /// conversation that settles it, and it has to finish before there is a
+    /// pump to build.
+    negotiation: Option<v8line::Modem>,
 }
 
 impl Modem {
@@ -314,6 +327,7 @@ impl Modem {
             async_bits: AsyncBits::new(8),
             elapsed_samples: 0.0,
             since_dial_ms: 0,
+            negotiation: None,
         }
     }
 
@@ -342,6 +356,9 @@ impl Modem {
 
     /// Which step of the handshake the line is on.
     pub fn line_phase(&self) -> &'static str {
+        if let Some(negotiation) = self.negotiation.as_ref() {
+            return negotiation.phase();
+        }
         self.pump.as_ref().map_or("on hook", Pump::phase)
     }
 
@@ -394,6 +411,9 @@ impl Modem {
 
     /// The modulation in use, or the one the next call will use.
     pub fn standard(&self) -> &'static str {
+        if self.negotiation.is_some() {
+            return "V.8";
+        }
         match self.pump.as_ref() {
             Some(p) => p.standard(),
             None => match self.at.modulation.carrier.as_str() {
@@ -406,7 +426,11 @@ impl Modem {
 
     /// Whether the line is off hook, which is to say there is a call on it.
     pub fn off_hook(&self) -> bool {
-        self.pump.is_some()
+        // A negotiation is a call too. It is the first thing on the line after
+        // the far end picks up, and a front panel that showed the lamp out
+        // until a pump existed would show it out for the loudest three seconds
+        // of the call.
+        self.pump.is_some() || self.negotiation.is_some()
     }
 
     /// Whether the far end's carrier is present.
@@ -521,6 +545,10 @@ impl Modem {
             let whole = (self.elapsed_samples * ms) as u32;
             self.elapsed_samples -= f64::from(whole) / ms;
             self.tick(whole);
+        }
+
+        if self.negotiation.is_some() {
+            return self.negotiate(line);
         }
 
         let Some(pump) = self.pump.as_mut() else {
@@ -696,7 +724,123 @@ impl Modem {
     fn place_call(&mut self, role: Role) {
         self.role = role;
         self.since_dial_ms = 0;
-        self.pump = Some(match self.at.modulation.carrier.as_str() {
+        self.rate = 0;
+        self.ec = None;
+        self.outbound.clear();
+        self.async_bits.reset();
+        self.state = State::Handshaking;
+
+        // V.250 6.4.1's automode: the modem "may fall back to another
+        // modulation on its own". V.8 is how two modems do that on purpose
+        // rather than by each guessing and hoping, so that is what automode
+        // means here. With it off, the modulation named is the modulation
+        // used and there is nothing to negotiate.
+        let offered = self.offered();
+        if self.at.modulation.automode && !offered.is_empty() {
+            let role = match role {
+                Role::Calling => v8line::Role::Calling,
+                Role::Answering => v8line::Role::Answering,
+            };
+            self.pump = None;
+            self.negotiation = Some(v8line::Modem::new(
+                role,
+                CallFunction::Data,
+                offered,
+                self.fs,
+            ));
+            return;
+        }
+        self.start_pump(None);
+    }
+
+    /// What to put in a call menu.
+    ///
+    /// Only what this modem can actually demodulate, and only inside the range
+    /// `+MS` asked for -- offering a modulation and then failing to hold it is
+    /// worse than never offering it, and the whole value of the exchange is
+    /// that what comes back can be believed.
+    ///
+    /// Bell 103 is not in the list and cannot be: Table 4 of V.8 is a table of
+    /// V-series modulations and Bell 103 is not one of them. A modem told to
+    /// use it is therefore told something V.8 has no way to express, and the
+    /// honest answer is not to negotiate at all.
+    fn offered(&self) -> Modulations {
+        let (lowest, highest) = self.rate_range();
+        let settings = &self.at.modulation;
+        let Some(preferred) = (match settings.carrier.as_str() {
+            "V32" => Some(Modulation::V32bis),
+            "B103" => None,
+            _ => Some(Modulation::V22bis),
+        }) else {
+            return Modulations::NONE;
+        };
+        let mut offered = Modulations::NONE;
+        offered.insert(preferred);
+        // Everything else this modem has, within the rates asked for. V.32
+        // starts at 4800 and V.22bis spans 1200 to 2400, so a ceiling of 1200
+        // rules the first out entirely rather than merely discouraging it.
+        if highest >= 4800 {
+            offered.insert(Modulation::V32bis);
+        }
+        if highest >= 1200 && lowest <= 2400 {
+            offered.insert(Modulation::V22bis);
+        }
+        offered
+    }
+
+    /// The rate range `+MS` asked for, with V.250's "unspecified" resolved.
+    ///
+    /// 6.4.1 makes zero mean no limit rather than a rate of nothing, so every
+    /// comparison wants it turned into the limit it stands for first.
+    fn rate_range(&self) -> (u32, u32) {
+        let settings = &self.at.modulation;
+        let highest = if settings.max_rate == 0 { u32::MAX } else { settings.max_rate };
+        (settings.min_rate, highest)
+    }
+
+    /// Carry the negotiation one sample further, and build the pump when it
+    /// has decided.
+    fn negotiate(&mut self, line: f64) -> f64 {
+        let negotiation = self.negotiation.as_mut().expect("checked by the caller");
+        let out = negotiation.step(line);
+        match negotiation.status() {
+            v8line::Status::Negotiating => {}
+            v8line::Status::Agreed(modulation) => {
+                self.negotiation = None;
+                self.start_pump(Some(modulation));
+            }
+            // 8.1.1: a far end that sent the plain answering tone of V.25 does
+            // not speak V.8, and the call goes on "in accordance with Annex
+            // A/V.32 bis, ITU-T T.30, or other appropriate Recommendations" --
+            // which here means the modulation +MS named, exactly as before any
+            // of this existed.
+            v8line::Status::NoNegotiation => {
+                self.negotiation = None;
+                self.start_pump(None);
+            }
+            // Nothing in common, or nothing heard. Both ends know, which is
+            // the difference between this and a minute of silence.
+            v8line::Status::Failed => {
+                self.negotiation = None;
+                self.end_call(Ended::NoAnswer);
+            }
+        }
+        out
+    }
+
+    /// Build the data pump and let its own start-up begin.
+    ///
+    /// `chosen` is what V.8 agreed, where it ran. Without one the modulation
+    /// is whichever `+MS` named.
+    fn start_pump(&mut self, chosen: Option<Modulation>) {
+        let role = self.role;
+        let carrier = match chosen {
+            Some(Modulation::V32bis) => "V32".to_owned(),
+            Some(Modulation::V22bis) => "V22B".to_owned(),
+            // Nothing else is ever offered, so nothing else can come back.
+            _ => self.at.modulation.carrier.clone(),
+        };
+        self.pump = Some(match carrier.as_str() {
             "V32" => {
                 let hs_role = match role {
                     Role::Calling => v32::startup::Role::Calling,
@@ -709,7 +853,17 @@ impl Modem {
                 // 2.4.1.1, which is the alternative every V.32 modem is
                 // required to be able to fall back on. Trellis coding is not,
                 // so B8 of the rate signal stays clear.
-                let offer = v32::startup::rate_signal(true, true);
+                //
+                // And only within the range +MS allows. <max_rate> is "the
+                // highest value at which the DCE may establish a connection",
+                // which is not advice: a modem that offers 9600 to a terminal
+                // that asked for at most 4800 will get 9600, because the far
+                // end has no way to know it was not meant.
+                let (lowest, highest) = self.rate_range();
+                let offer = v32::startup::rate_signal(
+                    highest >= 4800 && lowest <= 4800,
+                    highest >= 9600,
+                );
                 Pump::V32(Box::new(v32::startup::Modem::new(hs_role, offer, self.fs)))
             }
             "B103" => {
@@ -729,7 +883,7 @@ impl Modem {
                 // to be told apart and the four of 1200 need about 13, so on
                 // a line that cannot give the first, 2400 is not the faster
                 // connection but the one that carries nothing.
-                let ceiling = if self.at.modulation.max_rate >= 2400 {
+                let ceiling = if self.rate_range().1 >= 2400 {
                     v22bis::Rate::Bps2400
                 } else {
                     v22bis::Rate::Bps1200
@@ -739,15 +893,12 @@ impl Modem {
                 )))
             }
         });
-        self.rate = 0;
-        self.ec = None;
-        self.outbound.clear();
-        self.async_bits.reset();
         self.state = State::Handshaking;
     }
 
     fn end_call(&mut self, why: Ended) {
         self.pump = None;
+        self.negotiation = None;
         self.rate = 0;
         self.ec = None;
         self.outbound.clear();

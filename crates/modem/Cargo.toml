@@ -9,6 +9,7 @@ at       = { path = "../at" }
 datapump = { path = "../datapump" }
 ec       = { path = "../ec" }
 line     = { path = "../line" }
+v8       = { path = "../v8" }
 
 [lints]
 workspace = true

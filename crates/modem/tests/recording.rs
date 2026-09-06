@@ -24,7 +24,11 @@ fn record(carrier: &str, text: &str, seconds: f64) -> Vec<f32> {
     let mut caller = Modem::new(FS);
     let mut host = Modem::new(FS);
     for m in [&mut caller, &mut host] {
-        for b in format!("AT+MS={carrier}\r").bytes() {
+        // Automode off. These are about one modulation over one line, and
+        // with it on the modem would negotiate its way to whichever
+        // modulation the two ends liked best -- which is the right
+        // answer to a different question.
+        for b in format!("AT+MS={carrier},0\r").bytes() {
             m.feed_dte(b);
         }
         m.take_dte();

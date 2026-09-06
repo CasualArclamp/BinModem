@@ -81,9 +81,12 @@ struct Modulation {
 
 impl Default for Modulation {
     fn default() -> Self {
-        // V.250 6.4.1: automode on, and the widest range, which is what the AT
-        // layer starts with too.
-        Self { automode: true, min_rate: 300, max_rate: 4800 }
+        // V.250 6.4.1: automode on, and both rates unspecified. Zero is not a
+        // rate -- "if unspecified (set to 0), they are determined by the
+        // modulation means selected" -- so this is the widest range there is,
+        // and `fit` turns it into the chosen modulation's own the moment the
+        // window opens.
+        Self { automode: true, min_rate: 0, max_rate: 0 }
     }
 }
 
@@ -1340,7 +1343,7 @@ mod modulation_tests {
         // composes the command that changes nothing.
         let m = Modulation::default();
         assert!(m.automode);
-        assert_eq!((m.min_rate, m.max_rate), (300, 4800));
+        assert_eq!((m.min_rate, m.max_rate), (0, 0), "a limit nobody asked for");
     }
 
     #[test]

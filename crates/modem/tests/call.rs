@@ -95,8 +95,14 @@ fn dialling_reaches_a_connection_and_says_so() {
     }
     // V.250 6.2.7: with X at its default the rate is reported, since it is the
     // only way a terminal learns what it got rather than what it asked for.
+    //
+    // Which rate is not this test's business and is no longer fixed: with
+    // automode on, a plain ATD negotiates through V.8 and comes out at
+    // whichever modulation both ends liked best. What has to hold is that the
+    // number the terminal was told is the number the modem actually got.
+    let rate = p.caller.rate().expect("connected without a rate");
     assert!(
-        p.caller_saw().contains("2400") || p.caller_saw().contains("1200"),
+        p.caller_saw().contains(&rate.to_string()),
         "CONNECT carried no rate: {:?}",
         p.caller_saw()
     );
@@ -252,7 +258,9 @@ fn hanging_up_ends_the_call_at_both_ends() {
     }
     p.run(1.5);
     Pair::type_at(&mut p.caller, "ATH0");
-    p.run(3.0);
+    // Long enough for the far end to notice the carrier has gone, which is a
+    // thing it can only do by waiting.
+    p.run(6.0);
 
     assert_eq!(p.caller.state(), State::Command, "the caller stayed online");
     assert_eq!(
@@ -477,8 +485,14 @@ fn a_scope_can_see_what_the_modem_is_doing() {
     Pair::type_at(&mut p.caller, "ATD5551234");
     p.run(0.5);
     assert!(p.caller.off_hook(), "still on hook while dialling");
-    // The start-up runs entirely in the four states whatever rate is being
-    // negotiated, so a scope watching it should see four.
+    // V.8 comes first and is not V.32, and says so rather than claiming to be
+    // a modulation it is only choosing between.
+    assert_eq!(p.caller.standard(), "V.8", "did not negotiate first");
+
+    // Once it has chosen, the V.32 start-up runs entirely in the four states
+    // whatever rate is being negotiated, so a scope watching it sees four.
+    p.run(4.0);
+    assert_eq!(p.caller.standard(), "V.32", "never reached the modulation");
     assert_eq!(p.caller.states(), 4);
 
     p.run(13.0);
@@ -697,4 +711,94 @@ fn a_clean_300_bit_link_reports_no_bad_frames() {
     );
     let saw = &p.at_caller[p.at_caller.len().saturating_sub(payload.len())..];
     assert_eq!(saw, &payload[..], "the bytes came back changed");
+}
+
+#[test]
+fn a_plain_dial_negotiates_before_it_starts() {
+    // V.250 6.4.1 names the mechanism: <automode> "enables or disables
+    // automatic modulation negotiation (e.g., Annex A/V.32 bis or ITU-T
+    // Rec. V.8)", and it is on by default. So an ordinary ATD asks first.
+    //
+    // This is the thing no modem start-up can do for itself. Every one of them
+    // assumes both ends already agree which Recommendation is being followed,
+    // and nothing in any of them says so; two modems that guessed differently
+    // transmit past each other until one gives up, which from either end looks
+    // exactly like a modem that never answered.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(0.5);
+    assert_eq!(p.caller.standard(), "V.8", "dialled without negotiating");
+    assert_eq!(p.host.standard(), "V.8", "answered without negotiating");
+
+    p.run(20.0);
+    assert_eq!(p.caller.state(), State::Data, "the caller never connected");
+    assert_eq!(p.host.state(), State::Data, "the host never connected");
+    // The point of it: both ends at the same place, having agreed rather than
+    // guessed.
+    assert_eq!(p.caller.standard(), p.host.standard());
+    assert_eq!(p.caller.rate(), p.host.rate());
+}
+
+#[test]
+fn turning_automode_off_says_the_modulation_and_means_it() {
+    // 6.4.1 lists disabling automode among the constraints on switching, and
+    // a terminal that has named a modulation and turned negotiation off has
+    // said what it wants twice.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "AT+MS=V22B,0");
+    Pair::type_at(&mut p.caller, "AT+MS=V22B,0");
+    p.run(0.01);
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(0.5);
+    assert_eq!(
+        p.caller.standard(),
+        "V.22bis",
+        "negotiated after being told not to"
+    );
+
+    p.run(12.0);
+    assert_eq!(p.caller.state(), State::Data);
+    assert_eq!(p.caller.rate(), Some(2400));
+}
+
+#[test]
+fn a_rate_ceiling_is_honoured_through_the_negotiation() {
+    // The setting that matters on a line that cannot carry the faster rate,
+    // and the one a negotiation could quietly undo: V.8 settles on "the
+    // modulation mode with the lowest item number", which is the fastest, so
+    // a ceiling has to be applied to what is offered rather than to what comes
+    // back. Offer V.32 and V.32 is what will be agreed.
+    let mut p = Pair::new();
+    for m in [&mut p.host, &mut p.caller] {
+        Pair::type_at(m, "AT+MS=V22B,1,1200,1200");
+    }
+    p.run(0.01);
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(20.0);
+
+    assert_eq!(p.caller.state(), State::Data, "never connected");
+    assert_eq!(p.caller.standard(), "V.22bis", "went faster than it was allowed");
+    assert_eq!(p.caller.rate(), Some(1200));
+    assert_eq!(p.host.rate(), Some(1200));
+}
+
+#[test]
+fn a_far_end_that_cannot_go_as_fast_is_met_where_it_is() {
+    // One end able to do V.32 and the other not. Without V.8 this is the case
+    // that fails silently at both ends; with it, both come out at V.22bis.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "AT+MS=V32,1,1200,9600");
+    Pair::type_at(&mut p.host, "AT+MS=V22B,1,1200,2400");
+    p.run(0.01);
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(20.0);
+
+    assert_eq!(p.caller.state(), State::Data, "the caller never connected");
+    assert_eq!(p.host.state(), State::Data, "the host never connected");
+    assert_eq!(p.caller.standard(), "V.22bis");
+    assert_eq!(p.host.standard(), "V.22bis");
 }

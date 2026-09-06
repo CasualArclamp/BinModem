@@ -1392,6 +1392,17 @@ impl Modem {
     }
 
     /// The round trip the start-up measured, in symbol intervals.
+    /// Whether the far end is still there.
+    ///
+    /// Measured on the echo-cancelled signal, which is the only place it can
+    /// honestly be measured: V.32 puts both directions in one band, so the raw
+    /// line carries this modem's own transmission whether or not anybody is
+    /// listening to it, and a detector pointed at that would report a carrier
+    /// for as long as we kept talking to ourselves.
+    pub fn carrier(&self) -> bool {
+        self.rx.carrier()
+    }
+
     pub fn round_trip(&self) -> u64 {
         self.startup.round_trip()
     }
