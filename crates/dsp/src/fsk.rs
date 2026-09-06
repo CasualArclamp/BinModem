@@ -23,6 +23,16 @@ pub struct FskDetector {
     prev_i: f64,
     prev_q: f64,
     fs: f64,
+    /// Half the shift, and signed: negative where the mark tone is the lower
+    /// of the two.
+    ///
+    /// The sign is the whole of the orientation. Dividing the measured offset
+    /// by it is what makes a mark read as `+1` whichever side of the band it
+    /// sits on, and taking the magnitude here instead quietly inverts every
+    /// bit of any standard whose mark is the lower tone. Bell 103 puts the
+    /// mark above the space in both bands, so nothing here noticed for a long
+    /// time; V.21 puts it below in both -- 980 against 1180, and 1650 against
+    /// 1850 -- and the first thing sent over one came back inside out.
     deviation: f64,
     fast_env: OnePole,
     slow_env: OnePole,
@@ -44,11 +54,13 @@ impl FskDetector {
     /// post-detection bandwidth.
     pub fn new(f_space: f64, f_mark: f64, baud: f64, fs: f64) -> Self {
         let centre = (f_space + f_mark) / 2.0;
-        let deviation = (f_mark - f_space).abs() / 2.0;
+        let deviation = (f_mark - f_space) / 2.0;
         // Wide enough for the shifted tones plus modulation sidebands, tight
         // enough to reject the opposite direction, which on a 2-wire tap is
         // present at full strength in the other band.
-        let half = deviation + baud * 0.9;
+        // The width of the band wants the size of the shift and not its
+        // direction, which is the one place the magnitude is the right thing.
+        let half = deviation.abs() + baud * 0.9;
         // Order 8, not 4. The dominant interferer is not the far end but our
         // own transmitter: a 2-wire hybrid typically leaks near-end signal only
         // 10-15 dB below the received level. Order 4 rejects the opposite Bell
@@ -128,6 +140,37 @@ impl FskDetector {
 
 #[cfg(test)]
 mod tests {
+
+    /// The two channels of V.21, which put the mark below the space.
+    ///
+    /// Bell 103 puts the mark above the space in both of its bands, so a
+    /// detector that took the magnitude of the shift worked for it and was
+    /// inverted for everything else. V.8 rides on V.21, so this is the case
+    /// that found it.
+    #[test]
+    fn a_mark_below_its_space_still_reads_as_a_mark() {
+        let fs = 16_000.0;
+        for (name, space, mark) in [
+            ("V.21 channel 1", 1180.0, 980.0),
+            ("V.21 channel 2", 1850.0, 1650.0),
+            ("Bell 103 originate", 1070.0, 1270.0),
+            ("Bell 103 answer", 2025.0, 2225.0),
+        ] {
+            for (bit, freq) in [("mark", mark), ("space", space)] {
+                let mut d = FskDetector::new(space, mark, 300.0, fs);
+                let mut out = 0.0;
+                for i in 0..(fs as usize / 4) {
+                    let x = (std::f64::consts::TAU * freq * i as f64 / fs).sin();
+                    out = d.feed(x);
+                }
+                let wanted = if bit == "mark" { 1.0 } else { -1.0 };
+                assert!(
+                    (out - wanted).abs() < 0.25,
+                    "{name}: a {bit} read as {out:+.2} rather than {wanted:+.0}"
+                );
+            }
+        }
+    }
     use super::*;
     use std::f64::consts::TAU;
 

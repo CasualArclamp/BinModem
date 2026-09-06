@@ -27,6 +27,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod ansam;
+
+pub use ansam::AnswerTone;
+
 /// The ten ONEs every sequence opens with (Table 1).
 ///
 /// Not an octet. It is the idle condition of the line held for ten bit times,

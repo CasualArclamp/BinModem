@@ -6,6 +6,7 @@ license.workspace    = true
 
 [dependencies]
 dsp = { path = "../dsp" }
+v8  = { path = "../v8" }
 
 [dev-dependencies]
 ec = { path = "../ec" }
