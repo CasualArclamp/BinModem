@@ -110,6 +110,13 @@ pub struct Frame {
     pub state: CallState,
     /// Modulation currently in use, e.g. "Bell 103".
     pub modulation: &'static str,
+    /// Where inside that modulation's own procedure the call has got to.
+    ///
+    /// The most informative thing on a window during a start-up and the
+    /// hardest to get any other way: a call that is not coming up is always
+    /// stuck somewhere particular, and "negotiating" for twenty seconds says
+    /// nothing about which somewhere.
+    pub line_phase: &'static str,
     /// Negotiated line rate once connected.
     pub bit_rate: Option<u32>,
     pub rx_bytes: u64,
@@ -136,6 +143,7 @@ impl Frame {
             leds: Leds::default(),
             state: CallState::Idle,
             modulation: "-",
+            line_phase: "-",
             bit_rate: None,
             rx_bytes: 0,
             tx_bytes: 0,

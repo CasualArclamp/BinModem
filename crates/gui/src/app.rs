@@ -131,12 +131,21 @@ impl Modulation {
     }
 
     /// The command this composes.
+    ///
+    /// The rates are left off when nobody has chosen any. V.250 6.4.1 makes an
+    /// omitted rate unspecified -- "determined by the modulation means
+    /// selected" -- and that is not the same as naming the chosen modulation's
+    /// own range. Naming V.22bis's rates would hold a negotiation to V.22bis,
+    /// which is the opposite of what a terminal that has not asked for a
+    /// ceiling wants.
     fn command(&self, carrier: &str) -> String {
+        let automode = u8::from(self.automode);
+        if self.min_rate == 0 && self.max_rate == 0 {
+            return format!("AT+MS={carrier},{automode}");
+        }
         format!(
-            "AT+MS={carrier},{},{},{}",
-            u8::from(self.automode),
-            self.min_rate,
-            self.max_rate
+            "AT+MS={carrier},{automode},{},{}",
+            self.min_rate, self.max_rate
         )
     }
 }
@@ -709,9 +718,33 @@ impl ScopeApp {
                     format!("AT+MS={}\r", Self::CARRIERS[i].0).as_bytes(),
                 );
             }
+            // V.250 6.4.1 makes this one setting, and it is the one that
+            // belongs on the face of the window rather than behind a button:
+            // with it on, the box to the left is where the call starts rather
+            // than where it ends up.
+            if ui
+                .selectable_label(self.modulation.automode, "V.8")
+                .on_hover_text(
+                    "Negotiate the modulation with the far end before starting \
+                     it. Both modems then enter the same one instead of each \
+                     guessing, which is the one thing no modem start-up can \
+                     arrange for itself. Off means the box to the left and \
+                     nothing else",
+                )
+                .clicked()
+            {
+                // Not `fit`. This toggle is about whether to negotiate and
+                // about nothing else: fitting would pin the range to the
+                // modulation named beside it, and a range that names V.22bis's
+                // rates is a range V.8 can never negotiate its way out of.
+                self.modulation.automode = !self.modulation.automode;
+                let command =
+                    self.modulation.command(Self::CARRIERS[self.carrier].0);
+                session.type_bytes(format!("{command}\r").as_bytes());
+            }
             if ui
                 .selectable_label(self.advanced, "Advanced")
-                .on_hover_text("the rest of AT+MS: fallback, and the range of line rates")
+                .on_hover_text("the rest of AT+MS: the range of line rates")
                 .clicked()
             {
                 self.advanced = !self.advanced;
@@ -769,6 +802,19 @@ impl ScopeApp {
                         dim
                     }),
             );
+            // Which start-up, and where inside it. A call that will not come
+            // up is always stuck somewhere particular, and "negotiating" on
+            // its own says nothing whatever about where.
+            if !on_hook && self.frame.line_phase != "-" {
+                ui.label(
+                    RichText::new(format!(
+                        "{}: {}",
+                        self.frame.modulation, self.frame.line_phase
+                    ))
+                    .monospace()
+                    .color(Color32::from_rgb(120, 210, 255)),
+                );
+            }
         });
 
         self.advanced_modulation(ui, &session);
@@ -810,13 +856,13 @@ impl ScopeApp {
                         });
                         ui.end_row();
 
-                        ui.label(RichText::new("fallback").monospace().color(dim));
+                        ui.label(RichText::new("negotiate").monospace().color(dim));
                         ui.checkbox(
                             &mut self.modulation.automode,
-                            "the modem may settle on a different modulation",
+                            "ask the far end first, and use what both have (V.8)",
                         )
                         .on_hover_text(
-                            "V.250 6.4.1 automode. Off means the one chosen above or                              nothing: the call fails rather than coming up as                              something else",
+                            "V.250 6.4.1: automode enables or disables automatic modulation negotiation, e.g. ITU-T Rec. V.8. With it on, the two modems exchange call menus over V.21 and both enter the same modulation instead of each guessing. Off means the one chosen above and nothing else",
                         );
                         ui.end_row();
 
@@ -1102,6 +1148,7 @@ impl ScopeApp {
                 };
                 row("state", f.state.label().into(), bright);
                 row("modulation", f.modulation.into(), bright);
+                row("phase", f.line_phase.into(), dim);
                 row(
                     "rate",
                     f.bit_rate.map(|r| format!("{r} bps")).unwrap_or_else(|| "-".into()),
@@ -1388,5 +1435,10 @@ mod modulation_tests {
         assert_eq!(m.command("V22B"), "AT+MS=V22B,1,1200,1200");
         let m = Modulation { automode: false, min_rate: 4800, max_rate: 9600 };
         assert_eq!(m.command("V32"), "AT+MS=V32,0,4800,9600");
+        // With no range chosen, none is sent: an omitted rate is unspecified,
+        // and sending the modulation's own range instead would be a ceiling
+        // nobody asked for and one a negotiation could not get past.
+        let m = Modulation::default();
+        assert_eq!(m.command("V22B"), "AT+MS=V22B,1");
     }
 }

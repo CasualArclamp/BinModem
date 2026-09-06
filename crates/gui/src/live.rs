@@ -453,6 +453,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     State::OnlineCommand => CallState::OffHook,
                 };
                 f.modulation = modem.standard();
+                f.line_phase = modem.line_phase();
                 f.bit_rate = rate;
                 f.rx_bytes = rx_bytes;
                 f.tx_bytes = tx_bytes;
