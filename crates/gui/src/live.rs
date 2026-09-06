@@ -244,6 +244,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // timestamped list of where it went is the difference between debugging it
     // and describing it.
     let mut last_phase = "";
+    // The same, for the error control that runs on top of whatever the line
+    // settled on.
+    let mut last_ec = "";
 
     let publish_every = Duration::from_millis(16);
     let mut next_publish = Instant::now();
@@ -397,6 +400,24 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 tx.log(Direction::Note, format!("{}: {phase}", modem.standard()));
             }
             last_phase = phase;
+        }
+
+        // The layer above the line, traced the same way. A call that connects
+        // without error control has failed at one of these steps, and which
+        // one is the whole of the diagnosis.
+        let ec = modem.error_control_phase();
+        if ec != last_ec {
+            if !ec.is_empty() {
+                let detail = if modem.compressing() {
+                    ", V.42bis"
+                } else if ec == "connected" {
+                    ", no compression"
+                } else {
+                    ""
+                };
+                tx.log(Direction::Note, format!("V.42: {ec}{detail}"));
+            }
+            last_ec = ec;
         }
 
         let state = modem.state();

@@ -919,3 +919,32 @@ fn a_call_without_error_control_still_says_connect_at_once() {
     assert!(saw.contains("CONNECT"), "never connected");
     assert!(!p.caller.error_controlled());
 }
+
+#[test]
+fn error_control_reports_where_it_has_got_to() {
+    // Nothing about this reaches the terminal, and on a real line the
+    // interesting part is which step did not happen. So the steps are
+    // reportable while they are happening, in the order V.42 puts them:
+    // 7.2.1's detection phase, then 8.10's XID exchange, then establishment.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+
+    let mut seen: Vec<&'static str> = Vec::new();
+    for _ in 0..(20.0 * FS) as usize {
+        let (a, b) = (p.from_caller, p.from_host);
+        p.from_caller = p.caller.step(b);
+        p.from_host = p.host.step(a);
+        p.caller.take_dte();
+        p.host.take_dte();
+        let phase = p.caller.error_control_phase();
+        if seen.last() != Some(&phase) {
+            seen.push(phase);
+        }
+    }
+    assert_eq!(
+        seen,
+        ["", "detecting", "negotiating", "establishing", "connected"],
+        "the phases a call goes through, in order"
+    );
+}

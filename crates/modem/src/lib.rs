@@ -501,6 +501,37 @@ impl Modem {
         self.ec.as_ref().is_some_and(Stack::is_connected)
     }
 
+    /// Where error control has got to, as a call is happening.
+    ///
+    /// None of this reaches the terminal, which sees a CONNECT and whatever
+    /// `+ER` and `+DR` were asked for -- and by then it is all over. On a real
+    /// line the interesting part is which step did not happen, and the only
+    /// way to know that is to watch it not happen.
+    ///
+    /// Empty when there is no call, which is not the same as no error control.
+    pub fn error_control_phase(&self) -> &'static str {
+        // Nothing to say until the line below has settled: the pump's own
+        // handshake is reported separately, and until it finishes there is no
+        // bit stream for any of this to run on.
+        if self.pump.is_none() || self.rate == 0 {
+            return "";
+        }
+        let Some(ec) = self.ec.as_ref() else {
+            // Either the terminal turned it off, or the far end declined and
+            // the stack has been put away. Both are calls without it.
+            return "none";
+        };
+        match ec.phase() {
+            // The ODP/ADP exchange of 7.2.1: is there a V.42 modem there.
+            Phase::Detecting => "detecting",
+            // XID: what the two of them can agree to do (8.10).
+            Phase::Negotiating => "negotiating",
+            Phase::Protocol if ec.is_connected() => "connected",
+            Phase::Protocol => "establishing",
+            Phase::Transparent => "none",
+        }
+    }
+
     /// Frames that arrived and did not survive the line.
     ///
     /// The difference between a link that is working and one that is only

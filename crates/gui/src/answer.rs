@@ -97,6 +97,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
     let mut greeted = false;
     let mut connected_at = Instant::now();
     let mut last_phase = "";
+    let mut last_ec = "";
     let started = Instant::now();
 
     loop {
@@ -118,16 +119,27 @@ pub fn run(args: Vec<String>) -> ExitCode {
             println!("[{:>6.2}s {phase}]", started.elapsed().as_secs_f64());
         }
 
+        // The same trace for the layer above, so that a call which connects
+        // without error control says which step it lost it at.
+        let ec = host.error_control_phase();
+        if ec != last_ec {
+            last_ec = ec;
+            if !ec.is_empty() {
+                println!("[{:>6.2}s V.42 {ec}]", started.elapsed().as_secs_f64());
+            }
+        }
+
         let heard = host.take_dte();
         if host.state() == State::Data {
             if !greeted {
                 greeted = true;
                 connected_at = Instant::now();
                 println!(
-                    "[{:>6.2}s connected at {} bit/s, error control {}]",
+                    "[{:>6.2}s connected at {} bit/s, error control {}, compression {}]",
                     started.elapsed().as_secs_f64(),
                     host.rate().unwrap_or(0),
-                    if host.error_controlled() { "on" } else { "off" }
+                    if host.error_controlled() { "V.42" } else { "off" },
+                    if host.compressing() { "V.42bis" } else { "off" }
                 );
             }
             // A moment before speaking. Both ends have a receiver that has
