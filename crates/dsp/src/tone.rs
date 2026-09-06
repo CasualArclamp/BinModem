@@ -216,9 +216,27 @@ impl ReversalDetector {
         self.envelope.process(self.tone.amplitude());
 
         // Direction, when there is enough of a phasor for one to mean
-        // anything. At the instant of a reversal there is not: the average
-        // holds equal parts of the old phase and the new, and they cancel.
-        let now = if magnitude > 1.0e-9 {
+        // anything, and when there is a tone for it to be the direction of.
+        //
+        // At the instant of a reversal there is not enough phasor: the average
+        // holds equal parts of the old phase and the new and they cancel, and
+        // the hole that leaves is passed over below rather than started again
+        // from, since it is exactly where a reversal lives.
+        //
+        // The presence test is there because a line with nothing on it is not
+        // silent, it is noisy, and noise has a phase like anything else. A
+        // history filled while waiting holds directions that are perfectly
+        // well defined and mean nothing whatever, and the honest value for a
+        // direction nobody sent is no direction at all.
+        //
+        // It changes no outcome that is presently known. The output was
+        // already gated on the same test, and the envelope deciding it takes
+        // about a tenth of a second to cross while the history is sixteen
+        // milliseconds deep -- so by the time a tone counts as present, the
+        // history it will be compared against is already the tone. This is
+        // saying the thing the code meant rather than fixing something it
+        // measurably got wrong.
+        let now = if self.present() && magnitude > 1.0e-9 {
             Some((re / magnitude, im / magnitude))
         } else {
             None
@@ -277,6 +295,72 @@ impl ReversalDetector {
 
 #[cfg(test)]
 mod tests {
+
+    /// A tone arriving is not a tone reversing.
+    ///
+    /// The case a clean test line cannot produce, because a clean test line is
+    /// silent before the signal and silence has no phase. A real line has
+    /// noise, noise has a phase, and the phase it has is not the one the
+    /// signal will arrive with.
+    ///
+    /// This passes without the presence test in `feed` as well as with it, so
+    /// it is a property being written down rather than a bug being pinned.
+    #[test]
+    fn a_tone_appearing_out_of_noise_is_not_a_reversal() {
+        let fs = 16_000.0;
+        let mut d = ReversalDetector::new(600.0, 60.0, 0.008, fs);
+        let mut rng = 12_345u64;
+        let mut noise = || {
+            rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            ((rng >> 33) as f64 / (1u64 << 31) as f64 - 1.0) * 0.05
+        };
+        // Two seconds of a line with nothing on it but noise.
+        for _ in 0..(fs as usize * 2) {
+            assert!(!d.feed(noise()), "found a reversal in noise");
+        }
+        // Then the far end starts, at a settled phase of its own.
+        let mut found = 0;
+        for i in 0..(fs as usize * 2) {
+            let t = i as f64 / fs;
+            let x = 0.2 * (std::f64::consts::TAU * 600.0 * t + 1.1).sin() + noise();
+            if d.feed(x) {
+                found += 1;
+            }
+        }
+        assert_eq!(found, 0, "read the arrival of a tone as {found} reversals");
+    }
+
+    /// And it still finds a real one afterwards.
+    #[test]
+    fn a_tone_that_arrives_and_then_reverses_is_still_caught() {
+        let fs = 16_000.0;
+        let mut d = ReversalDetector::new(600.0, 60.0, 0.008, fs);
+        let mut rng = 999u64;
+        let mut noise = || {
+            rng = rng.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            ((rng >> 33) as f64 / (1u64 << 31) as f64 - 1.0) * 0.05
+        };
+        for _ in 0..(fs as usize) {
+            d.feed(noise());
+        }
+        let mut at = None;
+        let turn = fs as usize;
+        for i in 0..(fs as usize * 2) {
+            let t = i as f64 / fs;
+            let sign = if i < turn { 1.0 } else { -1.0 };
+            let x = 0.2 * sign * (std::f64::consts::TAU * 600.0 * t + 1.1).sin()
+                + noise();
+            if d.feed(x) && at.is_none() {
+                at = Some(i);
+            }
+        }
+        let at = at.expect("missed a reversal that really happened");
+        let late = at as i64 - turn as i64;
+        assert!(
+            (0..fs as i64 / 10).contains(&late),
+            "reported {late} samples from where the reversal was"
+        );
+    }
 
     /// The number V.32's start-up turns on.
     ///
