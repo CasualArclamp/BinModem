@@ -948,3 +948,115 @@ fn error_control_reports_where_it_has_got_to() {
         "the phases a call goes through, in order"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A line that eats samples.
+//
+// The fault a real VoIP call actually has. It is not noise: noise flips a bit
+// and the frame check sequence catches it. A dropped sample moves the clock,
+// so the receiver's idea of where a bit ends slides by a fraction and then
+// stays slid -- and what comes out is not a damaged frame but a stream that
+// has lost its place. Everything above has to notice and recover, and the only
+// thing that can notice is the frame check sequence.
+
+impl Pair {
+    /// Run the line, losing a sample every `every` sample periods.
+    ///
+    /// Lost, not corrupted. Each end is stepped a second time on the input it
+    /// has already been given, and only the second output goes out -- so each
+    /// direction is short one sample and each receiver has been handed one
+    /// twice. That is what a jitter buffer running dry does to a modem: not a
+    /// gap the receiver can see, but a moment that never came, after which
+    /// everything is early. Noise flips a bit and the frame check sequence
+    /// catches it; this moves the clock, and what comes out is a stream that
+    /// has lost its place rather than a frame with a hole in it.
+    fn run_lossy(&mut self, seconds: f64, every: usize) {
+        for i in 0..(seconds * FS) as usize {
+            let (a, b) = (self.from_caller, self.from_host);
+            self.from_caller = self.caller.step(b);
+            self.from_host = self.host.step(a);
+            if every > 0 && i % every == 0 {
+                self.from_caller = self.caller.step(b);
+                self.from_host = self.host.step(a);
+            }
+            self.at_caller.extend(self.caller.take_dte());
+            self.at_host.extend(self.host.take_dte());
+        }
+    }
+}
+
+#[test]
+fn a_line_that_drops_samples_still_delivers_every_byte() {
+    // The whole point of error control, stated as a test. A byte that arrives
+    // wrong is worse than one that does not arrive, and V.42 exists so that
+    // neither happens: what the far end reads is what was typed, or the call
+    // ends.
+    let mut p = connect();
+    assert!(p.caller.error_controlled(), "no error control to test");
+
+    let text = "The quick brown fox jumps over the lazy dog. 0123456789\r\n";
+    for _ in 0..8 {
+        for b in text.bytes() {
+            p.caller.feed_dte(b);
+        }
+    }
+    // A sample lost every 20 ms, which is one whole packet's worth of jitter
+    // buffer arriving late, over and over.
+    p.run_lossy(25.0, (FS * 0.020) as usize);
+
+    let heard = p.host_saw();
+    let wanted = text.repeat(8);
+    assert!(
+        heard.contains(&wanted) || heard.is_empty(),
+        "what arrived was neither the text nor nothing:\n{heard:?}"
+    );
+    assert!(heard.contains(&wanted), "the text never arrived intact");
+    // And the recovery actually ran. A test that loses nothing proves nothing,
+    // and the count is the only evidence either way.
+    assert!(
+        p.host.damaged_frames() > 0,
+        "no frame was damaged, so nothing here was tested"
+    );
+}
+
+/// How much sample loss a call survives, and what it costs.
+///
+/// `cargo test -p modem --test call -- --ignored --nocapture report_loss`
+///
+/// Not a clean threshold, and it is not expected to be one. The loss here is
+/// perfectly regular, so how much harm it does depends on how its period sits
+/// against the symbol clock -- a rate that lands on the clock is tracked out
+/// like any other frequency offset, and one that beats against it is not. The
+/// figure to take from it is the order of magnitude, which is a lost sample
+/// every millisecond or so at 16 kHz.
+#[test]
+#[ignore = "reports rather than asserts"]
+fn report_loss_tolerance() {
+    let text = "The quick brown fox jumps over the lazy dog. 0123456789\r\n";
+    let wanted = text.repeat(8);
+
+    println!("\n  one sample lost every   damaged  delivered");
+    for ms in [50.0, 20.0, 10.0, 5.0, 2.0, 1.0, 0.5, 0.25, 0.125] {
+        let mut p = connect();
+        if !p.caller.error_controlled() {
+            println!("  {ms:>7.3} ms           no error control");
+            continue;
+        }
+        for b in wanted.bytes() {
+            p.caller.feed_dte(b);
+        }
+        p.run_lossy(25.0, (FS * ms / 1000.0) as usize);
+        println!(
+            "  {ms:>7.3} ms         {:8}  {}",
+            p.host.damaged_frames(),
+            if p.host_saw().contains(&wanted) {
+                "yes"
+            } else if p.host.state() == State::Data {
+                "not within 25 s, still retrying"
+            } else {
+                "no, the call dropped"
+            }
+        );
+    }
+    println!();
+}

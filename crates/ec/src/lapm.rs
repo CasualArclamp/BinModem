@@ -5,8 +5,10 @@
 //! read from a clock, so the whole protocol is testable at whatever speed a
 //! test wants.
 //!
-//! Not yet covered: selective reject, XID parameter negotiation (V.42 8.10),
-//! break transfer (V.42 8.13) and the optional T402/T403 timers.
+//! Not yet covered: selective reject (V.42 8.4.5), break transfer (8.13) and
+//! the optional T402/T403 timers. XID is covered, but not here: what it
+//! negotiates spans all three layers -- compression above, frame check
+//! sequence below -- so it is driven by the stack that owns them.
 
 use std::collections::VecDeque;
 
