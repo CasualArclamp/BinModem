@@ -13,6 +13,7 @@
 //!   modem-scope --live                           a modem, line chosen in the window
 //!   modem-scope --live --in <dev> --out <dev>    and opened straight away
 //!   modem-scope --telnet [host]                  a board over a socket, no modem
+//!   modem-scope --answer --in <dev> --out <dev>  a board to dial, on the same cable
 //! ```
 //!
 //! The last is for working on the terminal rather than on the modem. A board
@@ -26,6 +27,7 @@
 //! the speakers are plugged into, and a handshake played through speakers is
 //! no use to anyone.
 
+mod answer;
 mod app;
 mod console;
 mod engine;
@@ -43,8 +45,14 @@ use line::AudioSink;
 /// The rate a live modem runs at, matching [`live`].
 const LIVE_FS: f64 = 16_000.0;
 
+/// What to open when nothing was named.
+///
+/// Not a path. It used to be one, built from the directory this was compiled
+/// in, which meant the program worked on exactly one computer and reported a
+/// missing file on every other. The capture is carried inside the program now
+/// and this is the name it answers to.
 fn default_vector() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/vectors/bell103-300.wav")
+    PathBuf::from(engine::GOLDEN_NAME)
 }
 
 fn list_devices() {
@@ -102,7 +110,8 @@ fn parse() -> Result<Option<Args>, String> {
                      modem-scope --devices                         list audio devices\n\
                      modem-scope --live                            a modem, line chosen in the window\n\
                      modem-scope --live --in <dev> --out <dev>     and opened straight away\n\
-                     modem-scope --telnet [host]                   a board over a socket, no modem"
+                     modem-scope --telnet [host]                   a board over a socket, no modem\n\
+                     modem-scope --answer --in <dev> --out <dev>   a board to dial, on the same cable"
                 );
                 return Ok(None);
             }
@@ -128,6 +137,18 @@ fn parse() -> Result<Option<Args>, String> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The answering modem is a different program in the same file. It owns the
+    // process rather than sharing it -- there is no window, and what it prints
+    // is the whole of its output -- so it is dispatched before anything else
+    // is set up.
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    if raw.first().is_some_and(|a| a == "--answer") {
+        let code = answer::run(raw[1..].to_vec());
+        // ExitCode cannot be returned from here, and its value cannot be read
+        // out of it either, so the two outcomes are told apart by identity.
+        std::process::exit(i32::from(code != std::process::ExitCode::SUCCESS));
+    }
+
     let Some(args) = parse()? else { return Ok(()) };
 
     let control = Arc::new(Control::default());
@@ -139,7 +160,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (LIVE_FS, "dialupmodem2 - telnet")
     } else {
         let path = args.path.clone().unwrap_or_else(default_vector);
-        let wav = line::wav::read(&path)?;
+        let wav = engine::capture(&path)?;
         (f64::from(wav.sample_rate), "dialupmodem2 - scope")
     };
 

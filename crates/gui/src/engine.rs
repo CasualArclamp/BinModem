@@ -381,13 +381,32 @@ impl Ring {
 }
 
 /// Start the engine on its own thread.
+/// The recording built into the program.
+///
+/// A scope with nothing to look at is not much of a scope, and the first thing
+/// anyone does with one of these is open it. Four hundred kilobytes buys a
+/// program that has something to show on a machine that has never seen this
+/// repository -- which is every machine but the one it was built on.
+const GOLDEN: &[u8] = include_bytes!("../../../tests/vectors/bell103-300.wav");
+
+/// Where the golden vector lives when it is asked for by name.
+pub const GOLDEN_NAME: &str = "bell103-300 (built in)";
+
+/// Read a capture, from the file named or from the one carried inside.
+pub fn capture(path: &Path) -> std::io::Result<line::wav::Wav> {
+    if path.as_os_str() == GOLDEN_NAME {
+        return line::wav::from_bytes(GOLDEN);
+    }
+    line::wav::read(path)
+}
+
 pub fn spawn(
     path: &Path,
     tx: Publisher,
     control: Arc<Control>,
     sink: Arc<AudioSink>,
 ) -> std::io::Result<JoinHandle<()>> {
-    let wav = line::wav::read(path)?;
+    let wav = capture(path)?;
     let samples = wav.mono();
     let fs = wav.sample_rate as f64;
     let name = path
@@ -632,6 +651,25 @@ fn run(
 
 #[cfg(test)]
 mod tests {
+
+    /// The capture the program carries, opened the way a fresh machine opens
+    /// it.
+    ///
+    /// This used to be a path built from the directory the program was
+    /// compiled in, so it worked on one computer and reported a missing file
+    /// on every other -- which is a thing no test on the machine that built it
+    /// could ever have noticed.
+    #[test]
+    fn the_capture_built_in_is_a_capture() {
+        let wav = capture(Path::new(GOLDEN_NAME)).expect("the built-in vector");
+        assert_eq!(wav.sample_rate, 16_000);
+        assert!(wav.duration_secs() > 1.0, "only {:.2} s", wav.duration_secs());
+        let samples = wav.mono();
+        let rms = (samples.iter().map(|s| f64::from(*s) * f64::from(*s)).sum::<f64>()
+            / samples.len() as f64)
+            .sqrt();
+        assert!(rms > 0.01, "the built-in capture is silence: rms {rms:.5}");
+    }
     use super::*;
 
     /// Everything an encoder has queued.

@@ -62,7 +62,15 @@ fn u32le(b: &[u8]) -> u32 {
 /// reference capture in this repo does; in that case the chunk is taken to run
 /// to the end of the file.
 pub fn read<P: AsRef<Path>>(path: P) -> io::Result<Wav> {
-    let blob = fs::read(path)?;
+    from_bytes(&fs::read(path)?)
+}
+
+/// The same, for a recording that is not a file.
+///
+/// A capture built into the program is not on disk anywhere, and a program
+/// that could only read one from a path could only be run on the machine that
+/// compiled it.
+pub fn from_bytes(blob: &[u8]) -> io::Result<Wav> {
     let bad = |m: &str| io::Error::new(io::ErrorKind::InvalidData, m.to_string());
 
     if blob.len() < 12 || &blob[0..4] != b"RIFF" || &blob[8..12] != b"WAVE" {

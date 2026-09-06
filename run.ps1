@@ -121,13 +121,13 @@ if ($Live) {
     if ($Dev) { $profileName = "debug" }
     Write-Host ""
     Write-Step "building gui and modem ($profileName)"
-    $buildArgs = @("build", "-p", "gui", "-p", "modem")
+    $buildArgs = @("build", "-p", "gui")
     if (-not $Dev) { $buildArgs += "--release" }
     & cargo @buildArgs
     if ($LASTEXITCODE -ne 0) { Write-Fail "build failed"; exit 1 }
 
     $scope = Join-Path $root "target\$profileName\modem-scope.exe"
-    $answer = Join-Path $root "target\$profileName\modem-answer.exe"
+    # The board is the same program, under a different flag.
     if (-not (Test-Path $scope)) { Write-Fail "built, but $scope is missing"; exit 1 }
 
     # Ask the binary rather than keeping a second list here: it is the thing
@@ -187,13 +187,9 @@ if ($Live) {
     Write-Host ""
     $board = Read-Host "  start a board on the same line to dial? [Y/n]"
     if ($board -ne "n" -and $board -ne "N") {
-        if (-not (Test-Path $answer)) {
-            Write-Fail "built, but $answer is missing"
-            exit 1
-        }
         Write-Step "starting the board in its own window"
-        Start-Process -FilePath $answer -ArgumentList @(
-            "--in", $inName, "--out", $outName, "--carrier", $Carrier
+        Start-Process -FilePath $scope -ArgumentList @(
+            "--answer", "--in", $inName, "--out", $outName, "--carrier", $Carrier
         )
         # Let it get its streams open before the caller starts listening.
         Start-Sleep -Milliseconds 700

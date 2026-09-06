@@ -1,7 +1,8 @@
 //! A modem sitting on the line waiting to be dialled: a board to call.
 //!
-//! The companion to `modem-scope --live`. That window has a modem in it and a
-//! terminal wired to it, and nothing to ring. This is the thing that answers.
+//! The companion to `--live`, and in the same program as it. That window has
+//! a modem in it and a terminal wired to it, and nothing to ring. This is the
+//! thing that answers.
 //!
 //! Both point at the same virtual cable, and that is not a compromise: what
 //! comes back from a cable is what was written to it, a little later, summed
@@ -28,8 +29,8 @@ const FS: f64 = 16_000.0;
 /// well above its own average, and a clipped handshake is a failed one.
 const LEVEL: f32 = 0.45;
 
-fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+/// Run the answering modem. `args` is what followed `--answer`.
+pub fn run(args: Vec<String>) -> ExitCode {
     let mut input: Option<String> = None;
     let mut output: Option<String> = None;
     let mut carrier = "V22B".to_owned();
@@ -47,7 +48,7 @@ fn main() -> ExitCode {
             "--banner" => banner = value(),
             "--help" | "-h" => {
                 println!(
-                    "modem-answer --in <device> --out <device> \
+                    "modem-scope --answer --in <device> --out <device> \
                      [--carrier B103|V22B|V32] [--banner <text>]\n\
                      \n\
                      Answers calls on a virtual cable and echoes what is typed,\n\

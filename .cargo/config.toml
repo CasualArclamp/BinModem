@@ -1,0 +1,13 @@
+# Link the C runtime into the program rather than depending on a copy of it
+# being installed.
+#
+# Without this the binary imports vcruntime140.dll, which ships with the Visual
+# C++ redistributable and not with Windows. A machine that has never had a
+# developer tool on it very often does not have that file, and what it shows
+# when the program is double-clicked is a dialog naming a DLL rather than
+# anything about a modem.
+#
+# Everything else the program imports is Windows itself: the audio comes from
+# mmdevapi, the window from user32 and gdi32, and the drawing from opengl32.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

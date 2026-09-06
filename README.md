@@ -111,13 +111,31 @@ about 20 dB of signal to noise and four at 1200 need about 13, so on a line
 that cannot give the first, `AT+MS=V22B,1,1200,1200` is not the slower
 connection — it is the one that works.
 
-To have something to dial, run `modem-answer` on the same cable. It puts a
-second modem on the line, answers, and echoes what is typed like the simplest
-possible board:
+To have something to dial, run the same program again with `--answer` on the
+same cable. It puts a second modem on the line, answers, and echoes what is
+typed like the simplest possible board:
 
 ```powershell
-modem-answer --in "<input device>" --out "<output device>" --carrier V22B
+modem-scope --answer --in "<input device>" --out "<output device>" --carrier V22B
 ```
+
+## One file
+
+`dist.bat` (or `./dist.ps1`) builds a release and leaves
+`dist\dialupmodem2.exe`, which is the whole program: the scope, a modem, the
+telnet terminal, the answering board, and the golden capture it opens with.
+Nothing beside it, and nothing to install.
+
+The C runtime is linked in rather than depended on. Without that the binary
+imports `vcruntime140.dll`, which ships with the Visual C++ redistributable and
+not with Windows, so a machine that has never had a developer tool on it
+answers a double-click with a dialog naming a DLL. Everything else it uses is
+Windows itself — `mmdevapi` for the audio, `user32` and `gdi32` for the window,
+`opengl32` for the drawing.
+
+The capture is carried inside the file too. It used to be opened from a path
+built out of the directory the program was compiled in, which worked on exactly
+one computer.
 
 ## The terminal on its own
 
