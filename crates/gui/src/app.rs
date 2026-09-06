@@ -200,9 +200,18 @@ impl ScopeApp {
     }
 
     fn terminal_pane(&mut self, ui: &mut egui::Ui) {
-        let response = console::view(ui, &self.console.term, self.font_size);
+        let view = console::view(ui, &self.console.term, self.font_size);
+        let response = view.response;
         if response.clicked() {
             response.request_focus();
+        }
+        // Straight into the terminal, which knows which of these the far end
+        // asked for and drops the rest. What it decides to report joins the
+        // answerback in the same queue and goes out by the same route, so a
+        // board hears about the mouse over a call exactly as it does over a
+        // socket.
+        for event in view.mouse {
+            self.console.term.mouse(event);
         }
         if response.has_focus() {
             let typed = console::keys_to_bytes(ui);

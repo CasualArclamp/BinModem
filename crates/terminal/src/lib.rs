@@ -14,6 +14,90 @@ pub mod cp437;
 
 use std::collections::VecDeque;
 
+/// How much of the mouse the far end has asked to hear about.
+///
+/// These are separate modes rather than a dial, and a board may have several
+/// on at once; this is which of them is in charge, which is always the one
+/// that reports the most.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tracking {
+    /// Nothing is reported, and the mouse belongs to whatever is drawing the
+    /// screen. The state every terminal starts in and returns to.
+    #[default]
+    Off,
+    /// DECSET 9, the X10 original: presses, and nothing else. No releases, no
+    /// modifier keys, and no way to say which button was let go of.
+    Press,
+    /// DECSET 1000: presses and releases, with modifiers.
+    Normal,
+    /// DECSET 1002: and movement, but only while a button is held.
+    Drag,
+    /// DECSET 1003: and movement whether a button is held or not.
+    Any,
+}
+
+/// How the numbers in a report are written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Coordinates {
+    /// The original: one byte each, offset by 32 so that a report stays
+    /// printable characters. Which puts the last reportable position at 223,
+    /// and is the entire reason the other two exist.
+    #[default]
+    Legacy,
+    /// DECSET 1006: decimal and separated, with a release told apart by the
+    /// final byte rather than by a button code that throws away which button
+    /// it was. What to prefer wherever the far end offers it.
+    Sgr,
+    /// DECSET 1015: decimal, but still offset by 32 and still unable to say
+    /// which button was released.
+    Urxvt,
+}
+
+/// Which button, as far as a report is concerned.
+///
+/// A wheel is a button in this protocol. It is pressed and never released,
+/// which is as close as an encoding designed around three buttons could get
+/// to a thing that only ever happens once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Button {
+    Left,
+    Middle,
+    Right,
+    WheelUp,
+    WheelDown,
+}
+
+/// What the mouse did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Motion {
+    Press,
+    Release,
+    /// The pointer moved, with whatever was held while it did.
+    Moved,
+}
+
+/// Which of the modifier keys were down at the time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Modifiers {
+    pub shift: bool,
+    pub alt: bool,
+    pub ctrl: bool,
+}
+
+/// One thing the mouse did, in cells.
+#[derive(Debug, Clone, Copy)]
+pub struct Mouse {
+    pub motion: Motion,
+    /// The button pressed or released, or the one held during a move. `None`
+    /// for a move with nothing held.
+    pub button: Option<Button>,
+    /// Zero-based, as the screen is. The wire is one-based, and that
+    /// conversion happens on the way out and nowhere else.
+    pub col: usize,
+    pub row: usize,
+    pub modifiers: Modifiers,
+}
+
 pub const DEFAULT_COLS: usize = 80;
 pub const DEFAULT_ROWS: usize = 24;
 
@@ -95,6 +179,26 @@ pub struct Terminal {
     pub cursor_visible: bool,
     /// Set when BEL arrives; the UI clears it after reacting.
     pub bell: bool,
+    /// The four tracking modes, which are independent flags rather than one
+    /// setting. A board that turns dragging off while normal tracking is still
+    /// on means to go on hearing about buttons, so collapsing them into a
+    /// single value here would silence a board that had not asked to be
+    /// silenced.
+    mouse_press: bool,
+    mouse_normal: bool,
+    mouse_drag: bool,
+    mouse_any: bool,
+    /// The two extended encodings, likewise independent.
+    mouse_sgr: bool,
+    mouse_urxvt: bool,
+    /// The cell the pointer was last reported in.
+    ///
+    /// A mouse moves in pixels and this protocol speaks in cells, so most of
+    /// what a pointer does is not news. Reporting it anyway would put dozens
+    /// of six-byte messages on the line for one sweep across the screen --
+    /// which matters here more than it does in a terminal emulator, because
+    /// the line under this one may be carrying 300 bits a second.
+    mouse_cell: Option<(usize, usize)>,
     /// Bytes the terminal owes the far end, waiting to be sent.
     ///
     /// A terminal is not only a screen. Some sequences are questions, and a
@@ -133,6 +237,13 @@ impl Terminal {
             autowrap: true,
             cursor_visible: true,
             bell: false,
+            mouse_press: false,
+            mouse_normal: false,
+            mouse_drag: false,
+            mouse_any: false,
+            mouse_sgr: false,
+            mouse_urxvt: false,
+            mouse_cell: None,
             reply: Vec::new(),
         }
     }
@@ -361,11 +472,28 @@ impl Terminal {
             b'h' | b'l' => {
                 let set = final_byte == b'h';
                 if self.private {
-                    match self.param(0, 0) {
-                        7 => self.autowrap = set,
-                        25 => self.cursor_visible = set,
-                        _ => {}
+                    // Every parameter, not only the first. A board that wants
+                    // tracking and extended coordinates asks for both in one
+                    // sequence, and reading only the first would leave it
+                    // sending positions in an encoding nobody agreed to.
+                    for i in 0..self.params.len() {
+                        match self.param(i, 0) {
+                            7 => self.autowrap = set,
+                            25 => self.cursor_visible = set,
+                            9 => self.mouse_press = set,
+                            1000 => self.mouse_normal = set,
+                            1002 => self.mouse_drag = set,
+                            1003 => self.mouse_any = set,
+                            1006 => self.mouse_sgr = set,
+                            1015 => self.mouse_urxvt = set,
+                            _ => {}
+                        }
                     }
+                    // Wherever the pointer was is no longer worth comparing
+                    // against: the far end has changed its mind about what it
+                    // wants to hear, and the first thing it hears should be
+                    // where the pointer actually is.
+                    self.mouse_cell = None;
                 }
             }
             _ => {}
@@ -379,12 +507,147 @@ impl Terminal {
     /// reply takes twenty milliseconds to send, so a board that asked
     /// faster than that could otherwise grow this without limit.
     fn answer(&mut self, csi: String) {
+        self.answer_bytes(csi.as_bytes());
+    }
+
+    /// The same, for a sequence that is not text.
+    ///
+    /// The original mouse encoding offsets its numbers by 32 to keep them
+    /// printable, which works as far as column 95 and then starts producing
+    /// bytes that are not characters at all. It was never text; it only looked
+    /// like it for the first ninety-five columns.
+    fn answer_bytes(&mut self, csi: &[u8]) {
         const LIMIT: usize = 256;
         if self.reply.len() + csi.len() + 1 > LIMIT {
             return;
         }
         self.reply.push(0x1b);
-        self.reply.extend_from_slice(csi.as_bytes());
+        self.reply.extend_from_slice(csi);
+    }
+
+    /// Which tracking mode is in charge, if any.
+    ///
+    /// The most talkative of those enabled, because that is what each of them
+    /// asked for and none of them asked for less.
+    pub fn mouse_tracking(&self) -> Tracking {
+        if self.mouse_any {
+            Tracking::Any
+        } else if self.mouse_drag {
+            Tracking::Drag
+        } else if self.mouse_normal {
+            Tracking::Normal
+        } else if self.mouse_press {
+            Tracking::Press
+        } else {
+            Tracking::Off
+        }
+    }
+
+    /// How reports are being written.
+    pub fn mouse_coordinates(&self) -> Coordinates {
+        if self.mouse_sgr {
+            Coordinates::Sgr
+        } else if self.mouse_urxvt {
+            Coordinates::Urxvt
+        } else {
+            Coordinates::Legacy
+        }
+    }
+
+    /// Tell the far end what the mouse did, if it asked to be told.
+    ///
+    /// Returns whether anything was actually sent. Everything the pointer does
+    /// can be handed to this: what is not wanted, or is not news, is dropped
+    /// here rather than in the caller, so that only one place has to know what
+    /// each mode means.
+    pub fn mouse(&mut self, event: Mouse) -> bool {
+        let tracking = self.mouse_tracking();
+        let wanted = match (tracking, event.motion) {
+            (Tracking::Off, _) => false,
+            (_, Motion::Press) => true,
+            // X10 had presses and nothing else, and a board that asked for it
+            // is not expecting to be told about anything else.
+            (Tracking::Press, _) => false,
+            (_, Motion::Release) => true,
+            (Tracking::Normal, Motion::Moved) => false,
+            (Tracking::Drag, Motion::Moved) => event.button.is_some(),
+            (Tracking::Any, Motion::Moved) => true,
+        };
+        if !wanted {
+            return false;
+        }
+
+        // Clamped rather than dropped: a pointer a fraction of a cell past the
+        // edge is still pointing at the edge, and a board that laid something
+        // out in the last column should be able to have it clicked on.
+        let col = event.col.min(self.cols - 1);
+        let row = event.row.min(self.rows - 1);
+        if event.motion == Motion::Moved && self.mouse_cell == Some((col, row)) {
+            return false;
+        }
+        self.mouse_cell = Some((col, row));
+
+        let button = match event.button {
+            Some(Button::Left) | None => 0,
+            Some(Button::Middle) => 1,
+            Some(Button::Right) => 2,
+            // Bit 6, which is how a wheel was added to an encoding with room
+            // for three buttons and no room for a fourth.
+            Some(Button::WheelUp) => 64,
+            Some(Button::WheelDown) => 65,
+        };
+        // A move with nothing held is button 3, which is also what a release
+        // is: the low two bits ran out. Only the extended encoding can say
+        // which button was released, and only because the final byte carries
+        // the news instead.
+        let mut code = match (event.motion, event.button) {
+            (Motion::Release, _) if !self.mouse_sgr => 3,
+            (Motion::Moved, None) => 3,
+            _ => button,
+        };
+        // X10 had no modifier bits and no motion bit. Setting them would be
+        // sending a board something it has no code to read.
+        if tracking != Tracking::Press {
+            if event.modifiers.shift {
+                code |= 4;
+            }
+            if event.modifiers.alt {
+                code |= 8;
+            }
+            if event.modifiers.ctrl {
+                code |= 16;
+            }
+            if event.motion == Motion::Moved {
+                code |= 32;
+            }
+        }
+
+        // One-based on the wire, which is the only place it is.
+        let (x, y) = (col + 1, row + 1);
+        match self.mouse_coordinates() {
+            Coordinates::Sgr => {
+                let last = if event.motion == Motion::Release { 'm' } else { 'M' };
+                self.answer(format!("[<{code};{x};{y}{last}"));
+            }
+            Coordinates::Urxvt => self.answer(format!("[{};{x};{y}M", code + 32)),
+            Coordinates::Legacy => {
+                // The offset that keeps a report printable also caps it. Past
+                // 223 there is no byte left to say the number with, and a
+                // report that wrapped round would put the click somewhere the
+                // pointer has never been -- so there is nothing to send.
+                if x > 223 || y > 223 {
+                    return false;
+                }
+                self.answer_bytes(&[
+                    b'[',
+                    b'M',
+                    32 + code as u8,
+                    32 + x as u8,
+                    32 + y as u8,
+                ]);
+            }
+        }
+        true
     }
 
     /// Take what the terminal owes the far end. Draining leaves it empty.
@@ -566,6 +829,17 @@ impl Terminal {
         self.wrap_pending = false;
         self.autowrap = true;
         self.cursor_visible = true;
+        // Including the mouse. A reset is a terminal saying it is starting
+        // again, and a terminal that went on reporting to a board which had
+        // just cleared everything would be answering a question nobody had
+        // asked twice.
+        self.mouse_press = false;
+        self.mouse_normal = false;
+        self.mouse_drag = false;
+        self.mouse_any = false;
+        self.mouse_sgr = false;
+        self.mouse_urxvt = false;
+        self.mouse_cell = None;
     }
 
     pub fn clear_scrollback(&mut self) {
@@ -947,4 +1221,232 @@ mod tests {
         assert!(t.take_reply().len() <= 256);
     }
 
+}
+
+#[cfg(test)]
+mod mouse_tests {
+    use super::*;
+
+    fn at(motion: Motion, button: Option<Button>, col: usize, row: usize) -> Mouse {
+        Mouse { motion, button, col, row, modifiers: Modifiers::default() }
+    }
+
+    fn press(col: usize, row: usize) -> Mouse {
+        at(Motion::Press, Some(Button::Left), col, row)
+    }
+
+    fn enabled(modes: &str) -> Terminal {
+        let mut t = Terminal::new(DEFAULT_COLS, DEFAULT_ROWS);
+        t.feed_bytes(format!("\x1b[?{modes}h").as_bytes());
+        t
+    }
+
+    #[test]
+    fn a_terminal_says_nothing_about_the_mouse_until_it_is_asked() {
+        // The default matters. A board that never asked and gets a report
+        // reads it as somebody typing an escape sequence at its menu.
+        let mut t = Terminal::new(DEFAULT_COLS, DEFAULT_ROWS);
+        assert_eq!(t.mouse_tracking(), Tracking::Off);
+        assert!(!t.mouse(press(0, 0)));
+        assert!(t.take_reply().is_empty());
+    }
+
+    #[test]
+    fn normal_tracking_reports_a_press_where_it_happened() {
+        // The original encoding: button, then column, then row, each offset by
+        // 32, and both numbers one-based.
+        let mut t = enabled("1000");
+        assert_eq!(t.mouse_tracking(), Tracking::Normal);
+        assert!(t.mouse(press(0, 0)));
+        assert_eq!(t.take_reply(), vec![0x1b, b'[', b'M', 32, 33, 33]);
+
+        assert!(t.mouse(press(4, 9)));
+        assert_eq!(t.take_reply(), vec![0x1b, b'[', b'M', 32, 37, 42]);
+    }
+
+    #[test]
+    fn the_original_encoding_cannot_say_which_button_was_released() {
+        // Button three, whichever it was: the low two bits ran out. Worth a
+        // test because it looks like a bug every time it is read.
+        let mut t = enabled("1000");
+        t.mouse(at(Motion::Press, Some(Button::Right), 0, 0));
+        t.take_reply();
+        assert!(t.mouse(at(Motion::Release, Some(Button::Right), 0, 0)));
+        assert_eq!(t.take_reply(), vec![0x1b, b'[', b'M', 35, 33, 33]);
+    }
+
+    #[test]
+    fn the_extended_encoding_keeps_the_button_and_says_so_in_the_final_byte() {
+        let mut t = enabled("1000;1006");
+        assert_eq!(t.mouse_coordinates(), Coordinates::Sgr);
+        t.mouse(at(Motion::Press, Some(Button::Right), 0, 0));
+        assert_eq!(t.take_reply(), b"\x1b[<2;1;1M");
+        t.mouse(at(Motion::Release, Some(Button::Right), 0, 0));
+        assert_eq!(t.take_reply(), b"\x1b[<2;1;1m");
+    }
+
+    #[test]
+    fn one_sequence_can_turn_on_both_tracking_and_the_encoding() {
+        // Boards ask for them together, and reading only the first parameter
+        // would leave one sending positions in an encoding nobody agreed to.
+        let t = enabled("1000;1006");
+        assert_eq!(t.mouse_tracking(), Tracking::Normal);
+        assert_eq!(t.mouse_coordinates(), Coordinates::Sgr);
+    }
+
+    #[test]
+    fn x10_tracking_reports_presses_and_nothing_else() {
+        let mut t = enabled("9");
+        assert_eq!(t.mouse_tracking(), Tracking::Press);
+        assert!(t.mouse(press(0, 0)));
+        t.take_reply();
+        assert!(!t.mouse(at(Motion::Release, Some(Button::Left), 0, 0)));
+        assert!(!t.mouse(at(Motion::Moved, Some(Button::Left), 1, 0)));
+        assert!(t.take_reply().is_empty());
+    }
+
+    #[test]
+    fn x10_sends_no_modifier_bits() {
+        // It has no code to read them. A shift bit set here would be a button
+        // the far end has never heard of.
+        let mut t = enabled("9");
+        let mut event = press(0, 0);
+        event.modifiers = Modifiers { shift: true, alt: true, ctrl: true };
+        t.mouse(event);
+        assert_eq!(t.take_reply(), vec![0x1b, b'[', b'M', 32, 33, 33]);
+    }
+
+    #[test]
+    fn the_modifier_keys_are_bits_four_eight_and_sixteen() {
+        let mut t = enabled("1000;1006");
+        let mut event = press(0, 0);
+        event.modifiers = Modifiers { shift: true, alt: false, ctrl: true };
+        t.mouse(event);
+        assert_eq!(t.take_reply(), b"\x1b[<20;1;1M");
+    }
+
+    #[test]
+    fn a_wheel_is_a_button_that_is_never_released() {
+        // Bit six, because the encoding had room for three buttons and a wheel
+        // is not one of them.
+        let mut t = enabled("1000;1006");
+        t.mouse(at(Motion::Press, Some(Button::WheelUp), 2, 3));
+        assert_eq!(t.take_reply(), b"\x1b[<64;3;4M");
+        t.mouse(at(Motion::Press, Some(Button::WheelDown), 2, 3));
+        assert_eq!(t.take_reply(), b"\x1b[<65;3;4M");
+    }
+
+    #[test]
+    fn dragging_is_reported_only_while_a_button_is_held() {
+        let mut t = enabled("1002;1006");
+        assert_eq!(t.mouse_tracking(), Tracking::Drag);
+        assert!(!t.mouse(at(Motion::Moved, None, 1, 0)), "reported a hover");
+        assert!(t.mouse(at(Motion::Moved, Some(Button::Left), 2, 0)));
+        // Bit 32 marks it as a move rather than a press.
+        assert_eq!(t.take_reply(), b"\x1b[<32;3;1M");
+    }
+
+    #[test]
+    fn any_event_tracking_reports_a_hover_too() {
+        let mut t = enabled("1003;1006");
+        assert_eq!(t.mouse_tracking(), Tracking::Any);
+        assert!(t.mouse(at(Motion::Moved, None, 1, 0)));
+        // Button three and the motion bit: nothing was held.
+        assert_eq!(t.take_reply(), b"\x1b[<35;2;1M");
+    }
+
+    #[test]
+    fn a_pointer_that_has_not_left_its_cell_is_not_news() {
+        // The one that decides whether this is usable at 300 bit/s. A mouse
+        // moves in pixels and this protocol speaks in cells, so most of what a
+        // pointer does is the same answer again.
+        let mut t = enabled("1003;1006");
+        assert!(t.mouse(at(Motion::Moved, None, 4, 4)));
+        t.take_reply();
+        assert!(!t.mouse(at(Motion::Moved, None, 4, 4)));
+        assert!(t.take_reply().is_empty());
+        assert!(t.mouse(at(Motion::Moved, None, 5, 4)));
+    }
+
+    #[test]
+    fn a_press_in_the_same_cell_is_always_news() {
+        // Two clicks in one place are two clicks, however still the pointer
+        // was between them.
+        let mut t = enabled("1000;1006");
+        assert!(t.mouse(press(4, 4)));
+        t.take_reply();
+        assert!(t.mouse(press(4, 4)));
+        assert_eq!(t.take_reply(), b"\x1b[<0;5;5M");
+    }
+
+    #[test]
+    fn turning_off_dragging_leaves_the_buttons_reported() {
+        // The modes are separate flags, not a dial. A board that stops wanting
+        // movement has not stopped wanting clicks, and collapsing these into
+        // one setting would silence it.
+        let mut t = enabled("1000;1002");
+        t.feed_bytes(b"\x1b[?1002l");
+        assert_eq!(t.mouse_tracking(), Tracking::Normal);
+        assert!(t.mouse(press(0, 0)));
+    }
+
+    #[test]
+    fn turning_tracking_off_stops_the_reports() {
+        let mut t = enabled("1000");
+        t.feed_bytes(b"\x1b[?1000l");
+        assert_eq!(t.mouse_tracking(), Tracking::Off);
+        assert!(!t.mouse(press(0, 0)));
+        assert!(t.take_reply().is_empty());
+    }
+
+    #[test]
+    fn a_position_the_original_encoding_cannot_write_is_not_guessed_at() {
+        // Past 223 there is no byte left to say the number with. Sending a
+        // wrapped one would put the click somewhere the pointer has never
+        // been, which is worse than sending nothing.
+        let mut t = Terminal::new(300, 24);
+        t.feed_bytes(b"\x1b[?1000h");
+        assert!(!t.mouse(press(240, 0)));
+        assert!(t.take_reply().is_empty());
+        // And is exactly what the extended encoding was added for.
+        t.feed_bytes(b"\x1b[?1006h");
+        assert!(t.mouse(press(240, 0)));
+        assert_eq!(t.take_reply(), b"\x1b[<0;241;1M");
+    }
+
+    #[test]
+    fn a_pointer_past_the_edge_is_still_pointing_at_the_edge() {
+        let mut t = enabled("1000;1006");
+        t.mouse(press(999, 999));
+        assert_eq!(t.take_reply(), b"\x1b[<0;80;24M");
+    }
+
+    #[test]
+    fn a_reset_stops_the_reporting_as_well_as_clearing_the_screen() {
+        let mut t = enabled("1003;1006");
+        t.reset();
+        assert_eq!(t.mouse_tracking(), Tracking::Off);
+        assert_eq!(t.mouse_coordinates(), Coordinates::Legacy);
+        assert!(!t.mouse(press(0, 0)));
+    }
+
+    #[test]
+    fn a_board_that_never_reads_cannot_grow_the_queue_without_limit() {
+        // The same cap the answerback has, and it matters more here: at 300
+        // bit/s a six-byte report takes a fifth of a second to send, and a
+        // hand on a mouse produces them faster than that indefinitely.
+        let mut t = enabled("1003;1006");
+        for i in 0..2000 {
+            t.mouse(at(Motion::Moved, None, i % 80, (i / 80) % 24));
+        }
+        assert!(t.take_reply().len() <= 256);
+    }
+
+    #[test]
+    fn the_urxvt_encoding_is_decimal_and_still_offset() {
+        let mut t = enabled("1000;1015");
+        assert_eq!(t.mouse_coordinates(), Coordinates::Urxvt);
+        t.mouse(press(0, 0));
+        assert_eq!(t.take_reply(), b"\x1b[32;1;1M");
+    }
 }

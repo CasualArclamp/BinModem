@@ -4,12 +4,14 @@
 //! connected, which is exactly the split a real modem makes. The `+++` escape
 //! sequence moves between the two.
 
-use eframe::egui::{Align2, Color32, FontId, Painter, Rect, Sense, Ui, pos2, vec2};
+use eframe::egui::{
+    Align2, Color32, FontId, Painter, Pos2, Rect, Sense, Ui, Vec2, pos2, vec2,
+};
 
 use at::escape::EscapeDetector;
 use at::result::ResultCode;
 use at::{Action, Interpreter};
-use terminal::{Cell, Terminal};
+use terminal::{Button, Cell, Modifiers, Motion, Mouse, Terminal, Tracking};
 
 /// The IBM PC / ANSI.SYS 16-colour palette, which is what BBS art was drawn
 /// against. Using a modern terminal palette here makes period art look wrong.
@@ -200,8 +202,22 @@ impl Console {
     }
 }
 
+/// A painted terminal, and what the pointer did over it.
+///
+/// The mouse comes back rather than being applied here because painting takes
+/// the screen by shared reference and reporting changes it. Handing the events
+/// to the caller keeps the one function that draws from also being a function
+/// that writes.
+#[derive(Debug)]
+pub struct View {
+    pub response: eframe::egui::Response,
+    /// What the pointer did, in cells, in the order it did it. Empty unless
+    /// the far end has asked to be told.
+    pub mouse: Vec<Mouse>,
+}
+
 /// Paint a terminal, returning the response so the caller can manage focus.
-pub fn view(ui: &mut Ui, term: &Terminal, font_size: f32) -> eframe::egui::Response {
+pub fn view(ui: &mut Ui, term: &Terminal, font_size: f32) -> View {
     let font = FontId::monospace(font_size);
     let (cols, rows) = term.size();
     let (char_w, row_h) = ui.ctx().fonts_mut(|f| {
@@ -211,7 +227,17 @@ pub fn view(ui: &mut Ui, term: &Terminal, font_size: f32) -> eframe::egui::Respo
     });
 
     let size = vec2(char_w * cols as f32, row_h * rows as f32);
-    let (response, painter) = ui.allocate_painter(size, Sense::click());
+    // Dragging is only claimed when somebody is listening for it. Left on
+    // permanently it would take the drag away from the scroll area this sits
+    // in, so a screen too large for the window could no longer be pushed
+    // around with the mouse.
+    let tracking = term.mouse_tracking();
+    let sense = if tracking == Tracking::Off {
+        Sense::click()
+    } else {
+        Sense::click_and_drag()
+    };
+    let (response, painter) = ui.allocate_painter(size, sense);
     let origin = response.rect.min;
     painter.rect_filled(response.rect, 0.0, PALETTE[0]);
 
@@ -267,7 +293,129 @@ pub fn view(ui: &mut Ui, term: &Terminal, font_size: f32) -> eframe::egui::Respo
     if !response.has_focus() {
         hint(&painter, response.rect);
     }
-    response
+
+    let mouse = if tracking == Tracking::Off {
+        Vec::new()
+    } else {
+        gather(ui, response.rect, char_w, row_h, cols, rows)
+    };
+    View { response, mouse }
+}
+
+/// Turn what the pointer did into cells.
+///
+/// Read from the raw event stream rather than from the response, because the
+/// response reports the gestures egui recognises -- a click, a drag -- and what
+/// a board wants is the buttons and the movement underneath them. Everything
+/// outside the screen is dropped here; everything else is handed on, and the
+/// terminal decides which of it the far end actually asked for.
+fn gather(
+    ui: &Ui,
+    rect: Rect,
+    char_w: f32,
+    row_h: f32,
+    cols: usize,
+    rows: usize,
+) -> Vec<Mouse> {
+    use eframe::egui::{Event, MouseWheelUnit, PointerButton};
+
+    let cell = |pos: Pos2| -> Option<(usize, usize)> {
+        if !rect.contains(pos) {
+            return None;
+        }
+        let col = ((pos.x - rect.min.x) / char_w) as usize;
+        let row = ((pos.y - rect.min.y) / row_h) as usize;
+        Some((col.min(cols - 1), row.min(rows - 1)))
+    };
+    let button = |b: PointerButton| match b {
+        PointerButton::Primary => Some(Button::Left),
+        PointerButton::Middle => Some(Button::Middle),
+        PointerButton::Secondary => Some(Button::Right),
+        // The back and forward buttons, which this protocol has no number for.
+        _ => None,
+    };
+    let mods = |m: &eframe::egui::Modifiers| Modifiers {
+        shift: m.shift,
+        alt: m.alt,
+        ctrl: m.ctrl,
+    };
+
+    let mut out = Vec::new();
+    let mut wheeled = false;
+    ui.input(|i| {
+        let mut held = if i.pointer.button_down(PointerButton::Primary) {
+            Some(Button::Left)
+        } else if i.pointer.button_down(PointerButton::Middle) {
+            Some(Button::Middle)
+        } else if i.pointer.button_down(PointerButton::Secondary) {
+            Some(Button::Right)
+        } else {
+            None
+        };
+        for event in &i.events {
+            match event {
+                Event::PointerButton { pos, button: b, pressed, modifiers } => {
+                    let Some(b) = button(*b) else { continue };
+                    held = if *pressed { Some(b) } else { None };
+                    let Some((col, row)) = cell(*pos) else { continue };
+                    out.push(Mouse {
+                        motion: if *pressed { Motion::Press } else { Motion::Release },
+                        button: Some(b),
+                        col,
+                        row,
+                        modifiers: mods(modifiers),
+                    });
+                }
+                Event::PointerMoved(pos) => {
+                    let Some((col, row)) = cell(*pos) else { continue };
+                    out.push(Mouse {
+                        motion: Motion::Moved,
+                        button: held,
+                        col,
+                        row,
+                        modifiers: mods(&i.modifiers),
+                    });
+                }
+                Event::MouseWheel { unit, delta, modifiers, .. } => {
+                    let Some(pos) = i.pointer.hover_pos() else { continue };
+                    let Some((col, row)) = cell(pos) else { continue };
+                    if delta.y == 0.0 {
+                        continue;
+                    }
+                    // A wheel is a button in this protocol, so a scroll has to
+                    // become a whole number of presses. A trackpad reports
+                    // pixels and would otherwise produce dozens of them for
+                    // one flick of two fingers.
+                    let notches = match unit {
+                        MouseWheelUnit::Line => delta.y.abs().round(),
+                        MouseWheelUnit::Page => rows as f32,
+                        MouseWheelUnit::Point => (delta.y.abs() / row_h).round(),
+                    };
+                    let notches = (notches as usize).clamp(1, 5);
+                    let b = if delta.y > 0.0 { Button::WheelUp } else { Button::WheelDown };
+                    for _ in 0..notches {
+                        out.push(Mouse {
+                            motion: Motion::Press,
+                            button: Some(b),
+                            col,
+                            row,
+                            modifiers: mods(modifiers),
+                        });
+                    }
+                    wheeled = true;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    // Taken rather than shared: a board that asked for the wheel is using it
+    // to scroll something of its own, and having the pane underneath scroll at
+    // the same time would move the screen out from under the pointer.
+    if wheeled {
+        ui.input_mut(|i| i.smooth_scroll_delta = Vec2::ZERO);
+    }
+    out
 }
 
 fn hint(painter: &Painter, rect: Rect) {

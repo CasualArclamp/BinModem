@@ -27,6 +27,7 @@ and the COM port that would let Windows dial it.
 | `line` - WAV reader and writer, full-duplex audio | working |
 | `telemetry` - frame publishing, transcript log, raw line-data channel | working |
 | `terminal` - ANSI/CP437 screen emulator for BBS use | working |
+| `terminal` - mouse reporting: DECSET 9, 1000, 1002, 1003, 1006, 1015 | working |
 | `telnet` - RFC 854 options and escaping, so the terminal can be tried alone | working |
 | `gui` - waterfall, spectrum, symbol scope, faceplate, audio monitor, console | working |
 | `gui --live` - a modem on a real line, with the terminal wired to it | working |
@@ -119,6 +120,13 @@ here and badly over a call is the line's.
 `log bytes` puts everything the board sends into the transcript as well as on
 the screen, which is the pair worth having side by side when something draws
 wrongly: what arrived, and what it drew.
+
+Mouse reporting works in both windows, because both send what the terminal
+owes the far end by the same route. Say yes when a board asks whether your
+terminal supports it: presses, releases, dragging, the wheel and the modifier
+keys, in the original encoding or the extended one, whichever the board asks
+for. A move is only reported when the pointer changes cell, which is what
+keeps it usable on a line carrying 300 bits a second.
 
 The window reports the two negotiated options that decide whether any of it
 looks right. **7-bit!** means the board would not agree to eight-bit data and
