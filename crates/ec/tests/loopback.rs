@@ -422,3 +422,71 @@ fn negotiation_settles_the_parameters_both_ends_use() {
     assert_eq!(b.plain, text);
     assert_eq!(params.n2, ec::v42bis::DEFAULT_N2, "the lower value should win");
 }
+
+// ---------------------------------------------------------------------------
+// A far end whose answering pattern is not the one in Table 3.
+//
+// V.42 Appendix VI.1 records two patterns that real modems send *before* the
+// `EC` that says what they support: `EM` from a cellular protocol, five or
+// more times, and `EP` sixteen times to say the XID user data subfield may
+// carry V.44. Both mean V.42 is supported. A detector that acts on the first
+// pattern it sees answers either of them by declining error control to a modem
+// that has it, and the connection that results is unprotected for no reason.
+
+/// One start-stop character, low-order bit first, then the fill ones.
+fn character(out: &mut Vec<bool>, value: u8) {
+    out.push(false);
+    for i in 0..8 {
+        out.push(value & (1 << i) != 0);
+    }
+    out.push(true);
+    out.extend(std::iter::repeat_n(true, 12));
+}
+
+/// Run a stack originator against a hand-made answering pattern.
+fn against_pattern(seconds: &[(u8, usize)]) -> ec::stack::Phase {
+    use ec::detect::ADP_E;
+    let mut bits = Vec::new();
+    for &(second, times) in seconds {
+        for _ in 0..times {
+            character(&mut bits, ADP_E);
+            character(&mut bits, second);
+        }
+    }
+    let mut stack = ec::Stack::new(Role::Originator, Params::default());
+    for bit in bits {
+        stack.next_bit();
+        stack.feed_bit(bit);
+    }
+    stack.phase()
+}
+
+#[test]
+fn a_cellular_far_end_gets_error_control_through_the_stack() {
+    use ec::detect::{ADP_C, ADP_M};
+    assert_eq!(
+        against_pattern(&[(ADP_M, 5), (ADP_C, 10)]),
+        ec::stack::Phase::Negotiating,
+        "EM then EC is a modem that does V.42"
+    );
+}
+
+#[test]
+fn a_v44_capable_far_end_gets_error_control_through_the_stack() {
+    use ec::detect::{ADP_C, ADP_P};
+    assert_eq!(
+        against_pattern(&[(ADP_P, 16), (ADP_C, 10)]),
+        ec::stack::Phase::Negotiating,
+        "EP sixteen times then EC is a modem that does V.42"
+    );
+}
+
+#[test]
+fn a_far_end_that_declines_is_still_taken_at_its_word() {
+    use ec::detect::ADP_NULL;
+    assert_eq!(
+        against_pattern(&[(ADP_NULL, 4)]),
+        ec::stack::Phase::Transparent,
+        "E NUL means no error control, and listening past it would hang"
+    );
+}

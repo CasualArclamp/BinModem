@@ -29,8 +29,15 @@ pub const DEFAULT_T401_MS: u32 = 3000;
 
 /// Retransmission limit.
 ///
-/// V.42 9.2.2 likewise specifies no default, requiring only a minimum of 1.
-pub const DEFAULT_N400: u32 = 5;
+/// V.42 9.2.2 specifies no default, requiring only a minimum of 1. Appendix
+/// III.2 recommends "a relatively large value (e.g. 16)", and says why: by the
+/// time establishment is being attempted the detection phase has already
+/// finished, so each end knows the other does LAPM, and giving up early on a
+/// modem known to be there throws away a connection that noise alone was
+/// spoiling. The appendix's own caveat -- keep it small if the detection phase
+/// was omitted, to fall back quickly to a modem that does not do this at all
+/// -- does not apply here, because this modem never omits it.
+pub const DEFAULT_N400: u32 = 16;
 
 /// Tunable protocol parameters (V.42 clause 9.2).
 #[derive(Debug, Clone, Copy)]

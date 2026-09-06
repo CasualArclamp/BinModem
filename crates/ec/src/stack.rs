@@ -366,7 +366,15 @@ impl Stack {
     fn settle_detection(&mut self, outcome: Outcome) {
         match outcome {
             Outcome::Pending => {}
-            Outcome::Answered(Answer::ErrorControl) | Outcome::OriginatorDetected => {
+            Outcome::Answered(a) if a.error_controlled() => {
+                if matches!(&self.detect, Detect::Answer(a) if !a.finished_sending()) {
+                    return;
+                }
+                self.detect = Detect::Done;
+                self.phase = Phase::Negotiating;
+                self.waited_ms = 0;
+            }
+            Outcome::OriginatorDetected => {
                 // The answerer has to finish saying what it is saying: cutting
                 // its own reply short would leave the originator waiting for
                 // the rest of it.
