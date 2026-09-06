@@ -52,6 +52,16 @@ const K_DEFAULT: u8 = crate::lapm::DEFAULT_K;
 ///
 /// Bit 1 is the low-order bit of the first octet and is transmitted first.
 mod hdlc_bit {
+    /// Single-frame selective retransmission.
+    ///
+    /// V.42 12.2.2 Note 1 writes this one as "3A" where its three companions
+    /// are plain numbers, which is ISO/IEC 8885's own sub-lettering for the
+    /// variants of an option rather than anything about the mask: the four
+    /// entries in the note are bit positions in it, and this is position 3.
+    /// The reading is confirmed by what surrounds it -- the note requires a
+    /// transmitter to set positions 2, 4, 8, 9, 12 and 16 whatever it
+    /// supports, and 3 is the one gap in that run.
+    pub const SREJ_SINGLE: u32 = 3;
     pub const TEST_FRAME: u32 = 14;
     pub const FCS32: u32 = 17;
     pub const SREJ_MULTIPLE: u32 = 24;
@@ -110,6 +120,8 @@ pub struct Xid {
     /// A 32-bit frame check sequence is requested.
     pub fcs32: bool,
     /// The loop-back TEST frame procedure is supported.
+    /// Selective retransmission, one frame at a time (V.42 8.4.5.1).
+    pub srej_single: bool,
     pub test_frame: bool,
     /// Selective retransmission with a span list is supported.
     pub srej_multiple: bool,
@@ -146,6 +158,11 @@ impl Xid {
             // notices. What runs is the intersection, so a far end without it
             // simply keeps 16.
             fcs32: true,
+            // Offered. Go-back-N asks for the lost frame and everything
+            // sent after it, which on a full window is fifteen frames to
+            // recover one; this asks for the one. What runs is the
+            // intersection, so a far end without it loses nothing.
+            srej_single: true,
             test_frame: true,
             srej_multiple: false,
             compression: Some(compression),
@@ -198,6 +215,9 @@ impl Xid {
         let mut mask = 0u32;
         for bit in hdlc_bit::REQUIRED {
             mask |= 1 << (bit - 1);
+        }
+        if self.srej_single {
+            mask |= 1 << (hdlc_bit::SREJ_SINGLE - 1);
         }
         if self.test_frame {
             mask |= 1 << (hdlc_bit::TEST_FRAME - 1);
@@ -257,6 +277,7 @@ impl Xid {
                         return Err(XidError::BadLength { pi, len: value.len() as u8 });
                     }
                     let mask = u32::from_le_bytes([value[0], value[1], value[2], value[3]]);
+                    self.srej_single = mask & (1 << (hdlc_bit::SREJ_SINGLE - 1)) != 0;
                     self.test_frame = mask & (1 << (hdlc_bit::TEST_FRAME - 1)) != 0;
                     self.fcs32 = mask & (1 << (hdlc_bit::FCS32 - 1)) != 0;
                     self.srej_multiple = mask & (1 << (hdlc_bit::SREJ_MULTIPLE - 1)) != 0;
@@ -307,6 +328,7 @@ impl Xid {
             window_receive: lower(self.window_receive, other.window_receive, K_DEFAULT),
             // A capability is used only if both ends offer it.
             fcs32: self.fcs32 && other.fcs32,
+            srej_single: self.srej_single && other.srej_single,
             test_frame: self.test_frame && other.test_frame,
             srej_multiple: self.srej_multiple && other.srej_multiple,
             compression: match (self.compression, other.compression) {
@@ -619,6 +641,41 @@ mod tests {
     #[test]
     fn a_foreign_format_identifier_is_rejected() {
         assert_eq!(Xid::decode(&[0x01]), Err(XidError::UnknownFormat(0x01)));
+    }
+
+    #[test]
+    fn selective_reject_sits_at_the_bit_position_the_note_names() {
+        // V.42 12.2.2 Note 1 lists four bits of the HDLC optional functions
+        // mask and writes one of them as "3A" where the others are plain
+        // numbers. The "A" is ISO/IEC 8885's sub-lettering for the variants of
+        // an option, not part of the position: all four entries are positions
+        // in the same 32-bit mask, and this is position 3.
+        //
+        // Which the surrounding text confirms. The note requires a transmitter
+        // to set positions 2, 4, 8, 9, 12 and 16 whatever it supports, and 3
+        // is the one gap in that run -- the position left for the option the
+        // note is describing.
+        let mask = Xid { srej_single: true, ..Default::default() }.hdlc_mask();
+        assert_eq!(mask & !required_mask(), 1 << 2, "bit 3 counting from one");
+    }
+
+    #[test]
+    fn selective_reject_is_agreed_and_not_announced() {
+        // 8.4.5.1 has an end that did not agree treat an SREJ as an
+        // unrecognized command/response control field, which under 8.5.5 ends
+        // the connection. Sending one uninvited does not degrade the link, it
+        // drops it.
+        let asking = Xid::proposal(Compression::Both);
+        let silent = Xid { srej_single: false, ..Xid::proposal(Compression::Both) };
+        assert!(asking.srej_single, "this end should be offering it");
+        assert!(asking.resolve(&asking).srej_single, "both offered");
+        assert!(!asking.resolve(&silent).srej_single, "the far end did not");
+        assert!(!silent.resolve(&asking).srej_single, "this end did not");
+    }
+
+    /// The bits 12.2.2 Note 1 requires a transmitter to set whatever it does.
+    fn required_mask() -> u32 {
+        hdlc_bit::REQUIRED.iter().fold(0, |m, b| m | 1 << (b - 1))
     }
 
     #[test]

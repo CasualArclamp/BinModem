@@ -825,3 +825,4 @@ fn thirty_two_bits_needs_both_ends_to_have_asked() {
     assert!(!asking.resolve(&silent).fcs32, "the far end did not");
     assert!(!silent.resolve(&asking).fcs32, "this end did not");
 }
+

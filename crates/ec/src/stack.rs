@@ -433,6 +433,11 @@ impl Stack {
         if agreed.fcs32 {
             self.agreed_fcs = Fcs::Bits32;
         }
+        // 8.4.5.1: only after both ends have said so. An end that did not
+        // agree treats an SREJ as an unrecognized control field, which under
+        // 8.5.5 ends the connection -- so this is a capability to use when it
+        // has been granted rather than one to try.
+        self.lapm.set_selective_reject(agreed.srej_single);
         // Answer every command and no responses. 8.10.2: "on receipt of an
         // L-SETPARM response primitive ... an error control function shall
         // return the indicated parameter values/procedure settings in the

@@ -10,7 +10,7 @@
 //! negotiates spans all three layers -- compression above, frame check
 //! sequence below -- so it is driven by the stack that owns them.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use crate::frame::{Frame, Kind, MODULUS, Role};
 
@@ -139,6 +139,16 @@ pub struct Lapm {
     /// A REJ has been sent and not yet resolved, so do not send another
     /// (V.42 8.4.4: only one reject exception at a time).
     reject_sent: bool,
+    /// Whether the single-selective-reject procedure was agreed (8.4.5.1).
+    srej: bool,
+    /// I frames that arrived ahead of V(R), held until the gap closes.
+    ///
+    /// The whole of what selective reject buys. Go-back-N throws these away
+    /// and asks for all of them again; 8.2.4.8.1 says "I frames that may have
+    /// been transmitted following the I frame indicated by the SREJ frame
+    /// shall not be retransmitted", which is only possible if the receiver
+    /// kept them.
+    held: BTreeMap<u8, Vec<u8>>,
     /// An in-sequence I frame arrived and has not yet been acknowledged.
     ack_pending: bool,
     /// The timer-recovery condition (V.42 8.5.3): T401 expired with frames
@@ -166,6 +176,8 @@ impl Lapm {
             events: VecDeque::new(),
             peer_busy: false,
             reject_sent: false,
+            srej: false,
+            held: BTreeMap::new(),
             ack_pending: false,
             timer_recovery: false,
             timer: None,
@@ -179,6 +191,20 @@ impl Lapm {
     /// it depends on how the detection phase came out, which happens later.
     pub fn set_retransmissions(&mut self, n400: u32) {
         self.params.n400 = n400;
+    }
+
+    /// Use the selective retransmission procedure (V.42 8.4.5.1).
+    ///
+    /// Optional, and only after both ends have said so in XID: 8.4.5.1 has an
+    /// end that did not agree treat an SREJ as an unrecognized control field,
+    /// which under 8.5.5 ends the connection.
+    pub fn set_selective_reject(&mut self, on: bool) {
+        self.srej = on;
+    }
+
+    /// Whether selective retransmission is in use.
+    pub fn selective_reject(&self) -> bool {
+        self.srej
     }
 
     pub fn state(&self) -> State {
@@ -295,6 +321,7 @@ impl Lapm {
             Frame::Rr { nr, pf } => self.on_rr(*nr, *pf, kind),
             Frame::Rnr { nr, pf } => self.on_rnr(*nr, *pf, kind),
             Frame::Rej { nr, pf } => self.on_rej(*nr, *pf, kind),
+            Frame::Srej { nr } => self.on_srej(*nr),
             // SREJ, UI, XID, TEST and FRMR are not implemented yet; ignoring
             // them is safe because the peer's timers will recover.
             _ => {}
@@ -359,11 +386,21 @@ impl Lapm {
     fn on_i(&mut self, ns: u8, nr: u8, poll: bool, info: Vec<u8>) {
         self.acknowledge(nr);
         if ns == self.vr {
-            self.vr = (self.vr + 1) % MODULUS;
-            self.reject_sent = false;
-            self.ack_pending = true;
-            if !info.is_empty() {
-                self.events.push_back(Event::Data(info));
+            self.deliver(info);
+        } else if self.srej {
+            // Out of sequence, and the frames after the missing one are worth
+            // keeping: only the one that was lost has to be asked for
+            // (8.2.4.8.1). Bounded by the window, so that a sequence number
+            // from nowhere cannot make this grow.
+            let top = (self.vr + u8::min(self.params.k, MODULUS - 1)) % MODULUS;
+            if in_window(self.vr, ns, top) {
+                self.held.insert(ns, info);
+            }
+            if !self.reject_sent {
+                self.reject_sent = true;
+                // 8.2.4.8.1: the P/F bit of an SREJ is always 0, and its N(R)
+                // asks for one frame rather than acknowledging any.
+                self.send(Frame::Srej { nr: self.vr }, Kind::Command);
             }
         } else if !self.reject_sent {
             // Out of sequence: ask for everything from V(R) again
@@ -376,6 +413,43 @@ impl Lapm {
             self.send(Frame::Rr { nr: self.vr, pf: true }, Kind::Response);
             self.ack_pending = false;
         }
+    }
+
+    /// Take an in-sequence frame, and everything its arrival unblocks.
+    ///
+    /// The SREJ exception clears here too: 8.2.4.8.1 clears it "upon receipt
+    /// of the I frame with an N(S) equal to the N(R) of the SREJ frame", and
+    /// that N(R) was V(R), which is the frame being taken.
+    fn deliver(&mut self, info: Vec<u8>) {
+        self.vr = (self.vr + 1) % MODULUS;
+        self.reject_sent = false;
+        self.ack_pending = true;
+        if !info.is_empty() {
+            self.events.push_back(Event::Data(info));
+        }
+        while let Some(next) = self.held.remove(&self.vr) {
+            self.vr = (self.vr + 1) % MODULUS;
+            if !next.is_empty() {
+                self.events.push_back(Event::Data(next));
+            }
+        }
+    }
+
+    /// V.42 8.4.5.1: send again the one I frame the peer asked for.
+    fn on_srej(&mut self, nr: u8) {
+        self.peer_busy = false;
+        // "The N(R) of the SREJ frame does not indicate acknowledgement of any
+        // I frames" (8.2.4.8.1), so V(A) does not move -- which is the whole
+        // difference between this and a reject.
+        let Some((ns, info)) = self.unacked.iter().find(|(ns, _)| *ns == nr).cloned() else {
+            return;
+        };
+        self.out.push_back((
+            Frame::I { ns, nr: self.vr, poll: false, info },
+            Kind::Command,
+        ));
+        self.ack_pending = false;
+        self.start_timer();
     }
 
     fn on_rr(&mut self, nr: u8, pf: bool, kind: Kind) {
@@ -501,6 +575,7 @@ impl Lapm {
         self.vs = 0;
         self.va = 0;
         self.vr = 0;
+        self.held.clear();
         self.unacked.clear();
         self.peer_busy = false;
         self.reject_sent = false;
@@ -600,6 +675,104 @@ mod tests {
             })
             .flatten()
             .collect()
+    }
+
+    /// Move queued frames across, dropping the I frame numbered `lose`.
+    ///
+    /// One frame lost out of the middle of a full window, which is the case
+    /// the two procedures answer differently.
+    fn deliver_losing(from: &mut Lapm, to: &mut Lapm, lose: Option<u8>) -> Vec<u8> {
+        let mut sent = Vec::new();
+        while let Some((frame, kind)) = from.poll_transmit() {
+            if let Frame::I { ns, .. } = &frame {
+                sent.push(*ns);
+                if Some(*ns) == lose {
+                    continue;
+                }
+            }
+            to.receive(frame, kind);
+        }
+        sent
+    }
+
+    /// Establish a connection, optionally with selective reject agreed.
+    fn connected(srej: bool) -> (Lapm, Lapm) {
+        let (mut a, mut b) = pair();
+        a.set_selective_reject(srej);
+        b.set_selective_reject(srej);
+        a.connect();
+        settle(&mut a, &mut b);
+        assert!(a.is_connected() && b.is_connected());
+        (a, b)
+    }
+
+    /// Send five frames with the third lost, and report what was sent again.
+    fn recover(srej: bool) -> (Vec<u8>, Vec<u8>) {
+        let (mut a, mut b) = connected(srej);
+        for i in 0..5u8 {
+            a.send_data(&[b'a' + i]);
+        }
+        // The third frame never arrives.
+        deliver_losing(&mut a, &mut b, Some(2));
+        // Whatever b makes of that goes back, and whatever a sends in reply is
+        // the measurement: with go-back-N it is the lost frame and everything
+        // after, with selective reject it is the lost frame.
+        deliver(&mut b, &mut a);
+        let again = deliver_losing(&mut a, &mut b, None);
+        settle(&mut a, &mut b);
+        (again, data_from(&mut b))
+    }
+
+    #[test]
+    fn a_reject_asks_for_the_lost_frame_and_everything_after_it() {
+        // V.42 8.4.4, which is the procedure without the optional one.
+        let (again, data) = recover(false);
+        assert_eq!(again, vec![2, 3, 4], "go-back-N resends from the gap");
+        assert_eq!(data, b"abcde", "and everything still arrives in order");
+    }
+
+    #[test]
+    fn a_selective_reject_asks_for_the_lost_frame_and_no_others() {
+        // V.42 8.2.4.8.1: "I frames that may have been transmitted following
+        // the I frame indicated by the SREJ frame shall not be retransmitted
+        // as the result of receiving an SREJ frame." Which is only possible
+        // because the receiver kept them, and delivered them in order once the
+        // gap closed.
+        let (again, data) = recover(true);
+        assert_eq!(again, vec![2], "only the frame that was lost");
+        assert_eq!(data, b"abcde", "and everything still arrives in order");
+    }
+
+    #[test]
+    fn a_selective_reject_does_not_acknowledge_anything() {
+        // 8.2.4.8.1: "the N(R) of the SREJ frame does not indicate
+        // acknowledgement of any I frames". An end that treated it as one
+        // would drop the frames before the gap from its retransmission buffer
+        // and have nothing to send if they were asked for again.
+        let (mut a, mut b) = connected(true);
+        for i in 0..4u8 {
+            a.send_data(&[b'a' + i]);
+        }
+        deliver_losing(&mut a, &mut b, Some(1));
+        deliver(&mut b, &mut a);
+        // Frames 1, 2 and 3 are still outstanding: 1 because it was lost, and
+        // 2 and 3 because an SREJ acknowledges nothing.
+        assert_eq!(a.va, 1, "V(A) moved on a frame that was never acknowledged");
+    }
+
+    #[test]
+    fn frames_held_behind_a_gap_are_not_delivered_early() {
+        // Out of order on the line is in order at the DTE, or the whole thing
+        // is pointless.
+        let (mut a, mut b) = connected(true);
+        for i in 0..4u8 {
+            a.send_data(&[b'a' + i]);
+        }
+        deliver_losing(&mut a, &mut b, Some(0));
+        assert_eq!(data_from(&mut b), b"", "nothing can be delivered yet");
+        deliver(&mut b, &mut a);
+        deliver_losing(&mut a, &mut b, None);
+        assert_eq!(data_from(&mut b), b"abcd", "and then all of it, in order");
     }
 
     #[test]
