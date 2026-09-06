@@ -415,6 +415,13 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                         if modem.error_controlled() { "V.42" } else { "off" },
                         if modem.compressing() { "V.42bis" } else { "off" }
                     );
+                    // A count that climbs while the terminal still reads
+                    // correctly is LAPM doing its job, and is the only view of
+                    // how hard it is having to work.
+                    let damaged = modem.damaged_frames();
+                    if damaged > 0 {
+                        s.push_str(&format!(", {damaged} frames damaged"));
+                    }
                     if let Some(r) = modem.reflection() {
                         s.push_str(&format!(
                             ", echo found {:.0} ms away at {:.2} of the line",

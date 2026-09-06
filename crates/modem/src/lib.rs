@@ -501,6 +501,16 @@ impl Modem {
         self.ec.as_ref().is_some_and(Stack::is_connected)
     }
 
+    /// Frames that arrived and did not survive the line.
+    ///
+    /// The difference between a link that is working and one that is only
+    /// apparently working. LAPM retransmits, so a call can be delivering every
+    /// byte correctly and still be losing most of what is sent -- and the
+    /// terminal, which sees only the bytes, cannot tell.
+    pub fn damaged_frames(&self) -> u64 {
+        self.ec.as_ref().map_or(0, Stack::damaged_frames)
+    }
+
     /// Whether V.42bis was agreed, which needs both ends to have offered it.
     pub fn compressing(&self) -> bool {
         self.ec.as_ref().is_some_and(Stack::compressing)
