@@ -38,6 +38,24 @@ const CASCADE_CORNER: f64 = 0.643_594_252_905_582_5;
 /// `(1 + u)exp(-u) = 1/2`. There is no closed form; this is the root.
 const CASCADE_CROSSING: f64 = 1.678_347;
 
+/// How far the phasor may turn across the comparison window and still be
+/// judged.
+///
+/// [`ReversalDetector::new`] works out that seven hertz of carrier offset
+/// turns forty degrees in that window, and a hundred and thirty-five degrees
+/// is what counts as opposed -- so about twenty-four hertz of offset is enough
+/// to make a detector watching a perfectly steady tone report a reversal as
+/// often as it is allowed to. Forty-five degrees is a little more than the
+/// design already contemplated and a long way short of the angle that would
+/// fire it on its own.
+///
+/// Not a theoretical worry. On a recorded call the far end's carrier sat 22 Hz
+/// off and then 36 Hz off through the two seconds before its real reversal,
+/// and the detector declared fifty-one of them at exactly its own floor of
+/// 18.6 ms; through the ten seconds after, the same measurement read 0.0 Hz
+/// and the detector declared one.
+const MAX_CARRY: f64 = std::f64::consts::FRAC_PI_4;
+
 #[derive(Debug, Clone)]
 pub struct ToneDetector {
     nco: Nco,
@@ -142,6 +160,38 @@ pub struct ReversalDetector {
     /// Slow envelope of the amplitude, for deciding the tone is there.
     envelope: OnePole,
     latency: u32,
+    /// The direction on the previous sample, for measuring how fast the
+    /// phasor is turning.
+    previous: Option<(f64, f64)>,
+    /// Radians per sample the phasor is turning by, averaged slowly.
+    ///
+    /// A carrier that is simply off frequency turns steadily, and the
+    /// comparison this detector makes cannot tell that from a phase that
+    /// stepped: [`ReversalDetector::new`] works out that seven hertz of offset
+    /// turns forty degrees in the comparison window, so about twenty-four
+    /// turns the hundred and thirty-five that counts as opposed. Past that a
+    /// detector watching a perfectly steady tone reports a reversal as often
+    /// as it is allowed to.
+    ///
+    /// Measured on a real call, this is not a theoretical worry. In the two
+    /// seconds before one far end's genuine reversal its carrier sat 22 Hz
+    /// off, then 36 Hz off, and the detector declared fifty-one reversals at
+    /// exactly its own floor of 18.6 ms; through the ten seconds after it, the
+    /// offset measured 0.0 Hz and the detector declared one.
+    ///
+    /// So the turn is taken out before the comparison. The average is slow
+    /// enough -- half a second -- that the reversal's own half-turn moves it
+    /// by about a hertz, and steady enough that an offset is gone from the
+    /// comparison within a second of arriving.
+    drift: f64,
+    drift_rate: f64,
+    /// Samples the drift estimate has been forming over.
+    ///
+    /// An exponential average is worth nothing until it has run for its own
+    /// time constant, and half a second of not knowing is half a second of the
+    /// fault this exists to prevent. So it runs as a plain mean until it has
+    /// as many samples as the average is long, and as an average after that.
+    settled: u32,
 }
 
 impl ReversalDetector {
@@ -175,6 +225,11 @@ impl ReversalDetector {
             quiet: 0,
             count: 0,
             envelope: OnePole::new(0.100, fs),
+            previous: None,
+            drift: 0.0,
+            settled: 0,
+            // Half a second, in the one-pole form used everywhere else here.
+            drift_rate: 1.0 - (-1.0 / (0.5 * fs)).exp(),
             // While the average still holds some of the old phase, the
             // phasor is the new one less what is left of the old. Where that
             // mix changes sign is where opposition begins, and it then has to
@@ -241,6 +296,25 @@ impl ReversalDetector {
         } else {
             None
         };
+        // How fast the phasor is turning, before anything is compared. Taken
+        // from consecutive samples, where a reversal is a step of pi spread
+        // over a couple of time constants and so contributes about a hertz to
+        // an average half a second long.
+        if let (Some(now), Some(prev)) = (now, self.previous) {
+            let turn = (prev.0 * now.1 - prev.1 * now.0)
+                .atan2(prev.0 * now.0 + prev.1 * now.1);
+            self.settled = self.settled.saturating_add(1);
+            let rate = self.drift_rate.max(1.0 / f64::from(self.settled));
+            self.drift += (turn - self.drift) * rate;
+        } else {
+            // No tone, so nothing to measure and nothing worth keeping: what
+            // it was turning at before it went away says nothing about what it
+            // will be turning at when it comes back.
+            self.settled = 0;
+            self.drift = 0.0;
+        }
+        self.previous = now;
+
         let then = self.history.pop_back().flatten();
         self.history.push_front(now);
 
@@ -259,6 +333,21 @@ impl ReversalDetector {
         let (Some(now), Some(then)) = (now, then) else {
             return false;
         };
+
+        // How far a tone simply sitting off frequency would have turned
+        // between the two directions being compared. Past a point that is no
+        // longer a correction to make but a reason to say nothing: the two
+        // cases are not distinguishable from a single comparison, and a tone
+        // turning that fast is not one this was built to measure.
+        //
+        // Turning it out instead of refusing was tried, and doubled the count
+        // on a real call. The estimate has to come from the same noisy phasor,
+        // and de-rotating by a wrong angle manufactures oppositions of its
+        // own; refusing can only ever remove one.
+        if (self.drift * self.history.len() as f64).abs() > MAX_CARRY {
+            self.opposed = 0;
+            return false;
+        }
 
         if now.0 * then.0 + now.1 * then.1 < -0.7 {
             self.opposed += 1;
@@ -295,6 +384,52 @@ impl ReversalDetector {
 
 #[cfg(test)]
 mod tests {
+
+    /// Run a tone `offset` hertz away from where the detector is looking, with
+    /// an optional phase reversal half-way through, and count what it finds.
+    fn offset_tone(offset: f64, reverse: bool) -> u32 {
+        let fs = 16_000.0;
+        let seconds = 4.0;
+        let mut d = ReversalDetector::new(1800.0, 60.0, 0.008, fs);
+        let mut found = 0;
+        for i in 0..(fs * seconds) as usize {
+            let t = i as f64 / fs;
+            let flip = if reverse && t > seconds / 2.0 {
+                std::f64::consts::PI
+            } else {
+                0.0
+            };
+            let x = 0.2 * (std::f64::consts::TAU * (1800.0 + offset) * t + flip).sin();
+            if d.feed(x) {
+                found += 1;
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn a_tone_off_frequency_is_not_reversing() {
+        // The fault this cost a real call. The comparison is between the
+        // phasor now and the phasor six time constants ago, and a carrier that
+        // is simply off frequency turns steadily through the angle that counts
+        // as opposed and keeps going. `new` works out that seven hertz turns
+        // forty degrees in that window, so around twenty-four reaches a
+        // hundred and thirty-five -- and then the detector fires as often as
+        // it is allowed to, on a tone that never did anything.
+        assert_eq!(offset_tone(30.0, false), 0, "a steady tone, thirty hertz off");
+        assert_eq!(offset_tone(-30.0, false), 0);
+        assert_eq!(offset_tone(120.0, false), 0, "and a long way off");
+    }
+
+    #[test]
+    fn a_small_offset_does_not_hide_a_real_reversal() {
+        // The other half of it. Refusing to judge a phasor that is turning is
+        // only worth doing if it still judges the ones that are not, and no
+        // real line puts a carrier exactly where it belongs.
+        assert_eq!(offset_tone(0.0, true), 1, "on frequency");
+        assert_eq!(offset_tone(3.0, true), 1, "three hertz off");
+        assert_eq!(offset_tone(-3.0, true), 1);
+    }
 
     /// A tone arriving is not a tone reversing.
     ///

@@ -19,7 +19,7 @@
 //! An earlier commit guessed at the cause and was wrong, and said so. This
 //! runs the real detectors over the real recording instead of guessing again.
 
-use dsp::ReversalDetector;
+use dsp::{ReversalDetector, ToneDetector};
 
 const FS: f64 = 16_000.0;
 
@@ -55,6 +55,73 @@ fn capture() -> Option<(Vec<f32>, f64)> {
     Some((wav.channel(0), offset))
 }
 
+/// How fast the phasor at `freq` turns, in hertz, second by second.
+///
+/// The question the reversal detector cannot answer for itself. It compares
+/// the phasor now against the phasor six time constants ago and calls them
+/// opposed when they are more than a hundred and thirty-five degrees apart --
+/// and a carrier that is simply off frequency turns steadily through that
+/// angle and keeps going. `ReversalDetector::new` works out that seven hertz
+/// of offset turns forty degrees in the comparison window, so a hundred and
+/// thirty-five needs about twenty-four. Past that, a detector watching a
+/// perfectly steady tone reports a reversal as often as it is allowed to.
+#[test]
+#[ignore = "needs a capture; see the module comment"]
+fn probe_carrier_offset() {
+    let Some((line, offset)) = capture() else {
+        println!("set V32_CAPTURE to a recording to run this");
+        return;
+    };
+    let mut tones = [
+        ("carrier 1800", ToneDetector::new(CARRIER, BANDWIDTH, FS)),
+        ("lower 600", ToneDetector::new(CARRIER - SIDEBAND, BANDWIDTH, FS)),
+        ("upper 3000", ToneDetector::new(CARRIER + SIDEBAND, BANDWIDTH, FS)),
+    ];
+
+    // A second at a time, because the interesting stretches last seconds and
+    // an offset that changes within one is not an offset.
+    const WINDOW: usize = FS as usize;
+    println!(
+        "  {:>9}  {:<13} {:>10} {:>12}",
+        "session s", "tone", "amplitude", "offset"
+    );
+    let mut turned = [0.0f64; 3];
+    let mut previous = [f64::NAN; 3];
+    for (i, s) in line.iter().enumerate() {
+        for (k, (_, t)) in tones.iter_mut().enumerate() {
+            t.feed(f64::from(*s));
+            let phase = t.phase();
+            if previous[k].is_finite() {
+                let mut step = phase - previous[k];
+                while step > std::f64::consts::PI {
+                    step -= std::f64::consts::TAU;
+                }
+                while step < -std::f64::consts::PI {
+                    step += std::f64::consts::TAU;
+                }
+                turned[k] += step;
+            }
+            previous[k] = phase;
+        }
+        if i % WINDOW == WINDOW - 1 {
+            let t = i as f64 / FS + offset;
+            for (k, (name, d)) in tones.iter().enumerate() {
+                // Only where there is a tone to be off frequency. Noise turns
+                // as fast as it likes and means nothing by it.
+                if d.amplitude() > 0.008 {
+                    println!(
+                        "  {t:>9.3}  {name:<13} {:>10.5} {:>9.1} Hz",
+                        d.amplitude(),
+                        turned[k] / std::f64::consts::TAU
+                    );
+                }
+            }
+            turned = [0.0; 3];
+        }
+    }
+    println!();
+}
+
 #[test]
 #[ignore = "needs a capture; see the module comment"]
 fn probe_replay_reversals() {
@@ -72,23 +139,37 @@ fn probe_replay_reversals() {
     ];
 
     println!(
-        "  {:>9}  {:<13} {:>10} {:>8} {:>7}",
-        "session s", "detector", "amplitude", "since", "count"
+        "  {:>9}  {:<13} {:>8} {:>8} {:>8} {:>8} {:>7}",
+        "session s", "fired", "1800", "600", "3000", "since", "count"
     );
     let mut last = [f64::NAN; 3];
     for (i, s) in line.iter().enumerate() {
         let t = i as f64 / FS + offset;
-        for (k, (name, d)) in detectors.iter_mut().enumerate() {
-            if d.feed(f64::from(*s)) {
-                let gap = t - last[k];
-                last[k] = t;
-                println!(
-                    "  {t:>9.3}  {name:<13} {:>10.5} {:>7.1}ms {:>7}",
-                    d.amplitude(),
-                    gap * 1000.0,
-                    d.count()
-                );
+        let mut fired = [false; 3];
+        for (k, (_, d)) in detectors.iter_mut().enumerate() {
+            fired[k] = d.feed(f64::from(*s));
+        }
+        // All three amplitudes at every firing, because the question is not
+        // how big the tone that reversed was but whether it was the one the
+        // far end was sending. During its alternation the carrier is
+        // suppressed and the sidebands carry the signal; while it repeats a
+        // state the reverse. A reversal in the quieter of the two is a
+        // reversal in a place that is empty.
+        let amps: Vec<f64> = detectors.iter().map(|(_, d)| d.amplitude()).collect();
+        for (k, (name, d)) in detectors.iter().enumerate() {
+            if !fired[k] {
+                continue;
             }
+            let gap = t - last[k];
+            last[k] = t;
+            println!(
+                "  {t:>9.3}  {name:<13} {:>8.5} {:>8.5} {:>8.5} {:>6.1}ms {:>7}",
+                amps[0],
+                amps[1],
+                amps[2],
+                gap * 1000.0,
+                d.count()
+            );
         }
     }
 
