@@ -18,6 +18,24 @@
 //!
 //! An earlier commit guessed at the cause and was wrong, and said so. This
 //! runs the real detectors over the real recording instead of guessing again.
+//!
+//! What it found was that the far end's carrier was 22 to 36 Hz off frequency
+//! through the stretch in question, and that the detector could not tell that
+//! from a phase that had stepped. Across every recording in hand, before the
+//! fix that came out of this and after it:
+//!
+//! ```text
+//!                     carrier 1800    lower 600    upper 3000
+//!   live-1788682720      51 -> 5       44 -> 1        1 -> 1
+//!   live-1788682165      53 -> 5       48 -> 3        2 -> 2
+//!   live-1788671074       2 -> 1       33 -> 0        0 -> 0
+//!   live-1788681310      57 -> 5       35 -> 1        2 -> 1
+//! ```
+//!
+//! The upper sideband is the column to read for whether anything real was
+//! lost, because it was the one that was not chattering to begin with: three
+//! of its four counts survive unchanged. The fourth went from two to one and
+//! is not accounted for.
 
 use dsp::{ReversalDetector, ToneDetector};
 
