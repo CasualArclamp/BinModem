@@ -128,6 +128,13 @@ impl OnePole {
         self.y
     }
     pub fn value(&self) -> f64 { self.y }
+
+    /// Put the estimate somewhere, without waiting for it to get there.
+    ///
+    /// For the moment a smoothed value stops being a measurement of anything:
+    /// what it should hold then is a guess, and the guess is available at once
+    /// while the smoothing would take several time constants to reach it.
+    pub fn set(&mut self, value: f64) { self.y = value; }
     pub fn reset(&mut self) { self.y = 0.0; }
 }
 

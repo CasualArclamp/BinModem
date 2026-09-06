@@ -26,5 +26,7 @@ pub use filter::{Biquad, Cascade, OnePole, bandpass, butter_highpass, butter_low
 pub use fsk::FskDetector;
 pub use nco::Nco;
 pub use resample::Resampler;
-pub use shaping::{ComplexFir, Fir, Gardner, fir_lowpass, rrc_at, rrc_taps};
+pub use shaping::{
+    ComplexFir, Fir, Gardner, fir_lowpass, fir_lowpass_kaiser, rrc_at, rrc_taps,
+};
 pub use tone::{ReversalDetector, ToneDetector};

@@ -85,6 +85,75 @@ pub fn fir_lowpass(cutoff: f64, taps: usize, fs: f64) -> Vec<f64> {
     out
 }
 
+/// Zeroth-order modified Bessel function of the first kind.
+///
+/// The Kaiser window is defined in terms of it. The series converges quickly
+/// for the arguments a window design produces, and the loop stops when a term
+/// stops changing the sum.
+fn bessel_i0(x: f64) -> f64 {
+    let half = x / 2.0;
+    let mut term = 1.0;
+    let mut sum = 1.0;
+    for k in 1..64 {
+        let ratio = half / f64::from(k);
+        term *= ratio * ratio;
+        sum += term;
+        if term < sum * 1e-17 {
+            break;
+        }
+    }
+    sum
+}
+
+/// A low-pass designed from what it has to do, rather than from a tap count.
+///
+/// `pass` is the highest frequency to keep, `stop` the lowest to reject, and
+/// `stopband_db` how far down everything above `stop` has to be. How many taps
+/// that costs follows from the three of them, by Kaiser's formulas, and the
+/// caller does not get to choose it -- which is the point. A filter asked for
+/// by tap count is a filter whose rejection nobody has checked.
+///
+/// The window matters more than the length here. A Hamming window has a
+/// stopband floor of about 53 dB and stays there however many taps it is given,
+/// so a design that needs 80 cannot be had by making a Hamming filter longer.
+/// Kaiser's has a parameter for exactly this: ask for the depth, and pay for it
+/// in taps.
+pub fn fir_lowpass_kaiser(pass: f64, stop: f64, stopband_db: f64, fs: f64) -> Vec<f64> {
+    let transition = ((stop - pass) / fs).clamp(1e-5, 0.5);
+    // Below 21 dB the window is rectangular and the formulas do not apply.
+    let a = stopband_db.max(21.0);
+    let beta = if a > 50.0 {
+        0.1102 * (a - 8.7)
+    } else {
+        0.5842 * (a - 21.0).powf(0.4) + 0.07886 * (a - 21.0)
+    };
+    let n = ((a - 8.0) / (2.285 * (2.0 * PI * transition))).ceil().max(3.0) as usize | 1;
+
+    // Halfway between the two edges, which is where a windowed sinc sits 6 dB
+    // down: the passband edge and the stopband edge come out either side of it.
+    let cutoff = (pass + stop) / 2.0;
+    let mid = (n / 2) as f64;
+    let omega = 2.0 * PI * cutoff / fs;
+    let denominator = bessel_i0(beta);
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let t = i as f64 - mid;
+        let ideal = if t.abs() < 1e-9 {
+            omega / PI
+        } else {
+            (omega * t).sin() / (PI * t)
+        };
+        let r = t / mid;
+        let window = bessel_i0(beta * (1.0 - r * r).max(0.0).sqrt()) / denominator;
+        out.push(ideal * window);
+    }
+    let sum: f64 = out.iter().sum();
+    for tap in &mut out {
+        *tap /= sum;
+    }
+    out
+}
+
 /// A real finite impulse response filter with a sliding history.
 #[derive(Debug, Clone)]
 pub struct Fir {
@@ -286,6 +355,82 @@ impl Gardner {
 
 #[cfg(test)]
 mod tests {
+
+    /// Magnitude response of a tap set at one frequency.
+    fn response(taps: &[f64], freq: f64, fs: f64) -> f64 {
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for (i, &t) in taps.iter().enumerate() {
+            let w = 2.0 * PI * freq * i as f64 / fs;
+            re += t * w.cos();
+            im -= t * w.sin();
+        }
+        (re * re + im * im).sqrt()
+    }
+
+    #[test]
+    fn a_kaiser_design_keeps_what_it_was_told_to_keep() {
+        let fs = 16_000.0;
+        let taps = fir_lowpass_kaiser(525.0, 675.0, 80.0, fs);
+        for f in [0.0, 100.0, 300.0, 500.0, 525.0] {
+            let db = 20.0 * response(&taps, f, fs).log10();
+            assert!(db > -1.0, "passband sags {db:.2} dB at {f} Hz");
+        }
+    }
+
+    #[test]
+    fn a_kaiser_design_rejects_by_as_much_as_it_was_asked_for() {
+        // The property a windowed sinc cannot be talked into by length alone: a
+        // Hamming window bottoms out near 53 dB however many taps it is given,
+        // so a design needing eighty has to change window rather than grow.
+        let fs = 16_000.0;
+        let taps = fir_lowpass_kaiser(525.0, 675.0, 80.0, fs);
+        for f in [675.0, 800.0, 1200.0, 1725.0, 3000.0] {
+            let db = 20.0 * response(&taps, f, fs).log10();
+            assert!(db < -78.0, "stopband only {db:.1} dB down at {f} Hz");
+        }
+    }
+
+    #[test]
+    fn asking_for_more_rejection_costs_taps_and_nothing_else() {
+        let fs = 16_000.0;
+        let cheap = fir_lowpass_kaiser(525.0, 675.0, 40.0, fs);
+        let dear = fir_lowpass_kaiser(525.0, 675.0, 90.0, fs);
+        assert!(
+            dear.len() > cheap.len(),
+            "ninety decibels came out no longer than forty"
+        );
+        // Both odd, so both have a true centre tap and exact linear phase.
+        assert_eq!(cheap.len() % 2, 1);
+        assert_eq!(dear.len() % 2, 1);
+    }
+
+    #[test]
+    fn a_narrower_transition_costs_taps_too() {
+        let fs = 16_000.0;
+        let wide = fir_lowpass_kaiser(500.0, 1500.0, 80.0, fs);
+        let narrow = fir_lowpass_kaiser(500.0, 600.0, 80.0, fs);
+        assert!(narrow.len() > wide.len() * 4, "a tenth the transition cost too little");
+    }
+
+    #[test]
+    fn a_kaiser_design_passes_direct_current_untouched() {
+        // Normalised to unity at zero, so putting one in the signal path
+        // neither lifts nor drops the level.
+        let taps = fir_lowpass_kaiser(525.0, 675.0, 80.0, 16_000.0);
+        assert!((taps.iter().sum::<f64>() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_window_is_symmetric_so_the_phase_is_linear() {
+        // The whole reason a finite impulse response is used here rather than a
+        // Butterworth: every frequency is delayed by the same amount, so the
+        // pulse arrives with its shape intact and the matched pair still meets
+        // the Nyquist criterion.
+        let taps = fir_lowpass_kaiser(525.0, 675.0, 80.0, 16_000.0);
+        for (a, b) in taps.iter().zip(taps.iter().rev()) {
+            assert!((a - b).abs() < 1e-15, "not symmetric about its centre");
+        }
+    }
     use super::*;
 
     #[test]

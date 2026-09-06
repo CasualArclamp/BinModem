@@ -285,3 +285,122 @@ fn the_two_clocks_need_not_agree() {
         );
     }
 }
+
+/// Run `payload` through while our own channel comes back on top of it.
+///
+/// One virtual cable is not a hybrid. What is written to it is what comes back,
+/// so a modem on one hears its own transmit at full strength, in the channel it
+/// is not listening to, from the moment it starts sending -- which is well
+/// before the far end has said anything at all.
+///
+/// `quiet_ms` is how long that goes on for before the far end speaks, and it is
+/// the variable that matters: every real call has a pause of some length there,
+/// for the answer tone and the handshake, and no two calls have the same one.
+fn with_own_channel(payload: &[u8], lead_in: usize, own_level: f64, quiet_ms: f64) -> Vec<u8> {
+    let mut far = Transmitter::new(Channel::Answering, FS);
+    let mut own = Transmitter::new(Channel::Calling, FS);
+    // A calling modem: listens on the high channel, transmits on the low one.
+    let mut rx = Receiver::new(Channel::Calling, FS);
+    own.push_bytes(&vec![0x5a; 8192]);
+
+    let mut out = Vec::new();
+    for _ in 0..(FS * quiet_ms / 1000.0) as usize {
+        rx.feed(own.next_sample() * own_level);
+        out.extend(rx.take_bytes());
+    }
+
+    far.push_bytes(&vec![0x55; lead_in]);
+    far.push_bytes(payload);
+    far.push_bytes(&[0x55; 32]);
+    let symbols = (lead_in + payload.len() + 32) * 2;
+    for _ in 0..(symbols as f64 * FS / BAUD).ceil() as usize {
+        rx.feed(far.next_sample() + own.next_sample() * own_level);
+        out.extend(rx.take_bytes());
+    }
+    out
+}
+
+/// How often the far end is heard, over many different pauses before it starts.
+///
+/// One pause is not a measurement. Its length decides where in the symbol the
+/// carrier appears and how far gain control has run down, and a single value
+/// answers for that one alignment and no other. These are spaced so that no two
+/// land at the same point of a symbol.
+fn acquisitions(own_level: f64) -> (usize, usize) {
+    let payload = b"the far end is saying this while we talk over it";
+    let quiets = (0..16).map(|i| 131.0 * f64::from(i) + 0.37 * f64::from(i));
+    let mut heard = 0;
+    let mut tried = 0;
+    for quiet_ms in quiets {
+        tried += 1;
+        if contains_at_any_bit_offset(&with_own_channel(payload, 96, own_level, quiet_ms), payload) {
+            heard += 1;
+        }
+    }
+    (heard, tried)
+}
+
+#[test]
+fn a_carrier_that_arrives_after_a_pause_is_still_acquired() {
+    // Every real call has a pause before the far end's carrier: the answer
+    // tone, the silence after it, the handshake. This is where V.22bis was
+    // falling over, and the cause was a guard that had already expired.
+    //
+    // The equaliser is held still for its first sixty-four symbols to keep it
+    // away from the acquisition transient -- gain control pinned to its clamp
+    // by silence, a carrier loop that has not yet found the phase. Those
+    // symbols used to be counted from when the receiver was built rather than
+    // from when a carrier appeared, so after any pause longer than about a
+    // tenth of a second the guard was long gone, and the equaliser adapted
+    // straight into the transient it exists to avoid. It then spent the call
+    // unlearning it.
+    //
+    // Below a tenth of a second it worked, which is why every loopback test
+    // here passed: they all start the signal at once.
+    let (heard, tried) = acquisitions(0.0);
+    assert!(
+        heard >= tried - 2,
+        "heard the far end after only {heard} of {tried} pauses"
+    );
+}
+
+#[test]
+fn our_own_channel_does_not_stop_us_hearing_the_other() {
+    // The same, with our own transmit coming back at the strength one cable
+    // returns it at, which is all of it. Band selection has to hold that out
+    // of the loops for the whole of the pause as well as during the call:
+    // there is no hybrid here to help it.
+    let (heard, tried) = acquisitions(1.0);
+    assert!(
+        heard >= tried - 2,
+        "our own channel cost us the far end in {} of {tried} pauses",
+        tried - heard
+    );
+}
+
+#[test]
+fn the_channel_we_transmit_in_is_not_heard_as_a_carrier() {
+    // Nothing this modem sends should ever look like an incoming call. On one
+    // cable it all comes straight back, so the only thing separating the two
+    // is the selectivity of the band filter.
+    let mut own = Transmitter::new(Channel::Calling, FS);
+    let mut rx = Receiver::new(Channel::Calling, FS);
+    own.push_bytes(&vec![0x5a; 4096]);
+
+    let mut sent = 0.0f64;
+    let n = (FS * 0.5) as usize;
+    for _ in 0..n {
+        let s = own.next_sample();
+        sent += s * s;
+        rx.feed(s);
+    }
+    let sent = (sent / n as f64).sqrt();
+    assert!(!rx.carrier(), "heard its own transmit as an incoming carrier");
+    // Where the two channels sit, 55 dB is what the filter is designed for and
+    // 60 is what it should comfortably beat end to end.
+    let rejection = 20.0 * (sent / rx.level().max(1e-12)).log10();
+    assert!(
+        rejection > 60.0,
+        "our own channel is only {rejection:.1} dB down after band selection"
+    );
+}

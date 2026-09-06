@@ -473,8 +473,17 @@ pub struct Receiver {
     frequency: f64,
     agc: OnePole,
     equalizer: Equalizer,
-    /// Symbols seen, so adaptation can wait for the other loops.
-    symbols: u64,
+    /// Symbols seen since a carrier appeared, so that adaptation can wait for
+    /// the other loops to settle on it.
+    ///
+    /// Since the carrier, not since the receiver was made. Those are the same
+    /// thing only on a line that was already carrying a signal when the modem
+    /// was switched on, and no call has ever begun that way: a call begins
+    /// with an answer tone, a pause, and a handshake, and by the time the far
+    /// end's carrier arrives a counter started at construction has run out
+    /// many times over. Which left the equaliser adapting through exactly the
+    /// transient the counter exists to protect it from.
+    since_carrier: u64,
     quadrant: Option<u8>,
     /// Rate in use, once enough symbols have been seen to tell.
     rate: Rate,
@@ -501,24 +510,43 @@ impl Receiver {
     pub fn new(channel: Channel, fs: f64) -> Self {
         let carrier = channel.receive_carrier();
         let sps = fs / BAUD;
-        // The signal occupies the carrier plus half the symbol rate scaled by
-        // the roll-off, so a little over 500 Hz either side.
         // Channel selection happens at baseband, with a linear-phase filter.
         //
         // The two directions very nearly abut: the low channel reaches 1725 Hz
-        // and the high one starts at 1875. Once downconverted, the far channel
-        // lands from 675 Hz upwards while ours ends at 525. An earlier attempt
-        // used a steep Butterworth on the passband and made matters worse,
-        // which was read at the time as selectivity costing more than it
-        // bought. That was the wrong conclusion: the fault was not steepness
-        // but phase. A Butterworth delays different frequencies by different
-        // amounts and smears the pulse, while a symmetric finite impulse
-        // response delays them all equally and can be as sharp as wanted.
+        // and the high one starts at 1875. An earlier attempt used a steep
+        // Butterworth on the passband and made matters worse, which was read at
+        // the time as selectivity costing more than it bought. That was the
+        // wrong conclusion: the fault was not steepness but phase. A
+        // Butterworth delays different frequencies by different amounts and
+        // smears the pulse, while a symmetric finite impulse response delays
+        // them all equally and can be as sharp as wanted.
+        //
+        // Applying one real tap set to both parts of the complex signal gives a
+        // response symmetric about zero, so a low-pass here is a band-pass
+        // about the carrier, which is what a double-sideband signal wants.
         //
         // Four hundred taps put the passband edge at 525 Hz within a hundredth
-        // of a decibel and hold the whole of the far channel, which begins at
-        // 675 Hz once downconverted, at least 55 dB down. The twelve
-        // milliseconds of delay that buys sits in no feedback loop.
+        // of a decibel and hold the whole of the other channel, which begins at
+        // 675 Hz once downconverted, at least 55 dB down. Measured end to end
+        // against a transmitter of our own it rejects 67 dB, and that is the
+        // number that matters here. A real modem has a hybrid, which separates
+        // the two directions by ten or twenty decibels before its filter sees
+        // them. Written to a virtual cable there is no hybrid at all: what goes
+        // out comes back at full strength, in the channel this end is not
+        // listening to, and this filter is the only thing standing between the
+        // two.
+        //
+        // Sixty-seven decibels is enough, and was measured to be enough rather
+        // than assumed to be. A Kaiser-windowed design asking for ninety was
+        // tried here -- six hundred taps, and dsp::fir_lowpass_kaiser remains
+        // if it is ever wanted -- and changed nothing at any level our own
+        // transmit actually comes back at. It only began to help once that was
+        // twelve decibels louder than the far end, which is not a line, it is a
+        // fault. What it did do was cost two frames of a recorded call. So it
+        // is not here.
+        //
+        // The twelve milliseconds of delay four hundred taps costs sits in no
+        // feedback loop.
         Self {
             nco: Nco::new(carrier, fs),
             select: ComplexFir::new(fir_lowpass(600.0, 401, fs)),
@@ -544,7 +572,7 @@ impl Receiver {
             // magnitude, so handing it the raw scale where mean power is ten
             // would make every update a thousand times too large.
             equalizer: Equalizer::new(21, 1.32),
-            symbols: 0,
+            since_carrier: 0,
             quadrant: None,
             // Assume the faster rate and fall back once the constellation
             // says otherwise.
@@ -579,11 +607,18 @@ impl Receiver {
         let level = self
             .level
             .process((selected.0 * selected.0 + selected.1 * selected.1).sqrt());
+        let had_carrier = self.carrier;
         self.carrier = if self.carrier {
             level > CARRIER_OFF
         } else {
             level > CARRIER_ON
         };
+        if self.carrier != had_carrier {
+            // The settling clock starts when there is something to settle on,
+            // and starts again when it goes away. Everything downstream is
+            // about to be handed a signal it has never seen.
+            self.since_carrier = 0;
+        }
         let filtered = self.matched.process(selected);
 
         let previous = std::mem::replace(&mut self.previous_filtered, filtered);
@@ -616,6 +651,27 @@ impl Receiver {
         // slicer expects them.
         let power = symbol.0 * symbol.0 + symbol.1 * symbol.1;
         let mean_power = self.agc.process(power);
+        // Floored, rather than allowed to run down to nothing.
+        //
+        // A quiet line has no level to measure, and measuring it anyway gives
+        // an answer that falls towards zero with the smoothing time constant.
+        // The gain is the reciprocal, so within a second of silence it is
+        // pinned to the clamp below -- and then the first symbols of the
+        // carrier that eventually arrives are multiplied by four hundred. What
+        // the equaliser is handed at that moment is not a constellation, and it
+        // spends the rest of the call unlearning it.
+        //
+        // That was the whole of the trouble a call starting after any real
+        // pause was having, and every call starts after one: there is an answer
+        // tone, and a pause, and a handshake, long before the far end's carrier
+        // arrives.
+        //
+        // Put back where it started rather than frozen where it stopped.
+        // Freezing sounds tidier and is worse: the carrier flag flaps on a real
+        // line, and freezing hands the next moment a level measured during the
+        // last one, which cost two frames of a recorded call. Nominal is a
+        // guess, but it is the guess the receiver is built with and it is never
+        // far wrong.
         // Bound the gain. Between calls a capture contains answer tones,
         // silence before the carrier and silence after the hangup, and during
         // those the mean power falls towards zero. An unbounded gain then sends
@@ -660,10 +716,15 @@ impl Receiver {
         // Hold the equaliser still until gain control and the carrier loop have
         // settled. Adapting against the acquisition transient teaches it
         // nonsense that it then has to unlearn.
-        self.symbols += 1;
+        self.since_carrier += 1;
         // Nothing worth learning from silence or from a steady answer tone,
         // and plenty to unlearn afterwards.
-        if self.symbols > 64 && mean_power > SQUELCH {
+        // Asked of carrier detection rather than of the mean power. It is the
+        // same question, answered by the one thing built to answer it: the
+        // power reaching here has been through gain control, whose entire
+        // purpose is to make a weak signal and a strong one look alike, so a
+        // threshold on it is a threshold on a number chosen to be constant.
+        if self.since_carrier > 64 && mean_power > SQUELCH {
             self.equalizer.adapt(
                 equalized,
                 (
@@ -941,6 +1002,7 @@ fn point_bits(point: (f64, f64), quadrant: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
 
     #[test]
     fn the_channels_face_each_other() {
