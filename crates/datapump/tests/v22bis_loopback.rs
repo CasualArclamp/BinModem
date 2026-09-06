@@ -4,7 +4,7 @@
 //! self-synchronising descrambler before anything readable emerges, so every
 //! test sends a lead-in first and looks for the payload in what follows.
 
-use datapump::v22bis::{BAUD, Channel, Receiver, Signal, Transmitter};
+use datapump::v22bis::{BAUD, Channel, Rate, Receiver, Signal, Transmitter};
 
 const FS: f64 = 16_000.0;
 
@@ -185,7 +185,6 @@ fn the_receiver_reports_a_settled_constellation() {
 
 // -- 1200 bit/s (V.22bis 2.5.2.2) --------------------------------------------
 
-use datapump::v22bis::Rate;
 
 fn loopback_at(payload: &[u8], lead_in: usize, rate: Rate) -> (Vec<u8>, Rate) {
     let mut tx = Transmitter::at_rate(Channel::Calling, rate, FS);
@@ -534,4 +533,76 @@ fn six_decibels_of_headroom_buys_the_far_end_back() {
         heard >= tried - 1,
         "heard the far end after only {heard} of {tried} pauses at six decibels down"
     );
+}
+
+/// How often the far end is heard at `rate`, with our own transmit `db`
+/// relative to it and the whole line through companding.
+///
+/// The levels this is called with are measured, not invented: a recorded call
+/// through a real trunk put our own transmit 9.6 dB above the far end in our
+/// own receiver, with the far end arriving at -24.7 dBFS.
+fn acquisitions_at(rate: Rate, db: f64) -> (usize, usize) {
+    let payload = b"the far end is saying this while we talk over it";
+    let far_level = 0.058;
+    let own_level = far_level * 10.0f64.powf(db / 20.0);
+    let (mut heard, mut tried) = (0, 0);
+    for i in 0..8 {
+        tried += 1;
+        let quiet_ms = 131.0 * f64::from(i) + 0.37 * f64::from(i);
+        let mut far = Transmitter::at_rate(Channel::Answering, rate, FS);
+        let mut own = Transmitter::at_rate(Channel::Calling, rate, FS);
+        let mut rx = Receiver::new(Channel::Calling, FS);
+        own.push_bytes(&vec![0x5a; 8192]);
+
+        let mut out = Vec::new();
+        for _ in 0..(FS * quiet_ms / 1000.0) as usize {
+            rx.feed(ulaw_roundtrip(own.next_sample() * own_level));
+            out.extend(rx.take_bytes());
+        }
+        far.push_bytes(&[0x55; 96]);
+        far.push_bytes(payload);
+        far.push_bytes(&[0x55; 32]);
+        // Two bits to a symbol at 1200 and four at 2400, so the same bytes take
+        // twice as long to send at the slower rate.
+        let bits = (96 + payload.len() + 32) * 8;
+        let symbols = bits / if rate == Rate::Bps1200 { 2 } else { 4 };
+        for _ in 0..(symbols as f64 * FS / BAUD).ceil() as usize {
+            let line = far.next_sample() * far_level + own.next_sample() * own_level;
+            rx.feed(ulaw_roundtrip(line));
+            out.extend(rx.take_bytes());
+        }
+        if contains_at_any_bit_offset(&out, payload) {
+            heard += 1;
+        }
+    }
+    (heard, tried)
+}
+
+#[test]
+fn twenty_four_hundred_cannot_be_had_while_we_shout_over_it() {
+    // The condition a recorded call was actually in. Sixteen points need about
+    // twenty decibels of signal to noise to be told apart, and there is not
+    // twenty decibels here: our own transmit, squared onto the far end's
+    // carrier by companding, is louder than the far end itself.
+    let (heard, tried) = acquisitions_at(Rate::Bps2400, 9.6);
+    assert_eq!(heard, 0, "expected 2400 to be hopeless here, heard {heard} of {tried}");
+}
+
+#[test]
+fn twelve_hundred_carries_the_call_that_twenty_four_hundred_cannot() {
+    // The same line, the same companding, the same harmonic sitting on the
+    // same carrier -- and every single attempt succeeds. Four points need
+    // about thirteen decibels rather than twenty, and thirteen is there.
+    //
+    // Which is what a rate ceiling is for. On a line like this 2400 is not the
+    // faster connection, it is the one that carries nothing, and AT+MS can say
+    // so: the max rate field is honoured all the way down to the handshake,
+    // which then never offers 2400 at all.
+    for db in [9.6, 0.0, -6.0] {
+        let (heard, tried) = acquisitions_at(Rate::Bps1200, db);
+        assert_eq!(
+            heard, tried,
+            "1200 lost the far end at {db:+.1} dB: heard {heard} of {tried}"
+        );
+    }
 }
