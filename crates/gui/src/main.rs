@@ -12,7 +12,14 @@
 //!   modem-scope --devices                        what audio this machine has
 //!   modem-scope --live                           a modem, line chosen in the window
 //!   modem-scope --live --in <dev> --out <dev>    and opened straight away
+//!   modem-scope --telnet [host]                  a board over a socket, no modem
 //! ```
+//!
+//! The last is for working on the terminal rather than on the modem. A board
+//! sends the same ANSI down a socket as down a call, so the screen is the same
+//! screen -- but over a socket every byte arrives, which means anything that
+//! draws wrongly is the terminal's fault and not the line's. That is not a
+//! distinction a capture can make.
 //!
 //! Neither device defaults, and `--live` on its own opens with no line rather
 //! than guessing at one. The default output on a desktop machine is whatever
@@ -23,6 +30,7 @@ mod app;
 mod console;
 mod engine;
 mod live;
+mod net;
 mod scopes;
 
 use std::path::PathBuf;
@@ -55,10 +63,15 @@ struct Args {
     live: bool,
     input: Option<String>,
     output: Option<String>,
+    /// Whether to open a terminal onto a socket instead of a modem, and where
+    /// to point it. `Some(None)` is the mode with the host chosen in the
+    /// window, which is the usual way in.
+    telnet: Option<Option<String>>,
 }
 
 fn parse() -> Result<Option<Args>, String> {
-    let mut args = Args { path: None, live: false, input: None, output: None };
+    let mut args =
+        Args { path: None, live: false, input: None, output: None, telnet: None };
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut rest = raw.iter();
     while let Some(arg) = rest.next() {
@@ -67,6 +80,16 @@ fn parse() -> Result<Option<Args>, String> {
         };
         match arg.as_str() {
             "--live" => args.live = true,
+            // The host is optional: without one the window opens with the box
+            // empty and nothing connected, exactly as --live does with no
+            // devices named.
+            "--telnet" => {
+                let host = rest.clone().next().filter(|h| !h.starts_with('-'));
+                if host.is_some() {
+                    rest.next();
+                }
+                args.telnet = Some(host.cloned());
+            }
             "--in" => args.input = Some(value("--in")?),
             "--out" => args.output = Some(value("--out")?),
             "--devices" | "--list-devices" => {
@@ -78,7 +101,8 @@ fn parse() -> Result<Option<Args>, String> {
                     "modem-scope [path.wav]                        replay a capture\n\
                      modem-scope --devices                         list audio devices\n\
                      modem-scope --live                            a modem, line chosen in the window\n\
-                     modem-scope --live --in <dev> --out <dev>     and opened straight away"
+                     modem-scope --live --in <dev> --out <dev>     and opened straight away\n\
+                     modem-scope --telnet [host]                   a board over a socket, no modem"
                 );
                 return Ok(None);
             }
@@ -94,6 +118,12 @@ fn parse() -> Result<Option<Args>, String> {
     if args.input.is_some() != args.output.is_some() {
         return Err("--in and --out go together; see --devices".into());
     }
+    // One or the other. A window can show a modem on a line or a terminal on a
+    // socket, and asking for both is asking which of two things the terminal
+    // in it is wired to.
+    if args.live && args.telnet.is_some() {
+        return Err("--live and --telnet are different windows; pick one".into());
+    }
     Ok(Some(args))
 }
 
@@ -103,6 +133,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let control = Arc::new(Control::default());
     let (sample_rate, title) = if args.live {
         (LIVE_FS, "dialupmodem2 - live")
+    } else if args.telnet.is_some() {
+        // Nothing here is sampled. The rate only has to be something the
+        // telemetry channel can be sized against.
+        (LIVE_FS, "dialupmodem2 - telnet")
     } else {
         let path = args.path.clone().unwrap_or_else(default_vector);
         let wav = line::wav::read(&path)?;
@@ -114,7 +148,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // without adding latency you can hear against the scopes.
     let sink = Arc::new(AudioSink::new((sample_rate * 0.25) as usize));
 
-    let (engine, source) = if args.live {
+    let (engine, source) = if let Some(host) = args.telnet {
+        let session = Arc::new(net::Session::default());
+        if let Some(host) = host {
+            session.connect(&host);
+        }
+        let handle = net::spawn(tx, control.clone(), session.clone());
+        (handle, Source::Telnet(session))
+    } else if args.live {
         let session = Arc::new(live::Session::default());
         // Named devices open straight away; without them the window opens with
         // the modem on the desk and no line in it, and the line panel is where

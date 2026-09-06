@@ -10,6 +10,7 @@ use telemetry::{Direction, Frame, LogEntry, Subscriber};
 use crate::console::{self, Console, Mode};
 use crate::engine::{Control, FFT_SIZE, SCOPE_LEN, SPECTRUM_BINS};
 use crate::live;
+use crate::net;
 use crate::scopes::{self, Waterfall};
 
 /// Where what is on the scope comes from.
@@ -20,11 +21,39 @@ pub enum Source {
     /// A modem of our own on a real line. The terminal below is its DTE: what
     /// is typed goes to the modem, and the modem answers for itself.
     Live(Arc<live::Session>),
+    /// A board over a socket, with no modem and no line anywhere in it. For
+    /// working on the terminal itself: every byte a board sends arrives
+    /// intact, so anything that draws wrongly is the terminal's fault and
+    /// nothing else's.
+    Telnet(Arc<net::Session>),
 }
 
 impl Source {
     fn is_live(&self) -> bool {
         matches!(self, Self::Live(_))
+    }
+
+    fn is_telnet(&self) -> bool {
+        matches!(self, Self::Telnet(_))
+    }
+
+    /// Whether something at the far end owns the state.
+    ///
+    /// True of both a call and a socket, and the distinction that matters to
+    /// the console: with a far end, what arrives is drawn exactly as it
+    /// arrives and nothing on this side interprets it. A capture has no far
+    /// end, so this side has to play one.
+    fn is_line(&self) -> bool {
+        !matches!(self, Self::Capture)
+    }
+
+    /// Send bytes to whatever is at the far end, if anything is.
+    fn send(&self, bytes: &[u8]) {
+        match self {
+            Self::Live(session) => session.type_bytes(bytes),
+            Self::Telnet(session) => session.type_bytes(bytes),
+            Self::Capture => {}
+        }
     }
 }
 
@@ -67,6 +96,8 @@ pub struct ScopeApp {
     chosen_input: usize,
     chosen_output: usize,
     carrier: usize,
+    /// Where a telnet connection is aimed.
+    host: String,
     tab: Tab,
     font_size: f32,
     last_repaint: std::time::Instant,
@@ -105,7 +136,12 @@ impl ScopeApp {
             // A live console is a dumb terminal onto a modem that
             // answers for itself; a capture console has to pretend to
             // be one, so they open with different things to say.
-            console: if source.is_live() { Console::live() } else { Console::new() },
+            console: match source {
+                Source::Live(_) => Console::live(),
+                Source::Telnet(_) => Console::telnet(),
+                Source::Capture => Console::new(),
+            },
+            host: Self::BOARDS[0].to_owned(),
             source,
             line_inputs: inputs,
             line_outputs: outputs,
@@ -176,7 +212,34 @@ impl ScopeApp {
                     // its own and will echo, answer, and decide for itself
                     // what is a command and what is data. Nothing is parsed
                     // on this side of the line.
-                    Source::Live(session) => session.type_bytes(&typed),
+                    // Straight to the modem, which has an AT interpreter of
+                    // its own and will echo, answer, and decide for itself
+                    // what is a command and what is data. Nothing is parsed
+                    // on this side of the line.
+                    Source::Live(_) => self.source.send(&typed),
+                    Source::Telnet(session) => {
+                        let session = std::sync::Arc::clone(session);
+                        session.type_bytes(&typed);
+                        // RFC 857: until the far end says it will echo, this
+                        // end has to, or typing goes into a screen that never
+                        // changes. Boards almost always do, so this is the
+                        // path taken for the first moment of a connection and
+                        // then not again -- but that moment is the login
+                        // prompt, and a login prompt that swallows what is
+                        // typed at it looks exactly like a dead connection.
+                        if !session.state().echo {
+                            for &b in &typed {
+                                // A bare return leaves the cursor on the same
+                                // line, so echoing one verbatim would draw
+                                // every line of typing over the last.
+                                if b == b'\r' {
+                                    self.console.term.feed_bytes(b"\r\n");
+                                } else {
+                                    self.console.term.feed(b);
+                                }
+                            }
+                        }
+                    }
                     Source::Capture => {
                         let actions = self.console.typed(&typed);
                         self.perform(actions);
@@ -215,6 +278,115 @@ impl ScopeApp {
         ("V22B", "V.22bis - 1200 or 2400"),
         ("V32", "V.32 - 4800 or 9600"),
     ];
+
+    /// Boards to start from, because a text box on its own is a box nobody
+    /// can type an answer into.
+    ///
+    /// These rot. Boards move, change port and close, and none of that is
+    /// worth pinning a build to -- which is why the box beside them is
+    /// editable and is the real interface. The first is Synchronet's own
+    /// board, which is as close to a reference target as this has: it is run
+    /// by the author of the software a great many of the surviving boards run
+    /// on, and it answers with a great deal of ANSI.
+    const BOARDS: [&'static str; 5] = [
+        "vert.synchro.net",
+        "blackflag.acid.org",
+        "xibalba.l33t.codes:44510",
+        "bbs.fozztexx.com",
+        "heatwavebbs.com",
+    ];
+
+    /// Choosing a board, and connecting to it.
+    fn net_controls(&mut self, ui: &mut egui::Ui) {
+        let Source::Telnet(session) = &self.source else { return };
+        let session = Arc::clone(session);
+        let state = session.state();
+        let dim = Color32::from_rgb(140, 150, 165);
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("host").monospace().color(dim));
+            let editable = !state.connected;
+            let entry = ui.add_enabled(
+                editable,
+                egui::TextEdit::singleline(&mut self.host)
+                    .desired_width(230.0)
+                    .hint_text("host or host:port"),
+            );
+            // Enter connects, because a box you have just typed an address
+            // into and then have to go and find a button for is a box that
+            // gets typed into twice.
+            let entered = editable
+                && entry.lost_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+            egui::ComboBox::from_id_salt("boards")
+                .selected_text("...")
+                .width(34.0)
+                .show_ui(ui, |ui| {
+                    for board in Self::BOARDS {
+                        if ui.selectable_label(self.host == board, board).clicked() {
+                            self.host = board.to_owned();
+                        }
+                    }
+                });
+
+            if state.connected {
+                if ui.button("Disconnect").clicked() {
+                    session.disconnect();
+                }
+            } else if (ui.button("Connect").clicked() || entered)
+                && !self.host.trim().is_empty()
+            {
+                // A board draws its opening screen over whatever was there,
+                // so start it on a clean one rather than on the last one.
+                self.console.term.reset();
+                self.console.term.clear_scrollback();
+                session.connect(&self.host);
+            }
+
+            ui.separator();
+            if state.connected {
+                ui.label(
+                    RichText::new(format!("connected to {}", state.peer))
+                        .monospace()
+                        .color(Color32::from_rgb(90, 220, 130)),
+                );
+                // The two options that decide whether anything looks right.
+                // Without eight-bit data the art loses its top bits and every
+                // box is drawn out of question marks; without the far end
+                // echoing, nothing typed appears at all.
+                let flag = |on: bool, yes: &str, no: &str| {
+                    if on {
+                        RichText::new(yes.to_owned()).monospace().color(dim)
+                    } else {
+                        RichText::new(no.to_owned())
+                            .monospace()
+                            .color(Color32::from_rgb(240, 180, 90))
+                    }
+                };
+                ui.label(flag(state.binary, "8-bit", "7-bit!"));
+                ui.label(flag(state.echo, "remote echo", "local echo"));
+            } else if let Some(e) = &state.error {
+                ui.label(RichText::new(e).monospace().color(Color32::from_rgb(240, 120, 120)));
+            } else {
+                ui.label(RichText::new("not connected").monospace().color(dim));
+            }
+
+            ui.separator();
+            // The whole reason this mode exists: what arrived, beside what it
+            // drew. Off by default because an opening screen is thousands of
+            // bytes and would bury every notice in the transcript.
+            let mut logging = session.logging();
+            if ui
+                .checkbox(&mut logging, "log bytes")
+                .on_hover_text("put everything the board sends in the transcript as well")
+                .changed()
+            {
+                session.set_logging(logging);
+            }
+            ui.add(egui::Slider::new(&mut self.font_size, 9.0..=22.0).text("font"));
+        });
+    }
 
     /// Choosing the line, and driving the call on it.
     ///
@@ -557,7 +729,7 @@ impl ScopeApp {
         };
 
         let data = self.rx.take_line_data();
-        if self.source.is_live() {
+        if self.source.is_line() {
             // Everything the modem says, whether that is an OK of its own or
             // a byte off the line. It keeps the command and online states and
             // runs its own escape timer, so this side only follows along far
@@ -570,12 +742,10 @@ impl ScopeApp {
             // is talking to a teletype. Only while there is a call, though:
             // in command state this would go to the AT interpreter, which
             // would rightly make nothing of it.
-            if self.frame.state == telemetry::CallState::Connected
-                && let Source::Live(session) = &self.source
-            {
+            if self.frame.state == telemetry::CallState::Connected {
                 let reply = self.console.term.take_reply();
                 if !reply.is_empty() {
-                    session.type_bytes(&reply);
+                    self.source.send(&reply);
                 }
             }
             self.console
@@ -609,6 +779,12 @@ impl ScopeApp {
         // The line and the call come first: on a live window they are the
         // controls that matter and the rest is instrumentation.
         self.line_controls(ui);
+        if self.source.is_telnet() {
+            // Nothing below is about a socket. There is no capture to pause,
+            // no audio to monitor, and no spectrum to set a floor on.
+            self.net_controls(ui);
+            return;
+        }
         ui.horizontal_wrapped(|ui| {
             // A live line cannot be paused, restarted or slowed down. It is
             // happening, at the rate the sound card is happening at, and a
@@ -750,6 +926,57 @@ impl ScopeApp {
             });
     }
 
+    /// The terminal and the transcript, and the strip that switches them.
+    fn lower(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.tab, Tab::Terminal, "terminal");
+            ui.selectable_value(&mut self.tab, Tab::Transcript, "transcript");
+            ui.separator();
+            // A socket has no command state to be in, so saying which one it
+            // was in would be answering a question nobody asked.
+            if self.source.is_telnet() {
+                let on = self.frame.state == telemetry::CallState::Connected;
+                ui.label(
+                    RichText::new(if on { "online" } else { "offline" })
+                        .monospace()
+                        .color(if on {
+                            Color32::from_rgb(90, 220, 130)
+                        } else {
+                            Color32::from_rgb(150, 160, 175)
+                        }),
+                );
+            } else {
+                match self.console.mode {
+                    Mode::Command => ui.label(
+                        RichText::new("command state")
+                            .monospace()
+                            .color(Color32::from_rgb(150, 160, 175)),
+                    ),
+                    Mode::Online => ui.label(
+                        RichText::new("online")
+                            .monospace()
+                            .color(Color32::from_rgb(90, 220, 130)),
+                    ),
+                };
+            }
+            // In telnet mode this sits up with the host box instead, where
+            // there is room for it.
+            if self.tab == Tab::Terminal && !self.source.is_telnet() {
+                ui.separator();
+                ui.add(egui::Slider::new(&mut self.font_size, 9.0..=22.0).text("font"));
+            }
+        });
+        ui.separator();
+        match self.tab {
+            Tab::Terminal => {
+                egui::ScrollArea::both()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| self.terminal_pane(ui));
+            }
+            Tab::Transcript => self.transcript(ui),
+        }
+    }
+
     /// Label for the symbol scope, as the modem itself reports it.
     fn symbol_label(&self) -> String {
         self.frame.symbol_label.to_string()
@@ -766,6 +993,14 @@ impl eframe::App for ScopeApp {
             self.controls(ui);
             ui.add_space(4.0);
         });
+
+        // A socket has no signal path, so there is nothing for the scopes to
+        // show and no honest way to fill them. The terminal takes the whole
+        // window instead, which is what this mode is for looking at.
+        if self.source.is_telnet() {
+            egui::CentralPanel::default().show(ui, |ui| self.lower(ui));
+            return;
+        }
 
         egui::Panel::left("panel")
             .resizable(false)
@@ -799,40 +1034,7 @@ impl eframe::App for ScopeApp {
         egui::Panel::bottom("lower")
             .resizable(true)
             .default_size(420.0)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.tab, Tab::Terminal, "terminal");
-                    ui.selectable_value(&mut self.tab, Tab::Transcript, "transcript");
-                    ui.separator();
-                    match self.console.mode {
-                        Mode::Command => ui.label(
-                            RichText::new("command state").monospace().color(
-                                Color32::from_rgb(150, 160, 175),
-                            ),
-                        ),
-                        Mode::Online => ui.label(
-                            RichText::new("online").monospace().color(
-                                Color32::from_rgb(90, 220, 130),
-                            ),
-                        ),
-                    };
-                    if self.tab == Tab::Terminal {
-                        ui.separator();
-                        ui.add(
-                            egui::Slider::new(&mut self.font_size, 9.0..=22.0).text("font"),
-                        );
-                    }
-                });
-                ui.separator();
-                match self.tab {
-                    Tab::Terminal => {
-                        egui::ScrollArea::both().auto_shrink([false, false]).show(ui, |ui| {
-                            self.terminal_pane(ui)
-                        });
-                    }
-                    Tab::Transcript => self.transcript(ui),
-                }
-            });
+            .show(ui, |ui| self.lower(ui));
 
         egui::CentralPanel::default().show(ui, |ui| {
             ui.label(RichText::new("waterfall  (0 - 4000 Hz)").strong());

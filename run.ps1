@@ -23,6 +23,13 @@
     menu of the machine's audio devices, and offers to start a second modem on
     the same line so that there is something to dial.
 
+.PARAMETER Telnet
+    Open a terminal onto a board over a socket, with no modem and no line
+    anywhere in it. For working on the terminal rather than on the modem: a
+    board sends the same ANSI either way, but over a socket every byte arrives,
+    so anything that draws wrongly is the terminal's fault and not the line's.
+    Takes a host, or nothing to choose one in the window.
+
 .PARAMETER Carrier
     Modulation for a live call: B103, V22B or V32. Both ends have to agree, so
     this sets it for the board as well.
@@ -33,12 +40,19 @@
     .\run.ps1 -Vector v34-33600
 .EXAMPLE
     .\run.ps1 -Live
+.EXAMPLE
+    .\run.ps1 -Telnet
+.EXAMPLE
+    .\run.ps1 -Telnet vert.synchro.net
 #>
 param(
     [string] $Vector = "",
     [switch] $Dev,
     [switch] $List,
     [switch] $Live,
+    [Parameter()] [AllowEmptyString()]
+    [string] $Telnet,
+    [switch] $TelnetOnly,
     [ValidateSet("B103", "V22B", "V32")]
     [string] $Carrier = "V22B"
 )
@@ -75,6 +89,30 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     Write-Fail "cargo not found. Install Rust from https://rustup.rs and reopen this window."
     exit 1
+}
+
+# ---- a board over a socket ------------------------------------------------
+# No audio at all, so none of the device business below applies: build, launch,
+# done. The window opens with the host box empty unless one was named.
+if ($TelnetOnly -or $Telnet) {
+    $profileName = "release"
+    if ($Dev) { $profileName = "debug" }
+    Write-Host ""
+    Write-Step "building gui ($profileName)"
+    $buildArgs = @("build", "-p", "gui")
+    if (-not $Dev) { $buildArgs += "--release" }
+    & cargo @buildArgs
+    if ($LASTEXITCODE -ne 0) { Write-Fail "build failed"; exit 1 }
+
+    $scope = Join-Path $root "target\$profileName\modem-scope.exe"
+    if (-not (Test-Path $scope)) { Write-Fail "built, but $scope is missing"; exit 1 }
+
+    $scopeArgs = @("--telnet")
+    if ($Telnet) { $scopeArgs += $Telnet }
+    Write-Host ""
+    Write-Step "terminal only: no modem, no line, every byte arrives"
+    & $scope @scopeArgs
+    exit $LASTEXITCODE
 }
 
 # ---- a real line ----------------------------------------------------------

@@ -68,6 +68,20 @@ impl Console {
         console
     }
 
+    /// A console onto a board over a socket, with no modem between.
+    ///
+    /// The same terminal, fed the same bytes, with everything that could have
+    /// mangled them on the way taken out. What is on this screen is exactly
+    /// what the board sent, so anything wrong with it is this code.
+    pub fn telnet() -> Self {
+        let mut console = Self::new();
+        console.term = Terminal::new(terminal::DEFAULT_COLS, terminal::DEFAULT_ROWS);
+        console.term.feed_bytes(b"dialupmodem2 - terminal over telnet\r\n");
+        console.term.feed_bytes(b"No modem and no line: every byte arrives.\r\n");
+        console.term.feed_bytes(b"Pick a board above and connect.\r\n\r\n");
+        console
+    }
+
     pub fn new() -> Self {
         let mut at = Interpreter::new();
         // A terminal renders the echo itself only if the modem sends it, so

@@ -27,8 +27,10 @@ and the COM port that would let Windows dial it.
 | `line` - WAV reader and writer, full-duplex audio | working |
 | `telemetry` - frame publishing, transcript log, raw line-data channel | working |
 | `terminal` - ANSI/CP437 screen emulator for BBS use | working |
+| `telnet` - RFC 854 options and escaping, so the terminal can be tried alone | working |
 | `gui` - waterfall, spectrum, symbol scope, faceplate, audio monitor, console | working |
 | `gui --live` - a modem on a real line, with the terminal wired to it | working |
+| `gui --telnet` - the terminal alone, on a board over a socket | working |
 | V.32 trellis coding, V.32bis, V.34 | not started |
 | DTE binding: a COM port for Windows Dial-Up Networking | not started |
 
@@ -93,6 +95,35 @@ possible board:
 ```powershell
 modem-answer --in "<input device>" --out "<output device>" --carrier V22B
 ```
+
+## The terminal on its own
+
+Double-click **`run-telnet.bat`** (or `./run-telnet.sh`), or:
+
+```powershell
+modem-scope --telnet
+modem-scope --telnet vert.synchro.net
+```
+
+No modem, no line, no audio: a socket to a bulletin board, feeding the same
+terminal a call would. There is nothing for the scopes to show, so the terminal
+gets the whole window.
+
+It is there because *the board looked wrong* has two causes over a call, and
+they want opposite fixes. An escape byte the line dropped turns the sequence
+after it into text on the screen; an escape sequence the terminal does not
+implement does much the same thing. Over a socket every byte arrives, so
+anything still wrong is the terminal's — and anything that draws correctly
+here and badly over a call is the line's.
+
+`log bytes` puts everything the board sends into the transcript as well as on
+the screen, which is the pair worth having side by side when something draws
+wrongly: what arrived, and what it drew.
+
+The window reports the two negotiated options that decide whether any of it
+looks right. **7-bit!** means the board would not agree to eight-bit data and
+the CP437 art will arrive with its top bits stripped; **local echo** means the
+board is not echoing and this end is doing it instead.
 
 The Bell 103 and V.22bis captures decode to text; the rest still show their
 handshakes on the waterfall, which is worth watching in its own right - the
