@@ -210,11 +210,28 @@ impl ScopeApp {
     ) -> Self {
         let inputs = line::input_devices();
         let outputs = line::output_devices();
-        let pick = |names: &[String], want: &str| {
-            names.iter().position(|n| n.contains(want)).unwrap_or(0)
+        // Two cables if there are two, and the right way round.
+        //
+        // One cable is a two-wire line: everything written to it comes back,
+        // so a modem on one hears its own transmission at full strength. That
+        // is a fine model of a telephone pair with two modems across it and
+        // useless for reaching anything outside the machine, where what is
+        // wanted is a hybrid and there is none. Two cables are the hybrid: the
+        // far end's audio arrives on one and ours leaves on the other, and
+        // neither modem ever hears itself.
+        //
+        // So A carries what the softphone plays, and B carries what this modem
+        // says. Named first because a machine with A and B has usually got
+        // them for this, and the plain names are what a single-cable
+        // installation offers.
+        let pick = |names: &[String], wanted: &[&str]| {
+            wanted
+                .iter()
+                .find_map(|want| names.iter().position(|n| n.contains(want)))
+                .unwrap_or(0)
         };
-        let chosen_in = pick(&inputs, "CABLE Output");
-        let chosen_out = pick(&outputs, "CABLE Input");
+        let chosen_in = pick(&inputs, &["CABLE-A Output", "CABLE Output"]);
+        let chosen_out = pick(&outputs, &["CABLE-B Input", "CABLE Input"]);
         Self {
             rx,
             control,

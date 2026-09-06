@@ -150,10 +150,17 @@ if ($Live) {
     }
 
     # A virtual cable is almost always the right answer, so it is the default.
+    # $prefer is a list, best first. Two cables if the machine has two: A
+    # carries what the softphone plays and B what this modem says, so neither
+    # modem ever hears itself. One cable is a two-wire pair, which is a fine
+    # line to put two modems across and no way to reach anything outside the
+    # machine.
     function Choose($what, $names, $prefer) {
         $default = 0
-        for ($i = 0; $i -lt $names.Count; $i++) {
-            if ($names[$i] -like $prefer) { $default = $i; break }
+        :outer foreach ($want in $prefer) {
+            for ($i = 0; $i -lt $names.Count; $i++) {
+                if ($names[$i] -like $want) { $default = $i; break outer }
+            }
         }
         Write-Host ""
         Write-Host "  which $what?" -ForegroundColor White
@@ -174,8 +181,8 @@ if ($Live) {
         return $names[$index - 1]
     }
 
-    $inName = Choose "input (what the line says)" $inputs "*CABLE Output*"
-    $outName = Choose "output (what the modem says)" $outputs "*CABLE Input*"
+    $inName = Choose "input (what the line says)" $inputs @("*CABLE-A Output*", "*CABLE Output*")
+    $outName = Choose "output (what the modem says)" $outputs @("*CABLE-B Input*", "*CABLE Input*")
 
     Write-Host ""
     $board = Read-Host "  start a board on the same line to dial? [Y/n]"
