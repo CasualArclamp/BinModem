@@ -4,7 +4,7 @@
 //! self-synchronising descrambler before anything readable emerges, so every
 //! test sends a lead-in first and looks for the payload in what follows.
 
-use datapump::v22bis::{BAUD, Channel, Receiver, Transmitter};
+use datapump::v22bis::{BAUD, Channel, Receiver, Signal, Transmitter};
 
 const FS: f64 = 16_000.0;
 
@@ -402,5 +402,136 @@ fn the_channel_we_transmit_in_is_not_heard_as_a_carrier() {
     assert!(
         rejection > 60.0,
         "our own channel is only {rejection:.1} dB down after band selection"
+    );
+}
+
+
+/// Eight-bit mu-law: the companding every G.711 call is carried in.
+///
+/// Not an impairment somebody chose to model. It is what the network does to
+/// the signal, on every VoIP call, before anything has clipped or gone wrong.
+fn ulaw_roundtrip(x: f64) -> f64 {
+    const BIAS: f64 = 33.0;
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let magnitude = (x.abs() * 32635.0).min(32635.0) + BIAS;
+    let mut exponent = 7;
+    while exponent > 0 && magnitude < (1 << (exponent + 5)) as f64 {
+        exponent -= 1;
+    }
+    let mantissa = ((magnitude as u32) >> (exponent + 1)) & 0x0f;
+    let decoded = (((mantissa as f64) * 2.0 + 33.0) * (1u32 << exponent) as f64) - BIAS;
+    sign * decoded / 32635.0
+}
+
+/// The level our own channel reaches in the one we are listening to, after
+/// `distort` has had it.
+fn own_channel_leakage(distort: impl Fn(f64) -> f64) -> f64 {
+    let mut own = Transmitter::new(Channel::Calling, FS);
+    own.set_signal(Signal::DoubleDibit);
+    let mut rx = Receiver::new(Channel::Calling, FS);
+    for _ in 0..(FS * 1.0) as usize {
+        rx.feed(distort(own.next_sample()));
+    }
+    rx.level()
+}
+
+#[test]
+fn a_straight_line_keeps_our_own_channel_out_of_the_other_one() {
+    // What band selection is for, and it does it: 67 dB, and no carrier
+    // claimed. The two channels of V.22bis are far enough apart that a
+    // linear-phase filter can separate them completely.
+    let leak = own_channel_leakage(|x| x);
+    assert!(leak < 1.0e-3, "our own channel leaks at {leak:.2e} on a clean line");
+}
+
+#[test]
+fn a_bent_line_puts_our_own_channel_straight_on_top_of_the_other() {
+    // The frequency plan of V.22bis has the two carriers an octave apart:
+    // 1200 Hz and 2400 Hz. Double the one and you have the other exactly.
+    //
+    // So any even-order nonlinearity anywhere between here and the far end --
+    // a clipped sample, an amplifier run hot, or simply the companding of
+    // G.711, which is a logarithm and is nowhere near straight -- makes a copy
+    // of this modem's own transmission and lays it precisely over the channel
+    // it is trying to listen to. It arrives inside the passband. No amount of
+    // selectivity reaches it, because there is no frequency at which to reject
+    // it that is not also the frequency of the wanted signal.
+    //
+    // On a real line this is survivable, because a hybrid keeps most of the
+    // modem's own transmit out of its own receiver before any of it can be
+    // squared. Written to one virtual cable there is no hybrid: everything sent
+    // comes back at full strength to be squared at leisure.
+    //
+    // The test is the comparison, not the number. Same signal, same filter, and
+    // the only difference is a nonlinearity nobody can remove from the path.
+    let straight = own_channel_leakage(|x| x);
+    let companded = own_channel_leakage(ulaw_roundtrip);
+    assert!(
+        companded > straight * 20.0,
+        "companding lifted our own channel from {straight:.2e} only to {companded:.2e}"
+    );
+}
+
+/// How often the far end is heard through companding, with our own transmit
+/// `db` relative to it.
+fn acquisitions_through_companding(db: f64) -> (usize, usize) {
+    let payload = b"the far end is saying this while we talk over it";
+    // About -16 dBFS, which is the order of what a trunk delivers.
+    let far_level = 0.15;
+    let own_level = far_level * 10.0f64.powf(db / 20.0);
+    let mut heard = 0;
+    let mut tried = 0;
+    for i in 0..8 {
+        tried += 1;
+        let quiet_ms = 131.0 * f64::from(i) + 0.37 * f64::from(i);
+        let mut far = Transmitter::new(Channel::Answering, FS);
+        let mut own = Transmitter::new(Channel::Calling, FS);
+        let mut rx = Receiver::new(Channel::Calling, FS);
+        own.push_bytes(&vec![0x5a; 8192]);
+
+        let mut out = Vec::new();
+        for _ in 0..(FS * quiet_ms / 1000.0) as usize {
+            rx.feed(ulaw_roundtrip(own.next_sample() * own_level));
+            out.extend(rx.take_bytes());
+        }
+        far.push_bytes(&[0x55; 96]);
+        far.push_bytes(payload);
+        far.push_bytes(&[0x55; 32]);
+        let symbols = (96 + payload.len() + 32) * 2;
+        for _ in 0..(symbols as f64 * FS / BAUD).ceil() as usize {
+            let line = far.next_sample() * far_level + own.next_sample() * own_level;
+            rx.feed(ulaw_roundtrip(line));
+            out.extend(rx.take_bytes());
+        }
+        if contains_at_any_bit_offset(&out, payload) {
+            heard += 1;
+        }
+    }
+    (heard, tried)
+}
+
+#[test]
+fn transmitting_as_loudly_as_the_far_end_costs_us_the_far_end() {
+    // The harmonic grows as the square of our own level, so against a far end
+    // whose level we do not control it rises two decibels for every decibel of
+    // our own. Matching the far end is the worst place to sit that anyone would
+    // think to sit at.
+    let (heard, tried) = acquisitions_through_companding(0.0);
+    assert!(
+        heard * 2 < tried,
+        "expected transmitting this loudly to be the fault it is, heard {heard} of {tried}"
+    );
+}
+
+#[test]
+fn six_decibels_of_headroom_buys_the_far_end_back() {
+    // And is enough: measured across the range, everything from six decibels
+    // down behaves the same, so there is nothing bought by going quieter and a
+    // great deal lost by going louder. This is the number to set a drive
+    // control by on a line that has no hybrid in it.
+    let (heard, tried) = acquisitions_through_companding(-6.0);
+    assert!(
+        heard >= tried - 1,
+        "heard the far end after only {heard} of {tried} pauses at six decibels down"
     );
 }
