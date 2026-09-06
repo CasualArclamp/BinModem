@@ -15,7 +15,7 @@
 use crate::detect::{Answer, Answerer, Originator, Outcome};
 use crate::frame::{Address, Frame, Kind, Role};
 use crate::hdlc::{Decoder, Encoder, Fcs};
-use crate::lapm::{Event, Lapm, Params, State};
+use crate::lapm::{Cause, Event, Lapm, Params, State};
 use crate::v42bis;
 use crate::xid::{Compression, Xid};
 
@@ -71,6 +71,11 @@ pub struct Stack {
     offer: Compression,
     /// Whether the far end has already said it does LAPM, in V.8.
     declared: bool,
+    /// Whether the link has ever been up, which is what tells a failure to
+    /// establish apart from a connection that later ended.
+    established: bool,
+    /// Whether establishment was tried and nothing answered.
+    gave_up: bool,
     /// Whether a reply to the far end's XID has gone out. Exactly one is sent,
     /// because a reply to a reply would go round for ever.
     replied: bool,
@@ -113,6 +118,8 @@ impl Stack {
             },
             offer: Compression::Neither,
             declared: false,
+            established: false,
+            gave_up: false,
             replied: false,
             waited_ms: 0,
         }
@@ -174,6 +181,21 @@ impl Stack {
             encoder: v42bis::Encoder::new(params),
             decoder: v42bis::Decoder::new(params),
         });
+    }
+
+    /// Whether the question of error control has been answered.
+    ///
+    /// Three ways it can be: the far end declined or was not there, the link
+    /// came up, or establishment was tried and got nothing back. Until one of
+    /// them the answer is not known -- and V.250 6.5.5 has the DCE report what
+    /// it negotiated "before the final result code", so this is the thing a
+    /// CONNECT has to wait for.
+    pub fn settled(&self) -> bool {
+        match self.phase {
+            Phase::Detecting | Phase::Negotiating => false,
+            Phase::Transparent => true,
+            Phase::Protocol => self.lapm.is_connected() || self.gave_up,
+        }
     }
 
     /// Whether compression was agreed and is running.
@@ -442,8 +464,22 @@ impl Stack {
     fn drain(&mut self) {
         let mut arrived: Vec<u8> = Vec::new();
         while let Some(event) = self.lapm.poll_event() {
-            if let Event::Data(d) = event {
-                arrived.extend_from_slice(&d);
+            match event {
+                Event::Data(d) => arrived.extend_from_slice(&d),
+                Event::Connected => self.established = true,
+                // N400 attempts at a SABME that nothing answered, or a far end
+                // that refused. Whatever it said earlier, it is not doing LAPM
+                // now -- and a connection without error control is still a
+                // connection, which is the whole reason V.42 7.2.1 exists. The
+                // line reverts to start-stop characters, which is what a far
+                // end that never answered a SABME was expecting all along.
+                Event::Released(Cause::NoResponse | Cause::Refused)
+                    if !self.established =>
+                {
+                    self.gave_up = true;
+                    self.phase = Phase::Transparent;
+                }
+                _ => {}
             }
         }
         if arrived.is_empty() {

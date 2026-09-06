@@ -160,6 +160,10 @@ pub struct Config {
     pub speaker_mode: u8,
     /// Whether P or T last selected the default dialling method.
     pub pulse_dialling: bool,
+    /// +ER — report the error control that was negotiated (V.250 6.5.5).
+    pub report_error_control: bool,
+    /// +DR — report the compression that was negotiated (V.250 6.6.3).
+    pub report_compression: bool,
 }
 
 impl Default for Config {
@@ -172,6 +176,10 @@ impl Default for Config {
             speaker_volume: 2,
             speaker_mode: 1,
             pulse_dialling: false,
+            // V.250 6.5.5 and 6.6.3 both recommend a default of 0. A terminal
+            // that wants to be told asks to be told.
+            report_error_control: false,
+            report_compression: false,
         }
     }
 }
@@ -608,6 +616,38 @@ impl Interpreter {
         }
     }
 
+    /// `+ER` and `+DR` — reporting parameters (V.250 6.5.5, 6.6.3).
+    ///
+    /// Identical in shape: one numeric parameter, 0 or 1, off by default. What
+    /// differs is only which intermediate result code it lets out, and that is
+    /// the caller's business rather than this one's.
+    fn reporting(
+        &mut self,
+        op: &ExtOp,
+        name: &str,
+        current: bool,
+    ) -> Result<Option<bool>, ResultCode> {
+        match op {
+            ExtOp::Read => {
+                let text = format!("+{name}: {}", u8::from(current));
+                self.fmt.info(&text, &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Test => {
+                self.fmt.info(&format!("+{name}: (0,1)"), &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Set(value) => match value.trim() {
+                // V.250 5.4.2.1: an omitted subparameter takes its default,
+                // and the recommended default here is 0.
+                "" | "0" => Ok(Some(false)),
+                "1" => Ok(Some(true)),
+                _ => Err(ResultCode::Error),
+            },
+            ExtOp::Execute => Err(ResultCode::Error),
+        }
+    }
+
     /// `+DS` — data compression selection (V.250 6.6.1).
     fn compression_select(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
         match op {
@@ -651,11 +691,26 @@ impl Interpreter {
             // Everything named here is answered below; a DCE that lists a
             // command it does not implement is worse than one that lists
             // nothing, because a DTE will believe it.
-            "GCAP" => "+GCAP: +FCLASS,+MS,+ES,+DS".into(),
+            "GCAP" => "+GCAP: +FCLASS,+MS,+ES,+ER,+DS,+DR".into(),
             "FCLASS" => return self.fclass(op),
             "MS" => return self.modulation_select(op),
             "ES" => return self.error_control_select(op),
             "DS" => return self.compression_select(op),
+            // V.250 6.5.5 and 6.6.3. The same parameter twice over: one bit,
+            // defaulting to off, saying whether the DCE should report what it
+            // negotiated with the far end before it says CONNECT.
+            "ER" => {
+                if let Some(on) = self.reporting(op, "ER", self.config.report_error_control)? {
+                    self.config.report_error_control = on;
+                }
+                return Ok(None);
+            }
+            "DR" => {
+                if let Some(on) = self.reporting(op, "DR", self.config.report_compression)? {
+                    self.config.report_compression = on;
+                }
+                return Ok(None);
+            }
             _ => return Err(ResultCode::Error),
         };
         match op {

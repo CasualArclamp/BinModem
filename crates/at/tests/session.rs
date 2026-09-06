@@ -473,3 +473,61 @@ fn fclass_reports_data_and_only_data() {
     let (out, _) = send(&mut it, &format!("AT+FCLASS=1{CR}"));
     assert!(out.contains("ERROR"), "claimed a fax class: {out:?}");
 }
+
+// ---------------------------------------------------------------------------
+// +ER and +DR: whether the DCE says what it negotiated.
+
+#[test]
+fn error_control_reporting_is_off_until_it_is_asked_for() {
+    // V.250 6.5.5 recommends a default of 0, and 6.6.3 the same for +DR. A
+    // terminal that wants to be told asks to be told.
+    let mut it = quiet_dce();
+    assert_eq!(send(&mut it, "AT+ER?\r").0, "\r\n+ER: 0\r\n\r\nOK\r\n");
+    assert_eq!(send(&mut it, "AT+DR?\r").0, "\r\n+DR: 0\r\n\r\nOK\r\n");
+
+    send(&mut it, "AT+ER=1\r");
+    send(&mut it, "AT+DR=1\r");
+    assert!(it.config.report_error_control);
+    assert!(it.config.report_compression);
+    assert_eq!(send(&mut it, "AT+ER?\r").0, "\r\n+ER: 1\r\n\r\nOK\r\n");
+}
+
+#[test]
+fn the_reporting_parameters_say_what_they_support() {
+    let mut it = quiet_dce();
+    assert_eq!(send(&mut it, "AT+ER=?\r").0, "\r\n+ER: (0,1)\r\n\r\nOK\r\n");
+    assert_eq!(send(&mut it, "AT+DR=?\r").0, "\r\n+DR: (0,1)\r\n\r\nOK\r\n");
+}
+
+#[test]
+fn a_reporting_value_that_does_not_exist_is_refused() {
+    let mut it = quiet_dce();
+    send(&mut it, "AT+ER=1\r");
+    assert_eq!(send(&mut it, "AT+ER=2\r").0, "\r\nERROR\r\n");
+    assert!(it.config.report_error_control, "a refused set changes nothing");
+}
+
+#[test]
+fn factory_defaults_turn_the_reporting_back_off() {
+    // V.250 Table 4 lists +ER and +DR among the parameters &F restores.
+    let mut it = quiet_dce();
+    // V.250 5.4.3: extended commands on one line are separated by ";".
+    send(&mut it, "AT+ER=1;+DR=1\r");
+    assert!(it.config.report_error_control);
+    send(&mut it, "AT&F\r");
+    assert!(!it.config.report_error_control);
+    assert!(!it.config.report_compression);
+}
+
+#[test]
+fn the_capability_list_names_what_is_answered() {
+    // V.250 6.1.9. A DCE that lists a command it does not implement is worse
+    // than one that lists nothing, because a DTE will believe it.
+    let mut it = quiet_dce();
+    let (out, _) = send(&mut it, "AT+GCAP\r");
+    for name in ["+FCLASS", "+MS", "+ES", "+ER", "+DS", "+DR"] {
+        assert!(out.contains(name), "{name} is missing from +GCAP");
+        let (answer, _) = send(&mut it, &format!("AT{name}=?\r"));
+        assert!(!answer.contains("ERROR"), "{name} is listed but not answered");
+    }
+}

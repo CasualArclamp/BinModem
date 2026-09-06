@@ -21,12 +21,22 @@ pub enum ResultCode {
     /// `CONNECT <text>`: manufacturer-specific detail such as line speed and
     /// error-control state, issued when X is 1 or above.
     ConnectText(String),
+    /// An extended-format result code such as `+ER: LAPM` (V.250 5.7.2).
+    ///
+    /// Alphabetic whatever V says -- "unlike basic format result codes,
+    /// extended syntax result codes have no numeric equivalent, and are always
+    /// issued in alphabetic form" -- while the headers and trailers around it
+    /// follow V exactly as a basic code's do. Q1 suppresses it like any other
+    /// result code; X does not reach it at all.
+    Extended(String),
 }
 
 impl ResultCode {
     /// Numeric form, used when V0 is selected.
-    pub fn numeric(&self) -> u8 {
-        match self {
+    ///
+    /// `None` for the extended codes, which have no numeric form in any mode.
+    pub fn numeric(&self) -> Option<u8> {
+        Some(match self {
             Self::Ok => 0,
             // V.250 leaves numeric CONNECT <text> to the manufacturer, so it
             // degrades to plain CONNECT rather than inventing a code.
@@ -37,7 +47,8 @@ impl ResultCode {
             Self::NoDialtone => 6,
             Self::Busy => 7,
             Self::NoAnswer => 8,
-        }
+            Self::Extended(_) => return None,
+        })
     }
 
     /// Verbose form, used when V1 is selected. V.250 5.1 requires upper case.
@@ -52,13 +63,20 @@ impl ResultCode {
             Self::Busy => "BUSY".into(),
             Self::NoAnswer => "NO ANSWER".into(),
             Self::ConnectText(t) => format!("CONNECT {t}"),
+            Self::Extended(t) => t.clone(),
         }
     }
 
     /// Final result codes signal that the DCE will accept new commands
     /// (V.250 5.7.1). `CONNECT` is intermediate, `RING` unsolicited.
     pub fn is_final(&self) -> bool {
-        !matches!(self, Self::Connect | Self::ConnectText(_) | Self::Ring)
+        // The extended codes this modem issues -- +ER and +DR -- are
+        // intermediate by their own definitions (V.250 6.5.5, 6.6.3): they
+        // come during the handshake, before the CONNECT that ends it.
+        !matches!(
+            self,
+            Self::Connect | Self::ConnectText(_) | Self::Ring | Self::Extended(_)
+        )
     }
 }
 
@@ -95,8 +113,13 @@ impl Formatter {
             out.extend_from_slice(code.verbose().as_bytes());
             out.push(cr);
             out.push(lf);
+        } else if let Some(n) = code.numeric() {
+            out.extend_from_slice(n.to_string().as_bytes());
+            out.push(cr);
         } else {
-            out.extend_from_slice(code.numeric().to_string().as_bytes());
+            // No numeric form to fall back to, so the body is the same in
+            // either mode and only the trailer changes.
+            out.extend_from_slice(code.verbose().as_bytes());
             out.push(cr);
         }
     }
@@ -133,14 +156,14 @@ mod tests {
 
     #[test]
     fn numeric_values_match_table_1() {
-        assert_eq!(ResultCode::Ok.numeric(), 0);
-        assert_eq!(ResultCode::Connect.numeric(), 1);
-        assert_eq!(ResultCode::Ring.numeric(), 2);
-        assert_eq!(ResultCode::NoCarrier.numeric(), 3);
-        assert_eq!(ResultCode::Error.numeric(), 4);
-        assert_eq!(ResultCode::NoDialtone.numeric(), 6);
-        assert_eq!(ResultCode::Busy.numeric(), 7);
-        assert_eq!(ResultCode::NoAnswer.numeric(), 8);
+        assert_eq!(ResultCode::Ok.numeric(), Some(0));
+        assert_eq!(ResultCode::Connect.numeric(), Some(1));
+        assert_eq!(ResultCode::Ring.numeric(), Some(2));
+        assert_eq!(ResultCode::NoCarrier.numeric(), Some(3));
+        assert_eq!(ResultCode::Error.numeric(), Some(4));
+        assert_eq!(ResultCode::NoDialtone.numeric(), Some(6));
+        assert_eq!(ResultCode::Busy.numeric(), Some(7));
+        assert_eq!(ResultCode::NoAnswer.numeric(), Some(8));
     }
 
     #[test]

@@ -838,3 +838,81 @@ fn a_far_end_that_cannot_go_as_fast_is_met_where_it_is() {
     assert_eq!(p.caller.standard(), "V.22bis");
     assert_eq!(p.host.standard(), "V.22bis");
 }
+
+// ---------------------------------------------------------------------------
+// What the terminal is told, and when.
+
+#[test]
+fn the_reports_come_out_in_the_order_v250_gives_them() {
+    // V.250 6.5.5: +ER is issued "before the final result code (e.g.,
+    // CONNECT) is transmitted", and "after the modulation report ... and
+    // before the data compression report (+DR)". So there is an order, and
+    // the CONNECT is last -- which means it cannot be sent while the thing
+    // being reported is still being negotiated.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "AT+ER=1;+DR=1");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(20.0);
+
+    let saw = p.caller_saw();
+    let er = saw.find("+ER: LAPM").expect("no error control report");
+    let dr = saw.find("+DR: V42B").expect("no compression report");
+    let connect = saw.find("CONNECT").expect("never connected");
+    assert!(er < dr, "+DR should follow +ER");
+    assert!(dr < connect, "CONNECT is the final result code and comes last");
+}
+
+#[test]
+fn nothing_is_reported_unless_the_terminal_asked() {
+    // Both parameters default to 0 (V.250 6.5.5, 6.6.3), so an ordinary call
+    // says what it always said.
+    let p = connect();
+    let saw = p.caller_saw();
+    assert!(saw.contains("CONNECT"), "never connected");
+    assert!(!saw.contains("+ER:"), "reported without being asked");
+    assert!(!saw.contains("+DR:"));
+}
+
+#[test]
+fn the_connect_is_not_sent_before_it_is_true() {
+    // The reason the report has to come first is that it describes something
+    // that is not settled when the carriers come up. A CONNECT sent then is a
+    // promise about a negotiation that has not happened.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    // Step until the terminal is told, then look at what was true when it was.
+    let mut told = false;
+    for _ in 0..(30.0 * FS) as usize {
+        let (a, b) = (p.from_caller, p.from_host);
+        p.from_caller = p.caller.step(b);
+        p.from_host = p.host.step(a);
+        let out = p.caller.take_dte();
+        if String::from_utf8_lossy(&out).contains("CONNECT") {
+            told = true;
+            break;
+        }
+    }
+    assert!(told, "the caller was never told it had connected");
+    assert!(
+        p.caller.error_controlled(),
+        "CONNECT arrived while error control was still being negotiated"
+    );
+}
+
+#[test]
+fn a_call_without_error_control_still_says_connect_at_once() {
+    // The wait is for an answer, not for a protocol. A modem with error
+    // control turned off has its answer already.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "AT+ES=0;+ER=1");
+    Pair::type_at(&mut p.host, "AT+ES=0");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(20.0);
+    let saw = p.caller_saw();
+    assert!(saw.contains("+ER: NONE"), "no report: {saw:?}");
+    assert!(saw.contains("CONNECT"), "never connected");
+    assert!(!p.caller.error_controlled());
+}

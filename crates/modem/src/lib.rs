@@ -311,6 +311,14 @@ pub struct Modem {
     negotiation: Option<v8line::Modem>,
     /// Whether V.8 settled on LAPM before the data carriers went up.
     declared_lapm: bool,
+    /// The rate of a connection the terminal has not been told about yet.
+    ///
+    /// V.250 6.5.5 puts the error control report "before the final result
+    /// code", so the CONNECT cannot go out until the negotiation that report
+    /// describes has finished. Nothing is lost by the wait: anything typed
+    /// into the gap is queued, and the far end is not listening for it yet
+    /// either.
+    announce: Option<u32>,
 }
 
 impl Modem {
@@ -331,6 +339,7 @@ impl Modem {
             since_dial_ms: 0,
             negotiation: None,
             declared_lapm: false,
+            announce: None,
         }
     }
 
@@ -627,22 +636,59 @@ impl Modem {
                     }
                     self.ec = Some(stack);
                 }
-                // V.250 6.2.7: with X at 1 or above the CONNECT carries the
-                // rate, which is the only way a terminal finds out what it
-                // got rather than what it asked for.
-                let code = if self.at.config.x == 0 {
-                    ResultCode::Connect
-                } else {
-                    ResultCode::ConnectText(format!("{rate}"))
-                };
-                self.at.emit(code);
+                // Held rather than sent. What goes out first is the report
+                // of what was negotiated, and that is not known yet.
+                self.announce = Some(rate);
+                self.announce_connect();
             }
             Progress::Failed => self.end_call(Ended::NoAnswer),
         }
     }
 
+    /// Tell the terminal the call is up, once there is nothing left to say
+    /// about it.
+    ///
+    /// V.250 6.5.5: the `+ER` report is issued "at the point during error
+    /// control negotiation (handshaking) at which the DCE has determined which
+    /// error control protocol will be used (if any), before the final result
+    /// code (e.g., CONNECT) is transmitted", and 6.6.3 puts `+DR` between the
+    /// two. So the order is fixed and the CONNECT is last, which means it
+    /// cannot go out while the answer is still being worked out.
+    fn announce_connect(&mut self) {
+        let Some(rate) = self.announce else { return };
+        // No stack at all is an answer: this is a call without error control,
+        // and there is nothing to wait for.
+        if self.ec.as_ref().is_some_and(|e| !e.settled()) {
+            return;
+        }
+        self.announce = None;
+
+        // Table 24/V.250. `ALT` is for the alternative protocol of Annex A,
+        // which this modem does not do, so the report is between two.
+        if self.at.config.report_error_control {
+            let kind = if self.error_controlled() { "LAPM" } else { "NONE" };
+            self.at.emit(ResultCode::Extended(format!("+ER: {kind}")));
+        }
+        // Table 29/V.250. V.42bis is negotiated as a pair here -- both
+        // directions or neither -- so the one-directional reports cannot
+        // arise.
+        if self.at.config.report_compression {
+            let kind = if self.compressing() { "V42B" } else { "NONE" };
+            self.at.emit(ResultCode::Extended(format!("+DR: {kind}")));
+        }
+        // V.250 6.2.7: with X at 1 or above the CONNECT carries the rate,
+        // which is the only way a terminal finds out what it got rather than
+        // what it asked for.
+        let code = if self.at.config.x == 0 {
+            ResultCode::Connect
+        } else {
+            ResultCode::ConnectText(format!("{rate}"))
+        };
+        self.at.emit(code);
+    }
+
     fn carry_data(&mut self) {
-        let Some(pump) = self.pump.as_mut() else { return };
+        let Some(pump) = self.pump.as_ref() else { return };
         if !pump.carrier() {
             self.end_call(Ended::CarrierLost);
             return;
@@ -654,6 +700,9 @@ impl Modem {
         if self.ec.as_ref().is_some_and(|e| e.phase() == Phase::Transparent) {
             self.ec = None;
         }
+        self.announce_connect();
+
+        let Some(pump) = self.pump.as_mut() else { return };
         match self.ec.as_mut() {
             Some(ec) => {
                 // Error control owns the bit stream in both directions: it
@@ -742,6 +791,7 @@ impl Modem {
         self.rate = 0;
         self.ec = None;
         self.declared_lapm = false;
+        self.announce = None;
         self.outbound.clear();
         self.async_bits.reset();
         self.state = State::Handshaking;
@@ -923,6 +973,9 @@ impl Modem {
         self.negotiation = None;
         self.rate = 0;
         self.ec = None;
+        // A call that ends before its CONNECT went out never connected, and
+        // the terminal is about to be told why instead.
+        self.announce = None;
         self.outbound.clear();
         self.escape.reset();
         self.state = State::Command;

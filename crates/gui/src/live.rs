@@ -409,10 +409,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 // side, which sees a CONNECT and a rate and nothing else.
                 State::Data => {
                     let mut s = format!(
-                        "connected: {} at {} bit/s, error control {}",
+                        "connected: {} at {} bit/s, error control {}, compression {}",
                         modem.standard(),
                         modem.rate().unwrap_or(0),
-                        if modem.error_controlled() { "on" } else { "off" }
+                        if modem.error_controlled() { "V.42" } else { "off" },
+                        if modem.compressing() { "V.42bis" } else { "off" }
                     );
                     if let Some(r) = modem.reflection() {
                         s.push_str(&format!(
