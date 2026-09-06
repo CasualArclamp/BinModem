@@ -893,6 +893,9 @@ fn the_connect_is_not_sent_before_it_is_true() {
             told = true;
             break;
         }
+        // And the state agrees with what the terminal has been told. A modem
+        // in data state that has not said CONNECT is telling two stories.
+        assert_ne!(p.caller.state(), State::Data, "in data before the CONNECT");
     }
     assert!(told, "the caller was never told it had connected");
     assert!(

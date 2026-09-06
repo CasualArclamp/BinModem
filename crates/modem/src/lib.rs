@@ -613,13 +613,22 @@ impl Modem {
     }
 
     fn advance_handshake(&mut self) {
+        // The pump connecting is not the handshake ending. The detection phase
+        // and the XID exchange run on top of it, and V.250 6.5.5 has the
+        // terminal told what was negotiated before it is told it has connected
+        // -- so until the CONNECT goes out this is still handshaking. Which is
+        // also the honest answer to what a character typed into that gap
+        // means: 5.6.1's instruction to give up on the call, because from the
+        // terminal's side there is not yet a call.
+        if self.announce.is_some() {
+            self.carry_data();
+            return;
+        }
         let Some(pump) = self.pump.as_ref() else { return };
         match pump.status() {
             Progress::Negotiating => {}
             Progress::Connected(rate) => {
                 self.rate = rate;
-                self.state = State::Data;
-                self.escape.reset();
                 // Bell 103 is asynchronous all the way down: its line format
                 // *is* start-stop framing, and its receiver finds the frames
                 // by re-synchronising on each start bit rather than by holding
@@ -672,6 +681,8 @@ impl Modem {
             return;
         }
         self.announce = None;
+        self.state = State::Data;
+        self.escape.reset();
 
         // Table 24/V.250. `ALT` is for the alternative protocol of Annex A,
         // which this modem does not do, so the report is between two.
