@@ -439,3 +439,78 @@ fn a_far_end_that_can_only_do_4800_gets_4800() {
     assert!(contains_at_any_bit_offset(&at_host, payload));
     assert!(contains_at_any_bit_offset(&at_caller, payload));
 }
+
+/// As `long_call`, but with the two reflections given rather than fixed.
+fn custom_call(
+    seconds: f64,
+    delay: usize,
+    echo: f64,
+    far: f64,
+) -> (Modem, Modem, f64) {
+    let offer = rate_signal(true, false);
+    let mut calling = Modem::new(Role::Calling, offer, FS);
+    let mut answering = Modem::new(Role::Answering, offer, FS);
+    let mut a = std::collections::VecDeque::from(vec![0.0; 2 * delay + 1]);
+    let mut b = std::collections::VecDeque::from(vec![0.0; 2 * delay + 1]);
+    let (mut from_calling, mut from_answering) = (0.0, 0.0);
+    let mut at = f64::NAN;
+    for i in 0..(seconds * FS) as usize {
+        a.pop_back();
+        a.push_front(from_calling);
+        b.pop_back();
+        b.push_front(from_answering);
+        let there_and_back = 2 * delay;
+        let to_calling = echo * a[0] + far * b[delay] + TALKER * a[there_and_back];
+        let to_answering = echo * b[0] + far * a[delay] + TALKER * b[there_and_back];
+        from_calling = calling.step(to_calling);
+        from_answering = answering.step(to_answering);
+        if at.is_nan() && matches!(calling.status(), Status::Connected(_)) {
+            at = i as f64 / FS;
+        }
+    }
+    (calling, answering, at)
+}
+
+#[test]
+fn a_call_survives_the_round_trip_a_packet_network_adds() {
+    // The line this was written against is a hybrid twenty milliseconds away.
+    // A call carried over VoIP is nothing like that: the round trip is
+    // hundreds of milliseconds, most of it jitter buffer, and V.32 measures
+    // the round trip in clause 5.4 precisely because it has to place the
+    // canceller's second run of taps at the far hybrid.
+    for round_trip_ms in [40.0, 125.0, 200.0, 300.0, 400.0] {
+        let one_way = (round_trip_ms / 2.0 / 1000.0 * FS) as usize;
+        let (calling, _, at) = custom_call(30.0, one_way, ECHO, FAR);
+        assert!(
+            matches!(calling.status(), Status::Connected(4800)),
+            "a {round_trip_ms:.0} ms round trip left the call at {:?}",
+            calling.status()
+        );
+        assert!(at < 20.0, "{round_trip_ms:.0} ms took {at:.1} s to connect");
+    }
+}
+
+#[test]
+fn a_call_survives_an_echo_as_loud_as_what_was_sent() {
+    // What one virtual cable returns, measured on a recorded call: our own
+    // transmit came back at +0.26 dB, where a hybrid would have given -12, and
+    // the far end arrived only 5 dB below it. There is no hybrid in a cable --
+    // what is written to it is what comes back -- so the canceller is doing all
+    // the work rather than finishing what a transformer started.
+    //
+    // It manages, and it is worth knowing that it manages, because it means a
+    // V.32 call that will not come up on such a line is not failing for want of
+    // a quieter transmitter.
+    const CABLE_ECHO: f64 = 1.03;
+    const TRUNK_FAR: f64 = 0.575;
+    for round_trip_ms in [40.0, 200.0, 400.0] {
+        let one_way = (round_trip_ms / 2.0 / 1000.0 * FS) as usize;
+        let (calling, _, at) = custom_call(30.0, one_way, CABLE_ECHO, TRUNK_FAR);
+        assert!(
+            matches!(calling.status(), Status::Connected(4800)),
+            "an echo at unity over {round_trip_ms:.0} ms left the call at {:?}",
+            calling.status()
+        );
+        assert!(at < 20.0, "took {at:.1} s to connect");
+    }
+}
