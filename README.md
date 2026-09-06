@@ -29,6 +29,8 @@ and the COM port that would let Windows dial it.
 | `terminal` - ANSI/CP437 screen emulator for BBS use | working |
 | `terminal` - mouse reporting: DECSET 9, 1000, 1002, 1003, 1006, 1015 | working |
 | `telnet` - RFC 854 options and escaping, so the terminal can be tried alone | working |
+| `v8` - the CM/JM/CI/CJ messages and the mode selection between them | working |
+| `v8` - the V.21 transport and the start-up procedure around it | not started |
 | `gui` - waterfall, spectrum, symbol scope, faceplate, audio monitor, console | working |
 | `gui --live` - a modem on a real line, with the terminal wired to it | working |
 | `gui --telnet` - the terminal alone, on a board over a socket | working |
