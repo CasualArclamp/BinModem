@@ -87,6 +87,11 @@ pub struct Stack {
     offer: Compression,
     /// Whether the far end has already said it does LAPM, in V.8.
     declared: bool,
+    /// The check sequence width the two ends agreed on, once they have.
+    ///
+    /// Not in use yet when it is set: V.42 8.10.2 keeps XID at 16 bits and
+    /// changes over on the SABME, so this is what the connection *will* use.
+    agreed_fcs: Fcs,
     /// Whether the link has ever been up, which is what tells a failure to
     /// establish apart from a connection that later ended.
     established: bool,
@@ -133,6 +138,7 @@ impl Stack {
             },
             offer: Compression::Neither,
             declared: false,
+            agreed_fcs: Fcs::Bits16,
             established: false,
             gave_up: false,
             opened: false,
@@ -211,6 +217,14 @@ impl Stack {
             Phase::Transparent => true,
             Phase::Protocol => self.lapm.is_connected() || self.gave_up,
         }
+    }
+
+    /// The check sequence width the connection is using.
+    ///
+    /// 16 bits unless both ends offered 32 in XID and a SABME has since gone
+    /// across at that width (V.42 8.10.2).
+    pub fn fcs(&self) -> Fcs {
+        self.encoder.fcs()
     }
 
     /// Whether compression was agreed and is running.
@@ -340,7 +354,7 @@ impl Stack {
                     info: Xid::proposal(self.offer).encode(),
                 }
                 .encode(DLCI_DATA, self.role, Kind::Command);
-                self.encoder.frame(&body);
+                self.encoder.frame_with(&body, Fcs::Bits16);
                 queued = true;
             }
             while let Some((frame, kind)) = self.lapm.poll_transmit() {
@@ -394,6 +408,15 @@ impl Stack {
             self.receive_xid(info.clone(), address.kind);
             return;
         }
+        // The set-mode command settles the width for good, in whichever
+        // direction it was travelling: "receipt of a SABME frame with 16- or
+        // 32-bit FCS indicates use of the corresponding FCS for all subsequent
+        // frames", and the answer to one says the same thing back.
+        if matches!(frame, Frame::Sabme { .. } | Frame::Ua { .. }) {
+            let width = self.decoder.matched_fcs();
+            self.decoder.set_fcs(width);
+            self.encoder.set_fcs(width);
+        }
         self.lapm.receive(frame, address.kind);
         self.drain();
     }
@@ -406,6 +429,9 @@ impl Stack {
         let agreed = Xid::proposal(self.offer).resolve(&theirs);
         if let Some(params) = agreed.v42bis_params() {
             self.enable_compression(params);
+        }
+        if agreed.fcs32 {
+            self.agreed_fcs = Fcs::Bits32;
         }
         // Answer every command and no responses. 8.10.2: "on receipt of an
         // L-SETPARM response primitive ... an error control function shall
@@ -426,7 +452,9 @@ impl Stack {
                 info: Xid::proposal(self.offer).encode(),
             }
             .encode(DLCI_DATA, self.role, Kind::Response);
-            self.encoder.frame(&body);
+            // 8.10.2 keeps this one at 16 bits whatever the connection has
+            // moved to, because the command it answers was sent at 16.
+            self.encoder.frame_with(&body, Fcs::Bits16);
         }
         self.begin_protocol();
     }
@@ -485,6 +513,18 @@ impl Stack {
             return;
         }
         self.phase = Phase::Protocol;
+        if self.agreed_fcs == Fcs::Bits32 {
+            // 8.10.2: the width changes over on the SABME and not before, so
+            // until one has been seen neither end can be sure which it is
+            // reading -- the answerer because the SABME has not arrived, and
+            // the originator because a far end that agreed to 32 and then
+            // answered at 16 is a far end to go on talking to rather than one
+            // to stop hearing.
+            self.decoder.accept_either();
+            if self.role == Role::Originator {
+                self.encoder.set_fcs(Fcs::Bits32);
+            }
+        }
         if self.role == Role::Originator {
             self.lapm.connect();
         }

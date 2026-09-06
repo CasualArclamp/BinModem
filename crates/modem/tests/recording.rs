@@ -75,6 +75,12 @@ fn a_recording_of_our_own_call_decodes_the_way_a_real_one_does() {
 
     let mut rx = Receiver::new(Channel::Calling, FS);
     let mut decoder = Decoder::new(Fcs::Bits16);
+    // A tap has to follow the call rather than assume it. The check sequence
+    // is negotiated in XID and changes over on the SABME (V.42 8.10.2), so a
+    // recording of a connection that agreed 32 bits has both widths in it: the
+    // XID frames at 16, everything after the SABME at 32. A decoder fixed at
+    // either one reads half the call and calls the other half corrupt.
+    decoder.accept_either();
     let mut text = String::new();
     let (mut good, mut failed) = (0usize, 0usize);
     for s in &line {

@@ -139,7 +139,13 @@ impl Xid {
             n401_receive: Some(crate::lapm::DEFAULT_N401 as u16),
             window_transmit: Some(crate::lapm::DEFAULT_K),
             window_receive: Some(crate::lapm::DEFAULT_K),
-            fcs32: false,
+            // Offered, because the alternative is worse than it looks. A
+            // 16-bit check sequence lets about one damaged frame in 65536
+            // through undetected, and on a line damaging hundreds a minute
+            // that is a byte the terminal reads wrongly and nothing anywhere
+            // notices. What runs is the intersection, so a far end without it
+            // simply keeps 16.
+            fcs32: true,
             test_frame: true,
             srej_multiple: false,
             compression: Some(compression),

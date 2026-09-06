@@ -178,10 +178,35 @@ impl Encoder {
         Self { fcs, bits: VecDeque::new() }
     }
 
+    /// Change the check sequence width for frames queued from now on.
+    ///
+    /// V.42 8.10.2 changes it mid-connection: XID is exchanged with a 16-bit
+    /// FCS whatever is agreed, and the SABME that follows carries the agreed
+    /// one. Frames already queued keep the width they were built with, which
+    /// is what the far end is expecting of them.
+    pub fn set_fcs(&mut self, fcs: Fcs) {
+        self.fcs = fcs;
+    }
+
+    pub fn fcs(&self) -> Fcs {
+        self.fcs
+    }
+
     /// Queue one frame: opening flag, stuffed payload and FCS, closing flag.
     pub fn frame(&mut self, payload: &[u8]) {
+        let fcs = self.fcs;
+        self.frame_with(payload, fcs);
+    }
+
+    /// Queue one frame at a width of its own.
+    ///
+    /// V.42 8.10.2 needs this for exactly one frame type: "receipt of another
+    /// XID command frame, with a 16-bit FCS, shall be responded to ... using
+    /// an XID response frame with a 16-bit FCS", which holds even after the
+    /// connection has moved to 32.
+    pub fn frame_with(&mut self, payload: &[u8], fcs: Fcs) {
         self.raw_flag();
-        let body = append_fcs(payload, self.fcs);
+        let body = append_fcs(payload, fcs);
         let mut ones = 0u32;
         for &byte in &body {
             for i in 0..8 {
@@ -264,6 +289,18 @@ enum State {
 #[derive(Debug)]
 pub struct Decoder {
     fcs: Fcs,
+    /// Whether a frame that fails the expected width may be tried at the other.
+    ///
+    /// V.42 8.10.2: with 32-bit FCS agreed, "a called DCE shall be capable of
+    /// checking subsequent frames against both the 16-bit FCS and the 32-bit
+    /// FCS simultaneously (a frame shall be discarded only if it fails both
+    /// FCS checks)". The window is short -- it closes on the SABME, which
+    /// says which width the rest of the connection uses -- but during it the
+    /// answering end genuinely does not know: the XID it is still answering is
+    /// 16-bit and the SABME it is waiting for may not be.
+    either: bool,
+    /// The width the frame just returned was checked at.
+    matched: Fcs,
     state: State,
     history: u8,
     bits: Vec<bool>,
@@ -276,6 +313,8 @@ impl Decoder {
     pub fn new(fcs: Fcs) -> Self {
         Self {
             fcs,
+            either: false,
+            matched: fcs,
             state: State::Hunt,
             history: 0,
             bits: Vec::new(),
@@ -290,6 +329,26 @@ impl Decoder {
     pub fn with_max_octets(mut self, max: usize) -> Self {
         self.max_octets = max;
         self
+    }
+
+    /// Accept either check sequence width until told which one (V.42 8.10.2).
+    pub fn accept_either(&mut self) {
+        self.either = true;
+    }
+
+    /// Fix the width, closing the window `accept_either` opened.
+    pub fn set_fcs(&mut self, fcs: Fcs) {
+        self.fcs = fcs;
+        self.matched = fcs;
+        self.either = false;
+    }
+
+    /// The width the frame just returned checked out at.
+    ///
+    /// Only meaningful straight after a frame: it is how the answering end
+    /// learns from a SABME which width the connection is using.
+    pub fn matched_fcs(&self) -> Fcs {
+        self.matched
     }
 
     /// Feed one received bit. Yields a frame when one completes.
@@ -342,7 +401,23 @@ impl Decoder {
                 let overlong = self.overlong;
                 // A closing flag may open the next frame (V.42 8.1.1.2).
                 self.enter_frame();
-                Self::finish(bits, self.fcs, overlong)
+                let done = Self::finish(bits.clone(), self.fcs, overlong);
+                self.matched = self.fcs;
+                // The other width, only if this one failed the check and the
+                // connection has not yet settled which it is using. A frame
+                // that is too short or not octet aligned is wrong at either
+                // width, so only a bad check sequence is worth a second look.
+                if self.either && matches!(done, Some(Err(FrameError::BadFcs))) {
+                    let other = match self.fcs {
+                        Fcs::Bits16 => Fcs::Bits32,
+                        Fcs::Bits32 => Fcs::Bits16,
+                    };
+                    if let Some(Ok(frame)) = Self::finish(bits, other, overlong) {
+                        self.matched = other;
+                        return Some(Ok(frame));
+                    }
+                }
+                done
             }
         }
     }

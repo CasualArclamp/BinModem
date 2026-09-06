@@ -740,3 +740,88 @@ fn every_repeated_xid_command_is_answered() {
         assert!(answers > round, "command {} went unanswered", round + 1);
     }
 }
+
+#[test]
+fn a_connection_that_agreed_thirty_two_bits_uses_them() {
+    // V.42 12.2.2 Note 1 bit 17, negotiated in XID, and 8.10.2 for the
+    // changeover: XID is exchanged at 16 bits whatever is agreed, the SABME
+    // carries the agreed width, and everything after follows it.
+    //
+    // Worth having on a line that damages frames at all. A 16-bit check
+    // sequence lets about one damaged frame in 65536 through undetected, and
+    // an undetected one is not a retransmission -- it is a byte the terminal
+    // reads wrongly with nothing anywhere to notice.
+    let mut a = ec::Stack::new(Role::Originator, Params::default());
+    let mut b = ec::Stack::new(Role::Answerer, Params::default());
+    for _ in 0..200_000 {
+        let (x, y) = (a.next_bit(), b.next_bit());
+        a.feed_bit(y);
+        b.feed_bit(x);
+        a.tick(0);
+        b.tick(0);
+        if a.is_connected() && b.is_connected() {
+            break;
+        }
+    }
+    assert!(a.is_connected() && b.is_connected(), "never established");
+    assert_eq!(a.fcs(), ec::hdlc::Fcs::Bits32, "the originator stayed at 16");
+    assert_eq!(b.fcs(), ec::hdlc::Fcs::Bits32, "the answerer stayed at 16");
+
+    // And it still carries data, which is the only thing that proves both ends
+    // agree about where the check sequence starts.
+    let text = b"thirty-two bits of it".repeat(40);
+    a.send(&text);
+    let mut got = Vec::new();
+    for _ in 0..400_000 {
+        let (x, y) = (a.next_bit(), b.next_bit());
+        a.feed_bit(y);
+        b.feed_bit(x);
+        a.tick(0);
+        b.tick(0);
+        got.extend(b.take_received());
+        if got.len() >= text.len() {
+            break;
+        }
+    }
+    assert_eq!(got, text);
+}
+
+#[test]
+fn a_decoder_told_to_accept_either_width_reports_which_it_found() {
+    // The mechanism behind V.42 8.10.2's changeover. The answering end has to
+    // read frames at both widths at once -- "a frame shall be discarded only
+    // if it fails both FCS checks" -- and then has to know which one worked,
+    // because that is how the SABME tells it what the rest of the connection
+    // is using.
+    use ec::hdlc::{Encoder, Fcs};
+    for width in [Fcs::Bits16, Fcs::Bits32] {
+        let mut encoder = Encoder::new(width);
+        encoder.frame(b"\x03\x73the frame");
+        let mut decoder = Decoder::new(Fcs::Bits16);
+        decoder.accept_either();
+        let mut got = None;
+        while let Some(bit) = encoder.next_bit() {
+            if let Some(Ok(frame)) = decoder.feed(bit) {
+                got = Some((frame, decoder.matched_fcs()));
+            }
+        }
+        let (frame, matched) = got.expect("nothing decoded");
+        assert_eq!(frame, b"\x03\x73the frame");
+        assert_eq!(matched, width, "the wrong width was reported");
+    }
+}
+
+#[test]
+fn thirty_two_bits_needs_both_ends_to_have_asked() {
+    // V.42 12.2.2 Note 1: "a bit position set to 1 indicates request/agreement
+    // to use the procedure". One end asking is a request and not an agreement,
+    // and a connection where one end checks four octets while the other wrote
+    // two does not carry anything at all.
+    use ec::xid::{Compression, Xid};
+    let asking = Xid::proposal(Compression::Both);
+    let silent = Xid { fcs32: false, ..Xid::proposal(Compression::Both) };
+    assert!(asking.fcs32, "this end should be asking for it");
+    assert!(asking.resolve(&asking).fcs32, "both asked");
+    assert!(!asking.resolve(&silent).fcs32, "the far end did not");
+    assert!(!silent.resolve(&asking).fcs32, "this end did not");
+}
