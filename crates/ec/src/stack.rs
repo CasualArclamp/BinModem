@@ -22,6 +22,22 @@ use crate::xid::{Compression, Xid};
 /// The data link both ends use for user data (V.42 8.1.2).
 const DLCI_DATA: u8 = 0;
 
+/// Flags before the first protocol frame (V.42 8.10.2, Note).
+///
+/// "When sending the above frame as the first protocol frame following the
+/// detection phase (if used) or establishment of the physical connection (if
+/// the detection phase is not used), the originator shall first transmit flag
+/// patterns for a period of time sufficient to guarantee the transmission of
+/// at least 16-flag patterns."
+///
+/// The reason is on the other side of the line. The two ends leave the
+/// detection phase at different moments -- the answerer has to finish saying
+/// what it is saying -- and while it is still there, every bit it is handed
+/// goes to its detector rather than its deframer. Flags are what tell it the
+/// protocol phase has begun (7.2.1.3), and sixteen of them is long enough that
+/// it cannot miss the change and then miss the frame as well.
+const LEADING_FLAGS: usize = 16;
+
 /// How long to wait for the far end's XID before giving up on negotiating.
 ///
 /// V.42 8.10 does not name a figure. A second is generous at any rate this
@@ -76,9 +92,8 @@ pub struct Stack {
     established: bool,
     /// Whether establishment was tried and nothing answered.
     gave_up: bool,
-    /// Whether a reply to the far end's XID has gone out. Exactly one is sent,
-    /// because a reply to a reply would go round for ever.
-    replied: bool,
+    /// Whether the run of flags that opens the protocol phase has been queued.
+    opened: bool,
     waited_ms: u32,
 }
 
@@ -120,7 +135,7 @@ impl Stack {
             declared: false,
             established: false,
             gave_up: false,
-            replied: false,
+            opened: false,
             waited_ms: 0,
         }
     }
@@ -307,6 +322,11 @@ impl Stack {
         }
         if self.encoder.is_empty() {
             let mut queued = false;
+            if !self.opened {
+                self.opened = true;
+                self.encoder.idle(LEADING_FLAGS);
+                return self.encoder.next_bit().unwrap_or(true);
+            }
             if self.phase == Phase::Negotiating {
                 // Repeated, rather than sent once, and this is not belt and
                 // braces. The two ends leave the detection phase at slightly
@@ -371,14 +391,14 @@ impl Stack {
         // XID is handled here rather than by LAPM, because what it negotiates
         // is not LAPM's: the compression sits above it and the framing below.
         if let Frame::Xid { info, .. } = &frame {
-            self.receive_xid(info.clone());
+            self.receive_xid(info.clone(), address.kind);
             return;
         }
         self.lapm.receive(frame, address.kind);
         self.drain();
     }
 
-    fn receive_xid(&mut self, info: Vec<u8>) {
+    fn receive_xid(&mut self, info: Vec<u8>, kind: Kind) {
         let Ok(theirs) = Xid::decode(&info) else {
             self.damaged += 1;
             return;
@@ -387,11 +407,20 @@ impl Stack {
         if let Some(params) = agreed.v42bis_params() {
             self.enable_compression(params);
         }
-        // Answer, exactly once. The far end may not have heard anything this
-        // end said while it was still in its detection phase, so it needs to
-        // be told; but a reply to a reply would go back and forth for ever.
-        if !self.replied {
-            self.replied = true;
+        // Answer every command and no responses. 8.10.2: "on receipt of an
+        // L-SETPARM response primitive ... an error control function shall
+        // return the indicated parameter values/procedure settings in the
+        // information field of an XID response frame", and "receipt of another
+        // XID command frame ... shall be responded to". Both ends send a
+        // command here, so both end up replying, and neither replies to a
+        // reply -- which is what would go round for ever.
+        //
+        // Answering *every* command matters: 8.10.3 has a far end that heard
+        // no response retransmit its XID up to N400 times, and an end that
+        // answered only the first of them leaves it retransmitting into
+        // silence until it gives up on compression or, following Appendix
+        // III.3, on the call.
+        if kind == Kind::Command {
             let body = Frame::Xid {
                 pf: false,
                 info: Xid::proposal(self.offer).encode(),

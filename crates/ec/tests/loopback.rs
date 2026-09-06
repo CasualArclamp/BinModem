@@ -611,3 +611,132 @@ fn report_compression() {
     }
     println!();
 }
+
+#[test]
+fn the_protocol_phase_opens_with_sixteen_flags() {
+    // V.42 8.10.2, Note: the first protocol frame after the detection phase is
+    // preceded by "flag patterns for a period of time sufficient to guarantee
+    // the transmission of at least 16-flag patterns".
+    //
+    // The reason is at the other end. The answerer is still in its detection
+    // phase when this end leaves, sending its pattern until flags say the
+    // protocol phase has begun (7.2.1.3) -- so the flags are not padding, they
+    // are the message, and a frame sent before them is a frame sent into a
+    // detector.
+    use ec::detect::{ADP_C, ADP_E};
+    let mut bits = Vec::new();
+    for _ in 0..4 {
+        character(&mut bits, ADP_E);
+        character(&mut bits, ADP_C);
+    }
+    let mut stack = ec::Stack::new(Role::Originator, Params::default());
+    let mut sent = Vec::new();
+    let mut opened = None;
+    for bit in bits {
+        sent.push(stack.next_bit());
+        stack.feed_bit(bit);
+        if opened.is_none() && stack.phase() == ec::stack::Phase::Negotiating {
+            opened = Some(sent.len());
+        }
+    }
+    let start = opened.expect("the detection phase never finished");
+    while sent.len() < start + 16 * 8 {
+        sent.push(stack.next_bit());
+    }
+
+    // Checked without knowing where in a flag the stream begins, because the
+    // phase changed part-way through a bit and nothing here is aligned to it.
+    // A run of flags is periodic with a period of eight carrying two zeros, so
+    // any window of sixteen periods holds thirty-two zeros wherever it starts,
+    // and never more than six ones together.
+    let sent = &sent[start..start + 16 * 8];
+    assert_eq!(
+        sent.iter().filter(|b| !**b).count(),
+        32,
+        "sixteen flags carry thirty-two zeros, at any alignment"
+    );
+    let longest = sent
+        .split(|b| !*b)
+        .map(<[bool]>::len)
+        .max()
+        .unwrap_or(0);
+    assert!(longest <= 6, "a run of {longest} ones is not flags");
+}
+
+#[test]
+fn every_repeated_xid_command_is_answered() {
+    // V.42 8.10.3: a far end that hears no response "shall retransmit the XID
+    // command as above" up to N400 times. An end that answers only the first
+    // leaves it retransmitting into silence -- and Appendix III.3 says what a
+    // far end should do when the exchange fails, which is release the call.
+    //
+    // Only commands, though. Answering a response would go round for ever, and
+    // both ends here open with a command.
+    use ec::frame::{Address, Kind};
+    use ec::xid::{Compression, Xid};
+
+    let mut stack = ec::Stack::new(Role::Answerer, Params::default());
+    stack.offer_compression(Compression::Both);
+    // Into the protocol phase: the answerer needs the originator's pattern.
+    let mut odp = Vec::new();
+    for _ in 0..8 {
+        character(&mut odp, ec::detect::ODP_EVEN);
+        character(&mut odp, ec::detect::ODP_ODD);
+    }
+    for bit in &odp {
+        stack.next_bit();
+        stack.feed_bit(*bit);
+    }
+    // The pattern is sent for at least ten repetitions and then until the
+    // clock says the originator is not coming (7.2.1.3, III.1), so the phase
+    // does not change until both the timer has run and the last repetition is
+    // off the queue.
+    for _ in 0..40_000 {
+        stack.next_bit();
+    }
+    stack.tick(ec::detect::DEFAULT_T400_MS);
+    for _ in 0..4096 {
+        if stack.phase() != ec::stack::Phase::Detecting {
+            break;
+        }
+        stack.next_bit();
+        // Fed as well as drained: what re-examines the detection phase is a
+        // bit arriving or the clock, and the clock has already run.
+        stack.feed_bit(true);
+    }
+    assert_eq!(stack.phase(), ec::stack::Phase::Negotiating, "never left detection");
+
+    let command = Frame::Xid { pf: true, info: Xid::proposal(Compression::Both).encode() }
+        .encode(DLCI_DATA, Role::Originator, Kind::Command);
+    let mut encoder = Encoder::new(Fcs::Bits16);
+    let mut answers = 0;
+    for round in 0..3 {
+        encoder.frame(&command);
+        let mut decoder = Decoder::new(Fcs::Bits16);
+        while let Some(bit) = encoder.next_bit() {
+            // Read what comes back while feeding, since the reply is queued
+            // against the same encoder the next bit is drawn from.
+            if let Some(Ok(body)) = decoder.feed(stack.next_bit()) {
+                // Responses only. This end sends XID *commands* of its own
+                // while it is negotiating, and counting those would make the
+                // test pass on a stack that never replied at all.
+                if let Ok((Address { kind: Kind::Response, .. }, Frame::Xid { .. })) =
+                    Frame::decode(&body, Role::Originator)
+                {
+                    answers += 1;
+                }
+            }
+            stack.feed_bit(bit);
+        }
+        // Drain the reply, which is queued behind whatever was already going.
+        for _ in 0..4096 {
+            if let Some(Ok(body)) = decoder.feed(stack.next_bit())
+                && let Ok((Address { kind: Kind::Response, .. }, Frame::Xid { .. })) =
+                    Frame::decode(&body, Role::Originator)
+            {
+                answers += 1;
+            }
+        }
+        assert!(answers > round, "command {} went unanswered", round + 1);
+    }
+}
