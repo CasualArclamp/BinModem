@@ -309,6 +309,8 @@ pub struct Modem {
     /// conversation that settles it, and it has to finish before there is a
     /// pump to build.
     negotiation: Option<v8line::Modem>,
+    /// Whether V.8 settled on LAPM before the data carriers went up.
+    declared_lapm: bool,
 }
 
 impl Modem {
@@ -328,6 +330,7 @@ impl Modem {
             elapsed_samples: 0.0,
             since_dial_ms: 0,
             negotiation: None,
+            declared_lapm: false,
         }
     }
 
@@ -475,6 +478,15 @@ impl Modem {
             .unwrap_or_else(|| self.async_bits.framing_errors())
     }
 
+    /// Whether V.8 named LAPM before the data carriers went up.
+    ///
+    /// Not the same question as [`Modem::error_controlled`], which is about
+    /// what is running now. This is about what both ends said they would do,
+    /// at 300 bit/s, in the protocol category of V.8 Table 6.
+    pub fn error_control_negotiated(&self) -> bool {
+        self.declared_lapm
+    }
+
     /// Whether error control is running on the current call.
     pub fn error_controlled(&self) -> bool {
         self.ec.as_ref().is_some_and(Stack::is_connected)
@@ -604,6 +616,9 @@ impl Modem {
                         Role::Answering => EcRole::Answerer,
                     };
                     let mut stack = Stack::new(role, Params::default());
+                    if self.declared_lapm {
+                        stack = stack.declared_lapm();
+                    }
                     // Offer compression in both directions and let the far end
                     // decide. What runs is the intersection, so offering more
                     // than the far end can do costs nothing.
@@ -726,6 +741,7 @@ impl Modem {
         self.since_dial_ms = 0;
         self.rate = 0;
         self.ec = None;
+        self.declared_lapm = false;
         self.outbound.clear();
         self.async_bits.reset();
         self.state = State::Handshaking;
@@ -742,12 +758,17 @@ impl Modem {
                 Role::Answering => v8line::Role::Answering,
             };
             self.pump = None;
-            self.negotiation = Some(v8line::Modem::new(
-                role,
-                CallFunction::Data,
-                offered,
-                self.fs,
-            ));
+            let mut negotiation =
+                v8line::Modem::new(role, CallFunction::Data, offered, self.fs);
+            // V.8 Table 6 has an octet for error control, and 7.3 says it is
+            // there "in order to negotiate LAPM without requiring the ODP/ADP
+            // exchange". Asking costs one octet in a sequence already being
+            // sent, and what comes back is a second opinion on the question
+            // the detection phase is about to ask over a much worse channel.
+            if self.want_error_control {
+                negotiation = negotiation.offering_lapm();
+            }
+            self.negotiation = Some(negotiation);
             return;
         }
         self.start_pump(None);
@@ -806,6 +827,7 @@ impl Modem {
         match negotiation.status() {
             v8line::Status::Negotiating => {}
             v8line::Status::Agreed(modulation) => {
+                self.declared_lapm = negotiation.lapm();
                 self.negotiation = None;
                 self.start_pump(Some(modulation));
             }

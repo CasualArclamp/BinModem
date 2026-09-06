@@ -741,6 +741,42 @@ fn a_plain_dial_negotiates_before_it_starts() {
 }
 
 #[test]
+fn error_control_is_settled_in_v8_and_not_only_after_it() {
+    // V.8 Table 6 carries a protocol octet, and 7.3 says it is there "in order
+    // to negotiate LAPM without requiring the ODP/ADP exchange". Both ends can
+    // know before a data carrier exists.
+    //
+    // The exchange still runs -- V.42 Appendix VI.2 says many answering modems
+    // run it whatever V.8 said, and V.8 7.3 warns that some indicate LAPM and
+    // then require it anyway. What the earlier answer buys is a reading of
+    // silence: a detection phase that hears nothing has not contradicted a far
+    // end that already said, in its own words, that it does LAPM.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(20.0);
+    assert!(p.caller.error_control_negotiated(), "the caller never asked in V.8");
+    assert!(p.host.error_control_negotiated(), "the host never answered in V.8");
+    assert!(p.caller.error_controlled(), "and it never came up");
+    assert!(p.host.error_controlled());
+}
+
+#[test]
+fn a_modem_told_not_to_do_error_control_does_not_ask_for_it_in_v8() {
+    // 7.4 completes the negotiation only when the JM answers a CM that asked.
+    // A modem with error control turned off has nothing to ask about, and
+    // saying LAPM in V.8 and then declining it is a way of being wrong twice.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "AT+ES=0");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(20.0);
+    assert_eq!(p.caller.state(), State::Data, "the call should still connect");
+    assert!(!p.caller.error_control_negotiated());
+    assert!(!p.host.error_control_negotiated(), "there was nothing to answer");
+}
+
+#[test]
 fn turning_automode_off_says_the_modulation_and_means_it() {
     // 6.4.1 lists disabling automode among the constraints on switching, and
     // a terminal that has named a modulation and turned negotiation off has

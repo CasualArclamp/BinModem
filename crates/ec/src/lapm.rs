@@ -39,6 +39,17 @@ pub const DEFAULT_T401_MS: u32 = 3000;
 /// -- does not apply here, because this modem never omits it.
 pub const DEFAULT_N400: u32 = 16;
 
+/// Retransmissions to allow when the detection phase did not confirm anything.
+///
+/// The other half of Appendix III.2: a large N400 is right when detection has
+/// established that the far end does LAPM, and wrong when it has not, because
+/// then every retry is time spent talking at a modem in a language it may not
+/// speak. The appendix asks for a small value where the detection phase is
+/// omitted, "to accommodate fallback operation with non-error-correcting DCEs
+/// and with DCEs which support only the alternative protocol". A far end that
+/// named LAPM in V.8 is good evidence and not that confirmation.
+pub const UNCONFIRMED_N400: u32 = 3;
+
 /// Tunable protocol parameters (V.42 clause 9.2).
 #[derive(Debug, Clone, Copy)]
 pub struct Params {
@@ -158,6 +169,14 @@ impl Lapm {
             timer: None,
             retries: 0,
         }
+    }
+
+    /// Change the retransmission limit before anything has been established.
+    ///
+    /// How much patience is warranted is not known when the entity is built:
+    /// it depends on how the detection phase came out, which happens later.
+    pub fn set_retransmissions(&mut self, n400: u32) {
+        self.params.n400 = n400;
     }
 
     pub fn state(&self) -> State {

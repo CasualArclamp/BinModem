@@ -69,6 +69,8 @@ pub struct Stack {
     detect: Detect,
     /// What this end offers.
     offer: Compression,
+    /// Whether the far end has already said it does LAPM, in V.8.
+    declared: bool,
     /// Whether a reply to the far end's XID has gone out. Exactly one is sent,
     /// because a reply to a reply would go round for ever.
     replied: bool,
@@ -110,9 +112,25 @@ impl Stack {
                 ))),
             },
             offer: Compression::Neither,
+            declared: false,
             replied: false,
             waited_ms: 0,
         }
+    }
+
+    /// Note that V.8 has already settled this (V.8 Table 6, 7.3).
+    ///
+    /// The detection phase still runs -- V.42 Appendix VI.2 observes that many
+    /// answering modems run it whatever V.8 said, in order to catch protocols
+    /// V.8 has no name for, and V.8 7.3 warns that some ends indicate LAPM and
+    /// then require the exchange anyway. What this changes is what a silence
+    /// means. Without it, an ADP lost to the line is indistinguishable from a
+    /// far end that does no error control, and the safe reading is the second.
+    /// With a far end that has already said LAPM in its own words, at 300
+    /// bit/s, before any data carrier existed, the safe reading is the first.
+    pub fn declared_lapm(mut self) -> Self {
+        self.declared = true;
+        self
     }
 
     /// Where the connection has got to.
@@ -384,6 +402,22 @@ impl Stack {
                 self.detect = Detect::Done;
                 self.phase = Phase::Negotiating;
                 self.waited_ms = 0;
+            }
+            Outcome::TimedOut if self.declared => {
+                // Nothing came back, but the far end has already said it does
+                // LAPM. A detection phase that heard nothing has not
+                // contradicted that -- an ADP is ten patterns of async
+                // characters on a line that has just been trained, and losing
+                // all of them is what a bad line does.
+                //
+                // Patience is cut right back, though. Appendix III.2 asks for
+                // a small N400 wherever detection has not confirmed the far
+                // end, so that a modem which turns out not to be listening is
+                // fallen back from quickly rather than talked at for a minute.
+                self.detect = Detect::Done;
+                self.phase = Phase::Negotiating;
+                self.waited_ms = 0;
+                self.lapm.set_retransmissions(crate::lapm::UNCONFIRMED_N400);
             }
             Outcome::Answered(_) | Outcome::TimedOut => {
                 // No error control at the far end, or nothing there that

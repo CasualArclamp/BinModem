@@ -490,3 +490,61 @@ fn a_far_end_that_declines_is_still_taken_at_its_word() {
         "E NUL means no error control, and listening past it would hang"
     );
 }
+
+// ---------------------------------------------------------------------------
+// What V.8 already knew.
+//
+// V.8 Table 6 lets both ends name LAPM at 300 bit/s, before a data carrier
+// exists. V.42's detection phase then asks the same question again over a line
+// that has just been trained, and its answer is ten patterns of start-stop
+// characters that a bad line can eat entirely. Without the earlier answer, a
+// silence there is indistinguishable from a far end that does no error control
+// at all, and the safe reading is the second one.
+
+/// Drive a stack through a detection phase in which nothing comes back.
+fn through_silence(stack: &mut ec::Stack) {
+    for _ in 0..40_000 {
+        stack.next_bit();
+        stack.feed_bit(true);
+    }
+    stack.tick(ec::detect::DEFAULT_T400_MS);
+}
+
+#[test]
+fn a_far_end_that_named_lapm_in_v8_is_believed_through_a_silence() {
+    let mut stack = ec::Stack::new(Role::Originator, Params::default()).declared_lapm();
+    through_silence(&mut stack);
+    assert_eq!(
+        stack.phase(),
+        ec::stack::Phase::Negotiating,
+        "V.8 said LAPM; a lost ADP does not unsay it"
+    );
+}
+
+#[test]
+fn a_silence_on_its_own_is_still_no_error_control() {
+    let mut stack = ec::Stack::new(Role::Originator, Params::default());
+    through_silence(&mut stack);
+    assert_eq!(stack.phase(), ec::stack::Phase::Transparent);
+}
+
+#[test]
+fn a_refusal_beats_what_v8_said() {
+    // A far end that names LAPM in V.8 and then sends E NUL has changed its
+    // mind, or was never asking about the same thing. Either way the later and
+    // more specific statement is the one to act on: V.42 Table 3's `E` and
+    // NUL is "no error-correcting protocol desired", which is not a silence to
+    // be read around.
+    use ec::detect::ADP_NULL;
+    let mut bits = Vec::new();
+    for _ in 0..4 {
+        character(&mut bits, ec::detect::ADP_E);
+        character(&mut bits, ADP_NULL);
+    }
+    let mut stack = ec::Stack::new(Role::Originator, Params::default()).declared_lapm();
+    for bit in bits {
+        stack.next_bit();
+        stack.feed_bit(bit);
+    }
+    assert_eq!(stack.phase(), ec::stack::Phase::Transparent);
+}
