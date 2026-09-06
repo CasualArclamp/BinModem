@@ -10,4 +10,6 @@ pub mod codec;
 pub mod dictionary;
 
 pub use codec::{Decoder, Encoder, Error, Mode};
-pub use dictionary::{DEFAULT_N2, DEFAULT_N7, Dictionary, Params};
+pub use dictionary::{
+    DEFAULT_N2, DEFAULT_N7, Dictionary, OFFERED_N2, OFFERED_N7, Params,
+};

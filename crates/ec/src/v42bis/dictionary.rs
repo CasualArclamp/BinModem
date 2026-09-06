@@ -28,8 +28,24 @@ pub const RESET: u8 = 2;
 
 /// Total codewords, N2. V.42bis 5.1 gives P1 a default and minimum of 512.
 pub const DEFAULT_N2: u16 = 512;
+/// What this end proposes for N2.
+///
+/// Not the default, deliberately. V.42bis 6.4 resolves P1 by taking "the lower
+/// value ... in both DCEs", so proposing the minimum does not protect anything
+/// -- it forces the minimum on every far end that would have done better, and
+/// on both ends at once. Appendix II.1 names the figure to prefer: "a value
+/// for N2 of 2048 provides good compression performance across a wide range of
+/// data types". A far end that can only manage 512 still gets 512.
+pub const OFFERED_N2: u16 = 2048;
 /// Maximum string length, N7. P2 defaults to 6 and ranges from 6 to 250.
 pub const DEFAULT_N7: u8 = 6;
+/// What this end proposes for N7, the top of the range 6.4 permits.
+///
+/// The same argument as [`OFFERED_N2`]: the lower of the two is selected, so
+/// proposing the floor decides the matter for both ends and decides it badly.
+/// Longer strings are longer matches, and a match is one codeword however long
+/// it is.
+pub const OFFERED_N7: u8 = 250;
 
 /// Negotiable parameters (V.42bis clause 10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

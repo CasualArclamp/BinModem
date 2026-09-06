@@ -43,6 +43,11 @@ mod private_pi {
 /// what implementations use, so the V.42 text appears to be in error.
 pub const PARAMETER_SET_V42: [u8; 3] = *b"V42";
 
+/// N401 when nobody proposes one (V.42 9.2.3), in octets as the field carries.
+const N401_DEFAULT: u16 = crate::lapm::DEFAULT_N401 as u16;
+/// The window size when nobody proposes one (V.42 9.2.4).
+const K_DEFAULT: u8 = crate::lapm::DEFAULT_K;
+
 /// Bits of the HDLC optional functions mask that V.42 12.2.2 Note 1 names.
 ///
 /// Bit 1 is the low-order bit of the first octet and is transmitted first.
@@ -138,8 +143,8 @@ impl Xid {
             test_frame: true,
             srej_multiple: false,
             compression: Some(compression),
-            codewords: Some(v42bis::DEFAULT_N2),
-            max_string: Some(v42bis::DEFAULT_N7),
+            codewords: Some(v42bis::OFFERED_N2),
+            max_string: Some(v42bis::OFFERED_N7),
         }
     }
 
@@ -290,10 +295,10 @@ impl Xid {
     /// parameters: where the two ends differ, the lower value is used.
     pub fn resolve(&self, other: &Self) -> Self {
         Self {
-            n401_transmit: lower(self.n401_transmit, other.n401_transmit),
-            n401_receive: lower(self.n401_receive, other.n401_receive),
-            window_transmit: lower(self.window_transmit, other.window_transmit),
-            window_receive: lower(self.window_receive, other.window_receive),
+            n401_transmit: lower(self.n401_transmit, other.n401_transmit, N401_DEFAULT),
+            n401_receive: lower(self.n401_receive, other.n401_receive, N401_DEFAULT),
+            window_transmit: lower(self.window_transmit, other.window_transmit, K_DEFAULT),
+            window_receive: lower(self.window_receive, other.window_receive, K_DEFAULT),
             // A capability is used only if both ends offer it.
             fcs32: self.fcs32 && other.fcs32,
             test_frame: self.test_frame && other.test_frame,
@@ -302,8 +307,8 @@ impl Xid {
                 (Some(a), Some(b)) => Some(a.intersect(b)),
                 _ => None,
             },
-            codewords: lower(self.codewords, other.codewords),
-            max_string: lower(self.max_string, other.max_string),
+            codewords: lower(self.codewords, other.codewords, v42bis::DEFAULT_N2),
+            max_string: lower(self.max_string, other.max_string, v42bis::DEFAULT_N7),
         }
     }
 
@@ -320,12 +325,19 @@ impl Xid {
     }
 }
 
-fn lower<T: Ord + Copy>(a: Option<T>, b: Option<T>) -> Option<T> {
-    match (a, b) {
-        (Some(x), Some(y)) => Some(x.min(y)),
-        (Some(x), None) | (None, Some(x)) => Some(x),
-        (None, None) => None,
-    }
+/// The lower of two proposals, where an absent one is not silence.
+///
+/// Every parameter here has a value its Recommendation gives it when nobody
+/// proposes one: N401 is 128 and k is 15 (V.42 9.2.3, 9.2.4), N2 is 512 and N7
+/// is 6 (V.42bis 6.4). A far end that sends no P1 has not declined to have an
+/// opinion -- it is using 512, and an end that reads the absence as "whatever
+/// you like" comes away with a dictionary the far end does not have and
+/// delivers nonsense built out of it.
+///
+/// Nothing went wrong while every value proposed here was already the default.
+/// It would have gone wrong the moment one of them was not.
+fn lower<T: Ord + Copy>(a: Option<T>, b: Option<T>, default: T) -> Option<T> {
+    Some(a.unwrap_or(default).min(b.unwrap_or(default)))
 }
 
 fn be_u16(pi: u8, value: &[u8]) -> Result<u16, XidError> {

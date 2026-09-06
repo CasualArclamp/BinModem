@@ -420,7 +420,33 @@ fn negotiation_settles_the_parameters_both_ends_use() {
     a.send(&text);
     settle_stack(&mut a, &mut b);
     assert_eq!(b.plain, text);
-    assert_eq!(params.n2, ec::v42bis::DEFAULT_N2, "the lower value should win");
+    // V.42bis 6.4: "the lower value shall be selected and assigned to N2 in
+    // both DCEs". Which here is this end's own proposal, not the minimum --
+    // and that is the point of proposing something above the minimum.
+    assert_eq!(params.n2, ec::v42bis::OFFERED_N2, "the lower value should win");
+    assert_eq!(params.n7, 32, "and for the string length too");
+}
+
+#[test]
+fn a_parameter_nobody_sent_is_the_one_its_recommendation_gives() {
+    use ec::xid::{Compression, Xid};
+
+    // The case that only bites once this end proposes something other than the
+    // default. A far end that sends no P1 has not left the choice open: V.42bis
+    // 6.4 gives P1 "a default value of 512, which is its minimum value", and
+    // that is what the far end is using. An end that read the silence as
+    // agreement would build a dictionary of 2048 entries against one of 512,
+    // and every codeword above 512 would decode to something else entirely.
+    let ours = Xid::proposal(Compression::Both);
+    let silent = Xid { compression: Some(Compression::Both), ..Xid::default() };
+    let params = ours.resolve(&silent).v42bis_params().expect("compression is on");
+    assert_eq!(params.n2, ec::v42bis::DEFAULT_N2, "512 is what silence means");
+    assert_eq!(params.n7, ec::v42bis::DEFAULT_N7);
+
+    // And the same for the parameters of the link underneath it.
+    let agreed = ours.resolve(&silent);
+    assert_eq!(agreed.n401_transmit, Some(ec::lapm::DEFAULT_N401 as u16));
+    assert_eq!(agreed.window_transmit, Some(ec::lapm::DEFAULT_K));
 }
 
 // ---------------------------------------------------------------------------
