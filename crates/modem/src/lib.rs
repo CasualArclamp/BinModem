@@ -532,6 +532,22 @@ impl Modem {
         }
     }
 
+    /// How error control is running, in the form the live view shows.
+    ///
+    /// The check sequence width is worth having on the screen because it is
+    /// the one negotiated thing whose absence is silent: a connection with a
+    /// 16-bit FCS works, and goes on working, and is letting one damaged frame
+    /// in 65536 through while it does.
+    pub fn error_control_detail(&self) -> &'static str {
+        match self.ec.as_ref() {
+            Some(ec) if ec.is_connected() => match ec.fcs() {
+                ec::hdlc::Fcs::Bits32 => "V.42, FCS-32",
+                ec::hdlc::Fcs::Bits16 => "V.42, FCS-16",
+            },
+            _ => "off",
+        }
+    }
+
     /// Frames that arrived and did not survive the line.
     ///
     /// The difference between a link that is working and one that is only

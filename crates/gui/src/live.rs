@@ -433,7 +433,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                         "connected: {} at {} bit/s, error control {}, compression {}",
                         modem.standard(),
                         modem.rate().unwrap_or(0),
-                        if modem.error_controlled() { "V.42" } else { "off" },
+                        modem.error_control_detail(),
                         if modem.compressing() { "V.42bis" } else { "off" }
                     );
                     // A count that climbs while the terminal still reads

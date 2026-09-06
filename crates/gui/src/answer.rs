@@ -138,7 +138,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
                     "[{:>6.2}s connected at {} bit/s, error control {}, compression {}]",
                     started.elapsed().as_secs_f64(),
                     host.rate().unwrap_or(0),
-                    if host.error_controlled() { "V.42" } else { "off" },
+                    host.error_control_detail(),
                     if host.compressing() { "V.42bis" } else { "off" }
                 );
             }
