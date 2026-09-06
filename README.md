@@ -126,8 +126,11 @@ modem-scope --answer --in "<input device>" --out "<output device>" --carrier V22
 it, the telnet terminal, the answering board, and a capture to replay. Nothing
 beside it, and nothing to install.
 
-It opens on a real line, with the audio devices chosen in the window, because
-a modem is what it is for. `--capture` replays the golden vector instead, a
+It opens on a real line and opens the line, on the two VB-Audio cables if the
+machine has them -- A carrying what the softphone plays, B carrying what this
+modem says. A machine without them gets the picker and a person to fill it in,
+because falling back to whatever device sorts first would put the handshake
+through the speakers. `--capture` replays the golden vector instead, a
 path replays any recording, and `--telnet` opens the terminal onto a socket.
 
 The C runtime is linked in rather than depended on. Without that the binary

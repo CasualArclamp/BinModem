@@ -13,6 +13,33 @@ use crate::live;
 use crate::net;
 use crate::scopes::{self, Waterfall};
 
+/// Input devices that are one half of a two-wire line, best first.
+const LINE_IN: &[&str] = &["CABLE-A Output", "CABLE Output"];
+/// And the other half.
+const LINE_OUT: &[&str] = &["CABLE-B Input", "CABLE Input"];
+
+/// Where in `names` the first of `wanted` appears, if any of them does.
+fn named(names: &[String], wanted: &[&str]) -> Option<usize> {
+    wanted
+        .iter()
+        .find_map(|want| names.iter().position(|n| n.contains(want)))
+}
+
+/// The two cables a machine set up for this has, if it has them.
+///
+/// Named devices only, and nothing is guessed at. Falling back to whatever
+/// device happens to be first would open the line on the speakers, and a
+/// handshake played through speakers is no use to anyone -- so a machine
+/// without the cables gets an empty picker and a person to fill it in, which
+/// is the honest answer to not knowing.
+pub fn preferred_line() -> Option<(String, String)> {
+    let inputs = line::input_devices();
+    let outputs = line::output_devices();
+    let input = inputs.get(named(&inputs, LINE_IN)?)?.clone();
+    let output = outputs.get(named(&outputs, LINE_OUT)?)?.clone();
+    Some((input, output))
+}
+
 /// Where what is on the scope comes from.
 pub enum Source {
     /// A recording of a call someone else placed. It can be watched, paused
@@ -224,14 +251,8 @@ impl ScopeApp {
         // says. Named first because a machine with A and B has usually got
         // them for this, and the plain names are what a single-cable
         // installation offers.
-        let pick = |names: &[String], wanted: &[&str]| {
-            wanted
-                .iter()
-                .find_map(|want| names.iter().position(|n| n.contains(want)))
-                .unwrap_or(0)
-        };
-        let chosen_in = pick(&inputs, &["CABLE-A Output", "CABLE Output"]);
-        let chosen_out = pick(&outputs, &["CABLE-B Input", "CABLE Input"]);
+        let chosen_in = named(&inputs, LINE_IN).unwrap_or(0);
+        let chosen_out = named(&outputs, LINE_OUT).unwrap_or(0);
         Self {
             rx,
             control,
@@ -1457,5 +1478,83 @@ mod modulation_tests {
         // nobody asked for and one a negotiation could not get past.
         let m = Modulation::default();
         assert_eq!(m.command("V22B"), "AT+MS=V22B,1");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What one machine with both cables installed actually reports.
+    ///
+    /// Kept verbatim because the trap is in the detail: VB-Audio installs a
+    /// sixteen-channel endpoint beside each ordinary one, and it sorts first.
+    fn outputs() -> Vec<String> {
+        [
+            "XG2703-GS (NVIDIA High Definition Audio)",
+            "CABLE-A In 16ch (VB-Audio Virtual Cable A)",
+            "CABLE-A Input (VB-Audio Virtual Cable A)",
+            "CABLE-B Input (VB-Audio Virtual Cable B)",
+            "Speakers (Realtek(R) Audio)",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect()
+    }
+
+    #[test]
+    fn the_line_is_found_by_name_and_not_by_position() {
+        let outs = outputs();
+        let i = named(&outs, LINE_OUT).expect("the B cable is in that list");
+        assert!(outs[i].starts_with("CABLE-B Input"), "found {:?}", outs[i]);
+    }
+
+    #[test]
+    fn a_sixteen_channel_endpoint_is_not_mistaken_for_the_cable() {
+        // VB-Audio installs a sixteen-channel endpoint beside each ordinary
+        // one and it sorts first. It is the same cable with sixteen channels
+        // on it, and a modem opened there puts its carrier down one of them.
+        //
+        // On a machine with one cable, where the fallback is what matches, the
+        // two names differ by three characters: "CABLE Input" against "CABLE
+        // In 16ch". The pattern has to be the whole of "Input" for that to be
+        // a difference at all.
+        let single: Vec<String> = [
+            "CABLE In 16ch (VB-Audio Virtual Cable)",
+            "CABLE Input (VB-Audio Virtual Cable)",
+            "Speakers (Realtek(R) Audio)",
+        ]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect();
+        let i = named(&single, LINE_OUT).expect("one cable is still a cable");
+        assert!(!single[i].contains("16ch"), "matched {:?}", single[i]);
+        assert!(single[i].starts_with("CABLE Input"));
+    }
+
+    #[test]
+    fn two_cables_are_preferred_to_one() {
+        // A machine with both has them for this: one carries what the softphone
+        // plays and the other what this modem says, so neither modem hears
+        // itself. A single cable is a two-wire line with both modems across it,
+        // which is a fine model of a telephone pair and useless for reaching
+        // anything outside the machine.
+        let mut both = outputs();
+        both.push("CABLE Input (VB-Audio Virtual Cable)".to_owned());
+        let i = named(&both, LINE_OUT).expect("B is in there");
+        assert!(both[i].starts_with("CABLE-B Input"), "matched {:?}", both[i]);
+    }
+
+    #[test]
+    fn a_machine_without_the_cables_is_not_guessed_at() {
+        // The whole reason this returns an Option. Falling back to whichever
+        // device is first would open the line on the speakers, and a handshake
+        // played through speakers is no use to anyone.
+        let plain: Vec<String> = ["Speakers (Realtek(R) Audio)", "Microphone (Logi C615)"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect();
+        assert_eq!(named(&plain, LINE_IN), None);
+        assert_eq!(named(&plain, LINE_OUT), None);
     }
 }

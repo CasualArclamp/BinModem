@@ -205,6 +205,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // one gets chosen.
         if let (Some(input), Some(output)) = (&args.input, &args.output) {
             session.open(input, output);
+        } else if let Some((input, output)) = app::preferred_line() {
+            // A machine with the two cables on it has them for this. Opening
+            // the line it plainly meant is the difference between a program
+            // that is a modem and one that is a modem after two clicks.
+            session.open(&input, &output);
         }
         let handle = live::spawn(tx, control.clone(), session.clone(), sink.clone());
         (handle, Source::Live(session))
