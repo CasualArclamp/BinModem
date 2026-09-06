@@ -122,9 +122,13 @@ modem-scope --answer --in "<input device>" --out "<output device>" --carrier V22
 ## One file
 
 `dist.bat` (or `./dist.ps1`) builds a release and leaves
-`dist\dialupmodem2.exe`, which is the whole program: the scope, a modem, the
-telnet terminal, the answering board, and the golden capture it opens with.
-Nothing beside it, and nothing to install.
+`dist\dialupmodem2.exe`, which is the whole program: a modem, the scope around
+it, the telnet terminal, the answering board, and a capture to replay. Nothing
+beside it, and nothing to install.
+
+It opens on a real line, with the audio devices chosen in the window, because
+a modem is what it is for. `--capture` replays the golden vector instead, a
+path replays any recording, and `--telnet` opens the terminal onto a socket.
 
 The C runtime is linked in rather than depended on. Without that the binary
 imports `vcruntime140.dll`, which ships with the Visual C++ redistributable and

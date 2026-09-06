@@ -3,9 +3,12 @@
     Build the one file there is to hand to somebody.
 
 .DESCRIPTION
-    Leaves dist\dialupmodem2.exe: the scope, a modem, the telnet terminal, the
-    answering board and the capture it opens with, in a single executable that
-    needs nothing installed beside it.
+    Leaves dist\dialupmodem2.exe: a modem, the scope around it, the telnet
+    terminal, the answering board and a capture to replay, in a single
+    executable that needs nothing installed beside it.
+
+    It opens on a real line, because that is what the program is for. Every
+    other mode is a flag.
 
     The C runtime is linked in rather than depended on -- see .cargo/config.toml
     for why -- so the only things the file imports are Windows itself.
@@ -56,8 +59,8 @@ if ($runtime) {
     Write-Host "  no C runtime dependency; Windows is all it needs" -ForegroundColor DarkGray
 }
 Write-Host ""
-Write-Host "  dialupmodem2.exe                  the golden capture" -ForegroundColor DarkGray
-Write-Host "  dialupmodem2.exe --live           a modem on a real line" -ForegroundColor DarkGray
-Write-Host "  dialupmodem2.exe --telnet         a board over a socket" -ForegroundColor DarkGray
+Write-Host "  dialupmodem2.exe                  a modem on a real line" -ForegroundColor DarkGray
 Write-Host "  dialupmodem2.exe --devices        what audio this machine has" -ForegroundColor DarkGray
+Write-Host "  dialupmodem2.exe --telnet         a board over a socket" -ForegroundColor DarkGray
+Write-Host "  dialupmodem2.exe --capture        replay the golden capture" -ForegroundColor DarkGray
 Write-Host ""

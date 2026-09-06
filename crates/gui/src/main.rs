@@ -7,14 +7,18 @@
 //! is the call actually happening.
 //!
 //! ```text
-//!   modem-scope                                  the Bell 103 golden vector
-//!   modem-scope <path.wav>                       any capture
+//!   modem-scope                                  a modem, line chosen in the window
+//!   modem-scope --in <dev> --out <dev>           and opened straight away
+//!   modem-scope <path.wav>                       replay a capture
+//!   modem-scope --capture                        replay the Bell 103 golden vector
 //!   modem-scope --devices                        what audio this machine has
-//!   modem-scope --live                           a modem, line chosen in the window
-//!   modem-scope --live --in <dev> --out <dev>    and opened straight away
 //!   modem-scope --telnet [host]                  a board over a socket, no modem
 //!   modem-scope --answer --in <dev> --out <dev>  a board to dial, on the same cable
 //! ```
+//!
+//! A modem is what this is for, so a modem is what it opens with. `--live` is
+//! still accepted and still means what it says; it is simply no longer the
+//! thing that has to be typed to get the program's own subject on the screen.
 //!
 //! The last is for working on the terminal rather than on the modem. A board
 //! sends the same ANSI down a socket as down a call, so the screen is the same
@@ -68,6 +72,8 @@ fn list_devices() {
 
 struct Args {
     path: Option<PathBuf>,
+    /// Replay the capture carried inside the program.
+    golden: bool,
     live: bool,
     input: Option<String>,
     output: Option<String>,
@@ -78,8 +84,14 @@ struct Args {
 }
 
 fn parse() -> Result<Option<Args>, String> {
-    let mut args =
-        Args { path: None, live: false, input: None, output: None, telnet: None };
+    let mut args = Args {
+        path: None,
+        golden: false,
+        live: false,
+        input: None,
+        output: None,
+        telnet: None,
+    };
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut rest = raw.iter();
     while let Some(arg) = rest.next() {
@@ -88,6 +100,7 @@ fn parse() -> Result<Option<Args>, String> {
         };
         match arg.as_str() {
             "--live" => args.live = true,
+            "--capture" | "--golden" => args.golden = true,
             // The host is optional: without one the window opens with the box
             // empty and nothing connected, exactly as --live does with no
             // devices named.
@@ -106,10 +119,11 @@ fn parse() -> Result<Option<Args>, String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "modem-scope [path.wav]                        replay a capture\n\
+                    "modem-scope                                   a modem, line chosen in the window\n\
+                     modem-scope --in <dev> --out <dev>            and opened straight away\n\
+                     modem-scope [path.wav]                        replay a capture\n\
+                     modem-scope --capture                         replay the Bell 103 golden vector\n\
                      modem-scope --devices                         list audio devices\n\
-                     modem-scope --live                            a modem, line chosen in the window\n\
-                     modem-scope --live --in <dev> --out <dev>     and opened straight away\n\
                      modem-scope --telnet [host]                   a board over a socket, no modem\n\
                      modem-scope --answer --in <dev> --out <dev>   a board to dial, on the same cable"
                 );
@@ -132,6 +146,14 @@ fn parse() -> Result<Option<Args>, String> {
     // in it is wired to.
     if args.live && args.telnet.is_some() {
         return Err("--live and --telnet are different windows; pick one".into());
+    }
+    // A modem is the subject, so a modem is what this opens with. Nothing else
+    // asked for means the line, not a recording of somebody else's line --
+    // which is what somebody who has just double-clicked the file is after,
+    // and what every other mode here is a deliberate departure from.
+    args.live = args.live || (args.path.is_none() && !args.golden && args.telnet.is_none());
+    if args.live && (args.path.is_some() || args.golden) {
+        return Err("--live and a capture are different windows; pick one".into());
     }
     Ok(Some(args))
 }
