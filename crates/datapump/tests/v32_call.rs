@@ -514,3 +514,68 @@ fn a_call_survives_an_echo_as_loud_as_what_was_sent() {
         assert!(at < 20.0, "took {at:.1} s to connect");
     }
 }
+
+/// A call where the answering modem does not start until `quiet_ms` in.
+///
+/// Which is every real call: the calling modem goes off hook, the network
+/// takes its time, and the far end answers when it answers.
+fn late_call(
+    seconds: f64,
+    delay: usize,
+    echo: f64,
+    far: f64,
+    quiet_ms: f64,
+) -> (Modem, f64) {
+    let offer = rate_signal(true, false);
+    let mut calling = Modem::new(Role::Calling, offer, FS);
+    let mut answering = Modem::new(Role::Answering, offer, FS);
+    let mut a = std::collections::VecDeque::from(vec![0.0; 2 * delay + 1]);
+    let mut b = std::collections::VecDeque::from(vec![0.0; 2 * delay + 1]);
+    let (mut from_calling, mut from_answering) = (0.0, 0.0);
+    let mut at = f64::NAN;
+    let starts = (quiet_ms / 1000.0 * FS) as usize;
+    for i in 0..(seconds * FS) as usize {
+        a.pop_back();
+        a.push_front(from_calling);
+        b.pop_back();
+        b.push_front(from_answering);
+        let there_and_back = 2 * delay;
+        let to_calling = echo * a[0] + far * b[delay] + TALKER * a[there_and_back];
+        let to_answering = echo * b[0] + far * a[delay] + TALKER * b[there_and_back];
+        from_calling = calling.step(to_calling);
+        // The far end is not on the line yet.
+        from_answering = if i < starts { answering.step(0.0) * 0.0 } else { answering.step(to_answering) };
+        if at.is_nan() && matches!(calling.status(), Status::Connected(_)) {
+            at = i as f64 / FS;
+        }
+    }
+    (calling, at)
+}
+
+#[test]
+fn a_quiet_far_end_is_heard_through_an_echo_at_full_strength() {
+    // The stage a calling modem used to sit in forever on a virtual cable.
+    //
+    // In AA it transmits state A, which puts everything at the carrier and
+    // nothing at the sidebands, and listens at the sidebands for the far end
+    // to reverse its alternation. It is meant to be deaf to its own reflection
+    // by construction. It was not: the tone detectors were a single pole, which
+    // falls away at six decibels an octave, so a twentieth of the carrier still
+    // reached the sideband detector 1200 Hz away. Behind a hybrid that is
+    // twelve decibels down already and does not matter; on a cable the echo
+    // comes back whole, and a twentieth of it is a steady phasor large enough
+    // that the far end reversing its phase barely moved the sum.
+    //
+    // The modem waited for a reversal it could no longer see, which is exactly
+    // what it looked like from the outside: sometimes it does not detect the
+    // answering modem and the call never starts.
+    const CABLE_ECHO: f64 = 1.03;
+    for quiet_ms in [0.0, 500.0, 2000.0] {
+        let (calling, _) = late_call(12.0, 320, CABLE_ECHO, 0.1, quiet_ms);
+        let phase = calling.phase();
+        assert!(
+            !matches!(phase, "listening" | "AA"),
+            "after a {quiet_ms:.0} ms pause the calling modem was still in {phase}"
+        );
+    }
+}

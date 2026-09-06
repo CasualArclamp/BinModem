@@ -21,36 +21,80 @@ use std::collections::VecDeque;
 /// the amplitude and whose angle is the phase; everything else keeps turning
 /// and averages away, the faster the further off it is. The averaging time is
 /// therefore also the selectivity, and the two cannot be chosen separately.
+/// Averaging one-poles per axis. Two, for the reason in [`ToneDetector::new`].
+const POLES: usize = 2;
+
+/// Where two cascaded one-poles are half power, as a fraction of the width one
+/// of them would be. `sqrt(2^(1/2) - 1)`.
+const CASCADE_CORNER: f64 = 0.643_594_252_905_582_5;
+
+/// Where the cascade's mix of old phase and new changes sign, in units of one
+/// pole's own time constant.
+///
+/// A single pole settles as `1 - exp(-u)`, so during a reversal the phasor is
+/// the new phase less what is left of the old and goes as `1 - 2exp(-u)`,
+/// which crosses zero at `ln 2`. Two poles settle as `1 - (1 + u)exp(-u)`, so
+/// the same difference goes as `1 - 2(1 + u)exp(-u)` and crosses where
+/// `(1 + u)exp(-u) = 1/2`. There is no closed form; this is the root.
+const CASCADE_CROSSING: f64 = 1.678_347;
+
 #[derive(Debug, Clone)]
 pub struct ToneDetector {
     nco: Nco,
-    re: OnePole,
-    im: OnePole,
+    re: [OnePole; POLES],
+    im: [OnePole; POLES],
 }
 
 impl ToneDetector {
-    /// `bandwidth` is the half-power width of the detector, in hertz. It sets
-    /// how long the detector takes to respond as much as how sharp it is: 50 Hz
-    /// settles in about twenty milliseconds and rejects a tone 300 Hz away by
-    /// some fifteen decibels.
+    /// `bandwidth` is the half-power width of the detector, in hertz.
+    ///
+    /// Two poles rather than one, at the same half-power width. A single pole
+    /// falls away at six decibels an octave, which is barely falling away at
+    /// all: a 60 Hz detector still passes a twentieth of a tone 1200 Hz off.
+    /// That twentieth is not a rounding error here. It is exactly the distance
+    /// from V.32's carrier to its sidebands, and a calling modem in state AA is
+    /// putting its whole transmission at the carrier while listening for the
+    /// far end at the sidebands -- so a twentieth of its own signal lands
+    /// precisely where it is trying to hear somebody else.
+    ///
+    /// On a line with a hybrid that is survivable, since the hybrid has already
+    /// taken twelve decibels off the echo. Written to a virtual cable there is
+    /// no hybrid, the echo comes back at full strength, and a twentieth of it
+    /// is a steady phasor large enough that the far end reversing its own
+    /// phase barely moves the sum. The modem sits in AA waiting for a reversal
+    /// it can no longer see.
+    ///
+    /// Two poles cost about a factor of two in that leakage and gain a factor
+    /// of eight in rejection: each is widened by [`CASCADE_CORNER`] so the pair
+    /// is still half power at `bandwidth`, and the skirt then falls at twelve
+    /// decibels an octave instead of six.
     pub fn new(freq: f64, bandwidth: f64, fs: f64) -> Self {
-        let tau = 1.0 / (std::f64::consts::TAU * bandwidth.max(1.0));
+        // Each pole widened, so that the cascade is half power where one pole
+        // of `bandwidth` would have been.
+        let each = bandwidth.max(1.0) / CASCADE_CORNER;
+        let tau = 1.0 / (std::f64::consts::TAU * each);
         Self {
             nco: Nco::new(freq, fs),
-            re: OnePole::new(tau, fs),
-            im: OnePole::new(tau, fs),
+            re: std::array::from_fn(|_| OnePole::new(tau, fs)),
+            im: std::array::from_fn(|_| OnePole::new(tau, fs)),
         }
     }
 
     pub fn feed(&mut self, x: f64) {
         let (cos, sin) = self.nco.step();
-        self.re.process(x * cos);
-        self.im.process(x * -sin);
+        let mut r = x * cos;
+        let mut i = x * -sin;
+        for pole in &mut self.re {
+            r = pole.process(r);
+        }
+        for pole in &mut self.im {
+            i = pole.process(i);
+        }
     }
 
     /// The phasor: length is amplitude, angle is phase.
     pub fn phasor(&self) -> (f64, f64) {
-        (self.re.value(), self.im.value())
+        (self.re[POLES - 1].value(), self.im[POLES - 1].value())
     }
 
     /// Amplitude of the tone, on the same scale as the input.
@@ -64,7 +108,7 @@ impl ToneDetector {
     }
 
     pub fn phase(&self) -> f64 {
-        self.im.value().atan2(self.re.value())
+        self.im[POLES - 1].value().atan2(self.re[POLES - 1].value())
     }
 }
 
@@ -132,10 +176,18 @@ impl ReversalDetector {
             count: 0,
             envelope: OnePole::new(0.100, fs),
             // While the average still holds some of the old phase, the
-            // phasor is the new one less what is left of the old: a mix that
-            // goes as 1 - 2exp(-t/tau) and therefore changes sign at tau ln 2.
-            // Opposition begins there, and has to hold for a further tau.
-            latency: ((std::f64::consts::LN_2 + 1.0) * tau).round() as u32,
+            // phasor is the new one less what is left of the old. Where that
+            // mix changes sign is where opposition begins, and it then has to
+            // hold for a further tau before it is believed.
+            //
+            // The crossing is [`CASCADE_CROSSING`] of one pole's own time
+            // constant, and each pole is [`CASCADE_CORNER`] narrower in time
+            // than a single pole of the same half-power width would be. The
+            // two together come to a little over twice tau rather than the
+            // 1.69 a single pole gave -- which is not a detail: this number is
+            // subtracted from every round trip V.32 measures, and getting it
+            // wrong by twenty samples put five symbols on the answer.
+            latency: ((CASCADE_CROSSING * CASCADE_CORNER + 1.0) * tau).round() as u32,
         }
     }
 
@@ -225,6 +277,56 @@ impl ReversalDetector {
 
 #[cfg(test)]
 mod tests {
+
+    /// The number V.32's start-up turns on.
+    ///
+    /// A calling modem in AA puts its whole transmission at 1800 Hz and listens
+    /// for the far end 1200 Hz away, at the sidebands. Whatever fraction of the
+    /// carrier reaches that detector is a steady phasor sitting exactly where
+    /// the far end's reversal has to be seen, and on a line with no hybrid the
+    /// carrier reaching it is the modem's own transmission at full strength.
+    ///
+    /// One pole gave a twentieth, which was enough to hide a far end ten
+    /// decibels down. Two give better than a two-hundredth.
+    #[test]
+    fn a_carrier_does_not_reach_the_sideband_detector() {
+        let fs = 16_000.0;
+        let mut at_sideband = ToneDetector::new(1800.0 - 1200.0, 60.0, fs);
+        let mut at_carrier = ToneDetector::new(1800.0, 60.0, fs);
+        for i in 0..(fs as usize) {
+            let x = (std::f64::consts::TAU * 1800.0 * i as f64 / fs).sin();
+            at_sideband.feed(x);
+            at_carrier.feed(x);
+        }
+        let leak = at_sideband.amplitude() / at_carrier.amplitude();
+        assert!(
+            leak < 0.005,
+            "a carrier 1200 Hz away still reaches the detector at {leak:.4}"
+        );
+    }
+
+    #[test]
+    fn the_detector_is_still_half_power_where_it_says_it_is() {
+        // Two poles rather than one, but each widened so the pair keeps the
+        // half-power width it was asked for. Otherwise every timing derived
+        // from that width -- and in the reversal detector all of them are --
+        // would quietly mean something else.
+        let fs = 16_000.0;
+        let amplitude = |offset: f64| {
+            let mut d = ToneDetector::new(1800.0, 60.0, fs);
+            for i in 0..(fs as usize * 2) {
+                d.feed((std::f64::consts::TAU * (1800.0 + offset) * i as f64 / fs).sin());
+            }
+            d.amplitude()
+        };
+        let at_centre = amplitude(0.0);
+        let at_corner = amplitude(60.0);
+        let db = 20.0 * (at_corner / at_centre).log10();
+        assert!(
+            (db + 3.0).abs() < 0.6,
+            "the corner is {db:.2} dB down rather than three"
+        );
+    }
     use super::*;
     use std::f64::consts::TAU;
 
