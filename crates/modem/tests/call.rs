@@ -1035,6 +1035,14 @@ fn report_loss_tolerance() {
     let text = "The quick brown fox jumps over the lazy dog. 0123456789\r\n";
     let wanted = text.repeat(8);
 
+    let sample = connect();
+    println!(
+        "\n  over {} at {} bit/s, error control {}, compression {}",
+        sample.caller.standard(),
+        sample.caller.rate().unwrap_or(0),
+        if sample.caller.error_controlled() { "V.42" } else { "off" },
+        if sample.caller.compressing() { "V.42bis" } else { "off" }
+    );
     println!("\n  one sample lost every   damaged  delivered");
     for ms in [50.0, 20.0, 10.0, 5.0, 2.0, 1.0, 0.5, 0.25, 0.125] {
         let mut p = connect();
@@ -1059,4 +1067,46 @@ fn report_loss_tolerance() {
         );
     }
     println!();
+}
+
+#[test]
+fn error_control_comes_up_on_every_pump_that_can_carry_it() {
+    // V.42 wants a synchronous bit pipe. Two of the three pumps are one; the
+    // third is not, and the difference is not a detail that shows up anywhere
+    // above. Worth checking on each rather than on whichever the default
+    // happens to be, because the layer that would notice is the layer being
+    // tested.
+    for (carrier, seconds) in [("V22B", 12.0), ("V32", 14.0)] {
+        let mut p = Pair::new();
+        Pair::type_at(&mut p.host, &format!("AT+MS={carrier}"));
+        Pair::type_at(&mut p.caller, &format!("AT+MS={carrier}"));
+        Pair::type_at(&mut p.host, "ATA");
+        Pair::type_at(&mut p.caller, "ATD5551234");
+        p.run(seconds);
+        assert_eq!(p.caller.state(), State::Data, "{carrier} never connected");
+        assert!(p.caller.error_controlled(), "{carrier}: no error control");
+        assert!(p.host.error_controlled(), "{carrier}: none at the far end");
+        assert!(p.caller.compressing(), "{carrier}: no compression");
+    }
+
+    // Bell 103 is asynchronous all the way down: its line format *is*
+    // start-stop framing and its receiver re-synchronises on every start bit,
+    // so there is no synchronous pipe for V.42 to run on. Which is also how
+    // anyone ever dialled a board at 300 bit/s.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "AT+MS=B103");
+    Pair::type_at(&mut p.caller, "AT+MS=B103");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(12.0);
+    assert_eq!(p.caller.state(), State::Data, "Bell 103 never connected");
+    assert!(!p.caller.error_controlled(), "Bell 103 cannot carry V.42");
+    assert_eq!(p.caller.error_control_phase(), "none");
+
+    // And it still carries what is typed, which is the point.
+    for b in b"HELLO\r" {
+        p.caller.feed_dte(*b);
+    }
+    p.run(4.0);
+    assert!(p.host_saw().contains("HELLO"), "{:?}", p.host_saw());
 }
