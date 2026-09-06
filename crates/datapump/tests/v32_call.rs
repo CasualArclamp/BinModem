@@ -579,3 +579,79 @@ fn a_quiet_far_end_is_heard_through_an_echo_at_full_strength() {
         );
     }
 }
+
+/// Play an answering tone at `db` and report the loudest thing we said back.
+///
+/// `reversal_s` is how often the tone turns its phase over, which is what
+/// separates V.25's answering tone from V.8's, and `am` whether it also carries
+/// V.8's fifteen hertz of amplitude modulation.
+fn answered_with(reversal_s: f64, am: bool, db: f64) -> (f64, &'static str) {
+    let offer = rate_signal(true, false);
+    let mut calling = Modem::new(Role::Calling, offer, FS);
+    let level = 0.3 * 10.0f64.powf(db / 20.0);
+    let mut peak = 0.0f64;
+    let mut phase = 0.0f64;
+    for i in 0..(FS * 4.0) as usize {
+        let t = i as f64 / FS;
+        let flips = if reversal_s > 0.0 { (t / reversal_s) as u64 } else { 0 };
+        let sign = if flips % 2 == 0 { 1.0 } else { -1.0 };
+        let envelope = if am {
+            1.0 + 0.2 * (std::f64::consts::TAU * 15.0 * t).sin()
+        } else {
+            1.0
+        };
+        phase += std::f64::consts::TAU * 2100.0 / FS;
+        let out = calling.step(level * envelope * sign * phase.sin());
+        // After the second 5.4.1 requires, and a little to spare.
+        if t > 1.5 {
+            peak = peak.max(out.abs());
+        }
+    }
+    (peak, calling.phase())
+}
+
+#[test]
+fn a_modern_answering_tone_still_gets_answered() {
+    // 5.4.1: having heard the answering tone for a second, the calling modem
+    // "shall repetitively transmit carrier state A". It starts talking off the
+    // answering tone alone, before any 600 or 3000 Hz tone has arrived.
+    //
+    // V.25's answering tone is a plain 2100 Hz. V.8's -- which is what every
+    // answering modem made since 1994 sends -- is the same tone with a phase
+    // reversal every 450 ms, and the reversals are the entire point of it:
+    // they are how the far end says it can do V.8.
+    //
+    // A reversal takes a tone detector's phasor through zero, so measured on
+    // the phasor the tone stops existing for a few milliseconds twice a
+    // second. The second it has to be heard for arrived in 450 ms instalments
+    // and the counter went back to nought at every one, so the calling modem
+    // stayed mute -- and the far end, hearing nothing, took it for something
+    // that was not a V.32 modem and moved on. From the outside, a call that
+    // never starts and a modem that never transmits.
+    //
+    // Judged on the envelope instead, a reversal is a ripple.
+    for db in [0.0, -6.0, -12.0, -20.0, -26.0] {
+        for (what, reversal, am) in [
+            ("V.25, plain", 0.0, false),
+            ("V.8 ANSam, reversals", 0.450, false),
+            ("V.8 ANSam, reversals and AM", 0.450, true),
+        ] {
+            let (peak, phase) = answered_with(reversal, am, db);
+            assert!(
+                peak > 1.0e-3,
+                "{what} at {db:.0} dB left us silent, still in {phase}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_line_with_nothing_on_it_is_not_answered() {
+    // The other half of it. Riding through a reversal must not turn into
+    // hearing a tone that was never there: 5.4.1 has the calling modem silent
+    // until the far end speaks, and a modem that transmits into silence would
+    // be talking over the answering tone it is supposed to be waiting for.
+    let (peak, phase) = answered_with(0.0, false, -120.0);
+    assert!(peak < 1.0e-6, "transmitted into a silent line, reaching {phase}");
+    assert_eq!(phase, "listening");
+}

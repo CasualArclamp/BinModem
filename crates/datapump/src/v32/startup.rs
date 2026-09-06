@@ -76,9 +76,35 @@ pub enum Heard {
 #[derive(Debug)]
 pub struct Listener {
     answer: ToneDetector,
+    /// Envelope of the answering tone, which has to survive its own reversals.
+    ///
+    /// V.25's answering tone is a plain 2100 Hz. V.8's is the same tone with a
+    /// phase reversal every 450 ms, and the reversals are the whole point of
+    /// it: they are how an answering modem says it can do V.8 at all. Every
+    /// answering modem made since 1994 sends that one.
+    ///
+    /// A reversal takes the tone detector's phasor through zero. Judged on the
+    /// phasor, the tone therefore stops existing for a few milliseconds twice a
+    /// second -- and 5.4.1 wants it heard for a whole second before the calling
+    /// modem may join in, which it can now never be. The modem sits mute
+    /// waiting for a second of tone that arrives in 450 ms instalments, and the
+    /// far end, hearing nothing back, concludes it is talking to something that
+    /// is not a V.32 modem.
+    ///
+    /// The envelope is of the amplitude, which does not care about the sign,
+    /// and is slow enough that a reversal is a ripple in it.
+    answer_envelope: dsp::filter::OnePole,
     carrier: ToneDetector,
     low: ToneDetector,
     high: ToneDetector,
+    /// Envelope of the weaker sideband, on the same footing as the answering
+    /// tone's.
+    ///
+    /// The two are compared against each other, and a comparison between a
+    /// fast measure and a slow one is decided by their time constants rather
+    /// than by the signal: whichever rises first wins the first tenth of a
+    /// second of every call, whatever is on the line.
+    sideband_envelope: dsp::filter::OnePole,
     /// Total power on the line, to tell a spread signal from silence.
     power: dsp::filter::OnePole,
 }
@@ -90,6 +116,10 @@ impl Listener {
         const BANDWIDTH: f64 = 60.0;
         Self {
             answer: ToneDetector::new(super::ANSWER_TONE, BANDWIDTH, fs),
+            // Long against the few milliseconds a reversal costs, short
+            // against the second the tone has to be held for.
+            answer_envelope: dsp::filter::OnePole::new(0.100, fs),
+            sideband_envelope: dsp::filter::OnePole::new(0.100, fs),
             carrier: ToneDetector::new(super::CARRIER, BANDWIDTH, fs),
             low: ToneDetector::new(super::CARRIER - OFFSET, BANDWIDTH, fs),
             high: ToneDetector::new(super::CARRIER + OFFSET, BANDWIDTH, fs),
@@ -99,9 +129,12 @@ impl Listener {
 
     pub fn feed(&mut self, x: f64) {
         self.answer.feed(x);
+        self.answer_envelope.process(self.answer.amplitude());
         self.carrier.feed(x);
         self.low.feed(x);
         self.high.feed(x);
+        self.sideband_envelope
+            .process(self.low.amplitude().min(self.high.amplitude()));
         self.power.process(x.abs());
     }
 
@@ -114,12 +147,23 @@ impl Listener {
     /// Amplitude of the weaker of the two sidebands, which is what 5.4.1 has
     /// the calling modem listen for as "600 Hz and 3000 Hz".
     pub fn sideband_amplitude(&self) -> f64 {
-        self.low.amplitude().min(self.high.amplitude())
+        // The envelope, so that this and the answering tone it is weighed
+        // against are measured the same way.
+        self.sideband_envelope.value()
     }
 
     /// Amplitude of the answering tone (5.1).
     pub fn answer_amplitude(&self) -> f64 {
-        self.answer.amplitude()
+        // The envelope, for the same reason [`classify`] uses it: measured on
+        // the phasor, a tone with reversals in it keeps vanishing. That
+        // mattered here too. This is compared against the sidebands, so an
+        // answering tone that read as nothing for a few milliseconds made the
+        // skirt of itself reaching the sideband detectors look, for exactly
+        // those milliseconds, like a far end alternating -- and a loud enough
+        // answering tone would let the calling modem out of Listening on the
+        // strength of that glitch, which is not hearing anything, it is being
+        // startled by a discontinuity.
+        self.answer_envelope.value()
     }
 
     pub fn level(&self) -> f64 {
@@ -150,7 +194,7 @@ impl Listener {
         // than against an absolute, so that a quiet line and a loud one are
         // read alike and no threshold has to be told what the line is scaled
         // to.
-        let answer = self.answer.amplitude() / level;
+        let answer = self.answer_envelope.value() / level;
         let carrier = self.carrier.amplitude() / level;
         let sidebands = self.low.amplitude().min(self.high.amplitude()) / level;
 
