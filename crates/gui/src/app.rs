@@ -57,6 +57,87 @@ impl Source {
     }
 }
 
+/// The subparameters of `AT+MS`, as V.250 6.4.1 defines them.
+///
+/// The command carries four things: which modulation, whether the modem may
+/// fall back to another on its own, and the range of line rates it is allowed
+/// to use. The last two are the ones worth having a window for.
+///
+/// A rate ceiling is not a speed limit for the timid. The sixteen points of
+/// V.22bis at 2400 need something like 20 dB of signal to noise to be told
+/// apart, and the four at 1200 need about 13. On a line that cannot give the
+/// first, 2400 is not the faster connection -- it is the one that carries
+/// nothing, byte after byte of it, while 1200 would have carried the call.
+/// Measured on a recorded call through a real trunk, 2400 got the far end
+/// nought times in eight and 1200 got it eight.
+#[derive(Debug, Clone, Copy)]
+struct Modulation {
+    /// Whether the modem may choose a different modulation than the one asked
+    /// for. The Recommendation defaults this on.
+    automode: bool,
+    min_rate: u32,
+    max_rate: u32,
+}
+
+impl Default for Modulation {
+    fn default() -> Self {
+        // V.250 6.4.1: automode on, and the widest range, which is what the AT
+        // layer starts with too.
+        Self { automode: true, min_rate: 300, max_rate: 4800 }
+    }
+}
+
+impl Modulation {
+    /// The line rates a modulation actually has.
+    ///
+    /// This is what makes the window worth opening rather than typing the
+    /// command: the rates are not free numbers, they belong to the modulation,
+    /// and asking Bell 103 for 2400 is not a slow connection but an error.
+    fn rates(carrier: usize) -> &'static [u32] {
+        match carrier {
+            0 => &[300],
+            1 => &[1200, 2400],
+            _ => &[4800, 9600],
+        }
+    }
+
+    /// Move the range inside what this modulation can do.
+    ///
+    /// Called whenever the modulation changes, so the boxes can never be left
+    /// showing a rate the chosen modulation has never heard of.
+    fn fit(&mut self, carrier: usize) {
+        let rates = Self::rates(carrier);
+        let (lowest, highest) = (rates[0], rates[rates.len() - 1]);
+        // Membership first, and no clamping to the nearest. A rate the new
+        // modulation does not have says nothing about what was wanted, so the
+        // answer is its widest range rather than whichever of its numbers the
+        // old one happened to be closest to -- otherwise stepping through
+        // Bell 103 on the way to V.32 would leave V.32 held to 4800 by a
+        // 300 nobody meant as a ceiling.
+        if !rates.contains(&self.min_rate) {
+            self.min_rate = lowest;
+        }
+        if !rates.contains(&self.max_rate) {
+            self.max_rate = highest;
+        }
+        // 5.4.2 makes a minimum above the maximum an error, so it is not
+        // something to let the window compose in the first place.
+        if self.min_rate > self.max_rate {
+            self.min_rate = self.max_rate;
+        }
+    }
+
+    /// The command this composes.
+    fn command(&self, carrier: &str) -> String {
+        format!(
+            "AT+MS={carrier},{},{},{}",
+            u8::from(self.automode),
+            self.min_rate,
+            self.max_rate
+        )
+    }
+}
+
 /// Which view fills the lower panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -96,6 +177,10 @@ pub struct ScopeApp {
     chosen_input: usize,
     chosen_output: usize,
     carrier: usize,
+    /// The `AT+MS` subparameters the advanced window is composing, and whether
+    /// it is open.
+    modulation: Modulation,
+    advanced: bool,
     /// Where a telnet connection is aimed.
     host: String,
     tab: Tab,
@@ -150,6 +235,8 @@ impl ScopeApp {
             chosen_input: chosen_in,
             chosen_output: chosen_out,
             carrier: 1,
+            modulation: Modulation::default(),
+            advanced: false,
             tab: Tab::Terminal,
             font_size: 14.0,
             last_repaint: std::time::Instant::now(),
@@ -594,21 +681,38 @@ impl ScopeApp {
             let dim = Color32::from_rgb(140, 150, 165);
             ui.label(RichText::new("call").monospace().color(dim));
 
-            let before = self.carrier;
+            // Watched by what was clicked rather than by what the value is
+            // afterwards, so that the advanced window can set the same field
+            // without this row deciding a command needs sending.
+            let mut picked = None;
             egui::ComboBox::from_id_salt("carrier")
                 .width(180.0)
                 .selected_text(Self::CARRIERS[self.carrier].1)
                 .show_ui(ui, |ui| {
                     for (i, (_, label)) in Self::CARRIERS.iter().enumerate() {
-                        ui.selectable_value(&mut self.carrier, i, *label);
+                        if ui.selectable_label(self.carrier == i, *label).clicked() {
+                            picked = Some(i);
+                        }
                     }
                 });
-            if self.carrier != before {
+            if let Some(i) = picked {
+                self.carrier = i;
+                self.modulation.fit(i);
                 // Both ends have to agree: a modem listening for one of these
-                // hears nothing whatever of the others.
+                // hears nothing whatever of the others. Bare, so the rates go
+                // back to their defaults -- the advanced window is where a
+                // range is chosen on purpose.
                 session.type_bytes(
-                    format!("AT+MS={}\r", Self::CARRIERS[self.carrier].0).as_bytes(),
+                    format!("AT+MS={}\r", Self::CARRIERS[i].0).as_bytes(),
                 );
+            }
+            if ui
+                .selectable_label(self.advanced, "Advanced")
+                .on_hover_text("the rest of AT+MS: fallback, and the range of line rates")
+                .clicked()
+            {
+                self.advanced = !self.advanced;
+                self.modulation.fit(self.carrier);
             }
 
             let online = self.frame.state == telemetry::CallState::Connected;
@@ -663,6 +767,136 @@ impl ScopeApp {
                     }),
             );
         });
+
+        self.advanced_modulation(ui, &session);
+    }
+
+    /// The rest of `AT+MS`, in a window rather than typed.
+    ///
+    /// Everything here composes one command and sends it. That is the same
+    /// rule the buttons on the row above follow, and for the same reason: the
+    /// modem has one interface, and a control that reached past it into the
+    /// state machine could ask for things a terminal could not and would drift
+    /// from what the terminal sees the moment either changed. The command being
+    /// composed is on the face of the window, so nothing here is hidden.
+    fn advanced_modulation(&mut self, ui: &mut egui::Ui, session: &Arc<live::Session>) {
+        let dim = Color32::from_rgb(140, 150, 165);
+        // Copied out because the window's own close button wants `&mut bool`
+        // and so does everything inside it.
+        let mut open = self.advanced;
+        egui::Window::new("AT+MS - modulation")
+            .open(&mut open)
+            .resizable(false)
+            .default_width(460.0)
+            .show(ui.ctx(), |ui| {
+                egui::Grid::new("ms")
+                    .num_columns(2)
+                    .spacing([14.0, 10.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("modulation").monospace().color(dim));
+                        ui.vertical(|ui| {
+                            for (i, (name, label)) in Self::CARRIERS.iter().enumerate() {
+                                if ui
+                                    .radio(self.carrier == i, format!("{label}  ({name})"))
+                                    .clicked()
+                                {
+                                    self.carrier = i;
+                                    self.modulation.fit(i);
+                                }
+                            }
+                        });
+                        ui.end_row();
+
+                        ui.label(RichText::new("fallback").monospace().color(dim));
+                        ui.checkbox(
+                            &mut self.modulation.automode,
+                            "the modem may settle on a different modulation",
+                        )
+                        .on_hover_text(
+                            "V.250 6.4.1 automode. Off means the one chosen above or                              nothing: the call fails rather than coming up as                              something else",
+                        );
+                        ui.end_row();
+
+                        ui.label(RichText::new("line rate").monospace().color(dim));
+                        ui.horizontal(|ui| {
+                            // Only the rates this modulation has. They are not
+                            // free numbers -- asking Bell 103 for 2400 is not a
+                            // slow connection, it is an error, and V.250 5.4.2
+                            // says a modem should refuse it.
+                            let rates = Modulation::rates(self.carrier);
+                            let before =
+                                (self.modulation.min_rate, self.modulation.max_rate);
+                            ui.label(RichText::new("from").color(dim));
+                            rate_box(ui, "ms-min", &mut self.modulation.min_rate, rates);
+                            ui.label(RichText::new("to").color(dim));
+                            rate_box(ui, "ms-max", &mut self.modulation.max_rate, rates);
+                            // Keep the pair the right way round by moving
+                            // whichever one was not just touched.
+                            if self.modulation.min_rate > self.modulation.max_rate {
+                                if self.modulation.min_rate != before.0 {
+                                    self.modulation.max_rate = self.modulation.min_rate;
+                                } else {
+                                    self.modulation.min_rate = self.modulation.max_rate;
+                                }
+                            }
+                            if rates.len() == 1 {
+                                ui.label(
+                                    RichText::new("the only rate it has")
+                                        .small()
+                                        .color(dim),
+                                );
+                            }
+                        });
+                        ui.end_row();
+                    });
+
+                let rates = Modulation::rates(self.carrier);
+                let top = rates[rates.len() - 1];
+                ui.add_space(4.0);
+                if self.modulation.max_rate < top {
+                    ui.label(
+                        RichText::new(format!(
+                            "Held to {}. On a line that cannot carry {top}, that is not                              the slower connection -- it is the one that works.",
+                            self.modulation.max_rate
+                        ))
+                        .small()
+                        .color(Color32::from_rgb(240, 200, 120)),
+                    );
+                } else {
+                    ui.label(
+                        RichText::new(
+                            "A ceiling is worth setting on purpose. Sixteen points at                              2400 need about 20 dB of signal to noise; four at 1200                              need about 13.",
+                        )
+                        .small()
+                        .color(dim),
+                    );
+                }
+
+                ui.separator();
+                let command = self.modulation.command(Self::CARRIERS[self.carrier].0);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(&command)
+                            .monospace()
+                            .color(Color32::from_rgb(220, 225, 235)),
+                    );
+                    if ui
+                        .button("Send")
+                        .on_hover_text("Takes effect on the next call, not this one")
+                        .clicked()
+                    {
+                        session.type_bytes(format!("{command}\r").as_bytes());
+                    }
+                    if ui
+                        .button("Ask")
+                        .on_hover_text("AT+MS? - what the modem currently has")
+                        .clicked()
+                    {
+                        session.type_bytes(b"AT+MS?\r");
+                    }
+                });
+            });
+        self.advanced = open;
     }
 
     fn audio_controls(&mut self, ui: &mut egui::Ui) {
@@ -1067,5 +1301,89 @@ impl eframe::App for ScopeApp {
     }
 }
 
+/// One line-rate box, offering only the rates the modulation has.
+fn rate_box(ui: &mut egui::Ui, id: &str, value: &mut u32, rates: &[u32]) {
+    egui::ComboBox::from_id_salt(id)
+        .width(78.0)
+        .selected_text(format!("{value}"))
+        .show_ui(ui, |ui| {
+            for &rate in rates {
+                ui.selectable_value(value, rate, format!("{rate}"));
+            }
+        });
+}
+
 /// Compile-time reminder that the engine and UI agree on the FFT size.
 const _: () = assert!(FFT_SIZE / 2 == SPECTRUM_BINS);
+
+#[cfg(test)]
+mod modulation_tests {
+    use super::{Modulation, ScopeApp};
+
+    /// The rate lists are indexed by the same number the carrier box is, so
+    /// the two orders have to stay together. Nothing else enforces it.
+    #[test]
+    fn the_rate_lists_belong_to_the_carriers_they_are_indexed_by() {
+        assert_eq!(ScopeApp::CARRIERS[0].0, "B103");
+        assert_eq!(Modulation::rates(0), &[300]);
+        assert_eq!(ScopeApp::CARRIERS[1].0, "V22B");
+        assert_eq!(Modulation::rates(1), &[1200, 2400]);
+        assert_eq!(ScopeApp::CARRIERS[2].0, "V32");
+        assert_eq!(Modulation::rates(2), &[4800, 9600]);
+        assert_eq!(ScopeApp::CARRIERS.len(), 3);
+    }
+
+    #[test]
+    fn it_starts_where_the_recommendation_says() {
+        // V.250 6.4.1: automode on, and no range asked for. The same defaults
+        // the AT interpreter itself starts with, so an untouched window
+        // composes the command that changes nothing.
+        let m = Modulation::default();
+        assert!(m.automode);
+        assert_eq!((m.min_rate, m.max_rate), (300, 4800));
+    }
+
+    #[test]
+    fn changing_modulation_moves_the_rates_into_what_it_can_do() {
+        // The whole point of the window over typing the command: a rate the
+        // chosen modulation has never heard of should not be composable, let
+        // alone sendable.
+        let mut m = Modulation::default();
+        m.fit(1);
+        assert_eq!((m.min_rate, m.max_rate), (1200, 2400), "V.22bis");
+        m.fit(0);
+        assert_eq!((m.min_rate, m.max_rate), (300, 300), "Bell 103 has one rate");
+        m.fit(2);
+        assert_eq!((m.min_rate, m.max_rate), (4800, 9600), "V.32");
+    }
+
+    #[test]
+    fn a_ceiling_survives_a_modulation_that_still_has_it() {
+        // Someone who held V.22bis to 1200 and looked at another modulation
+        // and came back should find their ceiling still there.
+        let mut m = Modulation { automode: true, min_rate: 1200, max_rate: 1200 };
+        m.fit(1);
+        assert_eq!((m.min_rate, m.max_rate), (1200, 1200));
+    }
+
+    #[test]
+    fn a_minimum_above_the_maximum_is_never_composed() {
+        // V.250 5.4.2 makes it an error, so the window should not be able to
+        // build one to be refused.
+        let mut m = Modulation { automode: false, min_rate: 9600, max_rate: 1200 };
+        m.fit(2);
+        assert!(m.min_rate <= m.max_rate, "{m:?}");
+        let mut m = Modulation { automode: false, min_rate: 2400, max_rate: 1200 };
+        m.fit(1);
+        assert!(m.min_rate <= m.max_rate, "{m:?}");
+    }
+
+    #[test]
+    fn the_command_is_the_one_the_interpreter_parses() {
+        // Carrier, automode, minimum, maximum -- V.250 6.4.1, in that order.
+        let m = Modulation { automode: true, min_rate: 1200, max_rate: 1200 };
+        assert_eq!(m.command("V22B"), "AT+MS=V22B,1,1200,1200");
+        let m = Modulation { automode: false, min_rate: 4800, max_rate: 9600 };
+        assert_eq!(m.command("V32"), "AT+MS=V32,0,4800,9600");
+    }
+}

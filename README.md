@@ -89,6 +89,18 @@ those and nothing else — the modem has one interface, and a button that reache
 past it would be able to ask for things a terminal could not. The scopes show
 the call as it happens rather than a recording of somebody else's.
 
+**Advanced** beside the modulation box opens the rest of `AT+MS` — V.250
+6.4.1's other three subparameters — as toggles and boxes rather than something
+to type. It is mode aware: the line-rate boxes offer only the rates the chosen
+modulation actually has, since asking Bell 103 for 2400 is not a slow
+connection but an error. The command being composed is shown on the face of the
+window, and Send types it; nothing here reaches past the AT interface.
+
+A rate ceiling is the setting worth knowing about. Sixteen points at 2400 need
+about 20 dB of signal to noise and four at 1200 need about 13, so on a line
+that cannot give the first, `AT+MS=V22B,1,1200,1200` is not the slower
+connection — it is the one that works.
+
 To have something to dial, run `modem-answer` on the same cable. It puts a
 second modem on the line, answers, and echoes what is typed like the simplest
 possible board:
