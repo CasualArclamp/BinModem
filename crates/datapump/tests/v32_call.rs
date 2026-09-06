@@ -655,3 +655,4 @@ fn a_line_with_nothing_on_it_is_not_answered() {
     assert!(peak < 1.0e-6, "transmitted into a silent line, reaching {phase}");
     assert_eq!(phase, "listening");
 }
+
