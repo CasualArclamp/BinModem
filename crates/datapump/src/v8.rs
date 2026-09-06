@@ -269,7 +269,31 @@ impl Modem {
         self.elapsed = 0.0;
     }
 
-    /// Queue a sequence for transmission, and start the carrier.
+    /// Queue one whole sequence, preamble and all.
+    ///
+    /// 7.3 and 7.4: "a CM sequence starts with 10 ONEs followed by 10
+    /// synchronization bits", and the same for JM. The ONEs are not a
+    /// formality and not decoration. They are the idle condition of the line
+    /// held for ten bit times, and they are the only thing standing between a
+    /// carrier appearing and a start bit arriving.
+    ///
+    /// Without them the far end's frequency shift keyer is handed a carrier
+    /// and the first start bit in the same instant, with its carrier detector
+    /// and its gain control both still settling. It misses the octet -- and
+    /// the octet it misses is the synchronisation, without which there is no
+    /// finding the message. A real answering modem duly sent ANSam for its
+    /// four and a half seconds, heard nothing it recognised, and fell back to
+    /// V.22bis exactly as 8.2.2 tells it to.
+    fn send_sequence(&mut self, octets: Vec<u8>) {
+        self.tx.set_transmitting(true);
+        self.tx.push_bits(&[true; v8::PREAMBLE_ONES]);
+        self.outgoing = octets;
+    }
+
+    /// Queue octets with no preamble, for the signals that have none.
+    ///
+    /// CJ is three octets of zeros on a carrier that is already up and already
+    /// being read (3.5). It needs no run-in, and one would only delay it.
     fn send(&mut self, octets: Vec<u8>) {
         self.outgoing = octets;
         self.tx.set_transmitting(true);
@@ -318,7 +342,7 @@ impl Modem {
                 // 8.1.1: silence for Te, "prior to transmitting signal CM".
                 if self.elapsed >= timing::TE {
                     let cm = v8::sequence(Signal::Cm, &self.menu);
-                    self.send(cm);
+                    self.send_sequence(cm);
                     self.enter(State::SendingCm);
                 }
             }
@@ -337,7 +361,7 @@ impl Modem {
                 } else if self.outgoing.is_empty() && self.tx.pending_bits() == 0 {
                     // 7.3: "a repetitive sequence". Say it again.
                     let cm = v8::sequence(Signal::Cm, &self.menu);
-                    self.send(cm);
+                    self.send_sequence(cm);
                 }
             }
 
@@ -357,7 +381,7 @@ impl Modem {
                     self.last = None;
                     self.repeats = 0;
                     let octets = v8::sequence(Signal::Jm, &jm);
-                    self.send(octets);
+                    self.send_sequence(octets);
                     self.enter(State::SendingJm);
                 } else if self.elapsed >= timing::ANSAM {
                     // "If neither CM nor a suitable sigC is detected during
@@ -377,7 +401,7 @@ impl Modem {
                     self.enter(State::Handover);
                 } else if self.outgoing.is_empty() && self.tx.pending_bits() == 0 {
                     let jm = self.last_jm();
-                    self.send(jm);
+                    self.send_sequence(jm);
                 }
             }
 
@@ -478,6 +502,65 @@ mod tests {
         (calling.status(), answering.status())
     }
 
+
+
+    #[test]
+    fn a_sequence_runs_in_on_the_mark_tone_before_it_starts() {
+        // 7.3: "a CM sequence starts with 10 ONEs followed by 10
+        // synchronization bits". The ONEs are the idle line held for ten bit
+        // times, and they are the only thing between a carrier appearing and a
+        // start bit arriving. Without them a far end is handed both at once,
+        // with its carrier detector and its gain control still settling; the
+        // octet it misses is the synchronisation, and after that there is no
+        // message to find.
+        //
+        // A real answering modem, sent a CM with no run-in, held its ANSam for
+        // the full four and a half seconds of 8.2.2, heard nothing it
+        // recognised, and fell back to V.22bis. On a clean simulated line the
+        // negotiation completed anyway, which is why nothing here noticed.
+        //
+        // So this measures the tone rather than counting bit times: a ONE is
+        // the mark, and in V.21's low channel the mark is 980 Hz.
+        let mut calling = Modem::new(Role::Calling, CallFunction::Data, all(), FS);
+        let mut answering =
+            Modem::new(Role::Answering, CallFunction::Data, all(), FS);
+        let (mut to_calling, mut to_answering) = (0.0, 0.0);
+        let mut run_in: Vec<f64> = Vec::new();
+        let wanted = (FS / BAUD * v8::PREAMBLE_ONES as f64) as usize;
+
+        for _ in 0..(9.0 * FS) as usize {
+            let from_calling = calling.step(to_calling);
+            let from_answering = answering.step(to_answering);
+            to_calling = from_answering;
+            to_answering = from_calling;
+            if !run_in.is_empty() || from_calling.abs() > 1.0e-9 {
+                run_in.push(from_calling);
+                if run_in.len() >= wanted {
+                    break;
+                }
+            }
+        }
+        assert_eq!(run_in.len(), wanted, "the calling modem never transmitted");
+
+        // Which of the two tones the run-in is made of.
+        let energy = |f: f64| {
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (i, &x) in run_in.iter().enumerate() {
+                let w = std::f64::consts::TAU * f * i as f64 / FS;
+                re += x * w.cos();
+                im -= x * w.sin();
+            }
+            re.hypot(im) / run_in.len() as f64
+        };
+        let (space, mark) = LOW;
+        assert!(
+            energy(mark) > 4.0 * energy(space),
+            "the run-in is not ten bit times of mark: {:.4} at {mark} Hz \
+             against {:.4} at {space} Hz",
+            energy(mark),
+            energy(space)
+        );
+    }
 
     #[test]
     fn the_two_channels_are_the_ones_v21_defines() {

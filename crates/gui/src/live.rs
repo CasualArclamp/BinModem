@@ -239,6 +239,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     let mut typed_recently = Instant::now() - Duration::from_secs(1);
     let mut heard_recently = typed_recently;
     let mut last_state = State::Command;
+    // Where inside a start-up the call has got to, logged as it changes. A
+    // call that will not come up is always stuck somewhere particular, and a
+    // timestamped list of where it went is the difference between debugging it
+    // and describing it.
+    let mut last_phase = "";
 
     let publish_every = Duration::from_millis(16);
     let mut next_publish = Instant::now();
@@ -385,6 +390,14 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         sink.push(&from_line);
 
         drain_dte(&mut modem, &tx, &mut rx_bytes, &mut heard_recently);
+
+        let phase = modem.line_phase();
+        if phase != last_phase {
+            if phase != "on hook" {
+                tx.log(Direction::Note, format!("{}: {phase}", modem.standard()));
+            }
+            last_phase = phase;
+        }
 
         let state = modem.state();
         if state != last_state {
