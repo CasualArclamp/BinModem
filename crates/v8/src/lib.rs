@@ -232,11 +232,32 @@ impl Modulations {
     }
 }
 
+/// What the protocol category says (Table 6).
+///
+/// The category exists to settle error control before the line has been
+/// trained, and 7.3 says why anyone would bother: it "may be included in order
+/// to negotiate LAPM without requiring the ODP/ADP exchange".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Protocol {
+    /// No protocol octet. Table 6's note is explicit that this settles
+    /// nothing: "absence of this octet does not preclude alternative means of
+    /// protocol negotiation" -- and the V.42 detection phase is one.
+    #[default]
+    Unstated,
+    /// LAPM, according to ITU-T V.42.
+    Lapm,
+    /// A protocol named in an extension octet. Read only far enough to know it
+    /// is not the one this modem does.
+    Extended,
+}
+
 /// The contents of a CM or a JM: what the call is for, and what can carry it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Menu {
     pub function: CallFunction,
     pub modulations: Modulations,
+    /// What error control the far end will be asked for, if anything.
+    pub protocol: Protocol,
 }
 
 /// Category tags, in bits `b0..b3` of a category octet (Table 2).
@@ -251,6 +272,9 @@ mod tag {
     pub const CALL_FUNCTION: u8 = 0b0001;
     /// `b0 b1 b2 b3` = `1 0 1 0`.
     pub const MODULATION: u8 = 0b0101;
+    /// `b0 b1 b2 b3` = `0 1 0 1`, which is the modulation tag backwards and so
+    /// a free check that the bit order here is the right way round.
+    pub const PROTOCOL: u8 = 0b1010;
 }
 
 /// Build an octet from its bits, `b0` least significant.
@@ -314,6 +338,17 @@ impl Menu {
             has(Modulation::V23HalfDuplex),
             has(Modulation::V21),
         ]));
+
+        // Last, because 7.3 gives an order for the two categories before it
+        // and none for this one, and because a reader that does not know the
+        // category has to skip it -- which is easiest at the end.
+        if self.protocol == Protocol::Lapm {
+            out.push(octet([
+                false, true, false, true, // b0..b3: the protocol tag, 0101
+                false, // b4: a category octet
+                true, false, false, // b5..b7: 100, LAPM per ITU-T V.42
+            ]));
+        }
         out
     }
 
@@ -327,6 +362,7 @@ impl Menu {
     pub fn parse(octets: &[u8]) -> Option<Self> {
         let mut function = None;
         let mut modulations = Modulations::NONE;
+        let mut protocol = Protocol::Unstated;
         let mut rest = octets.iter().copied().peekable();
         while let Some(o) = rest.next() {
             // Only category octets carry a tag; an extension octet is
@@ -357,10 +393,21 @@ impl Menu {
                         }
                     }
                 }
+                tag::PROTOCOL if !bit(o, 4) => {
+                    // Table 6 defines two codes in b5..b7 and reserves the
+                    // rest. `111` names an extension octet this modem does not
+                    // read; anything else is a code that did not exist when
+                    // this was written, and clause 5 says to ignore it.
+                    protocol = match (bit(o, 5), bit(o, 6), bit(o, 7)) {
+                        (true, false, false) => Protocol::Lapm,
+                        (true, true, true) => Protocol::Extended,
+                        _ => Protocol::Unstated,
+                    };
+                }
                 _ => {}
             }
         }
-        Some(Self { function: function?, modulations })
+        Some(Self { function: function?, modulations, protocol })
     }
 
     /// The joint menu: what this end has that the far end also offered.
@@ -369,11 +416,28 @@ impl Menu {
     /// modes that are both indicated in CM and available in the answer DCE".
     /// And when there is nothing in common, the reply is not silence -- it is
     /// a menu with every modulation bit clear, which says so.
-    pub fn joint(&self, ours: Modulations) -> Self {
+    pub fn joint(&self, ours: Modulations, protocol: Protocol) -> Self {
         Self {
             function: self.function,
             modulations: self.modulations.intersect(ours),
+            // 7.4: "if the LAPM protocol code is indicated in CM, the protocol
+            // octet may be included in JM in order to complete the
+            // negotiation". Only then. An answer naming error control the call
+            // never asked about is not a negotiation, it is an announcement,
+            // and the calling modem has no reason to be reading it.
+            protocol: match (self.protocol, protocol) {
+                (Protocol::Lapm, Protocol::Lapm) => Protocol::Lapm,
+                _ => Protocol::Unstated,
+            },
         }
+    }
+
+    /// Whether both ends have now said LAPM.
+    ///
+    /// True of a JM, which is the joint menu and so already the intersection;
+    /// true of a CM only in the sense that the calling modem asked.
+    pub fn lapm(&self) -> bool {
+        self.protocol == Protocol::Lapm
     }
 
     /// Which modulation the call will use, if the two ends found one.
@@ -480,9 +544,23 @@ impl Decoder {
             }
         }
 
-        if octet == SYNC_MENU && self.kind != Some(Signal::Cm) {
-            // A menu is starting. Whatever was being gathered is finished, and
-            // is worth reporting if it parsed.
+        if octet == SYNC_MENU {
+            // A menu is starting -- or repeating, which is the same event seen
+            // from the far end of the last one. Either way what was being
+            // gathered is finished, and is worth reporting if it parsed.
+            //
+            // The repeat is the terminator because a menu has no length. V.8
+            // clause 5 requires a receiver to "ignore all bits, codes and
+            // octets reserved for such future definition", which it can only
+            // do if it is not counting them, and 7.3 and 7.4 both describe
+            // categories that may or may not be there. This used to stop after
+            // four octets, which was the length of every menu it could build
+            // at the time -- and the fifth category, the protocol octet that
+            // settles error control, fell off the end of every menu carrying
+            // one. The synchronisation octet cannot be mistaken for a body
+            // octet: its low nibble is zero and Table 2 gives no category that
+            // tag, and it has a clear b4 where a modulation extension octet
+            // has a set one.
             let done = self.finish();
             self.kind = Some(Signal::Cm);
             self.body.clear();
@@ -500,11 +578,6 @@ impl Decoder {
                 self.kind = None;
                 self.body.clear();
                 return f.map(Heard::Ci);
-            }
-            // The repeat is the terminator: a menu ends where the next copy of
-            // it begins, and there is always a next copy.
-            if kind == Signal::Cm && self.body.len() >= 4 {
-                return self.finish();
             }
         } else if octet == SYNC_CI {
             self.kind = Some(Signal::Ci);
@@ -543,6 +616,7 @@ mod tests {
         Menu {
             function: CallFunction::Data,
             modulations: Modulations::of(list),
+            protocol: Protocol::Unstated,
         }
     }
 
@@ -579,7 +653,8 @@ mod tests {
             CallFunction::ReceiveFax,
             CallFunction::Data,
         ] {
-            let menu = Menu { function: f, modulations: Modulations::NONE };
+            let menu =
+                Menu { function: f, modulations: Modulations::NONE, protocol: Protocol::Unstated };
             assert_eq!(Menu::parse(&menu.octets()).unwrap().function, f);
         }
     }
@@ -655,9 +730,100 @@ mod tests {
         // CM and available in the answer DCE".
         let theirs = data_menu(&[Modulation::V34Duplex, Modulation::V32bis, Modulation::V21]);
         let ours = Modulations::of(&[Modulation::V32bis, Modulation::V22bis]);
-        let jm = theirs.joint(ours);
+        let jm = theirs.joint(ours, Protocol::Unstated);
         assert_eq!(jm.modulations, Modulations::of(&[Modulation::V32bis]));
         assert_eq!(jm.function, CallFunction::Data, "the call function is carried over");
+    }
+
+    #[test]
+    fn the_protocol_tag_reads_the_same_way_round_as_the_others() {
+        // Table 2 prints b0 first and b0 is the least significant bit, so
+        // every tag is written backwards from the number it is. The protocol
+        // tag is "0101" where the modulation tag is "1010", which makes the
+        // two constants mirror images -- and if either were read straight off
+        // the table, they would come out as each other.
+        assert_eq!(tag::PROTOCOL, 0b1010);
+        assert_eq!(tag::MODULATION, 0b0101);
+        assert_eq!(tag::PROTOCOL.reverse_bits() >> 4, tag::MODULATION);
+    }
+
+    #[test]
+    fn the_lapm_octet_is_the_one_table_6_describes() {
+        // Table 6: tag "0101" in b0-b3, zero in b4 for a category octet, and
+        // "100" in b5-b7 for LAPM according to ITU-T V.42.
+        let menu = Menu {
+            function: CallFunction::Data,
+            modulations: Modulations::of(&[Modulation::V22bis]),
+            protocol: Protocol::Lapm,
+        };
+        let prot0 = *menu.octets().last().unwrap();
+        assert_eq!(tag_of(prot0), tag::PROTOCOL);
+        assert!(!bit(prot0, 4), "a category octet, not an extension");
+        assert_eq!((bit(prot0, 5), bit(prot0, 6), bit(prot0, 7)), (true, false, false));
+        assert_eq!(prot0, 0b0010_1010);
+    }
+
+    #[test]
+    fn a_protocol_octet_is_not_read_as_a_modulation_extension() {
+        // The hazard the parser has to survive: the modulation category
+        // swallows the octets after it that look like its own extensions, and
+        // an extension is told apart by "010" in b3..b5. The protocol octet
+        // has a one in b3, so it is not one -- but only by that one bit, and
+        // if it were lost the modulation bits would be read out of a protocol
+        // octet and the call would be offered modes nobody has.
+        let menu = Menu {
+            function: CallFunction::Data,
+            modulations: Modulations::of(&[Modulation::V21]),
+            protocol: Protocol::Lapm,
+        };
+        let octets = menu.octets();
+        let prot0 = *octets.last().unwrap();
+        assert!(!is_extension(prot0), "b3 is what keeps these apart");
+        let back = Menu::parse(&octets).unwrap();
+        assert_eq!(back, menu, "everything survives, in both categories");
+    }
+
+    #[test]
+    fn a_menu_that_says_nothing_about_protocol_says_nothing() {
+        // Table 6's note: "absence of this octet does not preclude alternative
+        // means of protocol negotiation". Silence is not a refusal, and the
+        // V.42 detection phase is exactly the alternative it means.
+        let menu = data_menu(&[Modulation::V32bis]);
+        assert_eq!(menu.protocol, Protocol::Unstated);
+        assert!(!menu.lapm());
+        assert_eq!(Menu::parse(&menu.octets()).unwrap().protocol, Protocol::Unstated);
+    }
+
+    #[test]
+    fn a_protocol_named_in_an_extension_octet_is_not_lapm() {
+        // Table 6 gives "111" to a protocol named in an extension octet. This
+        // modem does not read the extension, and the one thing it must not do
+        // is take a code it cannot read for the one it can.
+        let prot0 = octet([false, true, false, true, false, true, true, true]);
+        let mut octets = data_menu(&[Modulation::V21]).octets();
+        octets.push(prot0);
+        assert_eq!(Menu::parse(&octets).unwrap().protocol, Protocol::Extended);
+        assert!(!Menu::parse(&octets).unwrap().lapm());
+    }
+
+    #[test]
+    fn a_joint_menu_names_lapm_only_when_both_ends_did() {
+        // 7.4: "if the LAPM protocol code is indicated in CM, the protocol
+        // octet may be included in JM in order to complete the negotiation".
+        let asked = Menu {
+            function: CallFunction::Data,
+            modulations: Modulations::of(&[Modulation::V32bis]),
+            protocol: Protocol::Lapm,
+        };
+        let ours = Modulations::of(&[Modulation::V32bis]);
+        assert!(asked.joint(ours, Protocol::Lapm).lapm(), "both said it");
+        assert!(!asked.joint(ours, Protocol::Unstated).lapm(), "the answerer did not");
+
+        let silent = data_menu(&[Modulation::V32bis]);
+        assert!(
+            !silent.joint(ours, Protocol::Lapm).lapm(),
+            "the call never asked, so there is nothing to complete"
+        );
     }
 
     #[test]
@@ -667,7 +833,7 @@ mod tests {
         // answering modem that simply stopped talking would be informing
         // nobody of anything.
         let theirs = data_menu(&[Modulation::V34Duplex]);
-        let jm = theirs.joint(Modulations::of(&[Modulation::V21]));
+        let jm = theirs.joint(Modulations::of(&[Modulation::V21]), Protocol::Unstated);
         assert!(jm.modulations.is_empty());
         assert_eq!(jm.chosen(), None);
         assert_eq!(jm.octets().len(), theirs.octets().len(), "fewer octets than CM");
@@ -760,6 +926,35 @@ mod tests {
             }
         }
         assert_eq!(heard, Some(Heard::Cj));
+    }
+
+    #[test]
+    fn a_menu_is_read_to_its_end_and_not_to_a_length() {
+        // Clause 5: "a receiver shall ignore all bits, codes and octets
+        // reserved for such future definition". A decoder that stops counting
+        // at the length of the menus it happens to build cannot do that, and
+        // this one used to stop at four -- so a fifth category was not ignored
+        // but lost, along with anything a real modem might put after it. V.8
+        // describes several: PSTN access, PCM modem availability, non-standard
+        // facilities. Here the trailing octet is the PSTN access category,
+        // which this modem does not read and must still read past.
+        let mut menu = data_menu(&[Modulation::V32bis, Modulation::V22bis]);
+        menu.protocol = Protocol::Lapm;
+        let access0 = octet([true, false, true, true, false, false, false, false]);
+        assert_eq!(tag_of(access0), 0b1101, "the PSTN access tag of Table 2");
+
+        let mut decoder = Decoder::new();
+        let mut heard = None;
+        for _ in 0..3 {
+            let mut cm = sequence(Signal::Cm, &menu);
+            cm.push(access0);
+            for o in cm {
+                if let Some(h) = decoder.feed(o) {
+                    heard = Some(h);
+                }
+            }
+        }
+        assert_eq!(heard, Some(Heard::Cm(menu)), "a category past the end costs nothing");
     }
 
     #[test]

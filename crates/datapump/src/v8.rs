@@ -12,7 +12,7 @@
 
 use dsp::filter::OnePole;
 use dsp::Nco;
-use v8::{CallFunction, Decoder, Heard, Menu, Modulation, Modulations, Signal};
+use v8::{CallFunction, Decoder, Heard, Menu, Modulation, Modulations, Protocol, Signal};
 
 use crate::bell103::{Bell103Rx, Bell103Tx};
 use crate::framing::AsyncBits;
@@ -156,6 +156,8 @@ pub struct Modem {
     repeats: u32,
     /// What was agreed, once it has been.
     chosen: Option<Modulation>,
+    /// The error control both ends named, if they named any (Table 6).
+    agreed: Protocol,
     /// Octets of the sequence being sent, and where in it we are.
     outgoing: Vec<u8>,
     /// Zero octets of CJ seen so far (8.2.3 wants all three).
@@ -171,7 +173,7 @@ impl Modem {
         tx.set_transmitting(false);
         Self {
             role,
-            menu: Menu { function, modulations: ours },
+            menu: Menu { function, modulations: ours, protocol: Protocol::Unstated },
             tx,
             rx: Bell103Rx::with_tones(rx_space, rx_mark, fs),
             bits: AsyncBits::new(8),
@@ -188,9 +190,25 @@ impl Modem {
             last: None,
             repeats: 0,
             chosen: None,
+            agreed: Protocol::Unstated,
             outgoing: Vec::new(),
             cj: 0,
         }
+    }
+
+    /// Ask for LAPM in the protocol category (Table 6).
+    ///
+    /// 7.3: the category "may be included in order to negotiate LAPM without
+    /// requiring the ODP/ADP exchange". What this modem does with the answer
+    /// is not to skip that exchange -- 7.3 warns in the same breath that "some
+    /// existing implementations of V.8 may indicate LAPM in prot0, but still
+    /// require the ODP/ADP exchange", and V.42 Appendix VI.2 says many
+    /// answering modems run it regardless in order to catch protocols V.8
+    /// cannot name. It is worth having anyway: a far end that has said it does
+    /// LAPM has said so whether or not its ADP survives the line.
+    pub fn offering_lapm(mut self) -> Self {
+        self.menu.protocol = Protocol::Lapm;
+        self
     }
 
     pub fn status(&self) -> Status {
@@ -218,6 +236,11 @@ impl Modem {
     /// The modulation both ends settled on.
     pub fn chosen(&self) -> Option<Modulation> {
         self.chosen
+    }
+
+    /// Whether both ends named LAPM in the protocol category.
+    pub fn lapm(&self) -> bool {
+        self.agreed == Protocol::Lapm
     }
 
     /// One sample in, one sample out.
@@ -352,6 +375,9 @@ impl Modem {
                 // been received... signal CJ shall be transmitted."
                 if let Some(jm) = self.settled() {
                     self.chosen = jm.chosen();
+                    // A JM naming LAPM is an answer to the CM that asked, so
+                    // by 7.4 it is already the intersection of the two.
+                    self.agreed = jm.protocol;
                     // "The call DCE shall complete the current octet and
                     // associated start and stop bits and then signal CJ shall
                     // be transmitted" -- so the queue is drained, not dropped.
@@ -376,8 +402,9 @@ impl Modem {
                 // 8.2.2: "upon receiving a minimum of 2 identical CM
                 // sequences, the DCE shall transmit JM".
                 if let Some(cm) = self.settled() {
-                    let jm = cm.joint(self.menu.modulations);
+                    let jm = cm.joint(self.menu.modulations, self.menu.protocol);
                     self.chosen = jm.chosen();
+                    self.agreed = jm.protocol;
                     self.last = None;
                     self.repeats = 0;
                     let octets = v8::sequence(Signal::Jm, &jm);
@@ -430,7 +457,7 @@ impl Modem {
         }
         v8::sequence(
             Signal::Jm,
-            &Menu { function: self.menu.function, modulations },
+            &Menu { function: self.menu.function, modulations, protocol: self.agreed },
         )
     }
 
@@ -503,6 +530,46 @@ mod tests {
     }
 
 
+
+    /// Run the two ends against each other, each saying whether it does LAPM.
+    fn negotiate_protocol(ours: bool, theirs: bool, seconds: f64) -> (bool, bool) {
+        let mut calling = Modem::new(Role::Calling, CallFunction::Data, all(), FS);
+        if ours {
+            calling = calling.offering_lapm();
+        }
+        let mut answering = Modem::new(Role::Answering, CallFunction::Data, all(), FS);
+        if theirs {
+            answering = answering.offering_lapm();
+        }
+        let (mut to_calling, mut to_answering) = (0.0, 0.0);
+        for _ in 0..(seconds * FS) as usize {
+            let from_calling = calling.step(to_calling);
+            let from_answering = answering.step(to_answering);
+            to_calling = from_answering;
+            to_answering = from_calling;
+        }
+        (calling.lapm(), answering.lapm())
+    }
+
+    #[test]
+    fn two_modems_settle_error_control_before_the_line_is_trained() {
+        // 7.3: the protocol category "may be included in order to negotiate
+        // LAPM without requiring the ODP/ADP exchange". Both ends come out of
+        // V.8 knowing, which is a second and quite independent way of learning
+        // what the detection phase is there to find out.
+        assert_eq!(negotiate_protocol(true, true, 8.0), (true, true));
+    }
+
+    #[test]
+    fn one_end_asking_for_lapm_settles_nothing() {
+        // 7.4 completes the negotiation only when the JM answers a CM that
+        // asked. An answering modem that does LAPM has nothing to answer if
+        // the call never raised it, and a calling modem that asks a far end
+        // which does not do LAPM gets no octet back.
+        assert_eq!(negotiate_protocol(true, false, 8.0), (false, false));
+        assert_eq!(negotiate_protocol(false, true, 8.0), (false, false));
+        assert_eq!(negotiate_protocol(false, false, 8.0), (false, false));
+    }
 
     #[test]
     fn a_sequence_runs_in_on_the_mark_tone_before_it_starts() {
