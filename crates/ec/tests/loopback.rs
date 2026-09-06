@@ -574,3 +574,40 @@ fn a_refusal_beats_what_v8_said() {
     }
     assert_eq!(stack.phase(), ec::stack::Phase::Transparent);
 }
+
+/// What the negotiated parameters are worth, on the sort of text a board sends.
+///
+/// Not an assertion about a number, which would only pin whatever this happens
+/// to do today. It is here to be read: `cargo test -p ec -- --ignored
+/// --nocapture report_compression`.
+#[test]
+#[ignore = "reports rather than asserts"]
+fn report_compression() {
+    let text: Vec<u8> = b"MAIN MENU\r\n[1] Messages\r\n[2] Files\r\n[3] Doors\r\n\
+                          \x1b[1;36m--- Synchronet BBS ---\x1b[0m\r\n"
+        .iter()
+        .copied()
+        .cycle()
+        .take(60_000)
+        .collect();
+
+    println!("\n  N2    N7   octets  ratio");
+    for (n2, n7) in [
+        (ec::v42bis::DEFAULT_N2, ec::v42bis::DEFAULT_N7),
+        (1024, 32),
+        (ec::v42bis::OFFERED_N2, ec::v42bis::OFFERED_N7),
+        (4096, 250),
+    ] {
+        let params = ec::v42bis::Params { n2, n7 };
+        let mut out = Vec::new();
+        let mut encoder = ec::v42bis::Encoder::new(params);
+        encoder.encode(&text, &mut out);
+        encoder.flush(&mut out);
+        println!(
+            "{n2:6} {n7:5} {:8} {:6.2}:1",
+            out.len(),
+            text.len() as f64 / out.len() as f64
+        );
+    }
+    println!();
+}
