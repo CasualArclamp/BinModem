@@ -57,15 +57,26 @@ impl Address {
 
     /// The C/R bit for this frame, from the sender's point of view.
     ///
-    /// V.42 Table 6: the originator marks its commands 0 and its responses 1;
-    /// the answerer does the opposite.
+    /// There are two addresses on a connection and one bit to choose between
+    /// them, and 8.2.1.2 says which each frame carries: "a command frame
+    /// contains the address of the error-correcting entity to which it is
+    /// transmitted while a response frame contains the address of the
+    /// error-correcting entity transmitting the frame". So the bit does not
+    /// mean command or response on its own -- it names an end, and whether
+    /// that is a command depends on which end is reading it.
+    ///
+    /// Set is the answerer's address, clear the originator's. Table 6 says so
+    /// and is unreadable in the extracted text, so this is settled instead by
+    /// a real modem: in `live-1788758957.wav` the answering end sent a UA,
+    /// which 8.2.4.10 permits only as a response, with the bit set.
     fn cr_bit(&self, sender: Role) -> bool {
-        match (sender, self.kind) {
-            (Role::Originator, Kind::Command) => false,
-            (Role::Originator, Kind::Response) => true,
-            (Role::Answerer, Kind::Command) => true,
-            (Role::Answerer, Kind::Response) => false,
-        }
+        let addressed = match self.kind {
+            // A command names where it is going.
+            Kind::Command => sender.peer(),
+            // A response names where it came from.
+            Kind::Response => sender,
+        };
+        addressed == Role::Answerer
     }
 
     /// Decode an address octet received by `receiver`.
@@ -76,12 +87,13 @@ impl Address {
             return Err(DecodeError::ExtendedAddress);
         }
         let dlci = octet >> 2;
-        let cr = octet & 0x02 != 0;
-        // The sender is our peer, so invert the table.
-        let kind = match (receiver.peer(), cr) {
-            (Role::Originator, false) | (Role::Answerer, true) => Kind::Command,
-            (Role::Originator, true) | (Role::Answerer, false) => Kind::Response,
-        };
+        let addressed =
+            if octet & 0x02 != 0 { Role::Answerer } else { Role::Originator };
+        // Our own address on a frame the peer sent means it is addressed to
+        // us, and only commands are. The peer's own address means the frame
+        // came from there, which is what a response carries.
+        let kind =
+            if addressed == receiver { Kind::Command } else { Kind::Response };
         Ok(Self { dlci, kind })
     }
 }
@@ -308,23 +320,49 @@ mod tests {
 
     #[test]
     fn address_encodes_dlci_cr_and_ea() {
-        // DLCI 0, command from the originator: C/R clear, EA set.
+        // DLCI 0, EA set, and the C/R bit naming an end rather than a
+        // direction: everything addressed to or from the answerer is 0x03.
         let a = Address { dlci: DLCI_DATA, kind: Kind::Command };
-        assert_eq!(a.encode(Role::Originator), 0x01);
-        assert_eq!(a.encode(Role::Answerer), 0x03);
+        assert_eq!(a.encode(Role::Originator), 0x03);
+        assert_eq!(a.encode(Role::Answerer), 0x01);
         let r = Address { dlci: DLCI_DATA, kind: Kind::Response };
-        assert_eq!(r.encode(Role::Originator), 0x03);
-        assert_eq!(r.encode(Role::Answerer), 0x01);
+        assert_eq!(r.encode(Role::Originator), 0x01);
+        assert_eq!(r.encode(Role::Answerer), 0x03);
     }
 
     #[test]
     fn the_same_octet_means_opposite_things_at_each_end() {
-        // V.42 Table 6 is why: 0x01 from an originator is a command, but the
-        // identical octet from an answerer is a response.
-        let from_originator = Address::decode(0x01, Role::Answerer).unwrap();
-        assert_eq!(from_originator.kind, Kind::Command);
+        // 8.2.1.2: the octet names an end, and what that end is to the reader
+        // decides the rest. 0x01 is the originator's address, so it is a
+        // command when the originator reads it and a response otherwise.
         let from_answerer = Address::decode(0x01, Role::Originator).unwrap();
-        assert_eq!(from_answerer.kind, Kind::Response);
+        assert_eq!(from_answerer.kind, Kind::Command);
+        let from_originator = Address::decode(0x01, Role::Answerer).unwrap();
+        assert_eq!(from_originator.kind, Kind::Response);
+    }
+
+    /// What a real answering modem put on a real line.
+    ///
+    /// Table 6 has the polarity and does not survive being extracted from the
+    /// PDF, and getting it backwards is invisible in a loopback: two ends that
+    /// are wrong the same way agree with each other. This is the call that
+    /// caught it -- `live-1788758957.wav`, a V.22bis connection that
+    /// established and then carried nothing in either direction for thirty
+    /// seconds.
+    #[test]
+    fn a_real_answering_modem_addressed_it_this_way() {
+        // A UA, which 8.2.4.10 and Table 8 permit only as a response.
+        let (addr, frame) = Frame::decode(&[0x03, 0x73], Role::Originator).unwrap();
+        assert_eq!(addr.kind, Kind::Response);
+        assert_eq!(frame, Frame::Ua { final_bit: true });
+
+        // And then, every three seconds and unprompted, this. A supervisory
+        // response with F set answers a poll; nothing solicited these, so they
+        // are polls themselves -- and a poll is a command that owes us an
+        // answer, which is the answer that never went back.
+        let (addr, frame) = Frame::decode(&[0x01, 0x01, 0x01], Role::Originator).unwrap();
+        assert_eq!(addr.kind, Kind::Command);
+        assert_eq!(frame, Frame::Rr { nr: 0, pf: true });
     }
 
     #[test]

@@ -154,7 +154,12 @@ fn probe_replay_frames() {
                 Some(Ok(body)) => {
                     good += 1;
                     let what = match Frame::decode(&body, EcRole::Originator) {
-                        Ok((addr, frame)) => format!("{:?} {:?}", addr.kind, frame),
+                        // The address octet as it arrived, because the whole
+                        // question of who is polling whom turns on one bit of
+                        // it and a decoder is exactly what is in doubt.
+                        Ok((addr, frame)) => {
+                            format!("[{:02x}] {:?} {:?}", body[0], addr.kind, frame)
+                        }
                         Err(e) => format!("undecodable: {e:?} {body:02x?}"),
                     };
                     if seen.len() < 40 {

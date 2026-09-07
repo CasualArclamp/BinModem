@@ -6,7 +6,7 @@
 //! and decoded back, so a mistake in any of that shows up as data that fails to
 //! arrive.
 
-use ec::frame::{DLCI_DATA, Frame, Role};
+use ec::frame::{DLCI_DATA, Frame, Kind, Role};
 use ec::hdlc::{Decoder, Encoder, Fcs};
 use ec::lapm::{Event, Lapm, Params, State};
 
@@ -54,6 +54,34 @@ impl End {
             self.lapm.receive(frame, address.kind);
         }
         self.drain_events();
+    }
+
+    /// Deliver octets exactly as they came off a line, framed but unaltered.
+    ///
+    /// The address field is the point: `receive` above builds one from this
+    /// end's own encoder, and a test of what a far end sends must not.
+    fn wire(&mut self, body: &[u8]) {
+        let mut encoder = Encoder::new(Fcs::Bits16);
+        encoder.frame(body);
+        let mut bits = Vec::new();
+        while let Some(b) = encoder.next_bit() {
+            bits.push(b);
+        }
+        self.receive(&bits);
+    }
+
+    /// What this end put on the line, read as the far end would read it.
+    fn sent_frames(&mut self) -> Vec<(Kind, Frame)> {
+        let bits = self.transmit();
+        let mut decoder = Decoder::new(Fcs::Bits16);
+        let mut out = Vec::new();
+        for bit in bits {
+            let Some(Ok(body)) = decoder.feed(bit) else { continue };
+            if let Ok((address, frame)) = Frame::decode(&body, self.role.peer()) {
+                out.push((address.kind, frame));
+            }
+        }
+        out
     }
 
     fn drain_events(&mut self) {
@@ -117,6 +145,38 @@ fn pair() -> (End, End) {
         End::new(Role::Originator, Params::default()),
         End::new(Role::Answerer, Params::default()),
     )
+}
+
+/// The poll a real modem sent, and the answer that never went back.
+///
+/// `live-1788758957.wav`: a V.22bis call where LAPM established and then
+/// nothing crossed it in either direction. Every three seconds the answering
+/// end sent these three octets, and every three seconds this end decided they
+/// were a response to a poll it had not sent and let them go.
+///
+/// A loopback cannot catch that. Two ends that agree about the address field
+/// agree with each other whichever way round they have it, and both of these
+/// ends are the same program. So the octets are written down exactly as they
+/// arrived off the line, and the answer is read back the way the far end would
+/// have read it.
+#[test]
+fn the_poll_a_real_modem_sent_gets_an_answer() {
+    let (mut a, mut b) = pair();
+    a.lapm.connect();
+    settle(&mut a, &mut b);
+    assert_eq!(a.lapm.state(), State::Connected);
+    a.transmit();
+
+    // Address 0x01, then RR with N(R) = 0 and the poll bit set.
+    a.wire(&[0x01, 0x01, 0x01]);
+
+    let answered = a.sent_frames();
+    assert!(
+        answered.iter().any(|(kind, frame)| {
+            *kind == Kind::Response && matches!(frame, Frame::Rr { pf: true, .. })
+        }),
+        "8.4.2.1 wants a final in reply to that poll, and got {answered:?}",
+    );
 }
 
 #[test]
