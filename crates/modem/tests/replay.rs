@@ -146,6 +146,13 @@ fn probe_replay_frames() {
     // wrong width calls every frame corrupt.
     decoder.accept_either();
 
+    // Everything the receiver recovered, as it recovered it, for when the
+    // frames do not decode and the question becomes what is actually on the
+    // line. A link that establishes and then carries nothing has its answer
+    // there, and no layer above this one is going to show it.
+    let dump = std::env::var("MODEM_BITS").ok();
+    let mut raw: Vec<bool> = Vec::new();
+
     let mut connected = None;
     let (mut good, mut bad, mut flags) = (0u64, 0u64, 0u64);
     let mut seen: Vec<(f64, String)> = Vec::new();
@@ -164,6 +171,9 @@ fn probe_replay_frames() {
             continue;
         }
         for bit in pump.take_bits() {
+            if dump.is_some() {
+                raw.push(bit);
+            }
             match decoder.feed(bit) {
                 Some(Ok(body)) => {
                     good += 1;
@@ -197,6 +207,29 @@ fn probe_replay_frames() {
     }
     println!(
         "\n  {good} frames checked out, {bad} failed their check sequence, \
-         {flags} were malformed\n"
+         {flags} were malformed"
     );
+    if let Some(path) = dump {
+        // Written both ways round. V.42 8.1.1 sends the low-order bit of each
+        // octet first, which is not the order HDLC is drawn in, and which of
+        // the two a dump turns out to be readable in says something itself.
+        let pack = |msb_first: bool| -> Vec<u8> {
+            raw.chunks(8)
+                .map(|c| {
+                    c.iter().enumerate().fold(0u8, |b, (i, &v)| {
+                        let at = if msb_first { 7 - i } else { i };
+                        b | (u8::from(v) << at)
+                    })
+                })
+                .collect()
+        };
+        for (suffix, msb) in [("lsb", false), ("msb", true)] {
+            let name = format!("{path}.{suffix}");
+            match std::fs::write(&name, pack(msb)) {
+                Ok(()) => println!("  {} bits written to {name}", raw.len()),
+                Err(e) => println!("  could not write {name}: {e}"),
+            }
+        }
+    }
+    println!();
 }
