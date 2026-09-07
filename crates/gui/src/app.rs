@@ -858,12 +858,16 @@ impl ScopeApp {
             if let Some(i) = picked {
                 self.carrier = i;
                 self.modulation.fit(i);
-                // Both ends have to agree: a modem listening for one of these
-                // hears nothing whatever of the others. Bare, so the rates go
-                // back to their defaults -- the advanced window is where a
-                // range is chosen on purpose.
+                // Every subparameter, not just the carrier. A bare +MS leaves
+                // the rest to V.250 6.4.1's defaults -- which include automode
+                // on -- so choosing a modulation here used to switch V.8 back
+                // on behind the button beside it, while the button went on
+                // saying it was off. Picking V.22bis and being handed V.32 is
+                // not a surprise anybody should have to work out from a
+                // recording afterwards.
                 session.type_bytes(
-                    format!("AT+MS={}\r", Self::CARRIERS[i].0).as_bytes(),
+                    format!("{}\r", self.modulation.command(Self::CARRIERS[i].0))
+                        .as_bytes(),
                 );
             }
             // V.250 6.4.1 makes this one setting, and it is the one that

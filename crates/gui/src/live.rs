@@ -587,16 +587,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 }
             }
         } else if was_recording {
-            let seconds = recording.len() as f64 / 2.0 / FS;
-            match save(&recording) {
-                Ok(path) => {
-                    tx.log(Direction::Note, format!("kept {seconds:.1} s as {path}"));
-                    if let Ok(mut state) = session.state.lock() {
-                        state.recorded_to = Some(path);
-                    }
-                }
-                Err(e) => tx.log(Direction::Note, format!("could not write it: {e}")),
-            }
+            keep(&recording, &tx, &session);
             recording = Vec::new();
         }
         was_recording = recording_now;
@@ -781,6 +772,32 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 state.framing_errors = errors;
             }
         }
+    }
+
+    // The line is closing with a recording still running, which is what
+    // happens when somebody shuts the window on a call rather than pressing
+    // stop first. Writing it out here is the difference between having the
+    // call and not: it is over, it is the one that was worth keeping, and the
+    // obvious thing to do next is close the window.
+    if was_recording {
+        keep(&recording, &tx, &session);
+    }
+}
+
+/// Write a recording out and say so, wherever the decision to keep it was made.
+fn keep(recording: &[f32], tx: &Publisher, session: &Arc<Session>) {
+    if recording.is_empty() {
+        return;
+    }
+    let seconds = recording.len() as f64 / 2.0 / FS;
+    match save(recording) {
+        Ok(path) => {
+            tx.log(Direction::Note, format!("kept {seconds:.1} s as {path}"));
+            if let Ok(mut state) = session.state.lock() {
+                state.recorded_to = Some(path);
+            }
+        }
+        Err(e) => tx.log(Direction::Note, format!("could not write it: {e}")),
     }
 }
 
