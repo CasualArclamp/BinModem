@@ -9,6 +9,26 @@
 //!     --test v22bis_capture -- --ignored --nocapture
 //! ```
 //!
+//! `V22_SKIP` starts the receiver later, which is how a pump built after V.8
+//! has handed over is reproduced: it is not the pump this replay builds at
+//! zero, and what the two make of the same recording is not the same thing.
+//!
+//! That difference is the whole of a bug this probe found. On
+//! `live-1788775243.wav` the far end offered 2400 -- 135 ms of double dibit,
+//! clean, at eighteen decibels -- and whether the offer was seen depended on
+//! nothing but when the receiver had been built:
+//!
+//! ```text
+//!   V22_SKIP  15.40 15.45 15.51 15.55 15.58 15.60 15.65 15.70 15.80 16.00
+//!   before     2400  2400  2400  2400  2400  1200  1200  2400  2400  2400
+//!   after      2400  2400  2400  2400  2400  2400  2400  2400  2400  2400
+//! ```
+//!
+//! The cause is in `Receiver::half_symbol_out`, and the sweep is the evidence
+//! that the escape works: the loopback test that pins the same property passes
+//! either way, because a clean channel does not hold the loop at the false
+//! lock and this recording does.
+//!
 //! The file has two channels: what arrived on the first and what this modem
 //! was transmitting at the same instant on the second. Only the first is fed
 //! in — the receiver is being asked to do exactly what it did on the day, with
@@ -43,7 +63,24 @@ fn replay() {
         return;
     };
 
+    // Where to start the receiver. A pump built after V.8 has handed over is
+    // not the pump this replay builds at zero, and what the two make of the
+    // same recording is not the same thing: the one that has been running
+    // since the ringback has heard the answer tone and the whole V.21 menu
+    // before the modulation it is waiting for arrives.
+    let skip: f64 = std::env::var("V22_SKIP")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+    let start = ((skip * FS) as usize).min(heard.len());
+    if skip > 0.0 {
+        println!("  starting the receiver at {skip:.3} s");
+    }
+    let heard = &heard[start..];
+
     let mut modem = Modem::new(Role::Calling, FS);
+    let mut last_phase = "";
+    let mut last_pattern = datapump::v22bis::Pattern::None;
     let mut last = Status::Negotiating;
     let mut bytes: Vec<u8> = Vec::new();
     let mut framer = datapump::AsyncBits::new(8);
@@ -62,22 +99,33 @@ fn replay() {
             }
         }
 
+        let t = i as f64 / FS + skip;
+        // Which step it is on and what it thinks it is hearing, which together
+        // are the whole of how the rate gets decided.
+        if modem.phase() != last_phase || modem.pattern() != last_pattern {
+            println!(
+                "{t:>7.2}s  {:<18} hears {:?}",
+                modem.phase(),
+                modem.pattern()
+            );
+            last_phase = modem.phase();
+            last_pattern = modem.pattern();
+        }
+
         let now = modem.status();
         if now != last {
             println!(
-                "{:>7.2}s  {last:?} -> {now:?}",
-                i as f64 / FS
+                "{t:>7.2}s  {last:?} -> {now:?}"
             );
             if matches!(now, Status::Connected(_)) && connected_at.is_nan() {
-                connected_at = i as f64 / FS;
+                connected_at = t;
             }
             last = now;
         }
         if i % block == 0 && i > 0 && matches!(now, Status::Connected(_)) {
             let (re, im) = modem.constellation_point();
             println!(
-                "{:>7.2}s  err {:.3}  point ({re:>6.2}, {im:>6.2})  {} bytes",
-                i as f64 / FS,
+                "{t:>7.2}s  err {:.3}  point ({re:>6.2}, {im:>6.2})  {} bytes",
                 modem.residual_error(),
                 bytes.len()
             );

@@ -253,14 +253,7 @@ impl Pump {
     /// show progress or work out where one stalled.
     fn phase(&self) -> &'static str {
         match self {
-            // V.22bis negotiates by timing rather than by a sequence of named
-            // steps, so there is nothing finer to report than whether it is
-            // still going.
-            Self::V22bis(m) => match m.status() {
-                v22bis::handshake::Status::Negotiating => "negotiating",
-                v22bis::handshake::Status::Connected(_) => "connected",
-                v22bis::handshake::Status::Failed => "failed",
-            },
+            Self::V22bis(m) => m.phase(),
             Self::V32(m) => m.phase(),
             Self::Bell103(m) => m.line_phase(),
         }

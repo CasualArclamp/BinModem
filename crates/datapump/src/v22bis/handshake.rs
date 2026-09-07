@@ -146,6 +146,27 @@ impl Handshake {
         }
     }
 
+    /// Which step of 6.3.1 the handshake is on.
+    ///
+    /// Worth reporting for the same reason V.32's is. The rate this ends at is
+    /// decided by which of two things is heard first, and a connection that
+    /// came up at 1200 on a line that could carry 2400 is a question about
+    /// exactly which state it was in when it stopped listening.
+    pub fn phase(&self) -> &'static str {
+        match self.state {
+            State::AnswerTone => "answer tone",
+            State::OfferingOnes => "unscrambled ones",
+            State::Listening => "listening",
+            State::Pausing => "pausing",
+            State::OfferingDoubleDibit => "offering 2400",
+            State::Scrambled1200 => "scrambled 1200",
+            State::Rising2400 => "rising to 2400",
+            State::Settling2400 => "settling at 2400",
+            State::Connected(_) => "connected",
+            State::Failed => "failed",
+        }
+    }
+
     /// Advance one sample: read what is arriving, decide what to send.
     ///
     /// The receiver is taken by mutable reference because the rate is
@@ -155,6 +176,21 @@ impl Handshake {
     pub fn step(&mut self, tx: &mut Transmitter, rx: &mut Receiver) -> Status {
         self.elapsed += self.step;
         self.total += self.step;
+        // Only in the two states where the far end's offer of 2400 can
+        // arrive. A run of no turn at all is not one of 6.3.1's signals, and
+        // in those states there is exactly one thing it can be -- the double
+        // dibit, sampled half a symbol out, which reads as a constant. See
+        // `Receiver::half_symbol_out`.
+        //
+        // Narrow on purpose. Everywhere else in the handshake there is either
+        // no signal or a pure tone, and moving a clock on the strength of what
+        // noise happens to turn by is how a receiver that was right becomes a
+        // receiver that is wrong.
+        if matches!(self.state, State::OfferingDoubleDibit | State::Scrambled1200)
+            && rx.half_symbol_out()
+        {
+            rx.shift_half_symbol();
+        }
         let heard = rx.pattern();
 
         match self.state {
@@ -350,12 +386,25 @@ impl Modem {
         self.hs.status()
     }
 
+    pub fn phase(&self) -> &'static str {
+        self.hs.phase()
+    }
+
     pub fn rate(&self) -> Rate {
         self.rx.rate()
     }
 
     pub fn carrier(&self) -> bool {
         self.rx.carrier()
+    }
+
+    /// Which handshake signal the receiver believes is on the line.
+    ///
+    /// The rate a call ends at is decided by which of these is seen and when,
+    /// so a connection that came up slow is a question about this and nothing
+    /// else.
+    pub fn pattern(&self) -> super::Pattern {
+        self.rx.pattern()
     }
 
     /// Bits recovered from the line.

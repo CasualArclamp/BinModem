@@ -300,6 +300,11 @@ impl Gardner {
         self.adapting = adapting;
     }
 
+    /// The nominal symbol period this loop was built for, in samples.
+    pub fn samples_per_symbol(&self) -> f64 {
+        self.sps
+    }
+
     /// Offer a sample taken at the interval this returned last time.
     ///
     /// Yields a symbol on every second call, once at the symbol instant.

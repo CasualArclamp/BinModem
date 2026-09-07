@@ -456,6 +456,29 @@ pub enum Pattern {
 /// event, and it has to survive being asked again.
 const PATTERN_SYMBOLS: u32 = 5;
 
+/// Symbols of no turn at all before the symbol clock is judged half out.
+///
+/// Nothing in 6.3.1 sends the same point twice in a row for any length of
+/// time: the answering modem's signal is unscrambled binary 1, which is a turn
+/// of 270 degrees every symbol, and the double dibit that offers 2400
+/// alternates 90 and 270. A run of no turn at all is not a V.22bis handshake
+/// signal, and there is exactly one thing it is.
+///
+/// The double dibit alternates between two points a quarter turn apart, so its
+/// midpoints are all the same point -- sample there and every symbol reads
+/// identical and the turn reads zero. It is a stable place for a timing loop
+/// to sit, and nothing before it can tell: unscrambled binary 1 is a pure tone
+/// and reads the same turn wherever it is sampled, so a clock can be half a
+/// symbol out for the whole of the answering modem's signal and give no sign.
+///
+/// This is the sign, and it costs the connection its rate. On a real call the
+/// far end offered 2400 for 135 milliseconds and the receiver read
+/// `0000000000...` throughout, saw no offer, and settled at 1200 on a line
+/// that had just carried the offer at eighteen decibels. Eight symbols is
+/// thirteen milliseconds, which leaves the rest of the offer to read once the
+/// clock has been moved.
+const NO_TURN_RUN: u32 = 8;
+
 /// V.22bis receiver.
 #[derive(Debug)]
 pub struct Receiver {
@@ -501,6 +524,8 @@ pub struct Receiver {
     carrier: bool,
     /// Runs of each handshake signal, in symbols.
     unscrambled_run: u32,
+    /// Consecutive symbols with no phase change at all.
+    zero_run: u32,
     dibit_run: u32,
     scrambled_run: u32,
     previous_change: u8,
@@ -587,6 +612,7 @@ impl Receiver {
             level: OnePole::new(0.020, fs),
             carrier: false,
             unscrambled_run: 0,
+            zero_run: 0,
             dibit_run: 0,
             scrambled_run: 0,
             previous_change: 4,
@@ -842,6 +868,7 @@ impl Receiver {
         // turns of 90 and 270. Both are sent at 1200 whatever rate is being
         // negotiated, so only the leading dibit is ever looked at.
         self.unscrambled_run = if change == 3 { self.unscrambled_run + 1 } else { 0 };
+        self.zero_run = if change == 0 { self.zero_run + 1 } else { 0 };
         let alternating = change != self.previous_change
             && (change == 1 || change == 3)
             && (self.previous_change == 1 || self.previous_change == 3);
@@ -913,6 +940,36 @@ impl Receiver {
         } else {
             Pattern::None
         }
+    }
+
+    /// Whether the symbol clock has settled half a symbol away from the truth.
+    ///
+    /// See [`NO_TURN_RUN`]. Only meaningful during the handshake, which is why
+    /// acting on it is left to the thing that knows the handshake is still
+    /// going: scrambled data turns by nothing a quarter of the time, and a run
+    /// of eight comes up about once a minute at 600 baud, which would be a
+    /// receiver that threw its own timing away twice an hour of a call.
+    pub fn half_symbol_out(&self) -> bool {
+        self.carrier && self.zero_run >= NO_TURN_RUN
+    }
+
+    /// Push the sampling instant half a symbol on, and start the run again.
+    ///
+    /// A kick rather than a correction, and deliberately so. The midpoint of
+    /// an alternation is a *stable* place for this timing loop to sit -- the
+    /// error it measures is zero there, exactly as it is at the right instant
+    /// -- so nothing it does on its own will leave. Delaying the next sample
+    /// puts it somewhere the error is not zero and lets it converge again,
+    /// and repeating that while the turns stay flat is what gets it out.
+    ///
+    /// Relabelling the loop's midpoints as its symbols was tried first, which
+    /// is the exact half-symbol move and disturbs nothing. It is worse: an
+    /// exact move to the other stable point is still a move between two stable
+    /// points, and on the recording this came from it left one call in ten at
+    /// the wrong rate where this leaves none.
+    pub fn shift_half_symbol(&mut self) {
+        self.countdown += self.gardner.samples_per_symbol() / 2.0;
+        self.zero_run = 0;
     }
 
     /// Whether a carrier is present (V.22bis 6.5.2).

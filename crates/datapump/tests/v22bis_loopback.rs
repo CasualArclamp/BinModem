@@ -606,3 +606,85 @@ fn twelve_hundred_carries_the_call_that_twenty_four_hundred_cannot() {
         );
     }
 }
+
+/// The offer of 2400 has to be read whenever it arrives.
+///
+/// 6.3.1.1.2 a) has the answering modem send unscrambled binary 1 until it
+/// hears something back, which on a real call was a second and a half. That
+/// signal is the same turn every symbol, which is a pure tone: constant
+/// envelope, no transitions, and so nothing whatever for a timing loop to
+/// measure. The clock is therefore wherever it was when the tone started, and
+/// a tone reads the same turn wherever it is sampled, so nothing gives it away.
+///
+/// Then comes the double dibit of 6.3.1.1.1 c), 100 ms of it, and it is the
+/// far end offering 2400. It alternates between two points a quarter turn
+/// apart -- so its midpoints are all the same point, and a clock half a symbol
+/// out reads a constant and no turn at all. That is a stable place for this
+/// timing detector to sit: its error is zero there exactly as it is at the
+/// right instant.
+///
+/// On the call this came from the far end offered 2400 for 135 ms at
+/// eighteen decibels and the receiver read `0000000000...` for the whole of
+/// it, saw no offer, and settled at 1200. Whether it did depended on where the
+/// clock happened to be when the pump was built, so the same recording
+/// connected at either rate according to nothing at all.
+///
+/// This does not reproduce that, and is not the thing guarding against it. It
+/// passes with the escape in `Handshake::step` and without it: from a clean
+/// start, and from a start with noise on it, the loop finds the symbol instant
+/// inside the 100 ms every time. The false lock wants the real recording,
+/// where it survives -- see the sweep in the `v22bis_capture` probe, which is
+/// the evidence. What this pins is the property the fix is for, so that a
+/// change which breaks it from some phases is caught rather than shipped.
+#[test]
+fn the_offer_of_2400_is_read_from_every_starting_phase() {
+    let sps = (FS / BAUD).round() as usize;
+    let mut missed = Vec::new();
+    // A line, not a wire. The loop's error through a pure tone is zero on a
+    // clean channel and noise on a real one, and it is the second that lets it
+    // wander to the midpoint and sit there.
+    let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+    let mut noise = move || 0.04 * {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        f64::from(u16::try_from((seed >> 40) & 0xfff).unwrap_or(0)) / 2048.0 - 1.0
+    };
+    // Every phase the clock could have been left in by the tone before it.
+    for offset in 0..sps {
+        let mut tx = Transmitter::new(Channel::Answering, FS);
+        let mut rx = Receiver::new(Channel::Calling, FS);
+        for _ in 0..offset {
+            rx.feed(0.0);
+        }
+        // 6.3.1.1.2 a): unscrambled binary 1, and enough of it that anything
+        // the loop knew at the start has long since stopped mattering.
+        tx.set_rate(Rate::Bps1200);
+        tx.set_signal(Signal::UnscrambledOnes);
+        for _ in 0..(FS as usize) {
+            rx.feed(tx.next_sample() + noise());
+        }
+        assert_eq!(
+            rx.pattern(),
+            datapump::v22bis::Pattern::UnscrambledOnes,
+            "offset {offset}: the tone itself was not read",
+        );
+        // 6.3.1.1.1 b): 100 +/- 3 ms of it, and this end has that long.
+        tx.set_signal(Signal::DoubleDibit);
+        let mut seen = false;
+        for _ in 0..(FS * 0.100) as usize {
+            rx.feed(tx.next_sample() + noise());
+            if rx.pattern() == datapump::v22bis::Pattern::DoubleDibit {
+                seen = true;
+            }
+        }
+        if !seen {
+            missed.push(offset);
+        }
+    }
+    assert!(
+        missed.is_empty(),
+        "the offer was missed from {} of {sps} starting phases: {missed:?}",
+        missed.len(),
+    );
+}
