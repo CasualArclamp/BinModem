@@ -287,6 +287,8 @@ pub struct ScopeApp {
     transfer_open: bool,
     send_path: String,
     receive_dir: String,
+    /// Whether the line was open on the last frame, for noticing when it opens.
+    line_was_open: bool,
     /// Where a telnet connection is aimed.
     host: String,
     tab: Tab,
@@ -357,6 +359,7 @@ impl ScopeApp {
             protection: Protection::default(),
             protection_open: false,
             transfer_open: false,
+            line_was_open: false,
             send_path: String::new(),
             receive_dir: "downloads".to_owned(),
             tab: Tab::Terminal,
@@ -631,6 +634,15 @@ impl ScopeApp {
                 self.chosen_output = i;
             }
         }
+
+        // A line that has just opened gets told everything, once. Otherwise
+        // what the window shows and what the modem is running are two
+        // different things that happen to have started the same, and they
+        // drift the moment anything is typed at the terminal.
+        if state.open && !self.line_was_open {
+            self.assert_settings(&session);
+        }
+        self.line_was_open = state.open;
 
         ui.horizontal_wrapped(|ui| {
             let dim = Color32::from_rgb(140, 150, 165);
@@ -1105,6 +1117,26 @@ impl ScopeApp {
         self.advanced = open;
     }
 
+    /// Every setting the window holds, as command lines.
+    ///
+    /// `&F` first, and then all of it. The window's controls are the ones a
+    /// person has actually looked at, so they are what the modem should be
+    /// running -- and anything not represented here should be a default rather
+    /// than whatever the last call left behind.
+    fn settings(&self) -> Vec<String> {
+        let mut out = vec!["AT&F".to_owned()];
+        out.push(self.modulation.command(Self::CARRIERS[self.carrier].0));
+        out.extend(self.protection.commands());
+        out
+    }
+
+    /// Put the modem into the state the window is showing.
+    fn assert_settings(&self, session: &Arc<live::Session>) {
+        for command in self.settings() {
+            session.type_bytes(format!("{command}\r").as_bytes());
+        }
+    }
+
     /// Sending a file, or taking one.
     fn transfer_window(&mut self, ui: &mut egui::Ui, session: &Arc<live::Session>) {
         let dim = Color32::from_rgb(140, 150, 165);
@@ -1461,6 +1493,17 @@ impl ScopeApp {
                         for command in p.commands() {
                             session.type_bytes(format!("{command}\r").as_bytes());
                         }
+                    }
+                    if ui
+                        .button("Reset and send everything")
+                        .on_hover_text(
+                            "AT&F and then every setting this window holds, \
+                             modulation included. What the line gets when it \
+                             opens, and the way back to a known state",
+                        )
+                        .clicked()
+                    {
+                        self.assert_settings(session);
                     }
                     if ui
                         .button("Ask")
@@ -2066,6 +2109,64 @@ mod tests {
         it.feed(b'\r');
         let out = String::from_utf8(it.take_output()).unwrap();
         (it, out)
+    }
+
+    #[test]
+    fn the_startup_settings_leave_the_modem_where_the_window_says() {
+        // What the line gets the moment it opens. The window's controls are
+        // the ones a person has looked at, so they are what the modem should
+        // be running -- and before this it was whatever the modem happened to
+        // default to, which drifted from the window the moment anything was
+        // typed at the terminal.
+        let app_carrier = 2; // V.32, so it is not the modem's own default
+        let modulation = Modulation { automode: false, min_rate: 4800, max_rate: 4800 };
+        let protection = Protection {
+            request: 2,
+            fallback: 2,
+            compress: true,
+            compress_required: false,
+            max_dict: 1024,
+            max_string: 32,
+            report_error_control: true,
+            report_compression: true,
+        };
+
+        let mut commands = vec!["AT&F".to_owned()];
+        commands.push(modulation.command(ScopeApp::CARRIERS[app_carrier].0));
+        commands.extend(protection.commands());
+
+        let mut it = at::Interpreter::new();
+        it.config.echo = false;
+        for command in &commands {
+            for b in command.bytes() {
+                it.feed(b);
+            }
+            it.feed(b'\r');
+            let out = String::from_utf8(it.take_output()).unwrap();
+            assert!(!out.contains("ERROR"), "{command:?} was refused");
+        }
+
+        assert_eq!(it.modulation.carrier, "V32");
+        assert!(!it.modulation.automode);
+        assert_eq!(it.modulation.max_rate, 4800);
+        assert_eq!(it.error_control.request, 2);
+        assert_eq!(it.error_control.fallback, 2);
+        assert_eq!(it.compression.max_dict, 1024);
+        assert!(it.config.report_error_control && it.config.report_compression);
+    }
+
+    #[test]
+    fn the_reset_comes_first_or_it_undoes_the_rest() {
+        // &F restores the factory configuration, which now includes +MS, +ES
+        // and +DS. Sent after them it would put every one of them back.
+        let commands = {
+            let mut v = vec!["AT&F".to_owned()];
+            v.push(Modulation::default().command("V22B"));
+            v.extend(Protection::default().commands());
+            v
+        };
+        assert_eq!(commands[0], "AT&F");
+        assert!(commands[1..].iter().all(|c| c != "AT&F"));
     }
 
     #[test]

@@ -319,6 +319,14 @@ pub struct Modem {
     negotiation: Option<v8line::Modem>,
     /// What V.8 heard the far end say, kept after the negotiation is put away.
     far_menu: Option<v8::Menu>,
+    /// What the error control layer heard, kept after it is put away.
+    ///
+    /// A connection that ends up without error control drops the stack, and
+    /// with it every fact about why. That is the one moment those facts are
+    /// worth most: whether the far end declined, or answered something nobody
+    /// has defined, or said nothing at all are three different faults, and
+    /// afterwards they look identical.
+    far_ec: Vec<(&'static str, String)>,
     /// Whether V.8 settled on LAPM before the data carriers went up.
     declared_lapm: bool,
     /// The rate of a connection the terminal has not been told about yet.
@@ -349,6 +357,7 @@ impl Modem {
             since_dial_ms: 0,
             negotiation: None,
             far_menu: None,
+            far_ec: Vec::new(),
             declared_lapm: false,
             announce: None,
         }
@@ -538,6 +547,13 @@ impl Modem {
                 },
             ));
         }
+        rows.extend(self.error_control_rows());
+        rows
+    }
+
+    /// What the error control layer heard the far end say.
+    fn error_control_rows(&self) -> Vec<(&'static str, String)> {
+        let mut rows = Vec::new();
         if let Some(ec) = self.ec.as_ref() {
             // V.42 Table 3 and Appendix VI.1.
             rows.push((
@@ -581,6 +597,9 @@ impl Modem {
                 }
                 None => rows.push(("XID", "none sent".to_owned())),
             }
+        } else {
+            // The stack has been put away; what it heard was kept.
+            rows.extend(self.far_ec.iter().cloned());
         }
         rows
     }
@@ -800,7 +819,19 @@ impl Modem {
                 // control is off at 300 bit/s -- which is also how anyone ever
                 // dialled a board at 300 bit/s.
                 let framed = matches!(self.pump, Some(Pump::Bell103(_)));
-                if self.want_error_control && !framed {
+                // An answering modem with error control turned off still owes
+                // the caller an answer. 7.2.1.3 requires the answerer, on
+                // seeing the ODP, to "immediately send one of the Answerer
+                // Detection Patterns defined in Table 3 at least ten times",
+                // and Table 3 has one for exactly this: `E` and NUL, "no
+                // error-correcting protocol desired".
+                //
+                // Saying nothing works, because the caller times out. It costs
+                // it three quarters of a second, and it costs anyone looking
+                // at why a call has no error control the difference between a
+                // far end that declined and one that was not listening.
+                let answering = self.role == Role::Answering;
+                if (self.want_error_control || answering) && !framed {
                     let role = match self.role {
                         Role::Calling => EcRole::Originator,
                         Role::Answering => EcRole::Answerer,
@@ -811,6 +842,9 @@ impl Modem {
                     let params =
                         Params { t401_ms: ec::lapm::t401_for(rate), ..Params::default() };
                     let mut stack = Stack::new(role, params);
+                    if !self.want_error_control {
+                        stack = stack.declining();
+                    }
                     if self.declared_lapm {
                         stack = stack.declared_lapm();
                     }
@@ -915,6 +949,10 @@ impl Modem {
         // it. Once the detection phase has said so there is nothing for the
         // stack to do, and the characters go down the line as they are.
         if self.ec.as_ref().is_some_and(|e| e.phase() == Phase::Transparent) {
+            // Take what it knew before it goes. This is the moment somebody
+            // will want to know why there is no error control, and it is the
+            // moment the answer would otherwise be thrown away.
+            self.far_ec = self.error_control_rows();
             self.ec = None;
         }
         self.announce_connect();
@@ -1008,6 +1046,7 @@ impl Modem {
         self.rate = 0;
         self.ec = None;
         self.far_menu = None;
+        self.far_ec.clear();
         self.declared_lapm = false;
         self.announce = None;
         self.outbound.clear();

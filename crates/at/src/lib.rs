@@ -69,6 +69,15 @@ pub struct ErrorControl {
     pub fallback: u8,
 }
 
+impl Default for Modulation {
+    fn default() -> Self {
+        // V.250 6.4.1: automode on, and both rates unspecified. "If
+        // unspecified (set to 0), they are determined by the modulation means
+        // selected", so zero is the absence of a limit rather than a slow one.
+        Self { carrier: "V22B".into(), automode: true, min_rate: 0, max_rate: 0 }
+    }
+}
+
 impl ErrorControl {
     /// Whether V.42 should be attempted at all.
     pub fn wanted(self) -> bool {
@@ -288,12 +297,7 @@ impl Interpreter {
                 .iter()
                 .map(|s| (*s).to_owned())
                 .collect(),
-            modulation: Modulation {
-                carrier: "V22B".into(),
-                automode: true,
-                min_rate: 0,
-                max_rate: 0,
-            },
+            modulation: Modulation::default(),
             error_control: ErrorControl::default(),
             compression: Compression::default(),
             state: LineState::Idle,
@@ -319,10 +323,21 @@ impl Interpreter {
     }
 
     /// Restore the factory configuration (V.250 6.1.1, 6.1.2).
+    /// `AT&F`: everything V.250 Table 4 marks as restored by it.
+    ///
+    /// Which is more than the S-parameters and the format. The table's
+    /// "factory-defined configuration" column covers +MS, +ES, +DS, +ER and
+    /// +DR as well, and leaving those alone made `&F` a reset that reset some
+    /// of the modem -- so a session picked up settings from the one before it
+    /// and there was no way to get back to a known state short of restarting
+    /// the program.
     fn restore_defaults(&mut self) {
         self.regs = Registers::default();
         self.fmt = Formatter::default();
         self.config = Config::default();
+        self.modulation = Modulation::default();
+        self.error_control = ErrorControl::default();
+        self.compression = Compression::default();
     }
 
     /// Queue an unsolicited or deferred result code, such as `RING` or the

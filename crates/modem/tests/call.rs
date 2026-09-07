@@ -1216,3 +1216,32 @@ fn a_smaller_dictionary_is_still_a_working_call() {
     p.run(6.0);
     assert!(p.host_saw().contains("MAIN MENU"), "{:?}", p.host_saw());
 }
+
+#[test]
+fn why_there_is_no_error_control_survives_there_being_none() {
+    // A connection that ends up without it drops the stack, and every fact
+    // about why goes with it -- at exactly the moment those facts are worth
+    // most. A far end that declined, one that answered something nobody has
+    // defined, and one that said nothing at all are three different faults,
+    // and afterwards they look identical.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "AT+ES=0");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(25.0);
+
+    assert_eq!(p.caller.state(), State::Data, "never connected");
+    assert!(!p.caller.error_controlled(), "the far end had it turned off");
+
+    let distant = p.caller.distant();
+    // The row itself is the point. Whether it says the far end declined, or
+    // said something nobody has defined, or said nothing at all, it is the
+    // difference between three faults that look identical afterwards -- and
+    // before this it went into the bin with the stack that heard it.
+    let answered = distant
+        .iter()
+        .find(|(k, _)| *k == "answered")
+        .map(|(_, v)| v.clone())
+        .expect("the far end's answer was thrown away with the stack");
+    assert!(!answered.is_empty());
+}

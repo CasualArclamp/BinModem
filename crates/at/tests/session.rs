@@ -572,3 +572,28 @@ fn the_compression_test_syntax_says_what_is_supported() {
         "\r\n+DS: (0,3),(0,1),(512-65535),(6-250)\r\n\r\nOK\r\n"
     );
 }
+
+#[test]
+fn factory_defaults_reset_everything_the_table_says_they_do() {
+    // V.250 Table 4's "factory-defined configuration" column covers +MS, +ES,
+    // +DS, +ER and +DR as well as the S-parameters. Leaving those alone made
+    // &F a reset that reset some of the modem, and a session picked up
+    // settings from the one before it with no way back to a known state.
+    let mut it = quiet_dce();
+    send(&mut it, "AT+MS=V32,0,4800,9600\r");
+    send(&mut it, "AT+ES=0,2\r");
+    send(&mut it, "AT+DS=0,1,1024,32\r");
+    send(&mut it, "AT+ER=1;+DR=1\r");
+    send(&mut it, "ATE0X0\r");
+
+    send(&mut it, "AT&F\r");
+
+    assert_eq!(it.modulation.carrier, "V22B");
+    assert!(it.modulation.automode, "automode is on by default (6.4.1)");
+    assert_eq!((it.modulation.min_rate, it.modulation.max_rate), (0, 0));
+    assert_eq!(it.error_control, at::ErrorControl::default());
+    assert_eq!(it.compression, at::Compression::default());
+    assert!(!it.config.report_error_control);
+    assert!(!it.config.report_compression);
+    assert_eq!(it.config.x, 4);
+}

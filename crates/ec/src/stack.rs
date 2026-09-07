@@ -92,6 +92,14 @@ pub struct Stack {
     limits: (u16, u8),
     /// Whether the far end has already said it does LAPM, in V.8.
     declared: bool,
+    /// Whether this end is answering the detection phase with a refusal.
+    ///
+    /// It still runs: 7.2.1.3 has the answerer reply to the ODP whatever its
+    /// answer is going to be, and Table 3 gives it one for "no
+    /// error-correcting protocol desired". What it must not do is send that
+    /// and then go on into XID -- the far end has been told there will be no
+    /// protocol and has stopped listening for one.
+    declining: bool,
     /// What the far end answered in the detection phase, if it answered.
     heard_adp: Option<Answer>,
     /// What the far end proposed in XID, if it sent one.
@@ -148,6 +156,7 @@ impl Stack {
             offer: Compression::Neither,
             limits: (v42bis::OFFERED_N2, v42bis::OFFERED_N7),
             declared: false,
+            declining: false,
             heard_adp: None,
             heard_xid: None,
             agreed_fcs: Fcs::Bits16,
@@ -202,6 +211,7 @@ impl Stack {
     /// For tests, and for a configuration in which a terminal has asked for a
     /// connection without it.
     pub fn declining(mut self) -> Self {
+        self.declining = true;
         self.detect = Detect::Answer(Box::new(Answerer::new(
             crate::detect::DEFAULT_T400_MS,
             Answer::None,
@@ -553,6 +563,16 @@ impl Stack {
                 self.phase = Phase::Negotiating;
                 self.waited_ms = 0;
                 self.lapm.set_retransmissions(crate::lapm::UNCONFIRMED_N400);
+            }
+            // Said its piece and meant it. Going on to XID after sending
+            // Table 3's refusal would be talking protocol at an end that has
+            // just been told there would not be one.
+            Outcome::OriginatorDetected if self.declining => {
+                if matches!(&self.detect, Detect::Answer(a) if !a.finished_sending()) {
+                    return;
+                }
+                self.detect = Detect::Done;
+                self.phase = Phase::Transparent;
             }
             Outcome::OriginatorDetected => {
                 // The answerer has to finish saying what it is saying: cutting
