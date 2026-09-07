@@ -968,3 +968,57 @@ fn the_acknowledgement_timer_follows_the_line_rate() {
     // up and working.
     assert!(t401_for(2400) < 1200, "still too long at 2400");
 }
+
+#[test]
+fn compression_survives_being_handed_data_a_byte_at_a_time() {
+    // How a modem actually uses this. The terminal hands over whatever it has
+    // whenever it has it, so `send` is called with a byte or two at a time and
+    // every one of those calls flushes -- because a dictionary coder holding
+    // the last few characters back for a better match looks exactly like a
+    // hung line to somebody waiting for an echo.
+    //
+    // Every other test here hands the whole payload over in one call.
+    use ec::xid::Compression;
+    let mut a = ec::Stack::new(Role::Originator, Params::default());
+    let mut b = ec::Stack::new(Role::Answerer, Params::default());
+    a.offer_compression(Compression::Both);
+    b.offer_compression(Compression::Both);
+    for _ in 0..400_000 {
+        let (x, y) = (a.next_bit(), b.next_bit());
+        a.feed_bit(y);
+        b.feed_bit(x);
+        a.tick(0);
+        b.tick(0);
+        if a.is_connected() && b.is_connected() {
+            break;
+        }
+    }
+    assert!(a.compressing() && b.compressing(), "compression never came up");
+
+    let text: Vec<u8> = b"MAIN MENU\r\n[1] Messages\r\n[2] Files\r\n[3] Doors\r\n"
+        .iter()
+        .copied()
+        .cycle()
+        .take(4000)
+        .collect();
+    let mut sent = 0usize;
+    let mut got = Vec::new();
+    for _ in 0..4_000_000 {
+        // A handful at a time, as the modem's own loop does it.
+        if sent < text.len() {
+            let end = (sent + 3).min(text.len());
+            a.send(&text[sent..end]);
+            sent = end;
+        }
+        let (x, y) = (a.next_bit(), b.next_bit());
+        a.feed_bit(y);
+        b.feed_bit(x);
+        a.tick(0);
+        b.tick(0);
+        got.extend(b.take_received());
+        if got.len() >= text.len() {
+            break;
+        }
+    }
+    assert_eq!(got, text, "what arrived is not what was sent");
+}

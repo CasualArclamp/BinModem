@@ -53,6 +53,13 @@ pub struct Receiver {
     bad: u32,
     /// Times this end had to send the sender back.
     rewinds: u32,
+    /// The position the last ZRPOS asked for, while nothing has arrived since.
+    ///
+    /// After an error the sender goes on streaming until the ZRPOS reaches it,
+    /// so everything already in flight arrives at the wrong position and would
+    /// draw another ZRPOS each. Asking once and then waiting is both quieter
+    /// and faster: the answer is already on its way.
+    asked_at: Option<u32>,
     /// Whether a ZEOF has arrived whose length matched what was received.
     ///
     /// The difference between a session that ended and a file that arrived.
@@ -86,6 +93,7 @@ impl Receiver {
             waited: 0,
             bad: 0,
             rewinds: 0,
+            asked_at: None,
             complete: false,
             cans: 0,
         };
@@ -193,6 +201,7 @@ impl Receiver {
                             continue;
                         }
                         self.data.extend_from_slice(&packet.data);
+                        self.asked_at = None;
                         // 8.2: ZCRCQ and ZCRCW "expect a ZACK response with
                         // the receiver's file offset". ZCRCG and ZCRCE do not.
                         if packet.ending.acknowledged() {
@@ -211,11 +220,20 @@ impl Receiver {
                         // this end did not count, and saying the count is what
                         // puts the sender back. No gaps to remember, because
                         // nothing past the gap was accepted.
+                        //
+                        // What is left in the buffer is not thrown away. It
+                        // was, and that was a bug with a long reach: the modem
+                        // hands up a burst at a time, so clearing on a bad
+                        // subpacket discarded whole frames that had not been
+                        // looked at yet -- including, once, the end of the
+                        // file. Stepping over the rest of the damaged
+                        // subpacket and hunting for the next header loses
+                        // nothing that was not already lost.
                         self.bad += 1;
                         self.in_data = false;
-                        self.inbox.clear();
+                        self.inbox.drain(..1);
                         self.rewind();
-                        return;
+                        continue;
                     }
                 }
                 continue;
@@ -273,6 +291,7 @@ impl Receiver {
                 if u64::from(h.to_position()) != self.data.len() as u64 {
                     self.rewind();
                 } else {
+                    self.asked_at = None;
                     self.in_data = true;
                 }
             }
@@ -320,9 +339,18 @@ impl Receiver {
     }
 
     /// Say where this end has got to (8.2).
+    ///
+    /// Once, until something arrives. Everything the sender put on the line
+    /// before the ZRPOS reached it is still coming, and every frame of it is
+    /// at a position this end is not at -- asking again for each would fill
+    /// the return path with questions that were already answered.
     fn rewind(&mut self) {
-        self.rewinds += 1;
         let at = self.data.len() as u32;
+        if self.asked_at == Some(at) {
+            return;
+        }
+        self.rewinds += 1;
+        self.asked_at = Some(at);
         self.rewind_to(at);
     }
 

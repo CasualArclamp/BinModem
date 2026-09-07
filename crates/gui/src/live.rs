@@ -128,6 +128,52 @@ pub struct LineState {
     pub rx_rms: f32,
 }
 
+/// A transfer in progress: one half of a ZMODEM session and its bookkeeping.
+///
+/// The terminal does not see any of this. While a transfer runs it owns the
+/// byte stream in both directions -- what the modem hands up goes to the
+/// protocol rather than to the screen, and what the protocol says goes down
+/// the line -- because a board sending a file is not saying anything a person
+/// wants to read, and a keystroke in the middle of it would be data.
+#[derive(Debug)]
+enum Job {
+    Sending(Box<transfer::zmodem::Sender>),
+    Receiving(Box<transfer::zmodem::Receiver>, std::path::PathBuf),
+}
+
+/// What a file transfer is doing, for the window to show.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TransferView {
+    /// Whether this end is sending or receiving.
+    pub sending: bool,
+    pub name: String,
+    pub position: u64,
+    pub total: Option<u64>,
+    /// Times the protocol had to go back over ground it had covered.
+    pub rewinds: u32,
+    /// Bytes sent a second time because of those.
+    pub resent: u64,
+    /// Subpackets that failed their check sequence.
+    pub damaged: u32,
+    /// Bytes a second, averaged over the transfer so far.
+    pub rate: f64,
+    /// Empty while it runs; what happened, once it is over.
+    pub outcome: String,
+    pub finished: bool,
+    /// Where a received file was written.
+    pub written_to: Option<String>,
+}
+
+/// What the window has asked a transfer to do.
+#[derive(Debug, Clone)]
+enum TransferRequest {
+    /// Send this file.
+    Send(std::path::PathBuf),
+    /// Take whatever the far end offers, into this directory.
+    Receive(std::path::PathBuf),
+    Cancel,
+}
+
 /// The one thing the window and the line thread share.
 ///
 /// Everything crossing between them is here: what has been typed, what the
@@ -148,6 +194,10 @@ pub struct Session {
     drive: AtomicU32,
     /// Whether to keep what goes past, for looking at afterwards.
     recording: AtomicBool,
+    /// A transfer the window has asked for, until the line thread takes it.
+    transfer_request: Mutex<Option<TransferRequest>>,
+    /// What the transfer is doing, for the window to read.
+    transfer: Mutex<Option<TransferView>>,
 }
 
 impl Default for Session {
@@ -157,6 +207,8 @@ impl Default for Session {
             request: Mutex::default(),
             state: Mutex::default(),
             drive: AtomicU32::new(DEFAULT_DRIVE.to_bits()),
+            transfer_request: Mutex::default(),
+            transfer: Mutex::default(),
             recording: AtomicBool::new(false),
         }
     }
@@ -216,6 +268,42 @@ impl Session {
     /// Put the line down. The modem stays: `AT` still answers `OK`.
     pub fn close(&self) {
         self.ask(Request::Close);
+    }
+
+    /// Send a file over the connection.
+    pub fn send_file(&self, path: std::path::PathBuf) {
+        self.ask_transfer(TransferRequest::Send(path));
+    }
+
+    /// Take whatever the far end offers, into this directory.
+    pub fn receive_into(&self, directory: std::path::PathBuf) {
+        self.ask_transfer(TransferRequest::Receive(directory));
+    }
+
+    /// Stop, with 8.4's cancel sequence.
+    pub fn cancel_transfer(&self) {
+        self.ask_transfer(TransferRequest::Cancel);
+    }
+
+    fn ask_transfer(&self, request: TransferRequest) {
+        if let Ok(mut slot) = self.transfer_request.lock() {
+            *slot = Some(request);
+        }
+    }
+
+    fn take_transfer_request(&self) -> Option<TransferRequest> {
+        self.transfer_request.lock().ok().and_then(|mut s| s.take())
+    }
+
+    /// What the transfer is doing, if one is.
+    pub fn transfer(&self) -> Option<TransferView> {
+        self.transfer.lock().ok().and_then(|s| s.clone())
+    }
+
+    fn set_transfer(&self, view: Option<TransferView>) {
+        if let Ok(mut slot) = self.transfer.lock() {
+            *slot = view;
+        }
     }
 
     pub fn state(&self) -> LineState {
@@ -319,6 +407,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // The same, for the error control that runs on top of whatever the line
     // settled on.
     let mut last_ec = "";
+    // The transfer, while there is one, and when it started -- for the rate.
+    let mut job: Option<Job> = None;
+    let mut job_started = Instant::now();
 
     let publish_every = Duration::from_millis(16);
     let mut next_publish = Instant::now();
@@ -364,6 +455,54 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             session.set_state(state);
         }
 
+        // A transfer the window has asked for.
+        if let Some(request) = session.take_transfer_request() {
+            match request {
+                TransferRequest::Send(path) => match read_to_send(&path) {
+                    Ok((info, data)) => {
+                        tx.log(
+                            Direction::Note,
+                            format!("sending {} ({} bytes)", info.name, data.len()),
+                        );
+                        let rate = modem.rate().unwrap_or(2400);
+                        job = Some(Job::Sending(Box::new(
+                            transfer::zmodem::Sender::new(info, data, rate),
+                        )));
+                        job_started = Instant::now();
+                    }
+                    Err(e) => tx.log(Direction::Note, format!("cannot send it: {e}")),
+                },
+                TransferRequest::Receive(into) => {
+                    tx.log(Direction::Note, "waiting for the far end to send");
+                    job = Some(Job::Receiving(Box::default(), into));
+                    job_started = Instant::now();
+                }
+                TransferRequest::Cancel => {
+                    match job.as_mut() {
+                        Some(Job::Sending(s)) => s.cancel(),
+                        Some(Job::Receiving(r, _)) => r.cancel(),
+                        None => {}
+                    }
+                    tx.log(Direction::Note, "transfer cancelled");
+                }
+            }
+        }
+
+        // Drive whatever is running. Its output goes down the line the same
+        // way a keystroke does, because to the modem it is the same thing.
+        if let Some(active) = job.as_mut() {
+            let (out, done) = step_job(active, &tx, job_started);
+            for b in out {
+                modem.feed_dte(b);
+            }
+            session.set_transfer(Some(done.0));
+            if done.1 {
+                job = None;
+            }
+        } else {
+            session.set_transfer(None);
+        }
+
         // Everything the terminal has typed since last time. This goes in
         // whether or not there is a line at all: a modem answers `AT` with
         // `OK` sitting on a desk with nothing plugged into it, and a terminal
@@ -379,7 +518,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         }
 
         let Some(audio) = audio.as_ref() else {
-            drain_dte(&mut modem, &tx, &mut rx_bytes, &mut heard_recently);
+            drain_dte(&mut modem, &tx, &mut rx_bytes, &mut heard_recently, job.as_mut());
             thread::sleep(Duration::from_millis(8));
             continue;
         };
@@ -390,7 +529,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             // Nothing has arrived, so nothing can be stepped: the line is the
             // clock. Still hand the terminal whatever the modem said in the
             // meantime, which is how `OK` gets back before a call exists.
-            drain_dte(&mut modem, &tx, &mut rx_bytes, &mut heard_recently);
+            drain_dte(&mut modem, &tx, &mut rx_bytes, &mut heard_recently, job.as_mut());
             thread::sleep(Duration::from_millis(2));
             continue;
         }
@@ -477,7 +616,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         // scopes are looking at the same thing.
         sink.push(&from_line);
 
-        drain_dte(&mut modem, &tx, &mut rx_bytes, &mut heard_recently);
+        drain_dte(&mut modem, &tx, &mut rx_bytes, &mut heard_recently, job.as_mut());
 
         let phase = modem.line_phase();
         if phase != last_phase {
@@ -666,12 +805,151 @@ fn save(samples: &[f32]) -> Result<String, String> {
 }
 
 /// Hand the terminal everything the modem has to say.
-fn drain_dte(modem: &mut Modem, tx: &Publisher, rx_bytes: &mut u64, heard: &mut Instant) {
+/// Read a file and describe it, for a ZFILE frame.
+fn read_to_send(path: &std::path::Path) -> Result<(transfer::zmodem::FileInfo, Vec<u8>), String> {
+    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".to_owned());
+    // Clause 13's modification date: seconds since 1970 UTC, and 0 where it is
+    // not known -- which the far end is told to read as "the date it arrived".
+    let modified = std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs());
+    let length = Some(data.len() as u64);
+    Ok((transfer::zmodem::FileInfo { name, length, modified, mode: 0 }, data))
+}
+
+/// One round of a transfer: what it wants to say, and where it has got to.
+///
+/// Returns the view for the window and whether the job is over.
+fn step_job(job: &mut Job, tx: &Publisher, started: Instant) -> (Vec<u8>, (TransferView, bool)) {
+    use transfer::zmodem::State;
+    let elapsed = started.elapsed().as_secs_f64().max(0.001);
+    let (out, mut view, over) = match job {
+        Job::Sending(s) => {
+            s.tick(TICK_MS);
+            let p = s.progress();
+            let state = s.state();
+            (
+                s.take_out(),
+                TransferView {
+                    sending: true,
+                    name: p.name,
+                    position: p.position,
+                    total: p.total,
+                    rewinds: p.rewinds,
+                    resent: p.resent,
+                    damaged: 0,
+                    rate: p.position as f64 / elapsed,
+                    outcome: describe(state),
+                    finished: matches!(state, State::Done | State::Failed(_)),
+                    written_to: None,
+                },
+                matches!(state, State::Done | State::Failed(_)),
+            )
+        }
+        Job::Receiving(r, into) => {
+            r.tick(TICK_MS);
+            let p = r.progress();
+            let state = r.state();
+            let mut written = None;
+            if let Some(got) = r.finished() {
+                // 8.2 leaves the name to the receiver's judgement, and a board
+                // is not a trusted party: `safe_name` is what keeps a
+                // directory traversal out of the file system.
+                let path = into.join(got.file.safe_name());
+                let _ = std::fs::create_dir_all(into);
+                match std::fs::write(&path, &got.data) {
+                    Ok(()) => {
+                        let shown = std::fs::canonicalize(&path)
+                            .unwrap_or(path)
+                            .display()
+                            .to_string()
+                            .trim_start_matches(LONG_PATH)
+                            .to_owned();
+                        tx.log(
+                            Direction::Note,
+                            format!("kept {} bytes as {shown}", got.data.len()),
+                        );
+                        written = Some(shown);
+                    }
+                    Err(e) => tx.log(Direction::Note, format!("could not write it: {e}")),
+                }
+            }
+            (
+                r.take_out(),
+                TransferView {
+                    sending: false,
+                    name: p.name,
+                    position: p.position,
+                    total: p.total,
+                    rewinds: p.rewinds,
+                    resent: 0,
+                    damaged: r.damaged(),
+                    rate: p.position as f64 / elapsed,
+                    outcome: describe(state),
+                    finished: matches!(state, State::Done | State::Failed(_)),
+                    written_to: written,
+                },
+                matches!(state, State::Done | State::Failed(_)),
+            )
+        }
+    };
+    if over && view.outcome.is_empty() {
+        view.outcome = "over".to_owned();
+    }
+    (out, (view, over))
+}
+
+/// What to show for a state, in words rather than in its own terms.
+fn describe(state: transfer::zmodem::State) -> String {
+    use transfer::zmodem::send::Failure;
+    use transfer::zmodem::State;
+    match state {
+        State::Greeting => "starting".to_owned(),
+        State::Offering => "offering the file".to_owned(),
+        State::Sending => String::new(),
+        State::Finishing => "finishing".to_owned(),
+        State::Done => "done".to_owned(),
+        State::Failed(Failure::NoAnswer) => "the far end never answered".to_owned(),
+        State::Failed(Failure::Cancelled) => "cancelled".to_owned(),
+        State::Failed(Failure::Skipped) => "the far end did not want it".to_owned(),
+        State::Failed(Failure::FarEndError) => "the far end could not write it".to_owned(),
+    }
+}
+
+/// Windows' own prefix on a canonical path, which nobody wants to read.
+const LONG_PATH: &str = r"\\?\";
+
+/// How long a round of the loop is worth calling, for the protocol's timers.
+///
+/// The loop turns over on audio arriving rather than on a clock, and a
+/// millisecond a round is near enough at the block sizes involved.
+const TICK_MS: u32 = 1;
+
+/// Everything the modem has to say, and who it is for.
+///
+/// A transfer takes the stream while it runs; otherwise it goes to the screen.
+fn drain_dte(
+    modem: &mut Modem,
+    tx: &Publisher,
+    rx_bytes: &mut u64,
+    heard: &mut Instant,
+    job: Option<&mut Job>,
+) {
     let out = modem.take_dte();
     if out.is_empty() {
         return;
     }
     *rx_bytes += out.len() as u64;
     *heard = Instant::now();
-    tx.line_data(&out);
+    match job {
+        Some(Job::Sending(s)) => s.feed(&out),
+        Some(Job::Receiving(r, _)) => r.feed(&out),
+        None => tx.line_data(&out),
+    }
 }

@@ -283,6 +283,10 @@ pub struct ScopeApp {
     /// The same, for `AT+ES` and `AT+DS`.
     protection: Protection,
     protection_open: bool,
+    /// The file transfer window, and the two paths it works with.
+    transfer_open: bool,
+    send_path: String,
+    receive_dir: String,
     /// Where a telnet connection is aimed.
     host: String,
     tab: Tab,
@@ -352,6 +356,9 @@ impl ScopeApp {
             advanced: false,
             protection: Protection::default(),
             protection_open: false,
+            transfer_open: false,
+            send_path: String::new(),
+            receive_dir: "downloads".to_owned(),
             tab: Tab::Terminal,
             font_size: 14.0,
             last_repaint: std::time::Instant::now(),
@@ -880,6 +887,15 @@ impl ScopeApp {
                 self.modulation.fit(self.carrier);
             }
             if ui
+                .selectable_label(self.transfer_open, "Files")
+                .on_hover_text(
+                    "ZMODEM: send a file to the far end, or take one it offers",
+                )
+                .clicked()
+            {
+                self.transfer_open = !self.transfer_open;
+            }
+            if ui
                 .selectable_label(self.protection_open, "Error control")
                 .on_hover_text(
                     "AT+ES and AT+DS: V.42 error control and V.42bis compression, \
@@ -958,6 +974,7 @@ impl ScopeApp {
 
         self.advanced_modulation(ui, &session);
         self.advanced_protection(ui, &session);
+        self.transfer_window(ui, &session);
     }
 
     /// The rest of `AT+MS`, in a window rather than typed.
@@ -1086,6 +1103,163 @@ impl ScopeApp {
                 });
             });
         self.advanced = open;
+    }
+
+    /// Sending a file, or taking one.
+    fn transfer_window(&mut self, ui: &mut egui::Ui, session: &Arc<live::Session>) {
+        let dim = Color32::from_rgb(140, 150, 165);
+        let mut open = self.transfer_open;
+        let running = session.transfer();
+        egui::Window::new("ZMODEM - files")
+            .open(&mut open)
+            .resizable(false)
+            .default_width(520.0)
+            .show(ui.ctx(), |ui| {
+                let busy = running.as_ref().is_some_and(|t| !t.finished);
+                let online = self.frame.state == telemetry::CallState::Connected;
+
+                ui.add_enabled_ui(online && !busy, |ui| {
+                    egui::Grid::new("xfer")
+                        .num_columns(3)
+                        .spacing([10.0, 8.0])
+                        .show(ui, |ui| {
+                            ui.label(RichText::new("send").monospace().color(dim));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.send_path)
+                                    .desired_width(300.0)
+                                    .hint_text("path to a file"),
+                            );
+                            if ui.button("Send").clicked() && !self.send_path.trim().is_empty() {
+                                session.send_file(self.send_path.trim().into());
+                            }
+                            ui.end_row();
+
+                            ui.label(RichText::new("receive").monospace().color(dim));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.receive_dir)
+                                    .desired_width(300.0)
+                                    .hint_text("directory to keep files in"),
+                            );
+                            if ui
+                                .button("Receive")
+                                .on_hover_text(
+                                    "Wait for the far end to start sending. Tell the \
+                                     board to send first: this end answers, it does \
+                                     not ask",
+                                )
+                                .clicked()
+                            {
+                                session.receive_into(self.receive_dir.trim().into());
+                            }
+                            ui.end_row();
+                        });
+                });
+
+                if !online {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("There is no call. A transfer needs one.")
+                            .small()
+                            .color(dim),
+                    );
+                }
+
+                let Some(t) = running else { return };
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(if t.sending { "sending" } else { "receiving" })
+                            .monospace()
+                            .color(dim),
+                    );
+                    ui.label(
+                        RichText::new(if t.name.is_empty() { "-" } else { &t.name })
+                            .monospace()
+                            .color(Color32::from_rgb(220, 225, 235)),
+                    );
+                });
+                ui.add_space(4.0);
+
+                // A total is what the far end said, and 13 calls it "an
+                // estimate only" -- so a bar is drawn where there is one and a
+                // running count where there is not, rather than a bar that
+                // pretends to know.
+                match t.total.filter(|n| *n > 0) {
+                    Some(total) => {
+                        let part = (t.position as f32 / total as f32).clamp(0.0, 1.0);
+                        ui.add(
+                            egui::ProgressBar::new(part)
+                                .desired_width(480.0)
+                                .text(format!(
+                                    "{} of {} bytes  ({:.0}%)",
+                                    t.position,
+                                    total,
+                                    part * 100.0
+                                )),
+                        );
+                    }
+                    None => {
+                        ui.label(
+                            RichText::new(format!("{} bytes", t.position))
+                                .monospace()
+                                .color(dim),
+                        );
+                    }
+                }
+
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let stat = |ui: &mut egui::Ui, text: String, warn: bool| {
+                        ui.label(RichText::new(text).monospace().small().color(if warn {
+                            Color32::from_rgb(240, 200, 120)
+                        } else {
+                            dim
+                        }));
+                    };
+                    stat(ui, format!("{:.0} bytes/s", t.rate), false);
+                    ui.separator();
+                    // What an error costs, which is the number worth watching:
+                    // 8.2 recovers by sending the sender back, so a rewind is
+                    // ground covered twice.
+                    stat(ui, format!("{} rewinds", t.rewinds), t.rewinds > 0);
+                    if t.sending {
+                        ui.separator();
+                        stat(ui, format!("{} bytes resent", t.resent), t.resent > 0);
+                    } else {
+                        ui.separator();
+                        stat(ui, format!("{} damaged", t.damaged), t.damaged > 0);
+                    }
+                });
+
+                if !t.outcome.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(&t.outcome)
+                            .monospace()
+                            .color(if t.finished && t.outcome == "done" {
+                                Color32::from_rgb(90, 220, 130)
+                            } else if t.finished {
+                                Color32::from_rgb(235, 100, 90)
+                            } else {
+                                dim
+                            }),
+                    );
+                }
+                if let Some(where_to) = &t.written_to {
+                    ui.label(RichText::new(where_to).monospace().small().color(dim));
+                }
+                if !t.finished {
+                    ui.add_space(4.0);
+                    if ui
+                        .button("Cancel")
+                        .on_hover_text("Eight CAN characters, which is how ZMODEM stops")
+                        .clicked()
+                    {
+                        session.cancel_transfer();
+                    }
+                }
+            });
+        self.transfer_open = open;
     }
 
     /// `AT+ES` and `AT+DS`, and the two parameters that report on them.

@@ -970,6 +970,7 @@ dependencies = [
  "telemetry",
  "telnet",
  "terminal",
+ "transfer",
 ]
 
 [[package]]
@@ -1280,6 +1281,7 @@ dependencies = [
  "datapump",
  "ec",
  "line",
+ "transfer",
  "v8",
 ]
 

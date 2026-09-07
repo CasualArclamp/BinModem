@@ -70,6 +70,13 @@ pub struct Encoder {
     writer: BitWriter,
     /// Codeword of the string matched so far.
     matched: Option<u16>,
+    /// A codeword already sent whose dictionary entry has not been made yet.
+    ///
+    /// Only a flush leaves one: the string ended because the terminal stopped
+    /// talking rather than because a character failed to extend it, so what to
+    /// extend it *by* is not known until the next character arrives. The
+    /// decoder is in the same position and calls it `previous`.
+    owed: Option<u16>,
     /// The entry created by the last match, which V.42bis 6.3 b) forbids
     /// extending into. This is what keeps the decoder from ever meeting a
     /// codeword it has not yet built.
@@ -94,6 +101,7 @@ impl Encoder {
             inner: Common::new(params),
             writer: BitWriter::new(),
             matched: None,
+            owed: None,
             last_added: None,
             chars_in: 0,
             codewords_out: 0,
@@ -130,6 +138,14 @@ impl Encoder {
 
         // String matching (V.42bis 6.3).
         let Some(current) = self.matched else {
+            // A codeword was sent for a string that ended at a flush, and the
+            // dictionary entry it owes is the one the decoder is about to make
+            // from it: clause 8's "previous string extended by this one's
+            // first character". Skipping it here is how the two ends came to
+            // disagree about what every codeword above 259 meant.
+            if let Some(previous) = self.owed.take() {
+                self.last_added = self.inner.dict.add(previous, c);
+            }
             self.matched = Some(Dictionary::root_code(c));
             return;
         };
@@ -203,6 +219,7 @@ impl Encoder {
         out.push(ECM);
         self.inner.mode = Mode::Compressed;
         self.matched = None;
+        self.owed = None;
         self.last_added = None;
     }
 
@@ -213,6 +230,7 @@ impl Encoder {
         self.writer.align(out);
         self.inner.mode = Mode::Transparent;
         self.matched = None;
+        self.owed = None;
         self.last_added = None;
     }
 
@@ -225,18 +243,37 @@ impl Encoder {
     }
 
     /// Send everything outstanding (V.42bis 7.9).
+    ///
+    /// A flush is about getting bits onto the line, not about forgetting
+    /// anything. The dictionary is a history both ends build from the same
+    /// characters, and the decoder is told nothing by a flush that would let
+    /// it drop its own -- so an encoder that dropped its context here would
+    /// walk away from a shared state the far end still holds.
+    ///
+    /// Which it did. Every other test fed a whole payload in one call; a modem
+    /// hands over whatever the terminal typed, whenever it typed it, and
+    /// flushes each time so that an echo is not held back waiting for a better
+    /// match. A few characters at a time, the two dictionaries came apart
+    /// within a couple of thousand bytes and what arrived was fragments of the
+    /// right text in the wrong order.
     pub fn flush(&mut self, out: &mut Vec<u8>) {
-        if self.inner.mode == Mode::Compressed {
-            self.emit_pending(out);
-            if self.writer.pending() > 0 {
-                // A partial octet would otherwise sit unsent; FLUSH lets the
-                // decoder discard the padding that follows.
-                self.write(FLUSH, out);
-                self.writer.align(out);
-            }
+        if self.inner.mode != Mode::Compressed {
+            // Transparent mode has already put every character on the line,
+            // and its matching state is the decoder's too.
+            return;
         }
-        self.matched = None;
-        self.last_added = None;
+        if let Some(current) = self.matched.take() {
+            self.emit(current, out);
+            // The dictionary entry this string owes, made when the next
+            // character arrives to say what to extend it by.
+            self.owed = Some(current);
+        }
+        if self.writer.pending() > 0 {
+            // A partial octet would otherwise sit unsent; FLUSH lets the
+            // decoder discard the padding that follows.
+            self.write(FLUSH, out);
+            self.writer.align(out);
+        }
     }
 
     /// Re-initialise and tell the peer (V.42bis 7.8.3).
@@ -248,6 +285,7 @@ impl Encoder {
         out.push(RESET);
         self.inner.reset();
         self.matched = None;
+        self.owed = None;
         self.last_added = None;
         self.chars_in = 0;
         self.codewords_out = 0;

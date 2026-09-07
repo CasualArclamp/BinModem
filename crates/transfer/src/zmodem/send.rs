@@ -283,9 +283,10 @@ impl Sender {
                     // Only from the start. 8.1 has the receiver send a ZRINIT
                     // when it starts *and* again for every ZRQINIT, so two of
                     // them at the beginning is the ordinary case -- and a
-                    // second offer would draw a second ZRPOS and put two ZDATA
-                    // headers back to back.
-                    State::Greeting | State::Offering => self.offer(),
+                    // second offer draws a second ZRPOS, which is a second
+                    // copy of the file behind the first. Offering again where
+                    // one was lost is the timer's job, not this one's.
+                    State::Greeting => self.offer(),
                     _ => {}
                 }
             }
