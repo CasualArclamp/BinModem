@@ -84,6 +84,20 @@ fn probe_replay_call() {
         }
     }
 
+    // What the far end said about itself, which is the other half of any
+    // question about why a call went the way it did.
+    let distant = modem.distant();
+    if distant.is_empty() {
+        println!("
+  the far end said nothing about itself");
+    } else {
+        println!("
+  the far end:");
+        for (what, value) in distant {
+            println!("    {what:<22} {value}");
+        }
+    }
+
     println!("\n  the terminal was told:");
     for line in String::from_utf8_lossy(&dte).lines() {
         if !line.trim().is_empty() {
