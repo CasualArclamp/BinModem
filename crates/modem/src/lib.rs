@@ -597,7 +597,15 @@ impl Modem {
                         },
                     ));
                 }
-                None => rows.push(("XID", "none sent".to_owned())),
+                // "none received", and the wording is the whole of it. Every
+                // row in this panel is about the far end, and this one used to
+                // say "none sent" -- which reads as a statement about this
+                // end, and was read that way: a call with no compression on it
+                // was put down to this modem not sending XID, when the frame
+                // log shows it sending one six times over and getting no
+                // answer. A label that can be read as the opposite of what it
+                // means is worse than no label.
+                None => rows.push(("XID", "none received".to_owned())),
             }
         } else {
             // The stack has been put away; what it heard was kept.
