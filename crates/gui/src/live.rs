@@ -491,7 +491,13 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         // Drive whatever is running. Its output goes down the line the same
         // way a keystroke does, because to the modem it is the same thing.
         if let Some(active) = job.as_mut() {
-            let (out, done) = step_job(active, &tx, job_started);
+            // How much more the line will take. Two seconds of it: enough to
+            // keep the modem busy through any scheduling hiccup, and short
+            // enough that when the far end asks the sender to go back, what
+            // has to drain first is two seconds and not the rest of the file.
+            let ahead = (modem.rate().unwrap_or(2400) as usize / 4).max(1024);
+            let room = ahead.saturating_sub(modem.queued());
+            let (out, done) = step_job(active, &tx, job_started, room);
             for b in out {
                 modem.feed_dte(b);
             }
@@ -826,12 +832,18 @@ fn read_to_send(path: &std::path::Path) -> Result<(transfer::zmodem::FileInfo, V
 /// One round of a transfer: what it wants to say, and where it has got to.
 ///
 /// Returns the view for the window and whether the job is over.
-fn step_job(job: &mut Job, tx: &Publisher, started: Instant) -> (Vec<u8>, (TransferView, bool)) {
+fn step_job(
+    job: &mut Job,
+    tx: &Publisher,
+    started: Instant,
+    room: usize,
+) -> (Vec<u8>, (TransferView, bool)) {
     use transfer::zmodem::State;
     let elapsed = started.elapsed().as_secs_f64().max(0.001);
     let (out, mut view, over) = match job {
         Job::Sending(s) => {
             s.tick(TICK_MS);
+            s.set_room(room);
             let p = s.progress();
             let state = s.state();
             (

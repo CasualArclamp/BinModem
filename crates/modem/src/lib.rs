@@ -632,6 +632,18 @@ impl Modem {
         }
     }
 
+    /// Bytes the terminal has handed over that are not yet on the line.
+    ///
+    /// The number anything streaming needs. A file transfer that hands over a
+    /// megabyte because nothing stopped it has not sent a megabyte -- it has
+    /// queued one, and at 9600 bit/s that is a quarter of an hour of line it
+    /// cannot take back. The first time the far end asks it to go back to an
+    /// earlier position, everything in that queue is already stale and still
+    /// has to be sent before anything new is heard.
+    pub fn queued(&self) -> usize {
+        self.outbound.len() + self.ec.as_ref().map_or(0, Stack::queued)
+    }
+
     /// Frames that arrived and did not survive the line.
     ///
     /// The difference between a link that is working and one that is only

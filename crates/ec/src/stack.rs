@@ -288,6 +288,11 @@ impl Stack {
         self.encoder.fcs()
     }
 
+    /// Bytes handed down and not yet framed for the line.
+    pub fn queued(&self) -> usize {
+        self.lapm.queued()
+    }
+
     /// Whether compression was agreed and is running.
     pub fn compressing(&self) -> bool {
         self.compression.is_some()

@@ -125,6 +125,19 @@ pub struct Sender {
     /// frame still has to be closed or the ZEOF header arrives where a
     /// subpacket was expected.
     frame_open: bool,
+    /// How much more the line will take before this end should stop.
+    ///
+    /// ZMODEM streams and clause 9 is about not stopping, but streaming down a
+    /// line is not the same as streaming into a queue. Nothing below here
+    /// pushes back -- hand it a megabyte and it will take a megabyte -- so a
+    /// sender that fills the buffer has put a quarter of an hour of line into
+    /// it, and 8.2's recovery is then a quarter of an hour long: the receiver
+    /// asks to go back, and everything already queued is stale and still has
+    /// to be sent before the answer to that question is even started.
+    ///
+    /// Measured on a real transfer: one rewind, half a megabyte resent, and
+    /// the far end stopped dead at the position it had asked for.
+    room: usize,
     rewinds: u32,
     resent: u64,
     /// Consecutive CANs from the far end (8.4).
@@ -151,6 +164,9 @@ impl Sender {
             holding: false,
             owe_header: false,
             frame_open: false,
+            // Somewhere to start before the caller says. Two seconds of line
+            // is enough to keep it busy and short enough to throw away.
+            room: (bits_per_second as usize / 4).max(1024),
             rewinds: 0,
             resent: 0,
             cans: 0,
@@ -161,6 +177,20 @@ impl Sender {
 
     pub fn state(&self) -> State {
         self.state
+    }
+
+    /// Say how much more the line will take.
+    ///
+    /// Called by whatever owns the queue below, because that is the only thing
+    /// that knows. Nothing is produced beyond it.
+    pub fn set_room(&mut self, bytes: usize) {
+        self.room = bytes;
+        self.fill();
+    }
+
+    /// Bytes produced and not yet taken.
+    pub fn pending(&self) -> usize {
+        self.out.len()
     }
 
     pub fn progress(&self) -> Progress {
@@ -207,7 +237,10 @@ impl Sender {
             match self.state {
                 State::Greeting => self.greet(),
                 State::Offering => self.offer(),
-                State::Sending => self.holding = false,
+                State::Sending => {
+                    self.holding = false;
+                    self.fill();
+                }
                 State::Finishing => self.say(Header::position(Kind::Fin, 0), Style::Hex),
                 _ => {}
             }
@@ -375,7 +408,7 @@ impl Sender {
             self.frame_open = true;
             self.say(Header::position(Kind::Data, self.at as u32), self.binary());
         }
-        while self.at < self.data.len() && !self.holding {
+        while self.at < self.data.len() && !self.holding && self.out.len() < self.room {
             let end = (self.at + self.chunk).min(self.data.len());
             let chunk = self.data[self.at..end].to_vec();
             let last = end >= self.data.len();
@@ -398,6 +431,8 @@ impl Sender {
             self.holding = ending.waits();
             self.frame_open = ending == Ending::Go;
         }
+        // Only once the file has actually all gone out, rather than once the
+        // loop stopped -- which it also does when the line is full.
         if self.finished() && !self.holding {
             // An empty file, or a resume that begins at the end, gets here
             // with a frame open and nothing sent in it. 8.2 closes a frame

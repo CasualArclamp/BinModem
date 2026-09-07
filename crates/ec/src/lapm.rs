@@ -295,6 +295,16 @@ impl Lapm {
         self.start_timer();
     }
 
+    /// Bytes accepted from above and not yet put in a frame.
+    ///
+    /// What anyone upstream needs to know before handing over more. There is
+    /// no back pressure in `send_data` -- it takes whatever it is given -- so
+    /// the only thing stopping a caller filling memory with a file is a caller
+    /// that asks first.
+    pub fn queued(&self) -> usize {
+        self.pending.iter().map(Vec::len).sum()
+    }
+
     /// Queue data for the peer. Split to fit N401 (V.42 9.2.3).
     pub fn send_data(&mut self, data: &[u8]) {
         for chunk in data.chunks(self.params.n401) {

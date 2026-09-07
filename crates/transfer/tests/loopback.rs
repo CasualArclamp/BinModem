@@ -15,6 +15,15 @@ use transfer::zmodem::{FileInfo, Receiver, Sender, State};
 /// into -- nor one where a cancel part-way through has anything to interrupt.
 const PIECE: usize = 200;
 
+/// How much the line will hold that has not gone out yet.
+///
+/// A modem's own queue, which is the thing a sender has to be stopped from
+/// filling. Without one modelled here, the harness takes everything the sender
+/// offers the instant it is offered -- and a sender that is never told to stop
+/// hands over the whole file, which is exactly the arrangement that made one
+/// error on a real transfer cost half a megabyte.
+const QUEUE: usize = 1024;
+
 /// Run the two ends against each other, optionally spoiling the line.
 ///
 /// `damage` is called with each piece going from sender to receiver and may
@@ -27,6 +36,7 @@ where
     let mut rx = Receiver::default();
     let (mut to_rx, mut to_tx): (Vec<u8>, Vec<u8>) = (Vec::new(), Vec::new());
     for round in 0..200_000 {
+        tx.set_room(QUEUE.saturating_sub(to_rx.len()));
         to_rx.extend(tx.take_out());
         to_tx.extend(rx.take_out());
 
@@ -233,4 +243,47 @@ fn the_progress_adds_up() {
     assert_eq!(p.total, Some(data.len() as u64));
     assert_eq!(rx.progress().position, data.len() as u64);
     assert_eq!(rx.progress().total, Some(data.len() as u64));
+}
+
+#[test]
+fn a_rewind_costs_what_is_in_flight_and_not_the_rest_of_the_file() {
+    // The fault a real transfer showed and no test here could: the sender had
+    // handed the whole file to the line's queue, so when the receiver asked it
+    // to go back, everything already queued was stale and still had to be sent
+    // before the answer to that question was even begun. One error, half a
+    // megabyte resent, and the far end stopped dead at the position it had
+    // asked for while the line spent minutes delivering data it had refused.
+    //
+    // The cost of an error should be what is in flight, which is the queue --
+    // and nothing beyond it.
+    let data: Vec<u8> = (0..60_000u32).map(|i| (i % 251) as u8).collect();
+    let mut spoiled = 0;
+    let (tx, rx) = run(plain("INFLIGHT.BIN", &data), data.clone(), |round, chunk| {
+        // Once, in the middle, and only once.
+        if spoiled == 0 && round > 60 && chunk.len() > 40 {
+            let at = chunk.len() / 2;
+            chunk[at] ^= 0xFF;
+            spoiled += 1;
+        }
+    });
+
+    assert_eq!(spoiled, 1, "the line was not damaged exactly once");
+    assert_eq!(tx.state(), State::Done, "the transfer did not survive");
+    assert_eq!(rx.finished().expect("no file").data, data);
+
+    let resent = tx.progress().resent;
+    assert!(tx.progress().rewinds > 0, "the sender was never sent back");
+    // What is in flight is the queue plus whatever subpacket was being built
+    // when the answer arrived. Generous, and still nowhere near the file.
+    let in_flight = (QUEUE + subpacket_len()) as u64;
+    assert!(
+        resent <= in_flight * 3,
+        "one error resent {resent} bytes of a {} byte file; in flight was {in_flight}",
+        data.len()
+    );
+}
+
+/// The subpacket size the harness's sender is using, from 7.4.
+fn subpacket_len() -> usize {
+    transfer::zmodem::subpacket::recommended_length(2400)
 }
