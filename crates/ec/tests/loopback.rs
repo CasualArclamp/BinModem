@@ -826,3 +826,109 @@ fn thirty_two_bits_needs_both_ends_to_have_asked() {
     assert!(!silent.resolve(&asking).fcs32, "this end did not");
 }
 
+
+#[test]
+fn an_originator_that_skips_detection_is_still_answered() {
+    // V.42 7.2.1.2: "the detection phase actions by the originator may be
+    // disabled by the user. In this case, the originator moves directly to the
+    // protocol establishment phase." The answerer is not told, and has to
+    // notice -- 7.2.1.3 ends its own wait on "receipt of continuous flags, or
+    // of an LAPM or alternative procedure protocol frame".
+    //
+    // An answerer that only knew about the ODP would wait out T400 and then
+    // decline error control to a modem already establishing it.
+    let mut a = ec::Stack::new(Role::Originator, Params::default()).without_detection();
+    let mut b = ec::Stack::new(Role::Answerer, Params::default());
+    a.offer_compression(ec::xid::Compression::Both);
+    b.offer_compression(ec::xid::Compression::Both);
+    for _ in 0..400_000 {
+        let (x, y) = (a.next_bit(), b.next_bit());
+        a.feed_bit(y);
+        b.feed_bit(x);
+        a.tick(0);
+        b.tick(0);
+        if a.is_connected() && b.is_connected() {
+            break;
+        }
+    }
+    assert!(a.is_connected(), "the originator never established");
+    assert!(b.is_connected(), "the answerer never noticed");
+    assert!(a.compressing() && b.compressing(), "and XID still ran");
+}
+
+#[test]
+fn one_flag_in_noise_does_not_start_the_protocol_phase() {
+    // The line during the detection phase is a demodulator's output with
+    // nothing framing it. A single flag pattern turns up in a random bit
+    // stream about once every 256 bits, which at 1200 bit/s is five times a
+    // second -- so an answerer that acted on one would abandon the detection
+    // phase almost immediately, every call.
+    //
+    // Found by writing the single-flag version of this and watching a working
+    // V.22bis call stop connecting.
+    let mut a = ec::detect::Answerer::default();
+    let mut rng = 88_172_645_463_325_252u64;
+    let mut bit = || {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+        rng & 1 == 1
+    };
+    for _ in 0..200_000 {
+        let outcome = a.receive(bit());
+        assert_ne!(
+            outcome,
+            ec::detect::Outcome::ProtocolStarted,
+            "read noise as the far end starting to talk"
+        );
+    }
+    assert!(!a.heard_flags());
+}
+
+#[test]
+fn a_terminals_ceiling_on_the_dictionary_reaches_the_far_end() {
+    // V.250 Table 27: <max_dict> and <max_string> are the DTE's ceilings on
+    // V.42bis P1 and P2, set "based on its knowledge of the nature of the data
+    // to be transmitted". V.42bis 6.4 then takes the lower of the two ends'
+    // proposals, so a ceiling at one end is a ceiling on both.
+    use ec::xid::Compression;
+    let mut a = ec::Stack::new(Role::Originator, Params::default());
+    let mut b = ec::Stack::new(Role::Answerer, Params::default());
+    a.offer_compression(Compression::Both);
+    b.offer_compression(Compression::Both);
+    a.offer_dictionary(1024, 32);
+    for _ in 0..400_000 {
+        let (x, y) = (a.next_bit(), b.next_bit());
+        a.feed_bit(y);
+        b.feed_bit(x);
+        a.tick(0);
+        b.tick(0);
+        if a.is_connected() && b.is_connected() {
+            break;
+        }
+    }
+    assert!(a.compressing() && b.compressing(), "compression never came up");
+
+    // Both ends have to have built the same dictionary, and the only way to
+    // show that is to put something through it.
+    let text: Vec<u8> = b"a ceiling at one end is a ceiling at both. "
+        .iter()
+        .copied()
+        .cycle()
+        .take(20_000)
+        .collect();
+    a.send(&text);
+    let mut got = Vec::new();
+    for _ in 0..2_000_000 {
+        let (x, y) = (a.next_bit(), b.next_bit());
+        a.feed_bit(y);
+        b.feed_bit(x);
+        a.tick(0);
+        b.tick(0);
+        got.extend(b.take_received());
+        if got.len() >= text.len() {
+            break;
+        }
+    }
+    assert_eq!(got, text);
+}

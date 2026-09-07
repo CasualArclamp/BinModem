@@ -50,6 +50,15 @@ const ADP_REPEATS: u32 = 10;
 /// The same byte read either way round, so the bit order does not arise.
 const FLAG: u8 = 0b0111_1110;
 
+/// Flags in a row before the protocol phase is believed to have started.
+///
+/// 7.2.1.3 says "continuous flags", and the plural is load-bearing. The line
+/// during the detection phase is a demodulator's output with nothing framing
+/// it, and one flag pattern turns up in a random bit stream about once every
+/// 256 bits -- which at 1200 bit/s is five times a second. Three of them
+/// back to back, on the same eight-bit grid, is once in about sixteen million.
+const FLAG_RUN: u32 = 3;
+
 /// What the answerer is reporting (V.42 Table 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Answer {
@@ -105,6 +114,18 @@ pub enum Outcome {
     Answered(Answer),
     /// The originator's pattern was seen, so the far end does error control.
     OriginatorDetected,
+    /// The protocol phase began without a pattern ever arriving.
+    ///
+    /// 7.2.1.3 has the answerer send marks "until termination of the detection
+    /// phase, receipt of the ODP, or detection of the start of the protocol
+    /// phase (the start of the protocol phase is indicated by receipt of
+    /// continuous flags, or of an LAPM or alternative procedure protocol
+    /// frame)". The third of those is the case where the originator skipped
+    /// the detection phase entirely -- which 7.2.1.2 allows it to do, and
+    /// which V.92 9.3.1 requires when V.8 has already settled LAPM. An
+    /// answerer that only knew about the first two would wait out T400 and
+    /// then decline error control to a modem that is already establishing it.
+    ProtocolStarted,
     /// T400 elapsed with nothing recognised (V.42 7.2.1.2, 7.2.1.3).
     TimedOut,
 }
@@ -296,6 +317,11 @@ pub struct Answerer {
     repeats: u32,
     /// The last eight bits from the line, watched for a flag.
     history: u8,
+    /// Bits since the last flag pattern, for telling flags in a row from flags
+    /// that happen to be there.
+    since_flag: u32,
+    /// Flags seen back to back, on the same eight-bit grid.
+    flag_run: u32,
     /// Whether the originator has begun the protocol phase (7.2.1.3).
     flags: bool,
 }
@@ -319,6 +345,8 @@ impl Answerer {
             answer,
             repeats: 0,
             history: 0,
+            since_flag: u32::MAX,
+            flag_run: 0,
             flags: false,
         }
     }
@@ -344,7 +372,10 @@ impl Answerer {
     /// flags never come at all -- a far end that heard the ODP out of noise it
     /// made itself, and is not in fact a modem doing V.42.
     fn said_enough(&self) -> bool {
-        self.repeats >= ADP_REPEATS && (self.flags || self.elapsed >= self.t400_ms)
+        // Nothing to say when nothing was asked.
+        self.outcome == Outcome::ProtocolStarted
+            || (self.repeats >= ADP_REPEATS
+                && (self.flags || self.elapsed >= self.t400_ms))
     }
 
     fn queue_adp(&mut self) {
@@ -364,8 +395,22 @@ impl Answerer {
         // pattern is the originator's flags (7.2.1.3) and those arrive after
         // the ODP has already been recognised.
         self.history = (self.history << 1) | u8::from(bit);
-        if self.outcome == Outcome::OriginatorDetected && self.history == FLAG {
-            self.flags = true;
+        self.since_flag = self.since_flag.saturating_add(1);
+        if self.history == FLAG {
+            // Contiguous, or it starts again: two flags eight bits apart are a
+            // run and two flags nine bits apart are a coincidence.
+            self.flag_run = if self.since_flag == 8 { self.flag_run + 1 } else { 1 };
+            self.since_flag = 0;
+            if self.flag_run >= FLAG_RUN {
+                self.flags = true;
+                if self.outcome == Outcome::Pending {
+                    // Nothing was ever asked and the answer is already being
+                    // given: the far end is past the detection phase, so this
+                    // end is too (7.2.1.3).
+                    self.outcome = Outcome::ProtocolStarted;
+                    return self.outcome;
+                }
+            }
         }
         if self.outcome != Outcome::Pending {
             return self.outcome;

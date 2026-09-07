@@ -85,6 +85,11 @@ pub struct Stack {
     detect: Detect,
     /// What this end offers.
     offer: Compression,
+    /// Ceilings on the V.42bis parameters, if the terminal set any.
+    ///
+    /// Ceilings twice over: what goes into XID, and then 6.4 takes the lower
+    /// of the two ends' proposals.
+    limits: (u16, u8),
     /// Whether the far end has already said it does LAPM, in V.8.
     declared: bool,
     /// The check sequence width the two ends agreed on, once they have.
@@ -137,6 +142,7 @@ impl Stack {
                 ))),
             },
             offer: Compression::Neither,
+            limits: (v42bis::OFFERED_N2, v42bis::OFFERED_N7),
             declared: false,
             agreed_fcs: Fcs::Bits16,
             established: false,
@@ -166,6 +172,25 @@ impl Stack {
         self.phase
     }
 
+    /// Go straight to protocol establishment (V.42 7.2.1.2).
+    ///
+    /// "The detection phase actions by the originator may be disabled by the
+    /// user. In this case, the originator moves directly to the protocol
+    /// establishment phase." Which is what `+ES` with an `<orig_rqst>` of 2
+    /// asks for, and what V.92 9.3.1 requires once V.8 has settled LAPM: a
+    /// question already answered is not worth three quarters of a second to
+    /// ask again.
+    ///
+    /// It is a real cost if the far end turns out not to do V.42, though, so
+    /// the patience is the same as for a detection phase that heard nothing.
+    pub fn without_detection(mut self) -> Self {
+        self.detect = Detect::Done;
+        self.phase = Phase::Negotiating;
+        self.waited_ms = 0;
+        self.lapm.set_retransmissions(crate::lapm::UNCONFIRMED_N400);
+        self
+    }
+
     /// Answer the detection phase by declining error control (V.42 Table 3).
     ///
     /// For tests, and for a configuration in which a terminal has asked for a
@@ -185,6 +210,22 @@ impl Stack {
     /// than none: the far end would decompress data that was never compressed.
     pub fn offer_compression(&mut self, compression: Compression) {
         self.offer = compression;
+    }
+
+    /// Cap the V.42bis parameters this end proposes.
+    ///
+    /// V.250 Table 27's `<max_dict>` and `<max_string>`, which a terminal sets
+    /// "based on its knowledge of the nature of the data to be transmitted".
+    pub fn offer_dictionary(&mut self, codewords: u16, max_string: u8) {
+        self.limits = (codewords, max_string);
+    }
+
+    /// What to put in an XID: the standing proposal, capped by the terminal.
+    fn proposal(&self) -> Xid {
+        let mut xid = Xid::proposal(self.offer);
+        xid.codewords = Some(self.limits.0.min(v42bis::OFFERED_N2));
+        xid.max_string = Some(self.limits.1.min(v42bis::OFFERED_N7));
+        xid
     }
 
     /// Turn on V.42bis directly, bypassing the XID exchange.
@@ -351,7 +392,7 @@ impl Stack {
                 // costs nothing and makes the window harmless.
                 let body = Frame::Xid {
                     pf: self.role == Role::Originator,
-                    info: Xid::proposal(self.offer).encode(),
+                    info: self.proposal().encode(),
                 }
                 .encode(DLCI_DATA, self.role, Kind::Command);
                 self.encoder.frame_with(&body, Fcs::Bits16);
@@ -426,7 +467,7 @@ impl Stack {
             self.damaged += 1;
             return;
         };
-        let agreed = Xid::proposal(self.offer).resolve(&theirs);
+        let agreed = self.proposal().resolve(&theirs);
         if let Some(params) = agreed.v42bis_params() {
             self.enable_compression(params);
         }
@@ -454,7 +495,7 @@ impl Stack {
         if kind == Kind::Command {
             let body = Frame::Xid {
                 pf: false,
-                info: Xid::proposal(self.offer).encode(),
+                info: self.proposal().encode(),
             }
             .encode(DLCI_DATA, self.role, Kind::Response);
             // 8.10.2 keeps this one at 16 bits whatever the connection has
@@ -475,6 +516,14 @@ impl Stack {
                 self.detect = Detect::Done;
                 self.phase = Phase::Negotiating;
                 self.waited_ms = 0;
+            }
+            // The far end is already talking protocol, so there is nothing
+            // left to detect and nothing to answer.
+            Outcome::ProtocolStarted => {
+                self.detect = Detect::Done;
+                self.phase = Phase::Negotiating;
+                self.waited_ms = 0;
+                self.lapm.set_retransmissions(crate::lapm::UNCONFIRMED_N400);
             }
             Outcome::OriginatorDetected => {
                 // The answerer has to finish saying what it is saying: cutting

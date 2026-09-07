@@ -455,9 +455,10 @@ fn compression_can_be_turned_off_and_on() {
     let mut it = quiet_dce();
     let (out, actions) = send(&mut it, &format!("AT+DS=0{CR}"));
     assert!(out.contains("OK"), "{out:?}");
-    assert_eq!(actions, vec![Action::SelectCompression(false)]);
-    let (_, actions) = send(&mut it, &format!("AT+DS=3{CR}"));
-    assert_eq!(actions, vec![Action::SelectCompression(true)]);
+    assert_eq!(actions.len(), 1);
+    assert!(!it.compression.wanted());
+    send(&mut it, &format!("AT+DS=3{CR}"));
+    assert!(it.compression.wanted());
 
     let (out, _) = send(&mut it, &format!("AT+DS?{CR}"));
     assert!(out.contains("+DS: 3"), "read back {out:?}");
@@ -530,4 +531,44 @@ fn the_capability_list_names_what_is_answered() {
         let (answer, _) = send(&mut it, &format!("AT{name}=?\r"));
         assert!(!answer.contains("ERROR"), "{name} is listed but not answered");
     }
+}
+
+#[test]
+fn the_compression_parameters_are_all_four_of_them() {
+    // V.250 6.6.1: +DS=[<direction>[,<compression_negotiation>[,<max_dict>
+    // [,<max_string>]]]]. Three of the four used to be read and thrown away,
+    // and the read-back reported values the modem had stopped using.
+    let mut it = quiet_dce();
+    assert_eq!(send(&mut it, "AT+DS?\r").0, "\r\n+DS: 3,0,2048,250\r\n\r\nOK\r\n");
+
+    send(&mut it, "AT+DS=3,1,1024,32\r");
+    assert_eq!(send(&mut it, "AT+DS?\r").0, "\r\n+DS: 3,1,1024,32\r\n\r\nOK\r\n");
+
+    // V.250 5.4.2.1: an omitted subparameter keeps what it had.
+    send(&mut it, "AT+DS=,,4096\r");
+    assert_eq!(send(&mut it, "AT+DS?\r").0, "\r\n+DS: 3,1,4096,32\r\n\r\nOK\r\n");
+}
+
+#[test]
+fn a_dictionary_outside_the_permitted_range_is_refused() {
+    // V.42bis 6.4 on P1: "any attempt to specify less than the minimum value
+    // shall be considered a procedural error"; and on P2: "the permitted range
+    // is from 6 to 250. The values outside this range are invalid".
+    let mut it = quiet_dce();
+    for bad in ["AT+DS=3,0,256\r", "AT+DS=3,0,2048,5\r", "AT+DS=3,0,2048,251\r"] {
+        assert_eq!(send(&mut it, bad).0, "\r\nERROR\r\n", "accepted {bad:?}");
+    }
+    // And a direction this DCE cannot honour, since V.42bis is negotiated as a
+    // pair and offering half of it would be a promise it cannot keep.
+    assert_eq!(send(&mut it, "AT+DS=1\r").0, "\r\nERROR\r\n");
+    assert_eq!(send(&mut it, "AT+DS?\r").0, "\r\n+DS: 3,0,2048,250\r\n\r\nOK\r\n");
+}
+
+#[test]
+fn the_compression_test_syntax_says_what_is_supported() {
+    let mut it = quiet_dce();
+    assert_eq!(
+        send(&mut it, "AT+DS=?\r").0,
+        "\r\n+DS: (0,3),(0,1),(512-65535),(6-250)\r\n\r\nOK\r\n"
+    );
 }

@@ -36,7 +36,7 @@ pub enum Action {
     /// `AT+ES=` — how error control should be attempted (V.250 6.5.1).
     SelectErrorControl(ErrorControl),
     /// `AT+DS=` — whether to negotiate V.42bis (V.250 6.6.1).
-    SelectCompression(bool),
+    SelectCompression(Compression),
 }
 
 /// What `+MS` asked for.
@@ -87,6 +87,46 @@ impl ErrorControl {
     /// Whether to hang up if error control cannot be established.
     pub fn required(self) -> bool {
         self.fallback >= 2
+    }
+}
+
+/// What `+DS` asked for, in the terms of V.250 Table 27.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Compression {
+    /// `<direction>`: 0 none, 1 transmit only, 2 receive only, 3 both.
+    ///
+    /// V.42bis P0. Only 0 and 3 are offered: it is negotiated as a pair, and
+    /// offering half of it is a promise this DCE cannot keep.
+    pub direction: u8,
+    /// `<compression_negotiation>`: 1 disconnects if the far end will not.
+    pub required: bool,
+    /// `<max_dict>`: V.42bis P1, the number of codewords, 512 to 65535.
+    pub max_dict: u16,
+    /// `<max_string>`: V.42bis P2, the longest string, 6 to 250.
+    pub max_string: u8,
+}
+
+impl Compression {
+    /// Whether compression should be asked for at all.
+    pub fn wanted(self) -> bool {
+        self.direction != 0
+    }
+}
+
+impl Default for Compression {
+    fn default() -> Self {
+        // V.250 6.6.1 leaves the default `<max_dict>` to the manufacturer and
+        // points at Appendix II/V.42 bis, which says 2048 outright: "a value
+        // for N2 of 2048 provides good compression performance across a wide
+        // range of data types".
+        //
+        // `<max_string>` is a departure. V.250 recommends 6, which is also
+        // V.42bis's minimum, and V.42bis 6.4 settles the parameter by taking
+        // the lower of the two proposals -- so proposing the floor does not
+        // protect anything, it decides the matter for both ends and decides it
+        // badly. 250 is the top of the permitted range and a far end that can
+        // only manage 6 still gets 6.
+        Self { direction: 3, required: false, max_dict: 2048, max_string: 250 }
     }
 }
 
@@ -217,7 +257,7 @@ pub struct Interpreter {
     /// What `+ES` last selected.
     pub error_control: ErrorControl,
     /// What `+DS` last selected: whether V.42bis may be negotiated.
-    pub compression: bool,
+    pub compression: Compression,
     state: LineState,
     body: Vec<u8>,
     last_body: Vec<u8>,
@@ -255,7 +295,7 @@ impl Interpreter {
                 max_rate: 0,
             },
             error_control: ErrorControl::default(),
-            compression: true,
+            compression: Compression::default(),
             state: LineState::Idle,
             body: Vec::new(),
             last_body: Vec::new(),
@@ -648,32 +688,85 @@ impl Interpreter {
         }
     }
 
-    /// `+DS` — data compression selection (V.250 6.6.1).
+    /// `+DS` — data compression selection (V.250 6.6.1, Table 27).
     fn compression_select(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
         match op {
             ExtOp::Read => {
-                let text = format!("+DS: {},0,512,6", u8::from(self.compression) * 3);
+                let c = self.compression;
+                let text = format!(
+                    "+DS: {},{},{},{}",
+                    c.direction,
+                    u8::from(c.required),
+                    c.max_dict,
+                    c.max_string
+                );
                 self.fmt.info(&text, &self.regs, &mut self.out);
                 Ok(None)
             }
             ExtOp::Test => {
-                self.fmt
-                    .info("+DS: (0,3),(0),(512),(6)", &self.regs, &mut self.out);
+                // Only what this DCE can actually honour. The one-directional
+                // values of 1 and 2 are absent because V.42bis is negotiated
+                // as a pair and offering half of it would be a promise this
+                // DCE cannot keep; the ranges are V.42bis 6.4's own.
+                self.fmt.info(
+                    "+DS: (0,3),(0,1),(512-65535),(6-250)",
+                    &self.regs,
+                    &mut self.out,
+                );
                 Ok(None)
             }
             ExtOp::Set(value) => {
-                let first = value.split(',').next().unwrap_or("").trim();
-                // Table 22: 0 is no compression, 3 is both directions. The
-                // one-directional values are not offered, because V.42bis is
-                // negotiated as a pair and offering half of it would be a
-                // promise this DCE cannot keep.
-                let on = match first {
-                    "" | "3" => true,
-                    "0" => false,
-                    _ => return Err(ResultCode::Error),
+                let mut parts = value.split(',');
+                let field = |p: Option<&str>| -> Option<Option<u32>> {
+                    match p.map(str::trim) {
+                        // 5.4.2.1: an omitted subparameter keeps its value.
+                        None | Some("") => Some(None),
+                        Some(v) => v.parse().ok().map(Some),
+                    }
                 };
-                self.compression = on;
-                Ok(Some(Action::SelectCompression(on)))
+                let mut next = || field(parts.next()).ok_or(ResultCode::Error);
+                let direction = next()?;
+                let required = next()?;
+                let max_dict = next()?;
+                let max_string = next()?;
+                if parts.next().is_some() {
+                    return Err(ResultCode::Error);
+                }
+
+                let mut c = self.compression;
+                if let Some(d) = direction {
+                    // Table 27: 0 is no compression, 3 is both directions.
+                    if d != 0 && d != 3 {
+                        return Err(ResultCode::Error);
+                    }
+                    c.direction = d as u8;
+                }
+                if let Some(r) = required {
+                    if r > 1 {
+                        return Err(ResultCode::Error);
+                    }
+                    c.required = r == 1;
+                }
+                if let Some(n) = max_dict {
+                    // V.42bis 6.4: "P1 shall have a default value of 512,
+                    // which is its minimum value ... any attempt to specify
+                    // less than the minimum value shall be considered a
+                    // procedural error".
+                    c.max_dict = u16::try_from(n)
+                        .ok()
+                        .filter(|n| *n >= 512)
+                        .ok_or(ResultCode::Error)?;
+                }
+                if let Some(n) = max_string {
+                    // 6.4 again: "the permitted range is from 6 to 250. The
+                    // values outside this range are invalid".
+                    c.max_string = u8::try_from(n)
+                        .ok()
+                        .filter(|n| (6..=250).contains(n))
+                        .ok_or(ResultCode::Error)?;
+                }
+                self.compression = c;
+                Ok(Some(Action::SelectCompression(c)))
             }
             ExtOp::Execute => Err(ResultCode::Error),
         }

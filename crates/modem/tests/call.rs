@@ -1110,3 +1110,109 @@ fn error_control_comes_up_on_every_pump_that_can_carry_it() {
     p.run(4.0);
     assert!(p.host_saw().contains("HELLO"), "{:?}", p.host_saw());
 }
+
+#[test]
+fn asking_for_v42_without_the_detection_phase_skips_it() {
+    // V.250 Table 20, <orig_rqst> of 2: "initiate V.42 without Detection
+    // Phase. If ITU-T Rec. V.8 is in use, this is a request to disable V.42
+    // Detection Phase." A terminal that already knows what it is dialling can
+    // save the three quarters of a second of asking.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "AT+ES=2");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+
+    let mut seen: Vec<&'static str> = Vec::new();
+    for _ in 0..(20.0 * FS) as usize {
+        let (a, b) = (p.from_caller, p.from_host);
+        p.from_caller = p.caller.step(b);
+        p.from_host = p.host.step(a);
+        p.caller.take_dte();
+        p.host.take_dte();
+        let phase = p.caller.error_control_phase();
+        if seen.last() != Some(&phase) {
+            seen.push(phase);
+        }
+    }
+    assert!(!seen.contains(&"detecting"), "detected anyway: {seen:?}");
+    assert!(p.caller.error_controlled(), "and then did not establish");
+    // The far end was not told, and had to notice: V.42 7.2.1.3 ends its own
+    // wait on continuous flags as well as on the pattern it was listening for.
+    assert!(p.host.error_controlled(), "the answerer never noticed");
+}
+
+#[test]
+fn error_control_can_be_made_a_condition_of_the_call() {
+    // V.250 Table 20, <orig_fbk> of 2 and above: "error control required ...
+    // if error control not established, disconnect". A connection the terminal
+    // has already said it will not accept unprotected is not one to hand it
+    // anyway and let it find out.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "AT+ES=3,2");
+    Pair::type_at(&mut p.host, "AT+ES=0");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(25.0);
+
+    let saw = p.caller_saw();
+    assert!(!saw.contains("CONNECT"), "connected anyway: {saw:?}");
+    assert!(saw.contains("NO CARRIER"), "said nothing about it: {saw:?}");
+    assert_eq!(p.caller.state(), State::Command, "still off hook");
+}
+
+#[test]
+fn the_same_call_connects_when_error_control_is_only_preferred() {
+    // The other half of it, and the default: a far end without V.42 is a
+    // perfectly ordinary far end, and <orig_fbk> of 0 says so.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "AT+ES=3,0");
+    Pair::type_at(&mut p.host, "AT+ES=0");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(25.0);
+    assert!(p.caller_saw().contains("CONNECT"), "{:?}", p.caller_saw());
+    assert!(!p.caller.error_controlled());
+}
+
+#[test]
+fn compression_can_be_made_a_condition_of_the_call_too() {
+    // V.250 Table 27, <compression_negotiation> of 1: "disconnect if ITU-T
+    // Rec. V.42 bis is not negotiated by the remote DCE as specified in
+    // <direction>". The same bargain as <orig_fbk> makes for error control,
+    // one layer up.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "AT+DS=3,1");
+    Pair::type_at(&mut p.host, "AT+DS=0");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(25.0);
+
+    let saw = p.caller_saw();
+    assert!(!saw.contains("CONNECT"), "connected anyway: {saw:?}");
+    assert!(saw.contains("NO CARRIER"), "said nothing about it: {saw:?}");
+    // Error control was fine; it was compression that was refused, and the
+    // call was conditional on it.
+    assert_eq!(p.caller.state(), State::Command);
+}
+
+#[test]
+fn a_smaller_dictionary_is_still_a_working_call() {
+    // The setting exists to be used, not just to be accepted. A terminal that
+    // knows it is about to send something incompressible can hold the
+    // dictionary down, and the call has to go on working when it does.
+    let mut p = Pair::new();
+    for m in [&mut p.host, &mut p.caller] {
+        Pair::type_at(m, "AT+DS=3,0,512,6");
+    }
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(20.0);
+    assert_eq!(p.caller.state(), State::Data, "never connected");
+    assert!(p.caller.compressing(), "compression never came up");
+
+    for b in b"MAIN MENU\r" {
+        p.caller.feed_dte(*b);
+    }
+    p.run(6.0);
+    assert!(p.host_saw().contains("MAIN MENU"), "{:?}", p.host_saw());
+}

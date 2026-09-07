@@ -66,6 +66,14 @@ pub enum Ended {
     CarrierLost,
     /// The handshake never completed.
     NoAnswer,
+    /// The terminal asked for compression and the far end would not.
+    NoCompression,
+    /// The terminal asked for error control and there was none to be had.
+    ///
+    /// V.250 Table 20: an `<orig_fbk>` of 2 or above means "if error control
+    /// not established, disconnect". A connection the DTE said it would not
+    /// accept unprotected is not one to hand it anyway.
+    NoErrorControl,
 }
 
 /// The line side, whichever modulation is in use.
@@ -694,11 +702,24 @@ impl Modem {
                     if self.declared_lapm {
                         stack = stack.declared_lapm();
                     }
+                    // V.250 Table 20, `<orig_rqst>` of 2: "initiate V.42
+                    // without Detection Phase. If ITU-T Rec. V.8 is in use,
+                    // this is a request to disable V.42 Detection Phase".
+                    if !self.at.error_control.detect() {
+                        stack = stack.without_detection();
+                    }
                     // Offer compression in both directions and let the far end
                     // decide. What runs is the intersection, so offering more
                     // than the far end can do costs nothing.
-                    if self.at.compression {
+                    let c = self.at.compression;
+                    if c.wanted() {
                         stack.offer_compression(Compression::Both);
+                        // V.250 Table 27: `<max_dict>` and `<max_string>` are
+                        // the terminal's ceilings on V.42bis P1 and P2, "based
+                        // on its knowledge of the nature of the data to be
+                        // transmitted". 6.4 then takes the lower of the two
+                        // ends' proposals, so these are ceilings twice over.
+                        stack.offer_dictionary(c.max_dict, c.max_string);
                     }
                     self.ec = Some(stack);
                 }
@@ -725,6 +746,22 @@ impl Modem {
         // No stack at all is an answer: this is a call without error control,
         // and there is nothing to wait for.
         if self.ec.as_ref().is_some_and(|e| !e.settled()) {
+            return;
+        }
+        // V.250 Table 20 again, from the other end of the same setting: an
+        // `<orig_fbk>` of 2 or above requires error control, and a connection
+        // without it is one the terminal has already said it does not want.
+        if self.at.error_control.required() && !self.error_controlled() {
+            self.announce = None;
+            self.end_call(Ended::NoErrorControl);
+            return;
+        }
+        // And V.250 Table 27's <compression_negotiation> of 1: "disconnect if
+        // ITU-T Rec. V.42 bis is not negotiated by the remote DCE as specified
+        // in <direction>".
+        if self.at.compression.required && !self.compressing() {
+            self.announce = None;
+            self.end_call(Ended::NoCompression);
             return;
         }
         self.announce = None;
@@ -1051,7 +1088,9 @@ impl Modem {
             Ended::LocalRequest => ResultCode::Ok,
             // 6.3.1: what a dial that did not get there reports.
             Ended::Aborted => ResultCode::NoCarrier,
-            Ended::CarrierLost => ResultCode::NoCarrier,
+            Ended::CarrierLost | Ended::NoErrorControl | Ended::NoCompression => {
+                ResultCode::NoCarrier
+            }
             Ended::NoAnswer => ResultCode::NoAnswer,
         });
     }
