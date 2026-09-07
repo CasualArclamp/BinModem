@@ -106,6 +106,90 @@ struct Modulation {
     max_rate: u32,
 }
 
+/// The `AT+ES` and `AT+DS` subparameters the protection window is composing,
+/// and the two reporting parameters that say what came of them.
+///
+/// Everything here is settled between the two modems and none of it is visible
+/// from the terminal, which sees a CONNECT and a rate. The window is the only
+/// place a person can say what they want of it before the call rather than
+/// find out afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Protection {
+    /// `+ES` `<orig_rqst>`, V.250 Table 20.
+    request: u8,
+    /// `+ES` `<orig_fbk>`: 0 carries on without, 2 hangs up.
+    fallback: u8,
+    /// `+ER`: report which error control was negotiated.
+    report_error_control: bool,
+    /// `+DS` `<direction>`: 3 both ways or 0 not at all.
+    compress: bool,
+    /// `+DS` `<compression_negotiation>`: 1 hangs up if the far end will not.
+    compress_required: bool,
+    /// `+DS` `<max_dict>`, V.42bis P1.
+    max_dict: u16,
+    /// `+DS` `<max_string>`, V.42bis P2.
+    max_string: u8,
+    /// `+DR`: report which compression was negotiated.
+    report_compression: bool,
+}
+
+impl Default for Protection {
+    fn default() -> Self {
+        // The modem's own defaults, so the window opens agreeing with it.
+        Self {
+            request: 3,
+            fallback: 0,
+            report_error_control: false,
+            compress: true,
+            compress_required: false,
+            max_dict: 2048,
+            max_string: 250,
+            report_compression: false,
+        }
+    }
+}
+
+impl Protection {
+    /// Dictionary sizes worth offering.
+    ///
+    /// V.42bis Appendix II.1: "if values of N2 in the range 2^n + 1 to
+    /// approximately 1.3 x 2^n are selected, no performance improvement will
+    /// be gained over the selection of the value 2^n". So the powers of two,
+    /// and nothing between them.
+    const DICTIONARIES: [u16; 7] = [512, 1024, 2048, 4096, 8192, 16384, 32768];
+    /// String lengths, from V.42bis 6.4's floor to its ceiling.
+    const STRINGS: [u8; 6] = [6, 16, 32, 64, 128, 250];
+
+    /// Whether error control is being asked for at all.
+    fn wants_error_control(self) -> bool {
+        self.request >= 2
+    }
+
+    /// The command lines this composes, in the order they should be sent.
+    ///
+    /// `+ES` first, because turning error control off is also turning
+    /// compression off -- V.42bis rides on LAPM and there is nowhere else for
+    /// it to be -- and a terminal reading these back should see them settle in
+    /// an order that makes sense.
+    fn commands(self) -> Vec<String> {
+        vec![
+            format!("AT+ES={},{}", self.request, self.fallback),
+            format!(
+                "AT+DS={},{},{},{}",
+                if self.compress { 3 } else { 0 },
+                u8::from(self.compress_required),
+                self.max_dict,
+                self.max_string
+            ),
+            format!(
+                "AT+ER={};+DR={}",
+                u8::from(self.report_error_control),
+                u8::from(self.report_compression)
+            ),
+        ]
+    }
+}
+
 impl Default for Modulation {
     fn default() -> Self {
         // V.250 6.4.1: automode on, and both rates unspecified. Zero is not a
@@ -220,6 +304,9 @@ pub struct ScopeApp {
     /// it is open.
     modulation: Modulation,
     advanced: bool,
+    /// The same, for `AT+ES` and `AT+DS`.
+    protection: Protection,
+    protection_open: bool,
     /// Where a telnet connection is aimed.
     host: String,
     tab: Tab,
@@ -287,6 +374,8 @@ impl ScopeApp {
             carrier: 1,
             modulation: Modulation::default(),
             advanced: false,
+            protection: Protection::default(),
+            protection_open: false,
             tab: Tab::Terminal,
             font_size: 14.0,
             last_repaint: std::time::Instant::now(),
@@ -788,6 +877,16 @@ impl ScopeApp {
                 self.advanced = !self.advanced;
                 self.modulation.fit(self.carrier);
             }
+            if ui
+                .selectable_label(self.protection_open, "Error control")
+                .on_hover_text(
+                    "AT+ES and AT+DS: V.42 error control and V.42bis compression, \
+                     and whether the modem should report what it negotiated",
+                )
+                .clicked()
+            {
+                self.protection_open = !self.protection_open;
+            }
 
             let online = self.frame.state == telemetry::CallState::Connected;
             let on_hook = self.frame.state == telemetry::CallState::Idle;
@@ -856,6 +955,7 @@ impl ScopeApp {
         });
 
         self.advanced_modulation(ui, &session);
+        self.advanced_protection(ui, &session);
     }
 
     /// The rest of `AT+MS`, in a window rather than typed.
@@ -984,6 +1084,179 @@ impl ScopeApp {
                 });
             });
         self.advanced = open;
+    }
+
+    /// `AT+ES` and `AT+DS`, and the two parameters that report on them.
+    fn advanced_protection(&mut self, ui: &mut egui::Ui, session: &Arc<live::Session>) {
+        let dim = Color32::from_rgb(140, 150, 165);
+        let mut open = self.protection_open;
+        egui::Window::new("AT+ES / AT+DS - error control")
+            .open(&mut open)
+            .resizable(false)
+            .default_width(520.0)
+            .show(ui.ctx(), |ui| {
+                let p = &mut self.protection;
+                egui::Grid::new("es")
+                    .num_columns(2)
+                    .spacing([14.0, 10.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("error control").monospace().color(dim));
+                        ui.vertical(|ui| {
+                            // V.250 Table 20. Values 0 and 1 differ in what the
+                            // DTE interface does, which is nothing here: both
+                            // mean a connection with no protocol on it.
+                            ui.radio_value(&mut p.request, 3, "V.42, asking the far end first")
+                                .on_hover_text(
+                                    "Initiate V.42 with Detection Phase. The two modems \
+                                     exchange the patterns of V.42 7.2.1 to find out \
+                                     whether the other does error control at all, which \
+                                     costs up to three quarters of a second and is what \
+                                     makes a far end without it work rather than fail",
+                                );
+                            ui.radio_value(&mut p.request, 2, "V.42, without asking")
+                                .on_hover_text(
+                                    "Initiate V.42 without Detection Phase. For a far end \
+                                     already known to do V.42 -- and what V.92 requires \
+                                     once V.8 has settled it. Against a far end that does \
+                                     not, the fallback below is what happens instead",
+                                );
+                            ui.radio_value(&mut p.request, 0, "none")
+                                .on_hover_text(
+                                    "Direct mode: the line carries start-stop characters \
+                                     and nothing checks them. Which is how every modem \
+                                     worked before 1989, and how Bell 103 still works here",
+                                );
+                        });
+                        ui.end_row();
+
+                        ui.label(RichText::new("if there is none").monospace().color(dim));
+                        ui.add_enabled_ui(p.wants_error_control(), |ui| {
+                            ui.vertical(|ui| {
+                                ui.radio_value(&mut p.fallback, 0, "carry on without it")
+                                    .on_hover_text(
+                                        "Error control optional. A far end without V.42 is \
+                                         a perfectly ordinary far end -- V.42 7.2.1 exists \
+                                         to find that out rather than to fail on it",
+                                    );
+                                ui.radio_value(&mut p.fallback, 2, "hang up")
+                                    .on_hover_text(
+                                        "Error control required; if not established, \
+                                         disconnect. For a call whose whole point is that \
+                                         what arrives is what was sent",
+                                    );
+                            });
+                        });
+                        ui.end_row();
+
+                        ui.label(RichText::new("compression").monospace().color(dim));
+                        ui.add_enabled_ui(p.wants_error_control(), |ui| {
+                            ui.vertical(|ui| {
+                                ui.checkbox(&mut p.compress, "V.42bis, both directions")
+                                    .on_hover_text(
+                                        "V.42bis rides on LAPM and there is nowhere else \
+                                         for it to be, so error control off is compression \
+                                         off. Negotiated as a pair: one direction only is \
+                                         a promise this modem cannot keep",
+                                    );
+                                ui.add_enabled_ui(p.compress, |ui| {
+                                    ui.checkbox(
+                                        &mut p.compress_required,
+                                        "hang up if the far end will not",
+                                    )
+                                    .on_hover_text(
+                                        "V.250 Table 27: disconnect if V.42bis is not \
+                                         negotiated by the remote DCE as specified",
+                                    );
+                                });
+                            });
+                        });
+                        ui.end_row();
+
+                        ui.label(RichText::new("dictionary").monospace().color(dim));
+                        ui.add_enabled_ui(p.wants_error_control() && p.compress, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("codewords").color(dim));
+                                combo(ui, "ds-dict", &mut p.max_dict, &Protection::DICTIONARIES);
+                                ui.label(RichText::new("longest string").color(dim));
+                                combo(ui, "ds-str", &mut p.max_string, &Protection::STRINGS);
+                            });
+                        });
+                        ui.end_row();
+
+                        ui.label(RichText::new("report").monospace().color(dim));
+                        ui.vertical(|ui| {
+                            ui.checkbox(&mut p.report_error_control, "+ER, before the CONNECT")
+                                .on_hover_text(
+                                    "V.250 6.5.5: +ER: LAPM or +ER: NONE, issued once the \
+                                     modem has determined which error control protocol \
+                                     will be used, before the final result code",
+                                );
+                            ui.checkbox(&mut p.report_compression, "+DR, before the CONNECT")
+                                .on_hover_text(
+                                    "V.250 6.6.3: +DR: V42B or +DR: NONE, issued after the \
+                                     error control report and before the CONNECT",
+                                );
+                        });
+                        ui.end_row();
+                    });
+
+                ui.add_space(4.0);
+                let p = self.protection;
+                // The one thing worth saying out loud, because the numbers
+                // look like they are being given away and they are not.
+                let note = if !p.wants_error_control() {
+                    "Nothing checks what arrives. Every byte the line damages is a byte \
+                     the terminal reads."
+                } else if p.max_dict <= 512 {
+                    "512 codewords is V.42bis's floor. The lower of the two ends is what \
+                     runs, so this decides it for both."
+                } else {
+                    "The lower of the two ends is what runs, so asking for more than the \
+                     far end has costs nothing and asking for less decides it for both."
+                };
+                ui.label(RichText::new(note).small().color(if p.wants_error_control() {
+                    dim
+                } else {
+                    Color32::from_rgb(240, 200, 120)
+                }));
+
+                ui.separator();
+                for command in p.commands() {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(&command)
+                                .monospace()
+                                .color(Color32::from_rgb(220, 225, 235)),
+                        );
+                        if ui
+                            .button("Send")
+                            .on_hover_text("Takes effect on the next call, not this one")
+                            .clicked()
+                        {
+                            session.type_bytes(format!("{command}\r").as_bytes());
+                        }
+                    });
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Send all")
+                        .on_hover_text("All three, in order")
+                        .clicked()
+                    {
+                        for command in p.commands() {
+                            session.type_bytes(format!("{command}\r").as_bytes());
+                        }
+                    }
+                    if ui
+                        .button("Ask")
+                        .on_hover_text("What the modem currently has")
+                        .clicked()
+                    {
+                        session.type_bytes(b"AT+ES?;+DS?;+ER?;+DR?\r");
+                    }
+                });
+            });
+        self.protection_open = open;
     }
 
     fn audio_controls(&mut self, ui: &mut egui::Ui) {
@@ -1390,6 +1663,21 @@ impl eframe::App for ScopeApp {
 }
 
 /// One line-rate box, offering only the rates the modulation has.
+/// A box offering one of a fixed set of values.
+fn combo<T>(ui: &mut egui::Ui, id: &str, value: &mut T, options: &[T])
+where
+    T: Copy + PartialEq + std::fmt::Display,
+{
+    egui::ComboBox::from_id_salt(id)
+        .width(88.0)
+        .selected_text(format!("{value}"))
+        .show_ui(ui, |ui| {
+            for option in options {
+                ui.selectable_value(value, *option, format!("{option}"));
+            }
+        });
+}
+
 fn rate_box(ui: &mut egui::Ui, id: &str, value: &mut u32, rates: &[u32]) {
     egui::ComboBox::from_id_salt(id)
         .width(78.0)
@@ -1500,6 +1788,89 @@ mod tests {
         .iter()
         .map(|s| (*s).to_owned())
         .collect()
+    }
+
+    /// Run a command line through a real interpreter and report what it made
+    /// of it.
+    fn interpreted(line: &str) -> (at::Interpreter, String) {
+        let mut it = at::Interpreter::new();
+        it.config.echo = false;
+        for b in line.bytes() {
+            it.feed(b);
+        }
+        it.feed(b'\r');
+        let out = String::from_utf8(it.take_output()).unwrap();
+        (it, out)
+    }
+
+    #[test]
+    fn every_command_the_window_composes_is_one_the_modem_accepts() {
+        // The window builds AT lines by hand and the modem parses them by
+        // hand, and nothing else makes the two agree. A window offering a
+        // setting the interpreter refuses is worse than one without it.
+        for p in [
+            Protection::default(),
+            Protection { request: 2, fallback: 2, ..Protection::default() },
+            Protection { request: 0, ..Protection::default() },
+            Protection {
+                compress: false,
+                report_error_control: true,
+                report_compression: true,
+                ..Protection::default()
+            },
+            Protection { max_dict: 512, max_string: 6, ..Protection::default() },
+            Protection { max_dict: 32768, max_string: 250, ..Protection::default() },
+        ] {
+            for command in p.commands() {
+                let (_, out) = interpreted(&command);
+                assert!(!out.contains("ERROR"), "{command:?} was refused");
+            }
+        }
+    }
+
+    #[test]
+    fn what_the_window_sends_is_what_the_modem_then_has() {
+        // And the values survive the round trip, which is the part a typo in
+        // the format string would not.
+        let p = Protection {
+            request: 2,
+            fallback: 2,
+            compress: true,
+            compress_required: true,
+            max_dict: 4096,
+            max_string: 32,
+            report_error_control: true,
+            report_compression: true,
+        };
+        let mut it = at::Interpreter::new();
+        it.config.echo = false;
+        for command in p.commands() {
+            for b in command.bytes() {
+                it.feed(b);
+            }
+            it.feed(b'\r');
+            it.take_output();
+        }
+        assert_eq!(it.error_control.request, 2);
+        assert_eq!(it.error_control.fallback, 2);
+        assert_eq!(it.compression.direction, 3);
+        assert!(it.compression.required);
+        assert_eq!(it.compression.max_dict, 4096);
+        assert_eq!(it.compression.max_string, 32);
+        assert!(it.config.report_error_control);
+        assert!(it.config.report_compression);
+    }
+
+    #[test]
+    fn turning_error_control_off_turns_compression_off_with_it() {
+        // V.42bis rides on LAPM and there is nowhere else for it to be. The
+        // window disables the compression controls, and the command it sends
+        // has to say the same thing -- so the order matters: +ES first.
+        let p = Protection { request: 0, ..Protection::default() };
+        let commands = p.commands();
+        assert!(commands[0].starts_with("AT+ES=0"), "{:?}", commands[0]);
+        let (it, _) = interpreted(&commands[0]);
+        assert!(!it.error_control.wanted());
     }
 
     #[test]
