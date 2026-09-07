@@ -119,6 +119,22 @@ typed like the simplest possible board:
 modem-scope --answer --in "<input device>" --out "<output device>" --carrier V22B
 ```
 
+## Moving a file
+
+The **Files** button opens ZMODEM: a path to send, a directory to receive
+into, a progress bar, the rate, and the two numbers that say what the line is
+costing -- rewinds, because an error is recovered by sending the sender back
+over ground it had already covered, and subpackets that failed their check.
+
+It is not an ITU Recommendation and there are no clause numbers to cite. The
+reference is Chuck Forsberg's *The ZMODEM Inter Application File Transfer
+Protocol*, October 1988, and the clause numbers in `crates/transfer` are its
+own. Two values in it are given only by reference to a C header -- the frame
+type numbers and the subpacket terminators -- and where the code relies on one
+it says what it was derived from.
+
+Tell the board to send first. This end answers; it does not ask.
+
 ## One file
 
 `dist.bat` (or `./dist.ps1`) builds a release and leaves
