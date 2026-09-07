@@ -41,7 +41,18 @@ if (-not (Test-Path $built)) {
 $dist = Join-Path $root "dist"
 New-Item -ItemType Directory -Force $dist | Out-Null
 $out = Join-Path $dist "dialupmodem2.exe"
-Copy-Item $built $out -Force
+# Windows will not let a running executable be overwritten, and what it says
+# about it is a stack trace naming Copy-Item. The interesting fact is that the
+# last build is still open, which is a thing to be told rather than to work out.
+try {
+    Copy-Item $built $out -Force -ErrorAction Stop
+} catch [System.IO.IOException] {
+    Write-Host ""
+    Write-Host "  $out is running. Close it and build again." -ForegroundColor Yellow
+    Write-Host "  The new build is at $built and works from there." -ForegroundColor DarkGray
+    Write-Host ""
+    exit 1
+}
 
 # What it imports, so that "standalone" is a measurement rather than a claim.
 $bytes = [IO.File]::ReadAllBytes($out)
