@@ -429,6 +429,37 @@ fn hint(painter: &Painter, rect: Rect) {
 }
 
 /// Translate egui keyboard events into the bytes a DTE would send.
+/// What a pasted string puts on the line.
+///
+/// Line endings, and only line endings. A terminal ends a line with a carriage
+/// return, and what is on a clipboard is whatever the machine it was copied
+/// from uses -- so a paste from anywhere but a terminal arrives as line feeds,
+/// and a board reading it sees one enormous line that never ends. Everything
+/// else goes through untouched, including escape sequences: a terminal sends
+/// what it is given, and deciding otherwise here would be this program editing
+/// somebody's message on the way past.
+pub fn paste_bytes(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                // A CRLF is one line ending, not two.
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push(b'\r');
+            }
+            '\n' => out.push(b'\r'),
+            _ => {
+                let mut buf = [0u8; 4];
+                out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            }
+        }
+    }
+    out
+}
+
 pub fn keys_to_bytes(ui: &Ui) -> Vec<u8> {
     use eframe::egui::{Event, Key};
     let mut out = Vec::new();
@@ -436,7 +467,18 @@ pub fn keys_to_bytes(ui: &Ui) -> Vec<u8> {
         for event in &i.events {
             match event {
                 Event::Text(t) => out.extend_from_slice(t.as_bytes()),
+                Event::Paste(text) => out.extend_from_slice(&paste_bytes(text)),
                 Event::Key { key, pressed: true, modifiers, .. } => {
+                    // Ctrl+V is a paste and not a SYN. A terminal would send
+                    // 0x16 for it, and egui delivers the paste as well -- so
+                    // without this a person pasting into a login prompt sends
+                    // a control character in front of it, and no board has
+                    // ever wanted 0x16. Ctrl+C is left alone, because on a
+                    // board it is the way to stop a listing and there is
+                    // nothing else it could mean here.
+                    if modifiers.ctrl && *key == Key::V {
+                        continue;
+                    }
                     // Control codes are not delivered as Text, so build them here.
                     if modifiers.ctrl && let Some(c) = key.name().chars().next() {
                         let c = c.to_ascii_uppercase();
@@ -466,4 +508,37 @@ pub fn keys_to_bytes(ui: &Ui) -> Vec<u8> {
         }
     });
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::paste_bytes;
+
+    /// A clipboard is not a keyboard, and its line endings are not a terminal's.
+    ///
+    /// Whatever a paste was copied from decides how its lines end, and only one
+    /// of the three ways is what goes down a line to a board. A message pasted
+    /// into a board's editor with bare line feeds in it is one line as far as
+    /// the board is concerned, however it looked in the window it came from.
+    #[test]
+    fn a_paste_ends_its_lines_the_way_a_terminal_does() {
+        assert_eq!(paste_bytes("one\r\ntwo"), b"one\rtwo");
+        assert_eq!(paste_bytes("one\ntwo"), b"one\rtwo");
+        assert_eq!(paste_bytes("one\rtwo"), b"one\rtwo");
+        // A trailing one is still one, and an empty line in the middle stays.
+        assert_eq!(paste_bytes("a\r\n\r\nb\r\n"), b"a\r\rb\r");
+    }
+
+    /// Everything else goes through as it was.
+    ///
+    /// Including escape sequences. A terminal sends what it is handed, and
+    /// filtering here would be this program quietly editing somebody's message
+    /// on its way to the line.
+    #[test]
+    fn a_paste_is_otherwise_left_alone() {
+        assert_eq!(paste_bytes("\x1b[31mred\x1b[0m"), b"\x1b[31mred\x1b[0m");
+        assert_eq!(paste_bytes("\t \x07"), b"\t \x07");
+        // Not everything a clipboard holds is ASCII.
+        assert_eq!(paste_bytes("caf\u{e9}"), "caf\u{e9}".as_bytes());
+    }
 }

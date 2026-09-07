@@ -840,6 +840,14 @@ impl Terminal {
         self.mouse_sgr = false;
         self.mouse_urxvt = false;
         self.mouse_cell = None;
+        // And anything still owed to the far end, for the same reason. A
+        // board that asked where the cursor was before all this and is
+        // answered after it is being told about a screen that no longer
+        // exists. The bell goes with it: it was rung at a terminal that has
+        // since started again.
+        self.reply.clear();
+        self.bell = false;
+        self.private = false;
     }
 
     pub fn clear_scrollback(&mut self) {
@@ -1428,6 +1436,34 @@ mod mouse_tests {
         assert_eq!(t.mouse_tracking(), Tracking::Off);
         assert_eq!(t.mouse_coordinates(), Coordinates::Legacy);
         assert!(!t.mouse(press(0, 0)));
+    }
+
+    /// What the reset button on the window is for.
+    ///
+    /// A board draws with ANSI and then stops talking -- times the caller out,
+    /// drops the line, or simply gets cut off mid-sequence -- and what it
+    /// leaves is a terminal halfway through being set up. All of that state is
+    /// at this end, so none of it needs the far end's help to undo.
+    #[test]
+    fn a_reset_puts_back_everything_a_board_can_leave_behind() {
+        let mut t = Terminal::new(80, 24);
+        // Colour, the cursor parked, wrapping off, the cursor hidden, and then
+        // a sequence cut off half way through.
+        t.feed_bytes(b"[31;44m[10;40HXYZ[?7l[?25l[6n[1;2");
+        t.reset();
+
+        assert_eq!(t.cursor(), (0, 0));
+        assert!(t.autowrap, "wrapping stayed off");
+        assert!(t.cursor_visible, "the cursor stayed hidden");
+        assert!(!t.bell, "a bell rung before the reset");
+        assert!(t.take_reply().is_empty(), "answered a question from before it");
+        assert_eq!(t.cell(9, 39).ch, ' ', "the screen was not cleared");
+
+        // And the parser is not still waiting for the rest of that sequence,
+        // which would swallow whatever the next board sends first.
+        t.feed_bytes(b"A");
+        assert_eq!(t.cell(0, 0).ch, 'A');
+        assert_eq!(t.cell(0, 0).attr, Attr::default(), "the colour survived");
     }
 
     #[test]

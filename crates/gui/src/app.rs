@@ -433,10 +433,6 @@ impl ScopeApp {
                     // its own and will echo, answer, and decide for itself
                     // what is a command and what is data. Nothing is parsed
                     // on this side of the line.
-                    // Straight to the modem, which has an AT interpreter of
-                    // its own and will echo, answer, and decide for itself
-                    // what is a command and what is data. Nothing is parsed
-                    // on this side of the line.
                     Source::Live(_) => self.source.send(&typed),
                     Source::Telnet(session) => {
                         let session = std::sync::Arc::clone(session);
@@ -1825,10 +1821,30 @@ impl ScopeApp {
                     ),
                 };
             }
+            if self.tab == Tab::Terminal {
+                ui.separator();
+                // A board draws with ANSI and then stops talking, and what it
+                // leaves behind is the terminal it was halfway through setting
+                // up: a colour, a scrolling region, the cursor somewhere, the
+                // mouse reporting to nobody. All of that is this end's state
+                // and none of it survives a reset, so there is no reason to
+                // drop the call to get a readable screen back.
+                if ui
+                    .small_button("reset")
+                    .on_hover_text(
+                        "Put the screen back to a plain terminal -- colours, \
+                         cursor, wrapping and mouse reporting all as they \
+                         started. Local, so it can be done mid-call and the \
+                         far end will not know",
+                    )
+                    .clicked()
+                {
+                    self.console.term.reset();
+                }
+            }
             // In telnet mode this sits up with the host box instead, where
             // there is room for it.
             if self.tab == Tab::Terminal && !self.source.is_telnet() {
-                ui.separator();
                 ui.add(egui::Slider::new(&mut self.font_size, 9.0..=22.0).text("font"));
             }
         });
