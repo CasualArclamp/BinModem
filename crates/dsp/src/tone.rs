@@ -185,6 +185,8 @@ pub struct ReversalDetector {
     /// comparison within a second of arriving.
     drift: f64,
     drift_rate: f64,
+    /// Consecutive samples the phasor has been collapsed for.
+    null: u32,
     /// Samples the drift estimate has been forming over.
     ///
     /// An exponential average is worth nothing until it has run for its own
@@ -227,6 +229,7 @@ impl ReversalDetector {
             envelope: OnePole::new(0.100, fs),
             previous: None,
             drift: 0.0,
+            null: 0,
             settled: 0,
             // Half a second, in the one-pole form used everywhere else here.
             drift_rate: 1.0 - (-1.0 / (0.5 * fs)).exp(),
@@ -301,11 +304,60 @@ impl ReversalDetector {
         // over a couple of time constants and so contributes about a hertz to
         // an average half a second long.
         if let (Some(now), Some(prev)) = (now, self.previous) {
-            let turn = (prev.0 * now.1 - prev.1 * now.0)
-                .atan2(prev.0 * now.0 + prev.1 * now.1);
             self.settled = self.settled.saturating_add(1);
-            let rate = self.drift_rate.max(1.0 / f64::from(self.settled));
-            self.drift += (turn - self.drift) * rate;
+            // Not the stretch where the tone is still arriving. A phasor
+            // filling from nothing swings through most of a turn before it
+            // settles, and that turn belongs to this detector's own filter
+            // rather than to the carrier -- but the average cannot tell them
+            // apart, and while it is still short enough to be a plain mean
+            // the swing is most of what it holds.
+            //
+            // What that costs is precisely what this detector is for. A tone
+            // that arrived a moment ago reads as several hertz off frequency
+            // when it is exactly on it, and the gate below then refuses a
+            // reversal -- and the reversal it refuses is the first one,
+            // because a half turn of its own is what tips the estimate over
+            // the limit. Measured on the call in
+            // `a_far_end_that_starts_over_is_followed`: 0.61 of the limit
+            // before the reversal and past it during, on a carrier 81 ms old
+            // and dead on frequency, with the reversal the only thing that
+            // moved.
+            //
+            // The warm-up is the depth of the comparison window, which is six
+            // time constants and already the span this detector treats as
+            // long enough for one phase to have replaced another.
+            // Nor the reversal itself, which is the other way this estimate
+            // eats its own tail. Two opposite states either side of a step
+            // leave the phasor on one line through the origin: it collapses
+            // to nothing and comes back out the far side, so the whole half
+            // turn arrives in the one or two samples nearest the null as a
+            // step of pi rather than as a rotation. A single such sample is
+            // worth several hertz to an average still short enough to be a
+            // plain mean, which is enough on its own to close the gate on the
+            // reversal that produced it.
+            //
+            // A phasor collapsed under its own envelope is that null, the
+            // envelope being slow enough to still hold the tone that was
+            // there a moment ago. But so is a tone that has simply stopped,
+            // and the difference between them is only that a reversal fills
+            // back in: the magnitude goes as |1 - 2exp(-t/tau)| and is under a
+            // half for about one time constant. Two is the allowance, and it
+            // has to be about that -- exempting a phasor that stays collapsed
+            // takes away the one thing keeping a dead line quiet, and turned
+            // the twelve seconds of silence at the end of a recorded call
+            // into twelve reversals.
+            let warmup = self.history.len() as u32;
+            let collapsed = 2.0 * magnitude <= 0.5 * self.envelope.value();
+            self.null = if collapsed { self.null.saturating_add(1) } else { 0 };
+            let reversing = collapsed && self.null <= 2 * self.confirm;
+            if let Some(n) =
+                self.settled.checked_sub(warmup).filter(|n| *n > 0 && !reversing)
+            {
+                let turn = (prev.0 * now.1 - prev.1 * now.0)
+                    .atan2(prev.0 * now.0 + prev.1 * now.1);
+                let rate = self.drift_rate.max(1.0 / f64::from(n));
+                self.drift += (turn - self.drift) * rate;
+            }
         } else {
             // No tone, so nothing to measure and nothing worth keeping: what
             // it was turning at before it went away says nothing about what it
@@ -429,6 +481,45 @@ mod tests {
         assert_eq!(offset_tone(0.0, true), 1, "on frequency");
         assert_eq!(offset_tone(3.0, true), 1, "three hertz off");
         assert_eq!(offset_tone(-3.0, true), 1);
+    }
+
+    /// A reversal soon after the tone arrives is still a reversal.
+    ///
+    /// The other side of `a_tone_off_frequency_is_not_reversing`, and the way
+    /// the cure turned out to be worse than the disease in one corner. The
+    /// gate that refuses to judge a turning phasor takes its estimate of the
+    /// turn from the same phasor -- and a phasor filling from nothing swings
+    /// through most of a half turn on its way up, which is the filter's doing
+    /// and not the carrier's. Averaged in while the average is still a plain
+    /// mean, that reads as several hertz of offset on a tone that has none.
+    ///
+    /// So a carrier that had been up for eighty milliseconds sat at 0.61 of
+    /// the gate's limit, and its first reversal -- worth a further half turn
+    /// of apparent offset -- pushed it over and was refused on the strength of
+    /// itself. In V.32 that is the answering modem missing the calling modem's
+    /// AA to CC, which is the one thing it is waiting for.
+    #[test]
+    fn a_reversal_soon_after_the_tone_arrives_is_still_found() {
+        let fs = 16_000.0;
+        for lead_ms in [60.0, 87.0, 150.0, 300.0, 1000.0] {
+            let mut d = ReversalDetector::new(1800.0, 60.0, 0.008, fs);
+            for _ in 0..(fs as usize) {
+                d.feed(0.0);
+            }
+            let lead = (lead_ms / 1000.0 * fs) as usize;
+            let mut found = 0;
+            for i in 0..lead + (fs * 0.3) as usize {
+                let t = i as f64 / fs;
+                let flip = if i >= lead { std::f64::consts::PI } else { 0.0 };
+                if d.feed(0.5 * (std::f64::consts::TAU * 1800.0 * t + flip).sin()) {
+                    found += 1;
+                }
+            }
+            assert_eq!(
+                found, 1,
+                "a carrier {lead_ms} ms old reversed once and was counted                  {found} times",
+            );
+        }
     }
 
     /// A tone arriving is not a tone reversing.

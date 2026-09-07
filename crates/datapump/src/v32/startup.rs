@@ -932,6 +932,32 @@ impl Startup {
                     }
                     tx.set_signal(Signal::ConditioningS);
                     self.enter(State::PreRoll);
+                    return;
+                }
+                // 5.5.1: on "detection of one of two tones at frequencies
+                // 600 +/- 7 Hz and 3000 +/- 7 Hz for more than 128 symbol
+                // intervals", the calling modem goes back to repeating state
+                // A and into 5.4.1 again.
+                //
+                // This is the one state in the whole procedure where this end
+                // says nothing at all, and so the one place an answering modem
+                // that has given up and started again can go unnoticed for as
+                // long as anybody is prepared to hold the line. What is being
+                // waited for here is a conditioning signal, which stands a
+                // carrier up between those two tones; a bare alternation with
+                // no carrier is the answering modem back at the top of 5.4.2,
+                // waiting for a state A that is never coming.
+                //
+                // Not straight away, though. The answering modem goes on
+                // alternating until it hears this end stop, and that news
+                // takes the round trip that has just been measured to reach
+                // it -- so on a slow enough connection the tail of a perfectly
+                // healthy AC is longer than the rule's 128 symbols.
+                if self.hold(heard == Heard::Alternation)
+                    > self.round_trip + timing::MIN_ALTERNATION
+                {
+                    tx.set_signal(Signal::StateA);
+                    self.enter(State::Aa);
                 }
             }
             State::PreRoll => {

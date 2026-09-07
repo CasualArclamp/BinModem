@@ -190,6 +190,60 @@ fn the_round_trip_is_measured_and_the_line_delay_comes_out_of_it() {
     }
 }
 
+/// The far end gives up and starts again, and this end is still waiting.
+///
+/// From `live-1788758849.wav`. The answering modem went through AC, CA and AC
+/// and then abandoned the attempt: back to its answer tone for two seconds,
+/// and then alternating again from the top. This end had reached the one state
+/// in the procedure where it says nothing at all -- silent, waiting for a
+/// conditioning signal and a rate signal the far end had stopped intending to
+/// send -- and it stayed there, silent, for the twenty-two seconds until
+/// somebody put the phone down.
+///
+/// Neither end is at fault in that recording. The line had a round-trip delay
+/// of a second and a half, measured three ways, and every turn-round the far
+/// end made was a spec-shaped 64 symbols after the news reached it. What was
+/// missing was 5.5.1: hearing the alternating tones again means the far end is
+/// at the beginning, and the only thing that will move it is a state A.
+#[test]
+fn a_far_end_that_starts_over_is_followed() {
+    let offer = rate_signal(true, false);
+    let mut calling = Modem::new(Role::Calling, offer);
+    let mut answering = Modem::new(Role::Answering, offer);
+    let mut restarted_at = f64::NAN;
+    let mut connected_at = f64::NAN;
+
+    for i in 0..(40.0 * FS) as usize {
+        let (from_calling, from_answering) = (calling.out, answering.out);
+        calling.up.step(from_answering, &mut calling.tx, &mut calling.rx);
+        calling.out = calling.tx.next_sample();
+        answering.up.step(from_calling, &mut answering.tx, &mut answering.rx);
+        answering.out = answering.tx.next_sample();
+
+        // The moment this end falls silent to wait for R1, the far end throws
+        // the attempt away and begins again -- answer tone and all.
+        if restarted_at.is_nan() && calling.up.phase() == "awaiting R1" {
+            answering = Modem::new(Role::Answering, offer);
+            restarted_at = i as f64 / FS;
+        }
+        if connected_at.is_nan()
+            && matches!(calling.up.status(), Status::Connected(_))
+            && matches!(answering.up.status(), Status::Connected(_))
+        {
+            connected_at = i as f64 / FS;
+        }
+    }
+
+    assert!(restarted_at.is_finite(), "the call never got as far as R1");
+    assert!(
+        connected_at.is_finite(),
+        "the far end started over at {restarted_at:.2} s and this end never          followed it: {} and {}",
+        calling.up.phase(),
+        answering.up.phase(),
+    );
+    println!("restarted at {restarted_at:.2} s, connected at {connected_at:.2} s");
+}
+
 #[test]
 fn a_modem_that_hears_nothing_gives_up() {
     let offer = rate_signal(true, false);

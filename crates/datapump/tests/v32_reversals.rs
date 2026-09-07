@@ -36,6 +36,28 @@
 //! lost, because it was the one that was not chattering to begin with: three
 //! of its four counts survive unchanged. The fourth went from two to one and
 //! is not accounted for.
+//!
+//! Read again after the drift estimate stopped counting the reversal's own
+//! step, which is what a phasor collapsing through a null and coming back out
+//! the far side looks like sample by sample. That change was made because the
+//! estimate was closing the gate on the very reversal that moved it, on a
+//! carrier eighty milliseconds old and exactly on frequency -- see
+//! `a_reversal_soon_after_the_tone_arrives_is_still_found` in `dsp`.
+//!
+//! ```text
+//!                     carrier 1800    lower 600    upper 3000
+//!   live-1788758849       8 -> 12       2 -> 2        2 -> 2
+//!   live-1788758957       7 -> 13       0 -> 0        0 -> 0
+//!   live-1788760125     260 -> 284      5 -> 9        5 -> 8
+//! ```
+//!
+//! The sidebands hold on both telephone calls, which is what the V.32
+//! start-up reads. What moved is the carrier column, and where it moved is
+//! stretches that are not a V.32 carrier at all: the V.21 menu of `...849`,
+//! all of `...957`, which is a V.22bis call from end to end, and the eleven
+//! connected seconds of `...125`, where nothing consumes a reversal. The
+//! detector is chattier than it was on signals it was not built to watch, and
+//! no longer goes deaf on one it was.
 
 use dsp::{ReversalDetector, ToneDetector};
 
