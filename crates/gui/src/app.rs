@@ -786,6 +786,32 @@ impl ScopeApp {
                      times above its own average, so the same drive is not the \
                      same peak",
                 );
+
+                // The comparison, which is the thing the slider is really for.
+                // A transmit level is neither right nor wrong on its own; it
+                // is right or wrong against what is arriving.
+                if state.rx_rms > 1.0e-4 && state.tx_rms > 1.0e-4 {
+                    let over = 20.0 * (state.tx_rms / state.rx_rms).log10();
+                    let loud = over > 6.0;
+                    ui.label(
+                        RichText::new(format!("{over:+5.1} dB vs far end"))
+                            .monospace()
+                            .color(if loud {
+                                Color32::from_rgb(235, 100, 90)
+                            } else {
+                                Color32::from_rgb(140, 150, 165)
+                            }),
+                    )
+                    .on_hover_text(
+                        "How much louder this modem is than the one it is talking \
+                         to. Well above zero and something in the path is being \
+                         driven past what it can carry cleanly -- which does not \
+                         sound like silence at the far end, it sounds like a far \
+                         end that answers the robust parts of a handshake and none \
+                         of the delicate ones. V.21 at 300 bit/s survives almost \
+                         anything; a sixteen-point constellation does not",
+                    );
+                }
             }
         });
 

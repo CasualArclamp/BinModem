@@ -115,6 +115,17 @@ pub struct LineState {
     /// nearly three times higher than its own average. A drive setting that
     /// suits one clips the other.
     pub tx_peak: f32,
+    /// Mean power going out and mean power coming back, both as a fraction of
+    /// full scale, over the last little while.
+    ///
+    /// The pair rather than either alone, because what matters about a
+    /// transmit level is how it compares with the far end's. A modem sending
+    /// nine decibels louder than the signal arriving is a modem whose own
+    /// signal is being distorted somewhere in the path -- and the way that
+    /// shows is not silence but a far end that answers the robust parts of a
+    /// handshake and none of the delicate ones.
+    pub tx_rms: f32,
+    pub rx_rms: f32,
 }
 
 /// The one thing the window and the line thread share.
@@ -295,6 +306,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     let mut recording: Vec<f32> = Vec::new();
     let mut was_recording = false;
     let mut tx_peak = 0.0f32;
+    let (mut tx_rms, mut rx_rms) = (0.0f32, 0.0f32);
     let (mut errors_before, mut errors_at) = (0u64, Instant::now());
     let mut typed_recently = Instant::now() - Duration::from_secs(1);
     let mut heard_recently = typed_recently;
@@ -448,6 +460,19 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         // instead of flickering past between repaints.
         let block_peak = to_line.iter().fold(0.0f32, |m, s| m.max(s.abs()));
         tx_peak = (tx_peak * 0.90).max(block_peak);
+        // Averaged slowly, and only over blocks that carry something: a mean
+        // that includes the gaps is a mean of how much of the time the modem
+        // was talking, which is not the question.
+        let mean = |b: &[f32]| {
+            (b.iter().map(|s| s * s).sum::<f32>() / b.len().max(1) as f32).sqrt()
+        };
+        let (tx_now, rx_now) = (mean(&to_line), mean(&from_line));
+        if tx_now > 1.0e-4 {
+            tx_rms = tx_rms * 0.95 + tx_now * 0.05;
+        }
+        if rx_now > 1.0e-4 {
+            rx_rms = rx_rms * 0.95 + rx_now * 0.05;
+        }
         // What the monitor plays is what the modem heard, so the ear and the
         // scopes are looking at the same thing.
         sink.push(&from_line);
@@ -594,6 +619,8 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 state.dropped = dropped;
                 state.underruns = underruns;
                 state.tx_peak = tx_peak;
+                state.tx_rms = tx_rms;
+                state.rx_rms = rx_rms;
                 state.recording = recording_now
                     .then(|| recording.len() as f64 / 2.0 / FS);
                 let errors = modem.framing_errors();
