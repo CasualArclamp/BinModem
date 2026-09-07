@@ -1082,3 +1082,58 @@ fn compression_survives_being_handed_data_a_byte_at_a_time() {
     }
     assert_eq!(got, text, "what arrived is not what was sent");
 }
+
+/// Every frame is written down, including the ones nothing else keeps.
+///
+/// A link that establishes and then carries nothing is a question about the
+/// frames that could not be read, and every layer answers it with a number.
+/// The framing drops a frame that fails its check sequence, which is right;
+/// LAPM counts it, which is useful; and by the time anybody asks what the far
+/// end was actually sending, the octets are gone.
+#[test]
+fn what_crossed_is_kept_including_what_did_not_survive() {
+    let mut a = ec::Stack::new(Role::Originator, Params::default()).without_detection();
+    let mut b = ec::Stack::new(Role::Answerer, Params::default());
+    // Every fourth burst of bits from the answerer arrives with one flipped,
+    // which is a line rather than a wire.
+    let mut n = 0usize;
+    for _ in 0..400_000 {
+        let (x, mut y) = (a.next_bit(), b.next_bit());
+        n += 1;
+        if n.is_multiple_of(997) {
+            y = !y;
+        }
+        a.feed_bit(y);
+        b.feed_bit(x);
+        a.tick(0);
+        b.tick(0);
+        if a.is_connected() && b.is_connected() {
+            break;
+        }
+    }
+    assert!(a.is_connected() && b.is_connected(), "never established");
+
+    let log = a.take_log();
+    assert!(!log.is_empty(), "nothing was written down at all");
+    assert!(
+        log.iter().any(|f| f.outbound),
+        "nothing this end sent was written down",
+    );
+    assert!(
+        log.iter().any(|f| !f.outbound && f.intact),
+        "nothing that arrived intact was written down",
+    );
+    let broken: Vec<_> = log.iter().filter(|f| !f.outbound && !f.intact).collect();
+    assert!(
+        !broken.is_empty(),
+        "a line flipping a bit every 997 produced no damaged frame in {} frames",
+        log.len(),
+    );
+    assert!(
+        broken.iter().all(|f| !f.body.is_empty()),
+        "a damaged frame was written down with nothing in it, which is the \
+         one thing this exists to avoid",
+    );
+    // And taking them takes them: a second call is not the same frames again.
+    assert!(a.take_log().len() < log.len());
+}

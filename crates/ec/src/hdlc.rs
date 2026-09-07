@@ -307,6 +307,13 @@ pub struct Decoder {
     ones: u32,
     max_octets: usize,
     overlong: bool,
+    /// The octets of the frame just discarded, whatever was wrong with it.
+    ///
+    /// Throwing a frame that fails its check sequence away is right, and it is
+    /// also the only evidence there is of what a far end that cannot be read
+    /// is sending. A link that establishes and then carries nothing asks
+    /// exactly that question, and by the time it is asked the bytes are gone.
+    discarded: Vec<u8>,
 }
 
 impl Decoder {
@@ -323,6 +330,7 @@ impl Decoder {
             // for the header, FCS and a negotiated larger frame size.
             max_octets: 2048,
             overlong: false,
+            discarded: Vec::new(),
         }
     }
 
@@ -349,6 +357,14 @@ impl Decoder {
     /// learns from a SABME which width the connection is using.
     pub fn matched_fcs(&self) -> Fcs {
         self.matched
+    }
+
+    /// The octets of the frame just discarded, if the last one was.
+    ///
+    /// Empty otherwise, and overwritten by the next frame either way, so it is
+    /// worth reading only where the error was.
+    pub fn discarded(&self) -> &[u8] {
+        &self.discarded
     }
 
     /// Feed one received bit. Yields a frame when one completes.
@@ -403,6 +419,21 @@ impl Decoder {
                 self.enter_frame();
                 let done = Self::finish(bits.clone(), self.fcs, overlong);
                 self.matched = self.fcs;
+                // Kept before the other width is tried, since that may succeed
+                // and this is wanted only for the frames that do not.
+                self.discarded = match &done {
+                    Some(Err(_)) => bits
+                        .as_chunks::<8>()
+                        .0
+                        .iter()
+                        .map(|c| {
+                            c.iter().enumerate().fold(0u8, |b, (i, &v)| {
+                                b | (u8::from(v) << i)
+                            })
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
                 // The other width, only if this one failed the check and the
                 // connection has not yet settled which it is using. A frame
                 // that is too short or not octet aligned is wrong at either

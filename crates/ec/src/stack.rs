@@ -65,6 +65,30 @@ pub enum Phase {
     Transparent,
 }
 
+/// One frame as it crossed the line, for a record of what a call carried.
+///
+/// The whole frame between the flags, without the check sequence the framing
+/// adds and before anything above has looked at it -- so a frame that did not
+/// survive the line is here too, and is the only place it exists. That is the
+/// point: a link that comes up and then carries nothing is a question about
+/// the frames that could not be read, and by the time anybody asks, every
+/// layer above has already dropped them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Crossed {
+    /// Sent by this end, rather than received.
+    pub outbound: bool,
+    /// Whether it survived its check sequence. Always true for outbound.
+    pub intact: bool,
+    pub body: Vec<u8>,
+}
+
+/// How many frames are kept before the oldest is dropped.
+///
+/// A call at 2400 bit/s cannot produce more than about twenty a second, and
+/// whatever is draining this is doing so every audio block. The cap is here so
+/// that nothing draining it is a bounded mistake rather than an unbounded one.
+const LOG_FRAMES: usize = 4096;
+
 /// One end of a V.42 connection.
 #[derive(Debug)]
 pub struct Stack {
@@ -80,6 +104,8 @@ pub struct Stack {
     /// Frames that arrived but could not be read, which is the measure of how
     /// the line is behaving.
     damaged: u64,
+    /// Every frame either way, until somebody takes them.
+    log: Vec<Crossed>,
     phase: Phase,
     /// The detection phase, until it is over.
     detect: Detect,
@@ -143,6 +169,7 @@ impl Stack {
             compression: None,
             delivered: Vec::new(),
             damaged: 0,
+            log: Vec::new(),
             phase: Phase::Detecting,
             detect: match role {
                 Role::Originator => {
@@ -325,6 +352,18 @@ impl Stack {
         self.damaged
     }
 
+    /// Take the frames that have crossed since this was last called.
+    pub fn take_log(&mut self) -> Vec<Crossed> {
+        std::mem::take(&mut self.log)
+    }
+
+    fn note(&mut self, outbound: bool, intact: bool, body: &[u8]) {
+        if self.log.len() >= LOG_FRAMES {
+            self.log.remove(0);
+        }
+        self.log.push(Crossed { outbound, intact, body: body.to_vec() });
+    }
+
     /// Ask for the link to be established.
     ///
     /// Only meaningful once the detection phase has decided there is something
@@ -431,11 +470,13 @@ impl Stack {
                 }
                 .encode(DLCI_DATA, self.role, Kind::Command);
                 self.encoder.frame_with(&body, Fcs::Bits16);
+                self.note(true, true, &body);
                 queued = true;
             }
             while let Some((frame, kind)) = self.lapm.poll_transmit() {
                 let body = frame.encode(DLCI_DATA, self.role, kind);
                 self.encoder.frame(&body);
+                self.note(true, true, &body);
                 queued = true;
             }
             if !queued {
@@ -463,6 +504,8 @@ impl Stack {
             return;
         };
         let Ok(body) = result else {
+            let discarded = self.decoder.discarded().to_vec();
+            self.note(false, false, &discarded);
             // A frame that did not survive the line is dropped and left to the
             // retransmission machinery, which is what it is for. Counting them
             // is worth doing: it is the difference between a link that is
@@ -470,6 +513,7 @@ impl Stack {
             self.damaged += 1;
             return;
         };
+        self.note(false, true, &body);
         let Ok((address, frame)) = Frame::decode(&body, self.role) else {
             self.damaged += 1;
             return;
@@ -537,6 +581,7 @@ impl Stack {
             // 8.10.2 keeps this one at 16 bits whatever the connection has
             // moved to, because the command it answers was sent at 16.
             self.encoder.frame_with(&body, Fcs::Bits16);
+            self.note(true, true, &body);
         }
         self.begin_protocol();
     }

@@ -387,6 +387,15 @@ impl Modem {
         self.pump.as_ref().map_or("on hook", Pump::phase)
     }
 
+    /// Every LAPM frame that has crossed since this was last called.
+    ///
+    /// Empty when there is no error control, which is the honest answer: with
+    /// none there are no frames, only characters, and those the terminal
+    /// already sees.
+    pub fn take_frame_log(&mut self) -> Vec<ec::stack::Crossed> {
+        self.ec.as_mut().map(ec::stack::Stack::take_log).unwrap_or_default()
+    }
+
     /// The round trip the handshake measured, where it measures one.
     pub fn round_trip_symbols(&self) -> Option<u64> {
         match self.pump.as_ref() {

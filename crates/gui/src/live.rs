@@ -392,6 +392,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // through a receiver as many times as it takes with the other half of the
     // conversation there to check the answer against.
     let mut recording: Vec<f32> = Vec::new();
+    // What crossed inside the error control, written beside the audio. The
+    // recording says what was on the line and the terminal says what came out
+    // of it, and neither says what the far end sent -- which on a link that
+    // establishes and then carries nothing is the only question there is.
+    let mut frames: Vec<String> = Vec::new();
     let mut was_recording = false;
     let mut tx_peak = 0.0f32;
     let (mut tx_rms, mut rx_rms) = (0.0f32, 0.0f32);
@@ -586,9 +591,14 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     recording.push(*sent);
                 }
             }
+            let at = recording.len() as f64 / 2.0 / FS;
+            for f in modem.take_frame_log() {
+                frames.push(frame_line(at, &f));
+            }
         } else if was_recording {
-            keep(&recording, &tx, &session);
+            keep(&recording, &frames, &tx, &session);
             recording = Vec::new();
+            frames = Vec::new();
         }
         was_recording = recording_now;
 
@@ -780,12 +790,39 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // call and not: it is over, it is the one that was worth keeping, and the
     // obvious thing to do next is close the window.
     if was_recording {
-        keep(&recording, &tx, &session);
+        keep(&recording, &frames, &tx, &session);
     }
 }
 
+/// One frame, as a line of a log: when, which way, and every octet of it.
+///
+/// The address and control are left in. Naming them here would mean decoding
+/// them twice, and the frames worth reading in this file are the ones that did
+/// not decode -- so what it holds is what arrived, and the reading is done by
+/// whoever opens it.
+fn frame_line(at: f64, f: &ec::stack::Crossed) -> String {
+    let way = match (f.outbound, f.intact) {
+        (true, _) => "tx",
+        (false, true) => "rx",
+        (false, false) => "!!",
+    };
+    let hex: String =
+        f.body.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ");
+    let text: String = f
+        .body
+        .iter()
+        .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
+        .collect();
+    format!("{at:9.3}  {way}  {:3}  {hex}  |{text}|", f.body.len())
+}
+
 /// Write a recording out and say so, wherever the decision to keep it was made.
-fn keep(recording: &[f32], tx: &Publisher, session: &Arc<Session>) {
+fn keep(
+    recording: &[f32],
+    frames: &[String],
+    tx: &Publisher,
+    session: &Arc<Session>,
+) {
     if recording.is_empty() {
         return;
     }
@@ -793,6 +830,24 @@ fn keep(recording: &[f32], tx: &Publisher, session: &Arc<Session>) {
     match save(recording) {
         Ok(path) => {
             tx.log(Direction::Note, format!("kept {seconds:.1} s as {path}"));
+            if !frames.is_empty() {
+                let beside = format!("{path}.frames.txt");
+                let head = "        s  way  len  frame
+";
+                let body: String = frames.join("
+");
+                match std::fs::write(&beside, format!("{head}{body}
+")) {
+                    Ok(()) => tx.log(
+                        Direction::Note,
+                        format!("{} frames as {beside}", frames.len()),
+                    ),
+                    Err(e) => tx.log(
+                        Direction::Note,
+                        format!("could not write the frames: {e}"),
+                    ),
+                }
+            }
             if let Ok(mut state) = session.state.lock() {
                 state.recorded_to = Some(path);
             }
