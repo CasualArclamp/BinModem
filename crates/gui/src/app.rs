@@ -13,33 +13,6 @@ use crate::live;
 use crate::net;
 use crate::scopes::{self, Waterfall};
 
-/// Input devices that are one half of a two-wire line, best first.
-const LINE_IN: &[&str] = &["CABLE-A Output", "CABLE Output"];
-/// And the other half.
-const LINE_OUT: &[&str] = &["CABLE-B Input", "CABLE Input"];
-
-/// Where in `names` the first of `wanted` appears, if any of them does.
-fn named(names: &[String], wanted: &[&str]) -> Option<usize> {
-    wanted
-        .iter()
-        .find_map(|want| names.iter().position(|n| n.contains(want)))
-}
-
-/// The two cables a machine set up for this has, if it has them.
-///
-/// Named devices only, and nothing is guessed at. Falling back to whatever
-/// device happens to be first would open the line on the speakers, and a
-/// handshake played through speakers is no use to anyone -- so a machine
-/// without the cables gets an empty picker and a person to fill it in, which
-/// is the honest answer to not knowing.
-pub fn preferred_line() -> Option<(String, String)> {
-    let inputs = line::input_devices();
-    let outputs = line::output_devices();
-    let input = inputs.get(named(&inputs, LINE_IN)?)?.clone();
-    let output = outputs.get(named(&outputs, LINE_OUT)?)?.clone();
-    Some((input, output))
-}
-
 /// Where what is on the scope comes from.
 pub enum Source {
     /// A recording of a call someone else placed. It can be watched, paused
@@ -338,8 +311,8 @@ impl ScopeApp {
         // says. Named first because a machine with A and B has usually got
         // them for this, and the plain names are what a single-cable
         // installation offers.
-        let chosen_in = named(&inputs, LINE_IN).unwrap_or(0);
-        let chosen_out = named(&outputs, LINE_OUT).unwrap_or(0);
+        let chosen_in = live::named(&inputs, live::LINE_IN).unwrap_or(0);
+        let chosen_out = live::named(&outputs, live::LINE_OUT).unwrap_or(0);
         Self {
             rx,
             control,
@@ -1183,25 +1156,64 @@ impl ScopeApp {
                         });
                         ui.end_row();
 
-                        ui.label(RichText::new("report").monospace().color(dim));
+                        ui.label(RichText::new("tell me").monospace().color(dim));
                         ui.vertical(|ui| {
-                            ui.checkbox(&mut p.report_error_control, "+ER, before the CONNECT")
-                                .on_hover_text(
-                                    "V.250 6.5.5: +ER: LAPM or +ER: NONE, issued once the \
-                                     modem has determined which error control protocol \
-                                     will be used, before the final result code",
-                                );
-                            ui.checkbox(&mut p.report_compression, "+DR, before the CONNECT")
-                                .on_hover_text(
-                                    "V.250 6.6.3: +DR: V42B or +DR: NONE, issued after the \
-                                     error control report and before the CONNECT",
-                                );
+                            ui.checkbox(
+                                &mut p.report_error_control,
+                                "which error control was agreed  (+ER)",
+                            )
+                            .on_hover_text(
+                                "Prints +ER: LAPM or +ER: NONE to the terminal just \
+                                 before the CONNECT. V.250 6.5.5 puts it there on \
+                                 purpose: the modem has settled which protocol it will \
+                                 use by then, and CONNECT is the last thing said, so \
+                                 what is above it describes the call about to start. \
+                                 The window's own log line says more than this; it is \
+                                 for a terminal program reading the modem, or for a \
+                                 transcript that has to hold the answer",
+                            );
+                            ui.checkbox(
+                                &mut p.report_compression,
+                                "which compression was agreed  (+DR)",
+                            )
+                            .on_hover_text(
+                                "Prints +DR: V42B or +DR: NONE, between the error \
+                                 control report and the CONNECT (V.250 6.6.3)",
+                            );
                         });
                         ui.end_row();
                     });
 
                 ui.add_space(4.0);
                 let p = self.protection;
+                if p.report_error_control || p.report_compression {
+                    // What the terminal will actually see, since the point of
+                    // the setting is a line of text and nothing else.
+                    let mut shown = String::new();
+                    if p.report_error_control {
+                        shown.push_str(if p.wants_error_control() {
+                            "+ER: LAPM   "
+                        } else {
+                            "+ER: NONE   "
+                        });
+                    }
+                    if p.report_compression {
+                        shown.push_str(
+                            if p.wants_error_control() && p.compress {
+                                "+DR: V42B   "
+                            } else {
+                                "+DR: NONE   "
+                            },
+                        );
+                    }
+                    shown.push_str("CONNECT 9600");
+                    ui.label(
+                        RichText::new(format!("the terminal will see:  {shown}"))
+                            .small()
+                            .monospace()
+                            .color(dim),
+                    );
+                }
                 // The one thing worth saying out loud, because the numbers
                 // look like they are being given away and they are not.
                 let note = if !p.wants_error_control() {
@@ -1876,7 +1888,7 @@ mod tests {
     #[test]
     fn the_line_is_found_by_name_and_not_by_position() {
         let outs = outputs();
-        let i = named(&outs, LINE_OUT).expect("the B cable is in that list");
+        let i = live::named(&outs, live::LINE_OUT).expect("the B cable is in that list");
         assert!(outs[i].starts_with("CABLE-B Input"), "found {:?}", outs[i]);
     }
 
@@ -1898,7 +1910,7 @@ mod tests {
         .iter()
         .map(|s| (*s).to_owned())
         .collect();
-        let i = named(&single, LINE_OUT).expect("one cable is still a cable");
+        let i = live::named(&single, live::LINE_OUT).expect("one cable is still a cable");
         assert!(!single[i].contains("16ch"), "matched {:?}", single[i]);
         assert!(single[i].starts_with("CABLE Input"));
     }
@@ -1912,7 +1924,7 @@ mod tests {
         // anything outside the machine.
         let mut both = outputs();
         both.push("CABLE Input (VB-Audio Virtual Cable)".to_owned());
-        let i = named(&both, LINE_OUT).expect("B is in there");
+        let i = live::named(&both, live::LINE_OUT).expect("B is in there");
         assert!(both[i].starts_with("CABLE-B Input"), "matched {:?}", both[i]);
     }
 
@@ -1925,7 +1937,7 @@ mod tests {
             .iter()
             .map(|s| (*s).to_owned())
             .collect();
-        assert_eq!(named(&plain, LINE_IN), None);
-        assert_eq!(named(&plain, LINE_OUT), None);
+        assert_eq!(live::named(&plain, live::LINE_IN), None);
+        assert_eq!(live::named(&plain, live::LINE_OUT), None);
     }
 }

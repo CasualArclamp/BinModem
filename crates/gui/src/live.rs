@@ -38,6 +38,47 @@ enum Request {
     Close,
 }
 
+/// Input devices that are one half of a two-wire line, best first.
+///
+/// One cable is a two-wire line: everything written to it comes back, so a
+/// modem on one hears its own transmission at full strength. That is a fine
+/// model of a telephone pair with two modems across it and useless for
+/// reaching anything outside the machine, where what is wanted is a hybrid and
+/// there is none. Two cables are the hybrid: A carries what the softphone
+/// plays, B carries what this modem says, and neither modem hears itself.
+pub const LINE_IN: &[&str] = &["CABLE-A Output", "CABLE Output"];
+/// And the other half.
+pub const LINE_OUT: &[&str] = &["CABLE-B Input", "CABLE Input"];
+
+/// Where in `names` the first of `wanted` appears, if any of them does.
+pub fn named(names: &[String], wanted: &[&str]) -> Option<usize> {
+    wanted
+        .iter()
+        .find_map(|want| names.iter().position(|n| n.contains(want)))
+}
+
+/// The two cables a machine set up for this has, if it has them.
+///
+/// Named devices only, and nothing is guessed at. Falling back to whatever
+/// device happens to be first would open the line on the speakers, and a
+/// handshake played through speakers is no use to anyone -- so a machine
+/// without the cables gets an empty picker and a person to fill it in, which
+/// is the honest answer to not knowing.
+///
+/// Called from the line's own thread, which is the thread that opens the
+/// device. Enumerating audio devices initialises COM, and doing that on the
+/// main thread before the window and its graphics context exist is worth not
+/// doing on general Windows principle -- but only on principle. It was moved
+/// here while chasing a fault that turned out to be a telephone routed
+/// somewhere else, and it fixed nothing.
+fn preferred_line() -> Option<(String, String)> {
+    let inputs = line::input_devices();
+    let outputs = line::output_devices();
+    let input = inputs.get(named(&inputs, LINE_IN)?)?.clone();
+    let output = outputs.get(named(&outputs, LINE_OUT)?)?.clone();
+    Some((input, output))
+}
+
 /// What the line is doing, for the window to show.
 #[derive(Debug, Clone, Default)]
 pub struct LineState {
@@ -170,6 +211,12 @@ impl Session {
         self.state.lock().map(|s| s.clone()).unwrap_or_default()
     }
 
+    /// Whether a request is already waiting, so that one made before the
+    /// thread started is not quietly replaced by the one it would have chosen.
+    fn has_request(&self) -> bool {
+        self.request.lock().map(|s| s.is_some()).unwrap_or(false)
+    }
+
     fn ask(&self, request: Request) {
         if let Ok(mut slot) = self.request.lock() {
             *slot = Some(request);
@@ -206,7 +253,20 @@ pub fn spawn(
 }
 
 fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<AudioSink>) {
-    tx.log(Direction::Note, "modem ready; choose a line and open it");
+    // The line to open when nobody named one. Decided here rather than in
+    // `main` because this is the thread that opens the device, so it is the
+    // one that should go looking for it.
+    if !session.has_request() {
+        if let Some((input, output)) = preferred_line() {
+            session.open(&input, &output);
+        } else {
+            tx.log(
+                Direction::Note,
+                "no VB-Audio cables found; choose a line in the window",
+            );
+        }
+    }
+    tx.log(Direction::Note, "modem ready");
     tx.log(Direction::Note, "type AT commands; ATD to dial, ATA to answer, +++ to escape");
 
     // Opened and closed on request, and never handed across a thread: on
