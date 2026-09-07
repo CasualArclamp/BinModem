@@ -2,10 +2,16 @@
 
 pub mod crc;
 pub mod escape;
+pub mod file;
 pub mod header;
+pub mod receive;
+pub mod send;
 pub mod subpacket;
 
+pub use file::FileInfo;
 pub use header::{Header, HeaderError, Style};
+pub use receive::{Received, Receiver};
+pub use send::{Failure, Progress, Sender, State};
 pub use subpacket::{Ending, Subpacket, SubpacketError};
 
 /// The character a header starts with, `*` (7.3.1, Figure 2).
