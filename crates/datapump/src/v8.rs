@@ -158,6 +158,12 @@ pub struct Modem {
     chosen: Option<Modulation>,
     /// The error control both ends named, if they named any (Table 6).
     agreed: Protocol,
+    /// The menu the far end sent, which is what it has said about itself.
+    ///
+    /// From the calling end this is the joint menu of 7.4 and so already the
+    /// intersection: what the far end has *and* this end offered. From the
+    /// answering end it is the call menu, which is everything the far end has.
+    far_menu: Option<Menu>,
     /// Octets of the sequence being sent, and where in it we are.
     outgoing: Vec<u8>,
     /// Zero octets of CJ seen so far (8.2.3 wants all three).
@@ -191,6 +197,7 @@ impl Modem {
             repeats: 0,
             chosen: None,
             agreed: Protocol::Unstated,
+            far_menu: None,
             outgoing: Vec::new(),
             cj: 0,
         }
@@ -241,6 +248,11 @@ impl Modem {
     /// Whether both ends named LAPM in the protocol category.
     pub fn lapm(&self) -> bool {
         self.agreed == Protocol::Lapm
+    }
+
+    /// The menu the far end sent, once one has arrived.
+    pub fn far_menu(&self) -> Option<Menu> {
+        self.far_menu
     }
 
     /// One sample in, one sample out.
@@ -374,6 +386,7 @@ impl Modem {
                 // 8.1.2: "after a minimum of 2 identical JM sequences have
                 // been received... signal CJ shall be transmitted."
                 if let Some(jm) = self.settled() {
+                    self.far_menu = Some(jm);
                     self.chosen = jm.chosen();
                     // A JM naming LAPM is an answer to the CM that asked, so
                     // by 7.4 it is already the intersection of the two.
@@ -402,6 +415,7 @@ impl Modem {
                 // 8.2.2: "upon receiving a minimum of 2 identical CM
                 // sequences, the DCE shall transmit JM".
                 if let Some(cm) = self.settled() {
+                    self.far_menu = Some(cm);
                     let jm = cm.joint(self.menu.modulations, self.menu.protocol);
                     self.chosen = jm.chosen();
                     self.agreed = jm.protocol;

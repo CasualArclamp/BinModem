@@ -581,6 +581,8 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 };
                 f.modulation = modem.standard();
                 f.line_phase = modem.line_phase();
+                f.distant.clear();
+                f.distant.extend(modem.distant());
                 f.bit_rate = rate;
                 f.rx_bytes = rx_bytes;
                 f.tx_bytes = tx_bytes;

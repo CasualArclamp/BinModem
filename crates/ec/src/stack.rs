@@ -92,6 +92,10 @@ pub struct Stack {
     limits: (u16, u8),
     /// Whether the far end has already said it does LAPM, in V.8.
     declared: bool,
+    /// What the far end answered in the detection phase, if it answered.
+    heard_adp: Option<Answer>,
+    /// What the far end proposed in XID, if it sent one.
+    heard_xid: Option<Xid>,
     /// The check sequence width the two ends agreed on, once they have.
     ///
     /// Not in use yet when it is set: V.42 8.10.2 keeps XID at 16 bits and
@@ -144,6 +148,8 @@ impl Stack {
             offer: Compression::Neither,
             limits: (v42bis::OFFERED_N2, v42bis::OFFERED_N7),
             declared: false,
+            heard_adp: None,
+            heard_xid: None,
             agreed_fcs: Fcs::Bits16,
             established: false,
             gave_up: false,
@@ -243,6 +249,20 @@ impl Stack {
             encoder: v42bis::Encoder::new(params),
             decoder: v42bis::Decoder::new(params),
         });
+    }
+
+    /// What the far end said in the detection phase.
+    ///
+    /// `None` where it said nothing at all, which is not the same as declining
+    /// -- V.42 Table 3 has a pattern for declining and this is the absence of
+    /// any pattern.
+    pub fn far_answer(&self) -> Option<Answer> {
+        self.heard_adp
+    }
+
+    /// What the far end proposed in XID, if it sent one.
+    pub fn far_xid(&self) -> Option<Xid> {
+        self.heard_xid
     }
 
     /// Whether the question of error control has been answered.
@@ -467,6 +487,7 @@ impl Stack {
             self.damaged += 1;
             return;
         };
+        self.heard_xid = Some(theirs);
         let agreed = self.proposal().resolve(&theirs);
         if let Some(params) = agreed.v42bis_params() {
             self.enable_compression(params);
@@ -507,6 +528,9 @@ impl Stack {
 
     /// Act on how the detection phase came out (7.2.1.2, 7.2.1.3).
     fn settle_detection(&mut self, outcome: Outcome) {
+        if let Outcome::Answered(a) = outcome {
+            self.heard_adp = Some(a);
+        }
         match outcome {
             Outcome::Pending => {}
             Outcome::Answered(a) if a.error_controlled() => {

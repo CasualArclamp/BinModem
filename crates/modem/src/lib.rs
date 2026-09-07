@@ -317,6 +317,8 @@ pub struct Modem {
     /// conversation that settles it, and it has to finish before there is a
     /// pump to build.
     negotiation: Option<v8line::Modem>,
+    /// What V.8 heard the far end say, kept after the negotiation is put away.
+    far_menu: Option<v8::Menu>,
     /// Whether V.8 settled on LAPM before the data carriers went up.
     declared_lapm: bool,
     /// The rate of a connection the terminal has not been told about yet.
@@ -346,6 +348,7 @@ impl Modem {
             elapsed_samples: 0.0,
             since_dial_ms: 0,
             negotiation: None,
+            far_menu: None,
             declared_lapm: false,
             announce: None,
         }
@@ -507,6 +510,79 @@ impl Modem {
     /// Whether error control is running on the current call.
     pub fn error_controlled(&self) -> bool {
         self.ec.as_ref().is_some_and(Stack::is_connected)
+    }
+
+    /// Everything the far end has said about itself, as label and value.
+    ///
+    /// Gathered from the three places it says anything: the V.8 menu, which is
+    /// what it can do; the detection phase, which is whether it does error
+    /// control; and XID, which is the terms. None of it reaches the terminal
+    /// and all of it is the answer to why a call went the way it did.
+    ///
+    /// Empty before there is a call, because saying nothing is the honest
+    /// report of a far end that has not spoken.
+    pub fn distant(&self) -> Vec<(&'static str, String)> {
+        let mut rows = Vec::new();
+        if let Some(menu) = self.far_menu {
+            let modes: Vec<&str> = menu.modulations.iter().map(v8::Modulation::name).collect();
+            rows.push((
+                "modulations",
+                if modes.is_empty() { "none in common".to_owned() } else { modes.join(", ") },
+            ));
+            rows.push((
+                "V.8 protocol",
+                match menu.protocol {
+                    v8::Protocol::Lapm => "LAPM".to_owned(),
+                    v8::Protocol::Extended => "an extension octet".to_owned(),
+                    v8::Protocol::Unstated => "not stated".to_owned(),
+                },
+            ));
+        }
+        if let Some(ec) = self.ec.as_ref() {
+            // V.42 Table 3 and Appendix VI.1.
+            rows.push((
+                "answered",
+                match ec.far_answer() {
+                    Some(ec::detect::Answer::ErrorControl) => "EC, V.42 supported".to_owned(),
+                    Some(ec::detect::Answer::None) => "E NUL, no error control".to_owned(),
+                    Some(ec::detect::Answer::Extended(c)) => {
+                        format!("E{}, V.42 and more", c as char)
+                    }
+                    Some(ec::detect::Answer::Reserved(c)) => format!("E {c:#04x}, reserved"),
+                    None => "nothing".to_owned(),
+                },
+            ));
+            match ec.far_xid() {
+                Some(xid) => {
+                    if let Some(n) = xid.n401_transmit {
+                        rows.push(("frame size", format!("{n} octets")));
+                    }
+                    if let Some(k) = xid.window_transmit {
+                        rows.push(("window", format!("{k} frames")));
+                    }
+                    rows.push((
+                        "check sequence",
+                        if xid.fcs32 { "32 bit offered" } else { "16 bit" }.to_owned(),
+                    ));
+                    if xid.srej_single || xid.srej_multiple {
+                        rows.push(("selective reject", "offered".to_owned()));
+                    }
+                    rows.push((
+                        "compression",
+                        match (xid.compression, xid.codewords, xid.max_string) {
+                            (Some(c), Some(n2), Some(n7))
+                                if c != ec::xid::Compression::Neither =>
+                            {
+                                format!("V.42bis, {n2} codewords, strings to {n7}")
+                            }
+                            _ => "none offered".to_owned(),
+                        },
+                    ));
+                }
+                None => rows.push(("XID", "none sent".to_owned())),
+            }
+        }
+        rows
     }
 
     /// Where error control has got to, as a call is happening.
@@ -919,6 +995,7 @@ impl Modem {
         self.since_dial_ms = 0;
         self.rate = 0;
         self.ec = None;
+        self.far_menu = None;
         self.declared_lapm = false;
         self.announce = None;
         self.outbound.clear();
@@ -1007,6 +1084,7 @@ impl Modem {
             v8line::Status::Negotiating => {}
             v8line::Status::Agreed(modulation) => {
                 self.declared_lapm = negotiation.lapm();
+                self.far_menu = negotiation.far_menu();
                 self.negotiation = None;
                 self.start_pump(Some(modulation));
             }

@@ -117,6 +117,11 @@ pub struct Frame {
     /// stuck somewhere particular, and "negotiating" for twenty seconds says
     /// nothing about which somewhere.
     pub line_phase: &'static str,
+    /// What the far end has said about itself, as label and value.
+    ///
+    /// Owned strings rather than borrowed, because most of these are numbers
+    /// the far end chose and none of them are known at compile time.
+    pub distant: Vec<(&'static str, String)>,
     /// Negotiated line rate once connected.
     pub bit_rate: Option<u32>,
     pub rx_bytes: u64,
@@ -133,6 +138,9 @@ impl Frame {
             baseband: vec![0.0; scope_len],
             constellation: Vec::with_capacity(256),
             symbols: Vec::with_capacity(256),
+            // Ten rows is more than the far end has ever had to say, and
+            // publishing never resizes what it was given.
+            distant: Vec::with_capacity(10),
             tones: 2,
             symbol_label: "-",
             spectrum_db: vec![-120.0; spectrum_bins],

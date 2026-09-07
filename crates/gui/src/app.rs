@@ -245,6 +245,9 @@ const WATERFALL_W: usize = 720;
 const WATERFALL_H: usize = 260;
 const PANEL_W: f32 = 280.0;
 
+/// Width of the panel holding the far end's account of itself.
+const DISTANT_W: f32 = 250.0;
+
 pub struct ScopeApp {
     rx: Subscriber,
     control: Arc<Control>,
@@ -1611,12 +1614,62 @@ impl ScopeApp {
         ui.separator();
         match self.tab {
             Tab::Terminal => {
+                // A socket has no far end that describes itself, so there is
+                // nothing to put here and the terminal takes the room.
+                if !self.source.is_telnet() {
+                    egui::Panel::right("distant")
+                        .resizable(false)
+                        .exact_size(DISTANT_W)
+                        .show(ui, |ui| self.distant(ui));
+                }
                 egui::ScrollArea::both()
                     .auto_shrink([false, false])
                     .show(ui, |ui| self.terminal_pane(ui));
             }
             Tab::Transcript => self.transcript(ui),
         }
+    }
+
+    /// What the far end has said about itself.
+    ///
+    /// Beside the terminal because it is about the same call and there is room
+    /// there. Everything in it was said by the other modem: which modulations
+    /// it has, whether it named LAPM in V.8, what it answered in the detection
+    /// phase, and what it proposed in XID. None of that reaches the terminal
+    /// and all of it is the answer to why a call went the way it did.
+    fn distant(&self, ui: &mut egui::Ui) {
+        let dim = Color32::from_rgb(140, 150, 165);
+        let bright = Color32::from_rgb(220, 225, 235);
+        ui.add_space(6.0);
+        ui.label(RichText::new("distant").strong());
+        ui.add_space(4.0);
+        if self.frame.distant.is_empty() {
+            ui.label(
+                RichText::new(
+                    "Nothing said yet. A far end describes itself in the V.8 menu,                      in the detection phase, and in XID -- and a call that gets                      none of the way through says nothing at all.",
+                )
+                .small()
+                .color(dim),
+            );
+            return;
+        }
+        egui::Grid::new("distant-rows")
+            .num_columns(2)
+            .spacing([10.0, 4.0])
+            .show(ui, |ui| {
+                for (key, value) in &self.frame.distant {
+                    ui.label(RichText::new(*key).monospace().small().color(dim));
+                    // Wrapped, because a list of modulations is longer than the
+                    // panel and truncating it would hide the interesting end.
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(value).monospace().small().color(bright),
+                        )
+                        .wrap(),
+                    );
+                    ui.end_row();
+                }
+            });
     }
 
     /// Label for the symbol scope, as the modem itself reports it.
