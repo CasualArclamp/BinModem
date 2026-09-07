@@ -22,13 +22,48 @@ pub const DEFAULT_N401: usize = 128;
 /// Outstanding I frames allowed. V.42 9.2.4 sets the default at 15.
 pub const DEFAULT_K: u8 = 15;
 
-/// Acknowledgement timer in milliseconds.
+/// Acknowledgement timer in milliseconds, when the rate is not known.
 ///
 /// V.42 9.2.1 defines what T401 is for but gives no default value at all, only
 /// pointing at Appendix IV for the factors involved. Three seconds is
 /// comfortable at 300 bps, where a full 128-octet frame alone takes over four
 /// seconds to send, and is the sort of value real modems used at low speed.
+///
+/// It is far too long at any rate this modem actually runs V.42 at, which is
+/// why [`t401_for`] exists.
 pub const DEFAULT_T401_MS: u32 = 3000;
+
+/// The acknowledgement timer for a given line rate (V.42 Appendix IV).
+///
+/// The appendix does not give a value, it gives a sum: T401 must be at least
+/// "Ta + Tb + Tc + Td + Te + Tf" -- the propagation each way, the processing at
+/// each end, the time to finish whatever frame was already going out, and the
+/// time to send the acknowledgement. Only two of those are large, and both are
+/// the line rate: a full information frame in progress, and the supervisory
+/// frame that answers it.
+///
+/// Three seconds regardless of rate is what this was, and it is nearly seven
+/// times the transmission terms at 2400 bit/s. That does not sound like much
+/// until the retransmission limit multiplies it: a far end that never answers
+/// a SABME costs three seconds an attempt, and on a real call that meant nine
+/// seconds during which the terminal had been told nothing at all, on a
+/// connection that was up and working at 2400.
+///
+/// The propagation allowance is generous on purpose. A call carried over VoIP
+/// crosses a jitter buffer in each direction and half a second between them is
+/// not unusual.
+pub fn t401_for(bits_per_second: u32) -> u32 {
+    /// Ta + Te, the two propagation delays.
+    const PROPAGATION_MS: u32 = 500;
+    /// Tc: the longest frame that could already be going out, in bits -- the
+    /// information field plus address, control and check sequence.
+    const FRAME_BITS: u32 = (DEFAULT_N401 as u32 + 6) * 8;
+    /// Td: the supervisory frame that acknowledges it.
+    const ACK_BITS: u32 = 6 * 8;
+
+    let rate = bits_per_second.max(1);
+    PROPAGATION_MS + (FRAME_BITS + ACK_BITS) * 1000 / rate
+}
 
 /// Retransmission limit.
 ///

@@ -932,3 +932,39 @@ fn a_terminals_ceiling_on_the_dictionary_reaches_the_far_end() {
     }
     assert_eq!(got, text);
 }
+
+#[test]
+fn the_acknowledgement_timer_follows_the_line_rate() {
+    // V.42 Appendix IV gives a sum rather than a value: T401 must cover the
+    // propagation each way, the processing at each end, the frame that was
+    // already going out, and the acknowledgement that answers it. Two of those
+    // are the line rate, and they are the two that matter.
+    use ec::lapm::t401_for;
+
+    // Monotonic: a faster line waits less, because everything it is waiting
+    // for takes less time to arrive.
+    let rates = [1200u32, 2400, 4800, 9600, 14400];
+    for pair in rates.windows(2) {
+        assert!(
+            t401_for(pair[0]) > t401_for(pair[1]),
+            "{} waits no longer than {}",
+            pair[0],
+            pair[1]
+        );
+    }
+
+    // And long enough to be waiting for something real. A full information
+    // frame plus its acknowledgement, at the rate, has to fit inside it.
+    for rate in rates {
+        let transmission = (ec::lapm::DEFAULT_N401 as u32 + 12) * 8 * 1000 / rate;
+        assert!(
+            t401_for(rate) > transmission,
+            "at {rate} the timer expires before the frame it is waiting for arrives"
+        );
+    }
+
+    // The figure that mattered on a real call: three seconds a try at 2400 was
+    // nine seconds of a terminal being told nothing, on a connection that was
+    // up and working.
+    assert!(t401_for(2400) < 1200, "still too long at 2400");
+}

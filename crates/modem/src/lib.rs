@@ -679,11 +679,30 @@ impl Modem {
             self.carry_data();
             return;
         }
-        let Some(pump) = self.pump.as_ref() else { return };
-        match pump.status() {
+        // Read out and let go of it: the connected arm needs the pump back
+        // mutably, to throw away what it heard while it was training.
+        let Some(status) = self.pump.as_ref().map(Pump::status) else { return };
+        match status {
             Progress::Negotiating => {}
             Progress::Connected(rate) => {
                 self.rate = rate;
+                // Everything the receiver made of the handshake is thrown
+                // away. A demodulator that has not finished training still
+                // hands up bits, and by the time it has there are thousands
+                // of them waiting -- all of them noise, and all of them about
+                // to be handed to a detection phase that has just this moment
+                // been created.
+                //
+                // V.42 7.2.1.2 starts that phase "when circuits RFS and RSD go
+                // ON, indicating a successful connection between the signal
+                // converters", which is now. What came before is not part of
+                // it, and reading it as though it were is how a real call
+                // found the pattern for "no error control" in its own training
+                // garbage and went transparent against a modem that was
+                // establishing LAPM.
+                if let Some(pump) = self.pump.as_mut() {
+                    pump.take_bits();
+                }
                 // Bell 103 is asynchronous all the way down: its line format
                 // *is* start-stop framing, and its receiver finds the frames
                 // by re-synchronising on each start bit rather than by holding
@@ -692,13 +711,18 @@ impl Modem {
                 // apart into characters that were never there. So error
                 // control is off at 300 bit/s -- which is also how anyone ever
                 // dialled a board at 300 bit/s.
-                let framed = matches!(pump, Pump::Bell103(_));
+                let framed = matches!(self.pump, Some(Pump::Bell103(_)));
                 if self.want_error_control && !framed {
                     let role = match self.role {
                         Role::Calling => EcRole::Originator,
                         Role::Answering => EcRole::Answerer,
                     };
-                    let mut stack = Stack::new(role, Params::default());
+                    // The timer that decides how long a silence is worth
+                    // waiting through, sized to the rate the silence is on
+                    // (V.42 Appendix IV).
+                    let params =
+                        Params { t401_ms: ec::lapm::t401_for(rate), ..Params::default() };
+                    let mut stack = Stack::new(role, params);
                     if self.declared_lapm {
                         stack = stack.declared_lapm();
                     }

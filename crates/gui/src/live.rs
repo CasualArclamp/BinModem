@@ -624,7 +624,16 @@ fn save(samples: &[f32]) -> Result<String, String> {
     let path = dir.join(format!("live-{stamp}.wav"));
     // Two channels: what arrived, and what was sent at the same instant.
     line::wav::write_channels(&path, samples, 2, FS as u32).map_err(|e| e.to_string())?;
-    Ok(path.display().to_string())
+    // Absolute, because "captures" is relative to wherever the program was
+    // started from -- which since it became one file to hand somebody is the
+    // directory that file sits in, and not the one the source is in. A
+    // recording nobody can find is a recording that was not kept.
+    Ok(std::fs::canonicalize(&path)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+        .trim_start_matches(r"\?\")
+        .to_owned())
 }
 
 /// Hand the terminal everything the modem has to say.
