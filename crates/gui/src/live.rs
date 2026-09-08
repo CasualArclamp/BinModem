@@ -733,6 +733,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 f.echo_loss_db = modem.echo_return_loss_now();
                 f.echo_at = modem.reflection().map(|r| (r.delay, r.strength));
                 f.tones = modem.states();
+                f.constellation_peak = modem.constellation_peak();
                 f.symbol_label = modem.shape();
                 f.snr_db = modem.residual_error().map(|e| {
                     // The decision margin as decibels, so a tighter

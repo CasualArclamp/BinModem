@@ -2118,8 +2118,11 @@ impl eframe::App for ScopeApp {
                 scopes::symbol_scope(
                     ui,
                     &self.frame.symbols,
-                    &self.frame.constellation,
-                    self.frame.tones,
+                    scopes::Constellation {
+                        points: &self.frame.constellation,
+                        tones: self.frame.tones,
+                        peak: self.frame.constellation_peak,
+                    },
                     &label,
                     self.frame.symbol_quality(),
                     PANEL_W - 20.0,

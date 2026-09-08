@@ -94,6 +94,16 @@ pub struct Frame {
     /// How many tones or points the modulation uses, which sets how many arms
     /// the symbol scope draws: 2 for Bell 103, 16 for V.22bis.
     pub tones: usize,
+    /// The largest coordinate any point of this constellation can reach, in
+    /// the units the constellation points are reported in.
+    ///
+    /// One means it fits the scope's box exactly, which every constellation
+    /// did until V.32's trellis code: its points are normalised by a
+    /// root-mean-square of sqrt(10) and eight of the thirty-two have a
+    /// coordinate of four, so they land a quarter of the way outside the box
+    /// and get drawn off the edge of it. Twenty-four dots for a thirty-two
+    /// point constellation, and nothing on the screen to say why.
+    pub constellation_peak: f32,
     /// What to call the modulation on the symbol scope, such as "2FSK" or
     /// "16QAM". The scope cannot infer it: a constellation could be phase or
     /// quadrature amplitude modulation.
@@ -152,6 +162,7 @@ impl Frame {
             // publishing never resizes what it was given.
             distant: Vec::with_capacity(10),
             tones: 2,
+            constellation_peak: 1.0,
             symbol_label: "-",
             spectrum_db: vec![-120.0; spectrum_bins],
             hz_per_bin: sample_rate / (spectrum_bins as f64 * 2.0),

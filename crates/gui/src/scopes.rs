@@ -299,15 +299,25 @@ pub fn discriminator(ui: &mut Ui, samples: &[f32], height: f32) {
 /// The same widget serves the phase and quadrature-amplitude modulations: when
 /// `constellation` is non-empty it plots those points as a dot scatter against
 /// the same cross, which is what every mode above 300 bps will need.
+/// The scatter half of the symbol scope: the points, how many the modulation
+/// has, and how far they reach.
+pub struct Constellation<'a> {
+    pub points: &'a [(f32, f32)],
+    /// Sets how many arms are drawn: 2 for Bell 103, 16 for V.22bis.
+    pub tones: usize,
+    /// How far the points reach. One fits the box exactly.
+    pub peak: f32,
+}
+
 pub fn symbol_scope(
     ui: &mut Ui,
     symbols: &[f32],
-    constellation: &[(f32, f32)],
-    tones: usize,
+    dots: Constellation<'_>,
     label: &str,
     quality: Option<u32>,
     height: f32,
 ) {
+    let Constellation { points: constellation, tones, peak } = dots;
     let size = vec2(ui.available_width(), height);
     let (response, painter) = ui.allocate_painter(size, Sense::hover());
     let rect = response.rect;
@@ -354,15 +364,20 @@ pub fn symbol_scope(
 
     // Phase and QAM modulations plot as a dot scatter instead. Points are
     // scaled so a unit-magnitude symbol sits at the arm tip, matching the FSK
-    // convention that the tips are where an ideal symbol belongs.
+    // convention that the tips are where an ideal symbol belongs -- and then
+    // shrunk to fit if the constellation reaches further than that, which
+    // V.32's thirty-two points do. Eight of them have a coordinate a quarter
+    // beyond the box and were being drawn off the edge of it, so a
+    // thirty-two-point constellation showed twenty-four dots.
+    let fit = 1.0 / peak.max(1.0);
     let m = constellation.len().max(1);
     // Thirty-two clusters need enough dots to show their shape, and enough
     // dots need smaller dots or the clusters run together into one blob.
     let dot = if m > 200 { 1.5 } else { 2.4 };
     for (i, &(re, im)) in constellation.iter().enumerate() {
         let p = pos2(
-            centre.x + re.clamp(-1.4, 1.4) * radius,
-            centre.y - im.clamp(-1.4, 1.4) * radius,
+            centre.x + (re * fit).clamp(-1.4, 1.4) * radius,
+            centre.y - (im * fit).clamp(-1.4, 1.4) * radius,
         );
         let fade = 0.45 + 0.55 * (i as f32 / m as f32);
         let magnitude = (re * re + im * im).sqrt().min(1.0);

@@ -454,6 +454,25 @@ impl Modem {
         self.pump.as_ref().map_or(2, Pump::states)
     }
 
+    /// How far the constellation in use reaches, in the units
+    /// [`Self::constellation_point`] reports.
+    ///
+    /// One for everything that fits the scope's box. V.32's trellis code does
+    /// not: 2.4.1.2's thirty-two points are normalised by a root-mean-square
+    /// of sqrt(10), and the eight with a coordinate of four reach a quarter
+    /// beyond it.
+    pub fn constellation_peak(&self) -> f32 {
+        match self.pump.as_ref() {
+            Some(Pump::V32(m))
+                if matches!(m.status(), v32::startup::Status::Connected(9600))
+                    && m.coding() == v32::Coding::Trellis =>
+            {
+                (4.0 / v32::CONSTELLATION_RMS) as f32
+            }
+            _ => 1.0,
+        }
+    }
+
     /// Short name for the signal shape: "16QAM", "2FSK" and so on.
     pub fn shape(&self) -> &'static str {
         self.pump.as_ref().map_or("-", Pump::shape)
