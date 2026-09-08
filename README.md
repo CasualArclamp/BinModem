@@ -8,7 +8,7 @@ sound card. No DSP chip, no driver blob, and none of a winmodem's dependence on
 one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
-source for every normative constant. 790 tests.
+source for every normative constant. 864 tests.
 
 ## What works
 
@@ -37,7 +37,15 @@ mean power that had to come out at ten.
 | **Terminal** | ANSI/CP437 with mouse reporting; telnet (RFC 854) to use it alone |
 | **Settings** | remembered between runs, so the modem comes back where it was left |
 | **Files** | ZMODEM send and receive |
+| **Network** | PPP (RFC 1661/1662) with LCP and IPCP, and a ping over it |
 | **Line** | full-duplex sound card, or a WAV to replay |
+
+Two of these on a call can carry IP. The Network panel brings up PPP over
+the connection: the end that answered hands out an address, the end that
+dialled asks for one and is told, and an ICMP echo crosses and comes back with
+a round trip on it. A test does the whole of that against a simulated line —
+V.8, V.32 at 9600, V.42, V.42bis, PPP, IPCP, ping — so it can be checked
+without a sound card.
 
 The window around it is a scope: waterfall, spectrum, constellation, LED
 faceplate, decoded transcript, and a log of every frame both ends sent. What
@@ -66,11 +74,14 @@ OS-specific code — but only built and run on Windows so far.
 
 ## Next
 
-V.32bis (14 400) and V.34 (33 600), which the trellis code is most of the
-groundwork for. MNP as an alternative to LAPM, since it is what a modem
-without V.42 will offer. After that, the
-part that makes it a modem to the rest of the machine rather than only to its
-own window: a COM port, so Windows Dial-Up Networking can dial it.
+Getting real traffic over the PPP link: authentication (PAP and CHAP), a
+userspace TCP stack, and a SOCKS proxy, so a browser on one machine can reach
+the internet through a modem call to another — with no driver and no
+administrator.
+
+Alongside it: V.32bis (14 400) and V.34 (33 600), which the trellis code is
+most of the groundwork for, and MNP as an alternative to LAPM, since it is
+what a modem without V.42 will offer.
 
 ## Running it
 

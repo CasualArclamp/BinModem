@@ -90,6 +90,39 @@ it says what it was derived from.
 
 Tell the board to send first. This end answers; it does not ask.
 
+## Two of them on a network
+
+The **Network** button brings up PPP over a call that is already connected, so
+the two ends stop being terminals and start being machines with addresses.
+
+Bring the call up as usual, on both machines, then press **Bring PPP up** at
+each end. The end that answered the call hands out the addresses and keeps
+10.0.0.1; the end that dialled asks with the zeroes RFC 1332 3.3 makes the
+question rather than an address, and is told it is 10.0.0.2. Nothing is
+configured -- watch the "this end" line change on the calling machine when the
+answer arrives. Then **Ping**, or *one a second*, and the round trip appears
+underneath.
+
+What to expect: about 140 ms at 9600 over a virtual cable, and rather more over
+a VoIP trunk, which adds most of a second each way before the modem has done
+anything. The transcript carries the same thing in words, one line per echo,
+alongside every other layer's.
+
+While the link is up it owns the byte stream: nothing typed reaches the far
+end and nothing from the far end reaches the screen, because a PPP frame is
+not something anybody wants on a terminal and a keystroke in the middle of one
+is a frame that fails its check. A file transfer wants the stream for the same
+reason, so the two refuse to run together. **Put it down** gives the terminal
+back, and hanging up takes the link with it.
+
+There is no authentication yet. Two of these go straight from LCP to
+addresses; a far end that insists on PAP or CHAP will agree to LCP and stop
+there, which is at least a failure with a name on it.
+
+The clause numbers in `crates/ppp` are RFC numbers: 1662 for the framing, 1661
+for the negotiation, 1332 for the addresses, and 791, 792 and 1071 for the
+datagram, the echo and the checksum over both.
+
 ## One file
 
 `dist.bat` (or `./dist.ps1`) builds a release and leaves
