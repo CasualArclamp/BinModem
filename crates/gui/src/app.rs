@@ -426,6 +426,24 @@ impl ScopeApp {
             self.console.term.mouse(event);
         }
         if response.has_focus() {
+            // Keep the keys a terminal needs instead of letting them move the
+            // focus. egui spends the arrows and Tab on walking between widgets
+            // and Escape on giving focus up, which are the right defaults for
+            // a form and wrong for this: a board's menus are driven with the
+            // arrows, and Escape is how half of them are left. Pressing either
+            // put the cursor somewhere else in the window and sent nothing
+            // down the line, so an arrow-key menu could not be used at all.
+            ui.memory_mut(|m| {
+                m.set_focus_lock_filter(
+                    response.id,
+                    egui::EventFilter {
+                        tab: true,
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        escape: true,
+                    },
+                );
+            });
             let typed = console::keys_to_bytes(ui);
             if !typed.is_empty() {
                 match &self.source {

@@ -111,6 +111,9 @@ pub struct Stack {
     detect: Detect,
     /// What this end offers.
     offer: Compression,
+    /// Whether following an unnegotiated switch was tried and failed, so that
+    /// it is tried once and not on every frame for the rest of the call.
+    guessed_wrong: bool,
     /// Ceilings on the V.42bis parameters, if the terminal set any.
     ///
     /// Ceilings twice over: what goes into XID, and then 6.4 takes the lower
@@ -157,7 +160,14 @@ enum Detect {
 struct Compressor {
     encoder: v42bis::Encoder,
     decoder: v42bis::Decoder,
+    /// Turned on without an XID exchange, on the strength of the far end
+    /// saying so in the data stream. Decodes only: this end goes on sending
+    /// uncompressed, because nothing has agreed that the far end would read
+    /// anything else.
+    speculative: bool,
 }
+
+
 
 impl Stack {
     pub fn new(role: Role, params: Params) -> Self {
@@ -182,6 +192,7 @@ impl Stack {
             },
             offer: Compression::Neither,
             limits: (v42bis::OFFERED_N2, v42bis::OFFERED_N7),
+            guessed_wrong: false,
             declared: false,
             declining: false,
             heard_adp: None,
@@ -285,7 +296,29 @@ impl Stack {
         self.compression = Some(Compressor {
             encoder: v42bis::Encoder::new(params),
             decoder: v42bis::Decoder::new(params),
+            speculative: false,
         });
+    }
+
+    /// Whether an unnegotiated switch to compressed data should be followed.
+    ///
+    /// Only where this end offered to receive it and the far end never
+    /// answered. 6.4 negotiates V.42bis in XID and this far end sends none at
+    /// all -- but it reads the offer, turns compression on, and says so the
+    /// way 9.1 provides for. Refusing to decode what this end advertised it
+    /// could accept leaves a link that is up and unreadable, which is what it
+    /// did: a board's whole screen arrived as codewords and went to the
+    /// terminal as codewords.
+    ///
+    /// Nothing is assumed until the far end says it. Before the announcement
+    /// every octet goes through untouched, exactly as now.
+    fn may_follow_ecm(&self) -> bool {
+        !self.guessed_wrong
+            && self.heard_xid.is_none()
+            && matches!(
+                self.offer,
+                Compression::Both | Compression::ResponderToInitiator
+            )
     }
 
     /// What the far end said in the detection phase.
@@ -411,6 +444,10 @@ impl Stack {
             return;
         }
         match &mut self.compression {
+            // Decoding only. Nothing has agreed that the far end would read
+            // compressed data from this end, and it is reading what is sent
+            // now.
+            Some(c) if c.speculative => self.lapm.send_data(data),
             Some(c) => {
                 let mut out = Vec::new();
                 c.encoder.encode(data, &mut out);
@@ -702,9 +739,49 @@ impl Stack {
         if arrived.is_empty() {
             return;
         }
+        // A decoder for a far end that may switch without having asked.
+        //
+        // Built here, on the first octet of the connection, and not where the
+        // switch appears -- which is where it was first put, and it does not
+        // work there. 7.4 has the encoder adding strings to its dictionary
+        // while it is still in transparent mode, so a decoder that starts at
+        // the escape has an empty dictionary against a full one and disagrees
+        // from the first codeword. It has to see everything the far end sent.
+        //
+        // Costing nothing until then: a V.42bis decoder in transparent mode
+        // hands back what it is given. What it also does is read an escape
+        // character as an escape character, so a far end that never intended
+        // any of this and sends a literal zero will be misread -- and that is
+        // the price. It is bounded: the decode fails, the guess is dropped for
+        // the rest of the call, and the octets go through raw again.
+        if self.compression.is_none() && self.may_follow_ecm() {
+            // The far end never said what parameters it was using, so this is
+            // the only figure there is: what this end offered, which is what
+            // it read before deciding to compress at all.
+            let proposed = self.proposal();
+            self.enable_compression(v42bis::Params {
+                n2: proposed.codewords.unwrap_or(v42bis::OFFERED_N2),
+                n7: proposed.max_string.unwrap_or(v42bis::OFFERED_N7),
+            });
+            if let Some(c) = self.compression.as_mut() {
+                c.speculative = true;
+            }
+        }
         match &mut self.compression {
             Some(c) => {
+                let speculative = c.speculative;
                 if c.decoder.decode(&arrived, &mut self.delivered).is_err() {
+                    if speculative {
+                        // A guess that did not come off. Nothing negotiated
+                        // this, so nothing is owed to it: put the stream back
+                        // the way it was and stop guessing for the rest of the
+                        // call. Dropping a working link over a guess would be
+                        // worse than the garbled screen it was meant to fix.
+                        self.compression = None;
+                        self.guessed_wrong = true;
+                        self.delivered.extend_from_slice(&arrived);
+                        return;
+                    }
                     // A compressed stream that will not decode cannot be
                     // recovered from by asking again: the dictionary at each
                     // end is built from everything that came before, so once
@@ -927,5 +1004,157 @@ mod tests {
         settle(&mut a, &mut b, 20_000, |_, bit| bit);
         assert!(!a.is_connected(), "the originator is {:?}", a.state());
         assert!(!b.is_connected(), "the answerer is {:?}", b.state());
+    }
+
+    /// A far end that compresses without ever negotiating it.
+    ///
+    /// From `live-1788830261.wav`, a call to a real board. It answered the
+    /// SABME, polled, acknowledged everything sent to it -- and never sent an
+    /// XID, not one, damaged or otherwise. Then two octets of zero appeared in
+    /// the data and everything after them was V.42bis codewords, which went to
+    /// the terminal as codewords and filled the screen with noise. Turning
+    /// error control off fixed it, which is the wrong way round.
+    ///
+    /// 6.4 negotiates V.42bis in XID and this far end does not, so strictly
+    /// there is nothing to follow. But this end's own XID said it could
+    /// receive compressed data and the far end took it at its word; refusing
+    /// to decode what was advertised leaves a link that is up and unreadable.
+    /// Nothing is assumed until the far end says it -- before the escape every
+    /// octet goes through untouched -- and the guess is made once.
+    #[test]
+    fn a_far_end_that_compresses_without_asking_is_followed() {
+        use crate::frame::Kind;
+
+        // What the far end puts on the line: text, and then V.42bis deciding
+        // it is worth compressing, which it announces with the escape
+        // character and ECM and in no other way.
+        let params = v42bis::Params { n2: v42bis::OFFERED_N2, n7: v42bis::OFFERED_N7 };
+        let text: Vec<u8> = b"Welcome to the board. Please log in. "
+            .iter()
+            .copied()
+            .cycle()
+            .take(2000)
+            .collect();
+        let mut encoder = v42bis::Encoder::new(params);
+        let mut stream = Vec::new();
+        encoder.encode(&text, &mut stream);
+        encoder.flush(&mut stream);
+        assert!(
+            stream.windows(2).any(|w| w == [0, 0]),
+            "the encoder never left transparent mode, so there is nothing here to follow",
+        );
+
+        // This end: offering V.42bis, and told by V.8 that the far end does
+        // LAPM, so the detection phase is skipped and XID is all there is.
+        let mut stack = Stack::new(Role::Originator, Params::default()).without_detection();
+        stack.offer_compression(Compression::Both);
+        stack.connect();
+
+        // Everything the far end says, framed as it would arrive.
+        let wire = |stack: &mut Stack, body: &[u8]| {
+            let mut e = Encoder::new(Fcs::Bits16);
+            e.frame(body);
+            while let Some(bit) = e.next_bit() {
+                stack.next_bit();
+                stack.feed_bit(bit);
+            }
+            stack.tick(0);
+        };
+        // Let it send its XID and its SABME into a silence that answers
+        // neither, which is what the recording has.
+        // Time as well as bits: the XID wait is a timer, and a stack that is
+        // only ever handed bits never reaches the end of it.
+        for _ in 0..20 {
+            for _ in 0..4_000 {
+                stack.next_bit();
+                stack.feed_bit(true);
+            }
+            stack.tick(100);
+        }
+        wire(
+            &mut stack,
+            &Frame::Ua { final_bit: true }.encode(DLCI_DATA, Role::Answerer, Kind::Response),
+        );
+        assert!(stack.is_connected(), "the link never came up");
+        assert_eq!(stack.far_xid(), None, "the far end was not supposed to answer XID");
+
+        for (i, chunk) in stream.chunks(64).enumerate() {
+            let frame = Frame::I {
+                ns: (i % 128) as u8,
+                nr: 0,
+                poll: false,
+                info: chunk.to_vec(),
+            };
+            wire(&mut stack, &frame.encode(DLCI_DATA, Role::Answerer, Kind::Command));
+        }
+
+        assert_eq!(
+            stack.take_received(),
+            text,
+            "the screen got something other than what the far end sent",
+        );
+    }
+
+
+    /// And a far end that was never compressing at all keeps its link.
+    ///
+    /// The price of watching for a switch nobody negotiated: a decoder in
+    /// transparent mode reads an escape character as an escape character, so a
+    /// far end that sends a literal zero followed by something that is not a
+    /// command is misread. That has to cost the guess and nothing else --
+    /// dropping a working link over it would be worse than the garbled screen
+    /// the guess was made to fix.
+    #[test]
+    fn a_guess_that_does_not_come_off_costs_only_the_guess() {
+        use crate::frame::Kind;
+
+        let mut stack = Stack::new(Role::Originator, Params::default()).without_detection();
+        stack.offer_compression(Compression::Both);
+        stack.connect();
+        let wire = |stack: &mut Stack, body: &[u8]| {
+            let mut e = Encoder::new(Fcs::Bits16);
+            e.frame(body);
+            while let Some(bit) = e.next_bit() {
+                stack.next_bit();
+                stack.feed_bit(bit);
+            }
+            stack.tick(0);
+        };
+        for _ in 0..20 {
+            for _ in 0..4_000 {
+                stack.next_bit();
+                stack.feed_bit(true);
+            }
+            stack.tick(100);
+        }
+        wire(
+            &mut stack,
+            &Frame::Ua { final_bit: true }.encode(DLCI_DATA, Role::Answerer, Kind::Response),
+        );
+        assert!(stack.is_connected());
+
+        // A zero, and then a code 9.1 Table 3 reserves. Not a switch, and not
+        // anything a decoder can make sense of.
+        let mut ns = 0u8;
+        let mut send = |stack: &mut Stack, info: &[u8]| {
+            let frame = Frame::I { ns, nr: 0, poll: false, info: info.to_vec() };
+            ns = (ns + 1) % 128;
+            let body = frame.encode(DLCI_DATA, Role::Answerer, Kind::Command);
+            let mut e = Encoder::new(Fcs::Bits16);
+            e.frame(&body);
+            while let Some(bit) = e.next_bit() {
+                stack.next_bit();
+                stack.feed_bit(bit);
+            }
+            stack.tick(0);
+        };
+        send(&mut stack, b"login: \x00rest");
+        assert!(stack.is_connected(), "a misread guess dropped the link");
+
+        // And the next frame goes through untouched, because the guess is not
+        // made twice.
+        stack.take_received();
+        send(&mut stack, b"password: ");
+        assert_eq!(stack.take_received(), b"password: ");
     }
 }
