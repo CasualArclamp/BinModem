@@ -67,3 +67,26 @@ for rec in $RECS; do
 done
 rm -f "$JAR" "$JAR.html"
 echo "done -> $OUT"
+
+# The RFCs, for PPP. Text rather than PDF, so they go straight to the same
+# place the extracted Recommendations do and are greppable on arrival.
+#
+# 1661 is PPP itself and 1662 the framing under it; 1334 and 1994 are the two
+# ways a far end asks who is calling; 1332 is how an address is agreed; 1144
+# is Van Jacobson header compression, which is what made dial-up bearable.
+# Beside the extracted Recommendations, which is where spec_text.sh puts theirs
+# and where anything reading them expects to look.
+TEXT="${2:-$OUT/text}"
+mkdir -p "$TEXT"
+RFCS="1661 1662 1332 1334 1994 1144"
+n=0
+for rfc in $RFCS; do
+  if curl -sS --fail --max-time 30 -o "$TEXT/rfc$rfc.txt" \
+      "https://www.rfc-editor.org/rfc/rfc$rfc.txt"; then
+    printf '  %-32s %7s lines\n' "rfc$rfc.txt" "$(wc -l < "$TEXT/rfc$rfc.txt")"
+    n=$((n+1))
+  else
+    echo "  !! failed: rfc$rfc"
+  fi
+done
+echo "fetched $n RFCs -> $TEXT"
