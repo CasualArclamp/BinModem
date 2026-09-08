@@ -179,7 +179,7 @@ impl Modem {
         tx.set_transmitting(false);
         Self {
             role,
-            menu: Menu { function, modulations: ours, protocol: Protocol::Unstated },
+            menu: Menu { function, modulations: ours, protocol: Protocol::Unstated, access: None },
             tx,
             rx: Bell103Rx::with_tones(rx_space, rx_mark, fs),
             bits: AsyncBits::new(8),
@@ -471,7 +471,12 @@ impl Modem {
         }
         v8::sequence(
             Signal::Jm,
-            &Menu { function: self.menu.function, modulations, protocol: self.agreed },
+            &Menu {
+                function: self.menu.function,
+                modulations,
+                protocol: self.agreed,
+                access: None,
+            },
         )
     }
 

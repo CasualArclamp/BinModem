@@ -535,6 +535,23 @@ impl Modem {
     pub fn distant(&self) -> Vec<(&'static str, String)> {
         let mut rows = Vec::new();
         if let Some(menu) = self.far_menu {
+            // What the call is for, which the menu has always carried and this
+            // panel never showed. 6.2: a far end answering a data call says
+            // so, and one that thinks it is being asked for a fax says that
+            // instead -- which is worth seeing before wondering why the modem
+            // that answered will not talk.
+            rows.push((
+                "call function",
+                match menu.function {
+                    v8::CallFunction::Data => "data",
+                    v8::CallFunction::TransmitFax => "fax, sending",
+                    v8::CallFunction::ReceiveFax => "fax, receiving",
+                    v8::CallFunction::Textphone => "textphone (V.18)",
+                    v8::CallFunction::Videotext => "videotext (T.101)",
+                    v8::CallFunction::MultimediaTerminal => "multimedia (H.324)",
+                }
+                .to_owned(),
+            ));
             let modes: Vec<&str> = menu.modulations.iter().map(v8::Modulation::name).collect();
             rows.push((
                 "modulations",
@@ -546,6 +563,29 @@ impl Modem {
                     v8::Protocol::Lapm => "LAPM".to_owned(),
                     v8::Protocol::Extended => "an extension octet".to_owned(),
                     v8::Protocol::Unstated => "not stated".to_owned(),
+                },
+            ));
+            // Table 7, and Note 1 to it: absence conveys no information about
+            // the type of access, so a far end that said nothing is reported
+            // as having said nothing rather than as being analogue.
+            rows.push((
+                "line",
+                match menu.access {
+                    None => "not stated".to_owned(),
+                    Some(a) => {
+                        let mut what = vec![if a.digital {
+                            "digital network"
+                        } else {
+                            "analogue network"
+                        }];
+                        if a.call_cellular {
+                            what.push("this end cellular");
+                        }
+                        if a.answer_cellular {
+                            what.push("far end cellular");
+                        }
+                        what.join(", ")
+                    }
                 },
             ));
         }

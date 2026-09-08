@@ -258,6 +258,30 @@ pub struct Menu {
     pub modulations: Modulations,
     /// What error control the far end will be asked for, if anything.
     pub protocol: Protocol,
+    /// What kind of line the far end says it is on, if it says.
+    ///
+    /// Optional, and its absence means what Note 1 to Table 7 says it means:
+    /// nothing at all. A far end that is silent about this is not claiming to
+    /// be analogue, it is not answering the question -- so this is `None`
+    /// rather than a default, and anything reading it has to say which.
+    pub access: Option<Access>,
+}
+
+/// The PSTN access category (Table 7/V.8).
+///
+/// Three flags about the connection itself rather than about either modem,
+/// which is why they are worth having: whether the far end is on a digital
+/// network decides what a call can be expected to reach, and cellular decides
+/// whether it will hold still long enough to be worth trying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Access {
+    /// b5: the calling modem is on a cellular connection.
+    pub call_cellular: bool,
+    /// b6: the answering modem is on a cellular connection.
+    pub answer_cellular: bool,
+    /// b7: a modem on a digital network connection rather than an analogue
+    /// one. Note 2 warns that an analogue V.90 or V.92 modem may sit on one.
+    pub digital: bool,
 }
 
 /// Category tags, in bits `b0..b3` of a category octet (Table 2).
@@ -275,6 +299,8 @@ mod tag {
     /// `b0 b1 b2 b3` = `0 1 0 1`, which is the modulation tag backwards and so
     /// a free check that the bit order here is the right way round.
     pub const PROTOCOL: u8 = 0b1010;
+    /// `b0 b1 b2 b3` = `1 0 1 1`, Table 7.
+    pub const PSTN_ACCESS: u8 = 0b1101;
 }
 
 /// Build an octet from its bits, `b0` least significant.
@@ -363,6 +389,7 @@ impl Menu {
         let mut function = None;
         let mut modulations = Modulations::NONE;
         let mut protocol = Protocol::Unstated;
+        let mut access = None;
         let mut rest = octets.iter().copied().peekable();
         while let Some(o) = rest.next() {
             // Only category octets carry a tag; an extension octet is
@@ -404,10 +431,20 @@ impl Menu {
                         _ => Protocol::Unstated,
                     };
                 }
+                tag::PSTN_ACCESS if !bit(o, 4) => {
+                    // Table 7, in the order the table lists them: the calling
+                    // modem's connection, the answering modem's, and then
+                    // whether the network itself is digital.
+                    access = Some(Access {
+                        call_cellular: bit(o, 5),
+                        answer_cellular: bit(o, 6),
+                        digital: bit(o, 7),
+                    });
+                }
                 _ => {}
             }
         }
-        Some(Self { function: function?, modulations, protocol })
+        Some(Self { function: function?, modulations, protocol, access })
     }
 
     /// The joint menu: what this end has that the far end also offered.
@@ -429,6 +466,12 @@ impl Menu {
                 (Protocol::Lapm, Protocol::Lapm) => Protocol::Lapm,
                 _ => Protocol::Unstated,
             },
+            // Not answered back. Table 7 describes the connection, and what
+            // the calling modem said about its end is not something this end
+            // can confirm or has any business repeating. 6.5 has the category
+            // included by a DCE that "wishes to indicate network access type",
+            // which is a thing to say about oneself.
+            access: None,
         }
     }
 
@@ -617,6 +660,7 @@ mod tests {
             function: CallFunction::Data,
             modulations: Modulations::of(list),
             protocol: Protocol::Unstated,
+            access: None,
         }
     }
 
@@ -654,7 +698,12 @@ mod tests {
             CallFunction::Data,
         ] {
             let menu =
-                Menu { function: f, modulations: Modulations::NONE, protocol: Protocol::Unstated };
+                Menu {
+                    function: f,
+                    modulations: Modulations::NONE,
+                    protocol: Protocol::Unstated,
+                    access: None,
+                };
             assert_eq!(Menu::parse(&menu.octets()).unwrap().function, f);
         }
     }
@@ -755,6 +804,7 @@ mod tests {
             function: CallFunction::Data,
             modulations: Modulations::of(&[Modulation::V22bis]),
             protocol: Protocol::Lapm,
+            access: None,
         };
         let prot0 = *menu.octets().last().unwrap();
         assert_eq!(tag_of(prot0), tag::PROTOCOL);
@@ -775,6 +825,7 @@ mod tests {
             function: CallFunction::Data,
             modulations: Modulations::of(&[Modulation::V21]),
             protocol: Protocol::Lapm,
+            access: None,
         };
         let octets = menu.octets();
         let prot0 = *octets.last().unwrap();
@@ -814,6 +865,7 @@ mod tests {
             function: CallFunction::Data,
             modulations: Modulations::of(&[Modulation::V32bis]),
             protocol: Protocol::Lapm,
+            access: None,
         };
         let ours = Modulations::of(&[Modulation::V32bis]);
         assert!(asked.joint(ours, Protocol::Lapm).lapm(), "both said it");
@@ -936,12 +988,15 @@ mod tests {
         // this one used to stop at four -- so a fifth category was not ignored
         // but lost, along with anything a real modem might put after it. V.8
         // describes several: PSTN access, PCM modem availability, non-standard
-        // facilities. Here the trailing octet is the PSTN access category,
-        // which this modem does not read and must still read past.
+        // facilities. The trailing octet here is PCM modem availability, which
+        // this modem does not read and must still read past. It used to be the
+        // PSTN access category, until that one started being read -- and a
+        // test of stepping over the unknown wants a category that is still
+        // unknown, or it stops testing anything.
         let mut menu = data_menu(&[Modulation::V32bis, Modulation::V22bis]);
         menu.protocol = Protocol::Lapm;
-        let access0 = octet([true, false, true, true, false, false, false, false]);
-        assert_eq!(tag_of(access0), 0b1101, "the PSTN access tag of Table 2");
+        let access0 = octet([true, true, true, false, false, false, false, false]);
+        assert_eq!(tag_of(access0), 0b0111, "the PCM availability tag of Table 2");
 
         let mut decoder = Decoder::new();
         let mut heard = None;
@@ -976,5 +1031,59 @@ mod tests {
             }
         }
         assert_eq!(heard, Some(Heard::Cm(menu)));
+    }
+}
+
+#[cfg(test)]
+mod access_tests {
+    use super::*;
+
+    /// Table 7/V.8, and Note 1 to it.
+    ///
+    /// The category says what kind of connection the call is on, which is not
+    /// something either modem can work out for itself and is the difference
+    /// between a line that will hold a V.32 start-up and one that will not.
+    /// Its absence is not a claim that the line is analogue -- Note 1: "absence
+    /// of this octet conveys no information about the type of PSTN access" --
+    /// so it is an Option and a reader has to say which.
+    #[test]
+    fn the_pstn_access_category_is_read() {
+        // A menu with nothing but a call function has no access octet.
+        // Tag 1000 in b0..b3, b4 clear, and `011` in b5..b7 for data.
+        let function = octet([true, false, false, false, false, false, true, true]);
+        let bare = Menu::parse(&[function]).expect("a call function is a menu");
+        assert_eq!(bare.access, None, "silence was read as an answer");
+
+        // Tag 1011 in b0..b3, b4 clear to mark a category octet, then the
+        // three flags in b5, b6, b7.
+        let access = |call: bool, answer: bool, digital: bool| {
+            octet([true, false, true, true, false, call, answer, digital])
+        };
+        let read = |o: u8| Menu::parse(&[function, o]).unwrap().access.unwrap();
+
+        let a = read(access(false, false, false));
+        assert!(!a.digital && !a.call_cellular && !a.answer_cellular);
+        assert!(read(access(false, false, true)).digital, "digital not read");
+        assert!(read(access(true, false, false)).call_cellular);
+        assert!(read(access(false, true, false)).answer_cellular);
+        // And the three are independent of one another.
+        let all = read(access(true, true, true));
+        assert!(all.call_cellular && all.answer_cellular && all.digital);
+    }
+
+    /// The answer does not repeat it back.
+    ///
+    /// 6.5 has the category included by a DCE that "wishes to indicate network
+    /// access type", which is a thing to say about oneself. Echoing the calling
+    /// modem's own claim back at it would be this end asserting something it
+    /// cannot know.
+    #[test]
+    fn the_joint_menu_makes_no_claim_about_the_line() {
+        let function = octet([true, false, false, false, false, false, true, true]);
+        let access = octet([true, false, true, true, false, false, false, true]);
+        let theirs = Menu::parse(&[function, access]).unwrap();
+        assert!(theirs.access.is_some(), "the call menu should have one");
+        let ours = theirs.joint(Modulations::NONE, Protocol::Unstated);
+        assert_eq!(ours.access, None);
     }
 }
