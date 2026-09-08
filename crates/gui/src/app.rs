@@ -1784,6 +1784,33 @@ impl ScopeApp {
                     f.symbol_quality().map(|q| q.to_string()).unwrap_or_else(|| "-".into()),
                     bright,
                 );
+                // What the echo canceller is doing, which on a two-wire pair
+                // decides everything and is otherwise invisible: a
+                // constellation full of noise looks the same whether the noise
+                // is the line or this modem listening to itself.
+                if let Some(db) = f.echo_loss_db {
+                    row(
+                        "echo out",
+                        format!("{db:.1} dB"),
+                        if db >= 6.0 {
+                            Color32::from_rgb(90, 220, 130)
+                        } else {
+                            Color32::from_rgb(230, 140, 90)
+                        },
+                    );
+                    row(
+                        "echo at",
+                        match f.echo_at {
+                            Some((delay, strength)) => format!(
+                                "{:.0} ms, {:.2}",
+                                delay as f64 * 1000.0 / f.sample_rate,
+                                strength
+                            ),
+                            None => "not found".into(),
+                        },
+                        if f.echo_at.is_some() { dim } else { Color32::from_rgb(230, 140, 90) },
+                    );
+                }
                 row("rx bytes", f.rx_bytes.to_string(), bright);
                 row("tx bytes", f.tx_bytes.to_string(), bright);
                 row("dropped", self.rx.dropped_frames().to_string(), dim);

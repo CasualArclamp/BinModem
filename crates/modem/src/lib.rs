@@ -419,6 +419,15 @@ impl Modem {
         }
     }
 
+    /// What the canceller is taking out at this instant, rather than what it
+    /// managed by the end of training.
+    pub fn echo_return_loss_now(&self) -> Option<f64> {
+        match self.pump.as_ref() {
+            Some(Pump::V32(m)) => Some(m.echo_return_loss_now()),
+            _ => None,
+        }
+    }
+
     /// The point the receiver last decided on, for a constellation scope.
     pub fn constellation_point(&self) -> Option<(f64, f64)> {
         self.pump.as_ref().and_then(Pump::constellation_point)

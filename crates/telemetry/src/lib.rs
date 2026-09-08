@@ -126,6 +126,16 @@ pub struct Frame {
     pub bit_rate: Option<u32>,
     pub rx_bytes: u64,
     pub tx_bytes: u64,
+    /// How much of this end's own transmission the echo canceller is taking
+    /// out, in decibels, and where on the line it found it to take out.
+    ///
+    /// On a two-wire pair this is the difference between hearing the far end
+    /// and hearing yourself, and there is no way to tell from the constellation
+    /// alone which of the two is being looked at. A number for it is the
+    /// difference between suspecting the canceller and knowing.
+    pub echo_loss_db: Option<f64>,
+    /// Where the reflection was found, in samples, and how strong it was.
+    pub echo_at: Option<(usize, f64)>,
 }
 
 impl Frame {
@@ -154,6 +164,8 @@ impl Frame {
             line_phase: "-",
             bit_rate: None,
             rx_bytes: 0,
+            echo_loss_db: None,
+            echo_at: None,
             tx_bytes: 0,
         }
     }

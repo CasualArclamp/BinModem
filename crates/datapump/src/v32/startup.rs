@@ -1600,6 +1600,22 @@ impl Modem {
         self.trained_loss
     }
 
+    /// What the canceller is taking out right now.
+    ///
+    /// Not the same number as [`Self::echo_return_loss`], which is frozen at
+    /// the end of training because that is the last moment it means what it
+    /// says. With both ends talking the meter compares everything heard
+    /// against everything left and the far end is in both, so perfect
+    /// cancellation of an echo as loud as the far end reads about three
+    /// decibels rather than forty.
+    ///
+    /// It is still worth watching. Nothing at all reads zero, and zero while a
+    /// reflection has been found and taps placed on it is a canceller that has
+    /// been pointed at the wrong place.
+    pub fn echo_return_loss_now(&self) -> f64 {
+        self.echo.echo_return_loss()
+    }
+
     /// Queue data for transmission. Only meaningful once connected.
     pub fn send(&mut self, bytes: &[u8]) {
         self.tx.push_bytes(bytes);
