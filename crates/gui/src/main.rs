@@ -37,6 +37,7 @@ mod console;
 mod engine;
 mod live;
 mod net;
+mod remembered;
 mod scopes;
 
 use std::path::PathBuf;

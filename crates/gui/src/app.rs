@@ -70,7 +70,7 @@ impl Source {
 /// nothing, byte after byte of it, while 1200 would have carried the call.
 /// Measured on a recorded call through a real trunk, 2400 got the far end
 /// nought times in eight and 1200 got it eight.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Modulation {
     /// Whether the modem may choose a different modulation than the one asked
     /// for. The Recommendation defaults this on.
@@ -294,6 +294,9 @@ pub struct ScopeApp {
     tab: Tab,
     font_size: f32,
     last_repaint: std::time::Instant,
+    /// What was written out last, so that a frame which changed nothing does
+    /// not rewrite the file sixty times a second.
+    remembered: String,
 }
 
 impl ScopeApp {
@@ -322,7 +325,7 @@ impl ScopeApp {
         // installation offers.
         let chosen_in = live::named(&inputs, live::LINE_IN).unwrap_or(0);
         let chosen_out = live::named(&outputs, live::LINE_OUT).unwrap_or(0);
-        Self {
+        let mut app = Self {
             rx,
             control,
             frame: Frame::new(SCOPE_LEN, SPECTRUM_BINS, sample_rate),
@@ -365,7 +368,12 @@ impl ScopeApp {
             tab: Tab::Terminal,
             font_size: 14.0,
             last_repaint: std::time::Instant::now(),
-        }
+            remembered: String::new(),
+        };
+        // Before anything is drawn, so the first frame shows what the modem
+        // will actually be set to rather than the defaults it never used.
+        app.recall();
+        app
     }
 
     /// Carry out what the AT layer asked for.
@@ -1137,6 +1145,31 @@ impl ScopeApp {
 
     /// Every setting the window holds, as command lines.
     ///
+    /// Put back what the last run was set to.
+    fn recall(&mut self) {
+        let (carrier, modulation, protection) =
+            from_remembered(&crate::remembered::Remembered::load());
+        self.carrier = carrier;
+        self.modulation = modulation;
+        self.protection = protection;
+        self.remembered = self.settings().join("
+");
+    }
+
+    /// Write the settings out if they have moved since they were last written.
+    ///
+    /// Compared as the commands they compose rather than field by field, which
+    /// is the comparison that matters: two states that assert identically are
+    /// the same state as far as the modem is concerned.
+    fn remember(&mut self) {
+        let now = self.settings().join("
+");
+        if now != self.remembered {
+            self.remembered = now;
+            to_remember(self.carrier, self.modulation, self.protection).save();
+        }
+    }
+
     /// `&F` first, and then all of it. The window's controls are the ones a
     /// person has actually looked at, so they are what the modem should be
     /// running -- and anything not represented here should be a default rather
@@ -1933,9 +1966,101 @@ impl ScopeApp {
     }
 }
 
+/// Every setting worth carrying from one run to the next, as name and value.
+///
+/// The modulation is stored by its AT name rather than by its place in the
+/// list, so that adding one to the list does not silently change what an older
+/// file means.
+fn to_remember(
+    carrier: usize,
+    modulation: Modulation,
+    protection: Protection,
+) -> crate::remembered::Remembered {
+    let mut r = crate::remembered::Remembered::default();
+    r.set("carrier", ScopeApp::CARRIERS[carrier].0);
+    r.set("automode", modulation.automode);
+    r.set("min_rate", modulation.min_rate);
+    r.set("max_rate", modulation.max_rate);
+    r.set("es_request", protection.request);
+    r.set("es_fallback", protection.fallback);
+    r.set("report_error_control", protection.report_error_control);
+    r.set("compress", protection.compress);
+    r.set("compress_required", protection.compress_required);
+    r.set("max_dict", protection.max_dict);
+    r.set("max_string", protection.max_string);
+    r.set("report_compression", protection.report_compression);
+    r
+}
+
+/// The same, backwards, starting from the defaults.
+///
+/// Anything missing or unreadable keeps its default, so a file written by an
+/// older version -- or no file at all -- leaves the window exactly where it
+/// would have been.
+fn from_remembered(
+    r: &crate::remembered::Remembered,
+) -> (usize, Modulation, Protection) {
+    let mut carrier = 1;
+    let mut m = Modulation::default();
+    let mut p = Protection::default();
+    if let Some(name) = r.text("carrier")
+        && let Some(i) = ScopeApp::CARRIERS.iter().position(|c| c.0 == name)
+    {
+        carrier = i;
+    }
+    if let Some(v) = r.get("automode") {
+        m.automode = v;
+    }
+    if let Some(v) = r.get("min_rate") {
+        m.min_rate = v;
+    }
+    if let Some(v) = r.get("max_rate") {
+        m.max_rate = v;
+    }
+    // The rate boxes offer only the rates the chosen modulation has, so a pair
+    // carried over from a different one has to be brought back into range
+    // rather than asserted as it stands.
+    //
+    // Zero is left alone. V.250 6.4.1: unspecified rates "are determined by
+    // the modulation means selected", so zero is the absence of a limit rather
+    // than a limit that happens to be out of range, and fitting it would turn
+    // "whatever this modulation can do" into a ceiling nobody asked for.
+    if m.min_rate != 0 || m.max_rate != 0 {
+        m.fit(carrier);
+    }
+    if let Some(v) = r.get("es_request") {
+        p.request = v;
+    }
+    if let Some(v) = r.get("es_fallback") {
+        p.fallback = v;
+    }
+    if let Some(v) = r.get("report_error_control") {
+        p.report_error_control = v;
+    }
+    if let Some(v) = r.get("compress") {
+        p.compress = v;
+    }
+    if let Some(v) = r.get("compress_required") {
+        p.compress_required = v;
+    }
+    if let Some(v) = r.get("max_dict") {
+        p.max_dict = v;
+    }
+    if let Some(v) = r.get("max_string") {
+        p.max_string = v;
+    }
+    if let Some(v) = r.get("report_compression") {
+        p.report_compression = v;
+    }
+    (carrier, m, p)
+}
+
 impl eframe::App for ScopeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll();
+        // Anything the last frame changed, kept for the next run. Cheap when
+        // nothing moved, which is almost every frame.
+        self.remember();
         scopes::request_animation(ui.ctx());
 
         egui::Panel::top("controls").show(ui, |ui| {
@@ -2147,6 +2272,68 @@ mod tests {
         it.feed(b'\r');
         let out = String::from_utf8(it.take_output()).unwrap();
         (it, out)
+    }
+
+    #[test]
+    fn what_the_last_run_was_set_to_comes_back() {
+        // The window's controls are asserted onto the modem when a line opens,
+        // so a window that starts at its defaults puts the modem back to them.
+        // A person who left it on V.32 with V.8 off and no compression came
+        // back to V.22bis with V.8 on and compression, having been told
+        // nothing.
+        let carrier = 2; // V.32
+        let modulation = Modulation { automode: false, min_rate: 4800, max_rate: 4800 };
+        let protection = Protection {
+            request: 2,
+            fallback: 2,
+            compress: false,
+            compress_required: false,
+            max_dict: 1024,
+            max_string: 32,
+            report_error_control: true,
+            report_compression: true,
+        };
+
+        let (c, m, p) = from_remembered(&to_remember(carrier, modulation, protection));
+        assert_eq!(c, carrier, "the modulation came back as something else");
+        assert_eq!(m, modulation);
+        assert_eq!(p, protection);
+        // And what the modem is told is the same either way round, which is
+        // the only comparison that matters.
+        assert_eq!(
+            ScopeApp::CARRIERS[c].0, "V32",
+            "stored by name, so the list may be added to"
+        );
+    }
+
+    /// Nothing remembered leaves the window exactly where it starts.
+    #[test]
+    fn a_first_run_keeps_every_default() {
+        let (c, m, p) = from_remembered(&crate::remembered::Remembered::default());
+        assert_eq!(c, 1, "V.22bis, as it was");
+        assert_eq!(m, Modulation::default());
+        assert_eq!(p, Protection::default());
+    }
+
+    /// A rate that the remembered modulation does not have is brought back
+    /// into range rather than asserted.
+    #[test]
+    fn a_rate_from_another_modulation_is_fitted_to_this_one() {
+        let mut r = to_remember(
+            2,
+            Modulation { automode: false, min_rate: 9600, max_rate: 9600 },
+            Protection::default(),
+        );
+        // The same file, with the modulation changed under it to one that has
+        // no 9600 -- which is what editing the box by hand would do.
+        r.set("carrier", "V22B");
+        let (c, m, _) = from_remembered(&r);
+        assert_eq!(ScopeApp::CARRIERS[c].0, "V22B");
+        assert!(
+            Modulation::rates(c).contains(&m.max_rate),
+            "V.22bis was left asking for {}",
+            m.max_rate
+        );
     }
 
     #[test]
