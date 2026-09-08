@@ -613,11 +613,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             (b.iter().map(|s| s * s).sum::<f32>() / b.len().max(1) as f32).sqrt()
         };
         let (tx_now, rx_now) = (mean(&to_line), mean(&from_line));
-        if tx_now > 1.0e-4 {
-            tx_rms = tx_rms * 0.95 + tx_now * 0.05;
-        }
-        if rx_now > 1.0e-4 {
-            rx_rms = rx_rms * 0.95 + rx_now * 0.05;
+        if let Some((tx, rx)) = both_carrying(tx_now, rx_now) {
+            tx_rms = tx_rms * 0.95 + tx * 0.05;
+            rx_rms = rx_rms * 0.95 + rx * 0.05;
         }
         // What the monitor plays is what the modem heard, so the ear and the
         // scopes are looking at the same thing.
@@ -792,6 +790,24 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     if was_recording {
         keep(&recording, &frames, &tx, &session);
     }
+}
+
+/// The two levels, when comparing them means anything.
+///
+/// Both or neither, and that is the whole of it. These two numbers exist to be
+/// divided by each other, and averaging them over different stretches of time
+/// makes the quotient a comparison of two different moments.
+///
+/// Gated separately, which is how this was written, the reading drifts on its
+/// own after a call ends: a far end that has hung up leaves line noise at
+/// sixty decibels down, which still clears any threshold worth having, so its
+/// average walks toward the floor -- while this end stops transmitting exactly
+/// and freezes at its last real value. The gap grows with nothing behind it.
+/// A recorded call where the two ends were within half a decibel of each other
+/// was being shown as +11.6 dB, and the drive was being set by it.
+fn both_carrying(tx: f32, rx: f32) -> Option<(f32, f32)> {
+    const CARRYING: f32 = 1.0e-4;
+    (tx > CARRYING && rx > CARRYING).then_some((tx, rx))
 }
 
 /// One frame, as a line of a log: when, which way, and every octet of it.
@@ -1035,5 +1051,24 @@ fn drain_dte(
         Some(Job::Sending(s)) => s.feed(&out),
         Some(Job::Receiving(r, _)) => r.feed(&out),
         None => tx.line_data(&out),
+    }
+}
+
+#[cfg(test)]
+mod level_tests {
+    use super::both_carrying;
+
+    /// A comparison of two averages taken over different moments is not a
+    /// comparison, and the one place it shows is after a call.
+    #[test]
+    fn the_levels_are_compared_only_where_both_are_there() {
+        // Both talking: the ordinary case, and the only one worth averaging.
+        assert_eq!(both_carrying(0.05, 0.04), Some((0.05, 0.04)));
+        // The far end has hung up and left the line hissing. Sixty decibels
+        // down is still above any threshold, and following it alone is what
+        // made the reading drift.
+        assert_eq!(both_carrying(0.05, 0.0), None);
+        assert_eq!(both_carrying(0.0, 0.04), None);
+        assert_eq!(both_carrying(0.0, 0.0), None);
     }
 }
