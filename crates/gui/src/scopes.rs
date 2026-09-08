@@ -356,6 +356,9 @@ pub fn symbol_scope(
     // scaled so a unit-magnitude symbol sits at the arm tip, matching the FSK
     // convention that the tips are where an ideal symbol belongs.
     let m = constellation.len().max(1);
+    // Thirty-two clusters need enough dots to show their shape, and enough
+    // dots need smaller dots or the clusters run together into one blob.
+    let dot = if m > 200 { 1.5 } else { 2.4 };
     for (i, &(re, im)) in constellation.iter().enumerate() {
         let p = pos2(
             centre.x + re.clamp(-1.4, 1.4) * radius,
@@ -363,7 +366,7 @@ pub fn symbol_scope(
         );
         let fade = 0.45 + 0.55 * (i as f32 / m as f32);
         let magnitude = (re * re + im * im).sqrt().min(1.0);
-        painter.circle_filled(p, 2.4, margin_colour(magnitude).gamma_multiply(fade));
+        painter.circle_filled(p, dot, margin_colour(magnitude).gamma_multiply(fade));
     }
 
     // Always say something. A silent, empty scope gives no way to tell a modem

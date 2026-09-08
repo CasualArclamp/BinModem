@@ -26,9 +26,16 @@ use telemetry::{CallState, Direction, Leds, Publisher};
 pub const SCOPE_LEN: usize = 1024;
 pub const FFT_SIZE: usize = 1024;
 pub const SPECTRUM_BINS: usize = FFT_SIZE / 2;
-/// Symbols kept for the scope: roughly eight characters at 8N1, enough to see
-/// the cluster spread without smearing the display with ancient history.
-pub const SYMBOL_HISTORY: usize = 80;
+/// Symbols kept for the scope.
+///
+/// Eighty was enough when the largest constellation was sixteen points. It is
+/// not enough for thirty-two: two or three dots to a cluster does not show
+/// where a cluster is, let alone how tight it is, and a constellation that is
+/// slowly turning looks the same as one that is merely noisy. Five hundred and
+/// twelve is sixteen to a cluster at the widest, and still only a fifth of a
+/// second at 2400 baud -- recent enough that what is on the screen is what the
+/// line is doing now.
+pub const SYMBOL_HISTORY: usize = 512;
 
 /// Which standard a capture holds, and whether we can yet demodulate it.
 ///

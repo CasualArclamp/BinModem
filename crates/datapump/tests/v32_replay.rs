@@ -46,6 +46,7 @@ fn what_this_end_made_of_it() {
     let mut carrier = false;
     let mut bytes = Vec::new();
     let mut points: Vec<f64> = Vec::new();
+    let mut lock: Vec<(f64, (f64, f64))> = Vec::new();
 
     for (i, &x) in arrived.iter().enumerate() {
         let _ = modem.step(f64::from(x));
@@ -64,9 +65,16 @@ fn what_this_end_made_of_it() {
         }
         if matches!(status, Status::Connected(_)) {
             bytes.extend(modem.take_bytes());
+            // Normalised to unit mean power by the accessor; the tables
+            // are in the Recommendation's units, so put it back.
             let (i, q) = modem.constellation_point();
+            let (i, q) = (
+                i * datapump::v32::CONSTELLATION_RMS,
+                q * datapump::v32::CONSTELLATION_RMS,
+            );
             if i != 0.0 || q != 0.0 {
                 points.push((i * i + q * q).sqrt());
+                lock.push((at, (i, q)));
             }
         }
     }
@@ -90,6 +98,125 @@ fn what_this_end_made_of_it() {
         .map(|&c| if (32..127).contains(&c) || c == 10 || c == 13 { c as char } else { '.' })
         .collect();
     println!("{text}");
+
+    // How far each symbol lands from the nearest point it could have been, a
+    // second at a time. A receiver that has locked sits close to one; one
+    // whose carrier is turning wanders the whole constellation and averages
+    // out around the spacing itself.
+    if !lock.is_empty() {
+        println!("
+  second  symbols  mean miss   error along vs across the radius");
+        let mut second = lock[0].0.floor();
+        let (mut n, mut sum) = (0usize, 0.0);
+        let (mut radial, mut tangential) = (0.0f64, 0.0f64);
+        for &(at, (i, q)) in &lock {
+            if at.floor() != second {
+                if n > 0 {
+                    let miss = sum / n as f64;
+                    let across = (tangential / n as f64).sqrt();
+                    let along = (radial / n as f64).sqrt();
+                    let snr = 10.0
+                        * (10.0 / ((radial + tangential) / n as f64).max(1e-12))
+                            .log10();
+                    println!(
+                        "  {second:6.0}  {miss:7.3}  along {along:6.3}  across                          {across:6.3}  ratio {:4.2}  SNR {snr:5.1} dB",
+                        across / along.max(1e-9)
+                    );
+                }
+                second = at.floor();
+                n = 0;
+                sum = 0.0;
+                radial = 0.0;
+                tangential = 0.0;
+            }
+            // Whichever constellation the call settled on: the four points
+            // of 4800 (A B C D of Figure 1) or the thirty-two of Figure 3.
+            let (x, y) = if matches!(status, Status::Connected(9600)) {
+                datapump::v32::trellis::point(
+                    datapump::v32::trellis::nearest((i, q)),
+                )
+            } else {
+                const FOUR: [(f64, f64); 4] =
+                    [(-3.0, -1.0), (1.0, -3.0), (3.0, 1.0), (-1.0, 3.0)];
+                *FOUR
+                    .iter()
+                    .min_by(|a, b| {
+                        let d = |p: &(f64, f64)| {
+                            (i - p.0).powi(2) + (q - p.1).powi(2)
+                        };
+                        d(a).total_cmp(&d(b))
+                    })
+                    .unwrap()
+            };
+            sum += ((i - x).powi(2) + (q - y).powi(2)).sqrt();
+            // Split the error into the part along the radius and the part
+            // across it. Additive noise is the same in both; a constellation
+            // being turned is all across.
+            let r = (x * x + y * y).sqrt().max(1e-9);
+            let (ex, ey) = (i - x, q - y);
+            radial += ((ex * x + ey * y) / r).powi(2);
+            tangential += ((ey * x - ex * y) / r).powi(2);
+            n += 1;
+        }
+    }
+
+    // Is what is left of each symbol noise, or the symbols either side of it
+    // leaking in? Additive noise is uncorrelated with any of them; what a
+    // short equaliser leaves behind is the neighbours, and shows up here.
+    if lock.len() > 1000 {
+        let decided: Vec<(f64, f64)> = lock
+            .iter()
+            .map(|&(_, p)| datapump::v32::trellis::point(datapump::v32::trellis::nearest(p)))
+            .collect();
+        println!("
+  error against the symbol at each lag (0 is itself):");
+        for lag in -3i32..=3 {
+            let (mut num, mut ee, mut dd) = (0.0f64, 0.0f64, 0.0f64);
+            for n in 4..lock.len() - 4 {
+                let (i, q) = lock[n].1;
+                let (x, y) = decided[n];
+                let (ex, ey) = (i - x, q - y);
+                let (dx, dy) = decided[(n as i32 + lag) as usize];
+                num += ex * dx + ey * dy;
+                ee += ex * ex + ey * ey;
+                dd += dx * dx + dy * dy;
+            }
+            let r = num / (ee * dd).sqrt().max(1e-12);
+            let bar = "#".repeat((r.abs() * 200.0).min(40.0) as usize);
+            println!("  {lag:+3}   {r:+8.4}  {bar}");
+        }
+    }
+
+    // The scale error, ring by ring. A gain that is simply wrong shrinks every
+    // ring by the same fraction. Something in the path compressing the loud
+    // symbols -- a codec, a softphone's own gain control, a limiter -- pulls
+    // the outer rings in and leaves the inner ones alone, and that is fatal at
+    // thirty-two points and invisible at four, where every symbol has the same
+    // amplitude.
+    if lock.len() > 1000 {
+        println!("
+  ideal radius   symbols   measured   ratio");
+        let mut rings: std::collections::BTreeMap<i64, (usize, f64)> =
+            std::collections::BTreeMap::new();
+        for &(_, p) in &lock {
+            let (x, y) = datapump::v32::trellis::point(
+                datapump::v32::trellis::nearest(p),
+            );
+            let ideal = (x * x + y * y).sqrt();
+            let got = (p.0 * p.0 + p.1 * p.1).sqrt();
+            let e = rings.entry((ideal * 1000.0).round() as i64).or_insert((0, 0.0));
+            e.0 += 1;
+            e.1 += got;
+        }
+        for (k, (n, sum)) in rings {
+            let ideal = k as f64 / 1000.0;
+            let got = sum / n as f64;
+            println!(
+                "  {ideal:12.3}   {n:7}   {got:8.3}   {:5.3}",
+                got / ideal
+            );
+        }
+    }
 
     // How many amplitude rings the far end's constellation has. The 16-point
     // non-redundant alternative at 9600 puts its points at radii root 2, root
