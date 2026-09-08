@@ -466,6 +466,16 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // The PPP link, while one is up. Like a transfer it owns the byte stream
     // while it runs, and for the same reason.
     let mut networking: Option<Networking> = None;
+    // Line time the link has not been told about yet, in milliseconds.
+    //
+    // The loop turns over on audio arriving, so a round is a block and not a
+    // millisecond, and the blocks are not all the same size. Everywhere else
+    // that is near enough; here it is not. A Restart timer that runs at a
+    // tenth of real time will resend a Configure-Request half a minute after
+    // it should, and a round trip measured in rounds of this loop is not a
+    // round trip. So the link is given the line's own clock, which is the
+    // same one the modem keeps: samples divided by the rate.
+    let mut owed_ms = 0.0f64;
 
     let publish_every = Duration::from_millis(16);
     let mut next_publish = Instant::now();
@@ -562,7 +572,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         // Drive the link. Its frames go down the line the same way a keystroke
         // does, because to the modem that is what they are.
         if let Some(link) = networking.as_mut() {
-            for b in link.step(TICK_MS, &tx) {
+            let ms = owed_ms as u32;
+            owed_ms -= f64::from(ms);
+            for b in link.step(ms, &tx) {
                 modem.feed_dte(b);
             }
             session.set_network(Some(link.view()));
@@ -698,6 +710,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             waveform.push(s);
         }
         audio.transmit(&to_line);
+        owed_ms += from_line.len() as f64 / FS * 1000.0;
 
         let recording_now = session.recording();
         if recording_now {
