@@ -606,6 +606,10 @@ pub struct Startup {
     /// Whether a training segment has been sent yet. Only the first is a
     /// window the echo canceller can learn anything from.
     trained: bool,
+    /// A sequence with a rate signal's synchronising bits has arrived, so the
+    /// far end's training segment is behind us whether or not enough of them
+    /// have arrived to act on.
+    seen_a_sequence: bool,
     /// Whether an incoming E sequence has been seen, which ends the rate
     /// exchange for good.
     ///
@@ -656,6 +660,7 @@ impl Startup {
             held: 0,
             carrier_peak: 0.0,
             trained: false,
+            seen_a_sequence: false,
             pending_carrier_reversal: false,
             pending_sideband_reversal: false,
             pending_sequence: None,
@@ -734,7 +739,32 @@ impl Startup {
     /// S and S-bar repeat every two symbols, and a filter learned from a
     /// periodic reference is one of the many that explain that period and
     /// almost certainly not the one the line is.
+    /// Whether the far end's conditioning signal has already taught this
+    /// receiver everything it is going to.
+    ///
+    /// 5.2 makes the conditioning signal S, then S-bar, then a training
+    /// segment of at least 1280 symbols, and a receiver has had all of it by
+    /// the end of that. What comes next is a rate signal, which is scrambled
+    /// and differentially encoded and is data in every way that matters to an
+    /// equaliser -- and one that goes on adapting through it is learning from
+    /// something it was not given to learn from, on a line that by then has
+    /// this end's own echo on it too.
+    ///
+    /// Left to itself the adaptation ran until this end answered, which is
+    /// later and, worse, later by an amount that depends on how well the
+    /// adaptation is going: detecting a rate signal takes 5.3.1's two
+    /// identical sixteens, and a receiver that has drifted takes longer to see
+    /// them, which gives it longer to drift. That is a loop that only turns
+    /// one way.
+    fn far_end_finished_training(&self) -> bool {
+        matches!(self.state, State::AwaitingR1 | State::AwaitingR2)
+            && self.seen_a_sequence
+    }
+
     pub fn far_end_quiet(&self) -> bool {
+        if self.far_end_finished_training() {
+            return true;
+        }
         if matches!(self.state, State::Connected(_)) {
             // The listener below is only fed while the start-up is running, so
             // its answer goes stale the moment this connects. Data state has
@@ -877,6 +907,16 @@ impl Startup {
         let carrier = std::mem::take(&mut self.pending_carrier_reversal);
         let sidebands = std::mem::take(&mut self.pending_sideband_reversal);
         let sequence = self.pending_sequence.take();
+        // The far end's training segment ends where its rate signal begins,
+        // and one sequence with the synchronising bits of 5.3.1 is enough to
+        // know that. Acting on a rate signal needs two identical ones, which
+        // is later -- and later by an amount that depends on how well this
+        // receiver is doing, so a receiver that has drifted takes longer to
+        // see them and is given longer to drift. Training stops at the end of
+        // the training, not at the end of the argument about it.
+        if sequence.is_some_and(|s| is_rate_signal(s) || is_end_signal(s)) {
+            self.seen_a_sequence = true;
+        }
         self.symbols += 1;
         self.total += 1;
         if let Some(t) = self.timer.as_mut() {
@@ -951,6 +991,9 @@ impl Startup {
         rx: &mut Receiver,
     ) {
         let heard = self.listener.classify();
+        // How long the far end has been sending something with no line in it,
+        // which is its conditioning signal and then its rate signal. Broken by
+        // anything else, so a gap starts the count again.
         match self.state {
             // ---- calling modem -------------------------------------------
             State::Listening => {
@@ -1311,6 +1354,10 @@ impl Startup {
         self.state = state;
         self.symbols = 0;
         self.held = 0;
+        // Each wait for a rate signal is its own: the second conditioning
+        // signal is training too, and this end has to be allowed to learn from
+        // it.
+        self.seen_a_sequence = false;
     }
 
     /// Symbols the condition being waited for has held unbroken.
@@ -1511,6 +1558,11 @@ impl Modem {
     /// Which of 9600's two modulations the rate exchange settled on.
     pub fn coding(&self) -> Coding {
         self.startup.coding()
+    }
+
+    /// Whether the receiver is being allowed to learn from what is arriving.
+    pub fn receiver_adapting(&self) -> bool {
+        !self.startup.far_end_quiet()
     }
 
     pub fn status(&self) -> Status {
