@@ -49,12 +49,22 @@ pub const DEFAULT_T401_MS: u32 = 3000;
 /// seconds during which the terminal had been told nothing at all, on a
 /// connection that was up and working at 2400.
 ///
-/// The propagation allowance is generous on purpose. A call carried over VoIP
-/// crosses a jitter buffer in each direction and half a second between them is
-/// not unusual.
+/// The propagation allowance is measured rather than guessed at. Half a second
+/// for the pair of them was the guess, and a call to a board over a SIP trunk
+/// says otherwise: SABME out at 16.590 s, UA back at 17.870 s, and 466 ms of
+/// that is the transmission terms at 2400 bit/s. That leaves 814 ms of
+/// propagation and processing on an ordinary call, so a 500 ms allowance
+/// guarantees a duplicate SABME on every one of them -- and a duplicate SABME
+/// is not merely wasteful, since a far end that honours it resets its sequence
+/// variables underneath a link that was working.
+///
+/// A second covers that line with room to spare. A slower one is covered by
+/// [`Lapm::tick`] raising the timer as it learns, because no constant can be
+/// right for every path.
 pub fn t401_for(bits_per_second: u32) -> u32 {
-    /// Ta + Te, the two propagation delays.
-    const PROPAGATION_MS: u32 = 500;
+    /// Ta + Tb + Te + Tf: the propagation each way and the processing at each
+    /// end, which is the part that does not depend on the line rate.
+    const PROPAGATION_MS: u32 = 1000;
     /// Tc: the longest frame that could already be going out, in bits -- the
     /// information field plus address, control and check sequence.
     const FRAME_BITS: u32 = (DEFAULT_N401 as u32 + 6) * 8;
@@ -194,7 +204,19 @@ pub struct Lapm {
 
     timer: Option<u32>,
     retries: u32,
+    /// Time since the oldest command frame that is still unacknowledged.
+    ///
+    /// Not the same as the timer, and deliberately not reset when the timer
+    /// restarts: what is wanted is how long the acknowledgement really took,
+    /// across however many attempts it took to get one.
+    awaiting_ms: Option<u32>,
 }
+
+/// The most T401 will be allowed to grow to.
+///
+/// Nothing in V.42 gives a ceiling. This one is the point past which a line is
+/// not slow but gone, and it keeps N400 attempts from adding up to minutes.
+const MAX_T401_MS: u32 = 6000;
 
 impl Lapm {
     pub fn new(role: Role, dlci: u8, params: Params) -> Self {
@@ -218,6 +240,7 @@ impl Lapm {
             timer_recovery: false,
             timer: None,
             retries: 0,
+            awaiting_ms: None,
         }
     }
 
@@ -314,12 +337,21 @@ impl Lapm {
 
     /// Advance timers by `dt_ms` (V.42 8.3.2.2, 8.7.3, 8.4.8).
     pub fn tick(&mut self, dt_ms: u32) {
+        if let Some(waited) = self.awaiting_ms {
+            self.awaiting_ms = Some(waited.saturating_add(dt_ms));
+        }
         let Some(remaining) = self.timer else { return };
         if remaining > dt_ms {
             self.timer = Some(remaining - dt_ms);
             return;
         }
         self.timer = None;
+        // An expiry is the one thing that says T401 is too short for this line
+        // without saying by how much, so it grows by half and tries again.
+        // Appendix IV's sum has two terms this end cannot see -- the far end's
+        // transmit queue and its processing -- and a line it cannot see at
+        // all, so the value that works is found rather than calculated.
+        self.params.t401_ms = (self.params.t401_ms * 3 / 2).min(MAX_T401_MS);
         self.retries += 1;
         if self.retries >= self.params.n400 {
             self.fail();
@@ -558,6 +590,10 @@ impl Lapm {
             self.stop_timer();
             self.retries = 0;
         } else {
+            // Some of them were acknowledged and others were not, so the
+            // oldest outstanding frame is a different and later one: the wait
+            // being measured is its wait, not the retired frame's.
+            self.awaiting_ms = None;
             self.start_timer();
         }
     }
@@ -643,10 +679,32 @@ impl Lapm {
 
     fn start_timer(&mut self) {
         self.timer = Some(self.params.t401_ms);
+        // A retransmission is the same command still outstanding, so the wait
+        // carries on being measured from when it was first asked for.
+        self.awaiting_ms = self.awaiting_ms.or(Some(0));
     }
 
     fn stop_timer(&mut self) {
         self.timer = None;
+        if let Some(waited) = self.awaiting_ms.take()
+            && self.retries == 0
+        {
+            // A clean answer, so this is the round trip itself rather than the
+            // round trip plus whatever a lost frame cost. Appendix IV asks for
+            // at least the sum of the six terms; half again is the margin for
+            // the ones that vary.
+            let want = waited.saturating_add(waited / 2).min(MAX_T401_MS);
+            self.params.t401_ms = self.params.t401_ms.max(want);
+        }
+    }
+
+    /// The acknowledgement timer as it now stands, in milliseconds.
+    ///
+    /// It only ever rises: V.42 9.2.1 asks for a timer long enough to wait for
+    /// an acknowledgement, and a value that shrank on one fast frame would
+    /// spend the next slow one retransmitting.
+    pub fn t401_ms(&self) -> u32 {
+        self.params.t401_ms
     }
 
     /// Address this entity uses when encoding.
@@ -991,7 +1049,9 @@ mod tests {
             }
         }
         for _ in 0..3 {
-            a.tick(1000);
+            // However long the timer has grown to by now: the point of the
+            // test is how many attempts there are, not how long they take.
+            a.tick(a.t401_ms());
             while let Some((frame, _)) = a.poll_transmit() {
                 if matches!(frame, Frame::Sabme { .. }) {
                     sabmes += 1;
@@ -1001,6 +1061,45 @@ mod tests {
         assert_eq!(sabmes, 3, "one initial SABME and N400-1 retries");
         assert_eq!(a.state(), State::Disconnected);
         assert!(events(&mut a).contains(&Event::Released(Cause::NoResponse)));
+    }
+
+    /// A far end further away than the timer allows for is still reached.
+    ///
+    /// The line this was found on runs a 1.28 s round trip, and T401 at
+    /// 2400 bit/s came out at 966 ms: the second SABME was always on its way
+    /// out before the first one's UA arrived, and a far end that honours the
+    /// second resets the sequence variables under a link that was working.
+    #[test]
+    fn a_timer_too_short_for_the_line_grows_until_it_is_not() {
+        let params = Params { t401_ms: 966, ..Default::default() };
+        let mut a = Lapm::new(Role::Originator, DLCI_DATA, params);
+        a.connect();
+        let _ = a.poll_transmit();
+
+        // Nothing has come back after one T401, so it was too short.
+        a.tick(966);
+        assert!(a.t401_ms() > 1280, "still shorter than the round trip");
+
+        // The UA arrives 1.28 s after the SABME first went out. With the
+        // longer timer this end is still waiting for it rather than having
+        // given up and asked again.
+        a.tick(1280 - 966);
+        assert_eq!(a.state(), State::AwaitingEstablishment);
+        a.receive(Frame::Ua { final_bit: true }, Kind::Response);
+        assert_eq!(a.state(), State::Connected);
+    }
+
+    /// A measurement that arrives cleanly is used as it stands.
+    #[test]
+    fn a_slow_answer_on_the_first_attempt_lengthens_the_timer() {
+        let params = Params { t401_ms: 4000, ..Default::default() };
+        let mut a = Lapm::new(Role::Originator, DLCI_DATA, params);
+        a.connect();
+        let _ = a.poll_transmit();
+        a.tick(3000);
+        a.receive(Frame::Ua { final_bit: true }, Kind::Response);
+        // Appendix IV's sum, plus half again for the terms that vary.
+        assert_eq!(a.t401_ms(), 4500);
     }
 
     #[test]

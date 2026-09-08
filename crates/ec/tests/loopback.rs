@@ -1023,10 +1023,16 @@ fn the_acknowledgement_timer_follows_the_line_rate() {
         );
     }
 
-    // The figure that mattered on a real call: three seconds a try at 2400 was
-    // nine seconds of a terminal being told nothing, on a connection that was
-    // up and working.
-    assert!(t401_for(2400) < 1200, "still too long at 2400");
+    // Long enough for the line and no longer. A call over a SIP trunk answers
+    // a SABME in 1.28 s at 2400, so anything under that duplicates every
+    // command frame it sends -- and three seconds a try, which is what this
+    // was, is nine seconds of a terminal being told nothing on a connection
+    // that is up and working.
+    assert!(t401_for(2400) > 1280, "shorter than a real line's round trip");
+    assert!(
+        t401_for(2400) * 3 < 5000,
+        "three attempts at 2400 should not take five seconds"
+    );
 }
 
 #[test]

@@ -8,7 +8,7 @@ sound card. No DSP chip, no driver blob, and none of a winmodem's dependence on
 one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
-source for every normative constant. 766 tests.
+source for every normative constant. 768 tests.
 
 ## What works
 
