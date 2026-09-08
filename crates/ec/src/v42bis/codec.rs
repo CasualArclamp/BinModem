@@ -240,13 +240,22 @@ impl Encoder {
     }
 
     /// V.42bis 7.8.2.
+    ///
+    /// b) is the same debt 7.8.1 a) creates, owed at the other transition:
+    /// "perform the dictionary update procedure using the current accumulated
+    /// string and the next character to be processed by the string matching
+    /// procedure (which will be the first character transmitted in transparent
+    /// mode)". The character has not been seen yet, so the update is owed.
     fn enter_transparent(&mut self, out: &mut Vec<u8>) {
+        let accumulated = self.matched;
         self.emit_pending(out);
         self.write(ETM, out);
         self.writer.align(out);
         self.inner.mode = Mode::Transparent;
         self.matched = None;
-        self.owed = None;
+        if accumulated.is_some() {
+            self.owed = accumulated;
+        }
         self.last_added = None;
     }
 
@@ -320,6 +329,9 @@ pub struct Decoder {
     awaiting_command: bool,
     /// Transparent-mode match state, kept so the dictionary tracks the encoder.
     matched: Option<u16>,
+    /// A dictionary update the far end has made and this end cannot until the
+    /// character that completes it arrives. The encoder's `owed`, mirrored.
+    owed: Option<u16>,
 }
 
 impl std::fmt::Debug for Decoder {
@@ -340,6 +352,7 @@ impl Decoder {
             last_added: None,
             awaiting_command: false,
             matched: None,
+            owed: None,
         }
     }
 
@@ -367,6 +380,7 @@ impl Decoder {
             match byte {
                 ECM => {
                     self.inner.mode = Mode::Compressed;
+                    self.owed = None;
                     // 7.8.1 a), from this side. The far end has just extended
                     // its accumulated string by the first character of the
                     // string its first codeword names -- so carrying that
@@ -388,6 +402,7 @@ impl Decoder {
                     self.previous = None;
                     self.last_added = None;
                     self.matched = None;
+                    self.owed = None;
                 }
                 other => return Err(Error::ReservedCommand(other)),
             }
@@ -408,6 +423,9 @@ impl Decoder {
     /// encoder dictionary when compressed mode resumes (V.42bis clause 8).
     fn match_step(&mut self, c: u8) {
         let Some(current) = self.matched else {
+            if let Some(previous) = self.owed.take() {
+                self.last_added = self.inner.dict.add(previous, c);
+            }
             self.matched = Some(Dictionary::root_code(c));
             return;
         };
@@ -438,6 +456,19 @@ impl Decoder {
                 ETM => {
                     self.reader.align();
                     self.inner.mode = Mode::Transparent;
+                    // 7.8.2 b), from this side. The far end's encoder has
+                    // extended its accumulated string -- the last codeword it
+                    // sent -- by the first character it is about to send in
+                    // transparent mode. That character has not arrived, so
+                    // hold the string and make the entry when it does.
+                    //
+                    // Dropping it instead is invisible in a loopback, where
+                    // both ends drop it together, and comes apart against a
+                    // real one: one entry behind at every transition, and a
+                    // board that toggles modes every hundred octets is a
+                    // hundred octets of correct text and then "Rnkning on an
+                    // IWill" for "Running on an IWill".
+                    self.owed = self.previous;
                     self.previous = None;
                     self.last_added = None;
                     self.matched = None;

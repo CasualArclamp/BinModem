@@ -2,3 +2,6 @@
 *.wav binary
 *.pdf binary
 *.png binary
+
+# Captured wire data and the text it decodes to, byte for byte.
+crates/ec/tests/vectors/* binary

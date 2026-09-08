@@ -1,0 +1,61 @@
+Armbian 23.5.1 Bookworm l 
+
+**EMSI_REQA77E              
+Welcome to dialup.world! 
+If you are not here for internet access, try: [phreak] [fozz] [zork] [finalzone] [recamp] or [smirf]
+login:
+Armbian 23.5.1 Bookworm l 
+
+**EMSI_REQA77E              
+Welcome to dialup.world! 
+If you are not here for internet access, try: [phreak] [fozz] [zork] [finalzone] [recamp] or [smirf]
+login:fozz
+Trying 50.79.157.209...
+Connected to bbs.fozztexx.com.
+Escape character is 'off'.
+
+
+Welcome to the *NEW* Level 29 BBS!
+916 965 1701 - bbs.fozztexx.com
+
+              __
+  ___________/__\___________
+ /   _  _  -__ -   ___  -   \
+ \__________________________/
+             |  |
+             |  |
+        _____|  |______
+    ___|     |  |      |___
+   |   |     |  |      |   |
+___|___|____/____\_____|___|___
+                        __   __
+|     __        __  |  /  \ /  \
+|    /__\ |  | /__\ |   __/ \__/
+|___ \__   \/  \__  |  /___   /
+
+The official BBS of
+RetroBattlestations.com
+
+
+Enter your username or NEW or VISITOR
+User: visitor
+Terminal size (cols x rows) [40x16]: 
+Terminal type [unknown]: 
+Character set [ASCII]: 
+Welcome to the *NEW* Level 29 BBS!
+916 965 1701 - bbs.fozztexx.com
+
+The official BBS of
+RetroBattlestations.com
+
+Running on an IWill KK266Plus KT133A
+with AMD Duron at 1ghz and 1GB of RAM
+using custom software written by
+FozzTexx in Objective-C. The computer
+has no hard drive and boots using PXE
+flashed to a 27c128 in a PCI Kingston
+ethernet card and uses an NFS root.
+
+You are caller #137 for 07 Sep 2026
+-- Press a key --Connected at 115200 bps
+
