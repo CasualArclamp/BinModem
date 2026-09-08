@@ -3,7 +3,7 @@
     Build the one file there is to hand to somebody.
 
 .DESCRIPTION
-    Leaves dist\dialupmodem2.exe: a modem, the scope around it, the telnet
+    Leaves dist\binmodem.exe: a modem, the scope around it, the telnet
     terminal, the answering board and a capture to replay, in a single
     executable that needs nothing installed beside it.
 
@@ -18,7 +18,7 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Definition
 Set-Location $root
 
 Write-Host ""
-Write-Host "dialupmodem2 - building one file" -ForegroundColor Cyan
+Write-Host "BinModem - building one file" -ForegroundColor Cyan
 
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
@@ -32,7 +32,7 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 & cargo build --release -p gui
 if ($LASTEXITCODE -ne 0) { Write-Host "  build failed" -ForegroundColor Red; exit 1 }
 
-$built = Join-Path $root "target\release\modem-scope.exe"
+$built = Join-Path $root "target\release\binmodem.exe"
 if (-not (Test-Path $built)) {
     Write-Host "  built, but $built is missing" -ForegroundColor Red
     exit 1
@@ -40,7 +40,7 @@ if (-not (Test-Path $built)) {
 
 $dist = Join-Path $root "dist"
 New-Item -ItemType Directory -Force $dist | Out-Null
-$out = Join-Path $dist "dialupmodem2.exe"
+$out = Join-Path $dist "binmodem.exe"
 # Windows will not let a running executable be overwritten, and what it says
 # about it is a stack trace naming Copy-Item. The interesting fact is that the
 # last build is still open, which is a thing to be told rather than to work out.
@@ -70,8 +70,8 @@ if ($runtime) {
     Write-Host "  no C runtime dependency; Windows is all it needs" -ForegroundColor DarkGray
 }
 Write-Host ""
-Write-Host "  dialupmodem2.exe                  a modem on a real line" -ForegroundColor DarkGray
-Write-Host "  dialupmodem2.exe --devices        what audio this machine has" -ForegroundColor DarkGray
-Write-Host "  dialupmodem2.exe --telnet         a board over a socket" -ForegroundColor DarkGray
-Write-Host "  dialupmodem2.exe --capture        replay the golden capture" -ForegroundColor DarkGray
+Write-Host "  binmodem.exe                  a modem on a real line" -ForegroundColor DarkGray
+Write-Host "  binmodem.exe --devices        what audio this machine has" -ForegroundColor DarkGray
+Write-Host "  binmodem.exe --telnet         a board over a socket" -ForegroundColor DarkGray
+Write-Host "  binmodem.exe --capture        replay the golden capture" -ForegroundColor DarkGray
 Write-Host ""

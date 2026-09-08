@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "modem-scope"
+name = "binmodem"
 path = "src/main.rs"
 
 [dependencies]

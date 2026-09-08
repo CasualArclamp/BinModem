@@ -184,7 +184,7 @@ pub struct Identity {
 impl Default for Identity {
     fn default() -> Self {
         Self {
-            manufacturer: "dialupmodem2".into(),
+            manufacturer: "BinModem".into(),
             model: "SOFTMODEM".into(),
             revision: env!("CARGO_PKG_VERSION").into(),
             serial: "0".into(),

@@ -48,11 +48,11 @@ pub fn run(args: Vec<String>) -> ExitCode {
             "--banner" => banner = value(),
             "--help" | "-h" => {
                 println!(
-                    "modem-scope --answer --in <device> --out <device> \
+                    "binmodem --answer --in <device> --out <device> \
                      [--carrier B103|V22B|V32] [--banner <text>]\n\
                      \n\
                      Answers calls on a virtual cable and echoes what is typed,\n\
-                     so that `modem-scope --live` on the same cable has\n\
+                     so that `binmodem --live` on the same cable has\n\
                      something to dial. Both devices must be named."
                 );
                 return ExitCode::SUCCESS;

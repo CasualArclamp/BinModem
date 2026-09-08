@@ -15,4 +15,4 @@ if [ ! -f "$vector" ]; then
 fi
 
 cargo build -p gui --release
-exec ./target/release/modem-scope "$vector"
+exec ./target/release/binmodem "$vector"

@@ -62,7 +62,7 @@ impl Console {
     pub fn live() -> Self {
         let mut console = Self::new();
         console.term = Terminal::new(terminal::DEFAULT_COLS, terminal::DEFAULT_ROWS);
-        console.term.feed_bytes(b"dialupmodem2\r\n");
+        console.term.feed_bytes(b"BinModem\r\n");
         console.term.feed_bytes(
             b"Open a line above, then AT+MS to choose a modulation and ATD or ATA."
         );
@@ -78,7 +78,7 @@ impl Console {
     pub fn telnet() -> Self {
         let mut console = Self::new();
         console.term = Terminal::new(terminal::DEFAULT_COLS, terminal::DEFAULT_ROWS);
-        console.term.feed_bytes(b"dialupmodem2 - terminal over telnet\r\n");
+        console.term.feed_bytes(b"BinModem - terminal over telnet\r\n");
         console.term.feed_bytes(b"No modem and no line: every byte arrives.\r\n");
         console.term.feed_bytes(b"Pick a board above and connect.\r\n\r\n");
         console
@@ -90,7 +90,7 @@ impl Console {
         // leave E1 as the Recommendation's default and let the DCE echo.
         at.identity.model = "DIALUPMODEM2".into();
         let mut term = Terminal::new(terminal::DEFAULT_COLS, terminal::DEFAULT_ROWS);
-        term.feed_bytes(b"dialupmodem2 console\r\n");
+        term.feed_bytes(b"BinModem console\r\n");
         term.feed_bytes(b"AT commands accepted. ATD to replay the capture.\r\n\r\n");
         Self {
             term,

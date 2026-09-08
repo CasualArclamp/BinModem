@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Build and launch the dialupmodem2 scope.
+    Build and launch the BinModem scope.
 
 .DESCRIPTION
     With no arguments, offers a menu of the golden capture vectors and launches
@@ -76,7 +76,7 @@ $notes = [ordered]@{
 }
 
 Write-Host ""
-Write-Host "dialupmodem2" -ForegroundColor Cyan
+Write-Host "BinModem" -ForegroundColor Cyan
 
 # Rust may be installed but not on PATH in a fresh shell.
 if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
@@ -104,7 +104,7 @@ if ($TelnetOnly -or $Telnet) {
     & cargo @buildArgs
     if ($LASTEXITCODE -ne 0) { Write-Fail "build failed"; exit 1 }
 
-    $scope = Join-Path $root "target\$profileName\modem-scope.exe"
+    $scope = Join-Path $root "target\$profileName\binmodem.exe"
     if (-not (Test-Path $scope)) { Write-Fail "built, but $scope is missing"; exit 1 }
 
     $scopeArgs = @("--telnet")
@@ -126,7 +126,7 @@ if ($Live) {
     & cargo @buildArgs
     if ($LASTEXITCODE -ne 0) { Write-Fail "build failed"; exit 1 }
 
-    $scope = Join-Path $root "target\$profileName\modem-scope.exe"
+    $scope = Join-Path $root "target\$profileName\binmodem.exe"
     # The board is the same program, under a different flag.
     if (-not (Test-Path $scope)) { Write-Fail "built, but $scope is missing"; exit 1 }
 
@@ -275,7 +275,7 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-$exe = Join-Path $root "target\$profileName\modem-scope.exe"
+$exe = Join-Path $root "target\$profileName\binmodem.exe"
 if (-not (Test-Path $exe)) {
     Write-Fail "built, but $exe is missing"
     exit 1

@@ -10,4 +10,4 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 cargo build -p gui --release
-exec ./target/release/modem-scope --telnet "$@"
+exec ./target/release/binmodem --telnet "$@"

@@ -1,5 +1,5 @@
 @echo off
-rem Build the one file there is to hand to somebody: dist\dialupmodem2.exe.
+rem Build the one file there is to hand to somebody: dist\binmodem.exe.
 rem
 rem Everything is in it -- the scope, a modem, the telnet terminal, the
 rem answering board, and the capture it opens with -- and nothing has to be

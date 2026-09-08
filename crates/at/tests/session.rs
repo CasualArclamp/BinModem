@@ -288,7 +288,7 @@ fn junk_before_the_prefix_is_ignored() {
 fn identification_commands_answer() {
     let mut it = quiet_dce();
     assert!(send(&mut it, "ATI0\r").0.contains("SOFTMODEM"));
-    assert!(send(&mut it, "AT+GMI\r").0.contains("dialupmodem2"));
+    assert!(send(&mut it, "AT+GMI\r").0.contains("BinModem"));
     assert!(send(&mut it, "AT+GCAP\r").0.contains("+GCAP:"));
     assert_eq!(send(&mut it, "AT+NOSUCH\r").0, "\r\nERROR\r\n");
 }

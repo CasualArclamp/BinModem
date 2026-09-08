@@ -21,7 +21,7 @@ case "$carrier" in
 esac
 
 cargo build -p gui -p modem --release
-scope=./target/release/modem-scope
+scope=./target/release/binmodem
 answer=./target/release/modem-answer
 
 # Ask the binary which devices there are rather than keeping a second list

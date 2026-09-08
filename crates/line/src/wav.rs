@@ -176,7 +176,7 @@ mod write_tests {
 
     #[test]
     fn what_is_written_reads_back() {
-        let dir = std::env::temp_dir().join("dialupmodem2-wav-test");
+        let dir = std::env::temp_dir().join("binmodem-wav-test");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("roundtrip.wav");
 
@@ -198,7 +198,7 @@ mod write_tests {
 
     #[test]
     fn samples_past_full_scale_are_clamped_rather_than_wrapped() {
-        let dir = std::env::temp_dir().join("dialupmodem2-wav-test");
+        let dir = std::env::temp_dir().join("binmodem-wav-test");
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("clipped.wav");
         write(&path, &[2.0, -2.0, 0.0], 16_000).unwrap();
@@ -219,7 +219,7 @@ mod stereo_tests {
         // that arrived and the direction that was sent come back separately.
         // Averaged together they are a two-wire tap, which is the thing that
         // cannot be undone.
-        let dir = std::env::temp_dir().join("dialupmodem2-wav-test");
+        let dir = std::env::temp_dir().join("binmodem-wav-test");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("stereo.wav");
 

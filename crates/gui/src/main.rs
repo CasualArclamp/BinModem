@@ -7,13 +7,13 @@
 //! is the call actually happening.
 //!
 //! ```text
-//!   modem-scope                                  a modem, line chosen in the window
-//!   modem-scope --in <dev> --out <dev>           and opened straight away
-//!   modem-scope <path.wav>                       replay a capture
-//!   modem-scope --capture                        replay the Bell 103 golden vector
-//!   modem-scope --devices                        what audio this machine has
-//!   modem-scope --telnet [host]                  a board over a socket, no modem
-//!   modem-scope --answer --in <dev> --out <dev>  a board to dial, on the same cable
+//!   binmodem                                  a modem, line chosen in the window
+//!   binmodem --in <dev> --out <dev>           and opened straight away
+//!   binmodem <path.wav>                       replay a capture
+//!   binmodem --capture                        replay the Bell 103 golden vector
+//!   binmodem --devices                        what audio this machine has
+//!   binmodem --telnet [host]                  a board over a socket, no modem
+//!   binmodem --answer --in <dev> --out <dev>  a board to dial, on the same cable
 //! ```
 //!
 //! A modem is what this is for, so a modem is what it opens with. `--live` is
@@ -119,13 +119,13 @@ fn parse() -> Result<Option<Args>, String> {
             }
             "--help" | "-h" => {
                 println!(
-                    "modem-scope                                   a modem, line chosen in the window\n\
-                     modem-scope --in <dev> --out <dev>            and opened straight away\n\
-                     modem-scope [path.wav]                        replay a capture\n\
-                     modem-scope --capture                         replay the Bell 103 golden vector\n\
-                     modem-scope --devices                         list audio devices\n\
-                     modem-scope --telnet [host]                   a board over a socket, no modem\n\
-                     modem-scope --answer --in <dev> --out <dev>   a board to dial, on the same cable"
+                    "binmodem                                   a modem, line chosen in the window\n\
+                     binmodem --in <dev> --out <dev>            and opened straight away\n\
+                     binmodem [path.wav]                        replay a capture\n\
+                     binmodem --capture                         replay the Bell 103 golden vector\n\
+                     binmodem --devices                         list audio devices\n\
+                     binmodem --telnet [host]                   a board over a socket, no modem\n\
+                     binmodem --answer --in <dev> --out <dev>   a board to dial, on the same cable"
                 );
                 return Ok(None);
             }
@@ -175,15 +175,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let control = Arc::new(Control::default());
     let (sample_rate, title) = if args.live {
-        (LIVE_FS, "dialupmodem2 - live")
+        (LIVE_FS, "BinModem - live")
     } else if args.telnet.is_some() {
         // Nothing here is sampled. The rate only has to be something the
         // telemetry channel can be sized against.
-        (LIVE_FS, "dialupmodem2 - telnet")
+        (LIVE_FS, "BinModem - telnet")
     } else {
         let path = args.path.clone().unwrap_or_else(default_vector);
         let wav = engine::capture(&path)?;
-        (f64::from(wav.sample_rate), "dialupmodem2 - scope")
+        (f64::from(wav.sample_rate), "BinModem - scope")
     };
 
     let (tx, rx) = telemetry::channel(SCOPE_LEN, SPECTRUM_BINS, sample_rate);
