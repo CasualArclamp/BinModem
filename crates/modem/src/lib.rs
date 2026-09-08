@@ -219,10 +219,13 @@ impl Pump {
                 v22bis::handshake::Status::Connected(v22bis::Rate::Bps2400) => 16,
                 _ => 4,
             },
-            // Four during the whole start-up and at 4800; sixteen once the
-            // rate exchange has settled on 9600 (2.4.1.1).
-            Self::V32(m) => match m.status() {
-                v32::startup::Status::Connected(9600) => 16,
+            // Four during the whole start-up and at 4800. At 9600 it depends
+            // on which of the two modulations the rate exchange settled on:
+            // sixteen for 2.4.1.1 and thirty-two for the trellis code of
+            // 2.4.1.2.
+            Self::V32(m) => match (m.status(), m.coding()) {
+                (v32::startup::Status::Connected(9600), v32::Coding::Trellis) => 32,
+                (v32::startup::Status::Connected(9600), _) => 16,
                 _ => 4,
             },
             Self::Bell103(_) => 2,
@@ -233,6 +236,10 @@ impl Pump {
     fn shape(&self) -> &'static str {
         match self {
             Self::V22bis(_) | Self::V32(_) => match self.states() {
+                // The trellis code carries the same four bits as the sixteen
+                // points do; the extra one is the encoder's, so the name says
+                // coded rather than a larger alphabet.
+                32 => "32TCM",
                 16 => "16QAM",
                 _ => "4PSK",
             },

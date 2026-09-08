@@ -669,6 +669,11 @@ impl Startup {
         self.role
     }
 
+    /// Which of 9600's two modulations the rate exchange settled on.
+    pub fn coding(&self) -> Coding {
+        self.coding
+    }
+
     pub fn status(&self) -> Status {
         match self.state {
             State::Connected(rate) => Status::Connected(rate),
@@ -1501,6 +1506,11 @@ impl Modem {
     /// The network reflection the canceller went looking for, if it found one.
     pub fn reflection(&self) -> Option<Reflection> {
         self.reflection
+    }
+
+    /// Which of 9600's two modulations the rate exchange settled on.
+    pub fn coding(&self) -> Coding {
+        self.startup.coding()
     }
 
     pub fn status(&self) -> Status {

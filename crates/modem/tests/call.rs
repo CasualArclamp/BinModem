@@ -498,21 +498,21 @@ fn a_scope_can_see_what_the_modem_is_doing() {
     p.run(13.0);
     assert_eq!(p.caller.state(), State::Data, "never connected");
     assert_eq!(p.caller.rate(), Some(9600));
-    // And sixteen once the rate exchange has settled on 9600.
-    assert_eq!(p.caller.states(), 16);
-    assert_eq!(p.caller.shape(), "16QAM");
+    // And thirty-two once the rate exchange has settled on 9600, because both
+    // ends offer the trellis code of 2.4.1.2 and it is what they agree on. It
+    // was sixteen when 2.4.1.1 was the only 9600 there was.
+    assert_eq!(p.caller.states(), 32);
+    assert_eq!(p.caller.shape(), "32TCM");
     assert!(p.caller.carrier(), "connected with no carrier");
     let point = p.caller.constellation_point().expect("no point once connected");
     let radius = point.0.hypot(point.1);
-    // Sixteen points on three rings, normalised by the constellation's own
-    // root-mean-square: four inner corners at sqrt(2/10) = 0.447, eight at 1,
-    // and four outer at sqrt(18/10) = 1.342. Any of the three is a correct
-    // answer, and which one this is depends on the byte being carried when the
-    // run stopped -- so the range has to hold all of them. The bound started at
-    // 0.5, which excluded the inner ring, and passed for as long as nothing
-    // landed on it.
+    // Thirty-two points on five rings, normalised by the constellation's own
+    // root-mean-square of sqrt(10): the innermost four at sqrt(1/10) = 0.316
+    // and the outermost eight at sqrt(17/10) = 1.304. Any ring is a correct
+    // answer and which one this is depends on the byte being carried when the
+    // run stopped, so the range has to hold all of them.
     assert!(
-        (0.35..2.0).contains(&radius),
+        (0.25..2.0).contains(&radius),
         "the constellation is at radius {radius:.2}, so the scope would draw it \
          off the edge or in a dot"
     );
