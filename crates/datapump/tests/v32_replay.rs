@@ -106,11 +106,12 @@ fn what_this_end_made_of_it() {
     if !lock.is_empty() {
         println!("
   second  symbols  mean miss   error along vs across the radius");
-        let mut second = lock[0].0.floor();
+        let mut second = (lock[0].0 * 10.0).floor();
         let (mut n, mut sum) = (0usize, 0.0);
         let (mut radial, mut tangential) = (0.0f64, 0.0f64);
+        let (mut dot, mut cross) = (0.0f64, 0.0f64);
         for &(at, (i, q)) in &lock {
-            if at.floor() != second {
+            if (at * 10.0).floor() != second {
                 if n > 0 {
                     let miss = sum / n as f64;
                     let across = (tangential / n as f64).sqrt();
@@ -119,15 +120,18 @@ fn what_this_end_made_of_it() {
                         * (10.0 / ((radial + tangential) / n as f64).max(1e-12))
                             .log10();
                     println!(
-                        "  {second:6.0}  {miss:7.3}  along {along:6.3}  across                          {across:6.3}  ratio {:4.2}  SNR {snr:5.1} dB",
-                        across / along.max(1e-9)
+                        "  {:7.1}s  miss {miss:6.3}  SNR {snr:5.1} dB  turn                          {:+7.2} deg   along {along:5.3} across {across:5.3}",
+                        second / 10.0,
+                        cross.atan2(dot).to_degrees()
                     );
                 }
-                second = at.floor();
+                second = (at * 10.0).floor();
                 n = 0;
                 sum = 0.0;
                 radial = 0.0;
                 tangential = 0.0;
+                dot = 0.0;
+                cross = 0.0;
             }
             // Whichever constellation the call settled on: the four points
             // of 4800 (A B C D of Figure 1) or the thirty-two of Figure 3.
@@ -156,8 +160,43 @@ fn what_this_end_made_of_it() {
             let (ex, ey) = (i - x, q - y);
             radial += ((ex * x + ey * y) / r).powi(2);
             tangential += ((ey * x - ex * y) / r).powi(2);
+            dot += i * x + q * y;
+            cross += q * x - i * y;
             n += 1;
         }
+    }
+
+    // One number to compare settings by: how much of the connected time the
+    // constellation was clean enough for thirty-two points to be readable.
+    if !lock.is_empty() {
+        let (mut good, mut total) = (0usize, 0usize);
+        let (mut n, mut sq) = (0usize, 0.0f64);
+        let mut window = (lock[0].0 * 10.0).floor();
+        for &(at, p) in &lock {
+            if (at * 10.0).floor() != window {
+                if n > 0 {
+                    let snr = 10.0 * (10.0 / (sq / n as f64).max(1e-12)).log10();
+                    total += 1;
+                    if snr > 24.0 {
+                        good += 1;
+                    }
+                }
+                window = (at * 10.0).floor();
+                n = 0;
+                sq = 0.0;
+            }
+            let (x, y) = datapump::v32::trellis::point(
+                datapump::v32::trellis::nearest(p),
+            );
+            sq += (p.0 - x).powi(2) + (p.1 - y).powi(2);
+            n += 1;
+        }
+        println!(
+            "SUMMARY {:.1}s of {:.1}s above 24 dB ({:.0}%)",
+            good as f64 / 10.0,
+            total as f64 / 10.0,
+            100.0 * good as f64 / total.max(1) as f64
+        );
     }
 
     // Is what is left of each symbol noise, or the symbols either side of it
