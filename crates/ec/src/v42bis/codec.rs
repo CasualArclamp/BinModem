@@ -211,15 +211,31 @@ impl Encoder {
         self.bits_out = 0;
     }
 
-    /// V.42bis 7.8.1. Taken only at a match boundary, where the dictionary
-    /// update has just been done, so both ends stay in step without the
-    /// mid-match update the Recommendation describes for the general case.
+    /// V.42bis 7.8.1.
+    ///
+    /// a) is the whole of it, and skipping it is invisible until a real modem
+    /// is on the other end: "perform the dictionary update procedure using the
+    /// current accumulated string and the next character to be processed by
+    /// the string matching procedure (which will be the first character of the
+    /// string represented by the first codeword transmitted in compressed
+    /// mode)". One entry, added at the transition and at no other time.
+    ///
+    /// This used to throw the accumulated string away instead, on the grounds
+    /// that the switch was taken at a match boundary and both ends would stay
+    /// in step. Both ends did -- these two ends. Every dictionary this end
+    /// built after the switch was one entry short of the one a far end built,
+    /// so every codeword above that point named the wrong string, and a real
+    /// board's text came out as itself with the letters moved about: "If you
+    /// ar tnot he tn for int fne haccess,tory".
+    ///
+    /// The character is not known yet, so the update is owed rather than made,
+    /// which is what `owed` is already for.
     fn enter_compressed(&mut self, out: &mut Vec<u8>) {
         out.push(self.inner.escape);
         out.push(ECM);
         self.inner.mode = Mode::Compressed;
+        self.owed = self.matched;
         self.matched = None;
-        self.owed = None;
         self.last_added = None;
     }
 
@@ -351,7 +367,12 @@ impl Decoder {
             match byte {
                 ECM => {
                     self.inner.mode = Mode::Compressed;
-                    self.previous = None;
+                    // 7.8.1 a), from this side. The far end has just extended
+                    // its accumulated string by the first character of the
+                    // string its first codeword names -- so carrying that
+                    // string over as the previous one is the same update, made
+                    // when the character arrives rather than before.
+                    self.previous = self.matched;
                     self.last_added = None;
                     self.matched = None;
                 }
@@ -638,6 +659,63 @@ mod tests {
         assert_eq!(
             dec.decode(&[0, 200], &mut out),
             Err(Error::ReservedCommand(200))
+        );
+    }
+}
+
+/// What a real V.42bis encoder put on a real line.
+///
+/// Every other test here runs this encoder into this decoder, which proves
+/// they agree and cannot prove they are right: for years they agreed on
+/// skipping 7.8.1 a), and a pair that is wrong the same way is a pair that
+/// passes. This is the other kind of evidence -- 260 octets off
+/// `live-1788830261.wav`, the information fields of the first LAPM frames a
+/// board sent, in the order they arrived.
+///
+/// It opens in transparent mode, which is why the banner is legible in the
+/// bytes; `00 00` is the escape character and ECM (5.3 e, 9.1) and everything
+/// after it is codewords. Before 7.8.1 a) was implemented this decoded to
+/// "If you ar tnot he tn for int fne haccess,tory" -- the same letters, moved
+/// about, because every dictionary entry above the switch was off by one.
+#[cfg(test)]
+mod real_encoder {
+    use super::*;
+
+    const FROM_THE_LINE: &[u8] = &[
+    0x0d, 0x41, 0x72, 0x6d, 0x62, 0x69, 0x61, 0x6e, 0x20, 0x32, 0x33, 0x2e, 0x35, 0x2e, 0x31, 0x20,
+    0x42, 0x6f, 0x6f, 0x6b, 0x77, 0x6f, 0x72, 0x6d, 0x20, 0x6c, 0x20, 0x0a, 0x0d, 0x0a, 0x0d, 0x2a,
+    0x2a, 0x45, 0x4d, 0x53, 0x49, 0x5f, 0x52, 0x45, 0x51, 0x41, 0x37, 0x37, 0x45, 0x0d, 0x11, 0x20,
+    0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x20, 0x0d, 0x0d, 0x0a,
+    0x00, 0x00, 0x5a, 0xd0, 0xbc, 0x31, 0x23, 0x07, 0x0e, 0x9a, 0x11, 0x77, 0xe4, 0x8c, 0x38, 0x83,
+    0xf0, 0x0d, 0x9e, 0x39, 0x31, 0x2e, 0xd6, 0x79, 0x13, 0x00, 0x67, 0x48, 0x8c, 0xf0, 0xc8, 0x24,
+    0xcd, 0x08, 0x3e, 0x72, 0xf0, 0x8c, 0x20, 0x53, 0x87, 0x67, 0x1c, 0x39, 0x77, 0x46, 0xac, 0x41,
+    0x63, 0x75, 0x44, 0x1a, 0x8c, 0x23, 0xd8, 0xc4, 0xb9, 0xd3, 0x35, 0x0e, 0x1a, 0xad, 0x64, 0xcc,
+    0x98, 0x41, 0x63, 0xc7, 0xce, 0x8b, 0x9e, 0x75, 0xf8, 0xf4, 0x18, 0xe1, 0x65, 0xce, 0x1a, 0xab,
+    0x64, 0xdc, 0x80, 0xa9, 0x0b, 0xb6, 0x4f, 0x9f, 0x00, 0x7c, 0xbd, 0xf4, 0xc1, 0xb8, 0xb7, 0xef,
+    0x58, 0x32, 0x6f, 0x06, 0x9f, 0x0d, 0x6c, 0xd5, 0x0c, 0x19, 0x38, 0x73, 0xf8, 0x86, 0xf5, 0x62,
+    0x07, 0x0e, 0x9b, 0x3a, 0x69, 0xc0, 0x78, 0x7c, 0x23, 0x47, 0xcd, 0xd8, 0x1e, 0x1e, 0x07, 0x16,
+    0x3c, 0x98, 0x70, 0x61, 0xc3, 0x87, 0x11, 0x27, 0x56, 0x3c, 0x0a, 0x47, 0x23, 0xc7, 0xd0, 0x20,
+    0x45, 0x92, 0x34, 0x89, 0x52, 0x25, 0x4b, 0x97, 0x32, 0x65, 0xe6, 0x66, 0x5a, 0xf3, 0x66, 0xce,
+    0x9d, 0x3d, 0x7f, 0x06, 0x0d, 0x00, 0x88, 0x89, 0x1a, 0xc5, 0x98, 0x74, 0x69, 0xd3, 0xa7, 0x51,
+    0xa7, 0x56, 0xbd, 0x9a, 0x75, 0x6b, 0x57, 0x9e, 0x60, 0xeb, 0x88, 0x25, 0x6b, 0x16, 0x2d, 0xd5,
+    0xb5, 0x6d, 0xdf, 0xc6,
+    ];
+
+    #[test]
+    fn a_real_encoders_stream_decodes_to_what_it_said() {
+        let mut decoder = Decoder::new(Params { n2: 2048, n7: 250 });
+        let mut out = Vec::new();
+        decoder
+            .decode(FROM_THE_LINE, &mut out)
+            .expect("a real encoder's stream would not decode");
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains("Welcome to dialup.world!"),
+            "the transparent part is wrong, which would be a different fault: {text:?}",
+        );
+        assert!(
+            text.contains("If you are not here for internet access"),
+            "the compressed part came out as {text:?}",
         );
     }
 }
