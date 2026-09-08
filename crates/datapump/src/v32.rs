@@ -30,6 +30,7 @@
 //! what advertises it, and stays clear here.
 
 pub mod startup;
+pub mod trellis;
 
 use dsp::filter::OnePole;
 use dsp::{ComplexFir, Equalizer, Gardner, Nco, fir_lowpass, rrc_at, rrc_taps};
