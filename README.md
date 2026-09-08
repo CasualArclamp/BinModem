@@ -8,13 +8,15 @@ sound card. No DSP chip, no driver blob, and none of a winmodem's dependence on
 one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
-source for every normative constant. 763 tests.
+source for every normative constant. 766 tests.
 
 ## What works
 
 It places and answers real calls. A full interactive session — a public dial-up
 gateway, reached over a VoIP trunk — has crossed it at V.22bis 2400 with V.42
-error control and V.42bis compression, byte for byte correct.
+error control and V.42bis compression, byte for byte correct. Where a far end
+answers no XID at all and simply announces compression in band, that is
+followed too, and 1957 octets of one board's screen are kept as a test vector.
 
 | | |
 |---|---|
@@ -38,8 +40,6 @@ OS-specific code — but only built and run on Windows so far.
 - **V.32 at 9600** connects and then delivers noise. We implement the uncoded
   variant; real modems send the trellis-coded one. `AT+MS=V32,1,4800,4800`
   works around it.
-- **V.42bis divergence** late in long sessions: the two dictionaries drift
-  apart and the text comes out mangled. STEPUP is the suspect.
 - **V.32 over VoIP** needs echo cancellation turned off on the trunk. Both
   directions share the band and a canceller in the middle cannot separate them.
   V.22bis is unaffected, because it splits the band instead.
