@@ -1751,6 +1751,135 @@ impl ScopeApp {
                     .suffix(" dB"),
             );
         });
+
+        self.call_settings(ui);
+    }
+
+    /// Every ceiling this modem will offer, as rate, modulation and label.
+    ///
+    /// One list rather than a modulation and a rate to be chosen separately,
+    /// because nobody wants "V.22bis" and "2400" as two decisions -- they want
+    /// 2400, and the modulation that reaches it follows from that.
+    const CEILINGS: [(u32, usize, &'static str); 5] = [
+        (300, 0, "300"),
+        (1200, 1, "1200"),
+        (2400, 1, "2400"),
+        (4800, 2, "4800"),
+        (9600, 2, "9600"),
+    ];
+
+    /// How fast at most, and the three things that are simply on or off.
+    ///
+    /// V.250 makes this three commands across two clauses and a person does
+    /// not think of it that way. What they want to say is how fast at most and
+    /// whether to use the things that make a call reliable, and every one of
+    /// those is one click here.
+    ///
+    /// Nothing new is settable that was not settable before -- the modulation
+    /// box and the two windows write the same subparameters and are still
+    /// there for the rest of them. What is new is that the common answer does
+    /// not need a window opened to give it.
+    fn call_settings(&mut self, ui: &mut egui::Ui) {
+        let Source::Live(session) = &self.source else { return };
+        let session = Arc::clone(session);
+        let dim = Color32::from_rgb(140, 150, 165);
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("up to").monospace().color(dim));
+
+            let mut picked = None;
+            for (rate, carrier, label) in Self::CEILINGS {
+                let chosen =
+                    self.carrier == carrier && self.modulation.max_rate == rate;
+                if ui
+                    .radio(chosen, label)
+                    .on_hover_text(Self::CARRIERS[carrier].1)
+                    .clicked()
+                {
+                    picked = Some((rate, carrier));
+                }
+            }
+            if let Some((rate, carrier)) = picked {
+                self.carrier = carrier;
+                self.modulation.fit(carrier);
+                // A ceiling and no floor. V.250 6.4.1 has an unspecified rate
+                // "determined by the modulation means selected", which is what
+                // is wanted underneath: as fast as this, and as slow as it
+                // takes.
+                self.modulation.min_rate = 0;
+                self.modulation.max_rate = rate;
+                session.type_bytes(
+                    format!(
+                        "{}\r",
+                        self.modulation.command(Self::CARRIERS[carrier].0)
+                    )
+                    .as_bytes(),
+                );
+            }
+
+            ui.separator();
+
+            // V.250 6.4.1: with automode on, the box above is where the call
+            // starts rather than where it ends up.
+            let mut automode = self.modulation.automode;
+            if ui
+                .checkbox(&mut automode, "V.8")
+                .on_hover_text(
+                    "Negotiate the modulation with the far end (AT+MS                      <automode>). Off means the one chosen above and nothing                      else.",
+                )
+                .clicked()
+            {
+                self.modulation.automode = automode;
+                session.type_bytes(
+                    format!(
+                        "{}\r",
+                        self.modulation.command(Self::CARRIERS[self.carrier].0)
+                    )
+                    .as_bytes(),
+                );
+            }
+
+            let mut protect = self.protection.wants_error_control();
+            if ui
+                .checkbox(&mut protect, "V.42")
+                .on_hover_text(
+                    "Error control: what arrives is what was sent, or the                      call ends (AT+ES).",
+                )
+                .clicked()
+            {
+                // 3 is the Recommendation's own default and the one the
+                // window's first radio button offers: ask the far end first.
+                self.protection.request = if protect { 3 } else { 0 };
+                for line in self.protection.commands() {
+                    session.type_bytes(format!("{line}\r").as_bytes());
+                }
+            }
+
+            // V.42bis rides on LAPM and has nowhere else to be, so without
+            // error control there is nothing for this to be checked against.
+            let mut compress = self.protection.compress && protect;
+            let response = ui
+                .add_enabled(protect, egui::Checkbox::new(&mut compress, "V.42bis"))
+                .on_hover_text(
+                    "Compression, which needs error control underneath it                      (AT+DS).",
+                )
+                .on_disabled_hover_text(
+                    "V.42bis rides on LAPM and there is nowhere else for it                      to be, so error control off is compression off.",
+                );
+            if response.clicked() {
+                self.protection.compress = compress;
+                for line in self.protection.commands() {
+                    session.type_bytes(format!("{line}\r").as_bytes());
+                }
+            }
+
+            ui.separator();
+            ui.label(
+                RichText::new(self.modulation.command(Self::CARRIERS[self.carrier].0))
+                    .monospace()
+                    .color(dim),
+            );
+        });
     }
 
     fn status(&self, ui: &mut egui::Ui) {
