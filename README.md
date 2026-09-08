@@ -1,5 +1,7 @@
 # BinModem
 
+<img width="1319" height="1007" alt="dialupmodem2_0IgsyArLo3" src="https://github.com/user-attachments/assets/99c3c5a9-0a1f-4c6d-af22-05f37344e7d3" />
+
 A dial-up softmodem in Rust. Everything a modem does — the tones, the
 handshakes, the error control, the compression — is code, and the line is a
 sound card. No DSP chip, no driver blob, and none of a winmodem's dependence on
