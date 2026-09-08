@@ -213,35 +213,47 @@ fn a_rate_signal_repeats_its_sixteen_bits() {
     assert_eq!(r, states(0b0000_0110_0000_1001), "not reproducible");
 }
 
-/// A far end that flags V.32bis is not offered the 9600 this modem has.
+/// A V.32bis far end is met with trellis coding at 9600.
 ///
-/// Table 6 Note 1 has B4 and B8 together meaning V.32bis. V.32bis's own Note 1
-/// then says interworking proceeds under V.32 when either bit is zero in
-/// either direction, and V.32 1 e) makes the 16-state 9600 mandatory for that
-/// -- so this should not be necessary. It is: the modem this was measured
-/// against reads an E calling for 9600 without trellis and stops transmitting
-/// one round trip later, every time, while 4800 carries a whole session.
+/// Table 6 Note 1 has B4 and B8 together meaning V.32bis, and V.32bis's own
+/// Note 1 has interworking fall back to V.32 when either bit is zero in either
+/// direction. This end never sets B4, so what the two of them speak at 9600 is
+/// V.32 2.4.1.2 -- which is now implemented, so the rate stands.
 #[test]
-fn a_v32bis_far_end_is_taken_at_4800_until_there_is_a_trellis_decoder() {
+fn a_v32bis_far_end_is_met_with_trellis_coding() {
+    use datapump::v32::Coding;
+    use datapump::v32::startup::{agreed_coding, is_v32bis, rate_signal, usable_rate};
     // 2400/4800/9600 with trellis, which is what came off the line.
     let theirs = 0b0000_1111_1111_1001;
-    assert!(datapump::v32::startup::is_v32bis(theirs));
-    assert_eq!(
-        datapump::v32::startup::offered_rate(theirs),
-        9600,
-        "it does offer 9600"
-    );
-    assert_eq!(
-        datapump::v32::startup::usable_rate(theirs),
-        4800,
-        "but not one this modem can receive"
-    );
+    let ours = rate_signal(true, true);
+    assert!(is_v32bis(theirs));
+    assert!(!is_v32bis(ours), "this end is V.32, and says so with B4");
+    assert_eq!(usable_rate(theirs, ours), 9600);
+    assert_eq!(agreed_coding(theirs, ours, 9600), Coding::Trellis);
 }
 
-/// A plain V.32 far end keeps its 9600.
+/// A far end without B8 gets the sixteen-point alternative, which 1 e) makes
+/// mandatory for anything offering 9600 at all.
 #[test]
-fn a_far_end_that_is_only_v32_is_taken_at_the_rate_it_offers() {
-    let theirs = datapump::v32::startup::rate_signal(true, true);
-    assert!(!datapump::v32::startup::is_v32bis(theirs));
-    assert_eq!(datapump::v32::startup::usable_rate(theirs), 9600);
+fn a_far_end_without_trellis_gets_the_other_9600() {
+    use datapump::v32::Coding;
+    use datapump::v32::startup::{agreed_coding, rate_signal, usable_rate};
+    let ours = rate_signal(true, true);
+    let theirs = ours & !(1 << (15 - 8));
+    assert_eq!(usable_rate(theirs, ours), 9600);
+    assert_eq!(agreed_coding(theirs, ours, 9600), Coding::Uncoded);
+}
+
+/// With trellis turned off at this end, a V.32bis far end is still taken at
+/// 4800 rather than at a 9600 it will not honour.
+///
+/// The measurement that put this here: such a modem reads an E calling for
+/// 9600 without trellis and stops transmitting one round trip later, every
+/// time, while 4800 carries a whole session.
+#[test]
+fn without_trellis_a_v32bis_far_end_is_still_taken_at_4800() {
+    use datapump::v32::startup::{rate_signal, usable_rate};
+    let theirs = 0b0000_1111_1111_1001;
+    let ours = rate_signal(true, true) & !(1 << (15 - 8));
+    assert_eq!(usable_rate(theirs, ours), 4800);
 }

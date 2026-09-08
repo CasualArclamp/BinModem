@@ -656,3 +656,57 @@ fn a_line_with_nothing_on_it_is_not_answered() {
     assert_eq!(phase, "listening");
 }
 
+
+/// A whole call at 9600 with the trellis coding, negotiated rather than set.
+///
+/// Both ends offer 4800 and 9600, and both set B8 because both have 2.4.1.2.
+/// The rate exchange has to settle on 9600 *and* on the coding, the E sequence
+/// has to say so, and the two constellations have to change over at the same
+/// place in the stream -- which is the part no unit test of the code itself
+/// can reach.
+#[test]
+fn a_call_at_9600_settles_on_trellis_coding_and_carries_data() {
+    let offer = rate_signal(true, true);
+    let mut calling = Modem::new(Role::Calling, offer, FS);
+    let mut answering = Modem::new(Role::Answering, offer, FS);
+    let (mut from_calling, mut from_answering) = (0.0, 0.0);
+    let (to_host, to_caller) = (b"nine thousand six hundred\r\n", b"trellis coded");
+    let (mut sent, mut settled) = (false, f64::NAN);
+    let (mut at_host, mut at_caller) = (Vec::new(), Vec::new());
+
+    for i in 0..(40.0 * FS) as usize {
+        let (a, b) = (from_calling, from_answering);
+        from_calling = calling.step(b * FAR + a * ECHO);
+        from_answering = answering.step(a * FAR + b * ECHO);
+        at_caller.extend(calling.take_bytes());
+        at_host.extend(answering.take_bytes());
+
+        let up = matches!(calling.status(), Status::Connected(_))
+            && matches!(answering.status(), Status::Connected(_));
+        if up && settled.is_nan() {
+            settled = i as f64 / FS;
+        }
+        if up && !sent && i as f64 / FS > settled + 1.0 {
+            sent = true;
+            calling.send(to_host);
+            answering.send(to_caller);
+        }
+    }
+
+    assert_eq!(
+        calling.status(),
+        Status::Connected(9600),
+        "the calling end stopped at {}",
+        calling.phase()
+    );
+    assert_eq!(answering.status(), Status::Connected(9600));
+    assert!(sent, "never connected, so nothing was sent");
+    assert!(
+        contains_at_any_bit_offset(&at_host, to_host),
+        "the answering end did not receive what was typed"
+    );
+    assert!(
+        contains_at_any_bit_offset(&at_caller, to_caller),
+        "the calling end did not receive the host's reply"
+    );
+}

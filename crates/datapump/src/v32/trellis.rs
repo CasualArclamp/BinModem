@@ -85,6 +85,22 @@ pub fn point(code: usize) -> (f64, f64) {
     POINTS[code & 31]
 }
 
+/// The nearest of the thirty-two points, as an index.
+///
+/// Not how the data is decoded -- that is [`Decoder`], which follows the code
+/// rather than the point. This is for the equaliser, which needs something to
+/// measure this symbol against while it is still this symbol.
+pub fn nearest(at: (f64, f64)) -> usize {
+    let mut best = (f64::INFINITY, 0);
+    for (code, &(x, y)) in POINTS.iter().enumerate() {
+        let d = (at.0 - x).powi(2) + (at.1 - y).powi(2);
+        if d < best.0 {
+            best = (d, code);
+        }
+    }
+    best.1
+}
+
 /// How many states the code has: three delay elements in Figure 2.
 pub const STATES: usize = 8;
 

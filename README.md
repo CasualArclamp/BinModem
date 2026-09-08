@@ -8,7 +8,7 @@ sound card. No DSP chip, no driver blob, and none of a winmodem's dependence on
 one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
-source for every normative constant. 771 tests.
+source for every normative constant. 784 tests.
 
 ## What works
 
@@ -21,7 +21,7 @@ board's screen are kept as a test vector.
 
 | | |
 |---|---|
-| **Modulations** | Bell 103 (300), V.22 (1200), V.22bis (1200/2400), V.32 (4800/9600) |
+| **Modulations** | Bell 103 (300), V.22 (1200), V.22bis (1200/2400), V.32 (4800/9600, both codings) |
 | **Negotiation** | V.8 CM/JM/CI/CJ and ANSam; V.25 answer tone told apart from it |
 | **Error control** | V.42 LAPM — detection, HDLC, XID, REJ/SREJ, mod-128 |
 | **Compression** | V.42bis, negotiated in XID or followed in band |
@@ -38,13 +38,16 @@ OS-specific code — but only built and run on Windows so far.
 
 ## Work in progress
 
-- **V.32 at 9600** is untried against a real modem. We implement the uncoded
-  variant and real modems send the trellis-coded one, so `AT+MS=V32,1,4800,4800`
-  is the setting that is known to work.
+- **V.32 at 9600** is untried against a real modem. Both of its modulations
+  are implemented now, including the trellis code with a Viterbi decoder, and
+  the rate exchange picks between them — but only 4800 has actually carried a
+  call. `AT+MS=V32,1,4800,4800` is still the setting known to work.
 
 ## Next
 
-V.32 trellis coding, then V.32bis (14 400) and V.34 (33 600). After that, the
+V.32bis (14 400) and V.34 (33 600), which the trellis code is most of the
+groundwork for. MNP as an alternative to LAPM, since it is what a modem
+without V.42 will offer. After that, the
 part that makes it a modem to the rest of the machine rather than only to its
 own window: a COM port, so Windows Dial-Up Networking can dial it.
 

@@ -14,7 +14,7 @@
 //! that comes back. What is left after taking off the 64 is the time the line
 //! adds, which is what the echo canceller needs to know how far back to look.
 
-use super::{Mode, Receiver, Signal, Transmitter};
+use super::{Coding, Mode, Receiver, Signal, Transmitter};
 use dsp::{EchoCanceller, EchoFinder, ReversalDetector, ToneDetector};
 // Part of this module's surface: `Modem::reflection` hands one back, and what
 // is above a data pump should not have to reach past it to name the type.
@@ -257,6 +257,14 @@ pub fn rate_signal(bits_4800: bool, bits_9600: bool) -> u16 {
     }
     if bits_9600 {
         set(6);
+        // B8: "1 denotes availability of trellis coding/decoding at the
+        // highest data rate indicated in B4-6". This modem has both codings at
+        // 9600 and only that rate, so the two bits go together.
+        //
+        // B4 stays clear. Table 6 Note 1 makes B4 and B8 together mean V.32bis,
+        // and V.32bis's own Note 1 has interworking fall back to V.32 when
+        // either is zero -- which is the coding implemented here.
+        set(8);
     }
     // B9-14 are 0 0 1 0 0 0 for the absence of special modes, and B11 above is
     // the one of those that is set.
@@ -270,8 +278,16 @@ pub fn rate_signal(bits_4800: bool, bits_9600: bool) -> u16 {
 /// transmission of scrambled binary ones immediately following signal E". A
 /// modem that put its whole offer in E would tell a far end that had agreed to
 /// 4800 to start receiving at 9600.
-pub fn rate_signal_for(bits_per_second: u32) -> u16 {
-    rate_signal(bits_per_second == 4800, bits_per_second == 9600)
+pub fn rate_signal_for(bits_per_second: u32, coding: Coding) -> u16 {
+    let s = rate_signal(bits_per_second == 4800, bits_per_second == 9600);
+    if coding == Coding::Trellis {
+        s
+    } else {
+        // Table 7: E indicates "the data rate and coding ... immediately
+        // following signal E", so an E for the sixteen-point alternative must
+        // not claim the other one.
+        s & !(1 << (15 - 8))
+    }
 }
 
 /// The E sequence that ends a rate exchange (Table 7).
@@ -290,6 +306,25 @@ pub fn is_rate_signal(s: u16) -> bool {
 /// True if `s` is an E sequence rather than a rate signal.
 pub fn is_end_signal(s: u16) -> bool {
     s & 0xf000 == 0xf000 && s & (1 << 8) != 0 && s & (1 << 4) != 0 && s & 1 != 0
+}
+
+/// Whether a rate signal offers trellis coding at its highest rate (B8).
+pub fn offers_trellis(s: u16) -> bool {
+    s & (1 << (15 - 8)) != 0
+}
+
+/// The coding two rate signals settle on for `rate`.
+///
+/// 2.4.1 gives 9600 two modulations and nothing else has a choice, and 5.4.2
+/// has R3 name "the data rate, coding and any special operational modes to be
+/// used by both modems". Trellis needs both ends to have said B8; anything
+/// else is the sixteen-point alternative that 1 e) makes mandatory.
+pub fn agreed_coding(theirs: u16, ours: u16, rate: u32) -> Coding {
+    if rate == 9600 && offers_trellis(theirs) && offers_trellis(ours) {
+        Coding::Trellis
+    } else {
+        Coding::Uncoded
+    }
 }
 
 /// Whether a rate signal comes from a V.32bis modem.
@@ -322,10 +357,10 @@ pub fn is_v32bis(s: u16) -> bool {
 /// trellis decoder to offer it with. 5.4.1 asks for exactly this judgement:
 /// "R2 should also take account of the likely receiver performance with the
 /// particular connection".
-pub fn usable_rate(s: u16) -> u32 {
-    let bit = |b: u32| s & (1 << (15 - b)) != 0;
-    let rate = offered_rate(s);
-    if rate == 9600 && is_v32bis(s) {
+pub fn usable_rate(theirs: u16, ours: u16) -> u32 {
+    let bit = |b: u32| theirs & (1 << (15 - b)) != 0;
+    let rate = offered_rate(theirs);
+    if rate == 9600 && is_v32bis(theirs) && !offers_trellis(ours) {
         // 4800 is mandatory (1 d), so a far end that does not offer it is
         // asking for something this modem cannot give at all.
         return if bit(5) { 4800 } else { 0 };
@@ -589,6 +624,8 @@ pub struct Startup {
     pending_sequence: Option<u16>,
     /// What this modem offers, and what has been settled on.
     offer: u16,
+    /// Which of 9600's two modulations the rate exchange settled on.
+    coding: Coding,
     agreed: u32,
 }
 
@@ -623,6 +660,7 @@ impl Startup {
             pending_sideband_reversal: false,
             pending_sequence: None,
             offer,
+            coding: Coding::Uncoded,
             agreed: 0,
         }
     }
@@ -829,6 +867,7 @@ impl Startup {
         {
             self.heard_end = true;
             rx.set_data_rate(offered_rate(e));
+            rx.set_coding(agreed_coding(e, self.offer, offered_rate(e)));
         }
         let carrier = std::mem::take(&mut self.pending_carrier_reversal);
         let sidebands = std::mem::take(&mut self.pending_sideband_reversal);
@@ -966,7 +1005,9 @@ impl Startup {
             State::AwaitingR1 => {
                 tx.set_signal(Signal::Silent);
                 if let Some(s) = sequence.filter(|&s| is_rate_signal(s)) {
-                    self.agreed = usable_rate(s).min(offered_rate(self.offer));
+                    self.agreed = usable_rate(s, self.offer)
+                        .min(offered_rate(self.offer));
+                    self.coding = agreed_coding(s, self.offer, self.agreed);
                     if self.agreed == 0 {
                         self.state = State::Failed;
                         return;
@@ -1079,7 +1120,9 @@ impl Startup {
             State::AwaitingR2 => {
                 tx.set_signal(Signal::Silent);
                 if let Some(s) = sequence.filter(|&s| is_rate_signal(s)) {
-                    self.agreed = usable_rate(s).min(offered_rate(self.offer));
+                    self.agreed = usable_rate(s, self.offer)
+                        .min(offered_rate(self.offer));
+                    self.coding = agreed_coding(s, self.offer, self.agreed);
                     if self.agreed == 0 {
                         self.state = State::Failed;
                         return;
@@ -1137,11 +1180,13 @@ impl Startup {
                     Role::Answering => {
                         if let Some(s) = sequence.filter(|&s| is_end_signal(s)) {
                             if self.agreed == 0 {
-                                self.agreed = usable_rate(s);
+                                self.agreed = usable_rate(s, self.offer);
+                                self.coding =
+                                    agreed_coding(s, self.offer, self.agreed);
                             }
-                            tx.set_signal(Signal::Rate(end_signal(rate_signal_for(
-                                self.agreed,
-                            ))));
+                            tx.set_signal(Signal::Rate(end_signal(
+                                rate_signal_for(self.agreed, self.coding),
+                            )));
                             self.enter(State::SendEnd);
                         }
                     }
@@ -1159,7 +1204,7 @@ impl Startup {
                         let Some(s) = sequence.filter(|&s| is_rate_signal(s)) else {
                             return;
                         };
-                        let theirs = usable_rate(s);
+                        let theirs = usable_rate(s, self.offer);
                         if theirs == 0 {
                             // Table 6: no rate at all is a call to clear down.
                             self.state = State::Failed;
@@ -1174,8 +1219,10 @@ impl Startup {
                         } else {
                             self.agreed.min(theirs)
                         };
+                        self.coding = agreed_coding(s, self.offer, self.agreed);
                         tx.set_signal(Signal::Rate(end_signal(rate_signal_for(
                             self.agreed,
+                            self.coding,
                         ))));
                         self.enter(State::SendEnd);
                     }
@@ -1196,6 +1243,7 @@ impl Startup {
                     // segment, both rate exchanges -- is two bits to the
                     // symbol whatever was being negotiated.
                     tx.set_data_rate(self.agreed);
+                    tx.set_coding(self.coding);
                     tx.set_signal(Signal::ScrambledOnes);
                     self.enter(State::Settling);
                 }
@@ -1211,6 +1259,7 @@ impl Startup {
                     // end this is. If that E went unheard, this is the last
                     // chance to end up demodulating what is actually arriving.
                     rx.set_data_rate(rate);
+                    rx.set_coding(self.coding);
                     self.state = State::Connected(rate);
                 }
             }

@@ -970,14 +970,22 @@ impl Pair {
     /// everything is early. Noise flips a bit and the frame check sequence
     /// catches it; this moves the clock, and what comes out is a stream that
     /// has lost its place rather than a frame with a hole in it.
-    fn run_lossy(&mut self, seconds: f64, every: usize) {
+    /// Run with a stretch of the line missing every so often.
+    ///
+    /// `every` samples apart, `run` of them are lost. One sample at a time is
+    /// a clock offset and the timing loop simply tracks it; a run is a jitter
+    /// buffer that did not have the next packet when it needed it, which is
+    /// what a VoIP line actually does and what actually damages a frame.
+    fn run_lossy(&mut self, seconds: f64, every: usize, run: usize) {
         for i in 0..(seconds * FS) as usize {
             let (a, b) = (self.from_caller, self.from_host);
             self.from_caller = self.caller.step(b);
             self.from_host = self.host.step(a);
             if every > 0 && i % every == 0 {
-                self.from_caller = self.caller.step(b);
-                self.from_host = self.host.step(a);
+                for _ in 0..run {
+                    self.from_caller = self.caller.step(b);
+                    self.from_host = self.host.step(a);
+                }
             }
             self.at_caller.extend(self.caller.take_dte());
             self.at_host.extend(self.host.take_dte());
@@ -1000,9 +1008,16 @@ fn a_line_that_drops_samples_still_delivers_every_byte() {
             p.caller.feed_dte(b);
         }
     }
-    // A sample lost every 20 ms, which is one whole packet's worth of jitter
-    // buffer arriving late, over and over.
-    p.run_lossy(25.0, (FS * 0.020) as usize);
+    // A millisecond of line gone every 200 ms: a jitter buffer that did not
+    // have the next packet in time, over and over. It damages about a hundred
+    // and forty frames across the run, and the text still arrives, which is
+    // the whole claim.
+    //
+    // It used to be a single sample every 20 ms. That stopped damaging
+    // anything the moment 9600 became trellis coded -- the decisions it used
+    // to push over a boundary are not marginal any more -- so the impairment
+    // had to get harsher to go on testing the same thing.
+    p.run_lossy(25.0, (FS * 0.200) as usize, (FS * 0.001) as usize);
 
     let heard = p.host_saw();
     let wanted = text.repeat(8);
@@ -1043,8 +1058,8 @@ fn report_loss_tolerance() {
         if sample.caller.error_controlled() { "V.42" } else { "off" },
         if sample.caller.compressing() { "V.42bis" } else { "off" }
     );
-    println!("\n  one sample lost every   damaged  delivered");
-    for ms in [50.0, 20.0, 10.0, 5.0, 2.0, 1.0, 0.5, 0.25, 0.125] {
+    println!("\n  1 ms of line lost every  damaged  delivered");
+    for ms in [2000.0, 1000.0, 500.0, 200.0, 100.0, 50.0, 20.0] {
         let mut p = connect();
         if !p.caller.error_controlled() {
             println!("  {ms:>7.3} ms           no error control");
@@ -1053,7 +1068,7 @@ fn report_loss_tolerance() {
         for b in wanted.bytes() {
             p.caller.feed_dte(b);
         }
-        p.run_lossy(25.0, (FS * ms / 1000.0) as usize);
+        p.run_lossy(25.0, (FS * ms / 1000.0) as usize, (FS * 0.001) as usize);
         println!(
             "  {ms:>7.3} ms         {:8}  {}",
             p.host.damaged_frames(),

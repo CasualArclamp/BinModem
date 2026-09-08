@@ -24,7 +24,7 @@
 //! and read each other perfectly.
 
 use datapump::v32::startup::{end_signal, rate_signal_for};
-use datapump::v32::{BAUD, Mode, Signal, Transmitter};
+use datapump::v32::{BAUD, Coding, Mode, Signal, Transmitter};
 
 /// Ten samples to the symbol, so a symbol boundary is a whole number of
 /// samples and the test can count symbols without inferring anything.
@@ -34,11 +34,11 @@ const SAMPLES_PER_SYMBOL: usize = 10;
 const SYMBOLS_PER_SEQUENCE: u64 = 8;
 
 fn rate() -> Signal {
-    Signal::Rate(rate_signal_for(4800))
+    Signal::Rate(rate_signal_for(4800, Coding::Uncoded))
 }
 
 fn end() -> Signal {
-    Signal::Rate(end_signal(rate_signal_for(4800)))
+    Signal::Rate(end_signal(rate_signal_for(4800, Coding::Uncoded)))
 }
 
 fn symbol(tx: &mut Transmitter) {

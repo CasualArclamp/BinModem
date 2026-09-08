@@ -62,6 +62,23 @@ const SPAN: usize = 6;
 /// round trip actually measures, at both ends, and has to come off.
 pub const SHAPING_DELAY: u64 = SPAN as u64;
 
+/// Which of the two modulations 9600 bit/s is using.
+///
+/// 2.4.1 defines both and the rate signals choose between them: Table 6's B8
+/// says trellis coding is available at the highest rate offered, and 5.4.2 has
+/// R3 settle "the data rate, coding and any special operational modes to be
+/// used by both modems". Below 9600 there is only one coding and this is
+/// always [`Coding::Uncoded`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Coding {
+    /// 2.4.1.1, sixteen points and four bits, no redundancy.
+    #[default]
+    Uncoded,
+    /// 2.4.1.2, thirty-two points with a fifth bit from the convolutional
+    /// encoder.
+    Trellis,
+}
+
 /// Which end of the call this modem is.
 ///
 /// It selects the scrambler (4): each direction uses a different polynomial,
@@ -374,6 +391,10 @@ pub struct Transmitter {
     within: usize,
     /// Bits carried by each symbol: two at 4800, four at 9600.
     bits: u32,
+    /// Which of the two 9600 modulations is in use.
+    coding: Coding,
+    /// The convolutional encoder, used only by [`Coding::Trellis`].
+    trellis: trellis::Encoder,
     /// The sample most recently produced, for the echo canceller.
     last_sample: f64,
 }
@@ -397,6 +418,8 @@ impl Transmitter {
             rate_symbols: 0,
             within: WITHIN_4800,
             bits: 2,
+            coding: Coding::Uncoded,
+            trellis: trellis::Encoder::new(),
             last_sample: 0.0,
         }
     }
@@ -410,6 +433,20 @@ impl Transmitter {
     /// exchange -- is two bits to the symbol whatever is being negotiated.
     pub fn set_data_rate(&mut self, bits_per_second: u32) {
         self.bits = bits_per_symbol(bits_per_second);
+    }
+
+    /// Choose between the two modulations 9600 bit/s has (2.4.1).
+    ///
+    /// Set at the same moment as the rate and for the same reason: the E
+    /// sequence says what the scrambled ones after it are coded at, so the
+    /// change belongs where that sequence ends. The convolutional encoder
+    /// starts from zero, which is where a far end's decoder assumes nothing
+    /// and converges anyway.
+    pub fn set_coding(&mut self, coding: Coding) {
+        if coding != self.coding {
+            self.trellis.reset();
+        }
+        self.coding = coding;
     }
 
     /// What to send.
@@ -560,15 +597,7 @@ impl Transmitter {
                 // of which the first two are differentially encoded into the
                 // quadrant and the second two choose a point inside it. At
                 // 4800 the group is two long and the point is fixed (2.4.2).
-                let mut group = [false; 4];
-                for slot in group.iter_mut().take(self.bits as usize) {
-                    let bit = if self.pending.is_empty() {
-                        true
-                    } else {
-                        self.pending.remove(0)
-                    };
-                    *slot = self.scrambler.scramble(bit);
-                }
+                let group = self.next_group();
                 if self.bits == 4 {
                     self.within = usize::from(group[2]) << 1 | usize::from(group[3]);
                 }
@@ -579,6 +608,24 @@ impl Transmitter {
         state
     }
 
+    /// The next group of scrambled bits, as many as the rate carries.
+    ///
+    /// Between one byte from the terminal and the next there is nothing to
+    /// send and the line carries ones, which is what 5.4 asks for: the far end
+    /// stays trained on a signal that never stops.
+    fn next_group(&mut self) -> [bool; 4] {
+        let mut group = [false; 4];
+        for slot in group.iter_mut().take(self.bits as usize) {
+            let bit = if self.pending.is_empty() {
+                true
+            } else {
+                self.pending.remove(0)
+            };
+            *slot = self.scrambler.scramble(bit);
+        }
+        group
+    }
+
     /// Apply the differential quadrant coding of Table 1 and land on a state.
     fn turn(&mut self, dibit: [bool; 2]) -> usize {
         let change = QUADRANT_CHANGE[usize::from(dibit[0]) << 1 | usize::from(dibit[1])];
@@ -587,6 +634,24 @@ impl Transmitter {
     }
 
     fn next_symbol(&mut self) -> (f64, f64) {
+        // 2.4.1.2 replaces the quadrant machinery outright: the differential
+        // coding is Table 2 rather than Table 1, a fifth bit comes from the
+        // convolutional encoder, and the point is one of thirty-two rather
+        // than one of four quadrants times one of four places inside it. Only
+        // the data phase is affected -- the conditioning signal, the training
+        // segment and both rate exchanges are four points whatever was agreed.
+        if self.coding == Coding::Trellis
+            && self.bits == 4
+            && self.signal == Signal::ScrambledOnes
+        {
+            let group = self.next_group();
+            let code = self.trellis.encode(group);
+            // The quadrant tracker is deliberately left alone. Half the
+            // thirty-two points sit on an axis and belong to no quadrant, and
+            // nothing reads it while this coding is running: Table 2's
+            // differential state lives inside the encoder instead.
+            return trellis::point(code);
+        }
         let state = self.next_state();
         signal_point(state, self.within)
     }
@@ -670,6 +735,10 @@ pub struct Receiver {
     adapting: bool,
     /// Bits each arriving symbol carries: two at 4800, four at 9600.
     carried: u32,
+    /// Which of the two 9600 modulations is in use.
+    coding: Coding,
+    /// The Viterbi decoder, used only by [`Coding::Trellis`].
+    trellis: trellis::Decoder,
 }
 
 impl Receiver {
@@ -701,6 +770,8 @@ impl Receiver {
             carrier: false,
             adapting: true,
             carried: 2,
+            coding: Coding::Uncoded,
+            trellis: trellis::Decoder::new(),
         }
     }
 
@@ -713,6 +784,14 @@ impl Receiver {
     /// sending that E, so the two land on the same place in the stream.
     pub fn set_data_rate(&mut self, bits_per_second: u32) {
         self.carried = bits_per_symbol(bits_per_second);
+    }
+
+    /// Choose between the two modulations 9600 bit/s has (2.4.1).
+    pub fn set_coding(&mut self, coding: Coding) {
+        if coding != self.coding {
+            self.trellis.reset();
+        }
+        self.coding = coding;
     }
 
     pub fn feed(&mut self, sample: f64) {
@@ -772,11 +851,13 @@ impl Receiver {
         // constellation is in use: sixteen points read against the four would
         // put the error at a quarter of a turn for a point sitting exactly
         // where it belongs.
-        let coarse = if self.carried == 4 {
-            let (state, within) = nearest_point(point);
-            signal_point(state, within)
-        } else {
-            STATES[nearest_state(point)]
+        let coarse = match (self.carried, self.coding) {
+            (4, Coding::Trellis) => trellis::point(trellis::nearest(point)),
+            (4, Coding::Uncoded) => {
+                let (state, within) = nearest_point(point);
+                signal_point(state, within)
+            }
+            _ => STATES[nearest_state(point)],
         };
         let error = (point.1 * coarse.0 - point.0 * coarse.1)
             / (coarse.0 * coarse.0 + coarse.1 * coarse.1 + 1e-9);
@@ -798,12 +879,23 @@ impl Receiver {
             equalized.0 * CONSTELLATION_RMS,
             equalized.1 * CONSTELLATION_RMS,
         );
-        let (state, within) = if self.carried == 4 {
-            nearest_point(scaled)
+        // 2.4.1.2: the decision is a whole sequence rather than a point, so
+        // the trellis decoder is asked for it and the nearest of the
+        // thirty-two serves only to keep the equaliser learning. That is what
+        // a decision-directed equaliser wants anyway -- something to compare
+        // this symbol against now, rather than the right answer two dozen
+        // symbols later.
+        let trellis_coded = self.coding == Coding::Trellis && self.carried == 4;
+        let decision = if trellis_coded {
+            trellis::point(trellis::nearest(scaled))
         } else {
-            (nearest_state(scaled), WITHIN_4800)
+            let (state, within) = if self.carried == 4 {
+                nearest_point(scaled)
+            } else {
+                (nearest_state(scaled), WITHIN_4800)
+            };
+            signal_point(state, within)
         };
-        let decision = signal_point(state, within);
 
         self.symbols += 1;
         if self.symbols > 64 && self.carrier && self.adapting {
@@ -817,8 +909,23 @@ impl Receiver {
         }
         self.last_symbol = scaled;
 
+        if trellis_coded {
+            if let Some(group) = self.trellis.decode(scaled) {
+                for bit in group {
+                    let out = self.descrambler.descramble(bit);
+                    self.bits.push(out);
+                }
+            }
+            return;
+        }
+
         // Every state sits in its own quadrant, so the state index is the
         // quadrant and the turn between two of them is the difference.
+        let (state, within) = if self.carried == 4 {
+            nearest_point(scaled)
+        } else {
+            (nearest_state(scaled), WITHIN_4800)
+        };
         let quadrant = state as u8;
         let Some(previous) = self.quadrant.replace(quadrant) else {
             return;

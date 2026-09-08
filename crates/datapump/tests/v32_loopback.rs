@@ -5,7 +5,7 @@
 //! one band there is no filter that can separate the far end from this end's
 //! own reflection, and without cancelling it nothing gets through at all.
 
-use datapump::v32::{BAUD, Mode, Receiver, Transmitter};
+use datapump::v32::{BAUD, Coding, Mode, Receiver, Transmitter};
 use dsp::EchoCanceller;
 
 const FS: f64 = 16_000.0;
@@ -232,4 +232,39 @@ fn through_a_hybrid(cancel: bool) -> (Vec<u8>, f64) {
         out.extend(rx.take_bytes());
     }
     (out, loss)
+}
+
+/// 9600 bit/s with the trellis coding, transmitter into receiver.
+///
+/// The other 9600 is [`nine_thousand_six_hundred_uncoded`] above; this is the
+/// one a real modem will talk. It runs through the same transmitter and
+/// receiver as everything else -- only the mapping and the decision change --
+/// so what this proves is that the change is wired in, not that the code is
+/// right. The code is checked where it is defined.
+#[test]
+fn nine_thousand_six_hundred_with_trellis_coding() {
+    let payload = b"Trellis coding carries this at 9600 bits per second.";
+    let mut tx = Transmitter::new(Mode::Call, FS);
+    let mut rx = Receiver::new(Mode::Answer, FS);
+    tx.set_data_rate(9600);
+    tx.set_coding(Coding::Trellis);
+    rx.set_data_rate(9600);
+    rx.set_coding(Coding::Trellis);
+
+    tx.push_bytes(&vec![0x55; 256]);
+    tx.push_bytes(payload);
+    tx.push_bytes(&[0x55; 256]);
+
+    let symbols = (256 + payload.len() + 256) * 2;
+    let samples = (symbols as f64 * FS / BAUD).ceil() as usize;
+    let mut got = Vec::new();
+    for _ in 0..samples {
+        rx.feed(tx.next_sample());
+        got.extend(rx.take_bytes());
+    }
+    assert!(
+        contains_at_any_bit_offset(&got, payload),
+        "payload not recovered from {} bytes",
+        got.len()
+    );
 }
