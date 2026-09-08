@@ -23,6 +23,7 @@ use modem::{Modem, Role, State};
 use telemetry::{CallState, Direction, Leds, Publisher};
 
 use crate::engine::{Control, FFT_SIZE, Ring, SCOPE_LEN, SPECTRUM_BINS, SYMBOL_HISTORY};
+use crate::network::{Networking, Request as NetRequest, View as NetView};
 
 /// The rate the modem runs at, whatever the sound card is doing.
 ///
@@ -198,6 +199,10 @@ pub struct Session {
     transfer_request: Mutex<Option<TransferRequest>>,
     /// What the transfer is doing, for the window to read.
     transfer: Mutex<Option<TransferView>>,
+    /// Something the window has asked the PPP link to do.
+    network_request: Mutex<Option<NetRequest>>,
+    /// And what it is doing, once there is one.
+    network: Mutex<Option<NetView>>,
 }
 
 impl Default for Session {
@@ -209,6 +214,8 @@ impl Default for Session {
             drive: AtomicU32::new(DEFAULT_DRIVE.to_bits()),
             transfer_request: Mutex::default(),
             transfer: Mutex::default(),
+            network_request: Mutex::default(),
+            network: Mutex::default(),
             recording: AtomicBool::new(false),
         }
     }
@@ -293,6 +300,47 @@ impl Session {
 
     fn take_transfer_request(&self) -> Option<TransferRequest> {
         self.transfer_request.lock().ok().and_then(|mut s| s.take())
+    }
+
+    /// Bring PPP up over the call, so the two ends can carry IP.
+    pub fn start_network(&self) {
+        self.ask_network(NetRequest::Start);
+    }
+
+    /// Put it down and give the terminal its bytes back.
+    pub fn stop_network(&self) {
+        self.ask_network(NetRequest::Stop);
+    }
+
+    /// One echo to the far end.
+    pub fn ping_once(&self) {
+        self.ask_network(NetRequest::PingOnce);
+    }
+
+    /// Or a stream of them, until told otherwise.
+    pub fn ping_repeatedly(&self, on: bool) {
+        self.ask_network(NetRequest::PingRepeatedly(on));
+    }
+
+    /// What the link is doing, if there is one.
+    pub fn network(&self) -> Option<NetView> {
+        self.network.lock().ok().and_then(|s| s.clone())
+    }
+
+    fn ask_network(&self, request: NetRequest) {
+        if let Ok(mut slot) = self.network_request.lock() {
+            *slot = Some(request);
+        }
+    }
+
+    fn take_network_request(&self) -> Option<NetRequest> {
+        self.network_request.lock().ok().and_then(|mut s| s.take())
+    }
+
+    fn set_network(&self, view: Option<NetView>) {
+        if let Ok(mut slot) = self.network.lock() {
+            *slot = view;
+        }
     }
 
     /// What the transfer is doing, if one is.
@@ -415,6 +463,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // The transfer, while there is one, and when it started -- for the rate.
     let mut job: Option<Job> = None;
     let mut job_started = Instant::now();
+    // The PPP link, while one is up. Like a transfer it owns the byte stream
+    // while it runs, and for the same reason.
+    let mut networking: Option<Networking> = None;
 
     let publish_every = Duration::from_millis(16);
     let mut next_publish = Instant::now();
@@ -460,9 +511,69 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             session.set_state(state);
         }
 
+        // What the window has asked the PPP link to do.
+        if let Some(request) = session.take_network_request() {
+            match request {
+                NetRequest::Start if networking.is_some() => {}
+                NetRequest::Start if !modem.is_online() => {
+                    tx.log(Direction::Note, "ppp: there is no call to run it over");
+                }
+                NetRequest::Start if job.is_some() => {
+                    // Both want the whole byte stream, and neither would
+                    // survive the other having half of it.
+                    tx.log(Direction::Note, "ppp: not while a transfer is running");
+                }
+                NetRequest::Start => {
+                    let mut link = Networking::start(modem.role(), &tx);
+                    for b in link.step(0, &tx) {
+                        modem.feed_dte(b);
+                    }
+                    networking = Some(link);
+                }
+                NetRequest::Stop => {
+                    if let Some(mut link) = networking.take() {
+                        for b in link.stop(&tx) {
+                            modem.feed_dte(b);
+                        }
+                    }
+                    session.set_network(None);
+                }
+                NetRequest::PingOnce => match networking.as_mut() {
+                    Some(link) => link.ping_once(&tx),
+                    None => tx.log(Direction::Note, "ppp: there is no link to ping over"),
+                },
+                NetRequest::PingRepeatedly(on) => {
+                    if let Some(link) = networking.as_mut() {
+                        link.ping_repeatedly(on);
+                    }
+                }
+            }
+        }
+
+        // A call that has ended takes the link with it: RFC 1661 3.7 calls
+        // that the layer below going down, and there is nothing to negotiate
+        // with once the carrier has gone.
+        if networking.is_some() && !modem.is_online() {
+            networking = None;
+            session.set_network(None);
+            tx.log(Direction::Note, "ppp: the call ended");
+        }
+
+        // Drive the link. Its frames go down the line the same way a keystroke
+        // does, because to the modem that is what they are.
+        if let Some(link) = networking.as_mut() {
+            for b in link.step(TICK_MS, &tx) {
+                modem.feed_dte(b);
+            }
+            session.set_network(Some(link.view()));
+        }
+
         // A transfer the window has asked for.
         if let Some(request) = session.take_transfer_request() {
             match request {
+                _ if networking.is_some() => {
+                    tx.log(Direction::Note, "not while the PPP link is up");
+                }
                 TransferRequest::Send(path) => match read_to_send(&path) {
                     Ok((info, data)) => {
                         tx.log(
@@ -529,7 +640,14 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         }
 
         let Some(audio) = audio.as_ref() else {
-            drain_dte(&mut modem, &tx, &mut rx_bytes, &mut heard_recently, job.as_mut());
+            drain_dte(
+            &mut modem,
+            &tx,
+            &mut rx_bytes,
+            &mut heard_recently,
+            job.as_mut(),
+            networking.as_mut(),
+        );
             thread::sleep(Duration::from_millis(8));
             continue;
         };
@@ -540,7 +658,14 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             // Nothing has arrived, so nothing can be stepped: the line is the
             // clock. Still hand the terminal whatever the modem said in the
             // meantime, which is how `OK` gets back before a call exists.
-            drain_dte(&mut modem, &tx, &mut rx_bytes, &mut heard_recently, job.as_mut());
+            drain_dte(
+            &mut modem,
+            &tx,
+            &mut rx_bytes,
+            &mut heard_recently,
+            job.as_mut(),
+            networking.as_mut(),
+        );
             thread::sleep(Duration::from_millis(2));
             continue;
         }
@@ -621,7 +746,14 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         // scopes are looking at the same thing.
         sink.push(&from_line);
 
-        drain_dte(&mut modem, &tx, &mut rx_bytes, &mut heard_recently, job.as_mut());
+        drain_dte(
+            &mut modem,
+            &tx,
+            &mut rx_bytes,
+            &mut heard_recently,
+            job.as_mut(),
+            networking.as_mut(),
+        );
 
         let phase = modem.line_phase();
         if phase != last_phase {
@@ -1036,13 +1168,16 @@ const TICK_MS: u32 = 1;
 
 /// Everything the modem has to say, and who it is for.
 ///
-/// A transfer takes the stream while it runs; otherwise it goes to the screen.
+/// A transfer or a PPP link takes the stream while it runs; otherwise it goes
+/// to the screen. The two cannot both be running, so the order they are tried
+/// in here decides nothing.
 fn drain_dte(
     modem: &mut Modem,
     tx: &Publisher,
     rx_bytes: &mut u64,
     heard: &mut Instant,
     job: Option<&mut Job>,
+    network: Option<&mut Networking>,
 ) {
     let out = modem.take_dte();
     if out.is_empty() {
@@ -1050,10 +1185,11 @@ fn drain_dte(
     }
     *rx_bytes += out.len() as u64;
     *heard = Instant::now();
-    match job {
-        Some(Job::Sending(s)) => s.feed(&out),
-        Some(Job::Receiving(r, _)) => r.feed(&out),
-        None => tx.line_data(&out),
+    match (job, network) {
+        (Some(Job::Sending(s)), _) => s.feed(&out),
+        (Some(Job::Receiving(r, _)), _) => r.feed(&out),
+        (None, Some(link)) => link.feed(&out),
+        (None, None) => tx.line_data(&out),
     }
 }
 

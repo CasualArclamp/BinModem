@@ -283,6 +283,10 @@ pub struct ScopeApp {
     /// The same, for `AT+ES` and `AT+DS`.
     protection: Protection,
     protection_open: bool,
+    /// The PPP window.
+    network_open: bool,
+    /// Whether the window has asked for a stream of echoes rather than one.
+    ping_repeatedly: bool,
     /// The file transfer window, and the two paths it works with.
     transfer_open: bool,
     send_path: String,
@@ -361,6 +365,8 @@ impl ScopeApp {
             advanced: false,
             protection: Protection::default(),
             protection_open: false,
+            network_open: false,
+            ping_repeatedly: false,
             transfer_open: false,
             line_was_open: false,
             send_path: String::new(),
@@ -925,6 +931,16 @@ impl ScopeApp {
                 self.modulation.fit(self.carrier);
             }
             if ui
+                .selectable_label(self.network_open, "Network")
+                .on_hover_text(
+                    "PPP over the call: give the two ends addresses and ping \
+                     between them",
+                )
+                .clicked()
+            {
+                self.network_open = !self.network_open;
+            }
+            if ui
                 .selectable_label(self.transfer_open, "Files")
                 .on_hover_text(
                     "ZMODEM: send a file to the far end, or take one it offers",
@@ -1013,6 +1029,154 @@ impl ScopeApp {
         self.advanced_modulation(ui, &session);
         self.advanced_protection(ui, &session);
         self.transfer_window(ui, &session);
+        self.network_window(ui, &session);
+    }
+
+    /// PPP over the call, and a ping over that.
+    ///
+    /// The point of the window is the two numbers at the bottom: an address
+    /// this end was given rather than configured, and a round trip measured
+    /// over a modem. Between them they say the call is carrying IP, which is
+    /// not something any amount of staring at a constellation will tell you.
+    fn network_window(&mut self, ui: &mut egui::Ui, session: &Arc<live::Session>) {
+        let dim = Color32::from_rgb(140, 150, 165);
+        let bright = Color32::from_rgb(220, 225, 235);
+        let good = Color32::from_rgb(90, 220, 130);
+        let mut open = self.network_open;
+        let link = session.network();
+        egui::Window::new("PPP - network")
+            .open(&mut open)
+            .resizable(false)
+            .default_width(420.0)
+            .show(ui.ctx(), |ui| {
+                let online = self.frame.state == telemetry::CallState::Connected;
+                ui.horizontal(|ui| {
+                    if link.is_none() {
+                        if ui
+                            .add_enabled(online, egui::Button::new("Bring PPP up"))
+                            .on_hover_text(
+                                "RFC 1661: the terminal stops being a terminal and \
+                                 the call starts carrying frames",
+                            )
+                            .clicked()
+                        {
+                            session.start_network();
+                        }
+                    } else if ui.button("Put it down").clicked() {
+                        self.ping_repeatedly = false;
+                        session.stop_network();
+                    }
+                    if let Some(view) = &link {
+                        ui.label(
+                            RichText::new(&view.phase)
+                                .monospace()
+                                .color(if view.up { good } else { dim }),
+                        );
+                        ui.label(
+                            RichText::new(if view.serving {
+                                "handing out an address"
+                            } else {
+                                "asking for one"
+                            })
+                            .small()
+                            .color(dim),
+                        );
+                    }
+                });
+
+                if !online && link.is_none() {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("There is no call. PPP needs one under it.")
+                            .small()
+                            .color(dim),
+                    );
+                }
+
+                let Some(view) = link else { return };
+                ui.separator();
+                egui::Grid::new("ppp addresses")
+                    .num_columns(2)
+                    .spacing([10.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("this end").monospace().color(dim));
+                        ui.label(RichText::new(&view.local).monospace().color(bright));
+                        ui.end_row();
+                        ui.label(RichText::new("far end").monospace().color(dim));
+                        ui.label(RichText::new(&view.remote).monospace().color(bright));
+                        ui.end_row();
+                        ui.label(RichText::new("frames").monospace().color(dim));
+                        ui.label(
+                            RichText::new(format!(
+                                "{} octets out, {} in",
+                                view.tx_bytes, view.rx_bytes
+                            ))
+                            .monospace()
+                            .small()
+                            .color(dim),
+                        );
+                        ui.end_row();
+                    });
+
+                ui.separator();
+                ui.add_enabled_ui(view.up, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("Ping")
+                            .on_hover_text("RFC 792: one echo request to the far end")
+                            .clicked()
+                        {
+                            session.ping_once();
+                        }
+                        if ui
+                            .checkbox(&mut self.ping_repeatedly, "one a second")
+                            .changed()
+                        {
+                            session.ping_repeatedly(self.ping_repeatedly);
+                        }
+                        if view.in_flight > 0 {
+                            ui.label(
+                                RichText::new(format!("{} in flight", view.in_flight))
+                                    .small()
+                                    .color(dim),
+                            );
+                        }
+                    });
+                });
+
+                let s = view.stats;
+                if s.sent == 0 {
+                    return;
+                }
+                ui.add_space(4.0);
+                ui.label(
+                    RichText::new(format!(
+                        "{} sent, {} back, {} lost ({:.0}%)",
+                        s.sent,
+                        s.received,
+                        s.lost,
+                        s.loss() * 100.0
+                    ))
+                    .monospace()
+                    .small()
+                    .color(if s.lost > 0 {
+                        Color32::from_rgb(240, 200, 120)
+                    } else {
+                        dim
+                    }),
+                );
+                if let Some(average) = s.average_ms() {
+                    ui.label(
+                        RichText::new(format!(
+                            "round trip {} ms, best {}, worst {}, mean {average:.0}",
+                            s.last_ms, s.best_ms, s.worst_ms
+                        ))
+                        .monospace()
+                        .color(bright),
+                    );
+                }
+            });
+        self.network_open = open;
     }
 
     /// The rest of `AT+MS`, in a window rather than typed.

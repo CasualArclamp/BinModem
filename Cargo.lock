@@ -967,6 +967,7 @@ dependencies = [
  "eframe",
  "line",
  "modem",
+ "ppp",
  "telemetry",
  "telnet",
  "terminal",
@@ -1281,6 +1282,7 @@ dependencies = [
  "datapump",
  "ec",
  "line",
+ "ppp",
  "transfer",
  "v8",
 ]

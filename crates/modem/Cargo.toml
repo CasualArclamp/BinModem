@@ -15,6 +15,9 @@ v8       = { path = "../v8" }
 # For the end-to-end test: a file crossing a call, which is the only place the
 # whole stack is exercised at once.
 transfer = { path = "../transfer" }
+# And one taller than that: a ping, which needs the frames as well as the
+# octets under them.
+ppp      = { path = "../ppp" }
 
 [lints]
 workspace = true
