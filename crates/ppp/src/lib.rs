@@ -12,7 +12,11 @@
 
 pub mod control;
 pub mod frame;
+pub mod ip;
+pub mod ipcp;
 pub mod lcp;
+pub mod link;
+pub mod session;
 
 pub use control::{Action, Code, ConfigOption, Event, Message, State, transition};
 pub use frame::{Deframer, Discarded, Framer, Packet};

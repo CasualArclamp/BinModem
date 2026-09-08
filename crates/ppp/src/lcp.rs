@@ -262,6 +262,77 @@ pub fn review(options: &[ConfigOption], agreed: &mut Agreed) -> Review {
     Review::Ack
 }
 
+/// LCP as one end sees it: what it will ask for, and what it has agreed to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Lcp {
+    pub wanted: Wanted,
+    pub agreed: Agreed,
+}
+
+impl Lcp {
+    pub fn new(wanted: Wanted) -> Self {
+        Self { wanted, agreed: Agreed::default() }
+    }
+}
+
+impl crate::session::Protocol for Lcp {
+    fn number(&self) -> u16 {
+        crate::protocol::LCP
+    }
+
+    fn request(&self) -> Vec<ConfigOption> {
+        self.wanted.to_options()
+    }
+
+    fn review(&mut self, options: &[ConfigOption]) -> Review {
+        review(options, &mut self.agreed)
+    }
+
+    fn acked(&mut self, _options: &[ConfigOption]) {
+        // Nothing to record. 5.2 echoes the request back, so an acknowledgement
+        // says only that what was asked for is what will happen -- and what was
+        // asked for is already in `wanted`.
+    }
+
+    fn naked(&mut self, options: &[ConfigOption]) {
+        // 5.3: what comes back is what the peer would accept, so the next
+        // request carries that instead of what it refused.
+        for option in options {
+            match (option.kind, option.value.as_slice()) {
+                (option::MRU, &[hi, lo]) => {
+                    self.wanted.mru = u16::from_be_bytes([hi, lo]);
+                }
+                (option::ACCM, &[a, b, c, d]) => {
+                    // A peer that wants more escaping knows something about the
+                    // path this end does not, so it is taken as given.
+                    self.wanted.accm = u32::from_be_bytes([a, b, c, d]);
+                }
+                (option::MAGIC, &[a, b, c, d]) => {
+                    // 6.4: a Nak of a magic number means it collided, and the
+                    // answer is a different one rather than the one suggested.
+                    self.wanted.magic = u32::from_be_bytes([a, b, c, d]) ^ 0x5555_5555;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn rejected(&mut self, options: &[ConfigOption]) {
+        // 5.4: stop asking. Every one of these is something the link can do
+        // without.
+        for option in options {
+            match option.kind {
+                option::MAGIC => self.wanted.magic = 0,
+                option::PFC => self.wanted.pfc = false,
+                option::ACFC => self.wanted.acfc = false,
+                option::ACCM => self.wanted.accm = crate::frame::DEFAULT_ACCM,
+                option::MRU => self.wanted.mru = DEFAULT_MRU,
+                _ => {}
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
