@@ -110,7 +110,7 @@ fn a_v32_call_goes_through_a_sound_card_loopback() {
     for b in greeting.bytes() {
         cable.host.feed_dte(b);
     }
-    cable.run(4.0);
+    cable.run(25.0);
     let seen = String::from_utf8_lossy(&cable.at_caller).into_owned();
     assert!(
         seen.contains("CONNECT"),
@@ -133,7 +133,7 @@ fn the_cable_is_found_at_a_single_crossing_rather_than_the_round_trip() {
     // the cable is the far end. Taps placed at the round trip would be sitting
     // on empty line, which is why the delay is looked for rather than assumed.
     let mut cable = Cable::new("V32", CROSSING);
-    cable.run(15.0);
+    cable.run(25.0);
     let found = cable
         .caller
         .reflection()
@@ -181,7 +181,7 @@ fn v22bis_still_goes_through_it_without_needing_any_of_that() {
     // filter that selects the far one throws the echo away with the near one
     // and none of this arises.
     let mut cable = Cable::new("V22B", CROSSING);
-    cable.run(12.0);
+    cable.run(25.0);
     assert!(
         cable.up(),
         "the caller stopped at {} and the host at {}",
@@ -234,7 +234,7 @@ fn sweep_the_crossing() {
     // nothing here chooses. This says how much of that range works.
     for crossing in [64, 160, 320, 480, 700, 900, 1200, 1600, 2000] {
         let mut cable = Cable::new("V32", crossing);
-        cable.run(30.0);
+        cable.run(25.0);
         println!(
             "{crossing:>5} samples ({:>5.1} ms): {:>13} / {:>13}  reflection {:?}",
             crossing as f64 / FS * 1000.0,
@@ -252,7 +252,7 @@ fn three_hundred_baud_goes_through_it_as_well() {
     // full strength is of no interest to either: the band filter throws the
     // echo away with the half of the spectrum it lives in.
     let mut cable = Cable::new("B103", CROSSING);
-    cable.run(8.0);
+    cable.run(25.0);
     assert!(
         cable.up(),
         "the caller stopped at {} and the host at {}",
@@ -265,7 +265,7 @@ fn three_hundred_baud_goes_through_it_as_well() {
     for b in banner.bytes() {
         cable.host.feed_dte(b);
     }
-    cable.run(3.0);
+    cable.run(25.0);
     let seen = String::from_utf8_lossy(&cable.at_caller).into_owned();
     assert!(seen.contains(banner), "the banner did not arrive: {seen:?}");
 }

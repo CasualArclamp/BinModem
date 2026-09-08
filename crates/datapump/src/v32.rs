@@ -204,6 +204,37 @@ const CHANGE_TO_DIBIT: [u8; 4] = [0b01, 0b00, 0b10, 0b11];
 
 /// Ceiling on the receiver's gain, so silence is not amplified to infinity.
 const MAX_GAIN: f64 = 400.0;
+/// The least the carrier loop will divide a symbol's phase error by.
+///
+/// The error is the imaginary part of what arrived divided by what it was
+/// decided to be, and dividing by the decision means a quiet decision shouts.
+/// Four points and sixteen can live with that; the thirty-two of 2.4.1.2
+/// cannot, because its inner ring is a seventeenth of the power of its outer
+/// one -- so those symbols arrive in the estimate seventeen times as loud, and
+/// they are the ones a slicer gets wrong most often.
+///
+/// Half the mean power is a floor low enough to leave the ordinary weighting
+/// alone and high enough to stop the least reliable symbols being the loudest
+/// voices. At 4800 it changes nothing at all: every point there has exactly
+/// the mean power.
+const MIN_DECISION_POWER: f64 = CONSTELLATION_MEAN_POWER / 2.0;
+
+/// What the carrier loop's gains are multiplied by at thirty-two points.
+///
+/// A decision-directed loop is driven by its own decisions, and the noise in
+/// them grows as the points crowd together: at 4800 a symbol has to move 2.24
+/// units before it is taken for another one, and under 2.4.1.2 it takes 0.71.
+/// The loop has to be correspondingly less willing to believe any one symbol,
+/// which is a narrower bandwidth.
+const TRELLIS_LOOP: f64 = 0.5;
+
+/// How fast that estimate follows what one symbol says.
+///
+/// A tenth per symbol, so ten symbols have a say rather than one. One symbol's
+/// ratio is mostly noise, and a loop driven straight from it hunts -- which is
+/// what this one did, swinging five degrees either way for half a second after
+/// it had reached 30 dB, and then walking off and never coming back.
+const TRACK_SMOOTHING: f64 = 0.1;
 
 /// Level at which a carrier is declared present, and the lower level at which
 /// it is declared gone. Five decibels apart, as V.22bis 6.5.2 asks for.
@@ -733,6 +764,8 @@ pub struct Receiver {
     carrier: bool,
     /// Whether the equaliser may learn from what is arriving.
     adapting: bool,
+    /// The averaged phase error.
+    track: f64,
     /// Bits each arriving symbol carries: two at 4800, four at 9600.
     carried: u32,
     /// Which of the two 9600 modulations is in use.
@@ -769,6 +802,7 @@ impl Receiver {
             level: OnePole::new(0.020, fs),
             carrier: false,
             adapting: true,
+            track: 0.0,
             carried: 2,
             coding: Coding::Uncoded,
             trellis: trellis::Decoder::new(),
@@ -859,13 +893,23 @@ impl Receiver {
             }
             _ => STATES[nearest_state(point)],
         };
-        let error = (point.1 * coarse.0 - point.0 * coarse.1)
-            / (coarse.0 * coarse.0 + coarse.1 * coarse.1 + 1e-9);
+        // What arrived divided by what it was decided to be; the imaginary
+        // part of that is the angle between them.
+        let d2 = (coarse.0 * coarse.0 + coarse.1 * coarse.1)
+            .max(MIN_DECISION_POWER);
+        let raw = (point.1 * coarse.0 - point.0 * coarse.1) / d2;
+        if self.adapting {
+            self.track += TRACK_SMOOTHING * (raw - self.track);
+        }
+        let error = self.track;
+        let trellis_coded = self.coding == Coding::Trellis && self.carried == 4;
+        let bw = if trellis_coded { TRELLIS_LOOP } else { 1.0 };
         if self.adapting {
             // Second order, so the seven hertz of offset 2.1 allows for is
             // removed rather than merely tracked.
-            self.frequency = (self.frequency - 1.5e-5 * error).clamp(-0.02, 0.02);
-            self.phase -= 0.008 * error;
+            self.frequency =
+                (self.frequency - 1.5e-5 * bw * bw * error).clamp(-0.02, 0.02);
+            self.phase -= 0.008 * bw * error;
         }
         // The offset already found goes on being taken out even while the loop
         // is held still. It belongs to the far end's oscillator, which does not
@@ -885,7 +929,6 @@ impl Receiver {
         // a decision-directed equaliser wants anyway -- something to compare
         // this symbol against now, rather than the right answer two dozen
         // symbols later.
-        let trellis_coded = self.coding == Coding::Trellis && self.carried == 4;
         let decision = if trellis_coded {
             trellis::point(trellis::nearest(scaled))
         } else {
