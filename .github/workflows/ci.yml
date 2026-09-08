@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  windows:
+    name: test on windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rustup ships on the runner image; pinning the toolchain here rather
+      # than taking whatever the image happens to carry, because the edition
+      # is 2024 and an older stable will not build it at all.
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+          rustc --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # The suite is the whole argument that this is a modem rather than a
+      # program that compiles: handshakes, framing, dictionaries, and a real
+      # Bell 103 call decoded to its known plaintext.
+      - name: Tests
+        run: cargo test --workspace
