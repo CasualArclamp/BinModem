@@ -292,6 +292,47 @@ pub fn is_end_signal(s: u16) -> bool {
     s & 0xf000 == 0xf000 && s & (1 << 8) != 0 && s & (1 << 4) != 0 && s & 1 != 0
 }
 
+/// Whether a rate signal comes from a V.32bis modem.
+///
+/// Table 6 Note 1: "The combination of B4 equal one and B8 equal one indicates
+/// V.32 bis operation".
+pub fn is_v32bis(s: u16) -> bool {
+    let bit = |b: u32| s & (1 << (15 - b)) != 0;
+    bit(4) && bit(8)
+}
+
+/// The highest rate this modem can actually use with the far end that sent
+/// `s`, which is not always the highest one offered.
+///
+/// 9600 has two modulations. This modem implements the 16-state one and not
+/// the 32-state trellis code, and by the book that should be enough: V.32bis's
+/// own Note 1 to Table 5 says that when B4 or B8 is zero in a rate signal --
+/// and this end sends both zero -- "interworking can proceed only in
+/// accordance with Recommendation V.32", whose 1 e) then requires that
+/// "modems providing the 9600 bit/s data signalling rate shall be capable of
+/// interworking using the 16-state alternative".
+///
+/// The modem this was measured against does not. It offers 2400/4800/9600
+/// with B4 and B8 both set, reads an E calling for 9600 without trellis, and
+/// stops transmitting one round trip later -- 1.09 s against a measured 1.10 s
+/// -- leaving a connection that completes and then carries nothing in either
+/// direction. 4800 with the same modem carries a whole session.
+///
+/// So 9600 is not offered to a far end that flags V.32bis until there is a
+/// trellis decoder to offer it with. 5.4.1 asks for exactly this judgement:
+/// "R2 should also take account of the likely receiver performance with the
+/// particular connection".
+pub fn usable_rate(s: u16) -> u32 {
+    let bit = |b: u32| s & (1 << (15 - b)) != 0;
+    let rate = offered_rate(s);
+    if rate == 9600 && is_v32bis(s) {
+        // 4800 is mandatory (1 d), so a far end that does not offer it is
+        // asking for something this modem cannot give at all.
+        return if bit(5) { 4800 } else { 0 };
+    }
+    rate
+}
+
 /// The highest data rate a rate signal offers, in bits per second.
 ///
 /// Zero calls for the connection to be cleared down, which Table 6 spells as
@@ -925,7 +966,7 @@ impl Startup {
             State::AwaitingR1 => {
                 tx.set_signal(Signal::Silent);
                 if let Some(s) = sequence.filter(|&s| is_rate_signal(s)) {
-                    self.agreed = offered_rate(s).min(offered_rate(self.offer));
+                    self.agreed = usable_rate(s).min(offered_rate(self.offer));
                     if self.agreed == 0 {
                         self.state = State::Failed;
                         return;
@@ -1038,7 +1079,7 @@ impl Startup {
             State::AwaitingR2 => {
                 tx.set_signal(Signal::Silent);
                 if let Some(s) = sequence.filter(|&s| is_rate_signal(s)) {
-                    self.agreed = offered_rate(s).min(offered_rate(self.offer));
+                    self.agreed = usable_rate(s).min(offered_rate(self.offer));
                     if self.agreed == 0 {
                         self.state = State::Failed;
                         return;
@@ -1096,7 +1137,7 @@ impl Startup {
                     Role::Answering => {
                         if let Some(s) = sequence.filter(|&s| is_end_signal(s)) {
                             if self.agreed == 0 {
-                                self.agreed = offered_rate(s);
+                                self.agreed = usable_rate(s);
                             }
                             tx.set_signal(Signal::Rate(end_signal(rate_signal_for(
                                 self.agreed,
@@ -1118,7 +1159,7 @@ impl Startup {
                         let Some(s) = sequence.filter(|&s| is_rate_signal(s)) else {
                             return;
                         };
-                        let theirs = offered_rate(s);
+                        let theirs = usable_rate(s);
                         if theirs == 0 {
                             // Table 6: no rate at all is a call to clear down.
                             self.state = State::Failed;

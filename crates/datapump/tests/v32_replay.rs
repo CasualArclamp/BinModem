@@ -45,6 +45,7 @@ fn what_this_end_made_of_it() {
     let mut status = Status::Negotiating;
     let mut carrier = false;
     let mut bytes = Vec::new();
+    let mut points: Vec<f64> = Vec::new();
 
     for (i, &x) in arrived.iter().enumerate() {
         let _ = modem.step(f64::from(x));
@@ -63,6 +64,10 @@ fn what_this_end_made_of_it() {
         }
         if matches!(status, Status::Connected(_)) {
             bytes.extend(modem.take_bytes());
+            let (i, q) = modem.constellation_point();
+            if i != 0.0 || q != 0.0 {
+                points.push((i * i + q * q).sqrt());
+            }
         }
     }
 
@@ -85,4 +90,31 @@ fn what_this_end_made_of_it() {
         .map(|&c| if (32..127).contains(&c) || c == 10 || c == 13 { c as char } else { '.' })
         .collect();
     println!("{text}");
+
+    // How many amplitude rings the far end's constellation has. The 16-point
+    // non-redundant alternative at 9600 puts its points at radii root 2, root
+    // 10 and root 18 -- three rings. The 32-point trellis cross has five.
+    if !points.is_empty() {
+        let mean = points.iter().sum::<f64>() / points.len() as f64;
+        let mut hist = [0usize; 40];
+        for r in &points {
+            let bin = ((r / mean) * 10.0) as usize;
+            if bin < hist.len() {
+                hist[bin] += 1;
+            }
+        }
+        println!("
+radius, against the mean ({} symbols):", points.len());
+        let peak = *hist.iter().max().unwrap_or(&1) as f64;
+        for (bin, &n) in hist.iter().enumerate() {
+            if n * 200 > points.len() {
+                println!(
+                    "  {:.1}  {:6}  {}",
+                    bin as f64 / 10.0,
+                    n,
+                    "#".repeat((n as f64 / peak * 50.0) as usize)
+                );
+            }
+        }
+    }
 }

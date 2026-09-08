@@ -212,3 +212,36 @@ fn a_rate_signal_repeats_its_sixteen_bits() {
     assert_ne!(r, e, "signal E came out identical to the rate signal");
     assert_eq!(r, states(0b0000_0110_0000_1001), "not reproducible");
 }
+
+/// A far end that flags V.32bis is not offered the 9600 this modem has.
+///
+/// Table 6 Note 1 has B4 and B8 together meaning V.32bis. V.32bis's own Note 1
+/// then says interworking proceeds under V.32 when either bit is zero in
+/// either direction, and V.32 1 e) makes the 16-state 9600 mandatory for that
+/// -- so this should not be necessary. It is: the modem this was measured
+/// against reads an E calling for 9600 without trellis and stops transmitting
+/// one round trip later, every time, while 4800 carries a whole session.
+#[test]
+fn a_v32bis_far_end_is_taken_at_4800_until_there_is_a_trellis_decoder() {
+    // 2400/4800/9600 with trellis, which is what came off the line.
+    let theirs = 0b0000_1111_1111_1001;
+    assert!(datapump::v32::startup::is_v32bis(theirs));
+    assert_eq!(
+        datapump::v32::startup::offered_rate(theirs),
+        9600,
+        "it does offer 9600"
+    );
+    assert_eq!(
+        datapump::v32::startup::usable_rate(theirs),
+        4800,
+        "but not one this modem can receive"
+    );
+}
+
+/// A plain V.32 far end keeps its 9600.
+#[test]
+fn a_far_end_that_is_only_v32_is_taken_at_the_rate_it_offers() {
+    let theirs = datapump::v32::startup::rate_signal(true, true);
+    assert!(!datapump::v32::startup::is_v32bis(theirs));
+    assert_eq!(datapump::v32::startup::usable_rate(theirs), 9600);
+}
