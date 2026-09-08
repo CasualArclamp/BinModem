@@ -362,6 +362,12 @@ pub struct Transmitter {
     since_change: u64,
     /// Position in the repeating rate sequence.
     rate_bit: u32,
+    /// A rate sequence that will replace the current one at its next boundary
+    /// (5.3.2).
+    next_rate: Option<u16>,
+    /// Symbols of the current rate sequence sent since it took effect, which
+    /// is not the same as since the signal was asked for.
+    rate_symbols: u64,
     /// Which of the quadrant's four points the current symbol is on. Only
     /// 9600 bit/s ever moves it off the one the start-up uses.
     within: usize,
@@ -386,6 +392,8 @@ impl Transmitter {
             tick: 0,
             since_change: 0,
             rate_bit: 0,
+            next_rate: None,
+            rate_symbols: 0,
             within: WITHIN_4800,
             bits: 2,
             last_sample: 0.0,
@@ -421,13 +429,50 @@ impl Transmitter {
         if signal == self.signal {
             return;
         }
+        // 5.3.2: "the modem shall first complete the transmission of the
+        // current 16-bit rate sequence, and then transmit one 16-bit sequence
+        // E". One rate signal replacing another therefore waits for the
+        // boundary rather than cutting in where it is asked for.
+        //
+        // Cutting in is what this did, and R3 does not arrive on a boundary --
+        // it arrives whenever the line brings it. A call to a real modem cut
+        // the last R2 short after twelve of its sixteen bits and put the E
+        // there, so the far end, whose framing is locked to the sequences it
+        // has been reading, saw 0101000100011111 at its own alignment: B0-3
+        // neither 0000 nor 1111, which is neither a rate signal nor an E. It
+        // waited for an E that never came at a boundary and gave up one round
+        // trip later, every time.
+        if let (Signal::Rate(_), Signal::Rate(next)) = (self.signal, signal)
+            && self.rate_bit != 0
+        {
+            self.next_rate = Some(next);
+            return;
+        }
         self.signal = signal;
         self.since_change = 0;
         self.rate_bit = 0;
+        self.next_rate = None;
+        self.rate_symbols = 0;
         if signal == Signal::Trn {
             // 5.2.3: the scrambler starts from all zeros for the segment.
             self.scrambler.reset();
         }
+    }
+
+    /// Symbols sent of the rate sequence now going out.
+    pub fn rate_symbols(&self) -> u64 {
+        self.rate_symbols
+    }
+
+    /// Whether a rate sequence has been asked for and is waiting for the
+    /// current one to finish (5.3.2).
+    ///
+    /// The pair matters to anything timing a sequence: eight symbols of E
+    /// means eight symbols after the E began, not after it was asked for, and
+    /// between those two moments the symbols going out belong to the sequence
+    /// before it.
+    pub fn rate_pending(&self) -> bool {
+        self.next_rate.is_some()
     }
 
     pub fn signal(&self) -> Signal {
@@ -489,15 +534,24 @@ impl Transmitter {
                     TRN_STATES[usize::from(first) << 1 | usize::from(second)]
                 }
             }
-            Signal::Rate(sequence) => {
+            Signal::Rate(mut sequence) => {
                 // 5.3: the 16 bits repeat, scrambled, and are differentially
                 // encoded as data is.
                 let mut dibit = [false; 2];
                 for slot in &mut dibit {
+                    // The boundary a replacement has been waiting for.
+                    if self.rate_bit == 0
+                        && let Some(next) = self.next_rate.take()
+                    {
+                        sequence = next;
+                        self.signal = Signal::Rate(next);
+                        self.rate_symbols = 0;
+                    }
                     let bit = sequence & (1 << (15 - self.rate_bit)) != 0;
                     self.rate_bit = (self.rate_bit + 1) % 16;
                     *slot = self.scrambler.scramble(bit);
                 }
+                self.rate_symbols += 1;
                 return self.turn(dibit);
             }
             Signal::ScrambledOnes => {

@@ -1142,8 +1142,12 @@ impl Startup {
             }
             State::SendEnd => {
                 // 5.3.2: one complete sixteen-bit sequence, which is eight
-                // symbols at two bits each.
-                if self.symbols >= 8 {
+                // symbols at two bits each -- counted from where the E began
+                // rather than from where it was asked for. The clause before
+                // it has the rate sequence it interrupts finish first, so the
+                // two are up to seven symbols apart and the transmitter is the
+                // only thing that knows which.
+                if !tx.rate_pending() && tx.rate_symbols() >= 8 {
                     // 5.4: the E just finished says what the scrambled ones
                     // that follow it are coded at, so this is the moment the
                     // transmitter changes rate and not one symbol earlier.
