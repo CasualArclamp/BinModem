@@ -10,8 +10,10 @@
 //! than against a memory of them, with section numbers on the constants.
 //! `tools/fetch_specs.sh` downloads the RFCs beside the ITU Recommendations.
 
+pub mod control;
 pub mod frame;
 
+pub use control::{Action, Code, ConfigOption, Event, Message, State, transition};
 pub use frame::{Deframer, Discarded, Framer, Packet};
 
 /// The protocol numbers this implementation knows, from the "PPP DLL Protocol
