@@ -30,6 +30,12 @@ pub enum Phase {
     Terminate,
 }
 
+/// How many times round [`Link::round`] before giving up on it settling.
+///
+/// LCP coming up starts IPCP, and IPCP has a Configure-Request to send. That
+/// is two rounds and a third to find there is no more; the rest is slack.
+const ROUNDS: usize = 4;
+
 /// One end of the link.
 #[derive(Debug)]
 pub struct Link {
@@ -104,6 +110,13 @@ impl Link {
             // timer and will ask again.
             if let Ok(Some(packet)) = self.deframer.feed(byte) {
                 self.deliver(packet);
+                // Round by round rather than once at the end: what one frame
+                // agreed to governs how the next one is read, and the next one
+                // may be in this same buffer. A Configure-Ack and the first
+                // frame sent under what it agreed arrive together often
+                // enough that reading them under the same settings deadlocks
+                // the link.
+                self.pump();
             }
         }
         self.pump();
@@ -190,8 +203,39 @@ impl Link {
 
     /// Move whatever the two sessions have produced onto the line, and follow
     /// the phase they put the link in.
+    ///
+    /// Output before reports, and that order is the whole of it. What a
+    /// session produced, it produced under the settings that were in force
+    /// when it produced it: the Configure-Ack that brings this end up is the
+    /// last frame the far end will read while it is still down, and framing it
+    /// under what it agreed to would put octets on the line the far end is
+    /// still entitled to strip.
+    ///
+    /// It goes round more than once because a report starts the next protocol,
+    /// which has something to say immediately -- and that, correctly, is sent
+    /// under the new settings.
     fn pump(&mut self) {
+        for _ in 0..ROUNDS {
+            if !self.round() {
+                break;
+            }
+        }
+    }
+
+    /// One round of it. Says whether anything happened.
+    fn round(&mut self) -> bool {
+        let lcp: Vec<_> = self.lcp.take_output();
+        let ipcp: Vec<_> = self.ipcp.take_output();
+        let anything = !lcp.is_empty() || !ipcp.is_empty();
+        for message in lcp {
+            self.send(crate::protocol::LCP, message.to_bytes());
+        }
+        for message in ipcp {
+            self.send(crate::protocol::IPCP, message.to_bytes());
+        }
+        let mut reports = false;
         for report in self.lcp.take_reports() {
+            reports = true;
             match report {
                 Report::Up => {
                     // 3.4: what LCP agreed takes effect now, and the framer is
@@ -213,6 +257,7 @@ impl Link {
             }
         }
         for report in self.ipcp.take_reports() {
+            reports = true;
             match report {
                 Report::Up => self.phase = Phase::Network,
                 Report::Down | Report::Finished => {
@@ -223,14 +268,7 @@ impl Link {
                 Report::Started => {}
             }
         }
-        let lcp: Vec<_> = self.lcp.take_output();
-        for message in lcp {
-            self.send(crate::protocol::LCP, message.to_bytes());
-        }
-        let ipcp: Vec<_> = self.ipcp.take_output();
-        for message in ipcp {
-            self.send(crate::protocol::IPCP, message.to_bytes());
-        }
+        anything || reports
     }
 
     fn send(&mut self, protocol: u16, payload: Vec<u8>) {

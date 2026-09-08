@@ -16,6 +16,7 @@ pub mod ip;
 pub mod ipcp;
 pub mod lcp;
 pub mod link;
+pub mod ping;
 pub mod session;
 
 pub use control::{Action, Code, ConfigOption, Event, Message, State, transition};

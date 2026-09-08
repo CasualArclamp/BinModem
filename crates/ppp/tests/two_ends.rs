@@ -158,3 +158,64 @@ fn an_end_talking_to_nothing_stops_talking() {
         .sum();
     assert_eq!(quiet, 0, "it was still asking after it had given up");
 }
+
+/// The same two ends, with what one says handed over before the other has had
+/// its turn.
+///
+/// A modem does not deliver in neat alternating rounds, and this ordering is
+/// the one that catches the mistake: the far end's Configure-Request and its
+/// Configure-Ack of ours arrive in one buffer, so this end acknowledges and
+/// comes up in the same breath. What it acknowledged with has to be the old
+/// framing -- the far end is still down and still entitled to strip control
+/// octets out of anything it is sent -- and what it says afterwards has to be
+/// the new. Getting that the wrong way round deadlocks the link with both
+/// ends waiting for an acknowledgement the other has already sent.
+#[test]
+fn it_comes_up_however_the_two_ends_are_interleaved() {
+    let mut a = Link::new([10, 0, 0, 1], [10, 0, 0, 2]);
+    let mut b = Link::new([10, 0, 0, 2], [10, 0, 0, 1]);
+    a.open();
+    b.open();
+    for _ in 0..2_000 {
+        let from_a = a.take_line();
+        if !from_a.is_empty() {
+            b.feed(&from_a);
+        }
+        let from_b = b.take_line();
+        if !from_b.is_empty() {
+            a.feed(&from_b);
+        }
+        a.tick(1);
+        b.tick(1);
+        if a.up() && b.up() {
+            return;
+        }
+    }
+    panic!("stuck at {:?} and {:?}", a.phase(), b.phase());
+}
+
+/// And one octet at a time, which is what a slow line delivers.
+#[test]
+fn it_comes_up_one_octet_at_a_time() {
+    let mut a = Link::new([10, 0, 0, 1], [10, 0, 0, 2]);
+    let mut b = Link::new([10, 0, 0, 2], [10, 0, 0, 1]);
+    a.open();
+    b.open();
+    let (mut to_a, mut to_b) = (Vec::new(), Vec::new());
+    for _ in 0..20_000 {
+        to_b.extend(a.take_line());
+        to_a.extend(b.take_line());
+        if !to_b.is_empty() {
+            b.feed(&[to_b.remove(0)]);
+        }
+        if !to_a.is_empty() {
+            a.feed(&[to_a.remove(0)]);
+        }
+        a.tick(1);
+        b.tick(1);
+        if a.up() && b.up() {
+            return;
+        }
+    }
+    panic!("stuck at {:?} and {:?}", a.phase(), b.phase());
+}
