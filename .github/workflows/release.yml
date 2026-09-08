@@ -67,23 +67,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "${{ github.ref_name }}"
-          $notes = @"
-One file. Download ``binmodem.exe`` and run it -- nothing to install, and no
-Visual C++ redistributable, because the C runtime is linked in.
-
-``````
-binmodem.exe                  a modem on a real line
-binmodem.exe --devices        what audio this machine has
-binmodem.exe --telnet         a board over a socket
-binmodem.exe --capture        replay the golden capture
-``````
-
-Reaching a line outside the machine wants two virtual audio cables, so the
-output can go to a softphone's microphone while the input comes from its
-speaker. See docs/usage.md.
-
-Checksums are in ``SHA256SUMS.txt``.
-"@
-          gh release create $tag dist/binmodem.exe dist/SHA256SUMS.txt `
-              --title $tag --notes $notes
+          gh release create "${{ github.ref_name }}" `
+              dist/binmodem.exe dist/SHA256SUMS.txt `
+              --title "${{ github.ref_name }}" `
+              --notes-file .github/release-notes.md
