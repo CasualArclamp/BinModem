@@ -322,6 +322,11 @@ impl Session {
         self.ask_network(NetRequest::PingRepeatedly(on));
     }
 
+    /// Carry web traffic over the link, or stop.
+    pub fn carry_web(&self, on: bool) {
+        self.ask_network(NetRequest::Proxy(on));
+    }
+
     /// What the link is doing, if there is one.
     pub fn network(&self) -> Option<NetView> {
         self.network.lock().ok().and_then(|s| s.clone())
@@ -557,6 +562,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                         link.ping_repeatedly(on);
                     }
                 }
+                NetRequest::Proxy(on) => match networking.as_mut() {
+                    Some(link) => link.carry_web(on, &tx),
+                    None => tx.log(Direction::Note, "proxy: there is no link to carry it"),
+                },
             }
         }
 

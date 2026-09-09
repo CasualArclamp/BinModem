@@ -968,6 +968,7 @@ dependencies = [
  "line",
  "modem",
  "ppp",
+ "proxy",
  "telemetry",
  "telnet",
  "terminal",
@@ -1283,6 +1284,7 @@ dependencies = [
  "ec",
  "line",
  "ppp",
+ "proxy",
  "transfer",
  "v8",
 ]

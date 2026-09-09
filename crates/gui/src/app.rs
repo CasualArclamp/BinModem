@@ -287,6 +287,8 @@ pub struct ScopeApp {
     network_open: bool,
     /// Whether the window has asked for a stream of echoes rather than one.
     ping_repeatedly: bool,
+    /// And whether it has asked for web traffic to be carried.
+    carry_web: bool,
     /// The file transfer window, and the two paths it works with.
     transfer_open: bool,
     send_path: String,
@@ -367,6 +369,7 @@ impl ScopeApp {
             protection_open: false,
             network_open: false,
             ping_repeatedly: false,
+            carry_web: false,
             transfer_open: false,
             line_was_open: false,
             send_path: String::new(),
@@ -1064,6 +1067,7 @@ impl ScopeApp {
                         }
                     } else if ui.button("Put it down").clicked() {
                         self.ping_repeatedly = false;
+                        self.carry_web = false;
                         session.stop_network();
                     }
                     if let Some(view) = &link {
@@ -1142,6 +1146,52 @@ impl ScopeApp {
                             );
                         }
                     });
+                });
+
+                ui.separator();
+                ui.add_enabled_ui(view.up, |ui| {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .checkbox(&mut self.carry_web, "carry web traffic")
+                            .on_hover_text(
+                                "SOCKS 5 over the link: the end that answered \
+                                 the call opens the connections, the end that \
+                                 dialled points a browser at a local port",
+                            )
+                            .changed()
+                        {
+                            session.carry_web(self.carry_web);
+                        }
+                        if let Some(p) = &view.proxy {
+                            if let Some(why) = &p.trouble {
+                                ui.label(
+                                    RichText::new(why)
+                                        .small()
+                                        .color(Color32::from_rgb(235, 100, 90)),
+                                );
+                            } else if !p.at.is_empty() {
+                                ui.label(
+                                    RichText::new(if p.serving {
+                                        format!("offering the internet at {}", p.at)
+                                    } else {
+                                        format!("socks5://{}", p.at)
+                                    })
+                                    .monospace()
+                                    .small()
+                                    .color(bright),
+                                );
+                            }
+                        }
+                    });
+                    if let Some(p) = &view.proxy
+                        && p.open > 0
+                    {
+                        ui.label(
+                            RichText::new(format!("{} connections being carried", p.open))
+                                .small()
+                                .color(dim),
+                        );
+                    }
                 });
 
                 let s = view.stats;

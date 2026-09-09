@@ -19,6 +19,13 @@ use ppp::link::{Link, Phase};
 use ppp::ping::{Event, Pinger, Stats};
 use telemetry::{Direction, Publisher};
 
+/// Where a browser on the dialling machine should be pointed.
+///
+/// The loopback rather than every interface: the proxy is for the person at
+/// this machine, and a proxy listening on the network is one anybody on the
+/// network can use to reach the far end of somebody else's telephone call.
+pub const PROXY_AT: &str = "127.0.0.1:1080";
+
 /// The address the end that hands them out keeps for itself.
 ///
 /// A private range (RFC 1918) because these two ends are the whole internet as
@@ -39,6 +46,8 @@ pub enum Request {
     PingOnce,
     /// Keep sending them, or stop.
     PingRepeatedly(bool),
+    /// Carry web traffic over the link, or stop.
+    Proxy(bool),
 }
 
 /// What the link is doing, for the window to show.
@@ -62,6 +71,32 @@ pub struct View {
     /// own count: this starts when the link does.
     pub rx_bytes: u64,
     pub tx_bytes: u64,
+    /// The proxy, if one is running.
+    pub proxy: Option<ProxyView>,
+}
+
+/// What the proxy is doing, for the window to show.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProxyView {
+    /// Whether this end is the one with the internet.
+    pub serving: bool,
+    /// Where a browser should be pointed, on the end that dialled.
+    pub at: String,
+    /// Connections being carried right now.
+    pub open: usize,
+    pub trouble: Option<String>,
+}
+
+/// Which half of the proxy this end is.
+#[derive(Debug)]
+enum Proxy {
+    /// The end with the internet.
+    Serving(Box<proxy::Server>),
+    /// The end that dialled, listening for a browser.
+    Using(Box<proxy::Client>),
+    /// It was asked for and could not be started; the reason is kept so the
+    /// window can say why rather than showing nothing.
+    Refused(String),
 }
 
 fn dotted(address: [u8; 4]) -> String {
@@ -92,6 +127,9 @@ pub struct Networking {
     announced: bool,
     rx_bytes: u64,
     tx_bytes: u64,
+    /// Whether the window has asked for web traffic to be carried.
+    want_proxy: bool,
+    proxy: Option<Proxy>,
 }
 
 impl Networking {
@@ -135,6 +173,96 @@ impl Networking {
             announced: false,
             rx_bytes: 0,
             tx_bytes: 0,
+            want_proxy: false,
+            proxy: None,
+        }
+    }
+
+    /// Start or stop carrying web traffic.
+    ///
+    /// Which half this end is follows from which end answered the call, the
+    /// same way the addresses do: the machine that answered has the internet
+    /// and the machine that dialled wants it.
+    pub fn carry_web(&mut self, on: bool, tx: &Publisher) {
+        self.want_proxy = on;
+        if !on {
+            if self.proxy.is_some() {
+                tx.log(Direction::Note, "proxy: stopped");
+            }
+            self.proxy = None;
+        }
+    }
+
+    /// Bring the proxy up, once there are addresses to bring it up with.
+    fn start_proxy(&mut self, tx: &Publisher) {
+        let (local, remote) = self.link.addresses();
+        // The seed only has to differ between the two ends, and they are never
+        // the same role.
+        let seed = if self.serving { 0x9e37_79b9 } else { 0x85eb_ca6b };
+        if self.serving {
+            tx.log(
+                Direction::Note,
+                "proxy: this end has the internet and is offering it",
+            );
+            self.proxy = Some(Proxy::Serving(Box::new(proxy::Server::new(local, seed))));
+            return;
+        }
+        match proxy::Client::new(PROXY_AT, local, remote, seed) {
+            Ok(client) => {
+                tx.log(
+                    Direction::Note,
+                    format!("proxy: point a browser at socks5://{}", client.bound()),
+                );
+                self.proxy = Some(Proxy::Using(Box::new(client)));
+            }
+            Err(why) => {
+                tx.log(Direction::Note, format!("proxy: could not listen: {why}"));
+                self.proxy = Some(Proxy::Refused(why));
+            }
+        }
+    }
+
+    /// Move what the proxy has to say onto the link and back.
+    fn drive_proxy(&mut self, ms: u32, tx: &Publisher) {
+        if self.want_proxy && self.proxy.is_none() && self.link.up() {
+            self.start_proxy(tx);
+        }
+        let (local, remote) = self.link.addresses();
+        let carried = self.link.take_carried();
+        let mut outgoing = Vec::new();
+        let mut log = Vec::new();
+        match self.proxy.as_mut() {
+            Some(Proxy::Serving(server)) => {
+                for datagram in carried {
+                    if datagram.protocol == ppp::ip::PROTOCOL_TCP {
+                        server.deliver(datagram.from, datagram.to, &datagram.payload);
+                    }
+                }
+                server.tick(ms);
+                outgoing = server.take_outgoing();
+                log = server.take_log();
+            }
+            Some(Proxy::Using(client)) => {
+                for datagram in carried {
+                    if datagram.protocol == ppp::ip::PROTOCOL_TCP {
+                        client.deliver(datagram.from, datagram.to, &datagram.payload);
+                    }
+                }
+                client.tick(ms);
+                outgoing = client.take_outgoing();
+                log = client.take_log();
+            }
+            // Nothing above IP is listening, so a segment that arrives has
+            // nowhere to go. TCP's own answer to that is a reset, and there is
+            // no stack here to send one.
+            Some(Proxy::Refused(_)) | None => {}
+        }
+        let _ = (local, remote);
+        for line in log {
+            tx.log(Direction::Note, line);
+        }
+        for out in outgoing {
+            self.link.send_payload(ppp::ip::PROTOCOL_TCP, &out.payload);
         }
     }
 
@@ -151,6 +279,7 @@ impl Networking {
         // already been replied to inside the link; there is nothing above IP
         // here to hand it to.
         let _ = self.pinger.poll(&mut self.link, ms);
+        self.drive_proxy(ms, tx);
         self.report(tx);
         let out = self.link.take_line();
         self.tx_bytes += out.len() as u64;
@@ -193,6 +322,25 @@ impl Networking {
             in_flight: self.pinger.in_flight(),
             rx_bytes: self.rx_bytes,
             tx_bytes: self.tx_bytes,
+            proxy: match self.proxy.as_ref() {
+                Some(Proxy::Serving(server)) => Some(ProxyView {
+                    serving: true,
+                    at: format!("{}:{}", dotted(server.address()), server.port()),
+                    open: server.open(),
+                    trouble: None,
+                }),
+                Some(Proxy::Using(client)) => Some(ProxyView {
+                    serving: false,
+                    at: client.bound().to_string(),
+                    open: client.open(),
+                    trouble: None,
+                }),
+                Some(Proxy::Refused(why)) => Some(ProxyView {
+                    trouble: Some(why.clone()),
+                    ..ProxyView::default()
+                }),
+                None => self.want_proxy.then(ProxyView::default),
+            },
         }
     }
 
