@@ -293,7 +293,11 @@ impl Interpreter {
             // would be two entries for one thing. V.21 is absent because the
             // tones implemented are Bell 103's, and a modem that claimed V.21
             // and whistled at 1270 Hz would be lying to whoever asked.
-            modulations: ["V32", "V22B", "B103"]
+            // V.32 and V.32bis are separate names because V.250 makes them
+            // separate carriers, and the difference is real: V32 tops out at
+            // 9600 and V32B at 14 400. A far end that will not hold the faster
+            // rates is asked for the slower carrier and gets exactly it.
+            modulations: ["V32B", "V32", "V22B", "B103"]
                 .iter()
                 .map(|s| (*s).to_owned())
                 .collect(),

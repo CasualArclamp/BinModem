@@ -184,7 +184,10 @@ impl Modulation {
         match carrier {
             0 => &[300],
             1 => &[1200, 2400],
-            _ => &[4800, 9600],
+            2 => &[4800, 9600],
+            // V.32bis 2.3: the two V.32 rates and the three it adds, all at
+            // the same 2400 baud.
+            _ => &[4800, 7200, 9600, 12_000, 14_400],
         }
     }
 
@@ -525,10 +528,11 @@ impl ScopeApp {
     }
 
     /// Modulations the modem will accept, in the order the box shows them.
-    const CARRIERS: [(&'static str, &'static str); 3] = [
+    const CARRIERS: [(&'static str, &'static str); 4] = [
         ("B103", "Bell 103 - 300 bit/s"),
         ("V22B", "V.22bis - 1200 or 2400"),
         ("V32", "V.32 - 4800 or 9600"),
+        ("V32B", "V.32bis - 4800 to 14400"),
     ];
 
     /// Boards to start from, because a text box on its own is a box nobody
@@ -1323,7 +1327,7 @@ impl ScopeApp {
                 } else {
                     ui.label(
                         RichText::new(
-                            "A ceiling is worth setting on purpose. Sixteen points at                              2400 need about 20 dB of signal to noise; four at 1200                              need about 13.",
+                            "A ceiling is worth setting on purpose. Every rate here                              is 2400 baud and they differ only in how crowded the                              constellation is: four points at 4800, a hundred and                              twenty-eight at 14 400, and about 20 dB more signal to                              noise wanted across that span.",
                         )
                         .small()
                         .color(dim),
@@ -1974,15 +1978,22 @@ impl ScopeApp {
     /// One list rather than a modulation and a rate to be chosen separately,
     /// because nobody wants "V.22bis" and "2400" as two decisions -- they want
     /// 2400, and the modulation that reaches it follows from that.
+    /// Every ceiling worth one press, and which carrier each belongs to.
+    ///
+    /// Everything from 4800 up is V.32bis, including the two rates plain V.32
+    /// also has: V.32bis does them too, and offering the older carrier here
+    /// would only take 7200 away. Choosing V.32 on purpose -- which is worth
+    /// doing against a far end that claims V.32bis and cannot hold it -- is in
+    /// the Advanced window, where a deliberate choice belongs.
     const CEILINGS: [(u32, usize, &'static str); 8] = [
         (300, 0, "300"),
         (1200, 1, "1200"),
         (2400, 1, "2400"),
-        (4800, 2, "4800"),
-        (7200, 2, "7200"),
-        (9600, 2, "9600"),
-        (12_000, 2, "12000"),
-        (14_400, 2, "14400"),
+        (4800, 3, "4800"),
+        (7200, 3, "7200"),
+        (9600, 3, "9600"),
+        (12_000, 3, "12000"),
+        (14_400, 3, "14400"),
     ];
 
     /// How fast at most, and the three things that are simply on or off.
@@ -2553,7 +2564,29 @@ mod modulation_tests {
         assert_eq!(Modulation::rates(1), &[1200, 2400]);
         assert_eq!(ScopeApp::CARRIERS[2].0, "V32");
         assert_eq!(Modulation::rates(2), &[4800, 9600]);
-        assert_eq!(ScopeApp::CARRIERS.len(), 3);
+        assert_eq!(ScopeApp::CARRIERS[3].0, "V32B");
+        assert_eq!(Modulation::rates(3), &[4800, 7200, 9600, 12_000, 14_400]);
+        assert_eq!(ScopeApp::CARRIERS.len(), 4);
+    }
+
+    /// The two V.32 carriers are two ceilings on one modulation, and the
+    /// faster one has every rate the slower one has.
+    #[test]
+    fn v32bis_can_do_everything_v32_can() {
+        for rate in Modulation::rates(2) {
+            assert!(
+                Modulation::rates(3).contains(rate),
+                "V.32bis cannot do {rate}, which V.32 can"
+            );
+        }
+        // And the strip of ceilings only ever names a carrier that has the
+        // rate it is offering.
+        for (rate, carrier, _) in ScopeApp::CEILINGS {
+            assert!(
+                Modulation::rates(carrier).contains(&rate),
+                "the ceiling {rate} names a carrier that has no such rate"
+            );
+        }
     }
 
     #[test]

@@ -337,15 +337,36 @@ fn ms_chooses_which_modulation_the_call_uses() {
 
     assert_eq!(p.caller.state(), State::Data, "the V.32 caller never connected");
     assert_eq!(p.host.state(), State::Data, "the V.32 host never connected");
-    // Both ends offer everything from 4800 up, and the rate exchange
-    // settles on the best of what they share. `V32` selects the modulation
-    // family, and V.32bis is the top of it.
-    assert_eq!(p.caller.rate(), Some(14_400), "not the V.32bis rate");
+    // V.250 gives V.32 and V.32bis separate carrier names, and what
+    // separates them is a ceiling: this is the older one, so 9600 is as fast
+    // as it goes even though the modulation underneath would carry 14 400
+    // without changing anything but the constellation.
+    assert_eq!(p.caller.rate(), Some(9600), "not the V.32 rate");
     assert!(
-        p.caller_saw().contains("14400"),
-        "CONNECT did not report the rate: {:?}",
+        p.caller_saw().contains("9600"),
+        "CONNECT did not report the V.32 rate: {:?}",
         p.caller_saw()
     );
+    assert_eq!(p.caller.standard(), "V.32");
+}
+
+/// The two V.32 carriers are one modulation with two ceilings.
+///
+/// V.250 names them separately and a terminal that asks for the older one
+/// means it -- which is also how to meet a far end that claims V.32bis and
+/// cannot hold it, since what this end offers is what the rate exchange can
+/// settle on.
+#[test]
+fn the_two_v32_carriers_are_two_ceilings() {
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "AT+MS=V32B");
+    Pair::type_at(&mut p.caller, "AT+MS=V32B");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(14.0);
+    assert_eq!(p.caller.rate(), Some(14_400), "V.32bis should reach the top");
+    assert_eq!(p.caller.standard(), "V.32bis");
+    assert_eq!(p.caller.states(), 128);
 }
 
 #[test]
@@ -477,10 +498,14 @@ fn a_scope_can_see_what_the_modem_is_doing() {
     assert_eq!(p.caller.standard(), "V.22bis", "the default modulation");
     assert_eq!(p.caller.constellation_point(), None, "a point with no call");
 
-    Pair::type_at(&mut p.host, "AT+MS=V32");
-    Pair::type_at(&mut p.caller, "AT+MS=V32");
+    Pair::type_at(&mut p.host, "AT+MS=V32B");
+    Pair::type_at(&mut p.caller, "AT+MS=V32B");
     p.run(0.01);
-    assert_eq!(p.caller.standard(), "V.32", "+MS did not change what is reported");
+    assert_eq!(
+        p.caller.standard(),
+        "V.32bis",
+        "+MS did not change what is reported"
+    );
 
     Pair::type_at(&mut p.host, "ATA");
     Pair::type_at(&mut p.caller, "ATD5551234");

@@ -260,7 +260,13 @@ impl Pump {
     fn standard(&self) -> &'static str {
         match self {
             Self::V22bis(_) => "V.22bis",
-            Self::V32(_) => "V.32",
+            // The two names are one modulation with two ceilings, so which of
+            // them a connected call is depends on where it ended up rather
+            // than on what was asked for.
+            Self::V32(m) => match m.status() {
+                v32::startup::Status::Connected(rate) if rate > 9600 => "V.32bis",
+                _ => "V.32",
+            },
             Self::Bell103(_) => "Bell 103",
         }
     }
@@ -501,6 +507,7 @@ impl Modem {
         match self.pump.as_ref() {
             Some(p) => p.standard(),
             None => match self.at.modulation.carrier.as_str() {
+                "V32B" => "V.32bis",
                 "V32" => "V.32",
                 "B103" => "Bell 103",
                 _ => "V.22bis",
@@ -1244,7 +1251,10 @@ impl Modem {
         let (lowest, highest) = self.rate_range();
         let settings = &self.at.modulation;
         let Some(preferred) = (match settings.carrier.as_str() {
-            "V32" => Some(Modulation::V32bis),
+            // One bit in V.8's menu covers both (Table 4: "V.32 bis/V.32
+            // availability"), so the two carriers offer the same thing and
+            // differ only in what they will then agree to.
+            "V32" | "V32B" => Some(Modulation::V32bis),
             "B103" => None,
             _ => Some(Modulation::V22bis),
         }) else {
@@ -1313,13 +1323,20 @@ impl Modem {
     fn start_pump(&mut self, chosen: Option<Modulation>) {
         let role = self.role;
         let carrier = match chosen {
-            Some(Modulation::V32bis) => "V32".to_owned(),
+            // V.8 cannot tell the two apart, so what it agreed does not
+            // change which of them was asked for. Anything else -- a far end
+            // that offered it when this end had chosen V.22bis, say -- takes
+            // the faster carrier, since there is no reason to hold back.
+            Some(Modulation::V32bis) => match self.at.modulation.carrier.as_str() {
+                chosen @ ("V32" | "V32B") => chosen.to_owned(),
+                _ => "V32B".to_owned(),
+            },
             Some(Modulation::V22bis) => "V22B".to_owned(),
             // Nothing else is ever offered, so nothing else can come back.
             _ => self.at.modulation.carrier.clone(),
         };
         self.pump = Some(match carrier.as_str() {
-            "V32" => {
+            "V32" | "V32B" => {
                 let hs_role = match role {
                     Role::Calling => v32::startup::Role::Calling,
                     Role::Answering => v32::startup::Role::Answering,
@@ -1338,8 +1355,14 @@ impl Modem {
                 // that asked for at most 4800 will get 9600, because the far
                 // end has no way to know it was not meant.
                 let (lowest, highest) = self.rate_range();
+                // V.250's two carriers are two different ceilings. V.32 stops
+                // at 9600 and V.32bis goes to 14 400, and a terminal that
+                // asked for the first is not to be given the second -- which
+                // is also how to make this modem interwork with a far end that
+                // says V.32bis and cannot hold it.
+                let ceiling = if carrier == "V32" { 9600 } else { 14_400 };
                 let offer = v32::startup::rate_signal(
-                    v32::startup::Rates::between(lowest, highest),
+                    v32::startup::Rates::between(lowest, highest.min(ceiling)),
                 );
                 Pump::V32(Box::new(v32::startup::Modem::new(hs_role, offer, self.fs)))
             }

@@ -34,6 +34,11 @@ const HEADROOM: f64 = 0.45;
 const CROSSING: usize = 700;
 
 /// Two modems on one cable, hearing everything on it including themselves.
+///
+/// The V.32 tests here name the V.32bis carrier, which is the same modulation
+/// with a higher ceiling: what is being measured is whether the echo canceller
+/// can be pointed far enough away to work on this line at all, and the
+/// constellation that asks most of it is the one to ask with.
 struct Cable {
     caller: Modem,
     host: Modem,
@@ -87,7 +92,7 @@ impl Cable {
 
 #[test]
 fn a_v32_call_goes_through_a_sound_card_loopback() {
-    let mut cable = Cable::new("V32", CROSSING);
+    let mut cable = Cable::new("V32B", CROSSING);
     cable.run(25.0);
 
     println!(
@@ -133,7 +138,7 @@ fn the_cable_is_found_at_a_single_crossing_rather_than_the_round_trip() {
     // round trip away; on a cable it comes back after one crossing, because
     // the cable is the far end. Taps placed at the round trip would be sitting
     // on empty line, which is why the delay is looked for rather than assumed.
-    let mut cable = Cable::new("V32", CROSSING);
+    let mut cable = Cable::new("V32B", CROSSING);
     cable.run(25.0);
     let found = cable
         .caller
@@ -161,7 +166,7 @@ fn a_loopback_short_enough_to_need_no_far_taps_works_too() {
     // equaliser while its timing loop, carrier loop and gain went on tracking
     // the modem's own echo. Nothing about that is particular to a long line;
     // the long line only made it visible.
-    let mut cable = Cable::new("V32", 64);
+    let mut cable = Cable::new("V32B", 64);
     cable.run(25.0);
     assert!(
         cable.up(),
@@ -194,7 +199,7 @@ fn v22bis_still_goes_through_it_without_needing_any_of_that() {
 #[test]
 #[ignore]
 fn trace() {
-    let mut cable = Cable::new("V32", CROSSING);
+    let mut cable = Cable::new("V32B", CROSSING);
     let mut last = ("", "");
     for i in 0..(25.0 * FS) as usize {
         let heard = cable.wire.pop_front().unwrap_or(0.0);
@@ -234,7 +239,7 @@ fn sweep_the_crossing() {
     // What the delay actually is on a given machine depends on buffer sizes
     // nothing here chooses. This says how much of that range works.
     for crossing in [64, 160, 320, 480, 700, 900, 1200, 1600, 2000] {
-        let mut cable = Cable::new("V32", crossing);
+        let mut cable = Cable::new("V32B", crossing);
         cable.run(25.0);
         println!(
             "{crossing:>5} samples ({:>5.1} ms): {:>13} / {:>13}  reflection {:?}",
