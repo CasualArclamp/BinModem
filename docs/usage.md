@@ -115,13 +115,35 @@ is a frame that fails its check. A file transfer wants the stream for the same
 reason, so the two refuse to run together. **Put it down** gives the terminal
 back, and hanging up takes the link with it.
 
+### Web traffic over it
+
+Tick **carry web traffic** once the link is up and the two ends become a
+proxy. The end that answered the call has the internet and offers it; the end
+that dialled listens on `127.0.0.1:1080` and the panel says so. Point a
+browser's SOCKS 5 proxy setting there — in Firefox, Settings → Network
+Settings → Manual, SOCKS Host `127.0.0.1` port `1080`, SOCKS v5, and tick
+*Proxy DNS when using SOCKS v5* so names are resolved at the far end where
+there is something to resolve them with.
+
+The loopback rather than every interface, deliberately: a proxy listening on
+the network is one anybody on the network can use to reach the far end of
+somebody else's telephone call.
+
+What crosses is our own TCP (RFC 9293) over our own IP over PPP over the
+modem. The only part of the path belonging to the operating system is the
+socket the answering end opens to the site. Expect a page in tens of seconds
+at 2400 and rather better at 9600; a modern page with a hundred requests on it
+will not be pleasant, and a page from 1996 will be exactly as it was.
+
 There is no authentication yet. Two of these go straight from LCP to
 addresses; a far end that insists on PAP or CHAP will agree to LCP and stop
 there, which is at least a failure with a name on it.
 
 The clause numbers in `crates/ppp` are RFC numbers: 1662 for the framing, 1661
 for the negotiation, 1332 for the addresses, and 791, 792 and 1071 for the
-datagram, the echo and the checksum over both.
+datagram, the echo and the checksum over both. `crates/tcp` is RFC 9293, with
+6298 for the retransmission timer and 5681 for what to do about a loss;
+`crates/socks` is RFC 1928.
 
 ## One file
 

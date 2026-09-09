@@ -8,7 +8,8 @@ sound card. No DSP chip, no driver blob, and none of a winmodem's dependence on
 one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
-source for every normative constant. 864 tests.
+source for every normative constant, and against the RFCs for everything
+carried over the top of them. 916 tests.
 
 ## What works
 
@@ -38,14 +39,26 @@ mean power that had to come out at ten.
 | **Settings** | remembered between runs, so the modem comes back where it was left |
 | **Files** | ZMODEM send and receive |
 | **Network** | PPP (RFC 1661/1662) with LCP and IPCP, and a ping over it |
+| **Internet** | our own TCP (RFC 9293) and a SOCKS 5 proxy: a browser on one machine, the internet on the other |
 | **Line** | full-duplex sound card, or a WAV to replay |
 
-Two of these on a call can carry IP. The Network panel brings up PPP over
-the connection: the end that answered hands out an address, the end that
-dialled asks for one and is told, and an ICMP echo crosses and comes back with
-a round trip on it. A test does the whole of that against a simulated line —
-V.8, V.32 at 9600, V.42, V.42bis, PPP, IPCP, ping — so it can be checked
-without a sound card.
+Two of these on a call carry the internet. The Network panel brings up PPP:
+the end that answered hands out an address, the end that dialled asks for one
+and is told, and an ICMP echo crosses and comes back with a round trip on it.
+Tick *carry web traffic* and the end that answered offers its connection —
+point a browser on the dialling machine at `socks5://127.0.0.1:1080` and it
+goes out through the modem.
+
+TCP is ours, written against RFC 9293: the eleven states, retransmission with
+RFC 6298's estimator, Nagle, delayed acknowledgements, zero-window probing,
+out-of-order reassembly, and RFC 5681's fast retransmit. Nothing in the path
+belongs to the operating system except the socket at the far end that actually
+reaches the internet — no driver, no adapter, no route, no administrator.
+
+The tallest test does the whole of it against a simulated line: V.8, V.22bis,
+V.42, V.42bis, PPP, IPCP, TCP, SOCKS 5, and a real web server on the loopback.
+Connected six seconds into the call, network phase at seven, a page back at
+2400 bit/s — and it runs without a sound card.
 
 The window around it is a scope: waterfall, spectrum, constellation, LED
 faceplate, decoded transcript, and a log of every frame both ends sent. What
@@ -74,14 +87,13 @@ OS-specific code — but only built and run on Windows so far.
 
 ## Next
 
-Getting real traffic over the PPP link: authentication (PAP and CHAP), a
-userspace TCP stack, and a SOCKS proxy, so a browser on one machine can reach
-the internet through a modem call to another — with no driver and no
-administrator.
+V.32bis at 14 400, the rest of V.32, and the fax data pumps — V.27ter, V.29,
+V.33 and V.17 — which share most of their machinery with what is already here.
+Then V.34 at 33 600.
 
-Alongside it: V.32bis (14 400) and V.34 (33 600), which the trellis code is
-most of the groundwork for, and MNP as an alternative to LAPM, since it is
-what a modem without V.42 will offer.
+Alongside them: PAP and CHAP, so something other than another BinModem can
+dial in; and MNP as an alternative to LAPM, since it is what a modem without
+V.42 will offer.
 
 ## Running it
 
