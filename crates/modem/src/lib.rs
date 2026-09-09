@@ -219,13 +219,13 @@ impl Pump {
                 v22bis::handshake::Status::Connected(v22bis::Rate::Bps2400) => 16,
                 _ => 4,
             },
-            // Four during the whole start-up and at 4800. At 9600 it depends
-            // on which of the two modulations the rate exchange settled on:
-            // sixteen for 2.4.1.1 and thirty-two for the trellis code of
-            // 2.4.1.2.
-            Self::V32(m) => match (m.status(), m.coding()) {
-                (v32::startup::Status::Connected(9600), v32::Coding::Trellis) => 32,
-                (v32::startup::Status::Connected(9600), _) => 16,
+            // Four during the whole start-up and at 4800. Above that it
+            // depends on the rate and, at 9600, on which of the two
+            // modulations the rate exchange settled on.
+            Self::V32(m) => match m.status() {
+                v32::startup::Status::Connected(rate) => {
+                    v32::constellation_size(rate, m.coding())
+                }
                 _ => 4,
             },
             Self::Bell103(_) => 2,
@@ -236,11 +236,19 @@ impl Pump {
     fn shape(&self) -> &'static str {
         match self {
             Self::V22bis(_) | Self::V32(_) => match self.states() {
-                // The trellis code carries the same four bits as the sixteen
-                // points do; the extra one is the encoder's, so the name says
+                // A trellis code carries one bit fewer than its alphabet
+                // suggests; the extra one is the encoder's, so the name says
                 // coded rather than a larger alphabet.
+                128 => "128TCM",
+                64 => "64TCM",
                 32 => "32TCM",
-                16 => "16QAM",
+                16 => match self {
+                    // Sixteen points is either V.32 2.4.1.1's uncoded 9600 or
+                    // V.32bis 2.3.4's coded 7200, and they are not the same
+                    // signal at all.
+                    Self::V32(m) if m.coding() == v32::Coding::Trellis => "16TCM",
+                    _ => "16QAM",
+                },
                 _ => "4PSK",
             },
             Self::Bell103(_) => "2FSK",
@@ -463,12 +471,12 @@ impl Modem {
     /// beyond it.
     pub fn constellation_peak(&self) -> f32 {
         match self.pump.as_ref() {
-            Some(Pump::V32(m))
-                if matches!(m.status(), v32::startup::Status::Connected(9600))
-                    && m.coding() == v32::Coding::Trellis =>
-            {
-                (4.0 / v32::CONSTELLATION_RMS) as f32
-            }
+            Some(Pump::V32(m)) => match m.status() {
+                v32::startup::Status::Connected(rate) => {
+                    v32::constellation_peak(rate, m.coding()) as f32
+                }
+                _ => 1.0,
+            },
             _ => 1.0,
         }
     }
@@ -1276,8 +1284,7 @@ impl Modem {
                 // end has no way to know it was not meant.
                 let (lowest, highest) = self.rate_range();
                 let offer = v32::startup::rate_signal(
-                    highest >= 4800 && lowest <= 4800,
-                    highest >= 9600,
+                    v32::startup::Rates::between(lowest, highest),
                 );
                 Pump::V32(Box::new(v32::startup::Modem::new(hs_role, offer, self.fs)))
             }

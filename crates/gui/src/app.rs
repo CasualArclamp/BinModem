@@ -1974,12 +1974,15 @@ impl ScopeApp {
     /// One list rather than a modulation and a rate to be chosen separately,
     /// because nobody wants "V.22bis" and "2400" as two decisions -- they want
     /// 2400, and the modulation that reaches it follows from that.
-    const CEILINGS: [(u32, usize, &'static str); 5] = [
+    const CEILINGS: [(u32, usize, &'static str); 8] = [
         (300, 0, "300"),
         (1200, 1, "1200"),
         (2400, 1, "2400"),
         (4800, 2, "4800"),
+        (7200, 2, "7200"),
         (9600, 2, "9600"),
+        (12_000, 2, "12000"),
+        (14_400, 2, "14400"),
     ];
 
     /// How fast at most, and the three things that are simply on or off.

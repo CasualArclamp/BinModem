@@ -4,7 +4,7 @@
 //! nothing back, which is not a two-wire line but does isolate the start-up
 //! from the echo. The later ones put the hybrid back.
 
-use datapump::v32::startup::{Heard, Role, Startup, Status, endpoints, rate_signal};
+use datapump::v32::startup::{Rates, Heard, Role, Startup, Status, endpoints, rate_signal};
 use datapump::v32::{BAUD, Receiver, Transmitter};
 
 const FS: f64 = 16_000.0;
@@ -35,7 +35,7 @@ impl Modem {
 /// `hear` is given (what the far end sent, what this end sent) and returns
 /// what arrives at this end's receiver, which is how the hybrid is modelled.
 fn call(seconds: f64, hear: impl Fn(f64, f64) -> f64) -> (Modem, Modem, f64) {
-    let offer = rate_signal(true, false);
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
     let mut calling = Modem::new(Role::Calling, offer);
     let mut answering = Modem::new(Role::Answering, offer);
     let mut connected_at = f64::NAN;
@@ -96,7 +96,7 @@ fn the_answering_modem_speaks_first_and_the_calling_one_waits() {
     // Talking over the answering tone would be heard by the network as well as
     // by the far end, and the tone is what disables the echo control devices
     // along the way.
-    let offer = rate_signal(true, false);
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
     let mut calling = Modem::new(Role::Calling, offer);
     let mut answering = Modem::new(Role::Answering, offer);
     let mut first_sound = None;
@@ -153,7 +153,7 @@ fn the_round_trip_is_measured_and_the_line_delay_comes_out_of_it() {
     let delay_symbols = 40usize;
     let delay = (delay_symbols as f64 * FS / BAUD) as usize;
 
-    let offer = rate_signal(true, false);
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
     let mut calling = Modem::new(Role::Calling, offer);
     let mut answering = Modem::new(Role::Answering, offer);
     let mut to_calling = vec![0.0; delay];
@@ -207,7 +207,7 @@ fn the_round_trip_is_measured_and_the_line_delay_comes_out_of_it() {
 /// at the beginning, and the only thing that will move it is a state A.
 #[test]
 fn a_far_end_that_starts_over_is_followed() {
-    let offer = rate_signal(true, false);
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
     let mut calling = Modem::new(Role::Calling, offer);
     let mut answering = Modem::new(Role::Answering, offer);
     let mut restarted_at = f64::NAN;
@@ -246,7 +246,7 @@ fn a_far_end_that_starts_over_is_followed() {
 
 #[test]
 fn a_modem_that_hears_nothing_gives_up() {
-    let offer = rate_signal(true, false);
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
     let mut calling = Modem::new(Role::Calling, offer);
     let mut status = Status::Negotiating;
     for _ in 0..(65.0 * FS) as usize {
@@ -261,7 +261,7 @@ fn a_modem_that_hears_nothing_gives_up() {
 #[test]
 #[ignore]
 fn trace() {
-    let offer = rate_signal(true, false);
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
     let mut calling = Modem::new(Role::Calling, offer);
     let mut answering = Modem::new(Role::Answering, offer);
     let (mut cp, mut ap) = ("", "");

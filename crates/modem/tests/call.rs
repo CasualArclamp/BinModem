@@ -337,12 +337,13 @@ fn ms_chooses_which_modulation_the_call_uses() {
 
     assert_eq!(p.caller.state(), State::Data, "the V.32 caller never connected");
     assert_eq!(p.host.state(), State::Data, "the V.32 host never connected");
-    // Both ends offer 4800 and 9600, and the rate exchange settles on the
-    // better of what both can do.
-    assert_eq!(p.caller.rate(), Some(9600), "not the V.32 rate");
+    // Both ends offer everything from 4800 up, and the rate exchange
+    // settles on the best of what they share. `V32` selects the modulation
+    // family, and V.32bis is the top of it.
+    assert_eq!(p.caller.rate(), Some(14_400), "not the V.32bis rate");
     assert!(
-        p.caller_saw().contains("9600"),
-        "CONNECT did not report the V.32 rate: {:?}",
+        p.caller_saw().contains("14400"),
+        "CONNECT did not report the rate: {:?}",
         p.caller_saw()
     );
 }
@@ -497,22 +498,23 @@ fn a_scope_can_see_what_the_modem_is_doing() {
 
     p.run(13.0);
     assert_eq!(p.caller.state(), State::Data, "never connected");
-    assert_eq!(p.caller.rate(), Some(9600));
-    // And thirty-two once the rate exchange has settled on 9600, because both
-    // ends offer the trellis code of 2.4.1.2 and it is what they agree on. It
-    // was sixteen when 2.4.1.1 was the only 9600 there was.
-    assert_eq!(p.caller.states(), 32);
-    assert_eq!(p.caller.shape(), "32TCM");
+    assert_eq!(p.caller.rate(), Some(14_400));
+    // And a hundred and twenty-eight once the rate exchange has settled on
+    // 14 400: six information bits and the redundant one, on Figure
+    // 2-1/V.32bis. It was sixteen when 2.4.1.1 was the only 9600 there was,
+    // and thirty-two when 9600 was the fastest rate this modem had.
+    assert_eq!(p.caller.states(), 128);
+    assert_eq!(p.caller.shape(), "128TCM");
     assert!(p.caller.carrier(), "connected with no carrier");
     let point = p.caller.constellation_point().expect("no point once connected");
     let radius = point.0.hypot(point.1);
     // Thirty-two points on five rings, normalised by the constellation's own
-    // root-mean-square of sqrt(10): the innermost four at sqrt(1/10) = 0.316
-    // and the outermost eight at sqrt(17/10) = 1.304. Any ring is a correct
-    // answer and which one this is depends on the byte being carried when the
-    // run stopped, so the range has to hold all of them.
+    // A hundred and twenty-eight points on many rings, normalised by the
+    // constellation's own root-mean-square. Which ring this is depends on the
+    // byte being carried when the run stopped, so the range has to hold all of
+    // them -- from the four innermost to the corners of the cross.
     assert!(
-        (0.25..2.0).contains(&radius),
+        (0.1..2.0).contains(&radius),
         "the constellation is at radius {radius:.2}, so the scope would draw it \
          off the edge or in a dot"
     );

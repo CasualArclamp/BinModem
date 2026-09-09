@@ -17,7 +17,8 @@
 //! rather than this one; the replay is faithful up to the first point where
 //! the two would differ, and that point is what is being looked for.
 
-use datapump::v32::startup::{Modem, Role, Status, rate_signal};
+use datapump::v32::startup::{Rates, Modem, Role, Status, rate_signal};
+use datapump::v32::trellis::AT_9600;
 
 const FS: f64 = 16_000.0;
 
@@ -31,9 +32,9 @@ fn what_this_end_made_of_it() {
 
     let arrived = wav.channel(0);
     let offer = match offer.as_deref() {
-        Some("4800") => rate_signal(true, false),
-        Some("9600") => rate_signal(false, true),
-        _ => rate_signal(true, true),
+        Some("4800") => rate_signal(Rates { at_4800: true, ..Rates::default() }),
+        Some("9600") => rate_signal(Rates { at_9600: true, ..Rates::default() }),
+        _ => rate_signal(Rates { at_4800: true, at_9600: true, ..Rates::default() }),
     };
     println!(
         "\n{path}: {:.1} s, replaying channel 0, offering {offer:016b}\n",
@@ -136,9 +137,7 @@ fn what_this_end_made_of_it() {
             // Whichever constellation the call settled on: the four points
             // of 4800 (A B C D of Figure 1) or the thirty-two of Figure 3.
             let (x, y) = if matches!(status, Status::Connected(9600)) {
-                datapump::v32::trellis::point(
-                    datapump::v32::trellis::nearest((i, q)),
-                )
+                AT_9600.point(AT_9600.nearest((i, q)))
             } else {
                 const FOUR: [(f64, f64); 4] =
                     [(-3.0, -1.0), (1.0, -3.0), (3.0, 1.0), (-1.0, 3.0)];
@@ -185,9 +184,7 @@ fn what_this_end_made_of_it() {
                 n = 0;
                 sq = 0.0;
             }
-            let (x, y) = datapump::v32::trellis::point(
-                datapump::v32::trellis::nearest(p),
-            );
+            let (x, y) = AT_9600.point(AT_9600.nearest(p));
             sq += (p.0 - x).powi(2) + (p.1 - y).powi(2);
             n += 1;
         }
@@ -205,7 +202,7 @@ fn what_this_end_made_of_it() {
     if lock.len() > 1000 {
         let decided: Vec<(f64, f64)> = lock
             .iter()
-            .map(|&(_, p)| datapump::v32::trellis::point(datapump::v32::trellis::nearest(p)))
+            .map(|&(_, p)| AT_9600.point(AT_9600.nearest(p)))
             .collect();
         println!("
   error against the symbol at each lag (0 is itself):");
@@ -238,9 +235,7 @@ fn what_this_end_made_of_it() {
         let mut rings: std::collections::BTreeMap<i64, (usize, f64)> =
             std::collections::BTreeMap::new();
         for &(_, p) in &lock {
-            let (x, y) = datapump::v32::trellis::point(
-                datapump::v32::trellis::nearest(p),
-            );
+            let (x, y) = AT_9600.point(AT_9600.nearest(p));
             let ideal = (x * x + y * y).sqrt();
             let got = (p.0 * p.0 + p.1 * p.1).sqrt();
             let e = rings.entry((ideal * 1000.0).round() as i64).or_insert((0, 0.0));

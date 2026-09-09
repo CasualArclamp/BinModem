@@ -13,21 +13,25 @@
 //! and one has to be subtracted instead. That is what [`dsp::EchoCanceller`]
 //! is for, and it is why the two arrived together.
 //!
-//! 4800 and 9600 bit/s are implemented. At 4800 the scrambled data is taken
-//! two bits at a time and differentially encoded into a quadrant (2.4.2 with
-//! Table 1), one point to a quadrant. At 9600 it is taken four at a time: the
-//! first two do the same job and the other two choose between four points
-//! inside that quadrant (2.4.1.1). Twice the data at the same 2400 baud, and
-//! nothing else about the modem changes -- the same scrambler, the same
-//! differential coding, the same start-up conducted entirely in the four
-//! states, and even the same mean power for the gain control to hold.
+//! Every rate of V.32 and V.32bis is implemented: 4800, 7200, 9600, 12 000
+//! and 14 400, all at the same 2400 baud, differing only in how many bits ride
+//! on each symbol and how many points they choose between.
 //!
-//! What is not implemented is the other 9600, the trellis-coded alternative
-//! of 2.4.1.2, which spends a redundant bit on a convolutional code over
-//! thirty-two points and buys about four decibels with it. It is optional:
-//! 1 e) requires every modem offering 9600 to be able to fall back on the
-//! sixteen-state alternative, so this interworks. B8 of the rate signal is
-//! what advertises it, and stays clear here.
+//! At 4800 the scrambled data is taken two bits at a time and differentially
+//! encoded into a quadrant (2.4.2 with Table 1), one point to a quadrant. V.32
+//! 9600 takes four at a time: the first two do the same job and the other two
+//! choose between four points inside that quadrant (2.4.1.1).
+//!
+//! Everything faster, and 9600 itself when both ends can, is the trellis code
+//! of 2.4.1.2 and V.32bis 2.3 -- see [`trellis`]. The two differentially
+//! encoded bits go through a convolutional encoder that makes a redundant
+//! seventh, and the whole lot chooses one of up to a hundred and twenty-eight
+//! points. It buys nine decibels, and it is why 14 400 fits in the same
+//! channel that 4800 does.
+//!
+//! Nothing else about the modem changes with the rate: the same scrambler, the
+//! same start-up conducted entirely in the four states, and the same mean
+//! power for the gain control to hold.
 
 pub mod startup;
 pub mod trellis;
@@ -219,7 +223,35 @@ const MAX_GAIN: f64 = 400.0;
 /// the mean power.
 const MIN_DECISION_POWER: f64 = CONSTELLATION_MEAN_POWER / 2.0;
 
+/// How many points a rate and a coding put on the line.
+///
+/// Four during the whole start-up and at 4800; sixteen for V.32 2.4.1.1; and
+/// twice the information bits for each of the trellis codings, because of the
+/// redundant bit.
+pub fn constellation_size(bits_per_second: u32, coding: Coding) -> usize {
+    match coding_for(bits_per_second, coding) {
+        Some(coded) => coded.size(),
+        None if bits_per_second >= 9600 => 16,
+        None => 4,
+    }
+}
+
+/// How far the furthest point of one gets from the origin, as a multiple of
+/// the root-mean-square every constellation shares.
+pub fn constellation_peak(bits_per_second: u32, coding: Coding) -> f64 {
+    match coding_for(bits_per_second, coding) {
+        Some(coded) => coded.peak() / CONSTELLATION_RMS,
+        // Both uncoded constellations reach exactly their own average: the
+        // four points of 4800 are all at the root of ten, and the sixteen of
+        // 2.4.1.1 have their corners there too.
+        None => 1.0,
+    }
+}
+
 /// What the carrier loop's gains are multiplied by at thirty-two points.
+///
+/// The other three trellis constellations scale from this one, by how close
+/// their points are: see [`loop_bandwidth`].
 ///
 /// A decision-directed loop is driven by its own decisions, and the noise in
 /// them grows as the points crowd together: at 4800 a symbol has to move 2.24
@@ -227,6 +259,22 @@ const MIN_DECISION_POWER: f64 = CONSTELLATION_MEAN_POWER / 2.0;
 /// The loop has to be correspondingly less willing to believe any one symbol,
 /// which is a narrower bandwidth.
 const TRELLIS_LOOP: f64 = 0.5;
+
+/// How much of one symbol's word to take, for whatever is being carried.
+///
+/// A decision-directed loop is driven by its own decisions, and the noise in
+/// them grows as the points crowd together. The number for the thirty-two
+/// points of 2.4.1.2 was found against real hardware; the rest follow it in
+/// proportion to how far a symbol may move before it is taken for another one,
+/// which at 14 400 is half what it is at 9600.
+fn loop_bandwidth(coded: Option<trellis::Coded>) -> f64 {
+    match coded {
+        Some(coded) => TRELLIS_LOOP * coded.closest() / trellis::AT_9600.closest(),
+        // The uncoded constellations are not crowded: 4800's four points and
+        // 2.4.1.1's sixteen are both two units apart.
+        None => 1.0,
+    }
+}
 
 /// How fast that estimate follows what one symbol says.
 ///
@@ -287,7 +335,26 @@ fn nearest_point(p: (f64, f64)) -> (usize, usize) {
 
 /// How many bits a symbol carries at a given rate (2.4.1 and 2.4.2).
 fn bits_per_symbol(bits_per_second: u32) -> u32 {
-    if bits_per_second >= 9600 { 4 } else { 2 }
+    match trellis::for_rate(bits_per_second) {
+        Some(coded) => coded.bits as u32,
+        // The two rates with no trellis alternative: 4800's four points and
+        // two bits (V.32 2.4.2) and 9600's sixteen points and four (2.4.1.1).
+        None if bits_per_second >= 9600 => 4,
+        None => 2,
+    }
+}
+
+/// The trellis coding a rate and a choice of modulation come to, if any.
+///
+/// Only 9600 has a choice: V.32 2.4.1 gives it two modulations and 1 e) makes
+/// the uncoded one mandatory for interworking. The three rates V.32bis adds
+/// have no uncoded form at all -- 2.3.1 to 2.3.4 describe one coding each --
+/// and 4800 has no coded one.
+pub fn coding_for(bits_per_second: u32, coding: Coding) -> Option<trellis::Coded> {
+    if bits_per_second == 9600 && coding == Coding::Uncoded {
+        return None;
+    }
+    trellis::for_rate(bits_per_second)
 }
 
 /// The self-synchronising scrambler of clause 4.
@@ -420,8 +487,13 @@ pub struct Transmitter {
     /// Which of the quadrant's four points the current symbol is on. Only
     /// 9600 bit/s ever moves it off the one the start-up uses.
     within: usize,
-    /// Bits carried by each symbol: two at 4800, four at 9600.
+    /// Bits carried by each symbol: two at 4800 and up to six at 14 400.
     bits: u32,
+    /// The rate the data is coded at, kept because the coding depends on it
+    /// and the two are set from different places.
+    rate: u32,
+    /// The trellis coding in use, when the rate and the choice come to one.
+    coded: Option<trellis::Coded>,
     /// Which of the two 9600 modulations is in use.
     coding: Coding,
     /// The convolutional encoder, used only by [`Coding::Trellis`].
@@ -449,6 +521,8 @@ impl Transmitter {
             rate_symbols: 0,
             within: WITHIN_4800,
             bits: 2,
+            rate: 4800,
+            coded: None,
             coding: Coding::Uncoded,
             trellis: trellis::Encoder::new(),
             last_sample: 0.0,
@@ -463,7 +537,9 @@ impl Transmitter {
     /// earlier -- the conditioning signal, the training segment, the rate
     /// exchange -- is two bits to the symbol whatever is being negotiated.
     pub fn set_data_rate(&mut self, bits_per_second: u32) {
+        self.rate = bits_per_second;
         self.bits = bits_per_symbol(bits_per_second);
+        self.follow();
     }
 
     /// Choose between the two modulations 9600 bit/s has (2.4.1).
@@ -478,6 +554,17 @@ impl Transmitter {
             self.trellis.reset();
         }
         self.coding = coding;
+        self.follow();
+    }
+
+    /// Work out the coding from the rate and the choice, whichever was set
+    /// last.
+    fn follow(&mut self) {
+        let coded = coding_for(self.rate, self.coding);
+        if coded.map(|c| c.bits) != self.coded.map(|c| c.bits) {
+            self.trellis.reset();
+        }
+        self.coded = coded;
     }
 
     /// What to send.
@@ -644,8 +731,8 @@ impl Transmitter {
     /// Between one byte from the terminal and the next there is nothing to
     /// send and the line carries ones, which is what 5.4 asks for: the far end
     /// stays trained on a signal that never stops.
-    fn next_group(&mut self) -> [bool; 4] {
-        let mut group = [false; 4];
+    fn next_group(&mut self) -> [bool; 6] {
+        let mut group = [false; 6];
         for slot in group.iter_mut().take(self.bits as usize) {
             let bit = if self.pending.is_empty() {
                 true
@@ -671,17 +758,16 @@ impl Transmitter {
         // than one of four quadrants times one of four places inside it. Only
         // the data phase is affected -- the conditioning signal, the training
         // segment and both rate exchanges are four points whatever was agreed.
-        if self.coding == Coding::Trellis
-            && self.bits == 4
+        if let Some(coded) = self.coded
             && self.signal == Signal::ScrambledOnes
         {
             let group = self.next_group();
-            let code = self.trellis.encode(group);
-            // The quadrant tracker is deliberately left alone. Half the
-            // thirty-two points sit on an axis and belong to no quadrant, and
-            // nothing reads it while this coding is running: Table 2's
-            // differential state lives inside the encoder instead.
-            return trellis::point(code);
+            let code = self.trellis.encode(&coded, &group);
+            // The quadrant tracker is deliberately left alone. Half the points
+            // of a cross sit on an axis and belong to no quadrant, and nothing
+            // reads it while this coding is running: the differential state
+            // lives inside the encoder instead.
+            return coded.point(code);
         }
         let state = self.next_state();
         signal_point(state, self.within)
@@ -766,11 +852,20 @@ pub struct Receiver {
     adapting: bool,
     /// The averaged phase error.
     track: f64,
-    /// Bits each arriving symbol carries: two at 4800, four at 9600.
+    /// Bits each arriving symbol carries: two at 4800 and up to six at
+    /// 14 400.
     carried: u32,
+    /// The rate the arriving data is coded at.
+    rate: u32,
     /// Which of the two 9600 modulations is in use.
     coding: Coding,
-    /// The Viterbi decoder, used only by [`Coding::Trellis`].
+    /// The trellis coding the rate and the choice come to, when they come to
+    /// one at all.
+    coded: Option<trellis::Coded>,
+    /// How much of one symbol's word the carrier loop takes, which depends on
+    /// how crowded the constellation is.
+    bandwidth: f64,
+    /// The Viterbi decoder, used only when `coded` is set.
     trellis: trellis::Decoder,
 }
 
@@ -804,8 +899,11 @@ impl Receiver {
             adapting: true,
             track: 0.0,
             carried: 2,
+            rate: 4800,
             coding: Coding::Uncoded,
-            trellis: trellis::Decoder::new(),
+            coded: None,
+            bandwidth: 1.0,
+            trellis: trellis::Decoder::new(trellis::AT_9600),
         }
     }
 
@@ -817,15 +915,29 @@ impl Receiver {
     /// indicated by the E sequence." The far end changes as it finishes
     /// sending that E, so the two land on the same place in the stream.
     pub fn set_data_rate(&mut self, bits_per_second: u32) {
+        self.rate = bits_per_second;
         self.carried = bits_per_symbol(bits_per_second);
+        self.follow();
     }
 
     /// Choose between the two modulations 9600 bit/s has (2.4.1).
     pub fn set_coding(&mut self, coding: Coding) {
-        if coding != self.coding {
-            self.trellis.reset();
-        }
         self.coding = coding;
+        self.follow();
+    }
+
+    /// Work out the coding from the rate and the choice, whichever was set
+    /// last, and everything that depends on it.
+    fn follow(&mut self) {
+        let coded = coding_for(self.rate, self.coding);
+        if coded.map(|c| c.bits) != self.coded.map(|c| c.bits) {
+            match coded {
+                Some(coded) => self.trellis.set_coding(coded),
+                None => self.trellis.reset(),
+            }
+        }
+        self.coded = coded;
+        self.bandwidth = loop_bandwidth(coded);
     }
 
     pub fn feed(&mut self, sample: f64) {
@@ -885,9 +997,9 @@ impl Receiver {
         // constellation is in use: sixteen points read against the four would
         // put the error at a quarter of a turn for a point sitting exactly
         // where it belongs.
-        let coarse = match (self.carried, self.coding) {
-            (4, Coding::Trellis) => trellis::point(trellis::nearest(point)),
-            (4, Coding::Uncoded) => {
+        let coarse = match (self.carried, self.coded) {
+            (_, Some(coded)) => coded.point(coded.nearest(point)),
+            (4, None) => {
                 let (state, within) = nearest_point(point);
                 signal_point(state, within)
             }
@@ -902,8 +1014,7 @@ impl Receiver {
             self.track += TRACK_SMOOTHING * (raw - self.track);
         }
         let error = self.track;
-        let trellis_coded = self.coding == Coding::Trellis && self.carried == 4;
-        let bw = if trellis_coded { TRELLIS_LOOP } else { 1.0 };
+        let bw = self.bandwidth;
         if self.adapting {
             // Second order, so the seven hertz of offset 2.1 allows for is
             // removed rather than merely tracked.
@@ -929,8 +1040,8 @@ impl Receiver {
         // a decision-directed equaliser wants anyway -- something to compare
         // this symbol against now, rather than the right answer two dozen
         // symbols later.
-        let decision = if trellis_coded {
-            trellis::point(trellis::nearest(scaled))
+        let decision = if let Some(coded) = self.coded {
+            coded.point(coded.nearest(scaled))
         } else {
             let (state, within) = if self.carried == 4 {
                 nearest_point(scaled)
@@ -952,9 +1063,9 @@ impl Receiver {
         }
         self.last_symbol = scaled;
 
-        if trellis_coded {
+        if let Some(coded) = self.coded {
             if let Some(group) = self.trellis.decode(scaled) {
-                for bit in group {
+                for &bit in &group[..coded.bits] {
                     let out = self.descrambler.descramble(bit);
                     self.bits.push(out);
                 }

@@ -241,56 +241,178 @@ pub fn endpoints(role: Role, fs: f64) -> (Transmitter, Receiver) {
     (Transmitter::new(mode, fs), Receiver::new(mode, fs))
 }
 
-/// Signal that a modem sends to say what it can do (Table 6).
+/// The rates a modem is offering.
 ///
-/// Only the bits this implementation has any use for are set. B0 to B3 are
-/// zero and B7, B11 and B15 are one, which is what a receiver synchronises on
-/// and what separates a rate signal from the E that ends it.
-pub fn rate_signal(bits_4800: bool, bits_9600: bool) -> u16 {
+/// Table 5/V.32bis gives each one a bit and the bits are not in rate order:
+/// 4800 and 9600 are where V.32's Table 6 put them, and the three V.32bis adds
+/// are fitted into the gaps V.32 left -- B9, B10 and B12, which V.32's own
+/// Note 2 reserves for exactly this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Rates {
+    pub at_4800: bool,
+    pub at_7200: bool,
+    pub at_9600: bool,
+    pub at_12000: bool,
+    pub at_14400: bool,
+}
+
+/// Every rate there is, fastest first.
+pub const EVERY_RATE: [u32; 5] = [14_400, 12_000, 9600, 7200, 4800];
+
+impl Rates {
+    /// Every rate from `lowest` to `highest`, which is what a modem told to
+    /// work between two rates offers.
+    pub fn between(lowest: u32, highest: u32) -> Self {
+        let mut rates = Self::default();
+        for rate in EVERY_RATE {
+            if rate >= lowest && rate <= highest {
+                rates.set(rate, true);
+            }
+        }
+        rates
+    }
+
+    /// Just the one.
+    pub fn only(rate: u32) -> Self {
+        let mut rates = Self::default();
+        rates.set(rate, true);
+        rates
+    }
+
+    pub fn holds(self, rate: u32) -> bool {
+        match rate {
+            4800 => self.at_4800,
+            7200 => self.at_7200,
+            9600 => self.at_9600,
+            12_000 => self.at_12000,
+            14_400 => self.at_14400,
+            _ => false,
+        }
+    }
+
+    pub fn set(&mut self, rate: u32, on: bool) {
+        match rate {
+            4800 => self.at_4800 = on,
+            7200 => self.at_7200 = on,
+            9600 => self.at_9600 = on,
+            12_000 => self.at_12000 = on,
+            14_400 => self.at_14400 = on,
+            _ => {}
+        }
+    }
+
+    /// The fastest of them, or zero if there are none -- which Note 3 to
+    /// Table 5 makes a call for the connection to be cleared down.
+    pub fn highest(self) -> u32 {
+        EVERY_RATE.into_iter().find(|&r| self.holds(r)).unwrap_or(0)
+    }
+
+    /// What both ends can do.
+    pub fn shared_with(self, other: Self) -> Self {
+        let mut both = Self::default();
+        for rate in EVERY_RATE {
+            both.set(rate, self.holds(rate) && other.holds(rate));
+        }
+        both
+    }
+
+    pub fn any(self) -> bool {
+        self.highest() != 0
+    }
+}
+
+/// Where each rate's bit lives, in the B-numbering both tables use.
+const RATE_BITS: [(u32, u32); 5] =
+    [(4800, 5), (7200, 9), (9600, 6), (12_000, 10), (14_400, 12)];
+
+fn bit(s: u16, b: u32) -> bool {
+    s & (1 << (15 - b)) != 0
+}
+
+fn set_bit(s: &mut u16, b: u32) {
+    *s |= 1 << (15 - b);
+}
+
+/// The signal a V.32bis modem sends to say what it can do (Table 5/V.32bis).
+///
+/// B0 to B3 are zero and B7, B11 and B15 are one, which is what a receiver
+/// synchronises on and what separates a rate signal from the E that ends it.
+/// B4 and B8 are one always: Note 1 to V.32's Table 6 makes that pair mean
+/// "V.32 bis operation", which is why the two rates V.32 knew about keep their
+/// old bits and the new ones went elsewhere.
+pub fn rate_signal(rates: Rates) -> u16 {
     let mut s = 0u16;
-    let mut set = |bit: u32| s |= 1 << (15 - bit);
-    set(7);
-    set(11);
-    set(15);
-    if bits_4800 {
-        set(5);
+    for b in [7, 11, 15, 4, 8] {
+        set_bit(&mut s, b);
     }
-    if bits_9600 {
-        set(6);
-        // B8: "1 denotes availability of trellis coding/decoding at the
-        // highest data rate indicated in B4-6". This modem has both codings at
-        // 9600 and only that rate, so the two bits go together.
-        //
-        // B4 stays clear. Table 6 Note 1 makes B4 and B8 together mean V.32bis,
-        // and V.32bis's own Note 1 has interworking fall back to V.32 when
-        // either is zero -- which is the coding implemented here.
-        set(8);
+    for (rate, b) in RATE_BITS {
+        if rates.holds(rate) {
+            set_bit(&mut s, b);
+        }
     }
-    // B9-14 are 0 0 1 0 0 0 for the absence of special modes, and B11 above is
-    // the one of those that is set.
+    // B13 and B14 "shall be set to zero when transmitting" (Note 2).
     s
 }
 
-/// A rate signal offering exactly one rate (Table 6).
+/// The same, in the form a modem that is not V.32bis can read (Table 6/V.32).
+///
+/// Sent once the far end has shown it is not V.32bis. There, B4 means 2400 and
+/// B8 means trellis coding at the highest rate offered, so a V.32bis signal
+/// read by a V.32 modem would be claiming both -- 2400, which nothing here can
+/// do, and trellis at whatever rate, which at 4800 does not exist.
+pub fn rate_signal_v32(rates: Rates, trellis: bool) -> u16 {
+    let mut s = 0u16;
+    for b in [7, 11, 15] {
+        set_bit(&mut s, b);
+    }
+    if rates.at_4800 {
+        set_bit(&mut s, 5);
+    }
+    if rates.at_9600 {
+        set_bit(&mut s, 6);
+    }
+    if trellis {
+        set_bit(&mut s, 8);
+    }
+    s
+}
+
+/// What a rate signal offers, read as whichever table it belongs to.
+pub fn rates_offered(s: u16) -> Rates {
+    let mut rates = Rates::default();
+    if is_v32bis(s) {
+        for (rate, b) in RATE_BITS {
+            rates.set(rate, bit(s, b));
+        }
+        return rates;
+    }
+    // Table 6/V.32, where B4 is 2400 -- a rate this modem does not have and
+    // V.32 itself does not define a modulation for -- and B9 to B14 are the
+    // "absence of special operational modes" rather than rates.
+    rates.at_4800 = bit(s, 5);
+    rates.at_9600 = bit(s, 6);
+    rates
+}
+
+/// A rate signal offering exactly one rate.
 ///
 /// R1 and R2 say everything a modem can do. E says the one thing that was
-/// settled on, and only that: Table 7 has its rate bits "relate to the
+/// settled on, and only that: Table 6/V.32bis has its rate bits "relate to the
 /// transmission of scrambled binary ones immediately following signal E". A
 /// modem that put its whole offer in E would tell a far end that had agreed to
-/// 4800 to start receiving at 9600.
-pub fn rate_signal_for(bits_per_second: u32, coding: Coding) -> u16 {
-    let s = rate_signal(bits_per_second == 4800, bits_per_second == 9600);
-    if coding == Coding::Trellis {
-        s
+/// 4800 to start receiving at 14 400.
+///
+/// `v32bis` is whether the far end has shown it can read the newer table.
+pub fn rate_signal_for(bits_per_second: u32, coding: Coding, v32bis: bool) -> u16 {
+    let rates = Rates::only(bits_per_second);
+    if v32bis {
+        rate_signal(rates)
     } else {
-        // Table 7: E indicates "the data rate and coding ... immediately
-        // following signal E", so an E for the sixteen-point alternative must
-        // not claim the other one.
-        s & !(1 << (15 - 8))
+        rate_signal_v32(rates, coding == Coding::Trellis)
     }
 }
 
-/// The E sequence that ends a rate exchange (Table 7).
+/// The E sequence that ends a rate exchange (Table 6/V.32bis, Table 7/V.32).
 ///
 /// The same as a rate signal except that B0 to B3 are ones, which is the only
 /// thing distinguishing the two.
@@ -300,26 +422,33 @@ pub fn end_signal(rate: u16) -> u16 {
 
 /// True if `s` has the synchronising bits a rate signal must have (5.3.1).
 pub fn is_rate_signal(s: u16) -> bool {
-    s & 0xf000 == 0 && s & (1 << 8) != 0 && s & (1 << 4) != 0 && s & 1 != 0
+    s & 0xf000 == 0 && bit(s, 7) && bit(s, 11) && bit(s, 15)
 }
 
 /// True if `s` is an E sequence rather than a rate signal.
 pub fn is_end_signal(s: u16) -> bool {
-    s & 0xf000 == 0xf000 && s & (1 << 8) != 0 && s & (1 << 4) != 0 && s & 1 != 0
+    s & 0xf000 == 0xf000 && bit(s, 7) && bit(s, 11) && bit(s, 15)
 }
 
 /// Whether a rate signal offers trellis coding at its highest rate (B8).
 pub fn offers_trellis(s: u16) -> bool {
-    s & (1 << (15 - 8)) != 0
+    bit(s, 8)
 }
 
 /// The coding two rate signals settle on for `rate`.
 ///
-/// 2.4.1 gives 9600 two modulations and nothing else has a choice, and 5.4.2
-/// has R3 name "the data rate, coding and any special operational modes to be
-/// used by both modems". Trellis needs both ends to have said B8; anything
-/// else is the sixteen-point alternative that 1 e) makes mandatory.
+/// Between two V.32bis modems there is nothing to settle: 2.3.1 to 2.3.4 give
+/// each of the four faster rates exactly one coding and it is the trellis one,
+/// and 2.3.5 gives 4800 the four points it has always had.
+///
+/// With a modem that is not V.32bis it is V.32's rule instead. 2.4.1 gives
+/// 9600 two modulations, 1 e) makes the uncoded one mandatory for
+/// interworking, and B8 says whether the other is on offer -- so trellis needs
+/// both ends to have set it and anything else is the sixteen points.
 pub fn agreed_coding(theirs: u16, ours: u16, rate: u32) -> Coding {
+    if is_v32bis(theirs) && is_v32bis(ours) {
+        return if rate == 4800 { Coding::Uncoded } else { Coding::Trellis };
+    }
     if rate == 9600 && offers_trellis(theirs) && offers_trellis(ours) {
         Coding::Trellis
     } else {
@@ -329,60 +458,27 @@ pub fn agreed_coding(theirs: u16, ours: u16, rate: u32) -> Coding {
 
 /// Whether a rate signal comes from a V.32bis modem.
 ///
-/// Table 6 Note 1: "The combination of B4 equal one and B8 equal one indicates
-/// V.32 bis operation".
+/// Note 1 to Table 6/V.32: "The combination of B4 equal one and B8 equal one
+/// indicates V.32 bis operation".
 pub fn is_v32bis(s: u16) -> bool {
-    let bit = |b: u32| s & (1 << (15 - b)) != 0;
-    bit(4) && bit(8)
+    bit(s, 4) && bit(s, 8)
 }
 
-/// The highest rate this modem can actually use with the far end that sent
-/// `s`, which is not always the highest one offered.
+/// The fastest rate both ends can do.
 ///
-/// 9600 has two modulations. This modem implements the 16-state one and not
-/// the 32-state trellis code, and by the book that should be enough: V.32bis's
-/// own Note 1 to Table 5 says that when B4 or B8 is zero in a rate signal --
-/// and this end sends both zero -- "interworking can proceed only in
-/// accordance with Recommendation V.32", whose 1 e) then requires that
-/// "modems providing the 9600 bit/s data signalling rate shall be capable of
-/// interworking using the 16-state alternative".
-///
-/// The modem this was measured against does not. It offers 2400/4800/9600
-/// with B4 and B8 both set, reads an E calling for 9600 without trellis, and
-/// stops transmitting one round trip later -- 1.09 s against a measured 1.10 s
-/// -- leaving a connection that completes and then carries nothing in either
-/// direction. 4800 with the same modem carries a whole session.
-///
-/// So 9600 is not offered to a far end that flags V.32bis until there is a
-/// trellis decoder to offer it with. 5.4.1 asks for exactly this judgement:
-/// "R2 should also take account of the likely receiver performance with the
-/// particular connection".
+/// 5.4.1: "R2 shall exclude rates not appearing in the previously received
+/// rate signal R1", which is this. Zero means there is nothing in common, and
+/// Note 3 to Table 5 makes a rate signal with no rates in it a call for the
+/// connection to be cleared down.
 pub fn usable_rate(theirs: u16, ours: u16) -> u32 {
-    let bit = |b: u32| theirs & (1 << (15 - b)) != 0;
-    let rate = offered_rate(theirs);
-    if rate == 9600 && is_v32bis(theirs) && !offers_trellis(ours) {
-        // 4800 is mandatory (1 d), so a far end that does not offer it is
-        // asking for something this modem cannot give at all.
-        return if bit(5) { 4800 } else { 0 };
-    }
-    rate
+    rates_offered(theirs).shared_with(rates_offered(ours)).highest()
 }
 
 /// The highest data rate a rate signal offers, in bits per second.
 ///
-/// Zero calls for the connection to be cleared down, which Table 6 spells as
-/// B4 to B6 all zero.
+/// Zero calls for the connection to be cleared down.
 pub fn offered_rate(s: u16) -> u32 {
-    let bit = |b: u32| s & (1 << (15 - b)) != 0;
-    if bit(6) {
-        9600
-    } else if bit(5) {
-        4800
-    } else if bit(4) {
-        2400
-    } else {
-        0
-    }
+    rates_offered(s).highest()
 }
 
 /// Finds the 16-bit sequences a rate exchange is made of (5.3).
@@ -1232,8 +1328,14 @@ impl Startup {
                                 self.coding =
                                     agreed_coding(s, self.offer, self.agreed);
                             }
+                            // In whichever table the far end can read: it
+                            // has just shown which by what it sent.
                             tx.set_signal(Signal::Rate(end_signal(
-                                rate_signal_for(self.agreed, self.coding),
+                                rate_signal_for(
+                                    self.agreed,
+                                    self.coding,
+                                    is_v32bis(s),
+                                ),
                             )));
                             self.enter(State::SendEnd);
                         }
@@ -1271,6 +1373,7 @@ impl Startup {
                         tx.set_signal(Signal::Rate(end_signal(rate_signal_for(
                             self.agreed,
                             self.coding,
+                            is_v32bis(s),
                         ))));
                         self.enter(State::SendEnd);
                     }
@@ -1738,12 +1841,12 @@ mod tests {
 
     #[test]
     fn a_rate_signal_says_what_it_offers() {
-        let r = rate_signal(true, false);
+        let r = rate_signal(Rates { at_4800: true, ..Rates::default() });
         assert!(is_rate_signal(r), "{r:016b} lacks its synchronising bits");
         assert!(!is_end_signal(r));
         assert_eq!(offered_rate(r), 4800);
 
-        let both = rate_signal(true, true);
+        let both = rate_signal(Rates { at_4800: true, at_9600: true, ..Rates::default() });
         assert_eq!(offered_rate(both), 9600, "the highest offered wins");
 
         let e = end_signal(r);
@@ -1756,7 +1859,7 @@ mod tests {
     fn no_rate_at_all_calls_for_a_cleardown() {
         // Table 6: B4 to B6 all zero. A modem that reads that as some default
         // rate would keep talking to one that has given up.
-        let none = rate_signal(false, false);
+        let none = rate_signal(Rates::default());
         assert!(is_rate_signal(none));
         assert_eq!(offered_rate(none), 0);
     }

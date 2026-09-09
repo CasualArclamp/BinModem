@@ -34,11 +34,11 @@ const SAMPLES_PER_SYMBOL: usize = 10;
 const SYMBOLS_PER_SEQUENCE: u64 = 8;
 
 fn rate() -> Signal {
-    Signal::Rate(rate_signal_for(4800, Coding::Uncoded))
+    Signal::Rate(rate_signal_for(4800, Coding::Uncoded, true))
 }
 
 fn end() -> Signal {
-    Signal::Rate(end_signal(rate_signal_for(4800, Coding::Uncoded)))
+    Signal::Rate(end_signal(rate_signal_for(4800, Coding::Uncoded, true)))
 }
 
 fn symbol(tx: &mut Transmitter) {

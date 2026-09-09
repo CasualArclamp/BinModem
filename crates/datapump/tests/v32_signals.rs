@@ -5,6 +5,7 @@
 //! the thing worth testing. Each modem recognises the other by these alone,
 //! before either has a working demodulator: that is the point of them.
 
+use datapump::v32::startup::Rates;
 use datapump::v32::{BAUD, CARRIER, Mode, Signal, Transmitter};
 use dsp::ReversalDetector;
 use std::f64::consts::TAU;
@@ -213,23 +214,85 @@ fn a_rate_signal_repeats_its_sixteen_bits() {
     assert_eq!(r, states(0b0000_0110_0000_1001), "not reproducible");
 }
 
-/// A V.32bis far end is met with trellis coding at 9600.
+/// The rate signal one real modem put on the line, read again.
 ///
-/// Table 6 Note 1 has B4 and B8 together meaning V.32bis, and V.32bis's own
-/// Note 1 has interworking fall back to V.32 when either bit is zero in either
-/// direction. This end never sets B4, so what the two of them speak at 9600 is
-/// V.32 2.4.1.2 -- which is now implemented, so the rate stands.
+/// This is what came back from a V.32bis far end over a VoIP trunk, and for a
+/// long time this modem read it as "2400, 4800 and 9600 with trellis" -- which
+/// is what Table 6/V.32 says it means. It is not what it means. B4 and B8
+/// together are Note 1's mark of V.32bis, and under Table 5/V.32bis the bits
+/// this modem was ignoring say 7200, 12 000 and 14 400 as well. The far end
+/// had been offering 14 400 the whole time.
 #[test]
-fn a_v32bis_far_end_is_met_with_trellis_coding() {
-    use datapump::v32::Coding;
-    use datapump::v32::startup::{agreed_coding, is_v32bis, rate_signal, usable_rate};
-    // 2400/4800/9600 with trellis, which is what came off the line.
+fn a_real_far_ends_offer_reads_as_every_rate_there_is() {
+    use datapump::v32::startup::{is_v32bis, rates_offered};
     let theirs = 0b0000_1111_1111_1001;
-    let ours = rate_signal(true, true);
-    assert!(is_v32bis(theirs));
-    assert!(!is_v32bis(ours), "this end is V.32, and says so with B4");
+    assert!(is_v32bis(theirs), "B4 and B8 are what say so");
+    let rates = rates_offered(theirs);
+    assert_eq!(
+        rates,
+        Rates {
+            at_4800: true,
+            at_7200: true,
+            at_9600: true,
+            at_12000: true,
+            at_14400: true,
+        }
+    );
+    assert_eq!(rates.highest(), 14_400);
+}
+
+/// Two V.32bis modems settle on the fastest rate they both offer, coded.
+#[test]
+fn two_v32bis_ends_meet_at_the_fastest_rate_they_share() {
+    use datapump::v32::Coding;
+    use datapump::v32::startup::{agreed_coding, rate_signal, usable_rate};
+    let theirs = 0b0000_1111_1111_1001;
+    let ours = rate_signal(Rates::between(4800, 14_400));
+    assert_eq!(usable_rate(theirs, ours), 14_400);
+    assert_eq!(agreed_coding(theirs, ours, 14_400), Coding::Trellis);
+
+    // And no faster than this end was told to go.
+    let capped = rate_signal(Rates::between(4800, 9600));
+    assert_eq!(usable_rate(theirs, capped), 9600);
+    assert_eq!(agreed_coding(theirs, capped, 9600), Coding::Trellis);
+
+    // 4800 is the one rate V.32bis leaves uncoded (2.3.5).
+    let slow = rate_signal(Rates::only(4800));
+    assert_eq!(usable_rate(theirs, slow), 4800);
+    assert_eq!(agreed_coding(theirs, slow, 4800), Coding::Uncoded);
+}
+
+/// A far end that is not V.32bis is read by V.32's table and answered in it.
+///
+/// Note 1 to Table 5/V.32bis: "When B4 or B8 is set to zero, in a transmitted
+/// or received rate signal, then interworking can proceed only in accordance
+/// with Recommendation V.32."
+#[test]
+fn a_v32_far_end_is_read_and_answered_by_the_older_table() {
+    use datapump::v32::Coding;
+    use datapump::v32::startup::{
+        agreed_coding, is_v32bis, rate_signal, rate_signal_for, rate_signal_v32, rates_offered,
+        usable_rate,
+    };
+    // 4800 and 9600, with trellis, and none of V.32bis.
+    let theirs = rate_signal_v32(Rates { at_4800: true, at_9600: true, ..Rates::default() }, true);
+    assert!(!is_v32bis(theirs));
+    let rates = rates_offered(theirs);
+    assert!(rates.at_4800 && rates.at_9600);
+    assert!(
+        !rates.at_7200 && !rates.at_12000 && !rates.at_14400,
+        "V.32's B9, B10 and B12 are not rates"
+    );
+
+    let ours = rate_signal(Rates::between(4800, 14_400));
     assert_eq!(usable_rate(theirs, ours), 9600);
     assert_eq!(agreed_coding(theirs, ours, 9600), Coding::Trellis);
+
+    // What this end sends back has to be in the table that end can read: B4
+    // there means 2400, which nothing here can do.
+    let answer = rate_signal_for(9600, Coding::Trellis, is_v32bis(theirs));
+    assert!(!is_v32bis(answer), "it answered V.32 in the newer table");
+    assert_eq!(rates_offered(answer).highest(), 9600);
 }
 
 /// A far end without B8 gets the sixteen-point alternative, which 1 e) makes
@@ -237,23 +300,20 @@ fn a_v32bis_far_end_is_met_with_trellis_coding() {
 #[test]
 fn a_far_end_without_trellis_gets_the_other_9600() {
     use datapump::v32::Coding;
-    use datapump::v32::startup::{agreed_coding, rate_signal, usable_rate};
-    let ours = rate_signal(true, true);
-    let theirs = ours & !(1 << (15 - 8));
+    use datapump::v32::startup::{agreed_coding, rate_signal, rate_signal_v32, usable_rate};
+    let theirs =
+        rate_signal_v32(Rates { at_4800: true, at_9600: true, ..Rates::default() }, false);
+    let ours = rate_signal(Rates::between(4800, 14_400));
     assert_eq!(usable_rate(theirs, ours), 9600);
     assert_eq!(agreed_coding(theirs, ours, 9600), Coding::Uncoded);
 }
 
-/// With trellis turned off at this end, a V.32bis far end is still taken at
-/// 4800 rather than at a 9600 it will not honour.
-///
-/// The measurement that put this here: such a modem reads an E calling for
-/// 9600 without trellis and stops transmitting one round trip later, every
-/// time, while 4800 carries a whole session.
+/// Two ends with nothing in common call for the connection to be cleared down
+/// (Note 3 to Table 5/V.32bis).
 #[test]
-fn without_trellis_a_v32bis_far_end_is_still_taken_at_4800() {
+fn two_ends_with_no_rate_in_common_ask_to_hang_up() {
     use datapump::v32::startup::{rate_signal, usable_rate};
-    let theirs = 0b0000_1111_1111_1001;
-    let ours = rate_signal(true, true) & !(1 << (15 - 8));
-    assert_eq!(usable_rate(theirs, ours), 4800);
+    let theirs = rate_signal(Rates::only(14_400));
+    let ours = rate_signal(Rates::only(4800));
+    assert_eq!(usable_rate(theirs, ours), 0);
 }
