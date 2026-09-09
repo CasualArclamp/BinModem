@@ -1388,7 +1388,21 @@ impl Startup {
                 }
             }
             State::Cc => {
-                if sideband_reversal {
+                // Not before the far end could possibly have answered. 5.4.2
+                // holds it to "64 +/- 2 symbol periods" between receiving this
+                // end's reversal and putting its own on the line, and that is
+                // before the line is crossed twice, so 64 symbols after this
+                // end turned over is the earliest an answer can exist.
+                //
+                // Without this a single turnover was taken for two. The
+                // detector reported one 26 ms after the other -- 62 symbols,
+                // just inside the floor -- and the clock started and stopped
+                // inside that gap, giving a round trip of 53 ms on a line
+                // whose real one is 1.2 seconds. The start-up went on with it,
+                // and the far end, which had measured the same line properly,
+                // spent six seconds waiting for a modem that thought the line
+                // was twenty times shorter than it is.
+                if self.symbols >= timing::RESPONSE && sideband_reversal {
                     // Our reversal has come back, so stop the clock.
                     self.stop_the_clock();
                     tx.set_signal(Signal::Silent);
@@ -1428,8 +1442,16 @@ impl Startup {
                 // takes the round trip that has just been measured to reach
                 // it -- so on a slow enough connection the tail of a perfectly
                 // healthy AC is longer than the rule's 128 symbols.
+                //
+                // The clock's own reading and not the line's share of it, for
+                // the reason given on `counted`: what has to elapse is a trip
+                // out and back plus the far end noticing, and the difference
+                // between the two numbers is exactly the noticing. Measured
+                // with the wrong one, this fired 104 ms early on a real call,
+                // abandoning a start-up that was going perfectly and then
+                // restarting it into the far end's conditioning signal.
                 if self.hold(heard == Heard::Alternation)
-                    > self.round_trip + timing::MIN_ALTERNATION
+                    > self.counted + timing::MIN_ALTERNATION
                 {
                     tx.set_signal(Signal::StateA);
                     self.enter(State::Aa);
@@ -1735,7 +1757,7 @@ impl Startup {
                     // same of R3. A rate this receiver has just spent a second
                     // failing to read is the strongest evidence about the
                     // connection there is.
-                    self.stop_offering(running_at);
+                    self.stop_offering(running_at, rx.residual_error());
                     self.begin_retrain(tx, rx);
                 }
             }
@@ -1760,26 +1782,54 @@ impl Startup {
         self.start_again(tx, rx);
     }
 
-    /// Take `rate` and everything above it out of what this modem offers.
+    /// Stop offering `rate`, and everything above the one the measured error
+    /// says this line can carry.
     ///
     /// 5.4.1 and 5.4.2 both ask the rate signals to "take account of the
     /// likely receiver performance with the particular GSTN connection", and
-    /// leave what that means open. This is the plainest reading of it: a rate
-    /// tried on this connection and found unreadable is not offered again.
+    /// leave what that means open. A rate just found unreadable is the
+    /// plainest part of it: it goes, and so does everything above it, since
+    /// the rates share one trellis code and differ only in how many bits ride
+    /// through it untouched -- a constellation this receiver cannot read is a
+    /// floor under every denser one.
     ///
-    /// Everything above it goes too, not just the rate itself. The rates share
-    /// one trellis code and differ only in how many bits ride through it
-    /// untouched, so a constellation this receiver cannot read is a floor
-    /// under every denser one.
+    /// How far below is the rest of it, and the reason for not simply taking
+    /// one step. A step costs a whole start-up, and on a line with a second's
+    /// delay in it that is fifteen seconds; walking down from 14 400 to 7200
+    /// is most of a minute, and a far end asked to sit through three of them
+    /// hangs up first. Measured on the call this was written for: 14 400 was
+    /// unreadable, one step took it to 12 000, that was unreadable too, and
+    /// the far end gave up during the second retrain.
+    ///
+    /// What the error already says is how much room a symbol needs, and every
+    /// rate's room is known -- half the distance between neighbouring points.
+    /// So the target is the highest rate whose room the error would fit
+    /// inside, which on that call was 9600 and would have skipped the wasted
+    /// attempt at 12 000.
+    ///
+    /// Optimistic rather than pessimistic, and knowingly. The error is
+    /// measured against the nearest point rather than the right one, so once
+    /// decisions start going wrong it stops growing -- it saturates at about
+    /// two fifths of a gap however bad the line really is. A rate chosen from
+    /// it may therefore still be too fast, and the next retrain will say so.
+    /// One step at a time has the same fault and takes longer to find out.
     ///
     /// 4800 is never given up. It is the only rate V.32 requires of both ends,
     /// so an offer without it is an offer of nothing, and Table 6 reads that
     /// as a call to clear down -- which is a decision for whatever is above
     /// this and not for a receiver having a bad second.
-    fn stop_offering(&mut self, rate: u32) {
+    fn stop_offering(&mut self, rate: u32, error: f64) {
+        let coding = if offers_trellis(self.offer) {
+            Coding::Trellis
+        } else {
+            Coding::Uncoded
+        };
         let mut rates = rates_offered(self.offer);
-        for &r in EVERY_RATE.iter().filter(|&&r| r >= rate) {
-            rates.set(r, false);
+        for &r in EVERY_RATE.iter() {
+            let room = UNSATISFACTORY_GAP * super::point_spacing_at(r, coding);
+            if r >= rate || error >= room {
+                rates.set(r, false);
+            }
         }
         if !rates.any() {
             rates.set(4800, true);

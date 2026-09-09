@@ -357,6 +357,24 @@ pub fn coding_for(bits_per_second: u32, coding: Coding) -> Option<trellis::Coded
     trellis::for_rate(bits_per_second)
 }
 
+/// How far apart the closest two points are at a given rate and coding, in the
+/// units a receiver's residual error is measured in.
+///
+/// Half of it is the decision boundary, so this is the whole of what a rate
+/// costs a receiver: 4800 and 14 400 differ by a factor of six in how much
+/// room a symbol has to be wrong in, and by nothing else that matters here.
+pub fn point_spacing_at(bits_per_second: u32, coding: Coding) -> f64 {
+    let figure = match coding_for(bits_per_second, coding) {
+        Some(coded) => coded.closest(),
+        // Figure 2/V.32, 9600's non-redundant alternative: sixteen points on a
+        // grid of two.
+        None if bits_per_second == 9600 => 2.0,
+        // A B C D of Figure 1 are a knight's move apart on that grid.
+        None => f64::sqrt(20.0),
+    };
+    figure / CONSTELLATION_RMS
+}
+
 /// The self-synchronising scrambler of clause 4.
 ///
 /// One polynomial for each direction. The transmitter divides by it and the
@@ -1142,6 +1160,12 @@ impl Receiver {
             _ => f64::sqrt(20.0),
         };
         figure / CONSTELLATION_RMS
+    }
+
+    /// The same for a rate this receiver is not using, so that a modem
+    /// deciding what to fall back to can ask what each rate would cost it.
+    pub fn point_spacing_at(&self, bits_per_second: u32, coding: Coding) -> f64 {
+        point_spacing_at(bits_per_second, coding)
     }
 
     pub fn equalizer_blind(&self) -> bool {

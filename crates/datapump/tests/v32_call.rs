@@ -1092,3 +1092,36 @@ fn a_rate_that_cannot_be_read_is_given_up() {
         calling.retrains()
     );
 }
+
+#[test]
+fn the_two_clocks_differ_by_the_one_wait_that_is_inside_only_one_of_them() {
+    // 5.4.1 starts the calling modem's counter on detecting the answering
+    // modem's reversal and stops it on detecting the answer, so both 64-symbol
+    // waits are inside it: this end's, before it turns over, and the far
+    // end's before it turns back. 5.4.2 starts the answering modem's counter
+    // as it begins transmitting its own reversal, so only the calling modem's
+    // wait is inside. NT is therefore MT plus exactly one of them.
+    //
+    // Which makes it a check on the clocks themselves. A counter that starts
+    // and stops on the same event -- one turnover reported twice by a detector
+    // that has not settled -- reads near zero and breaks the relation. That
+    // happened on a real call: 53 ms on a line whose round trip is 1.2
+    // seconds, and the start-up carried on with it while the far end, which
+    // had measured the same line properly, waited six seconds for a modem that
+    // thought the line was twenty times shorter than it is.
+    let (_, _, nt, mt) = s_and_its_margin(DELAY);
+    let trip = (2 * DELAY) as f64 * datapump::v32::BAUD / FS;
+    println!("NT {nt}, MT {mt}, and the line itself is {trip:.0} symbols");
+    assert_eq!(
+        nt,
+        mt + 64,
+        "NT should be MT and one 64-symbol wait, and is {nt} against {mt}"
+    );
+    // And both have to contain the line. A clock stopped by its own start
+    // reads less than the trip it is supposed to be measuring.
+    assert!(
+        (mt as f64) > trip + 64.0,
+        "MT of {mt} is under the {trip:.0} symbols of line plus the wait it \
+         contains, so it cannot have measured the round trip at all"
+    );
+}

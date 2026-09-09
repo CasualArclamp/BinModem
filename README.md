@@ -9,7 +9,7 @@ one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
 source for every normative constant, and against the RFCs for everything
-carried over the top of them. 925 tests.
+carried over the top of them. 926 tests.
 
 ## What works
 
@@ -109,6 +109,11 @@ OS-specific code — but only built and run on Windows so far.
   rate signals to "take account of the likely receiver performance with the
   particular GSTN connection", and a rate this receiver has just spent a second
   failing to read is the strongest evidence about the connection there is.
+  Tried on the line: 14 400 came up, was unreadable, and the modem retrained
+  and agreed 12 000 with the far end — the first rate renegotiated with a real
+  modem. 12 000 was unreadable too, so the step is chosen from the measurement
+  now rather than taken one rate at a time; on a line with a second's delay a
+  retrain costs fifteen seconds and the far end hung up during the third.
 - **The rate signal gets misread, and it costs the rate.** One recorded call
   to a real V.32bis modem: the far end offered 4800 through 14 400 and sent
   that same sixteen bits 201 times; this end read one corrupted copy of it,
