@@ -710,3 +710,155 @@ fn a_call_at_9600_settles_on_trellis_coding_and_carries_data() {
         "the calling end did not receive the host's reply"
     );
 }
+
+/// A retrain, and the call carrying on afterwards (V.32bis 7).
+///
+/// The thing this exists to catch: a modem that has decided the line is no
+/// longer good enough goes back to the beginning of the start-up, and the far
+/// end has to notice. It has nothing to go on but the tone -- 7.1 and 7.2 give
+/// the two ends the same trigger the start-up gives them, which is the point:
+/// the signal a modem sends to say "again" is the signal it sent to say
+/// "hello".
+///
+/// So this asks one end to retrain, and requires that the other follow it back
+/// through the whole handshake and that data cross afterwards. A modem that
+/// ignores the tone sits there demodulating a conditioning signal as though it
+/// were data, which is what a real far end doing this looked like from here.
+#[test]
+fn a_retrain_is_followed_by_the_far_end_and_the_call_carries_on() {
+    let offer = rate_signal(Rates::between(4800, 14_400));
+    let mut calling = Modem::new(Role::Calling, offer, FS);
+    let mut answering = Modem::new(Role::Answering, offer, FS);
+    let (mut from_calling, mut from_answering) = (0.0, 0.0);
+    let (before, after) = (b"before the retrain\r\n", b"and after it\r\n");
+    let (mut at_host, mut at_caller) = (Vec::new(), Vec::new());
+
+    let mut connected_at = f64::NAN;
+    let mut asked = false;
+    let mut retrained_at = f64::NAN;
+    let mut back_at = f64::NAN;
+    let mut sent_after = false;
+    let mut saw_retraining = (false, false);
+
+    for i in 0..(90.0 * FS) as usize {
+        let now = i as f64 / FS;
+        let (a, b) = (from_calling, from_answering);
+        from_calling = calling.step(b * FAR + a * ECHO);
+        from_answering = answering.step(a * FAR + b * ECHO);
+        at_caller.extend(calling.take_bytes());
+        at_host.extend(answering.take_bytes());
+
+        let up = matches!(calling.status(), Status::Connected(_))
+            && matches!(answering.status(), Status::Connected(_));
+        if up && connected_at.is_nan() {
+            connected_at = now;
+            calling.send(before);
+        }
+        // A second of settled call, then one end decides the line will not do.
+        if up && !asked && connected_at.is_finite() && now > connected_at + 1.0 {
+            asked = true;
+            answering.ask_for_retrain();
+        }
+        if asked {
+            saw_retraining.0 |= calling.status() == Status::Retraining;
+            saw_retraining.1 |= answering.status() == Status::Retraining;
+        }
+        if asked && retrained_at.is_nan() && !up {
+            retrained_at = now;
+        }
+        // And back again, which is the whole question.
+        if asked && retrained_at.is_finite() && back_at.is_nan() && up {
+            back_at = now;
+        }
+        if back_at.is_finite() && !sent_after && now > back_at + 1.0 {
+            sent_after = true;
+            answering.send(after);
+        }
+    }
+
+    assert!(connected_at.is_finite(), "never connected in the first place");
+    assert!(asked, "never got far enough to ask");
+    assert!(
+        retrained_at.is_finite(),
+        "the retrain never took: calling is {} and answering is {}",
+        calling.phase(),
+        answering.phase()
+    );
+    // The end that did not ask has to have noticed. That is the bug this is
+    // here for: without it, it stays "connected" and demodulates a handshake.
+    assert!(
+        saw_retraining.0,
+        "the calling end never noticed the far end had gone back to the start"
+    );
+    assert!(saw_retraining.1, "the asking end did not report a retrain");
+    assert!(
+        back_at.is_finite(),
+        "it went back through the start-up and never came out: calling is {} \
+         and answering is {}",
+        calling.phase(),
+        answering.phase()
+    );
+    assert!(
+        matches!(calling.status(), Status::Connected(_)),
+        "the calling end ended at {}",
+        calling.phase()
+    );
+    assert_eq!(calling.retrains(), 1, "the calling end counted its retrains wrong");
+    assert_eq!(answering.retrains(), 1);
+
+    assert!(
+        contains_at_any_bit_offset(&at_host, before),
+        "what was sent before the retrain did not arrive"
+    );
+    assert!(sent_after, "never came back up in time to send anything");
+    assert!(
+        contains_at_any_bit_offset(&at_caller, after),
+        "the call did not carry data after the retrain"
+    );
+    println!(
+        "  connected at {connected_at:.1} s, retrained at {retrained_at:.1}, \
+         back at {back_at:.1}, {} bit/s",
+        match calling.status() {
+            Status::Connected(rate) => rate,
+            _ => 0,
+        }
+    );
+}
+
+/// And the far end's own tone is enough: nothing is asked for here, the
+/// calling modem simply hears what an answering modem sends when it starts
+/// again.
+#[test]
+fn the_retrain_tone_alone_is_enough_to_follow() {
+    let offer = rate_signal(Rates::between(4800, 9600));
+    let mut calling = Modem::new(Role::Calling, offer, FS);
+    let mut answering = Modem::new(Role::Answering, offer, FS);
+    let (mut from_calling, mut from_answering) = (0.0, 0.0);
+    let mut connected_at = f64::NAN;
+    let mut noticed = false;
+
+    for i in 0..(60.0 * FS) as usize {
+        let now = i as f64 / FS;
+        let (a, b) = (from_calling, from_answering);
+        from_calling = calling.step(b * FAR + a * ECHO);
+        from_answering = answering.step(a * FAR + b * ECHO);
+        let _ = (calling.take_bytes(), answering.take_bytes());
+
+        if connected_at.is_nan() && matches!(calling.status(), Status::Connected(_)) {
+            connected_at = now;
+        }
+        if connected_at.is_finite() && now > connected_at + 1.0 {
+            answering.ask_for_retrain();
+        }
+        if calling.status() == Status::Retraining {
+            noticed = true;
+            break;
+        }
+    }
+    assert!(connected_at.is_finite(), "never connected");
+    assert!(
+        noticed,
+        "the calling end sat through the answering end's retrain tone: {}",
+        calling.phase()
+    );
+}

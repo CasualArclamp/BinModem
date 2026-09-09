@@ -113,6 +113,7 @@ impl Pump {
             },
             Self::V32(m) => match m.status() {
                 v32::startup::Status::Negotiating => Progress::Negotiating,
+                v32::startup::Status::Retraining => Progress::Retraining,
                 v32::startup::Status::Connected(rate) => Progress::Connected(rate),
                 v32::startup::Status::Failed => Progress::Failed,
             },
@@ -279,6 +280,9 @@ impl Pump {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Progress {
     Negotiating,
+    /// A call that was up and is going through its start-up again, which only
+    /// V.32bis 7 defines.
+    Retraining,
     Connected(u32),
     Failed,
 }
@@ -302,6 +306,8 @@ pub struct Modem {
     pump: Option<Pump>,
     /// The rate the handshake settled on.
     rate: u32,
+    /// Whether the line is going through its start-up again (V.32bis 7).
+    retraining: bool,
     /// Error control over it, once connected.
     ec: Option<Stack>,
     /// Whether error control is wanted at all. Without it the connection is
@@ -356,6 +362,7 @@ impl Modem {
             fs,
             pump: None,
             rate: 0,
+            retraining: false,
             ec: None,
             want_error_control: true,
             role: Role::Calling,
@@ -844,7 +851,10 @@ impl Modem {
 
         match self.state {
             State::Handshaking => self.advance_handshake(),
-            State::Data | State::OnlineCommand => self.carry_data(),
+            State::Data | State::OnlineCommand => {
+                self.watch_for_retrain();
+                self.carry_data();
+            }
             State::Command => {}
         }
         out
@@ -883,7 +893,9 @@ impl Modem {
         // mutably, to throw away what it heard while it was training.
         let Some(status) = self.pump.as_ref().map(Pump::status) else { return };
         match status {
-            Progress::Negotiating => {}
+            // A retrain cannot happen before the call is up, so during the
+            // handshake it means nothing.
+            Progress::Negotiating | Progress::Retraining => {}
             Progress::Connected(rate) => {
                 self.rate = rate;
                 // Everything the receiver made of the handshake is thrown
@@ -1029,6 +1041,49 @@ impl Modem {
             ResultCode::ConnectText(format!("{rate}"))
         };
         self.at.emit(code);
+    }
+
+    /// Follow a retrain, if the line has started one (V.32bis 7).
+    ///
+    /// The call stays up throughout: 7.3 keeps circuit 107 ON and 109 ON, and
+    /// what is clamped is the received data. So the terminal is told nothing
+    /// and sees nothing -- no second CONNECT, no NO CARRIER -- and the only
+    /// thing that changes underneath is the rate, which is very often the
+    /// point of the exercise.
+    ///
+    /// The error control above notices anyway, in the only way it can: V.42's
+    /// T401 expires on whatever was in flight and it is sent again. That is
+    /// what the timer is for, and a retrain is exactly the sort of gap it was
+    /// written against.
+    fn watch_for_retrain(&mut self) {
+        let Some(status) = self.pump.as_ref().map(Pump::status) else { return };
+        match status {
+            Progress::Retraining => self.retraining = true,
+            Progress::Connected(rate) if self.retraining => {
+                self.retraining = false;
+                self.rate = rate;
+            }
+            // A retrain that never finishes is a call that has ended, whatever
+            // the line is still carrying.
+            Progress::Failed if self.retraining => self.end_call(Ended::CarrierLost),
+            _ => {}
+        }
+    }
+
+    /// Whether the line is retraining right now.
+    pub fn retraining(&self) -> bool {
+        self.retraining
+    }
+
+    /// How many times this call has retrained.
+    ///
+    /// One is a line that changed. A handful is a line that cannot hold what
+    /// the two ends keep agreeing on, and is worth seeing on the panel.
+    pub fn retrains(&self) -> u32 {
+        match self.pump.as_ref() {
+            Some(Pump::V32(m)) => m.retrains(),
+            _ => 0,
+        }
     }
 
     fn carry_data(&mut self) {

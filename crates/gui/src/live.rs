@@ -465,6 +465,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // The same, for the error control that runs on top of whatever the line
     // settled on.
     let mut last_ec = "";
+    // Whether the line was retraining last time round, and what it was
+    // carrying before it started.
+    let mut was_retraining = false;
+    let mut rate_before = 0;
     // The transfer, while there is one, and when it started -- for the rate.
     let mut job: Option<Job> = None;
     let mut job_started = Instant::now();
@@ -776,6 +780,37 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             job.as_mut(),
             networking.as_mut(),
         );
+
+        // A retrain is not a new call and the terminal is told nothing about
+        // it, so the transcript is the only place it shows. Which rate it
+        // comes back at is the interesting part: a line that has got worse
+        // gives back a slower one, and that is the whole point of the
+        // procedure.
+        let retraining = modem.retraining();
+        if retraining != was_retraining {
+            if retraining {
+                rate_before = modem.rate().unwrap_or(0);
+                tx.log(
+                    Direction::Note,
+                    format!("retraining, was {rate_before} bit/s"),
+                );
+            } else {
+                let now = modem.rate().unwrap_or(0);
+                let note = match now.cmp(&rate_before) {
+                    std::cmp::Ordering::Less => "slower",
+                    std::cmp::Ordering::Greater => "faster",
+                    std::cmp::Ordering::Equal => "the same",
+                };
+                tx.log(
+                    Direction::Note,
+                    format!(
+                        "retrained: {now} bit/s, {note} ({} so far)",
+                        modem.retrains()
+                    ),
+                );
+            }
+            was_retraining = retraining;
+        }
 
         let phase = modem.line_phase();
         if phase != last_phase {

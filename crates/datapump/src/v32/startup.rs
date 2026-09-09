@@ -566,12 +566,28 @@ impl RateDetector {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Negotiating,
+    /// A call that was up and is going through the start-up again (7).
+    ///
+    /// Told apart from `Negotiating` because it is: the line is still there,
+    /// the far end is still on it, and what is being settled is a rate that
+    /// stopped working rather than one that was never chosen.
+    Retraining,
     /// Agreed, at this many bits per second.
     Connected(u32),
     /// The far end called for the connection to be cleared, or nothing
     /// recognisable arrived in time.
     Failed,
 }
+
+/// What the equaliser may be left with before reception counts as
+/// unsatisfactory (7).
+///
+/// The error is measured against a constellation normalised to unit
+/// root-mean-square, where the closest two points at 4800 are 0.63 apart and
+/// at 14 400 only 0.22. Half of the smallest of those is where a decision is
+/// as likely to be wrong as right, and an equaliser driven by decisions that
+/// are wrong half the time is not converging on anything.
+pub const UNSATISFACTORY_ERROR: f64 = 0.35;
 
 /// Durations from clause 5, in symbol intervals.
 mod timing {
@@ -586,6 +602,23 @@ mod timing {
     pub const RESPONSE: u64 = 64;
     /// Alternating states before the answering modem may move on (5.4.2).
     pub const MIN_ALTERNATION: u64 = 128;
+    /// How long the far end's retrain tone must hold before it is believed.
+    ///
+    /// V.32bis 7.1 and 7.2 both say "for more than 128 symbol intervals",
+    /// which is 53 ms -- long enough that nothing in scrambled data imitates
+    /// it and short enough that a call spends a twentieth of a second
+    /// carrying rubbish before it notices.
+    pub const RETRAIN_TONE: u64 = 128;
+    /// How long reception must stay unsatisfactory before this end asks for a
+    /// retrain of its own.
+    ///
+    /// 7 leaves the judgement open -- "if either modem incorporates a means of
+    /// detecting unsatisfactory signal reception" -- and says nothing about
+    /// how long to wait. A second of it: long enough that a burst of noise is
+    /// ridden out rather than answered with thirty seconds of handshake,
+    /// short enough that a line which has genuinely changed is not carrying
+    /// nonsense for a minute.
+    pub const UNSATISFACTORY: u64 = 2400;
     /// The incoming carrier must be heard this long first (5.4.2).
     pub const HEARD_CARRIER: u64 = 64;
     /// Shortest a rate signal may be sent for.
@@ -637,6 +670,8 @@ enum State {
 
     /// Answering: sending the V.25 answering tone (5.1).
     AnswerTone,
+    /// Answering: V.32bis 7.2's opening alternation, before 6.2 resumes.
+    RetrainAc,
     /// Answering: alternating A and C, waiting to hear the calling modem.
     Ac,
     /// Answering: alternating the other way round, waiting for the reversal.
@@ -697,6 +732,16 @@ pub struct Startup {
     round_trip: u64,
     /// Consecutive symbols the condition being waited for has held.
     held: u64,
+    /// Consecutive symbols reception has been unsatisfactory for (7).
+    unsatisfactory: u64,
+    /// Whether this call has ever been up, which is what makes going through
+    /// the start-up again a retrain rather than a first attempt.
+    connected_once: bool,
+    /// How many times it has retrained, which is worth showing: a call that
+    /// retrains repeatedly is a call the line cannot hold.
+    retrains: u32,
+    /// Set by [`Startup::ask_for_retrain`] and taken by the next step.
+    asked_to_retrain: bool,
     /// Amplitude of the incoming carrier while it was up, for spotting a drop.
     carrier_peak: f64,
     /// Whether a training segment has been sent yet. Only the first is a
@@ -754,6 +799,10 @@ impl Startup {
             timer: None,
             round_trip: 0,
             held: 0,
+            unsatisfactory: 0,
+            connected_once: false,
+            retrains: 0,
+            asked_to_retrain: false,
             carrier_peak: 0.0,
             trained: false,
             seen_a_sequence: false,
@@ -779,6 +828,9 @@ impl Startup {
         match self.state {
             State::Connected(rate) => Status::Connected(rate),
             State::Failed => Status::Failed,
+            // Anything else on a call that has been up once is 7's retrain
+            // rather than a first negotiation.
+            _ if self.connected_once => Status::Retraining,
             _ => Status::Negotiating,
         }
     }
@@ -909,6 +961,7 @@ impl Startup {
             State::AwaitingR1 => "awaiting R1",
             State::PreRoll => "S pre-roll",
             State::AnswerTone => "answer tone",
+            State::RetrainAc => "AC (retrain)",
             State::Ac => "AC",
             State::Ca => "CA",
             State::CaToAc => "CA to AC",
@@ -925,6 +978,26 @@ impl Startup {
             State::Connected(_) => "connected",
             State::Failed => "failed",
         }
+    }
+
+    /// Ask for a retrain: 7's "unsatisfactory signal reception", decided
+    /// somewhere other than here.
+    ///
+    /// Takes effect at the next step, and only on a call that is up. There is
+    /// nothing to retrain otherwise, and a start-up told to start again would
+    /// simply lose whatever progress it had made.
+    pub fn ask_for_retrain(&mut self) {
+        if matches!(self.state, State::Connected(_)) {
+            self.asked_to_retrain = true;
+        }
+    }
+
+    /// How many times this call has gone back through the start-up.
+    ///
+    /// Worth showing. One retrain is a line that changed; a handful is a line
+    /// that cannot hold what the two ends keep agreeing on.
+    pub fn retrains(&self) -> u32 {
+        self.retrains
     }
 
     /// What the line is carrying at the moment.
@@ -1122,10 +1195,31 @@ impl Startup {
             }
             State::Aa => {
                 tx.set_signal(Signal::StateA);
+                // 6.1: "conditioned to detect one of two incoming tones at
+                // frequencies 600 and 3000 Hz, and *subsequently* to detect a
+                // phase reversal in that tone". The order is the whole of it.
+                // A reversal is a comparison between the tone now and the tone
+                // a moment ago, so there has to have been a tone a moment ago
+                // for the comparison to mean anything.
+                //
+                // In a first call this changes nothing: the far end alternates
+                // for seconds before it turns over. In 7's retrain it decides
+                // whether the thing works at all, because there the far end
+                // turns over a tenth of a second after this end started
+                // listening, and a detector still full of data will believe
+                // anything.
+                // Measured where the tone is rather than by classifying the
+                // whole line: this end is transmitting 1800 Hz into its own
+                // hybrid, so `classify` sees a carrier and sidebands together
+                // and calls it something else entirely. The sidebands are the
+                // one place this modem's own signal is not.
+                let sidebands = self.listener.sideband_amplitude();
+                let steady =
+                    self.hold(sidebands > AUDIBLE) >= timing::HEARD_CARRIER;
                 // The far end is alternating, so its reversal is in the
                 // sidebands. This end is repeating a state, which puts nothing
                 // there at all.
-                if sideband_reversal {
+                if steady && sideband_reversal {
                     // The far end has turned its alternation over. Start the
                     // clock and owe it a reversal of our own in 64 symbols.
                     self.timer = Some(0);
@@ -1200,6 +1294,19 @@ impl Startup {
                 tx.set_signal(Signal::AnswerTone);
                 if self.symbols >= timing::ANSWER_TONE {
                     tx.set_signal(Signal::AlternateAC);
+                    self.enter(State::Ac);
+                }
+            }
+            // 7.2: "transmit alternate carrier states A and C for an even
+            // number of symbol intervals not less than 128. It shall then
+            // proceed in accordance with 6.2 beginning with the third
+            // paragraph." The 128 belong to 7.2 and the third paragraph's own
+            // 128 come after them -- which is not pedantry: they are what give
+            // the far end a settled tone to measure its first reversal
+            // against, and without them it measures one against data.
+            State::RetrainAc => {
+                tx.set_signal(Signal::AlternateAC);
+                if self.symbols >= timing::MIN_ALTERNATION {
                     self.enter(State::Ac);
                 }
             }
@@ -1412,9 +1519,107 @@ impl Startup {
                     rx.set_data_rate(rate);
                     rx.set_coding(self.coding);
                     self.state = State::Connected(rate);
+                    self.connected_once = true;
+                    self.unsatisfactory = 0;
                 }
             }
-            State::Connected(_) | State::Failed => {}
+            State::Connected(_) => {
+                // 7.1 and 7.2. The tone that says the far end has given up on
+                // this connection and gone back to the beginning is the same
+                // tone it sent at the beginning, so this is the same test the
+                // start-up makes -- a calling modem watches for the answering
+                // modem's alternation, 600 and 3000 with the carrier
+                // suppressed, and an answering modem for the calling modem's
+                // bare 1800.
+                //
+                // Both clauses give the two ends the same trigger for starting
+                // one, which is what makes following the far end and deciding
+                // to go first the same piece of code: whichever happens, this
+                // end ends up sending its own opening signal.
+                let asking = match self.role {
+                    Role::Calling => heard == Heard::Alternation,
+                    Role::Answering => heard == Heard::Carrier,
+                };
+                if self.hold(asking) > timing::RETRAIN_TONE || self.asked_to_retrain {
+                    self.begin_retrain(tx, rx);
+                    return;
+                }
+                // "detection of unsatisfactory signal reception", which 7
+                // leaves each implementation to define. This one calls it
+                // unsatisfactory when what the equaliser is left with, symbol
+                // after symbol, is a large part of the distance to the next
+                // point along -- which is the point at which the decisions
+                // driving the equaliser are as likely to be wrong as right and
+                // nothing downstream can recover.
+                let bad = rx.residual_error() > UNSATISFACTORY_ERROR;
+                self.unsatisfactory = if bad { self.unsatisfactory + 1 } else { 0 };
+                if self.unsatisfactory > timing::UNSATISFACTORY {
+                    self.begin_retrain(tx, rx);
+                }
+            }
+            State::Failed => {}
+        }
+    }
+
+    /// Go back to the beginning of the start-up, keeping the call.
+    ///
+    /// 7.1 sends the calling modem to the third paragraph of 6.1 and 7.2 sends
+    /// the answering modem to the third paragraph of 6.2, which are exactly
+    /// where each of them arrives after the answer tone. So the states are the
+    /// ones already here; what has to be undone is everything the last
+    /// negotiation settled, because none of it is true any more.
+    fn begin_retrain(&mut self, tx: &mut Transmitter, rx: &mut Receiver) {
+        self.retrains += 1;
+        self.asked_to_retrain = false;
+        // The patience of PATIENCE is for one attempt at the start-up, and
+        // this is a fresh one. Left running, a call that has been up for a
+        // minute retrains straight into a timeout.
+        self.total = 0;
+        // And everything that listens starts again, because all of it is full
+        // of data. A tone detector that has spent a minute on scrambled
+        // fourteen-four believes it can already hear 1800 Hz, and an answering
+        // modem that believes that skips 6.2's wait and turns over before the
+        // calling modem has begun -- which leaves the calling end watching for
+        // a reversal that has already happened.
+        let fs = self.sps * super::BAUD;
+        self.listener = Listener::new(fs);
+        self.carrier_reversals =
+            ReversalDetector::new(super::CARRIER, 60.0, AUDIBLE, fs);
+        self.low_reversals =
+            ReversalDetector::new(super::CARRIER - OFFSET, 60.0, AUDIBLE, fs);
+        self.high_reversals =
+            ReversalDetector::new(super::CARRIER + OFFSET, 60.0, AUDIBLE, fs);
+        self.carrier_quiet = 0;
+        self.sideband_quiet = 0;
+        self.pending_carrier_reversal = false;
+        self.pending_sideband_reversal = false;
+        self.pending_sequence = None;
+        self.rates = RateDetector::new();
+        self.seen_a_sequence = false;
+        self.unsatisfactory = 0;
+        self.agreed = 0;
+        self.coding = Coding::Uncoded;
+        self.timer = None;
+        self.round_trip = 0;
+        self.carrier_peak = 0.0;
+        self.trained = false;
+        self.heard_end = false;
+        // The start-up is conducted in the four states whatever was agreed
+        // (5.4), so both ends go back to two bits a symbol before either of
+        // them sends anything.
+        tx.set_data_rate(4800);
+        tx.set_coding(Coding::Uncoded);
+        rx.set_data_rate(4800);
+        rx.set_coding(Coding::Uncoded);
+        match self.role {
+            Role::Calling => {
+                tx.set_signal(Signal::StateA);
+                self.enter(State::Aa);
+            }
+            Role::Answering => {
+                tx.set_signal(Signal::AlternateAC);
+                self.enter(State::RetrainAc);
+            }
         }
     }
 
@@ -1593,11 +1798,18 @@ impl Modem {
         self.was_training = training;
         self.echo.set_adapting(training);
 
-        if matches!(self.startup.status(), Status::Connected(_)) {
-            self.rx.feed(cleaned);
-        } else {
-            self.startup.step(cleaned, &mut self.tx, &mut self.rx);
-        }
+        // The start-up keeps running for the whole call, and not because it
+        // has anything left to do. 7 has a retrain begin with the tone the
+        // far end opened with, and it may begin at any moment; 8.2 says the
+        // same of rate renegotiation -- "a modem shall be conditioned to
+        // detect an incoming preamble at any time while receiving data". A
+        // machine that stops listening once it is connected cannot hear
+        // either, which is what a far end retraining looked like from here:
+        // nothing at all, and a demodulator quietly turning a conditioning
+        // signal into rubbish.
+        //
+        // It feeds the receiver itself, so there is one path in either case.
+        self.startup.step(cleaned, &mut self.tx, &mut self.rx);
         self.tx.next_sample()
     }
 
@@ -1674,6 +1886,16 @@ impl Modem {
 
     pub fn phase(&self) -> &'static str {
         self.startup.phase()
+    }
+
+    /// Ask for a retrain (7).
+    pub fn ask_for_retrain(&mut self) {
+        self.startup.ask_for_retrain();
+    }
+
+    /// How many times this call has gone back through the start-up.
+    pub fn retrains(&self) -> u32 {
+        self.startup.retrains()
     }
 
     /// The round trip the start-up measured, in symbol intervals.
