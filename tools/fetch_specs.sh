@@ -68,17 +68,24 @@ done
 rm -f "$JAR" "$JAR.html"
 echo "done -> $OUT"
 
-# The RFCs, for PPP. Text rather than PDF, so they go straight to the same
-# place the extracted Recommendations do and are greppable on arrival.
+# The RFCs, for what goes over the call. Text rather than PDF, so they go
+# straight to the same place the extracted Recommendations do and are greppable
+# on arrival.
 #
-# 1661 is PPP itself and 1662 the framing under it; 1334 and 1994 are the two
-# ways a far end asks who is calling; 1332 is how an address is agreed; 1144
-# is Van Jacobson header compression, which is what made dial-up bearable.
+# The link: 1661 is PPP itself and 1662 the framing under it; 1334 and 1994 are
+# the two ways a far end asks who is calling; 1332 is how an address is agreed;
+# 1144 is Van Jacobson header compression, which is what made dial-up bearable.
+#
+# What crosses it: 791 the datagram, 792 the echo, 1071 the checksum over both,
+# and 9293 -- TCP, which obsoletes 793 and gathers fifty years of amendments to
+# it into one document, so that is the one to implement against. 1122 says what
+# a host must do with all of them, 6298 how to time a retransmission, 5681 how
+# fast to send, and 7323 how to say a window larger than sixteen bits.
 # Beside the extracted Recommendations, which is where spec_text.sh puts theirs
 # and where anything reading them expects to look.
 TEXT="${2:-$OUT/text}"
 mkdir -p "$TEXT"
-RFCS="1661 1662 1332 1334 1994 1144"
+RFCS="1661 1662 1332 1334 1994 1144 791 792 1071 9293 1122 6298 5681 7323"
 n=0
 for rfc in $RFCS; do
   if curl -sS --fail --max-time 30 -o "$TEXT/rfc$rfc.txt" \
