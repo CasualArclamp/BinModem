@@ -872,3 +872,146 @@ fn the_retrain_tone_alone_is_enough_to_follow() {
         calling.phase()
     );
 }
+
+/// The margins around 5.4.1's S sequence, over a line with length.
+///
+/// Returned in symbol intervals: how long the calling modem's S lasted, and
+/// how much of it was left on the line when the answering modem finished
+/// waiting out 5.4.2's MT and looked for it again.
+fn s_and_its_margin(delay: usize) -> (i64, i64, u64, u64) {
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
+    let mut calling = Modem::new(Role::Calling, offer, FS);
+    let mut answering = Modem::new(Role::Answering, offer, FS);
+    let mut line = Line::new(delay);
+    let (mut from_calling, mut from_answering) = (0.0, 0.0);
+    let (mut began, mut ended, mut looked) = (None, None, None);
+
+    for i in 0..(40.0 * FS) as usize {
+        let (to_calling, to_answering) = line.step(from_calling, from_answering);
+        from_calling = calling.step(to_calling);
+        from_answering = answering.step(to_answering);
+        if began.is_none() && calling.phase() == "S pre-roll" {
+            began = Some(i);
+        }
+        if began.is_some() && ended.is_none() && calling.phase() == "S bar" {
+            ended = Some(i);
+        }
+        if looked.is_none() && answering.phase() == "awaiting R2" {
+            looked = Some(i);
+        }
+    }
+    let (began, ended, looked) = (
+        began.expect("the calling end never sent an S"),
+        ended.expect("the calling end never finished its S"),
+        looked.expect("the answering end never waited out MT"),
+    );
+    let symbols = |samples: i64| (samples as f64 * datapump::v32::BAUD / FS) as i64;
+    (
+        symbols((ended - began) as i64),
+        // The S the answering end is looking for left this end a one-way
+        // delay ago, so that is where the two clocks meet.
+        symbols(ended as i64 + delay as i64 - looked as i64),
+        calling.counted(),
+        answering.counted(),
+    )
+}
+
+#[test]
+fn the_s_sequence_is_still_going_when_the_far_end_looks_for_it_again() {
+    // 5.4.1 has the calling modem send S "for a period NT already estimated by
+    // the counter/timer" and then for 256 symbol intervals more. 5.4.2 has the
+    // answering modem hear that S, cease transmitting, "wait for a period MT
+    // already estimated by the counter/timer" and then go on only "if an
+    // incoming S sequence persists".
+    //
+    // So the two ends meet on the strength of NT and MT being the same
+    // measurement, which they are: symmetric clocks over one line, timing the
+    // procedure's own fixed delays as well as the line's, and what is on both
+    // sides cancels. The 256 symbols are the whole of the margin, and they are
+    // there to be spent on how long the far end's detector takes.
+    //
+    // Take anything off one side and the margin goes with it. On a recorded
+    // call to a real V.32bis modem, 166 symbols had been taken off NT; the far
+    // end spent 228 noticing the S; and when it looked again MT later the S
+    // had finished 30 ms earlier. It waited nearly five seconds for one to
+    // reappear, then started the call over from the answer tone. Twice.
+    let (length, margin, nt, mt) = s_and_its_margin(DELAY);
+    println!(
+        "S ran {length} symbols, {margin} of them still to come when the \
+         answering end looked; NT {nt}, MT {mt}"
+    );
+    assert!(
+        margin >= 128,
+        "only {margin} symbols of S left when the far end looked for it, \
+         and a far end slower to notice one than this would find none"
+    );
+    assert!(
+        length >= nt as i64 + 256,
+        "S ran {length} symbols, short of the NT of {nt} and the 256 more \
+         that 5.4.1 asks for"
+    );
+}
+
+
+#[test]
+fn r2_is_not_held_up_for_ever_when_no_r3_is_coming() {
+    // 5.4.1 says "Transmission of R2 shall continue until an incoming rate
+    // signal R3 is detected" and stops there. Read as written it is a wait
+    // with no end, and a far end that has given up and gone back to its own
+    // answer tone will never satisfy it.
+    //
+    // That is not a hypothetical either. On a recorded call the far end
+    // restarted twice, eight seconds of alternations each time, while this end
+    // sent R2 at it for twenty-three seconds and then let it hang up.
+    //
+    // What bounds the wait is the far end's own procedure: before R3 it sends
+    // a second conditioning signal, and 5.2 makes that 256 symbols of S, 16 of
+    // S-bar and a training segment 5.2.3 caps at 8192. Here the answering
+    // modem is taken off the line the moment this end starts R2, so no R3 is
+    // ever coming and the whole of that bound has to run out.
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
+    let mut calling = Modem::new(Role::Calling, offer, FS);
+    let mut answering = Modem::new(Role::Answering, offer, FS);
+    let (mut from_calling, mut from_answering) = (0.0, 0.0);
+    let (mut began_r2, mut gave_up) = (None, None);
+
+    for i in 0..(40.0 * FS) as usize {
+        let (a, b) = (from_calling, from_answering);
+        // Once this end is sending R2 the far end is gone, and what reaches
+        // this end is its own reflection off the hybrid and nothing else.
+        let heard = if began_r2.is_some() { 0.0 } else { b * FAR };
+        from_calling = calling.step(heard + a * ECHO);
+        from_answering = answering.step(a * FAR + b * ECHO);
+        if began_r2.is_none() && calling.phase() == "rate signal" {
+            began_r2 = Some(i);
+        }
+        if began_r2.is_some() && gave_up.is_none() && calling.phase() == "AA" {
+            gave_up = Some(i);
+            break;
+        }
+    }
+
+    let began_r2 = began_r2.expect("this end never got as far as R2");
+    let gave_up = gave_up.expect(
+        "this end was still sending R2 forty seconds later, at an answering \
+         modem that had been off the line for most of them",
+    );
+    let symbols = (gave_up - began_r2) as f64 * datapump::v32::BAUD / FS;
+    println!("gave up on R3 after {symbols:.0} symbols and went back to state A");
+    // 5.2's longest conditioning signal is 8464 symbols; anything much under
+    // that would be giving up on a far end still doing as it is told.
+    assert!(
+        symbols > 8464.0,
+        "gave up after only {symbols:.0} symbols, inside the 8464 a far end \
+         following 5.2 is allowed for its second conditioning signal"
+    );
+    assert!(
+        symbols < 12000.0,
+        "took {symbols:.0} symbols to notice, which on a real call is nine \
+         seconds of talking to nobody"
+    );
+    assert!(
+        !matches!(calling.status(), Status::Connected(_)),
+        "connected to a modem that was not there"
+    );
+}

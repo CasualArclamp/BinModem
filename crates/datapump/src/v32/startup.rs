@@ -722,6 +722,21 @@ mod timing {
     pub const SEGMENT_TRN_LONG: u64 = 4096;
     /// Scrambled ones before data may flow (5.4.1 e, 5.4.2).
     pub const SETTLE: u64 = 128;
+    /// The latest an R3 could still be on its way, once the round trip is
+    /// added to it.
+    ///
+    /// 5.4.1 has R2 continue "until an incoming rate signal R3 is detected"
+    /// and sets no limit on the waiting. The far end has one. Before R3 it
+    /// sends a second conditioning signal, and 5.2 fixes the shape of that:
+    /// 256 symbols of S, 16 of S-bar, and a training segment 5.2.3 allows
+    /// "at least 1280 and not exceed 8192". Past the longest of those there is
+    /// nothing an R3 could still be behind.
+    ///
+    /// What is on the line instead, on the call this was written for, was the
+    /// far end starting the whole procedure again: the answer tone, then eight
+    /// seconds of alternations, twice over. This end held R2 up through all of
+    /// it for twenty-three seconds and then let the far end hang up.
+    pub const R3_AT_THE_LATEST: u64 = SEGMENT_S + SEGMENT_S_BAR + 8192;
     /// Nothing recognisable for this long and the attempt is abandoned. The
     /// recommendation sets no overall limit; a modem that waits for ever is no
     /// use to whatever is waiting on it.
@@ -802,8 +817,10 @@ pub struct Startup {
     /// Symbols in the current state, and since the start.
     symbols: u64,
     total: u64,
-    /// Symbols since the round-trip timer was started, and its final value.
+    /// Symbols since the round-trip timer was started, and the two answers
+    /// taken off it: what the clock read, and what the line adds.
     timer: Option<u64>,
+    counted: u64,
     round_trip: u64,
     /// Consecutive symbols the condition being waited for has held.
     held: u64,
@@ -883,6 +900,7 @@ impl Startup {
             symbols: 0,
             total: 0,
             timer: None,
+            counted: 0,
             round_trip: 0,
             held: 0,
             unsatisfactory: 0,
@@ -926,9 +944,36 @@ impl Startup {
     /// The round trip, in symbol intervals, once it has been measured.
     ///
     /// This is what an echo canceller needs in order to know how far back the
-    /// line's reflection of our own signal can be.
+    /// line's reflection of our own signal can be. It is not what 5.4.1 and
+    /// 5.4.2 ask a modem to wait; see [`counted`](Self::counted).
     pub fn round_trip(&self) -> u64 {
         self.round_trip
+    }
+
+    /// What the counter/timer read, in symbol intervals.
+    ///
+    /// 5.4.1 has the calling modem send S "for a period NT already estimated
+    /// by the counter/timer" and 5.4.2 has the answering modem wait "a period
+    /// MT already estimated by the counter/timer". Both are the raw reading
+    /// and not [`round_trip`](Self::round_trip), which has the procedure's own
+    /// fixed delays taken off it.
+    ///
+    /// The distinction is the whole point of the two periods. NT and MT are
+    /// what makes the two ends meet: the calling modem holds S up for NT and
+    /// the answering modem looks for it again after MT, and the 256 symbols
+    /// 5.4.1 puts on the end of NT are all the margin there is between them.
+    /// Two symmetric clocks measure the same delays, including the ones the
+    /// procedure itself contributes, so those cancel and the margin is spent
+    /// on the far end's detector. Take them off one side only and the margin
+    /// goes with them.
+    ///
+    /// Measured on a call that failed for it: 166 symbols came off NT, the far
+    /// end took 228 to notice the S and cease transmitting as 5.4.2 tells it
+    /// to, and when it looked again MT later the S had ended 30 ms earlier. It
+    /// waited nearly five seconds for one to reappear and then started the
+    /// whole call again. Twice.
+    pub fn counted(&self) -> u64 {
+        self.counted
     }
 
     /// Whether this end is sending the training segment, which is the one
@@ -1333,7 +1378,7 @@ impl Startup {
             State::Cc => {
                 if sideband_reversal {
                     // Our reversal has come back, so stop the clock.
-                    self.round_trip = self.measured();
+                    self.stop_the_clock();
                     tx.set_signal(Signal::Silent);
                     self.enter(State::AwaitingR1);
                 }
@@ -1379,10 +1424,13 @@ impl Startup {
                 }
             }
             State::PreRoll => {
-                // 5.4.1: an S sequence for the period already measured, which
-                // lines this modem's conditioning signal up with the far end's
-                // idea of when it should arrive.
-                if self.symbols >= self.round_trip {
+                // 5.4.1: "an S sequence for a period NT already estimated by
+                // the counter/timer", which lines this modem's conditioning
+                // signal up with the far end's idea of when it should arrive.
+                // The clock's own reading, not the line's share of it: the far
+                // end waits out a clock of its own and the two only meet if
+                // neither has been trimmed.
+                if self.symbols >= self.counted {
                     self.enter(State::SendS);
                 }
             }
@@ -1430,7 +1478,7 @@ impl Startup {
                 // bare carrier at 1800 Hz. This end is alternating, which
                 // suppresses the carrier and leaves that place empty.
                 if carrier_reversal {
-                    self.round_trip = self.measured();
+                    self.stop_the_clock();
                     self.enter(State::CaToAc);
                 }
             }
@@ -1458,10 +1506,11 @@ impl Startup {
             }
             State::AfterR1 => {
                 // 5.4.2: having sent R1 and heard the far end's conditioning
-                // signal, wait out the measured round trip before believing
-                // what arrives next.
+                // signal, "wait for a period MT already estimated by the
+                // counter/timer" before believing what arrives next. The
+                // clock's own reading, for the reason given on `counted`.
                 tx.set_signal(Signal::Silent);
-                if self.symbols >= self.round_trip {
+                if self.symbols >= self.counted {
                     self.rates.reset();
                     self.enter(State::AwaitingR2);
                 }
@@ -1548,6 +1597,17 @@ impl Startup {
                     // 5.4.1: "Transmission of R2 shall continue until an
                     // incoming rate signal R3 is detected."
                     Role::Calling => {
+                        // Continue, but not for ever. Past the point where a
+                        // far end still following 5.4.2 could have one on the
+                        // way, whatever is out there is doing something else,
+                        // and 5.5.1's answer to that is this end's answer to
+                        // it too: back to repetitively transmitting state A
+                        // and on again from 5.4.1's third paragraph.
+                        if self.symbols > timing::R3_AT_THE_LATEST + self.counted
+                        {
+                            self.start_again(tx, rx);
+                            return;
+                        }
                         // "until an incoming rate signal R3 is detected", and
                         // a rate signal only. An E cannot arrive here: the
                         // answering modem sends R3 until this end closes the
@@ -1673,7 +1733,18 @@ impl Startup {
         // this is a fresh one. Left running, a call that has been up for a
         // minute retrains straight into a timeout.
         self.total = 0;
-        // And everything that listens starts again, because all of it is full
+        self.start_again(tx, rx);
+    }
+
+    /// Go back to the top of the start-up without granting fresh patience.
+    ///
+    /// The difference from a retrain is what the clock does. 7 begins again
+    /// after a call has been carrying data, and the minute PATIENCE allows is
+    /// for the new attempt. Giving up on a start-up that never got anywhere
+    /// and trying it again is not a new call, and a modem that reset its own
+    /// deadline every time it did so would try for ever.
+    fn start_again(&mut self, tx: &mut Transmitter, rx: &mut Receiver) {
+        // Everything that listens starts again, because all of it is full
         // of data. A tone detector that has spent a minute on scrambled
         // fourteen-four believes it can already hear 1800 Hz, and an answering
         // modem that believes that skips 6.2's wait and turns over before the
@@ -1698,6 +1769,7 @@ impl Startup {
         self.agreed = 0;
         self.coding = Coding::Uncoded;
         self.timer = None;
+        self.counted = 0;
         self.round_trip = 0;
         self.carrier_peak = 0.0;
         self.trained = false;
@@ -1728,10 +1800,17 @@ impl Startup {
         self.carrier_peak = self.carrier_peak.max(self.listener.carrier_amplitude());
     }
 
-    /// What the clock says the line adds, once everything else is taken off.
+    /// Stop the clock and keep both of the things it has measured.
     ///
-    /// Four things sit between the two events the clock is started and stopped
-    /// by, and only one of them is the line.
+    /// The reading itself is NT and MT, which 5.4.1 and 5.4.2 hand straight
+    /// back to the two modems as periods to wait; nothing is taken off it,
+    /// because both ends measure the same delays and what is on both sides
+    /// cancels.
+    ///
+    /// What the echo canceller wants out of the same measurement is a
+    /// different number: how far back down the line its own signal can come
+    /// from. Four things sit between the two events the clock is started and
+    /// stopped by, and only one of them is the line.
     ///
     /// The two ends do not measure the same interval, which is the part most
     /// easily got wrong. The calling modem starts its clock on *detecting* the
@@ -1746,14 +1825,15 @@ impl Startup {
     /// anything until its average has followed the signal round; both happen
     /// twice, once going and once coming back, and on a short line they come
     /// to more than the line does.
-    fn measured(&mut self) -> u64 {
+    fn stop_the_clock(&mut self) {
         let response = match self.role {
             Role::Calling => 2 * timing::RESPONSE,
             Role::Answering => timing::RESPONSE,
         };
         let latency = 2.0 * f64::from(self.low_reversals.latency()) / self.sps;
         let overhead = response + latency.round() as u64 + 2 * super::SHAPING_DELAY;
-        self.timer.take().unwrap_or(0).saturating_sub(overhead)
+        self.counted = self.timer.take().unwrap_or(0);
+        self.round_trip = self.counted.saturating_sub(overhead);
     }
 
     fn enter(&mut self, state: State) {
@@ -2015,6 +2095,11 @@ impl Modem {
 
     pub fn round_trip(&self) -> u64 {
         self.startup.round_trip()
+    }
+
+    /// What the counter/timer read: 5.4.1's NT and 5.4.2's MT.
+    pub fn counted(&self) -> u64 {
+        self.startup.counted()
     }
 
     /// How much of its own echo the modem was removing when it finished

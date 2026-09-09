@@ -9,7 +9,7 @@ one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
 source for every normative constant, and against the RFCs for everything
-carried over the top of them. 918 tests.
+carried over the top of them. 924 tests.
 
 ## What works
 
@@ -102,6 +102,18 @@ OS-specific code — but only built and run on Windows so far.
   under it, not a stricter test above it.
   [tools/read_rate_signals.py](tools/read_rate_signals.py) reads them off a
   recording.
+- **The round trip is a second and a quarter, and V.32's start-up has no room
+  for it.** MicroSIP to a real modem measures 2947 symbols there and back. Two
+  faults that only show up at that length have been found and fixed. 5.4.1's NT
+  and 5.4.2's MT are counter readings the two ends compare, and this end was
+  handing the pre-roll a trimmed version of one: the far end heard the S, ceased
+  transmitting as 5.4.2 tells it to, looked again MT later and found the S had
+  ended 30 ms earlier. It waited five seconds for another and then started the
+  call from the answer tone, twice. And 5.4.1's "transmission of R2 shall
+  continue until an incoming rate signal R3 is detected" was read as written,
+  so this end talked at a modem that had gone back to the beginning for
+  twenty-three seconds and let it hang up. Both are guarded by tests now;
+  neither has been tried on the line again yet.
 - **Two of these on one virtual cable** fail in one direction only. The
   answering end reads a clean thirty-two point constellation and brings up
   V.42 and V.42bis; the originating end sees noise. Measured off a recording,

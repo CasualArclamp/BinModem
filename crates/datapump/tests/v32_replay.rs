@@ -41,6 +41,25 @@ fn what_this_end_made_of_it() {
         .unwrap_or(0);
     let role = if channel == 0 { Role::Calling } else { Role::Answering };
     let arrived = wav.channel(channel);
+
+    // Where in the recording to start the modem, which is not the beginning.
+    // A live call builds this pump only once V.8 has agreed on it, so before
+    // that moment nothing here has heard anything -- while a replay from the
+    // top hands it the dial tone, the ringing and whatever else the network
+    // played over a call nobody had picked up yet, and an adaptive receiver
+    // let loose on all that keeps what it learns. Measured on one capture:
+    // eight seconds of call progress before the far end answered pinned the
+    // residual error at 0.39 for the remaining forty, through a conditioning
+    // signal and a training segment that should have fixed anything, and the
+    // far end's rate signal arrived 356 times and was read none of them. The
+    // same modem started a few seconds later read all 356. That is a fault in
+    // the replay and not in the modem, and a replay that invents faults is
+    // worse than no replay.
+    let from: f64 = std::env::var("V32_FROM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.0);
+    let arrived = &arrived[((from * FS) as usize).min(arrived.len())..];
     let offer = match offer.as_deref() {
         Some("4800") => rate_signal(Rates { at_4800: true, ..Rates::default() }),
         Some("9600") => rate_signal(Rates { at_9600: true, ..Rates::default() }),
@@ -52,6 +71,7 @@ fn what_this_end_made_of_it() {
         wav.duration_secs(),
         if channel == 0 { "calling" } else { "answering" }
     );
+    println!("started at {from:.2} s into it\n");
 
     let mut modem = Modem::new(role, offer, FS);
     let mut phase = "";
@@ -63,7 +83,7 @@ fn what_this_end_made_of_it() {
 
     for (i, &x) in arrived.iter().enumerate() {
         let _ = modem.step(f64::from(x));
-        let at = i as f64 / FS;
+        let at = from + i as f64 / FS;
         if modem.phase() != phase {
             phase = modem.phase();
             println!("{at:8.3}s  phase {phase}");
