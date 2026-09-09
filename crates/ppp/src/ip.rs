@@ -1,9 +1,10 @@
-//! Just enough IPv4 and ICMP to send a ping and recognise the answer.
+//! IPv4, and just enough ICMP to send a ping and recognise the answer.
 //!
-//! Not a network stack. A stack has to reassemble fragments, hold routes,
-//! track connections and keep timers for all of it; this builds one kind of
-//! datagram and reads one kind back, which is what it takes to prove a link
-//! carries IP at all. What goes on top of it comes later.
+//! Not a whole network layer: nothing here reassembles a fragment or holds a
+//! route, because a link with one hop and a fixed pair of addresses has
+//! neither to deal with. What it does is carry a datagram of any protocol in
+//! either direction, and answer an echo, which between them are what it takes
+//! to show a link carries IP and to put something useful on top of it.
 //!
 //! RFC 791 for the datagram, RFC 792 for the echo, RFC 1071 for the sum that
 //! covers both.
@@ -11,8 +12,13 @@
 /// RFC 792: the two message types this understands.
 pub const ECHO_REPLY: u8 = 0;
 pub const ECHO_REQUEST: u8 = 8;
-/// RFC 790's protocol number for ICMP.
+/// RFC 790's protocol numbers, for the two that cross this link.
 pub const PROTOCOL_ICMP: u8 = 1;
+pub const PROTOCOL_TCP: u8 = 6;
+
+/// The header this builds and the only length it accepts: five words, no
+/// options.
+pub const HEADER_LEN: usize = 20;
 
 /// RFC 1071's internet checksum: the one's complement of the one's complement
 /// sum of the data taken as sixteen-bit words.
@@ -62,7 +68,8 @@ impl Echo {
         out
     }
 
-    fn parse(body: &[u8]) -> Option<Self> {
+    /// Read one out of a datagram's payload.
+    pub fn parse(body: &[u8]) -> Option<Self> {
         if body.len() < 8 || checksum(body) != 0 {
             return None;
         }
@@ -86,10 +93,18 @@ impl Echo {
     }
 }
 
-/// Wrap an ICMP echo in an IPv4 datagram.
-pub fn datagram(from: [u8; 4], to: [u8; 4], echo: &Echo, id: u16) -> Vec<u8> {
-    let body = echo.to_bytes();
-    let total = 20 + body.len();
+/// One datagram, whatever is inside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Carried {
+    pub from: [u8; 4],
+    pub to: [u8; 4],
+    pub protocol: u8,
+    pub payload: Vec<u8>,
+}
+
+/// Wrap a payload of any protocol in an IPv4 datagram.
+pub fn build(from: [u8; 4], to: [u8; 4], protocol: u8, payload: &[u8], id: u16) -> Vec<u8> {
+    let total = HEADER_LEN + payload.len();
     let mut out = Vec::with_capacity(total);
     // Version 4, header length 5 words: no options, which is every datagram
     // this sends.
@@ -101,14 +116,19 @@ pub fn datagram(from: [u8; 4], to: [u8; 4], echo: &Echo, id: u16) -> Vec<u8> {
     // octet MRU and a datagram built to fit it has nothing to fragment.
     out.extend_from_slice(&[0x40, 0x00]);
     out.push(64); // Time to live
-    out.push(PROTOCOL_ICMP);
+    out.push(protocol);
     out.extend_from_slice(&[0, 0]); // Header checksum, filled in below
     out.extend_from_slice(&from);
     out.extend_from_slice(&to);
-    let sum = checksum(&out[..20]);
+    let sum = checksum(&out[..HEADER_LEN]);
     out[10..12].copy_from_slice(&sum.to_be_bytes());
-    out.extend_from_slice(&body);
+    out.extend_from_slice(payload);
     out
+}
+
+/// Wrap an ICMP echo in one.
+pub fn datagram(from: [u8; 4], to: [u8; 4], echo: &Echo, id: u16) -> Vec<u8> {
+    build(from, to, PROTOCOL_ICMP, &echo.to_bytes(), id)
 }
 
 /// What arrived, if it was an echo addressed to somebody.
@@ -119,17 +139,16 @@ pub struct Arrived {
     pub echo: Echo,
 }
 
-/// Read a datagram, taking only what this understands.
+/// Read a datagram, whatever protocol it carries.
 ///
-/// Anything else -- another protocol, a fragment, a header this end cannot
-/// check -- is not an error and not this layer's business. It gives back
-/// nothing and the caller carries on.
-pub fn parse(datagram: &[u8]) -> Option<Arrived> {
-    if datagram.len() < 20 || datagram[0] >> 4 != 4 {
+/// A header this end cannot check, or a fragment, is not an error and not
+/// this layer's business. It gives back nothing and the caller carries on.
+pub fn read(datagram: &[u8]) -> Option<Carried> {
+    if datagram.len() < HEADER_LEN || datagram[0] >> 4 != 4 {
         return None;
     }
     let header = usize::from(datagram[0] & 0x0f) * 4;
-    if header < 20 || datagram.len() < header {
+    if header < HEADER_LEN || datagram.len() < header {
         return None;
     }
     // RFC 791: the header checksum covers the header alone, and a good one
@@ -141,18 +160,31 @@ pub fn parse(datagram: &[u8]) -> Option<Arrived> {
     if total < header || total > datagram.len() {
         return None;
     }
-    if datagram[9] != PROTOCOL_ICMP {
-        return None;
-    }
     // A datagram that is part of something larger cannot be read on its own.
+    // Nothing here fragments and the link's MRU is larger than anything sent
+    // over it, so one that arrives fragmented came from somewhere unexpected.
     let fragmented = datagram[6] & 0x1f != 0 || datagram[7] != 0;
     if fragmented {
         return None;
     }
-    Some(Arrived {
+    Some(Carried {
         from: datagram[12..16].try_into().ok()?,
         to: datagram[16..20].try_into().ok()?,
-        echo: Echo::parse(&datagram[header..total])?,
+        protocol: datagram[9],
+        payload: datagram[header..total].to_vec(),
+    })
+}
+
+/// Read a datagram, taking only an echo out of it.
+pub fn parse(datagram: &[u8]) -> Option<Arrived> {
+    let carried = read(datagram)?;
+    if carried.protocol != PROTOCOL_ICMP {
+        return None;
+    }
+    Some(Arrived {
+        from: carried.from,
+        to: carried.to,
+        echo: Echo::parse(&carried.payload)?,
     })
 }
 
@@ -249,6 +281,32 @@ mod tests {
         udp[10..12].copy_from_slice(&[0, 0]);
         let sum = checksum(&udp[..20]);
         udp[10..12].copy_from_slice(&sum.to_be_bytes());
-        assert_eq!(parse(&udp), None);
+        assert_eq!(parse(&udp), None, "the echo reader took something else");
+        // It is still a datagram, and the layer that wants it can have it.
+        assert_eq!(read(&udp).unwrap().protocol, 17);
+    }
+
+    /// Anything at all crosses, which is what makes something other than a
+    /// ping possible on top.
+    #[test]
+    fn a_payload_of_any_protocol_reads_back() {
+        let segment = b"not really a TCP segment, but it is opaque here";
+        let bytes = build([10, 0, 0, 1], [10, 0, 0, 2], PROTOCOL_TCP, segment, 42);
+        let got = read(&bytes).expect("did not read back");
+        assert_eq!(got.protocol, PROTOCOL_TCP);
+        assert_eq!(got.from, [10, 0, 0, 1]);
+        assert_eq!(got.to, [10, 0, 0, 2]);
+        assert_eq!(got.payload, segment);
+    }
+
+    /// And a header damaged on the way is still not believed.
+    #[test]
+    fn a_damaged_header_is_not_believed_whatever_it_carries() {
+        let good = build([10, 0, 0, 1], [10, 0, 0, 2], PROTOCOL_TCP, &[0; 40], 1);
+        for i in 0..HEADER_LEN {
+            let mut bad = good.clone();
+            bad[i] ^= 0x01;
+            assert!(read(&bad).is_none(), "a flip at octet {i} was accepted");
+        }
     }
 }

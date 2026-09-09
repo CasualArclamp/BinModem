@@ -46,6 +46,9 @@ pub struct Link {
     phase: Phase,
     line: Vec<u8>,
     arrived: Vec<ip::Arrived>,
+    /// Datagrams carrying something other than an echo, for whatever is above
+    /// this to make sense of.
+    carried: Vec<ip::Carried>,
     /// 791's Identification field, which only has to differ between datagrams
     /// that are alive at once.
     next_id: u16,
@@ -68,6 +71,7 @@ impl Link {
             phase: Phase::Dead,
             line: Vec::new(),
             arrived: Vec::new(),
+            carried: Vec::new(),
             next_id: 1,
         }
     }
@@ -141,6 +145,27 @@ impl Link {
         std::mem::take(&mut self.arrived)
     }
 
+    /// And everything else that has: whatever is above this deals with it.
+    pub fn take_carried(&mut self) -> Vec<ip::Carried> {
+        std::mem::take(&mut self.carried)
+    }
+
+    /// Put a payload of some other protocol on the link, addressed from this
+    /// end to the other.
+    ///
+    /// Does nothing before the network phase, for the reason 3.6 gives: there
+    /// is nowhere to send it and no address to send it from.
+    pub fn send_payload(&mut self, protocol: u8, payload: &[u8]) -> bool {
+        if !self.up() {
+            return false;
+        }
+        let (local, remote) = self.addresses();
+        let datagram = ip::build(local, remote, protocol, payload, self.next_id);
+        self.next_id = self.next_id.wrapping_add(1);
+        self.send(crate::protocol::IP, datagram);
+        true
+    }
+
     /// Send one echo request to the far end.
     ///
     /// Does nothing before the network phase, because there is nowhere to send
@@ -181,7 +206,21 @@ impl Link {
                 if !self.up() {
                     return;
                 }
-                if let Some(arrived) = ip::parse(&packet.payload) {
+                let Some(carried) = ip::read(&packet.payload) else {
+                    return;
+                };
+                if carried.protocol != ip::PROTOCOL_ICMP {
+                    // Somebody else's business. TCP is the only thing that
+                    // asks for it so far.
+                    self.carried.push(carried);
+                    return;
+                }
+                if let Some(echo) = ip::Echo::parse(&carried.payload) {
+                    let arrived = ip::Arrived {
+                        from: carried.from,
+                        to: carried.to,
+                        echo,
+                    };
                     if !arrived.echo.reply {
                         // RFC 792 makes answering an echo the receiver's job,
                         // and doing it here rather than above keeps a ping
