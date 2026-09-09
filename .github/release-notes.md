@@ -20,22 +20,39 @@ Bell 103, V.22, V.22bis, V.32 and V.32bis; V.8 negotiation, V.42 error control
 and V.42bis compression; a V.250 AT interface, an ANSI/CP437 terminal and
 ZMODEM.
 
-New since v0.2.0:
+New since v0.3.0, all of it from recordings of calls to a real modem over a
+trunk with a second and a quarter of delay in it — which is where V.32's
+half-duplex start-up stops forgiving anything.
 
-- **V.32bis to 14 400.** One trellis code serves 7200, 9600, 12 000 and
-  14 400, and only the number of bits riding through it untouched changes.
-  Every constellation was read off the figures by position.
-- **V.32 and V.32bis are separate carriers**, because V.250 gives them
-  separate names: `AT+MS=V32` stops at 9600 and `AT+MS=V32B` goes to 14 400.
-- **The retrain of V.32bis 7.** A far end that gives up and starts again is
-  followed now, from either end of the call, instead of being talked over.
-- **The internet over a call.** PPP with LCP and IPCP, a TCP written against
-  RFC 9293, and a SOCKS 5 proxy: tick *carry web traffic* on the end that
-  answered and point a browser on the other machine at
-  `socks5://127.0.0.1:1080`.
+- **14 400 reached with a real modem**, and then found unreadable, which is
+  the next thing to fix. Both ends offered every rate and agreed on the top
+  one.
+- **A rate that cannot be read is given up.** 7 begins a retrain on
+  "unsatisfactory signal reception" and leaves the definition open; ours was a
+  distance, which is a quarter of the gap between points at 4800 and one and a
+  half gaps at 14 400 — further than a symbol can land from the nearest point,
+  so at the rates it mattered for it could not fire at all. It is a fraction of
+  the gap now, and the retrain that follows offers less than it did. On the
+  line: 14 400 came up, could not be read, and the far end answered the reduced
+  offer with 12 000. The first rate this modem has renegotiated with anything
+  but itself.
+- **Three start-up faults that only appear on a slow line.** The period one end
+  holds a signal up for and the period the other waits before looking for it
+  are counter readings meant to be compared, and one of them was being trimmed;
+  the wait for the far end's final rate signal had no end at all, so the modem
+  talked at a modem that had gone back to the beginning for twenty-three
+  seconds; and a single phase reversal was once taken for two, giving a round
+  trip of 53 ms on a line whose real one is 1.2 seconds.
+- **Silence during a retrain is no longer read as a hangup.** The training
+  segment is the one stretch the far end must be quiet for, and on a line that
+  reflects almost nothing that is indistinguishable from a far end that has
+  gone. The modem was ending calls in the middle of retrains it had asked for.
+- **The panel says what the receiver is managing**, as a fraction of the
+  distance between the points it is choosing between. A tenth is a clean lock,
+  a quarter is where the modem gives up on the rate, a half is a coin flip.
 
 V.32 at 9600 connects to a real modem and passes data, but loses the carrier
-about half a second in; `AT+MS=V32B,1,4800,14400` is what has been used for
-the calls that stayed up.
+about half a second in. `AT+MS=V32B,1,4800,14400` is what has been used for the
+calls that stayed up.
 
 Checksums are in `SHA256SUMS.txt`.
