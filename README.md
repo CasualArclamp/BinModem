@@ -9,7 +9,7 @@ one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
 source for every normative constant, and against the RFCs for everything
-carried over the top of them. 916 tests.
+carried over the top of them. 918 tests.
 
 ## What works
 
@@ -20,17 +20,24 @@ correct including the ANSI. Where a far end answers no XID at all and simply
 announces compression in band, that is followed too, and 1957 octets of one
 board's screen are kept as a test vector.
 
-At 9600 it negotiates V.32's trellis code and carries data with it. Every
-number of that code — the differential table, the thirty-two point
-constellation, the convolutional encoder — was read off the Recommendation's
-own figures rather than out of extracted text, which loses the sign of every
-coordinate, and checked three ways: against the magnitudes the table does
-survive with, against the set partition the code exists to have, and against a
-mean power that had to come out at ten.
+V.32bis runs to 14 400. One trellis code serves 7200, 9600, 12 000 and
+14 400 — Figure 1/V.32bis draws it once, with four parallel lines each
+labelled by the rates it exists for — and only the number of bits riding
+through untouched changes, from one to four. The redundant bit buys nine
+decibels at every one of them, which is why 14 400 fits in the channel 4800
+does.
+
+Every constellation was read off the figures by position rather than out of
+extracted text, which loses the sign of each coordinate and shuffles the axis
+labels through the rows. [tools/read_constellation.py](tools/read_constellation.py)
+takes the scale from the spacing of the ticks and the origin from the
+constellation's own quarter-turn symmetry. Run on V.32bis Figure 2-3 it gives
+back exactly the thirty-two points read off V.32's Figure 3 by hand, which had
+been checked three other ways: two documents, two methods, one table.
 
 | | |
 |---|---|
-| **Modulations** | Bell 103 (300), V.22 (1200), V.22bis (1200/2400), V.32 (4800/9600, both codings) |
+| **Modulations** | Bell 103 (300), V.22 (1200), V.22bis (1200/2400), V.32 (4800/9600, both codings), V.32bis (7200/12000/14400) |
 | **Negotiation** | V.8 CM/JM/CI/CJ and ANSam; V.25 answer tone told apart from it |
 | **Error control** | V.42 LAPM — detection, HDLC, XID, REJ/SREJ, mod-128 |
 | **Compression** | V.42bis, negotiated in XID or followed in band |
@@ -78,6 +85,12 @@ OS-specific code — but only built and run on Windows so far.
   is all across the radius and none along it, and the equaliser — frozen at
   the peak to check — leaves the radial part untouched. So it is the carrier
   loop, not the line and not the equaliser. Two calls now say the same thing.
+  The rates above it are more crowded still and will want the same fix.
+- **14 400 has not been tried on a real line.** Two of these on one virtual
+  cable reach it and carry a board's greeting over it, but the far end that
+  was measured against has only ever been asked for 9600 — until now, because
+  its rate signal was being read by the wrong table. It had been offering
+  14 400 all along.
 - **Two of these on one virtual cable** fail in one direction only. The
   answering end reads a clean thirty-two point constellation and brings up
   V.42 and V.42bis; the originating end sees noise. Measured off a recording,
@@ -87,9 +100,9 @@ OS-specific code — but only built and run on Windows so far.
 
 ## Next
 
-V.32bis at 14 400, the rest of V.32, and the fax data pumps — V.27ter, V.29,
-V.33 and V.17 — which share most of their machinery with what is already here.
-Then V.34 at 33 600.
+The fax data pumps — V.27ter, V.29, V.33 and V.17 — which share most of their
+machinery with what is already here: V.33 and V.17 are the same trellis code
+again, on a leased line and a fax call respectively. Then V.34 at 33 600.
 
 Alongside them: PAP and CHAP, so something other than another BinModem can
 dial in; and MNP as an alternative to LAPM, since it is what a modem without
