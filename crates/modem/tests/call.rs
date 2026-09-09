@@ -1287,3 +1287,62 @@ fn why_there_is_no_error_control_survives_there_being_none() {
         .expect("the far end's answer was thrown away with the stack");
     assert!(!answered.is_empty());
 }
+
+#[test]
+fn a_retrain_is_not_mistaken_for_the_far_end_hanging_up() {
+    // The line these two are joined by has no echo on it whatever, which is
+    // the condition this is about. 5.2.3's training segment is the one stretch
+    // of the start-up the far end is required to be silent for, so while this
+    // end sends its own the line carries nothing at all -- and a carrier
+    // detector that has not been told a retrain is running reads that as a far
+    // end that has gone.
+    //
+    // Which is what happened on a real call over a trunk that reflects almost
+    // nothing: the modem asked for a retrain, reached its own training
+    // segment, decided the carrier had dropped, dropped the pump and stopped
+    // transmitting. The far end was left listening for a signal that was never
+    // coming, in the middle of a procedure this end had started.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "AT+MS=V32B,1,4800,9600");
+    Pair::type_at(&mut p.caller, "AT+MS=V32B,1,4800,9600");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(14.0);
+    assert_eq!(p.caller.state(), State::Data, "never connected to begin with");
+    let before = p.caller.retrains();
+
+    p.at_caller.clear();
+    p.at_host.clear();
+    p.caller.ask_for_retrain();
+    p.run(25.0);
+
+    assert!(
+        !p.caller_saw().contains("NO CARRIER"),
+        "the end that asked for the retrain hung up on itself: {:?}",
+        p.caller_saw()
+    );
+    assert!(
+        !p.host_saw().contains("NO CARRIER"),
+        "the far end was dropped during the retrain: {:?}",
+        p.host_saw()
+    );
+    assert!(
+        p.caller.retrains() > before,
+        "the retrain never happened at all"
+    );
+    assert_eq!(p.caller.state(), State::Data, "the call did not come back");
+    assert_eq!(p.host.state(), State::Data, "the far end did not come back");
+
+    // And it still carries what it carried before.
+    p.at_caller.clear();
+    p.at_host.clear();
+    for b in b"still here" {
+        p.caller.feed_dte(*b);
+    }
+    p.run(4.0);
+    assert!(
+        p.host_saw().contains("still here"),
+        "nothing crossed after the retrain: {:?}",
+        p.host_saw()
+    );
+}

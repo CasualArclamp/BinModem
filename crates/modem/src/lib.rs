@@ -1105,6 +1105,19 @@ impl Modem {
         self.retraining
     }
 
+    /// Ask the data pump to go back through its start-up (V.32bis 7).
+    ///
+    /// 7 begins a retrain "if either modem incorporates a means of detecting
+    /// unsatisfactory signal reception", and this modem has one; this is the
+    /// same door from outside, for a test that wants a retrain without having
+    /// to build a line bad enough to earn one. Nothing on a real call calls
+    /// it. Ignored by the modulations that have no such procedure.
+    pub fn ask_for_retrain(&mut self) {
+        if let Some(Pump::V32(m)) = self.pump.as_mut() {
+            m.ask_for_retrain();
+        }
+    }
+
     /// How many times this call has retrained.
     ///
     /// One is a line that changed. A handful is a line that cannot hold what
@@ -1118,7 +1131,25 @@ impl Modem {
 
     fn carry_data(&mut self) {
         let Some(pump) = self.pump.as_ref() else { return };
-        if !pump.carrier() {
+        // A carrier that has gone is only news when one was supposed to be
+        // there, and through a retrain there are stretches where one is not.
+        // The training segment of 5.2.3 is the plainest: each end sends its
+        // own while the other is required to be silent, so for a second or
+        // more the line carries nothing but this modem's own reflection.
+        //
+        // On a line that reflects almost nothing that is indistinguishable
+        // from a far end that has hung up, and this read it as one. It ended
+        // the call in the middle of the retrain it had itself asked for --
+        // dropped the pump, stopped transmitting, and left the far end
+        // listening to silence for a signal that was never going to come.
+        //
+        // Asked of the pump rather than of the flag `watch_for_retrain` keeps,
+        // so that it cannot be a step behind on the one step where it matters.
+        // The retrain has an ending of its own: the start-up gives up on it
+        // and reports `Failed`, which becomes this same NO CARRIER a moment
+        // later and by a route that knows what it is doing.
+        let retraining = matches!(pump.status(), Progress::Retraining);
+        if !pump.carrier() && !retraining {
             self.end_call(Ended::CarrierLost);
             return;
         }
