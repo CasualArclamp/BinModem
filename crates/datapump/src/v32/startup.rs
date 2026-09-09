@@ -654,15 +654,27 @@ pub enum Status {
     Failed,
 }
 
-/// What the equaliser may be left with before reception counts as
-/// unsatisfactory (7).
+/// What fraction of the distance between neighbouring points the equaliser
+/// may be left with before reception counts as unsatisfactory (7).
 ///
-/// The error is measured against a constellation normalised to unit
-/// root-mean-square, where the closest two points at 4800 are 0.63 apart and
-/// at 14 400 only 0.22. Half of the smallest of those is where a decision is
-/// as likely to be wrong as right, and an equaliser driven by decisions that
-/// are wrong half the time is not converging on anything.
-pub const UNSATISFACTORY_ERROR: f64 = 0.35;
+/// A fraction and not a distance, because the distance is different at every
+/// rate: normalised to unit root-mean-square the closest two points are 1.41
+/// apart at 4800 and 0.22 at 14 400. Half of whichever it is, is where a
+/// decision is as likely to be wrong as right, and an equaliser driven by
+/// decisions that are wrong half the time is not converging on anything.
+///
+/// This was a distance, 0.35, which is a quarter of the gap at 4800 and one
+/// and a half gaps at 14 400 -- further than a symbol can land from the
+/// nearest point, so at the rates it mattered most for it could not be
+/// reached at all. Measured on a call that came up at 14 400 and never
+/// decoded a byte: the equaliser sat at 0.073 to 0.088 for thirty-seven
+/// seconds, which is a third of a gap and a receiver reading noise, and 7's
+/// retrain never once looked like firing. Locked, the same call ran 0.028 to
+/// 0.050.
+///
+/// A quarter is what 0.35 was at 4800, so the rate this was tuned on keeps the
+/// threshold it had.
+pub const UNSATISFACTORY_GAP: f64 = 0.25;
 
 /// Durations from clause 5, in symbol intervals.
 mod timing {
@@ -1681,7 +1693,7 @@ impl Startup {
                     self.unsatisfactory = 0;
                 }
             }
-            State::Connected(_) => {
+            State::Connected(running_at) => {
                 // 7.1 and 7.2. The tone that says the far end has given up on
                 // this connection and gone back to the beginning is the same
                 // tone it sent at the beginning, so this is the same test the
@@ -1709,9 +1721,21 @@ impl Startup {
                 // point along -- which is the point at which the decisions
                 // driving the equaliser are as likely to be wrong as right and
                 // nothing downstream can recover.
-                let bad = rx.residual_error() > UNSATISFACTORY_ERROR;
+                let bad =
+                    rx.residual_error() > UNSATISFACTORY_GAP * rx.point_spacing();
                 self.unsatisfactory = if bad { self.unsatisfactory + 1 } else { 0 };
                 if self.unsatisfactory > timing::UNSATISFACTORY {
+                    // Going round again at the rate that just failed would
+                    // arrive back here, since nothing about the line has
+                    // changed and the rate exchange has no memory of its own.
+                    // What it has instead is 5.4.1's advice about what to put
+                    // in the rate signal: "It is recommended that R2 should
+                    // also take account of the likely receiver performance
+                    // with the particular GSTN connection", and 5.4.2 says the
+                    // same of R3. A rate this receiver has just spent a second
+                    // failing to read is the strongest evidence about the
+                    // connection there is.
+                    self.stop_offering(running_at);
                     self.begin_retrain(tx, rx);
                 }
             }
@@ -1734,6 +1758,41 @@ impl Startup {
         // minute retrains straight into a timeout.
         self.total = 0;
         self.start_again(tx, rx);
+    }
+
+    /// Take `rate` and everything above it out of what this modem offers.
+    ///
+    /// 5.4.1 and 5.4.2 both ask the rate signals to "take account of the
+    /// likely receiver performance with the particular GSTN connection", and
+    /// leave what that means open. This is the plainest reading of it: a rate
+    /// tried on this connection and found unreadable is not offered again.
+    ///
+    /// Everything above it goes too, not just the rate itself. The rates share
+    /// one trellis code and differ only in how many bits ride through it
+    /// untouched, so a constellation this receiver cannot read is a floor
+    /// under every denser one.
+    ///
+    /// 4800 is never given up. It is the only rate V.32 requires of both ends,
+    /// so an offer without it is an offer of nothing, and Table 6 reads that
+    /// as a call to clear down -- which is a decision for whatever is above
+    /// this and not for a receiver having a bad second.
+    fn stop_offering(&mut self, rate: u32) {
+        let mut rates = rates_offered(self.offer);
+        for &r in EVERY_RATE.iter().filter(|&&r| r >= rate) {
+            rates.set(r, false);
+        }
+        if !rates.any() {
+            rates.set(4800, true);
+        }
+        // In whichever of the two tables this end has been speaking. Table 6
+        // and Table 5/V.32bis put the rates in different bits, and a modem
+        // that answered in the other one would be offering something else
+        // entirely.
+        self.offer = if is_v32bis(self.offer) {
+            rate_signal(rates)
+        } else {
+            rate_signal_v32(rates, offers_trellis(self.offer))
+        };
     }
 
     /// Go back to the top of the start-up without granting fresh patience.
@@ -2166,6 +2225,18 @@ impl Modem {
     /// them, which is how well the receiver is doing.
     pub fn residual_error(&self) -> f64 {
         self.rx.residual_error()
+    }
+
+    /// Whether the equaliser is still adapting blind, for a test to look at.
+    pub fn equalizer_blind(&self) -> bool {
+        self.rx.equalizer_blind()
+    }
+
+    /// The distance between neighbouring points of the constellation being
+    /// received, which is what [`residual_error`](Self::residual_error) has to
+    /// be read against.
+    pub fn point_spacing(&self) -> f64 {
+        self.rx.point_spacing()
     }
 }
 

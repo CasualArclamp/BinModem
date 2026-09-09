@@ -18,9 +18,51 @@
 //! the two would differ, and that point is what is being looked for.
 
 use datapump::v32::startup::{Rates, Modem, Role, Status, rate_signal};
-use datapump::v32::trellis::AT_9600;
+use datapump::v32::Coding;
+use datapump::v32::trellis::{AT_7200, AT_9600, AT_12000, AT_14400};
 
 const FS: f64 = 16_000.0;
+
+/// A B C D of Figure 1/V.32, which 4800 and every training segment use.
+const FOUR: [(f64, f64); 4] = [(-3.0, -1.0), (1.0, -3.0), (3.0, 1.0), (-1.0, 3.0)];
+/// Figure 2/V.32: 9600's non-redundant alternative (2.4.1.1).
+const SIXTEEN: [(f64, f64); 16] = [
+    (-3.0, -3.0), (-3.0, -1.0), (-3.0, 1.0), (-3.0, 3.0),
+    (-1.0, -3.0), (-1.0, -1.0), (-1.0, 1.0), (-1.0, 3.0),
+    (1.0, -3.0), (1.0, -1.0), (1.0, 1.0), (1.0, 3.0),
+    (3.0, -3.0), (3.0, -1.0), (3.0, 1.0), (3.0, 3.0),
+];
+
+fn nearest_of(points: &[(f64, f64)], (i, q): (f64, f64)) -> (f64, f64) {
+    *points
+        .iter()
+        .min_by(|a, b| {
+            let d = |p: &(f64, f64)| (i - p.0).powi(2) + (q - p.1).powi(2);
+            d(a).total_cmp(&d(b))
+        })
+        .expect("no points")
+}
+
+fn rate_of(status: Status) -> Option<u32> {
+    match status {
+        Status::Connected(rate) => Some(rate),
+        _ => None,
+    }
+}
+
+/// The closest two points of whatever is in use, for scale.
+fn spacing(status: Status, coding: Coding) -> f64 {
+    match (rate_of(status), coding) {
+        (Some(7200), _) => AT_7200.closest(),
+        (Some(9600), Coding::Trellis) => AT_9600.closest(),
+        (Some(12_000), _) => AT_12000.closest(),
+        (Some(14_400), _) => AT_14400.closest(),
+        // Figure 2/V.32's sixteen sit on a grid of two.
+        (Some(9600), _) => 2.0,
+        // A B C D are a knight's move apart on the same grid.
+        _ => f64::sqrt(20.0),
+    }
+}
 
 #[test]
 #[ignore = "needs a capture"]
@@ -79,7 +121,11 @@ fn what_this_end_made_of_it() {
     let mut carrier = false;
     let mut bytes = Vec::new();
     let mut points: Vec<f64> = Vec::new();
-    let mut lock: Vec<(f64, (f64, f64))> = Vec::new();
+    // Time, where the symbol landed, and what the equaliser was left with
+    // at that moment -- which is the number 7's retrain decides on, so it has
+    // to be recorded as the call goes and not read off the wreckage
+    // afterwards.
+    let mut lock: Vec<(f64, (f64, f64), f64)> = Vec::new();
 
     for (i, &x) in arrived.iter().enumerate() {
         let _ = modem.step(f64::from(x));
@@ -113,7 +159,7 @@ fn what_this_end_made_of_it() {
             );
             if i != 0.0 || q != 0.0 {
                 points.push((i * i + q * q).sqrt());
-                lock.push((at, (i, q)));
+                lock.push((at, (i, q), modem.residual_error()));
             }
         }
     }
@@ -149,7 +195,8 @@ fn what_this_end_made_of_it() {
         let (mut n, mut sum) = (0usize, 0.0);
         let (mut radial, mut tangential) = (0.0f64, 0.0f64);
         let (mut dot, mut cross) = (0.0f64, 0.0f64);
-        for &(at, (i, q)) in &lock {
+        let (mut residual, mut worst) = (0.0f64, 0.0f64);
+        for &(at, (i, q), left) in &lock {
             if (at * 10.0).floor() != second {
                 if n > 0 {
                     let miss = sum / n as f64;
@@ -158,11 +205,23 @@ fn what_this_end_made_of_it() {
                     let snr = 10.0
                         * (10.0 / ((radial + tangential) / n as f64).max(1e-12))
                             .log10();
+                    // The miss on its own means nothing without the
+                    // constellation it was measured in: 0.35 is a working
+                    // receiver at 4800 and a dead one at 14 400, where the
+                    // closest two points are a fifth as far apart. As a
+                    // fraction of that distance it means the same thing at
+                    // every rate, and half of it is where a decision is as
+                    // likely to be wrong as right.
+                    let gap = spacing(status, modem.coding());
+                    let residual = residual / n as f64;
                     println!(
-                        "  {:7.1}s  miss {miss:6.3}  SNR {snr:5.1} dB  turn                          {:+7.2} deg   along {along:5.3} across {across:5.3}",
+                        "  {:7.1}s  miss {miss:6.3} = {:5.2} of the gap  SNR {snr:5.1} dB  \
+                         turn {:+7.2} deg  residual {residual:5.3} worst {worst:5.3}",
                         second / 10.0,
-                        cross.atan2(dot).to_degrees()
+                        miss / gap,
+                        cross.atan2(dot).to_degrees(),
                     );
+                    let _ = (along, across);
                 }
                 second = (at * 10.0).floor();
                 n = 0;
@@ -171,23 +230,28 @@ fn what_this_end_made_of_it() {
                 tangential = 0.0;
                 dot = 0.0;
                 cross = 0.0;
+                residual = 0.0;
+                worst = 0.0;
             }
-            // Whichever constellation the call settled on: the four points
-            // of 4800 (A B C D of Figure 1) or the thirty-two of Figure 3.
-            let (x, y) = if matches!(status, Status::Connected(9600)) {
-                AT_9600.point(AT_9600.nearest((i, q)))
-            } else {
-                const FOUR: [(f64, f64); 4] =
-                    [(-3.0, -1.0), (1.0, -3.0), (3.0, 1.0), (-1.0, 3.0)];
-                *FOUR
-                    .iter()
-                    .min_by(|a, b| {
-                        let d = |p: &(f64, f64)| {
-                            (i - p.0).powi(2) + (q - p.1).powi(2)
-                        };
-                        d(a).total_cmp(&d(b))
-                    })
-                    .unwrap()
+            residual += left;
+            worst = worst.max(left);
+            // Whichever constellation the call settled on. Reading a
+            // hundred and twenty-eight points against the four of 4800 puts
+            // every symbol most of a quadrant from its answer and reports a
+            // working receiver as noise, which is what this did until a call
+            // came up at 14 400 and the table said 5 dB while the modem was
+            // decoding it.
+            let (x, y) = match (rate_of(status), modem.coding()) {
+                (Some(7200), _) => AT_7200.point(AT_7200.nearest((i, q))),
+                (Some(9600), Coding::Trellis) => {
+                    AT_9600.point(AT_9600.nearest((i, q)))
+                }
+                (Some(12_000), _) => AT_12000.point(AT_12000.nearest((i, q))),
+                (Some(14_400), _) => AT_14400.point(AT_14400.nearest((i, q))),
+                // 4800, and 9600's uncoded modulation, which 2.4.1.1 puts on
+                // the sixteen points of Figure 2/V.32 rather than a coded set.
+                (Some(9600), _) => nearest_of(&SIXTEEN, (i, q)),
+                _ => nearest_of(&FOUR, (i, q)),
             };
             sum += ((i - x).powi(2) + (q - y).powi(2)).sqrt();
             // Split the error into the part along the radius and the part
@@ -209,7 +273,7 @@ fn what_this_end_made_of_it() {
         let (mut good, mut total) = (0usize, 0usize);
         let (mut n, mut sq) = (0usize, 0.0f64);
         let mut window = (lock[0].0 * 10.0).floor();
-        for &(at, p) in &lock {
+        for &(at, p, _) in &lock {
             if (at * 10.0).floor() != window {
                 if n > 0 {
                     let snr = 10.0 * (10.0 / (sq / n as f64).max(1e-12)).log10();
@@ -240,7 +304,7 @@ fn what_this_end_made_of_it() {
     if lock.len() > 1000 {
         let decided: Vec<(f64, f64)> = lock
             .iter()
-            .map(|&(_, p)| AT_9600.point(AT_9600.nearest(p)))
+            .map(|&(_, p, _)| AT_9600.point(AT_9600.nearest(p)))
             .collect();
         println!("
   error against the symbol at each lag (0 is itself):");
@@ -272,7 +336,7 @@ fn what_this_end_made_of_it() {
   ideal radius   symbols   measured   ratio");
         let mut rings: std::collections::BTreeMap<i64, (usize, f64)> =
             std::collections::BTreeMap::new();
-        for &(_, p) in &lock {
+        for &(_, p, _) in &lock {
             let (x, y) = AT_9600.point(AT_9600.nearest(p));
             let ideal = (x * x + y * y).sqrt();
             let got = (p.0 * p.0 + p.1 * p.1).sqrt();

@@ -1124,6 +1124,26 @@ impl Receiver {
         self.equalizer.error()
     }
 
+    /// How far apart the closest two points of the constellation in use are,
+    /// in the units [`residual_error`](Self::residual_error) is measured in.
+    ///
+    /// The error on its own says nothing. Half this distance is the decision
+    /// boundary, so the same error is a comfortably locked receiver at 4800
+    /// and a receiver reading noise at 14 400, where the points are a sixth as
+    /// far apart. Anything that wants to judge reception has to divide by this
+    /// first.
+    pub fn point_spacing(&self) -> f64 {
+        let figure = match (self.carried, self.coded) {
+            (_, Some(coded)) => coded.closest(),
+            // Figure 2/V.32, 9600's non-redundant alternative: sixteen points
+            // on a grid of two.
+            (4, None) => 2.0,
+            // A B C D of Figure 1 are a knight's move apart on that grid.
+            _ => f64::sqrt(20.0),
+        };
+        figure / CONSTELLATION_RMS
+    }
+
     pub fn equalizer_blind(&self) -> bool {
         self.equalizer.is_blind()
     }

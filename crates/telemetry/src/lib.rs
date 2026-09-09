@@ -144,6 +144,10 @@ pub struct Frame {
     /// alone which of the two is being looked at. A number for it is the
     /// difference between suspecting the canceller and knowing.
     pub echo_loss_db: Option<f64>,
+    /// How far the receiver is missing by, as a fraction of the distance
+    /// between neighbouring constellation points. Half is where a decision is
+    /// as likely to be wrong as right.
+    pub reception: Option<f64>,
     /// Where the reflection was found, in samples, and how strong it was.
     pub echo_at: Option<(usize, f64)>,
 }
@@ -176,6 +180,7 @@ impl Frame {
             bit_rate: None,
             rx_bytes: 0,
             echo_loss_db: None,
+            reception: None,
             echo_at: None,
             tx_bytes: 0,
         }

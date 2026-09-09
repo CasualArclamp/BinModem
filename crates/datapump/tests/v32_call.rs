@@ -6,7 +6,9 @@
 //! at all: with both directions in the one band, no filter can tell the two
 //! apart, and there is nothing to fall back on.
 
-use datapump::v32::startup::{Rates, Modem, Role, Status, rate_signal};
+use datapump::v32::startup::{
+    Modem, Rates, Role, Status, UNSATISFACTORY_GAP, rate_signal,
+};
 
 const FS: f64 = 16_000.0;
 
@@ -726,7 +728,13 @@ fn a_call_at_9600_settles_on_trellis_coding_and_carries_data() {
 /// were data, which is what a real far end doing this looked like from here.
 #[test]
 fn a_retrain_is_followed_by_the_far_end_and_the_call_carries_on() {
-    let offer = rate_signal(Rates::between(4800, 14_400));
+    // Up to 9600 and no further, so that the only retrain in this call is the
+    // one it asks for. This line does not hold 14 400 -- what is left after
+    // the canceller has taken out an echo eight decibels louder than the far
+    // end is a third of the distance between neighbouring points, and the
+    // modem now says so and steps down, which is
+    // `a_rate_that_cannot_be_read_is_given_up` below.
+    let offer = rate_signal(Rates::between(4800, 9600));
     let mut calling = Modem::new(Role::Calling, offer, FS);
     let mut answering = Modem::new(Role::Answering, offer, FS);
     let (mut from_calling, mut from_answering) = (0.0, 0.0);
@@ -1013,5 +1021,74 @@ fn r2_is_not_held_up_for_ever_when_no_r3_is_coming() {
     assert!(
         !matches!(calling.status(), Status::Connected(_)),
         "connected to a modem that was not there"
+    );
+}
+
+
+#[test]
+fn a_rate_that_cannot_be_read_is_given_up() {
+    // 7 begins a retrain on "detection of unsatisfactory signal reception" and
+    // leaves each implementation to say what that is. Saying it as a distance
+    // does not work: normalised the same way, neighbouring points are 1.41
+    // apart at 4800 and 0.22 at 14 400, so one number is a quarter of the gap
+    // at one end of the range and one and a half gaps at the other -- further
+    // than a symbol can land from the nearest point, which made the test
+    // unreachable exactly where it was needed.
+    //
+    // On a real call that came up at 14 400 and never decoded a byte, the
+    // equaliser sat at a third of a gap for thirty-seven seconds and nothing
+    // fired. Here the same thing happens on a line whose residual echo will
+    // not carry a hundred and twenty-eight points, and the modem has to notice
+    // and come back somewhere it can read -- which means offering less, since
+    // the rate exchange has no memory and would otherwise arrive back where it
+    // started. 5.4.1 and 5.4.2 both ask for that: the rate signals "should
+    // also take account of the likely receiver performance with the particular
+    // GSTN connection".
+    let offer = rate_signal(Rates::between(4800, 14_400));
+    let mut calling = Modem::new(Role::Calling, offer, FS);
+    let mut answering = Modem::new(Role::Answering, offer, FS);
+    let (mut from_calling, mut from_answering) = (0.0, 0.0);
+    let mut first = None;
+    let mut settled = None;
+
+    for i in 0..(40.0 * FS) as usize {
+        let (a, b) = (from_calling, from_answering);
+        from_calling = calling.step(b * FAR + a * ECHO);
+        from_answering = answering.step(a * FAR + b * ECHO);
+        if let (Status::Connected(here), Status::Connected(there)) =
+            (calling.status(), answering.status())
+        {
+            if first.is_none() {
+                first = Some(here);
+            }
+            settled = Some((here, there, i as f64 / FS));
+        }
+    }
+
+    let first = first.expect("never connected at all");
+    let (here, there, _) = settled.expect("never connected at all");
+    println!(
+        "came up at {first}, ended at {here} after {} retrains, {:.3} of the gap",
+        calling.retrains(),
+        calling.residual_error() / calling.point_spacing(),
+    );
+    assert_eq!(first, 14_400, "did not start at the rate that cannot be read");
+    assert!(
+        here < first,
+        "stayed at {here} on a line it cannot read it on"
+    );
+    assert_eq!(here, there, "the two ends came back at different rates");
+    assert!(calling.retrains() >= 1, "went down without a retrain");
+    // And it is not still going down. A modem that steps once per second until
+    // it runs out of rates is no better than one that never steps at all.
+    assert!(
+        calling.residual_error() < UNSATISFACTORY_GAP * calling.point_spacing(),
+        "settled at {here} and is still not reading it: {:.3} of the gap",
+        calling.residual_error() / calling.point_spacing(),
+    );
+    assert!(
+        calling.retrains() <= 3,
+        "took {} retrains to find a rate it could read",
+        calling.retrains()
     );
 }

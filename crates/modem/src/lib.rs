@@ -213,6 +213,23 @@ impl Pump {
         }
     }
 
+    /// How far the receiver is missing by, as a fraction of the distance
+    /// between neighbouring points.
+    ///
+    /// The residual error on its own is not comparable between rates: the same
+    /// number is a comfortable lock at 4800 and a receiver reading noise at
+    /// 14 400, where the points are a sixth as far apart. Divided by the gap it
+    /// means one thing everywhere -- half is the decision boundary, and V.32bis
+    /// 7 begins a retrain well before that.
+    ///
+    /// Only V.32, which is the only pump here that knows its own spacing.
+    fn reception(&self) -> Option<f64> {
+        match self {
+            Self::V32(m) => Some(m.residual_error() / m.point_spacing()),
+            Self::V22bis(_) | Self::Bell103(_) => None,
+        }
+    }
+
     /// How many states the modulation has, for a scope to size itself by.
     fn states(&self) -> usize {
         match self {
@@ -468,6 +485,12 @@ impl Modem {
     /// them, which is the one number that says whether a call is healthy.
     pub fn residual_error(&self) -> Option<f64> {
         self.pump.as_ref().and_then(Pump::residual_error)
+    }
+
+    /// How far the receiver is missing by, in units of the distance between
+    /// neighbouring points. See [`Pump::reception`].
+    pub fn reception(&self) -> Option<f64> {
+        self.pump.as_ref().and_then(Pump::reception)
     }
 
     /// How many states the modulation in use has.

@@ -9,7 +9,7 @@ one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
 source for every normative constant, and against the RFCs for everything
-carried over the top of them. 924 tests.
+carried over the top of them. 925 tests.
 
 ## What works
 
@@ -86,9 +86,29 @@ OS-specific code — but only built and run on Windows so far.
   the peak to check — leaves the radial part untouched. So it is the carrier
   loop, not the line and not the equaliser. Two calls now say the same thing.
   The rates above it are more crowded still and will want the same fix.
-- **14 400 works on one virtual cable**, both ends, with V.42 and V.42bis on
-  top and 0.76 of everything each modem says coming back a sixth of a second
-  later. Over a VoIP trunk to a real modem it has not been reached.
+- **14 400 to a real modem, and it cannot be read.** Reached over the VoIP
+  trunk once the two start-up faults below were fixed: both ends offered every
+  rate, agreed on 14 400 and came up. The receiver locked for a second at a
+  fifth of the distance between neighbouring points, then let go and settled at
+  two fifths, which is where a symbol lands when the decisions are random. It
+  stayed there for thirty-seven seconds. On one virtual cable, where it works,
+  both ends carry V.42 and V.42bis at 14 400 with 0.76 of everything each modem
+  says coming back a sixth of a second later, so what the trunk adds is the
+  difference.
+- **A rate that cannot be read is given up now.** 7 begins a retrain on
+  "detection of unsatisfactory signal reception" and leaves the definition
+  open. Ours was a distance, which cannot work: normalised the same way,
+  neighbouring points are 1.41 apart at 4800 and 0.22 at 14 400, so one number
+  was a quarter of the gap at one end of the range and one and a half gaps at
+  the other — further than a symbol can land from the nearest point. The test
+  was unreachable exactly where it was needed, which is why that call sat there
+  for thirty-seven seconds. It is a fraction of the gap now, a quarter, which
+  is what the old number was at the rate it was tuned on. The retrain that
+  follows offers less than it did, since the rate exchange has no memory and
+  would otherwise arrive back where it started; 5.4.1 and 5.4.2 both ask the
+  rate signals to "take account of the likely receiver performance with the
+  particular GSTN connection", and a rate this receiver has just spent a second
+  failing to read is the strongest evidence about the connection there is.
 - **The rate signal gets misread, and it costs the rate.** One recorded call
   to a real V.32bis modem: the far end offered 4800 through 14 400 and sent
   that same sixteen bits 201 times; this end read one corrupted copy of it,

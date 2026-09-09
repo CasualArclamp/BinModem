@@ -2136,11 +2136,31 @@ impl ScopeApp {
                     if f.carrier { "detected" } else { "none" }.into(),
                     if f.carrier { Color32::from_rgb(90, 220, 130) } else { dim },
                 );
-                row(
-                    "quality",
-                    f.symbol_quality().map(|q| q.to_string()).unwrap_or_else(|| "-".into()),
-                    bright,
-                );
+                // How far the receiver is missing by, against the distance
+                // between the points it is choosing between. It is the number
+                // 7's retrain decides on, and the only one that means the same
+                // thing at 4800 and at 14 400: a tenth is a clean lock,
+                // a quarter is where this modem gives up on the rate, and a
+                // half is a coin flip.
+                if let Some(miss) = f.reception {
+                    row(
+                        "reading",
+                        format!("{miss:.2} of the gap"),
+                        if miss < 0.25 {
+                            Color32::from_rgb(90, 220, 130)
+                        } else {
+                            Color32::from_rgb(230, 140, 90)
+                        },
+                    );
+                } else {
+                    row(
+                        "quality",
+                        f.symbol_quality()
+                            .map(|q| q.to_string())
+                            .unwrap_or_else(|| "-".into()),
+                        bright,
+                    );
+                }
                 // What the echo canceller is doing, which on a two-wire pair
                 // decides everything and is otherwise invisible: a
                 // constellation full of noise looks the same whether the noise
