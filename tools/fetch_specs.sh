@@ -12,6 +12,11 @@ JAR="$(mktemp)"
 UA="Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 mkdir -p "$OUT"
 
+# T.30 and T.4 are not modulations. They are what a fax call does over one --
+# the control procedure and the page coding -- and they are here because a
+# number that answers with 2100 Hz and then V.21 is a fax machine, and the only
+# way to know what it will accept is to read its DIS.
+
 # Editions wanted for a reason, with the reason.
 #
 #   V.42@200011  The last edition carrying Annex A, the alternative error
@@ -31,6 +36,7 @@ V.42 V.42bis V.44 V.14
 V.42@200011
 V.24 V.25 V.25bis V.250
 V.2 V.56bis
+T.30 T.4
 "
 
 fetch_one() {
