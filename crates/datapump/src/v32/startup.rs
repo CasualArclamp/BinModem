@@ -481,6 +481,40 @@ pub fn offered_rate(s: u16) -> u32 {
     rates_offered(s).highest()
 }
 
+/// What a 16-bit sequence says, in words.
+///
+/// For a log. Sixteen bits written out as a number tell nobody anything, and
+/// which table they are to be read by is the first thing to know about them.
+pub fn describe_sequence(s: u16) -> String {
+    let kind = if is_end_signal(s) {
+        "E"
+    } else if is_rate_signal(s) {
+        "R"
+    } else {
+        return format!("{s:016b} (not a rate sequence)");
+    };
+    let rates = rates_offered(s);
+    let mut which: Vec<String> = EVERY_RATE
+        .into_iter()
+        .rev()
+        .filter(|r| rates.holds(*r))
+        .map(|r| r.to_string())
+        .collect();
+    if which.is_empty() {
+        which.push("none, which asks to clear down".to_owned());
+    }
+    format!(
+        "{kind} {s:016b}  {}  {}{}",
+        if is_v32bis(s) { "V.32bis" } else { "V.32   " },
+        which.join(" "),
+        if !is_v32bis(s) && offers_trellis(s) {
+            ", trellis"
+        } else {
+            ""
+        }
+    )
+}
+
 /// Finds the 16-bit sequences a rate exchange is made of (5.3).
 ///
 /// The stream carries no framing, so the boundary has to be found in it.
@@ -504,7 +538,15 @@ pub struct RateDetector {
     locked: bool,
     /// Bits since that boundary.
     since: u32,
+    /// The sequence being counted, and how many times it has come round
+    /// unchanged.
+    candidate: Option<u16>,
+    agreed: u32,
+    /// Sequences seen at the locked phase since this detector was reset, which
+    /// is how long it has been hoping for a better reading.
+    sequences: u32,
 }
+
 
 impl RateDetector {
     pub fn new() -> Self {
@@ -523,13 +565,30 @@ impl RateDetector {
         let previous = (self.window >> 16) as u16;
 
         // 5.3.1: two identical sixteens with the synchronising bits in place.
+        //
+        // Two is the document's minimum and, on a real line, one short of
+        // enough -- see [`RateDetector::agreement`], which counts how many
+        // times the reading has held. That count is not acted on. Raising the
+        // bar was tried and made things worse: over a virtual cable returning
+        // the transmitter at unity, a correct reading never happens three
+        // times running, so a modem that waits for a third never connects at
+        // all. The reading needs a better receiver under it, not a stricter
+        // test above it.
         // Checked at every position rather than only until a boundary is first
         // found, because a boundary found in noise will never match the real
         // thing, and a detector that could not change its mind stayed wrong
         // for the rest of the call.
+        //
+        // A repeating sixteen-bit signal matches its own predecessor at every
+        // one of the sixteen phases, so what picks the phase out is the
+        // synchronising bits -- and this therefore fires once per sequence
+        // rather than once per bit.
         if group == previous && is_rate_signal(group) {
             self.locked = true;
             self.since = 0;
+            self.sequences += 1;
+            self.agreed = if self.candidate == Some(group) { self.agreed + 1 } else { 1 };
+            self.candidate = Some(group);
             return Some(group);
         }
 
@@ -554,7 +613,23 @@ impl RateDetector {
         None
     }
 
+    /// The sequence being counted, how many times running it has read the
+    /// same, and how many have been seen at all.
+    ///
+    /// A measurement, not a decision. It is here because the difference
+    /// between a rate signal that was read and one that was guessed at is
+    /// exactly this number, and off one recording it was the difference
+    /// between 14 400 and 4800: at the locked phase the true sequence ran 53
+    /// consecutive in one exchange and 222 in another, while every wrong
+    /// reading ran once -- except the one that was acted on, which ran twice.
+    pub fn agreement(&self) -> (Option<u16>, u32, u32) {
+        (self.candidate, self.agreed, self.sequences)
+    }
+
     pub fn reset(&mut self) {
+        self.candidate = None;
+        self.agreed = 0;
+        self.sequences = 0;
         self.window = 0;
         self.filled = 0;
         self.locked = false;
@@ -742,6 +817,17 @@ pub struct Startup {
     retrains: u32,
     /// Set by [`Startup::ask_for_retrain`] and taken by the next step.
     asked_to_retrain: bool,
+    /// Every 16-bit sequence the far end has sent since anyone asked, without
+    /// the repeats -- a rate signal is sent over and over, and one line per
+    /// symbol is not a log.
+    ///
+    /// A diagnostic and nothing else. What rate a call settled on is decided
+    /// entirely by these, and off a recording they are the difference between
+    /// knowing why it went to 4800 and guessing.
+    seen: Vec<u16>,
+    /// The last one, kept separately so that draining `seen` does not make
+    /// every sequence look new again.
+    last_seen: Option<u16>,
     /// Amplitude of the incoming carrier while it was up, for spotting a drop.
     carrier_peak: f64,
     /// Whether a training segment has been sent yet. Only the first is a
@@ -803,6 +889,8 @@ impl Startup {
             connected_once: false,
             retrains: 0,
             asked_to_retrain: false,
+            seen: Vec::new(),
+            last_seen: None,
             carrier_peak: 0.0,
             trained: false,
             seen_a_sequence: false,
@@ -1000,6 +1088,12 @@ impl Startup {
         self.retrains
     }
 
+    /// The 16-bit sequences the far end has sent, in order, without the
+    /// repeats.
+    pub fn take_sequences(&mut self) -> Vec<u16> {
+        std::mem::take(&mut self.seen)
+    }
+
     /// What the line is carrying at the moment.
     pub fn heard(&self) -> Heard {
         self.listener.classify()
@@ -1050,6 +1144,10 @@ impl Startup {
                     continue;
                 }
                 if let Some(s) = self.rates.feed(bit) {
+                    if self.last_seen != Some(s) {
+                        self.last_seen = Some(s);
+                        self.seen.push(s);
+                    }
                     self.pending_sequence = Some(s);
                 }
             }
@@ -1896,6 +1994,11 @@ impl Modem {
     /// How many times this call has gone back through the start-up.
     pub fn retrains(&self) -> u32 {
         self.startup.retrains()
+    }
+
+    /// The rate sequences the far end has sent.
+    pub fn take_sequences(&mut self) -> Vec<u16> {
+        self.startup.take_sequences()
     }
 
     /// The round trip the start-up measured, in symbol intervals.

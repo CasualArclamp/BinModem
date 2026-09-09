@@ -30,18 +30,30 @@ fn what_this_end_made_of_it() {
     let wav = line::wav::read(&path).expect("could not read the capture");
     assert_eq!(wav.sample_rate as f64, FS, "built for 16 kHz");
 
-    let arrived = wav.channel(0);
+    // Channel 0 is what came off the line. Channel 1 is what this modem put
+    // on it, which is worth replaying too: it is clean, it has no echo in it,
+    // and reading it back says what this end actually asked for rather than
+    // what it meant to. It has to be read as the far end would, which means
+    // the other role -- 4.1 gives each direction its own scrambler.
+    let channel: usize = std::env::var("V32_CHANNEL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+    let role = if channel == 0 { Role::Calling } else { Role::Answering };
+    let arrived = wav.channel(channel);
     let offer = match offer.as_deref() {
         Some("4800") => rate_signal(Rates { at_4800: true, ..Rates::default() }),
         Some("9600") => rate_signal(Rates { at_9600: true, ..Rates::default() }),
+        Some("all") => rate_signal(Rates::between(4800, 14_400)),
         _ => rate_signal(Rates { at_4800: true, at_9600: true, ..Rates::default() }),
     };
     println!(
-        "\n{path}: {:.1} s, replaying channel 0, offering {offer:016b}\n",
-        wav.duration_secs()
+        "\n{path}: {:.1} s, channel {channel} as the {} end, offering {offer:016b}\n",
+        wav.duration_secs(),
+        if channel == 0 { "calling" } else { "answering" }
     );
 
-    let mut modem = Modem::new(Role::Calling, offer, FS);
+    let mut modem = Modem::new(role, offer, FS);
     let mut phase = "";
     let mut status = Status::Negotiating;
     let mut carrier = false;
@@ -63,6 +75,12 @@ fn what_this_end_made_of_it() {
         if modem.carrier() != carrier {
             carrier = modem.carrier();
             println!("{at:8.3}s  carrier {carrier}");
+        }
+        for seq in modem.take_sequences() {
+            println!(
+                "{at:8.3}s  heard {}",
+                datapump::v32::startup::describe_sequence(seq)
+            );
         }
         if matches!(status, Status::Connected(_)) {
             bytes.extend(modem.take_bytes());

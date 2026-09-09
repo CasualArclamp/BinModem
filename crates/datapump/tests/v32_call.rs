@@ -735,6 +735,7 @@ fn a_retrain_is_followed_by_the_far_end_and_the_call_carries_on() {
 
     let mut connected_at = f64::NAN;
     let mut asked = false;
+    let mut crossed = false;
     let mut retrained_at = f64::NAN;
     let mut back_at = f64::NAN;
     let mut sent_after = false;
@@ -754,10 +755,19 @@ fn a_retrain_is_followed_by_the_far_end_and_the_call_carries_on() {
             connected_at = now;
             calling.send(before);
         }
-        // A second of settled call, then one end decides the line will not do.
-        if up && !asked && connected_at.is_finite() && now > connected_at + 1.0 {
-            asked = true;
-            answering.ask_for_retrain();
+        // Only once what was sent has actually crossed: a retrain throws away
+        // whatever the line was carrying, so asking for one on a timer would
+        // be testing how fast the line is rather than whether the retrain
+        // works.
+        // Looked for now and then rather than every sample: the search is
+        // over every bit offset of everything received so far, and doing that
+        // sixteen thousand times a second of line is slower than the line.
+        if up && !asked && i % (FS as usize / 20) == 0 {
+            crossed = crossed || contains_at_any_bit_offset(&at_host, before);
+            if crossed {
+                asked = true;
+                answering.ask_for_retrain();
+            }
         }
         if asked {
             saw_retraining.0 |= calling.status() == Status::Retraining;

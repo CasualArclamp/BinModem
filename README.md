@@ -86,11 +86,22 @@ OS-specific code — but only built and run on Windows so far.
   the peak to check — leaves the radial part untouched. So it is the carrier
   loop, not the line and not the equaliser. Two calls now say the same thing.
   The rates above it are more crowded still and will want the same fix.
-- **14 400 has not been tried on a real line.** Two of these on one virtual
-  cable reach it and carry a board's greeting over it, but the far end that
-  was measured against has only ever been asked for 9600 — until now, because
-  its rate signal was being read by the wrong table. It had been offering
-  14 400 all along.
+- **14 400 works on one virtual cable**, both ends, with V.42 and V.42bis on
+  top and 0.76 of everything each modem says coming back a sixth of a second
+  later. Over a VoIP trunk to a real modem it has not been reached.
+- **The rate signal gets misread, and it costs the rate.** One recorded call
+  to a real V.32bis modem: the far end offered 4800 through 14 400 and sent
+  that same sixteen bits 201 times; this end read one corrupted copy of it,
+  answered with an E calling for 4800, and connected there. 5.3.1 asks for two
+  consecutive identical sequences and two is what a systematic misread
+  produces — counted at the locked phase, the true sequence ran 53 consecutive
+  and every wrong one ran once, except the one that was acted on, which ran
+  twice. Waiting for a third was tried and is worse: on a line returning the
+  transmitter at unity a correct reading never happens three times running, so
+  a modem that holds out never connects. The reading wants a better receiver
+  under it, not a stricter test above it.
+  [tools/read_rate_signals.py](tools/read_rate_signals.py) reads them off a
+  recording.
 - **Two of these on one virtual cable** fail in one direction only. The
   answering end reads a clean thirty-two point constellation and brings up
   V.42 and V.42bis; the originating end sees noise. Measured off a recording,
