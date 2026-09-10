@@ -33,6 +33,7 @@
 
 mod answer;
 mod app;
+mod faxwin;
 mod console;
 mod engine;
 mod live;

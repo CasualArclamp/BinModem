@@ -292,6 +292,9 @@ pub struct ScopeApp {
     ping_repeatedly: bool,
     /// And whether it has asked for web traffic to be carried.
     carry_web: bool,
+    /// The fax window: a picture, the page it becomes, and the machine at
+    /// the far end of the call.
+    fax: crate::faxwin::Fax,
     /// The file transfer window, and the two paths it works with.
     transfer_open: bool,
     send_path: String,
@@ -373,6 +376,7 @@ impl ScopeApp {
             network_open: false,
             ping_repeatedly: false,
             carry_web: false,
+            fax: crate::faxwin::Fax::new(),
             transfer_open: false,
             line_was_open: false,
             send_path: String::new(),
@@ -970,6 +974,15 @@ impl ScopeApp {
                 self.transfer_open = !self.transfer_open;
             }
             if ui
+                .selectable_label(self.fax.open, "Fax")
+                .on_hover_text(
+                    "T.30: send a picture as a fax, and see what the machine                      answering can do",
+                )
+                .clicked()
+            {
+                self.fax.open = !self.fax.open;
+            }
+            if ui
                 .selectable_label(self.protection_open, "Error control")
                 .on_hover_text(
                     "AT+ES and AT+DS: V.42 error control and V.42bis compression, \
@@ -1050,6 +1063,17 @@ impl ScopeApp {
         self.advanced_protection(ui, &session);
         self.transfer_window(ui, &session);
         self.network_window(ui, &session);
+        let online = self.frame.state == telemetry::CallState::Connected;
+        if self.fax.show(ui, online) {
+            // The transaction itself is the next piece of work. Until it
+            // exists this says so rather than pretending, because a button
+            // that looks like it did something is worse than one that does
+            // not.
+            self.fax.trouble = Some(
+                "The page is ready. Sending it needs the V.27ter data pump,                  which is not written yet."
+                    .to_owned(),
+            );
+        }
     }
 
     /// PPP over the call, and a ping over that.
