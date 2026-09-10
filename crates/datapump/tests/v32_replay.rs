@@ -125,7 +125,13 @@ fn what_this_end_made_of_it() {
     // at that moment -- which is the number 7's retrain decides on, so it has
     // to be recorded as the call goes and not read off the wreckage
     // afterwards.
-    let mut lock: Vec<(f64, (f64, f64), f64)> = Vec::new();
+    // Time, where the symbol landed, what the equaliser was left with, and
+    // how far apart the points were at that moment. The last of those has to
+    // travel with the sample: read off the modem after the loop it is the
+    // spacing of whatever the call ended on, which turned a working receiver
+    // at 14 400 into a tenth of a gap when it was two thirds of one, and sent
+    // a whole afternoon looking in the wrong place.
+    let mut lock: Vec<(f64, (f64, f64), f64, f64)> = Vec::new();
 
     for (i, &x) in arrived.iter().enumerate() {
         let _ = modem.step(f64::from(x));
@@ -159,7 +165,12 @@ fn what_this_end_made_of_it() {
             );
             if i != 0.0 || q != 0.0 {
                 points.push((i * i + q * q).sqrt());
-                lock.push((at, (i, q), modem.residual_error()));
+                lock.push((
+                    at,
+                    (i, q),
+                    modem.residual_error(),
+                    spacing(status, modem.coding()),
+                ));
             }
         }
     }
@@ -196,7 +207,8 @@ fn what_this_end_made_of_it() {
         let (mut radial, mut tangential) = (0.0f64, 0.0f64);
         let (mut dot, mut cross) = (0.0f64, 0.0f64);
         let (mut residual, mut worst) = (0.0f64, 0.0f64);
-        for &(at, (i, q), left) in &lock {
+        let mut gap = 1.0f64;
+        for &(at, (i, q), left, here) in &lock {
             if (at * 10.0).floor() != second {
                 if n > 0 {
                     let miss = sum / n as f64;
@@ -212,7 +224,6 @@ fn what_this_end_made_of_it() {
                     // fraction of that distance it means the same thing at
                     // every rate, and half of it is where a decision is as
                     // likely to be wrong as right.
-                    let gap = spacing(status, modem.coding());
                     let residual = residual / n as f64;
                     println!(
                         "  {:7.1}s  miss {miss:6.3} = {:5.2} of the gap  SNR {snr:5.1} dB  \
@@ -235,6 +246,7 @@ fn what_this_end_made_of_it() {
             }
             residual += left;
             worst = worst.max(left);
+            gap = here;
             // Whichever constellation the call settled on. Reading a
             // hundred and twenty-eight points against the four of 4800 puts
             // every symbol most of a quadrant from its answer and reports a
@@ -273,7 +285,7 @@ fn what_this_end_made_of_it() {
         let (mut good, mut total) = (0usize, 0usize);
         let (mut n, mut sq) = (0usize, 0.0f64);
         let mut window = (lock[0].0 * 10.0).floor();
-        for &(at, p, _) in &lock {
+        for &(at, p, _, _) in &lock {
             if (at * 10.0).floor() != window {
                 if n > 0 {
                     let snr = 10.0 * (10.0 / (sq / n as f64).max(1e-12)).log10();
@@ -304,7 +316,7 @@ fn what_this_end_made_of_it() {
     if lock.len() > 1000 {
         let decided: Vec<(f64, f64)> = lock
             .iter()
-            .map(|&(_, p, _)| AT_9600.point(AT_9600.nearest(p)))
+            .map(|&(_, p, _, _)| AT_9600.point(AT_9600.nearest(p)))
             .collect();
         println!("
   error against the symbol at each lag (0 is itself):");
@@ -336,7 +348,7 @@ fn what_this_end_made_of_it() {
   ideal radius   symbols   measured   ratio");
         let mut rings: std::collections::BTreeMap<i64, (usize, f64)> =
             std::collections::BTreeMap::new();
-        for &(_, p, _) in &lock {
+        for &(_, p, _, _) in &lock {
             let (x, y) = AT_9600.point(AT_9600.nearest(p));
             let ideal = (x * x + y * y).sqrt();
             let got = (p.0 * p.0 + p.1 * p.1).sqrt();
