@@ -1408,3 +1408,112 @@ fn a_fax_call_carries_the_identification_it_was_given() {
         "the identification did not reach the line"
     );
 }
+
+/// A page with something on it that survives a round trip recognisably.
+fn a_test_page(lines: usize) -> fax::page::Page {
+    let width = fax::page::WIDTH;
+    fax::page::Page {
+        lines: (0..lines)
+            .map(|y| {
+                (0..width)
+                    .map(|x| (x / 60 + y / 6).is_multiple_of(2) && x % 60 < 44)
+                    .collect()
+            })
+            .collect(),
+        resolution: fax::page::Resolution::Standard,
+    }
+}
+
+#[test]
+fn one_modem_faxes_a_page_to_another_over_at_commands() {
+    // The whole of what the two buttons in the window do, and nothing else:
+    // one modem is told it is a fax and dialled, the other is told it is a
+    // fax and answered, and a page has to cross between them.
+    let mut caller = Modem::new(FS);
+    caller.fax_identification = "61399990000".to_owned();
+    let page = a_test_page(10);
+    caller.fax_page = Some(page.clone());
+    Pair::type_at(&mut caller, "AT+FCLASS=1");
+    Pair::type_at(&mut caller, "ATD61388880000");
+
+    let mut answerer = Modem::new(FS);
+    answerer.fax_identification = "61388880000".to_owned();
+    Pair::type_at(&mut answerer, "AT+FCLASS=1");
+    Pair::type_at(&mut answerer, "ATA");
+
+    let (mut to_caller, mut to_answerer) = (0.0, 0.0);
+    let mut arrived = None;
+    for _ in 0..(FS * 40.0) as usize {
+        let from_caller = caller.step(to_caller);
+        let from_answerer = answerer.step(to_answerer);
+        to_caller = from_answerer;
+        to_answerer = from_caller;
+        let _ = caller.take_dte();
+        let _ = answerer.take_dte();
+        if arrived.is_none() {
+            arrived = answerer.take_received_page();
+        }
+        let both_done = caller
+            .fax_call()
+            .is_some_and(|c| c.phase().is_over())
+            && answerer.fax_call().is_some_and(|c| c.phase().is_over());
+        if both_done && arrived.is_some() {
+            break;
+        }
+    }
+
+    let got = arrived.expect("no page reached the answering end");
+    assert_eq!(got.lines.len(), page.lines.len(), "wrong number of lines");
+    assert_eq!(got.lines, page.lines, "the page came out different");
+
+    // And each end knows who the other said it was.
+    assert_eq!(
+        caller.fax_call().expect("a call").identity(),
+        "61388880000",
+        "the caller never read the CSI"
+    );
+    assert_eq!(
+        answerer.fax_call().expect("a call").identity(),
+        "61399990000",
+        "the answerer never read the TSI"
+    );
+}
+
+#[test]
+fn a_fax_that_answers_does_not_go_looking_for_v8() {
+    // The 2100 Hz an answering fax sends has no phase reversals in it, and a
+    // V.8 negotiation must never be started on a fax call. This is the same
+    // rule the dialling side already follows, from the other end.
+    let mut answerer = Modem::new(FS);
+    Pair::type_at(&mut answerer, "AT+FCLASS=1");
+    Pair::type_at(&mut answerer, "ATA");
+    let seconds = 2.0;
+    let mut cos_sum = 0.0f64;
+    let mut sin_sum = 0.0f64;
+    let mut power = 0.0f64;
+    for i in 0..(FS * seconds) as usize {
+        let out = answerer.step(0.0);
+        let turn = std::f64::consts::TAU * 2100.0 * i as f64 / FS;
+        cos_sum += out * turn.cos();
+        sin_sum += out * turn.sin();
+        power += out * out;
+    }
+    assert!(
+        answerer.fax_call().is_some(),
+        "answering in fax class did not make a fax call"
+    );
+    assert_ne!(answerer.standard(), "V.8", "a fax call started a negotiation");
+
+    // A tone that holds one phase for two whole seconds correlates with
+    // itself; one that turns over every 450 ms, as V.8 asks, does not. That
+    // difference is the only thing telling an answering fax from an answering
+    // modem, and it is why a fax call must never reach the negotiation.
+    let n = FS * seconds;
+    let magnitude = (cos_sum * cos_sum + sin_sum * sin_sum).sqrt() / n;
+    let rms = (power / n).sqrt();
+    assert!(rms > 0.1, "no tone went out at all: {rms:.4}");
+    assert!(
+        magnitude > 0.45 * rms,
+        "the 2100 Hz tone was not continuous: {magnitude:.4} of {rms:.4}"
+    );
+}

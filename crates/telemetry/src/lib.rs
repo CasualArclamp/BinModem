@@ -154,6 +154,15 @@ pub struct Frame {
     pub fax_phase: Option<&'static str>,
     pub fax_identity: String,
     pub fax_capabilities: Option<Vec<u8>>,
+    /// How far through the page, the rate it is going at, and how many lines
+    /// have arrived. None for the fraction until there is a page moving.
+    pub fax_progress: Option<f64>,
+    pub fax_rate: u32,
+    pub fax_lines: usize,
+    /// Whether this end is the one sending.
+    pub fax_sending: bool,
+    /// What went wrong with the fax, if anything did.
+    pub fax_trouble: Option<String>,
     /// Where the reflection was found, in samples, and how strong it was.
     pub echo_at: Option<(usize, f64)>,
 }
@@ -190,6 +199,11 @@ impl Frame {
             fax_phase: None,
             fax_identity: String::new(),
             fax_capabilities: None,
+            fax_progress: None,
+            fax_rate: 0,
+            fax_lines: 0,
+            fax_sending: false,
+            fax_trouble: None,
             echo_at: None,
             tx_bytes: 0,
         }

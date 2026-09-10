@@ -209,6 +209,13 @@ pub struct Session {
     /// lives here beside the drive and not in a dial string. T.30 allows it
     /// to be blank and plenty of machines send nothing at all.
     fax_identification: Mutex<String>,
+    /// A page the window has loaded, waiting for the line thread to take it.
+    ///
+    /// Taken rather than read, and a page is megabytes of booleans, so it
+    /// crosses the two threads exactly once.
+    fax_page: Mutex<Option<fax::page::Page>>,
+    /// A page that arrived, waiting for the window to take it.
+    fax_received: Mutex<Option<fax::page::Page>>,
 }
 
 impl Default for Session {
@@ -223,6 +230,8 @@ impl Default for Session {
             network_request: Mutex::default(),
             network: Mutex::default(),
             fax_identification: Mutex::default(),
+            fax_page: Mutex::default(),
+            fax_received: Mutex::default(),
             recording: AtomicBool::new(false),
         }
     }
@@ -248,6 +257,28 @@ impl Session {
         if let Ok(mut v) = self.fax_identification.lock() {
             who.clone_into(&mut v);
         }
+    }
+
+    /// Leave a page for the next fax call that dials.
+    pub fn set_fax_page(&self, page: Option<fax::page::Page>) {
+        if let Ok(mut v) = self.fax_page.lock() {
+            *v = page;
+        }
+    }
+
+    fn take_fax_page(&self) -> Option<fax::page::Page> {
+        self.fax_page.lock().ok().and_then(|mut v| v.take())
+    }
+
+    fn set_fax_received(&self, page: fax::page::Page) {
+        if let Ok(mut v) = self.fax_received.lock() {
+            *v = Some(page);
+        }
+    }
+
+    /// A page that arrived, once and only once.
+    pub fn take_fax_received(&self) -> Option<fax::page::Page> {
+        self.fax_received.lock().ok().and_then(|mut v| v.take())
     }
 
     /// How hard the line is being driven.
@@ -683,6 +714,12 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         // thread, and a call can be placed by typing at the terminal instead
         // of by pressing the button.
         modem.fax_identification = session.fax_identification();
+        if let Some(page) = session.take_fax_page() {
+            modem.fax_page = Some(page);
+        }
+        if let Some(page) = modem.take_received_page() {
+            session.set_fax_received(page);
+        }
 
         let typed = session.take_typed();
         if !typed.is_empty() {
@@ -954,6 +991,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     f.fax_phase = Some(call.phase().name());
                     f.fax_identity = call.identity().to_owned();
                     f.fax_capabilities = call.capability_field().map(<[u8]>::to_vec);
+                    f.fax_progress = call.progress();
+                    f.fax_rate = call.rate();
+                    f.fax_lines = call.lines_received();
+                    f.fax_sending = call.role() == fax::call::Role::Caller;
+                    f.fax_trouble = call.trouble().map(str::to_owned);
                 }
                 f.echo_at = modem.reflection().map(|r| (r.delay, r.strength));
                 f.tones = modem.states();

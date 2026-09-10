@@ -97,9 +97,22 @@ impl FaxCall {
         self.call.progress()
     }
 
+    /// Lines of a page that have arrived.
+    pub fn lines_received(&self) -> usize {
+        self.call.lines_received()
+    }
+
     /// The page that arrived, once one has.
     pub fn received(&self) -> Option<&Page> {
         self.call.received.as_ref()
+    }
+
+    /// The page that arrived, handed over and forgotten.
+    ///
+    /// A page is a couple of megabytes of booleans, so it is moved rather
+    /// than copied and moved exactly once. Whoever takes it owns it.
+    pub fn take_received(&mut self) -> Option<Page> {
+        self.call.received.take()
     }
 
     /// Why the call went badly, if it did.

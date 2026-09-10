@@ -1064,19 +1064,21 @@ impl ScopeApp {
         self.advanced_protection(ui, &session);
         self.transfer_window(ui, &session);
         self.network_window(ui, &session);
-        self.fax.observe(
-            self.frame.fax_phase,
-            &self.frame.fax_identity,
-            self.frame.fax_capabilities.as_deref(),
-        );
+        self.fax.observe(&self.frame);
+        if let Some(page) = session.take_fax_received() {
+            self.fax.arrived(page);
+            self.fax.open = true;
+        }
         let on_hook = self.frame.state == telemetry::CallState::Idle;
-        if let Some(number) = self.fax.show(ui, on_hook) {
+        if let Some(start) = self.fax.show(ui, on_hook) {
             self.fax.trouble = None;
-            // Who this end says it is, before the call rather than in it:
-            // the identification goes out inside the first frame this modem
-            // sends, which is well before the window is asked anything again.
+            // Who this end says it is, and what it is sending, before the
+            // call rather than in it: both go out inside the first frames
+            // this modem sends, which is well before the window is asked
+            // anything again.
             session.set_fax_identification(self.fax.identification.trim());
-            session.type_bytes(crate::faxwin::Fax::commands(&number).as_bytes());
+            session.set_fax_page(self.fax.page().cloned());
+            session.type_bytes(crate::faxwin::Fax::commands(&start).as_bytes());
         }
     }
 

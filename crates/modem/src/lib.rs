@@ -1462,6 +1462,14 @@ impl Modem {
         self.fax.as_ref().or(self.fax_result.as_ref())
     }
 
+    /// A page a fax call received, handed over once and then gone.
+    pub fn take_received_page(&mut self) -> Option<fax::page::Page> {
+        self.fax
+            .as_mut()
+            .and_then(FaxCall::take_received)
+            .or_else(|| self.fax_result.as_mut().and_then(FaxCall::take_received))
+    }
+
     /// Carry the negotiation one sample further, and build the pump when it
     /// has decided.
     fn negotiate(&mut self, line: f64) -> f64 {
