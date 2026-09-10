@@ -143,16 +143,21 @@ pub const CED_SECONDS: f64 = 3.0;
 /// TCF: "A series of 0 for 1.5 s +/- 10%" (6.2.6).
 pub const TCF_SECONDS: f64 = 1.5;
 
-/// How much of a training check has to be zeros for the rate to be accepted.
+/// How many of a training check's bits have to be zeros for the rate to be
+/// accepted, and how many in a row mark where it starts.
 ///
 /// T.30 does not give a number. It says only that the check exists "to verify
 /// training and to give a first indication of the acceptability of the
-/// channel", and leaves the judgement to the receiver. Half the expected
-/// length as one unbroken run is a deliberate compromise: the front of what
-/// arrives is the tail of a training sequence through a descrambler and is
-/// never zeros, and a line good enough to carry a page will hand back the
-/// rest of it clean.
-const TCF_MUST_BE_CLEAN: f64 = 0.5;
+/// channel", and leaves the judgement to the receiver.
+///
+/// A fraction rather than one unbroken run, because one unbroken run makes a
+/// single bit error in a second and a half of line reject a rate that would
+/// have carried the page perfectly well. What is in front of the zeros is the
+/// tail of a training sequence through a descrambler, which is never zeros
+/// and has to be skipped: thirty-two zeros in a row is where the check
+/// starts, and nothing but the check produces thirty-two.
+const TCF_ZEROS_WANTED: f64 = 0.95;
+const TCF_STARTS_AFTER: usize = 32;
 
 /// The rates this modem can carry a page at, fastest first.
 ///
@@ -220,6 +225,10 @@ pub struct Call {
     /// Whether the last thing judged was good, which decides what follows the
     /// frame now going out.
     accepted: bool,
+    /// Attempts made at the command in hand. 5.4.2 allows three of anything
+    /// before the call is a lost cause, and a first attempt that goes
+    /// unanswered is the ordinary way a fax call starts on a bad line.
+    attempts: u8,
     /// Why the call ended, when it ended badly.
     pub trouble: Option<String>,
 }
@@ -271,6 +280,7 @@ impl Call {
             decoder: t4::Decoder::new(),
             received: None,
             accepted: false,
+            attempts: 0,
             trouble: None,
         }
     }
@@ -393,10 +403,22 @@ impl Call {
     }
 
     /// Bits recovered from the high-speed carrier.
+    ///
+    /// Anything arriving puts the clock back to the start. A page takes a
+    /// minute at 4800 and four at 2400, and the six seconds T2 allows for a
+    /// command is nothing like long enough to wait for one: what the timer
+    /// has to mean here is how long the line may go quiet, not how long the
+    /// page may take.
     pub fn fast_bits(&mut self, bits: &[bool]) {
         match self.phase {
-            Phase::CheckingTraining => self.fast_in.extend_from_slice(bits),
-            Phase::Receiving => self.decoder.feed_bits(bits),
+            Phase::CheckingTraining => {
+                self.fast_in.extend_from_slice(bits);
+                self.timer = T2_SECONDS;
+            }
+            Phase::Receiving => {
+                self.decoder.feed_bits(bits);
+                self.timer = T2_SECONDS;
+            }
             _ => {}
         }
     }
@@ -534,6 +556,19 @@ impl Call {
         self.phase = Phase::Failed;
     }
 
+    /// Give up, but tell the far end first.
+    ///
+    /// 5.3.7 has a disconnect for exactly this. A machine that simply stops
+    /// answering leaves the far end holding the line for its whole T1 and
+    /// then reporting a failure to whoever is standing at it, which is a
+    /// worse outcome than the one being reported.
+    fn bow_out(&mut self, why: &str) {
+        if self.trouble.is_none() {
+            self.trouble = Some(why.to_owned());
+        }
+        self.pause_then(Phase::Ending);
+    }
+
     // ---- what the far end said --------------------------------------------
 
     fn received(&mut self, message: Message) {
@@ -559,8 +594,11 @@ impl Call {
                 self.scan_line_field = t30::field_of(&message.fif, 21, 23);
                 self.capabilities = Some(caps);
                 self.capability_field = Some(message.fif.clone());
-                if self.role == Role::Caller {
-                    self.choose_rate();
+                // Only if there is a rate to command. A far end offering
+                // nothing this end can raise has already been told so, and
+                // sending it a DCS naming a modulation neither of us agreed
+                // on would be worse than saying nothing.
+                if self.role == Role::Caller && self.choose_rate() {
                     self.pause_then(Phase::Commanding);
                 }
             }
@@ -624,9 +662,21 @@ impl Call {
         self.heard.push(message);
     }
 
+    /// How many goes at one command before it is a lost cause (5.4.2).
+    const ATTEMPTS: u8 = 3;
+
     fn timed_out(&mut self) {
         match self.phase {
-            Phase::AwaitingConfirm => self.step_down(),
+            Phase::AwaitingConfirm => {
+                // The same rate again before a slower one: a command that was
+                // not heard is not a line that cannot carry the rate.
+                if self.attempts < Self::ATTEMPTS {
+                    self.pause_then(Phase::Commanding);
+                } else {
+                    self.attempts = 0;
+                    self.step_down();
+                }
+            }
             Phase::AwaitingCommand => {
                 if self.elapsed > T1_SECONDS {
                     self.give_up("the far end never said what it wanted");
@@ -638,11 +688,14 @@ impl Call {
                 }
             }
             Phase::AwaitingReceipt => {
-                self.trouble = Some("no receipt for the page".to_owned());
-                self.pause_then(Phase::Ending);
+                if self.attempts < Self::ATTEMPTS {
+                    self.pause_then(Phase::EndingPage);
+                } else {
+                    self.bow_out("no receipt for the page");
+                }
             }
             Phase::AwaitingPostMessage => {
-                self.give_up("the page stopped and nothing said why");
+                self.bow_out("the page stopped and nothing said why");
             }
             Phase::AwaitingDisconnect => self.phase = Phase::Done,
             Phase::CheckingTraining => {
@@ -654,7 +707,7 @@ impl Call {
             }
             Phase::Receiving => {
                 if self.decoder.lines().is_empty() {
-                    self.give_up("the page never arrived");
+                    self.bow_out("the page never arrived");
                 } else {
                     self.page_ended();
                 }
@@ -666,23 +719,26 @@ impl Call {
     // ---- the caller's side ------------------------------------------------
 
     /// Pick the fastest rate both ends have (5.3.6.2.2).
-    fn choose_rate(&mut self) {
+    fn choose_rate(&mut self) -> bool {
         let Some(caps) = self.capabilities.as_ref() else {
-            return;
+            return false;
         };
         match caps.best_shared(&OUR_MODULATIONS) {
             Some((modulation, rate)) => {
                 self.modulation = modulation;
                 self.rate = rate;
+                self.attempts = 0;
                 self.fallback = modulation
                     .rates()
                     .iter()
                     .copied()
-                    .filter(|r| *r < rate)
+                    .filter(|r| *r < rate && *r <= caps.ceiling(modulation))
                     .collect();
+                true
             }
             None => {
-                self.give_up("nothing in common with the far end");
+                self.bow_out("nothing in common with the far end");
+                false
             }
         }
     }
@@ -693,13 +749,15 @@ impl Call {
             Some(rate) => {
                 self.fallback.remove(0);
                 self.rate = rate;
+                self.attempts = 0;
                 self.pause_then(Phase::Commanding);
             }
-            None => self.give_up("the line would not carry a page at any rate"),
+            None => self.bow_out("the line would not carry a page at any rate"),
         }
     }
 
     fn send_command(&mut self) {
+        self.attempts += 1;
         let tsi = Message::new(Frame::Tsi, true)
             .and_more()
             .with_fif(&t30::identification_field(&self.identification));
@@ -736,6 +794,7 @@ impl Call {
     }
 
     fn send_end_of_page(&mut self) {
+        self.attempts += 1;
         // One page and no more, so end of procedure rather than multi-page
         // signal (6.2.9).
         self.sender
@@ -782,15 +841,33 @@ impl Call {
         if self.phase != Phase::CheckingTraining {
             return;
         }
-        let want = (TCF_SECONDS * f64::from(self.rate) * TCF_MUST_BE_CLEAN) as usize;
-        let mut longest = 0usize;
-        let mut run = 0usize;
-        for &bit in &self.fast_in {
-            run = if bit { 0 } else { run + 1 };
-            longest = longest.max(run);
-        }
-        self.accepted = longest >= want;
+        self.accepted = self.training_check_passes();
         self.pause_then(Phase::Confirming);
+    }
+
+    fn training_check_passes(&self) -> bool {
+        // Where the zeros begin, which is where the training stops.
+        let mut run = 0usize;
+        let mut start = None;
+        for (i, &bit) in self.fast_in.iter().enumerate() {
+            run = if bit { 0 } else { run + 1 };
+            if run == TCF_STARTS_AFTER {
+                start = Some(i + 1 - TCF_STARTS_AFTER);
+                break;
+            }
+        }
+        let Some(start) = start else { return false };
+        // A second and a half of it from there, or whatever arrived.
+        let want = (TCF_SECONDS * f64::from(self.rate)) as usize;
+        let end = (start + want).min(self.fast_in.len());
+        let window = &self.fast_in[start..end];
+        // Half the expected length has to be there at all: a burst that was
+        // cut short is not a channel that will carry a page.
+        if window.len() * 2 < want {
+            return false;
+        }
+        let zeros = window.iter().filter(|b| !**b).count();
+        zeros as f64 >= TCF_ZEROS_WANTED * window.len() as f64
     }
 
     fn page_ended(&mut self) {
@@ -890,6 +967,140 @@ mod tests {
             }
         }
         call
+    }
+
+
+    /// A training check as it really arrives: training first, then zeros,
+    /// with `errors` of them flipped, then the tail of the turn-off.
+    fn a_training_check(rate: u32, errors: usize) -> Vec<bool> {
+        let mut bits: Vec<bool> = (0..3400)
+            .map(|i: u32| !i.wrapping_mul(2_654_435_761).is_multiple_of(3))
+            .collect();
+        let zeros = (TCF_SECONDS * f64::from(rate)) as usize;
+        let start = bits.len();
+        bits.extend(std::iter::repeat_n(false, zeros));
+        for k in 0..errors {
+            // Spread them out, so no two land next to each other.
+            bits[start + (k + 1) * zeros / (errors + 1)] = true;
+        }
+        bits.extend(std::iter::repeat_n(true, 30));
+        bits
+    }
+
+    fn judge(rate: u32, bits: Vec<bool>) -> bool {
+        let mut call = Call::answer(FS, "1");
+        call.rate = rate;
+        call.fast_in = bits;
+        call.training_check_passes()
+    }
+
+    #[test]
+    fn a_clean_training_check_is_accepted() {
+        assert!(judge(4800, a_training_check(4800, 0)));
+        assert!(judge(2400, a_training_check(2400, 0)));
+    }
+
+    #[test]
+    fn a_training_check_with_a_few_errors_in_it_is_still_good_enough() {
+        // One bit in a second and a half is a line that will carry a page.
+        // Requiring one unbroken run of zeros threw the rate away for it.
+        assert!(judge(4800, a_training_check(4800, 1)));
+        assert!(judge(4800, a_training_check(4800, 20)));
+    }
+
+    #[test]
+    fn a_training_check_that_is_mostly_wrong_is_refused() {
+        let mut bits = a_training_check(4800, 0);
+        let zeros = (TCF_SECONDS * 4800.0) as usize;
+        let from = bits.len() - zeros;
+        for (i, bit) in bits[from..].iter_mut().enumerate() {
+            *bit = !i.is_multiple_of(5);
+        }
+        assert!(!judge(4800, bits));
+    }
+
+    #[test]
+    fn nothing_at_all_on_the_fast_carrier_is_refused() {
+        assert!(!judge(4800, Vec::new()));
+        assert!(!judge(4800, vec![true; 5000]), "ones are not a check");
+    }
+
+    #[test]
+    fn a_check_that_was_cut_short_is_refused() {
+        let mut bits = a_training_check(4800, 0);
+        bits.truncate(3400 + 2000);
+        assert!(!judge(4800, bits), "a third of a check is not a check");
+    }
+
+    #[test]
+    fn a_page_may_take_longer_than_a_command_timeout() {
+        // A page is a minute at 4800 and four at 2400. T2 is six seconds, and
+        // it has to mean how long the line may go quiet rather than how long
+        // the page may take.
+        let mut call = Call::answer(FS, "1");
+        call.enter(Phase::Receiving);
+        call.set_fast_carrier(true);
+        let long = T2_SECONDS * 3.0;
+        for i in 0..(FS * long) as usize {
+            if i.is_multiple_of(100) {
+                call.fast_bits(&[false]);
+            }
+            call.tick(true);
+        }
+        assert_eq!(
+            call.phase(),
+            Phase::Receiving,
+            "it gave up on a page that was still arriving"
+        );
+    }
+
+    #[test]
+    fn a_page_that_stops_arriving_does_not_wait_for_ever() {
+        let mut call = Call::answer(FS, "1");
+        call.enter(Phase::Receiving);
+        call.set_fast_carrier(true);
+        call.fast_bits(&[false]);
+        for _ in 0..(FS * (T2_SECONDS + 1.0)) as usize {
+            call.tick(true);
+        }
+        assert_ne!(call.phase(), Phase::Receiving, "it waited for ever");
+    }
+
+    #[test]
+    fn a_command_is_tried_again_before_the_rate_is_dropped() {
+        // 5.4.2 allows three goes. A DCS that was not heard is not a line
+        // that cannot carry the rate, and dropping to 2400 on the first
+        // silence doubles how long the page takes for no reason.
+        let call = run_until(
+            &[Message::new(Frame::Dis, false).with_fif(&DIS)],
+            30.0,
+            |c| c.rate() == 2400,
+        );
+        assert_eq!(call.rate(), 2400, "it never dropped a rate at all");
+        let commands = call
+            .heard
+            .iter()
+            .filter(|m| m.frame == Frame::Dis)
+            .count();
+        assert_eq!(commands, 1, "the far end only ever sent one DIS");
+        assert!(
+            call.seconds() > 3.0 * T4_SECONDS,
+            "it dropped the rate after {:.1} s, too soon for three tries",
+            call.seconds()
+        );
+    }
+
+    #[test]
+    fn giving_up_says_goodbye_first() {
+        // A machine that simply stops answering leaves the far end holding
+        // the line for its whole T1 and then reporting a failure.
+        let mut fif = vec![0u8; 3];
+        t30::set_bit(&mut fif, 10, true);
+        // Bits 11 to 14 as 1000: V.29 alone, which this end cannot raise.
+        t30::set_field(&mut fif, 11, 14, 0b1000);
+        let call = run(&[Message::new(Frame::Dis, false).with_fif(&fif)], 20.0);
+        assert_eq!(call.phase(), Phase::Done, "it did not hang up politely");
+        assert!(call.trouble.is_some(), "it gave up without saying why");
     }
 
     #[test]

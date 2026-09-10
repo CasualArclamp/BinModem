@@ -377,6 +377,41 @@ mod tests {
         assert_eq!(got.lines, page.lines, "the page came out different");
     }
 
+
+    /// A page over a line with noise on it.
+    ///
+    /// Not a real channel -- there is no filtering and no echo -- but enough
+    /// to prove that the page is not getting through because both ends are
+    /// working from arithmetic that happens to match. A single bit error in
+    /// the training check used to throw the rate away, and a single one in
+    /// the page has to cost one line rather than the page.
+    #[test]
+    fn a_page_gets_through_a_line_with_noise_on_it() {
+        let page = a_page(6);
+        let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()));
+        let mut answerer = FaxCall::answer(FS, "61388880000");
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut noise = move || {
+            // Xorshift, so the run is the same every time it is looked at.
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64 * 0.02 - 0.01
+        };
+        let (mut to_caller, mut to_answerer) = (0.0, 0.0);
+        for _ in 0..(FS * 40.0) as usize {
+            let a = caller.step(to_caller);
+            let b = answerer.step(to_answerer);
+            to_caller = b + noise();
+            to_answerer = a + noise();
+            if caller.phase().is_over() && answerer.phase().is_over() {
+                break;
+            }
+        }
+        let got = answerer.received().expect("no page arrived");
+        assert_eq!(got.lines, page.lines, "the page came out different");
+    }
+
     #[test]
     fn the_two_ends_learn_each_others_numbers() {
         let mut caller = FaxCall::originate(FS, "61399990000", Some(a_page(4)));
