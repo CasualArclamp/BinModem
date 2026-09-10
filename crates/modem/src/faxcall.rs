@@ -263,15 +263,41 @@ mod tests {
         }
     }
 
-    /// Run two of these against each other down one wire.
+    /// Run two of these against each other down one clean wire.
     fn between(caller: &mut FaxCall, answerer: &mut FaxCall, seconds: f64) {
+        through(caller, answerer, seconds, &mut |s| s);
+    }
+
+    /// The same, with something done to the line in both directions.
+    ///
+    /// `FAX_TRACE=1` prints every change of phase at both ends. A fax call
+    /// goes wrong by one end waiting for something the other has stopped
+    /// sending, and that is invisible in an assertion at the end of it.
+    fn through(
+        caller: &mut FaxCall,
+        answerer: &mut FaxCall,
+        seconds: f64,
+        line: &mut dyn FnMut(f64) -> f64,
+    ) {
+        let trace = std::env::var("FAX_TRACE").is_ok();
+        let (mut was_a, mut was_b) = (caller.phase(), answerer.phase());
         let mut from_caller = 0.0;
         let mut from_answerer = 0.0;
-        for _ in 0..(seconds * FS) as usize {
+        for i in 0..(seconds * FS) as usize {
             let a = caller.step(from_answerer);
             let b = answerer.step(from_caller);
-            from_caller = a;
-            from_answerer = b;
+            from_caller = line(a);
+            from_answerer = line(b);
+            if trace && (caller.phase() != was_a || answerer.phase() != was_b) {
+                eprintln!(
+                    "{:6.2}s caller {:<32} answerer {}",
+                    i as f64 / FS,
+                    caller.phase().name(),
+                    answerer.phase().name()
+                );
+                was_a = caller.phase();
+                was_b = answerer.phase();
+            }
             if caller.phase().is_over() && answerer.phase().is_over() {
                 break;
             }
@@ -398,16 +424,25 @@ mod tests {
             seed ^= seed << 17;
             (seed >> 11) as f64 / (1u64 << 53) as f64 * 0.02 - 0.01
         };
-        let (mut to_caller, mut to_answerer) = (0.0, 0.0);
-        for _ in 0..(FS * 40.0) as usize {
-            let a = caller.step(to_caller);
-            let b = answerer.step(to_answerer);
-            to_caller = b + noise();
-            to_answerer = a + noise();
-            if caller.phase().is_over() && answerer.phase().is_over() {
-                break;
-            }
-        }
+        through(&mut caller, &mut answerer, 40.0, &mut |s| s + noise());
+        let got = answerer.received().expect("no page arrived");
+        assert_eq!(got.lines, page.lines, "the page came out different");
+    }
+
+    /// A page over a line that is simply quiet.
+    ///
+    /// Thirty decibels down is about what a real one delivered, once the
+    /// drive setting and the path between the two machines had had it. The
+    /// carrier detector had a threshold picked from a loopback, where the far
+    /// end is exactly as loud as this end wrote it, so it never saw the
+    /// carrier at all -- and everything downstream of a carrier detector is
+    /// held still until it says there is something there.
+    #[test]
+    fn a_page_gets_through_a_line_thirty_decibels_down() {
+        let page = a_page(6);
+        let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()));
+        let mut answerer = FaxCall::answer(FS, "61388880000");
+        through(&mut caller, &mut answerer, 40.0, &mut |s| s * 0.0316);
         let got = answerer.received().expect("no page arrived");
         assert_eq!(got.lines, page.lines, "the page came out different");
     }

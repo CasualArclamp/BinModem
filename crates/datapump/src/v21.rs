@@ -61,8 +61,12 @@ impl Tone {
         Self {
             phase: 0.0,
             step: std::f64::consts::TAU * hz / fs,
-            // The same level everything else here goes out at.
-            amplitude: 0.35,
+            // Full scale, which for a single tone is a root mean square of
+            // 0.707 -- the level every other transmitter in this modem leaves
+            // at, including the V.8 answer tone this one is easily mistaken
+            // for. At 0.35 the two tones of a fax call went out nine decibels
+            // below the frames on either side of them.
+            amplitude: 1.0,
         }
     }
 

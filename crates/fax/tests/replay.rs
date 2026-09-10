@@ -105,3 +105,87 @@ fn what_the_two_ends_said() {
         "read no frames at all out of a fax call"
     );
 }
+
+/// What the high-speed receiver makes of a recording, level by level.
+///
+/// ```text
+/// FAX_CAPTURE=... cargo test -p fax --test replay -- --ignored --nocapture
+/// ```
+///
+/// The one number that decides whether a page can arrive at all is the level
+/// the carrier detector sees, because everything downstream is held still
+/// until it says there is a carrier. A threshold set from a loopback, where
+/// the far end is exactly as loud as this end wrote it, is a threshold set
+/// from the one case that cannot go wrong.
+#[test]
+#[ignore = "needs a recording"]
+fn what_the_fast_receiver_saw() {
+    let path = std::env::var("FAX_CAPTURE").expect("set FAX_CAPTURE");
+    let wav = line::wav::read(&path).expect("could not read the recording");
+    let fs = f64::from(wav.sample_rate);
+    println!("\n{path}\n");
+    for channel in 0..2 {
+        let samples = wav.channel(channel);
+        if samples.is_empty() {
+            continue;
+        }
+        let mut rx = datapump::v27ter::Receiver::new(fs);
+        rx.set_rate(datapump::v27ter::Rate::R4800);
+        let mut peak = 0.0f64;
+        let mut spans: Vec<(f64, f64, f64)> = Vec::new();
+        let mut up: Option<(f64, f64)> = None;
+        // The loudest tenth of a second anywhere, so a threshold can be
+        // judged against what actually arrived rather than against nothing.
+        let mut window = 0.0f64;
+        let mut best_quiet = 0.0f64;
+        for (i, &s) in samples.iter().enumerate() {
+            rx.feed(f64::from(s));
+            let level = rx.level();
+            peak = peak.max(level);
+            window = window.max(level);
+            let at = i as f64 / fs;
+            match (rx.carrier(), up) {
+                (true, None) => up = Some((at, level)),
+                (true, Some((from, loudest))) => up = Some((from, loudest.max(level))),
+                (false, Some((from, loudest))) => {
+                    spans.push((from, at, loudest));
+                    up = None;
+                }
+                (false, None) => best_quiet = best_quiet.max(level),
+            }
+        }
+        if let Some((from, loudest)) = up {
+            spans.push((from, samples.len() as f64 / fs, loudest));
+        }
+        let side = if channel == 0 { "far " } else { "near" };
+        println!(
+            "{side}  loudest {peak:.5}  loudest while it thought the line was \
+             quiet {best_quiet:.5}"
+        );
+        for (from, to, loudest) in &spans {
+            println!("      carrier {from:7.2}s to {to:7.2}s   peak {loudest:.5}");
+        }
+        if spans.is_empty() {
+            println!("      no carrier found at all");
+        }
+        // And the whole trace, half a second at a time, so a threshold can be
+        // put somewhere between the quiet and the loud rather than guessed.
+        let mut rx = datapump::v27ter::Receiver::new(fs);
+        rx.set_rate(datapump::v27ter::Rate::R4800);
+        let step = (fs * 0.5) as usize;
+        let mut line = String::new();
+        for (i, &s) in samples.iter().enumerate() {
+            rx.feed(f64::from(s));
+            if i % step == step - 1 {
+                line.push_str(&format!(" {:.4}", rx.level()));
+                if line.len() > 100 {
+                    println!("      {:6.1}s {line}", (i + 1) as f64 / fs);
+                    line.clear();
+                }
+            }
+        }
+        if !line.is_empty() {
+            println!("      end     {line}");
+        }
+    }
+}

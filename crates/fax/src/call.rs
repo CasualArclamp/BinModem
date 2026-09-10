@@ -143,6 +143,17 @@ pub const CED_SECONDS: f64 = 3.0;
 /// TCF: "A series of 0 for 1.5 s +/- 10%" (6.2.6).
 pub const TCF_SECONDS: f64 = 1.5;
 
+/// How long the high-speed carrier has to be there before it counts as a
+/// burst having started.
+///
+/// The shortest burst any of this sends is the short turn-on sequence, fifty
+/// milliseconds at 4800, and the one it actually sends is fourteen times
+/// that. What is being ruled out is shorter still: the level meter ringing as
+/// the last V.21 burst dies away puts ten milliseconds of carrier on the line
+/// at exactly the moment this end starts listening for one, and a burst that
+/// arrived and ended is what the procedure reads that as.
+const FAST_CARRIER_SETTLED: f64 = 0.040;
+
 /// How many of a training check's bits have to be zeros for the rate to be
 /// accepted, and how many in a row mark where it starts.
 ///
@@ -218,6 +229,8 @@ pub struct Call {
     /// arrived is not the same thing.
     fast_carrier: bool,
     fast_seen: bool,
+    /// How long it has been up for, without a break.
+    fast_up: f64,
     /// The page arriving, if one is.
     decoder: t4::Decoder,
     /// The page that arrived.
@@ -277,6 +290,7 @@ impl Call {
             fast_in: Vec::new(),
             fast_carrier: false,
             fast_seen: false,
+            fast_up: 0.0,
             decoder: t4::Decoder::new(),
             received: None,
             accepted: false,
@@ -416,8 +430,15 @@ impl Call {
                 self.timer = T2_SECONDS;
             }
             Phase::Receiving => {
+                // A line rather than a bit, because noise is bits too. A
+                // carrier detector that has latched onto the hiss on a line
+                // hands up a bit every symbol for ever, and a clock put back
+                // by every one of them is a clock that never runs out.
+                let before = self.decoder.lines().len();
                 self.decoder.feed_bits(bits);
-                self.timer = T2_SECONDS;
+                if self.decoder.lines().len() != before {
+                    self.timer = T2_SECONDS;
+                }
             }
             _ => {}
         }
@@ -426,8 +447,8 @@ impl Call {
     /// Whether the far end's high-speed carrier is on the line.
     pub fn set_fast_carrier(&mut self, up: bool) {
         self.fast_carrier = up;
-        if up && matches!(self.phase, Phase::CheckingTraining | Phase::Receiving) {
-            self.fast_seen = true;
+        if !up {
+            self.fast_up = 0.0;
         }
     }
 
@@ -486,12 +507,25 @@ impl Call {
                 }
             }
             Phase::CheckingTraining | Phase::Receiving => {
+                if self.fast_carrier {
+                    self.fast_up += self.step;
+                    if self.fast_up > FAST_CARRIER_SETTLED {
+                        self.fast_seen = true;
+                    }
+                }
                 // A high-speed burst has no closing flag. What ends it is the
                 // carrier going away, and for a page the return to control
                 // T.4 puts at the end of it as well.
                 if self.phase == Phase::Receiving && self.decoder.is_done() {
                     self.page_ended();
                 } else if self.fast_seen && !self.fast_carrier {
+                    self.fast_burst_heard();
+                } else if self.phase == Phase::CheckingTraining && self.check_is_long_enough()
+                {
+                    // A training check is a second and a half and no longer.
+                    // Twice that much has arrived, so whatever is on the line
+                    // is not going to stop being on it, and there is already
+                    // more than enough to judge.
                     self.fast_burst_heard();
                 } else if self.timer <= 0.0 {
                     self.timed_out();
@@ -540,10 +574,12 @@ impl Call {
             Phase::CheckingTraining => {
                 self.fast_in.clear();
                 self.fast_seen = false;
+                self.fast_up = 0.0;
             }
             Phase::Receiving => {
                 self.decoder.reset();
                 self.fast_seen = false;
+                self.fast_up = 0.0;
             }
             _ => {}
         }
@@ -845,6 +881,12 @@ impl Call {
         self.pause_then(Phase::Confirming);
     }
 
+    /// Whether more than a training check's worth has arrived.
+    fn check_is_long_enough(&self) -> bool {
+        let seconds = self.fast_in.len() as f64 / f64::from(self.rate);
+        seconds > 2.0 * (1.0 + TCF_SECONDS)
+    }
+
     fn training_check_passes(&self) -> bool {
         // Where the zeros begin, which is where the training stops.
         let mut run = 0usize;
@@ -1037,16 +1079,30 @@ mod tests {
         // A page is a minute at 4800 and four at 2400. T2 is six seconds, and
         // it has to mean how long the line may go quiet rather than how long
         // the page may take.
+        let mut coded = t4::Bits::new();
+        for y in 0..300 {
+            let line: Vec<bool> = (0..crate::page::WIDTH)
+                .map(|x| (x / 50 + y / 4).is_multiple_of(2))
+                .collect();
+            t4::write_line(&mut coded, &line);
+        }
+        let bits = coded.to_bits();
+
         let mut call = Call::answer(FS, "1");
         call.enter(Phase::Receiving);
         call.set_fast_carrier(true);
         let long = T2_SECONDS * 3.0;
-        for i in 0..(FS * long) as usize {
-            if i.is_multiple_of(100) {
-                call.fast_bits(&[false]);
+        let samples = (FS * long) as usize;
+        let every = samples / bits.len();
+        for i in 0..samples {
+            if i.is_multiple_of(every)
+                && let Some(&bit) = bits.get(i / every)
+            {
+                call.fast_bits(&[bit]);
             }
             call.tick(true);
         }
+        assert!(call.lines_received() > 0, "no line arrived at all");
         assert_eq!(
             call.phase(),
             Phase::Receiving,
@@ -1056,10 +1112,15 @@ mod tests {
 
     #[test]
     fn a_page_that_stops_arriving_does_not_wait_for_ever() {
+        // And noise is not a page. What arrives when a carrier detector has
+        // latched onto the hiss on a line is a bit every symbol for ever,
+        // which is bits without lines.
         let mut call = Call::answer(FS, "1");
         call.enter(Phase::Receiving);
         call.set_fast_carrier(true);
-        call.fast_bits(&[false]);
+        for i in 0..20_000 {
+            call.fast_bits(&[!(i as u32).wrapping_mul(2_654_435_761).is_multiple_of(3)]);
+        }
         for _ in 0..(FS * (T2_SECONDS + 1.0)) as usize {
             call.tick(true);
         }

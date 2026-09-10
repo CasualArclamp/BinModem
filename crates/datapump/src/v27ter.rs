@@ -229,10 +229,16 @@ const TURN_OFF_SYMBOLS: u32 = 10;
 
 /// The level a symbol goes out at.
 ///
-/// The same as the V.21 that alternates with it through a fax call. Two
-/// carriers from one machine arriving at different levels make the far end's
-/// gain control chase the turnaround rather than the signal.
-const LEVEL: f64 = 0.35;
+/// Every transmitter in this modem leaves at a root mean square of 0.707, and
+/// the peak is allowed to go where the shaping puts it -- close to 2 for the
+/// crowded V.32 constellations, and about 1.5 here. That is the convention
+/// V.2 asks for as well: a transmit level is a power, and a shaped signal and
+/// a constant-envelope one with the same power do not have the same peak.
+///
+/// Getting it wrong here was worth nine decibels. Every V.21 burst in a fax
+/// call arrived three times louder than the V.27 ter burst next to it, so the
+/// far end had a nine decibel step to chase at every single turnaround.
+const LEVEL: f64 = 1.0;
 
 /// V.27 ter transmitter.
 #[derive(Debug)]
@@ -474,18 +480,58 @@ impl Transmitter {
     }
 }
 
-/// The level the carrier detector calls a carrier, and the lower one it stops
-/// at. Two thresholds because a single one chatters at exactly the level that
-/// matters most.
-const CARRIER_ON: f64 = 0.030;
-const CARRIER_OFF: f64 = 0.015;
+/// The quietest thing that may be called a carrier at all, and the level it
+/// has to fall below before it is called gone.
+///
+/// Sixty decibels below full scale with five decibels of hysteresis, which is
+/// what every other carrier detector in this modem uses. Only a floor: what
+/// actually decides is the ratio below, because a fixed level cannot be both
+/// low enough for a quiet line and high enough to ignore the noise on a noisy
+/// one. Sixty decibels down was above the carrier on a real line at an
+/// ordinary drive setting, and below the noise on a line with any hiss in it.
+const CARRIER_ON: f64 = 1.0e-3;
+const CARRIER_OFF: f64 = 5.62e-4;
+
+/// How far above the quiet line a carrier has to be. Twelve decibels.
+const ON_ABOVE_FLOOR: f64 = 4.0;
+
+/// How far a carrier has to fall below its own loudest to be called gone.
+///
+/// Its own, because that is the only reference that is always available and
+/// always right. Measuring the end of a burst against a fixed level, or
+/// against an estimate of the noise, needs the noise to be known -- and the
+/// only time it can be measured is while there is no carrier, which is
+/// exactly what cannot be established when the detector is stuck on. A burst
+/// that has stopped is twelve decibels down on the burst that was there, on
+/// any line at any level, and nothing has to be known in advance.
+const OFF_BELOW_LOUDEST: f64 = 0.25;
+
+/// How fast the loudest-so-far is forgotten, per sample at 16 kHz.
+///
+/// About two seconds, so a burst that fades over a long page is followed
+/// rather than cut off at the first quiet stretch.
+const LOUDEST_DECAY: f64 = 3.1e-5;
+
+/// How fast the estimate of the quiet line follows what it hears, going down
+/// and going up, per sample at 16 kHz.
+///
+/// Down in a tenth of a second, so a burst ending is noticed; up over five
+/// seconds, because what it is measuring is the noise on a line and that does
+/// not change quickly. It only moves at all while there is no carrier, so
+/// what it follows is only ever the quiet line.
+const FLOOR_FALL: f64 = 6.25e-4;
+const FLOOR_RISE: f64 = 1.25e-5;
 
 /// What one symbol should come off the equaliser at.
 const UNIT: f64 = 1.0;
 
 /// Ceiling on the gain control, so silence does not become noise at full
 /// scale while the far end is between bursts.
-const MAX_GAIN: f64 = 40.0;
+///
+/// High enough not to be reached by a quiet line, which is a receiver
+/// refusing to work rather than a receiver protecting itself. What stops
+/// silence being amplified is the carrier detector, not this.
+const MAX_GAIN: f64 = 400.0;
 
 /// V.27 ter receiver.
 ///
@@ -511,6 +557,10 @@ pub struct Receiver {
     agc: OnePole,
     equalizer: Equalizer,
     level: OnePole,
+    /// What the line sounds like with nothing on it.
+    floor: f64,
+    /// The loudest the burst in hand has been.
+    loudest: f64,
     carrier: bool,
     symbols: u64,
     /// The phase the previous symbol landed on, in eighths of a turn.
@@ -544,6 +594,8 @@ impl Receiver {
             // circuit at 1600 baud, which is what segment 4 is for.
             equalizer: Equalizer::new(31, UNIT),
             level: OnePole::new(0.010, fs),
+            floor: 0.0,
+            loudest: 0.0,
             carrier: false,
             symbols: 0,
             eighths: None,
@@ -593,9 +645,25 @@ impl Receiver {
     ///
     /// The equaliser is kept: it has learned the line, and the line does not
     /// change between one turnaround and the next. Everything that belongs to
-    /// one burst -- the differential reference, the descrambler, any bits not
-    /// yet taken -- goes.
+    /// one burst goes -- the differential reference, the descrambler, any bits
+    /// not yet taken, and the carrier detector along with them. The detector
+    /// especially: what is on the line at the moment somebody starts listening
+    /// for a burst is the tail of the last one, and a detector that carries
+    /// its own state across a turnaround reports that tail as a burst that
+    /// arrived and ended.
     pub fn restart(&mut self) {
+        self.new_burst();
+        self.carrier = false;
+        self.loudest = 0.0;
+        self.level.reset();
+    }
+
+    /// The same, less the detector.
+    ///
+    /// What the detector does when it finds a carrier: throw away the
+    /// decoding state left over from the last burst, and keep its own, since
+    /// it is the thing that just decided there is a burst at all.
+    fn new_burst(&mut self) {
         self.eighths = None;
         self.descrambler.reset();
         self.bits.clear();
@@ -612,14 +680,21 @@ impl Receiver {
         let level = self
             .level
             .process((selected.0 * selected.0 + selected.1 * selected.1).sqrt());
+        if self.carrier {
+            self.loudest = self.loudest.max(level) * (1.0 - LOUDEST_DECAY);
+        } else {
+            self.loudest = 0.0;
+            let k = if level < self.floor { FLOOR_FALL } else { FLOOR_RISE };
+            self.floor += k * (level - self.floor);
+        }
         let was = self.carrier;
         self.carrier = if self.carrier {
-            level > CARRIER_OFF
+            level > (self.loudest * OFF_BELOW_LOUDEST).max(CARRIER_OFF)
         } else {
-            level > CARRIER_ON
+            level > (self.floor * ON_ABOVE_FLOOR).max(CARRIER_ON)
         };
         if self.carrier && !was {
-            self.restart();
+            self.new_burst();
         }
         let filtered = self.matched.process(selected);
 
