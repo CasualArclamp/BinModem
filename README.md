@@ -1,6 +1,7 @@
 # BinModem
 
-<img width="1319" height="1007" alt="dialupmodem2_0IgsyArLo3" src="https://github.com/user-attachments/assets/99c3c5a9-0a1f-4c6d-af22-05f37344e7d3" />
+<img width="1182" height="897" alt="binmodem_hX4m6Ql6QN" src="https://github.com/user-attachments/assets/a281afa1-c2a8-4082-b43e-3677c8780a83" />
+
 
 A dial-up softmodem in Rust. Everything a modem does — the tones, the
 handshakes, the error control, the compression — is code, and the line is a
