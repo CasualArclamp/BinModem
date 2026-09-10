@@ -27,6 +27,10 @@ use datapump::AsyncBits;
 use datapump::bell103;
 use datapump::v22bis;
 use datapump::v32;
+mod faxcall;
+
+pub use faxcall::FaxCall;
+
 use datapump::v8 as v8line;
 use v8::{CallFunction, Modulation, Modulations};
 use ec::stack::Phase;
@@ -354,6 +358,21 @@ pub struct Modem {
     /// conversation that settles it, and it has to finish before there is a
     /// pump to build.
     negotiation: Option<v8line::Modem>,
+    /// The fax call, when `+FCLASS=1` made this a fax rather than a modem.
+    ///
+    /// Beside the data pump rather than inside it. A fax call shares nothing
+    /// with a data call: no V.8, no error control, no rate to agree, and a
+    /// procedure that owns the line from the first tone to the last frame.
+    fax: Option<FaxCall>,
+    /// The last fax call, kept after it ends so the window can still show
+    /// what the far end was.
+    fax_result: Option<FaxCall>,
+    /// What this end calls itself in a fax call, sent as a TSI.
+    ///
+    /// Twenty characters of digits, spaces and a plus, and blank is legal:
+    /// 5.3.6.2.3 makes the identification optional and plenty of machines
+    /// send nothing at all.
+    pub fax_identification: String,
     /// What V.8 heard the far end say, kept after the negotiation is put away.
     far_menu: Option<v8::Menu>,
     /// What the error control layer heard, kept after it is put away.
@@ -394,6 +413,9 @@ impl Modem {
             elapsed_samples: 0.0,
             since_dial_ms: 0,
             negotiation: None,
+            fax: None,
+            fax_result: None,
+            fax_identification: String::new(),
             far_menu: None,
             far_ec: Vec::new(),
             declared_lapm: false,
@@ -870,6 +892,10 @@ impl Modem {
             self.tick(whole);
         }
 
+        if self.fax.is_some() {
+            return self.carry_fax(line);
+        }
+
         if self.negotiation.is_some() {
             return self.negotiate(line);
         }
@@ -1252,6 +1278,17 @@ impl Modem {
                         self.at.emit(ResultCode::Error);
                     }
                 }
+                Action::SelectServiceClass(_) => {
+                    // A change of class is a change of what this machine is,
+                    // so nothing from before it survives. Anything on the
+                    // line goes, because a fax call and a data call have no
+                    // state in common to carry across.
+                    if self.pump.is_some() || self.fax.is_some() {
+                        self.end_call(Ended::LocalRequest);
+                    } else {
+                        self.at.emit(ResultCode::Ok);
+                    }
+                }
                 Action::SelectModulation(_) | Action::SelectCompression(_) => {
                     // Both take effect on the next call, so there is nothing
                     // to do now beyond acknowledging: the interpreter has
@@ -1274,6 +1311,21 @@ impl Modem {
 
     fn place_call(&mut self, role: Role) {
         self.role = role;
+        // A fax call goes nowhere near any of this. There is no modulation to
+        // select, nothing to negotiate, and V.8 in particular must not run:
+        // a group 3 fax has never heard of it, and answers the 2100 Hz tone
+        // of T.30 rather than the one V.8 puts reversals in.
+        if self.at.service_class == at::ServiceClass::Fax {
+            self.since_dial_ms = 0;
+            self.rate = 0;
+            self.ec = None;
+            self.pump = None;
+            self.negotiation = None;
+            self.announce = None;
+            self.state = State::Handshaking;
+            self.fax = Some(FaxCall::new(self.fs, &self.fax_identification));
+            return;
+        }
         self.since_dial_ms = 0;
         self.rate = 0;
         self.ec = None;
@@ -1359,6 +1411,41 @@ impl Modem {
         let settings = &self.at.modulation;
         let highest = if settings.max_rate == 0 { u32::MAX } else { settings.max_rate };
         (settings.min_rate, highest)
+    }
+
+    /// Carry a fax call one sample further.
+    ///
+    /// The phases that need only 300 bit/s: the calling tone, the far end's
+    /// identification and capabilities, our own identification, and the
+    /// disconnect. What is missing from the middle of that is the page,
+    /// which wants a modulation this does not have yet -- so the call ends
+    /// politely rather than holding the line while the far end waits out its
+    /// own patience and reports a failed receive to whoever is standing at
+    /// it.
+    fn carry_fax(&mut self, line: f64) -> f64 {
+        let Some(fax) = self.fax.as_mut() else { return 0.0 };
+        let out = fax.step(line);
+        match fax.phase() {
+            fax::call::Phase::Done => {
+                // Whatever was learned is kept: the window wants to show it
+                // after the call as much as during it.
+                self.fax_result = self.fax.take();
+                self.state = State::Command;
+                self.at.emit(ResultCode::Ok);
+            }
+            fax::call::Phase::Failed => {
+                self.fax_result = self.fax.take();
+                self.state = State::Command;
+                self.at.emit(ResultCode::NoAnswer);
+            }
+            _ => {}
+        }
+        out
+    }
+
+    /// What the far end of a fax call said, during or after it.
+    pub fn fax_call(&self) -> Option<&FaxCall> {
+        self.fax.as_ref().or(self.fax_result.as_ref())
     }
 
     /// Carry the negotiation one sample further, and build the pump when it

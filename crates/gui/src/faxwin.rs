@@ -36,6 +36,11 @@ pub struct Fax {
     /// What the far end said, once it has said anything.
     pub far: Option<t30::Capabilities>,
     pub far_identity: String,
+    /// Where the call has got to, straight off the modem.
+    pub phase: Option<&'static str>,
+    /// The number to dial, and what this end calls itself.
+    pub number: String,
+    pub identification: String,
 }
 
 /// The preview is drawn at a size a window can hold, not at 1728 across.
@@ -151,12 +156,29 @@ impl Fax {
         self.preview.clone()
     }
 
-    /// Draw the window. Returns true if the user asked to start a fax.
-    pub fn show(&mut self, ui: &mut egui::Ui, online: bool) -> bool {
+    /// Take what the modem knows about the call in progress.
+    pub fn observe(
+        &mut self,
+        phase: Option<&'static str>,
+        identity: &str,
+        capabilities: Option<&[u8]>,
+    ) {
+        self.phase = phase;
+        if !identity.is_empty() {
+            self.far_identity = identity.to_owned();
+        }
+        if let Some(fif) = capabilities {
+            self.far = Some(t30::capabilities(fif));
+        }
+    }
+
+    /// Draw the window. Returns the number to dial if the user asked to
+    /// start a fax.
+    pub fn show(&mut self, ui: &mut egui::Ui, on_hook: bool) -> Option<String> {
         let dim = Color32::from_rgb(140, 150, 165);
         let bright = Color32::from_rgb(220, 225, 235);
         let mut open = self.open;
-        let mut start = false;
+        let mut start = None;
         egui::Window::new("T.30 - fax")
             .open(&mut open)
             .resizable(false)
@@ -292,25 +314,55 @@ impl Fax {
                 });
 
                 ui.separator();
-                ui.add_enabled_ui(online && self.page.is_some(), |ui| {
-                    if ui
-                        .button("Start fax")
-                        .on_hover_text(
-                            "ATD and then T.30: the answering machine's \
-                             identification and capabilities first, then the page",
-                        )
-                        .clicked()
-                    {
-                        start = true;
-                    }
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("dial ").monospace().color(dim));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.number)
+                            .desired_width(150.0)
+                            .hint_text("a fax number"),
+                    );
+                    ui.label(RichText::new("as").monospace().color(dim));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.identification)
+                            .desired_width(140.0)
+                            .hint_text("this end's number"),
+                    )
+                    .on_hover_text(
+                        "Sent as a TSI. Digits, spaces and a plus, and blank \
+                         is allowed: plenty of machines send nothing",
+                    );
+                    ui.add_enabled_ui(on_hook, |ui| {
+                        if ui
+                            .button("Start fax")
+                            .on_hover_text(
+                                "AT+FCLASS=1 and then ATD. The calling tone \
+                                 goes out, and whatever answers says what it is",
+                            )
+                            .clicked()
+                        {
+                            start = Some(self.number.trim().to_owned());
+                        }
+                    });
                 });
-                if !online {
+                if !on_hook {
                     ui.label(
-                        RichText::new("There is no call. A fax needs one.")
-                            .small()
-                            .color(dim),
+                        RichText::new(match self.phase {
+                            Some(p) => format!("the call is {p}"),
+                            None => "there is a call already".to_owned(),
+                        })
+                        .small()
+                        .color(dim),
                     );
                 }
+                ui.label(
+                    RichText::new(
+                        "The page cannot be sent yet: that wants V.17 or \
+                         V.27ter, which are not written. This end identifies \
+                         itself, learns what the far end is, and hangs up.",
+                    )
+                    .small()
+                    .color(dim),
+                );
 
                 ui.separator();
                 ui.label(RichText::new("the machine at the far end").color(dim));
@@ -368,5 +420,12 @@ impl Fax {
             });
         self.open = open;
         start
+    }
+
+    /// What to type at the modem to place the call.
+    pub fn commands(number: &str) -> String {
+        // The class first: it decides what the dial does, and a modem told to
+        // dial before it is told what it is places a data call.
+        format!("AT+FCLASS=1\rATD{number}\r")
     }
 }

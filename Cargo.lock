@@ -1316,6 +1316,7 @@ dependencies = [
  "at",
  "datapump",
  "ec",
+ "fax 0.1.0",
  "line",
  "ppp",
  "proxy",

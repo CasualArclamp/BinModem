@@ -148,6 +148,12 @@ pub struct Frame {
     /// between neighbouring constellation points. Half is where a decision is
     /// as likely to be wrong as right.
     pub reception: Option<f64>,
+    /// Where a fax call has got to, what the far end calls itself, and the
+    /// capability field it sent, raw. Raw because reading it belongs to the
+    /// fax crate and the panel is downstream of that.
+    pub fax_phase: Option<&'static str>,
+    pub fax_identity: String,
+    pub fax_capabilities: Option<Vec<u8>>,
     /// Where the reflection was found, in samples, and how strong it was.
     pub echo_at: Option<(usize, f64)>,
 }
@@ -181,6 +187,9 @@ impl Frame {
             rx_bytes: 0,
             echo_loss_db: None,
             reception: None,
+            fax_phase: None,
+            fax_identity: String::new(),
+            fax_capabilities: None,
             echo_at: None,
             tx_bytes: 0,
         }

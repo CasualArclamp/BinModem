@@ -37,6 +37,34 @@ pub enum Action {
     SelectErrorControl(ErrorControl),
     /// `AT+DS=` — whether to negotiate V.42bis (V.250 6.6.1).
     SelectCompression(Compression),
+    /// `AT+FCLASS=` — data or facsimile (V.250 6.1.10).
+    SelectServiceClass(ServiceClass),
+}
+
+/// What the DCE is being asked to be.
+///
+/// V.250 6.1.10 gives `+FCLASS` the job of switching a modem between being a
+/// modem and being a fax, and every fax program on earth begins by asking
+/// for one. It is a mode and not a setting: nothing about a data call
+/// survives the change, and nothing about a fax call is expressible in `+MS`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ServiceClass {
+    /// Zero: an ordinary modem, and everything else in this interface.
+    #[default]
+    Data,
+    /// One: facsimile, with the host running T.30 over the primitives of
+    /// T.31. The modem sends and receives frames and data on command and
+    /// keeps no state of its own about the procedure.
+    Fax,
+}
+
+impl ServiceClass {
+    pub fn number(self) -> u8 {
+        match self {
+            Self::Data => 0,
+            Self::Fax => 1,
+        }
+    }
 }
 
 /// What `+MS` asked for.
@@ -267,6 +295,8 @@ pub struct Interpreter {
     pub error_control: ErrorControl,
     /// What `+DS` last selected: whether V.42bis may be negotiated.
     pub compression: Compression,
+    /// What `+FCLASS` last selected: a modem or a fax.
+    pub service_class: ServiceClass,
     state: LineState,
     body: Vec<u8>,
     last_body: Vec<u8>,
@@ -304,6 +334,7 @@ impl Interpreter {
             modulation: Modulation::default(),
             error_control: ErrorControl::default(),
             compression: Compression::default(),
+            service_class: ServiceClass::default(),
             state: LineState::Idle,
             body: Vec::new(),
             last_body: Vec::new(),
@@ -561,19 +592,29 @@ impl Interpreter {
 
     /// `+FCLASS` — which service class is in use (V.250 6.1.10).
     ///
-    /// Zero is data, and it is the only one here: facsimile is a different
-    /// recommendation and this DCE does not implement it.
+    /// Zero is data and one is facsimile. Claiming a class that is not there
+    /// is a lie a fax program acts on, so this said zero and only zero until
+    /// there was a T.30 behind it.
     fn fclass(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
         match op {
             ExtOp::Read => {
-                self.fmt.info("+FCLASS: 0", &self.regs, &mut self.out);
+                let text = format!("+FCLASS: {}", self.service_class.number());
+                self.fmt.info(&text, &self.regs, &mut self.out);
                 Ok(None)
             }
             ExtOp::Test => {
-                self.fmt.info("+FCLASS: (0)", &self.regs, &mut self.out);
+                self.fmt.info("+FCLASS: (0,1)", &self.regs, &mut self.out);
                 Ok(None)
             }
-            ExtOp::Set(v) if v.trim() == "0" => Ok(None),
+            ExtOp::Set(v) => {
+                let want = match v.trim() {
+                    "0" => ServiceClass::Data,
+                    "1" => ServiceClass::Fax,
+                    _ => return Err(ResultCode::Error),
+                };
+                self.service_class = want;
+                Ok(Some(Action::SelectServiceClass(want)))
+            }
             _ => Err(ResultCode::Error),
         }
     }

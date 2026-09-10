@@ -465,14 +465,37 @@ fn compression_can_be_turned_off_and_on() {
 }
 
 #[test]
-fn fclass_reports_data_and_only_data() {
-    // Facsimile is a different recommendation and is not implemented, so
-    // claiming class 1 or 2 would be a lie a fax program would act on.
+fn fclass_offers_data_and_facsimile() {
+    // Class 2 stays out: it puts the modem in charge of T.30, and this one
+    // is not. Claiming it would be a lie a fax program acts on.
     let mut it = quiet_dce();
     let (out, _) = send(&mut it, &format!("AT+FCLASS=?{CR}"));
-    assert!(out.contains("+FCLASS: (0)"), "{out:?}");
-    let (out, _) = send(&mut it, &format!("AT+FCLASS=1{CR}"));
-    assert!(out.contains("ERROR"), "claimed a fax class: {out:?}");
+    assert!(out.contains("+FCLASS: (0,1)"), "{out:?}");
+    let (out, _) = send(&mut it, &format!("AT+FCLASS=2{CR}"));
+    assert!(out.contains("ERROR"), "claimed class 2: {out:?}");
+}
+
+#[test]
+fn fclass_switches_the_dce_between_a_modem_and_a_fax() {
+    let mut it = quiet_dce();
+    let (out, _) = send(&mut it, &format!("AT+FCLASS?{CR}"));
+    assert!(out.contains("+FCLASS: 0"), "did not start as a modem: {out:?}");
+
+    let (out, actions) = send(&mut it, &format!("AT+FCLASS=1{CR}"));
+    assert!(out.contains("OK"), "{out:?}");
+    assert_eq!(
+        actions,
+        vec![at::Action::SelectServiceClass(at::ServiceClass::Fax)],
+        "the change has to reach the modem, not just the interpreter"
+    );
+    let (out, _) = send(&mut it, &format!("AT+FCLASS?{CR}"));
+    assert!(out.contains("+FCLASS: 1"), "{out:?}");
+
+    let (_, actions) = send(&mut it, &format!("AT+FCLASS=0{CR}"));
+    assert_eq!(
+        actions,
+        vec![at::Action::SelectServiceClass(at::ServiceClass::Data)]
+    );
 }
 
 // ---------------------------------------------------------------------------

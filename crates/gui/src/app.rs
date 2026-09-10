@@ -425,7 +425,8 @@ impl ScopeApp {
                 // The interpreter has already recorded them; the scope has no
                 // call of its own to apply them to, since what it is looking at
                 // is a recording of somebody else's.
-                at::Action::SelectModulation(_)
+                at::Action::SelectServiceClass(_)
+                | at::Action::SelectModulation(_)
                 | at::Action::SelectErrorControl(_)
                 | at::Action::SelectCompression(_)
                 | at::Action::OffHook
@@ -1063,16 +1064,15 @@ impl ScopeApp {
         self.advanced_protection(ui, &session);
         self.transfer_window(ui, &session);
         self.network_window(ui, &session);
-        let online = self.frame.state == telemetry::CallState::Connected;
-        if self.fax.show(ui, online) {
-            // The transaction itself is the next piece of work. Until it
-            // exists this says so rather than pretending, because a button
-            // that looks like it did something is worse than one that does
-            // not.
-            self.fax.trouble = Some(
-                "The page is ready. Sending it needs the V.27ter data pump,                  which is not written yet."
-                    .to_owned(),
-            );
+        self.fax.observe(
+            self.frame.fax_phase,
+            &self.frame.fax_identity,
+            self.frame.fax_capabilities.as_deref(),
+        );
+        let on_hook = self.frame.state == telemetry::CallState::Idle;
+        if let Some(number) = self.fax.show(ui, on_hook) {
+            self.fax.trouble = None;
+            session.type_bytes(crate::faxwin::Fax::commands(&number).as_bytes());
         }
     }
 

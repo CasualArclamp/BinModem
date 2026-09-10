@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 at       = { path = "../at" }
+fax      = { path = "../fax" }
 datapump = { path = "../datapump" }
 ec       = { path = "../ec" }
 line     = { path = "../line" }
