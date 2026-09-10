@@ -13,6 +13,8 @@ line     = { path = "../line" }
 v8       = { path = "../v8" }
 
 [dev-dependencies]
+datapump = { path = "../datapump" }
+fax      = { path = "../fax" }
 # For the end-to-end test: a file crossing a call, which is the only place the
 # whole stack is exercised at once.
 transfer = { path = "../transfer" }

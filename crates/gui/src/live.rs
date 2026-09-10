@@ -673,6 +673,17 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         // `OK` sitting on a desk with nothing plugged into it, and a terminal
         // that had to wait for audio before its own modem would talk to it
         // would feel broken.
+        // Before anything typed is acted on, because one of the things that
+        // can be typed is the dial that starts a fax call, and the call takes
+        // a copy of this as it is built. Set after, it is a block too late
+        // and the first call of a session goes out anonymous -- which is what
+        // it did, twice, against a real machine.
+        //
+        // Every block rather than at the dial: the window is a different
+        // thread, and a call can be placed by typing at the terminal instead
+        // of by pressing the button.
+        modem.fax_identification = session.fax_identification();
+
         let typed = session.take_typed();
         if !typed.is_empty() {
             typed_recently = Instant::now();
@@ -714,10 +725,6 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         }
 
         to_line.clear();
-        // Cheap, once a block, and it has to be here rather than at the dial:
-        // the window is a different thread and the call may be placed by
-        // typing at the terminal rather than by pressing the button.
-        modem.fax_identification = session.fax_identification();
         let drive = session.drive();
         for &s in &from_line {
             let heard = f64::from(s);

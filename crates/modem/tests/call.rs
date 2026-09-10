@@ -1346,3 +1346,65 @@ fn a_retrain_is_not_mistaken_for_the_far_end_hanging_up() {
         p.host_saw()
     );
 }
+
+#[test]
+fn a_fax_call_carries_the_identification_it_was_given() {
+    // The identification is set before the dial and read when the call is
+    // built, so anything that sets it a moment too late sends twenty spaces
+    // instead. Which is what happened against a real machine, twice, because
+    // the window set it after the dial had already been acted on.
+    let mut caller = Modem::new(FS);
+    caller.fax_identification = "61399990000".to_owned();
+    Pair::type_at(&mut caller, "AT+FCLASS=1");
+    Pair::type_at(&mut caller, "ATD1300368909");
+
+    // A far end that answers as a real fax does: its identification, then
+    // what it can do. The capability field is a real one, off a recording.
+    let mut far_frames = fax::frames::Sender::new();
+    far_frames.send(&[
+        fax::frames::Message::new(fax::t30::Frame::Csi, false)
+            .and_more()
+            .with_fif(b"       909 863  0031"),
+        fax::frames::Message::new(fax::t30::Frame::Dis, false)
+            .with_fif(&[0x00, 0x6e, 0xf8, 0x00]),
+    ]);
+    let mut far = datapump::v21::Sender::new(FS);
+    far.set_transmitting(true);
+
+    // And read back what this end says.
+    let mut ours = datapump::v21::Receiver::new(FS);
+    let mut reader = fax::frames::Reader::new();
+    let mut said: Vec<fax::frames::Message> = Vec::new();
+
+    let mut from_far = 0.0;
+    for _ in 0..(FS * 20.0) as usize {
+        while far.pending_bits() < 16 {
+            match far_frames.next_bit() {
+                Some(b) => far.push_bits(&[b]),
+                None => break,
+            }
+        }
+        let from_us = caller.step(from_far);
+        from_far = far.next_sample();
+        let _ = caller.take_dte();
+        if let Some(bit) = ours.feed(from_us)
+            && let Some(m) = reader.feed(bit)
+        {
+            said.push(m);
+        }
+    }
+
+    let call = caller.fax_call().expect("there was a fax call");
+    assert_eq!(call.identity(), "1300  368 909", "did not read the far end");
+    assert!(call.capabilities().is_some());
+
+    let tsi = said
+        .iter()
+        .find(|m| m.frame == fax::t30::Frame::Tsi)
+        .expect("this end never identified itself");
+    assert_eq!(
+        fax::t30::identification(&tsi.fif),
+        "61399990000",
+        "the identification did not reach the line"
+    );
+}
