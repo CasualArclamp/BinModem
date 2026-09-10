@@ -1,0 +1,15 @@
+[package]
+name    = "fax"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ec = { path = "../ec" }
+
+[dev-dependencies]
+datapump = { path = "../datapump" }
+line     = { path = "../line" }
+
+[lints]
+workspace = true
