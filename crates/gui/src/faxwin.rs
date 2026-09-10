@@ -44,6 +44,8 @@ pub struct Fax {
     pub rate: u32,
     pub lines: usize,
     pub sending: bool,
+    /// Whether the modem is a fax rather than a modem just now.
+    pub fax_class: bool,
     /// The number to dial, and what this end calls itself.
     pub number: String,
     pub identification: String,
@@ -186,6 +188,7 @@ impl Fax {
         self.rate = frame.fax_rate;
         self.lines = frame.fax_lines;
         self.sending = frame.fax_sending;
+        self.fax_class = frame.fax_class;
         if !frame.fax_identity.is_empty() {
             self.far_identity = frame.fax_identity.clone();
         }
@@ -502,6 +505,19 @@ impl Fax {
         bright: Color32,
     ) {
         if on_hook {
+            // A modem stays whatever class it was last told, which is also a
+            // good way to dial a bulletin board and greet it with a calling
+            // tone. Worth saying, since nothing else on the panel does.
+            if self.fax_class {
+                ui.label(
+                    RichText::new(
+                        "The modem is in fax class. AT+FCLASS=0 makes it a \
+                         modem again.",
+                    )
+                    .small()
+                    .color(dim),
+                );
+            }
             return;
         }
         let what = match self.phase {

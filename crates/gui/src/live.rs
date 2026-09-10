@@ -987,6 +987,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 f.tx_bytes = tx_bytes;
                 f.echo_loss_db = modem.echo_return_loss_now();
                 f.reception = modem.reception();
+                f.fax_class = modem.is_fax_class();
                 if let Some(call) = modem.fax_call() {
                     f.fax_phase = Some(call.phase().name());
                     f.fax_identity = call.identity().to_owned();

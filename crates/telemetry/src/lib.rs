@@ -163,6 +163,9 @@ pub struct Frame {
     pub fax_sending: bool,
     /// What went wrong with the fax, if anything did.
     pub fax_trouble: Option<String>,
+    /// Whether the modem is in fax class, which it stays in until told
+    /// otherwise.
+    pub fax_class: bool,
     /// Where the reflection was found, in samples, and how strong it was.
     pub echo_at: Option<(usize, f64)>,
 }
@@ -204,6 +207,7 @@ impl Frame {
             fax_lines: 0,
             fax_sending: false,
             fax_trouble: None,
+            fax_class: false,
             echo_at: None,
             tx_bytes: 0,
         }

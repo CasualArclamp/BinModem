@@ -573,7 +573,16 @@ impl Modem {
         // the far end picks up, and a front panel that showed the lamp out
         // until a pump existed would show it out for the loudest three seconds
         // of the call.
-        self.pump.is_some() || self.negotiation.is_some()
+        self.pump.is_some() || self.negotiation.is_some() || self.fax.is_some()
+    }
+
+    /// Whether the modem is a fax rather than a modem just now (V.250 6.1.10).
+    ///
+    /// It stays whatever it was told until it is told otherwise, which is
+    /// what the recommendation asks for and is also a good way to dial a
+    /// bulletin board and send it a calling tone.
+    pub fn is_fax_class(&self) -> bool {
+        self.at.service_class == at::ServiceClass::Fax
     }
 
     /// Whether the far end's carrier is present.
