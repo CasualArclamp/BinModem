@@ -262,9 +262,406 @@ pub fn encode(lines: &[Vec<bool>]) -> Bits {
     out
 }
 
+/// Six EOLs in a row: the return to control that ends a page (4.1.2).
+pub const RTC_EOLS: u32 = 6;
+
+/// The longest code word in any of the tables, in bits.
+const LONGEST: u8 = 13;
+
+/// The fewest zeros in a row that can only be an EOL.
+///
+/// The end-of-line code is eleven zeros and a one, and no other code word in
+/// any table has eleven leading zeros. That is the whole reason 4.1.2 chose
+/// it: fill may be added in front of it, and a receiver that has lost its
+/// place can find the next line by counting zeros.
+const EOL_ZEROS: usize = 11;
+
+/// What a code word turned out to mean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Word {
+    /// A terminating code: this many pels, and then the other colour.
+    Run(u32),
+    /// A make-up code: this many pels, and another code word to come.
+    MakeUp(u32),
+}
+
+fn table(colour: Colour) -> std::collections::HashMap<(u8, u16), Word> {
+    let (terminating, makeup): (&[Code; 64], &[Code; 27]) = match colour {
+        Colour::White => (&WHITE_TERMINATING, &WHITE_MAKEUP),
+        Colour::Black => (&BLACK_TERMINATING, &BLACK_MAKEUP),
+    };
+    let mut map = std::collections::HashMap::new();
+    for (i, code) in terminating.iter().enumerate() {
+        map.insert((code.len, code.bits), Word::Run(i as u32));
+    }
+    for (i, code) in makeup.iter().enumerate() {
+        map.insert((code.len, code.bits), Word::MakeUp(64 * (i as u32 + 1)));
+    }
+    for (i, code) in EXTENDED_MAKEUP.iter().enumerate() {
+        map.insert((code.len, code.bits), Word::MakeUp(1792 + 64 * i as u32));
+    }
+    map
+}
+
+/// Modified Huffman going the other way: bits in, scan lines out.
+///
+/// It starts out looking for an end-of-line code and throwing away everything
+/// else, which is not a special case but the ordinary way a page is found.
+/// What arrives before the first line is the tail of a training sequence and
+/// whatever the descrambler made of it, and 4.1.2 puts an EOL in front of the
+/// first line precisely so that a receiver can start there.
+#[derive(Debug)]
+pub struct Decoder {
+    white: std::collections::HashMap<(u8, u16), Word>,
+    black: std::collections::HashMap<(u8, u16), Word>,
+    /// Bits not yet decoded, oldest first.
+    bits: std::collections::VecDeque<bool>,
+    colour: Colour,
+    /// Make-up length waiting for the terminating code that completes it.
+    carried: u32,
+    line: Vec<bool>,
+    lines: Vec<Vec<bool>>,
+    /// EOLs seen in a row, with no line between them.
+    eols: u32,
+    /// Whether everything up to the next EOL is being thrown away.
+    hunting: bool,
+    done: bool,
+    damaged: usize,
+    width: usize,
+}
+
+impl Default for Decoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Decoder {
+    pub fn new() -> Self {
+        Self::with_width(crate::page::WIDTH)
+    }
+
+    pub fn with_width(width: usize) -> Self {
+        Self {
+            white: table(Colour::White),
+            black: table(Colour::Black),
+            bits: std::collections::VecDeque::new(),
+            colour: Colour::White,
+            carried: 0,
+            line: Vec::new(),
+            lines: Vec::new(),
+            eols: 0,
+            hunting: true,
+            done: false,
+            damaged: 0,
+            width,
+        }
+    }
+
+    /// The lines decoded so far.
+    pub fn lines(&self) -> &[Vec<bool>] {
+        &self.lines
+    }
+
+    /// Whether the return to control has arrived and the page is complete.
+    pub fn is_done(&self) -> bool {
+        self.done
+    }
+
+    /// Lines that did not come out the width they should have.
+    ///
+    /// What T.30 6.3.2 wants counted: a receiver totals its bad lines and
+    /// decides from that whether to accept the page or ask for it again.
+    pub fn damaged(&self) -> usize {
+        self.damaged
+    }
+
+    /// Everything decoded, as a page.
+    pub fn page(&self, resolution: crate::page::Resolution) -> crate::page::Page {
+        crate::page::Page {
+            lines: self.lines.clone(),
+            resolution,
+        }
+    }
+
+    /// Start again for the next page, keeping nothing.
+    pub fn reset(&mut self) {
+        let width = self.width;
+        *self = Self::with_width(width);
+    }
+
+    pub fn feed(&mut self, bit: bool) {
+        if self.done {
+            return;
+        }
+        self.bits.push_back(bit);
+        while self.step() {}
+    }
+
+    pub fn feed_bits(&mut self, bits: &[bool]) {
+        for &bit in bits {
+            self.feed(bit);
+        }
+    }
+
+    /// Take one code word off the front. Returns whether anything was taken.
+    fn step(&mut self) -> bool {
+        if self.done {
+            self.bits.clear();
+            return false;
+        }
+        // An EOL first, always: it outranks every code word, and while hunting
+        // it is the only thing being looked for.
+        let zeros = self.bits.iter().take_while(|b| !**b).count();
+        if zeros >= EOL_ZEROS {
+            if self.bits.len() > zeros {
+                self.bits.drain(..zeros + 1);
+                self.end_of_line();
+                return true;
+            }
+            // Nothing but zeros so far. Fill can be any length, so keep only
+            // as many as it takes to still recognise the EOL when the one
+            // finally arrives.
+            if zeros > EOL_ZEROS {
+                self.bits.drain(..zeros - EOL_ZEROS);
+            }
+            return false;
+        }
+        if self.hunting {
+            // Everything with eleven zeros in front of it went to the branch
+            // above, so what is here either starts with a one inside the
+            // first eleven bits or is all zeros and too short to tell yet.
+            // Waiting on the second is the whole point: dropping a bit at a
+            // time throws away the leading zeros of the very code being
+            // looked for, and the hunt then never ends.
+            if zeros == self.bits.len() {
+                return false;
+            }
+            // No end of line can begin at any of these, so all of them go.
+            self.bits.drain(..zeros + 1);
+            return true;
+        }
+
+        let table = match self.colour {
+            Colour::White => &self.white,
+            Colour::Black => &self.black,
+        };
+        let mut value: u16 = 0;
+        for len in 1..=LONGEST {
+            let Some(&bit) = self.bits.get(usize::from(len) - 1) else {
+                // Not enough bits yet to rule the rest of the table out.
+                return false;
+            };
+            value = value << 1 | u16::from(bit);
+            if let Some(&word) = table.get(&(len, value)) {
+                self.bits.drain(..usize::from(len));
+                self.apply(word);
+                return true;
+            }
+        }
+        // Thirteen bits that are no code word at all. The line is spoiled, and
+        // the answer is to find the next EOL and carry on from there, which
+        // loses one line rather than the rest of the page.
+        self.spoil();
+        true
+    }
+
+    fn apply(&mut self, word: Word) {
+        match word {
+            Word::MakeUp(n) => self.carried += n,
+            Word::Run(n) => {
+                let total = self.carried + n;
+                self.carried = 0;
+                let ink = self.colour == Colour::Black;
+                // A line longer than the paper is a decoding error rather than
+                // a wider page: stop growing it, and let the width check at
+                // the end of the line notice.
+                let room = (self.width * 2).saturating_sub(self.line.len());
+                let count = (total as usize).min(room);
+                self.line.extend(std::iter::repeat_n(ink, count));
+                self.colour = match self.colour {
+                    Colour::White => Colour::Black,
+                    Colour::Black => Colour::White,
+                };
+            }
+        }
+    }
+
+    /// Give up on the line in hand and look for the next EOL.
+    fn spoil(&mut self) {
+        self.damaged += 1;
+        self.hunting = true;
+        self.line.clear();
+        self.carried = 0;
+        self.colour = Colour::White;
+        self.bits.pop_front();
+    }
+
+    fn end_of_line(&mut self) {
+        if self.line.is_empty() {
+            self.eols += 1;
+        } else {
+            self.eols = 1;
+            let mut line = std::mem::take(&mut self.line);
+            if line.len() != self.width {
+                self.damaged += 1;
+            }
+            line.resize(self.width, false);
+            self.lines.push(line);
+        }
+        self.colour = Colour::White;
+        self.carried = 0;
+        self.line.clear();
+        self.hunting = false;
+        if self.eols >= RTC_EOLS {
+            self.done = true;
+            self.bits.clear();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A page with something on it: text-like bars, a solid block and some
+    /// single-pel speckle, which between them reach every kind of code word.
+    fn a_page(lines: usize, width: usize) -> Vec<Vec<bool>> {
+        (0..lines)
+            .map(|y| {
+                (0..width)
+                    .map(|x| match y % 5 {
+                        0 => false,
+                        1 => x % 97 < 3,
+                        2 => (100..width.saturating_sub(100)).contains(&x),
+                        3 => x % 2 == 0,
+                        _ => x.wrapping_mul(y) % 31 == 0,
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn bits_of(coded: &Bits) -> Vec<bool> {
+        let mut out = Vec::new();
+        for (i, &byte) in coded.octets().iter().enumerate() {
+            let last = i + 1 == coded.octets().len();
+            let count = if last && coded.padding() > 0 {
+                8 - coded.padding()
+            } else {
+                8
+            };
+            for b in 0..count {
+                out.push(byte >> (7 - b) & 1 != 0);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_page_survives_being_coded_and_decoded() {
+        let width = crate::page::WIDTH;
+        let lines = a_page(40, width);
+        let coded = encode(&lines);
+        let mut decoder = Decoder::with_width(width);
+        decoder.feed_bits(&bits_of(&coded));
+        assert!(decoder.is_done(), "the return to control was not found");
+        assert_eq!(decoder.damaged(), 0, "lines came out the wrong width");
+        assert_eq!(decoder.lines(), lines.as_slice());
+    }
+
+    #[test]
+    fn the_decoder_finds_the_page_through_whatever_came_before_it() {
+        // What arrives in front of a page is the tail of a training sequence
+        // through a descrambler, which is noise. The first EOL is where the
+        // page starts and nothing before it should reach the paper.
+        let width = 128;
+        let lines = a_page(12, width);
+        let coded = encode(&lines);
+        let mut stream: Vec<bool> = (0..500)
+            .map(|i: u32| !i.wrapping_mul(2_654_435_761).is_multiple_of(3))
+            .collect();
+        stream.extend(bits_of(&coded));
+        let mut decoder = Decoder::with_width(width);
+        decoder.feed_bits(&stream);
+        assert!(decoder.is_done());
+        assert_eq!(decoder.lines(), lines.as_slice());
+    }
+
+    #[test]
+    fn fill_in_front_of_an_end_of_line_is_not_part_of_the_line() {
+        // 4.1.2 allows fill between the data and the EOL, so that a line can
+        // be stretched to the minimum scan line time the far end asked for.
+        // It is zeros, and the EOL still ends eleven zeros and a one.
+        let width = 64;
+        let lines = a_page(6, width);
+        let mut padded = Bits::new();
+        for line in &lines {
+            for _ in 0..37 {
+                padded.push(false);
+            }
+            write_line(&mut padded, line);
+        }
+        write_rtc(&mut padded);
+        let mut decoder = Decoder::with_width(width);
+        decoder.feed_bits(&bits_of(&padded));
+        assert!(decoder.is_done());
+        assert_eq!(decoder.lines(), lines.as_slice());
+    }
+
+    #[test]
+    fn a_spoiled_line_costs_one_line_and_not_the_page() {
+        let width = 128;
+        let lines = a_page(20, width);
+        let mut coded = bits_of(&encode(&lines));
+        // Break something in the middle, well past the first line.
+        let at = coded.len() / 2;
+        for bit in &mut coded[at..at + 24] {
+            *bit = !*bit;
+        }
+        let mut decoder = Decoder::with_width(width);
+        decoder.feed_bits(&coded);
+        assert!(decoder.is_done(), "the page never finished");
+        assert!(decoder.damaged() > 0, "the damage went unnoticed");
+        assert!(
+            decoder.lines().len() >= lines.len() - 3,
+            "lost {} lines to one bad run",
+            lines.len() - decoder.lines().len()
+        );
+        assert_eq!(
+            decoder.lines()[0],
+            lines[0],
+            "damage in the middle spoiled the start"
+        );
+    }
+
+    #[test]
+    fn nothing_but_zeros_does_not_grow_without_bound() {
+        // Fill can be any length at all, and a receiver that keeps every bit
+        // of it while waiting for the one that ends it has a leak.
+        let mut decoder = Decoder::with_width(64);
+        for _ in 0..100_000 {
+            decoder.feed(false);
+        }
+        assert!(decoder.bits.len() <= EOL_ZEROS + 1);
+        assert!(!decoder.is_done());
+    }
+
+    #[test]
+    fn six_end_of_lines_in_a_row_end_the_page() {
+        let width = 64;
+        let mut coded = Bits::new();
+        write_line(&mut coded, &vec![false; width]);
+        write_rtc(&mut coded);
+        let mut decoder = Decoder::with_width(width);
+        let bits = bits_of(&coded);
+        decoder.feed_bits(&bits);
+        assert!(decoder.is_done());
+        assert_eq!(decoder.lines().len(), 1);
+        // And nothing after it is taken as more page.
+        decoder.feed_bits(&bits);
+        assert_eq!(decoder.lines().len(), 1);
+    }
 
     #[test]
     fn the_tables_are_the_length_the_recommendation_gives_them() {
