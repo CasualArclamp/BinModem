@@ -1,34 +1,69 @@
-//! A fax call on the line: the tones, V.21, and T.30 above them.
+//! A fax call on the line: the tones, V.21, V.27 ter, and T.30 above them.
 //!
 //! The join between the two halves. [`fax::call`] knows the procedure and
-//! nothing about signals; [`datapump::v21`] knows the signals and nothing
-//! about the procedure. This puts one on top of the other and gives the
-//! result a sample at a time, which is the only thing a line understands.
+//! nothing about signals; [`datapump::v21`] and [`datapump::v27ter`] know the
+//! signals and nothing about the procedure. This puts one on top of the other
+//! and gives the result a sample at a time, which is the only thing a line
+//! understands.
+//!
+//! The whole of the join is one question asked once a sample: what should be
+//! on the line just now. A fax call answers it with a different thing eight or
+//! ten times before a page has moved -- a tone, then 300 bit/s, then silence,
+//! then 4800, then silence, then 300 again -- and every one of those changes
+//! is a carrier going up or down at both ends.
 
-use datapump::v21;
-use fax::call::{Call, Phase};
+use datapump::{v21, v27ter};
+use fax::call::{Call, Line, Phase, Role};
+use fax::page::Page;
 
-/// A fax call, from the end that dialled.
+/// Which V.27 ter rate a number of bits per second is.
+fn rate_of(bits_per_second: u32) -> v27ter::Rate {
+    match bits_per_second {
+        4800 => v27ter::Rate::R4800,
+        _ => v27ter::Rate::R2400,
+    }
+}
+
+/// A fax call, from either end.
 #[derive(Debug)]
 pub struct FaxCall {
     call: Call,
-    tx: v21::Sender,
-    rx: v21::Receiver,
+    control_tx: v21::Sender,
+    control_rx: v21::Receiver,
+    fast_tx: v27ter::Transmitter,
+    fast_rx: v27ter::Receiver,
     cng: v21::Tone,
-    /// Whether the V.21 carrier is up, which has to be turned on before the
-    /// preamble and left on until the closing flag has gone.
-    sending: bool,
+    ced: v21::Tone,
+    /// What the line was doing on the last sample, so a change can be seen.
+    line: Line,
 }
 
 impl FaxCall {
-    pub fn new(fs: f64, identification: &str) -> Self {
+    /// The end that dialled.
+    pub fn originate(fs: f64, identification: &str, page: Option<Page>) -> Self {
+        Self::with(Call::originate(fs, identification, page), fs)
+    }
+
+    /// The end that answered.
+    pub fn answer(fs: f64, identification: &str) -> Self {
+        Self::with(Call::answer(fs, identification), fs)
+    }
+
+    fn with(call: Call, fs: f64) -> Self {
         Self {
-            call: Call::new(fs, identification),
-            tx: v21::Sender::new(fs),
-            rx: v21::Receiver::new(fs),
+            call,
+            control_tx: v21::Sender::new(fs),
+            control_rx: v21::Receiver::new(fs),
+            fast_tx: v27ter::Transmitter::new(fs),
+            fast_rx: v27ter::Receiver::new(fs),
             cng: v21::Tone::new(v21::CNG, fs),
-            sending: false,
+            ced: v21::Tone::new(v21::CED, fs),
+            line: Line::Quiet,
         }
+    }
+
+    pub fn role(&self) -> Role {
+        self.call.role()
     }
 
     pub fn phase(&self) -> Phase {
@@ -52,58 +87,142 @@ impl FaxCall {
         self.call.capability_field.as_deref()
     }
 
+    /// The rate the page is being carried at.
+    pub fn rate(&self) -> u32 {
+        self.call.rate()
+    }
+
+    /// How far through the page the call has got.
+    pub fn progress(&self) -> Option<f64> {
+        self.call.progress()
+    }
+
+    /// The page that arrived, once one has.
+    pub fn received(&self) -> Option<&Page> {
+        self.call.received.as_ref()
+    }
+
+    /// Why the call went badly, if it did.
+    pub fn trouble(&self) -> Option<&str> {
+        self.call.trouble.as_deref()
+    }
+
     pub fn take_heard(&mut self) -> Vec<fax::frames::Message> {
         self.call.take_heard()
     }
 
-    /// Whether the far end's control channel is on the line.
+    /// Whether anything of the far end's is on the line.
     pub fn carrier(&self) -> bool {
-        self.rx.carrier()
+        self.control_rx.carrier() || self.fast_rx.carrier()
     }
 
     /// One sample in, one sample out.
-    ///
-    /// The receiver is fed whatever arrives even while this end is
-    /// transmitting. On a two-wire line that means it hears itself, which is
-    /// harmless here: a fax is half duplex, so anything it hears while
-    /// sending is its own echo and the frames in it are the frames it just
-    /// sent. They are addressed the same way and would be read as the far
-    /// end's, so the procedure ignores whatever arrives while it is talking.
-    pub fn step(&mut self, line: f64) -> f64 {
-        let bit = if self.sending { None } else { self.rx.feed(line) };
-        // The line is idle when nothing is queued in the modulator either,
-        // not merely when the procedure has handed everything over.
-        let idle = !self.sending && self.tx.pending_bits() == 0;
-        self.call.advance(bit, idle);
+    pub fn step(&mut self, input: f64) -> f64 {
+        let want = self.call.line();
+        self.follow(want);
+        self.listen(want, input);
+        let (out, idle) = self.talk(want);
+        self.call.tick(idle);
+        out
+    }
 
-        // Keep the transmitter fed while there is a burst to send, and take
-        // the carrier down once the last flag has gone out.
-        let wanted = self.call.wants_carrier();
-        if wanted && !self.sending {
-            self.sending = true;
-            self.tx.set_transmitting(true);
+    /// Put up or take down whatever changed.
+    fn follow(&mut self, want: Line) {
+        if want == self.line {
+            return;
         }
-        if self.sending {
-            while self.tx.pending_bits() < 16 {
-                match self.call.next_bit() {
-                    Some(bit) => self.tx.push_bits(&[bit]),
-                    None => break,
+        match self.line {
+            Line::Control => self.control_tx.set_transmitting(false),
+            // Nothing should be left running by the time the procedure moves
+            // on, since it waits for the line to go idle first. This is only
+            // in case something ends a call in the middle of a burst.
+            Line::Fast(_) => self.fast_tx.abort(),
+            _ => {}
+        }
+        match want {
+            Line::Control => self.control_tx.set_transmitting(true),
+            Line::Fast(rate) => {
+                // Always the long turn-on sequence. T.30 leaves the choice to
+                // the sender for V.27 ter, and a fax turns the line around
+                // between every message, so nothing is remembered from the
+                // last burst that a short one could refresh.
+                self.fast_tx.start(rate_of(rate), v27ter::Training::Long);
+            }
+            Line::FastListen(rate) => {
+                self.fast_rx.set_rate(rate_of(rate));
+                self.fast_rx.restart();
+            }
+            _ => {}
+        }
+        self.line = want;
+    }
+
+    /// Feed whichever receiver belongs to what the line is doing.
+    ///
+    /// Only one of them, and only while this end is not talking. On a
+    /// two-wire line a receiver left running hears its own transmission, and
+    /// a fax is half duplex, so anything it hears while sending is its own
+    /// echo. The frames in that echo are the frames it just sent, addressed
+    /// the same way, and would be read as the far end agreeing with itself.
+    fn listen(&mut self, want: Line, input: f64) {
+        match want {
+            Line::Quiet | Line::Listen | Line::CallingTone => {
+                if let Some(bit) = self.control_rx.feed(input) {
+                    self.call.control_bit(bit);
                 }
             }
-            if !wanted && self.tx.pending_bits() == 0 {
-                self.sending = false;
-                self.tx.set_transmitting(false);
+            Line::FastListen(_) => {
+                self.fast_rx.feed(input);
+                let bits = self.fast_rx.take_bits();
+                if !bits.is_empty() {
+                    self.call.fast_bits(&bits);
+                }
+                self.call.set_fast_carrier(self.fast_rx.carrier());
             }
-            return self.tx.next_sample();
+            Line::Control | Line::Fast(_) | Line::CalledTone => {}
         }
+    }
 
-        if self.call.wants_calling_tone() {
-            return self.cng.next_sample();
+    /// Produce the sample, and say whether the line has gone quiet.
+    fn talk(&mut self, want: Line) -> (f64, bool) {
+        match want {
+            Line::Control => {
+                while self.control_tx.pending_bits() < 16 {
+                    match self.call.next_control_bit() {
+                        Some(bit) => self.control_tx.push_bits(&[bit]),
+                        None => break,
+                    }
+                }
+                let idle = self.control_tx.pending_bits() == 0;
+                (self.control_tx.next_sample(), idle)
+            }
+            Line::Fast(_) => {
+                while self.fast_tx.pending_bits() < 32 {
+                    match self.call.next_fast_bit() {
+                        Some(bit) => self.fast_tx.push_bits(&[bit]),
+                        None => break,
+                    }
+                }
+                // Nothing left to hand over and nothing left in the
+                // modulator: the burst is over, so take the carrier down the
+                // way V.27 ter asks rather than cutting it.
+                if self.fast_tx.trained() && self.fast_tx.pending_bits() == 0 {
+                    self.fast_tx.stop();
+                }
+                let idle = !self.fast_tx.is_transmitting();
+                (self.fast_tx.next_sample(), idle)
+            }
+            Line::CallingTone => {
+                let on = self.call.calling_tone_on();
+                // The tone keeps running while it is silent, so its phase is
+                // continuous across the gaps rather than clicking at every
+                // burst.
+                let sample = self.cng.next_sample();
+                (if on { sample } else { 0.0 }, true)
+            }
+            Line::CalledTone => (self.ced.next_sample(), true),
+            Line::Quiet | Line::Listen | Line::FastListen(_) => (0.0, true),
         }
-        // The tone keeps running while it is silent, so its phase is
-        // continuous across the gaps rather than clicking at every burst.
-        self.cng.next_sample();
-        0.0
     }
 }
 
@@ -111,13 +230,54 @@ impl FaxCall {
 mod tests {
     use super::*;
     use fax::frames::{Message, Reader};
+    use fax::page::Resolution;
     use fax::t30::Frame;
 
     const FS: f64 = 16_000.0;
 
+    /// A page with something recognisable on it.
+    fn a_page(lines: usize) -> Page {
+        let width = fax::page::WIDTH;
+        Page {
+            lines: (0..lines)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| (x / 40 + y / 8).is_multiple_of(2) && x % 40 < 30)
+                        .collect()
+                })
+                .collect(),
+            resolution: Resolution::Standard,
+        }
+    }
+
+    /// Run two of these against each other down one wire.
+    fn between(caller: &mut FaxCall, answerer: &mut FaxCall, seconds: f64) {
+        let mut from_caller = 0.0;
+        let mut from_answerer = 0.0;
+        for _ in 0..(seconds * FS) as usize {
+            let a = caller.step(from_answerer);
+            let b = answerer.step(from_caller);
+            from_caller = a;
+            from_answerer = b;
+            if caller.phase().is_over() && answerer.phase().is_over() {
+                break;
+            }
+        }
+    }
+
     #[test]
     fn the_calling_tone_goes_on_the_line() {
-        let mut call = FaxCall::new(FS, "61400000000");
+        let mut call = FaxCall::originate(FS, "61400000000", None);
+        let mut loudest = 0.0f64;
+        for _ in 0..(FS * 0.3) as usize {
+            loudest = loudest.max(call.step(0.0).abs());
+        }
+        assert!(loudest > 0.1, "nothing went out: {loudest}");
+    }
+
+    #[test]
+    fn the_answering_tone_goes_on_the_line() {
+        let mut call = FaxCall::answer(FS, "61399990000");
         let mut loudest = 0.0f64;
         for _ in 0..(FS * 0.3) as usize {
             loudest = loudest.max(call.step(0.0).abs());
@@ -139,13 +299,12 @@ mod tests {
         let mut far = v21::Sender::new(FS);
         far.set_transmitting(true);
 
-        let mut call = FaxCall::new(FS, "61400000000");
-        // Read back what this end says, so the reply can be checked.
+        let mut call = FaxCall::originate(FS, "61400000000", None);
         let mut ours = v21::Receiver::new(FS);
         let mut reader = Reader::new();
         let mut said: Vec<Message> = Vec::new();
 
-        for _ in 0..(FS * 12.0) as usize {
+        for _ in 0..(FS * 20.0) as usize {
             while far.pending_bits() < 16 {
                 match far_tx.next_bit() {
                     Some(b) => far.push_bits(&[b]),
@@ -159,7 +318,7 @@ mod tests {
             {
                 said.push(m);
             }
-            if call.phase() == Phase::Done {
+            if call.phase().is_over() {
                 break;
             }
         }
@@ -167,7 +326,6 @@ mod tests {
         assert_eq!(call.identity(), "1300  368 909");
         let caps = call.capabilities().expect("it said what it can do");
         assert_eq!(caps.modulations.len(), 3, "V.27ter, V.29 and V.17");
-        assert_eq!(call.phase(), Phase::Done);
 
         let names: Vec<Frame> = said.iter().map(|m| m.frame).collect();
         assert!(
@@ -175,8 +333,52 @@ mod tests {
             "this end never identified itself: {names:?}"
         );
         assert!(
-            names.contains(&Frame::Dcn),
-            "this end never hung up politely: {names:?}"
+            names.contains(&Frame::Dcs),
+            "this end never said how it would send: {names:?}"
         );
+    }
+
+    #[test]
+    fn one_modem_faxes_a_page_to_another() {
+        let page = a_page(8);
+        let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()));
+        let mut answerer = FaxCall::answer(FS, "61388880000");
+        between(&mut caller, &mut answerer, 40.0);
+
+        assert_eq!(
+            caller.phase(),
+            Phase::Done,
+            "the caller ended at {} ({:?})",
+            caller.phase().name(),
+            caller.trouble()
+        );
+        assert_eq!(
+            answerer.phase(),
+            Phase::Done,
+            "the answerer ended at {} ({:?})",
+            answerer.phase().name(),
+            answerer.trouble()
+        );
+        let got = answerer.received().expect("no page arrived");
+        assert_eq!(got.lines.len(), page.lines.len(), "wrong number of lines");
+        assert_eq!(got.lines, page.lines, "the page came out different");
+    }
+
+    #[test]
+    fn the_two_ends_learn_each_others_numbers() {
+        let mut caller = FaxCall::originate(FS, "61399990000", Some(a_page(4)));
+        let mut answerer = FaxCall::answer(FS, "61388880000");
+        between(&mut caller, &mut answerer, 40.0);
+        assert_eq!(caller.identity(), "61388880000", "the CSI did not arrive");
+        assert_eq!(answerer.identity(), "61399990000", "the TSI did not arrive");
+    }
+
+    #[test]
+    fn a_call_with_no_page_says_so_and_hangs_up() {
+        let mut caller = FaxCall::originate(FS, "61399990000", None);
+        let mut answerer = FaxCall::answer(FS, "61388880000");
+        between(&mut caller, &mut answerer, 40.0);
+        assert_eq!(caller.phase(), Phase::Done);
+        assert!(answerer.received().is_none(), "a page arrived from nowhere");
     }
 }

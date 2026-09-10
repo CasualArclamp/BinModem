@@ -179,6 +179,23 @@ impl Bits {
     pub fn padding(&self) -> u8 {
         self.spare
     }
+
+    /// Every bit in order, without the padding of the last octet.
+    ///
+    /// What goes on a line is a bit stream, not a byte stream. The octets
+    /// exist for writing a page to a file, and the padding at the end of the
+    /// last one would be a run of white nobody asked for.
+    pub fn to_bits(&self) -> Vec<bool> {
+        let mut out = Vec::with_capacity(self.len());
+        for (i, &byte) in self.bytes.iter().enumerate() {
+            let last = i + 1 == self.bytes.len();
+            let count = if last { 8 - self.spare } else { 8 };
+            for b in 0..count {
+                out.push(byte >> (7 - b) & 1 != 0);
+            }
+        }
+        out
+    }
 }
 
 /// Write one run length as make-up plus terminating codes (4.1.1).
@@ -254,9 +271,28 @@ pub fn write_rtc(out: &mut Bits) {
 ///
 /// `line` is one row of the page, one `bool` per pel, true for black.
 pub fn encode(lines: &[Vec<bool>]) -> Bits {
+    encode_padded(lines, 0)
+}
+
+/// Code a page, stretching every line to at least `min_bits`.
+///
+/// The minimum scan line time of T.30 Table 2, bits 21 to 23, is not a
+/// property of the picture but of the paper going through the far end: a
+/// thermal head can only print so fast, and a line that arrives sooner than
+/// it can be printed is a line lost. 4.1.2 allows fill for exactly this, as
+/// zeros between the end of one line and the EOL that starts the next, which
+/// is where they go here.
+///
+/// The fill is counted per line including its own EOL, which is what the
+/// receiver's clock sees.
+pub fn encode_padded(lines: &[Vec<bool>], min_bits: usize) -> Bits {
     let mut out = Bits::new();
     for line in lines {
+        let before = out.len();
         write_line(&mut out, line);
+        for _ in out.len() - before..min_bits {
+            out.push(false);
+        }
     }
     write_rtc(&mut out);
     out

@@ -1,34 +1,85 @@
-//! Phase A and B of a fax call, from the calling end.
+//! A fax call, from either end.
 //!
 //! T.30 divides a call into five phases: A is getting the two machines to
 //! agree they are faxes, B is finding out what they can do and settling on
-//! it, C is the page, D is what to do next, E is hanging up. This is A and B,
-//! and the beginning of E, because those are the parts that need no
-//! modulation faster than 300 bit/s.
+//! it, C is the page, D is what to do about it, E is hanging up. This is all
+//! five, from the end that dialled and from the end that answered.
 //!
-//! Which is not a small part of a fax call. Everything a fax knows about the
-//! machine at the other end it learns here, and every fax call that fails
-//! before a page is sent fails here.
+//! Nothing here knows what a signal is. It says what the line should be
+//! doing -- a tone, the 300 bit/s control channel, or the high-speed carrier
+//! at an agreed rate -- and takes back whatever bits arrived. The reason for
+//! the split is that a fax call changes modulation eight or ten times before
+//! a page has moved, and the rule for when it changes is procedure rather
+//! than signal processing.
+//!
+//! The awkward part of that procedure, and the part every implementation gets
+//! wrong first, is that the two ends take turns. There is no moment when both
+//! are talking, and every turnaround has a settling time either side of it
+//! that is longer than it looks like it should be.
 
 use crate::frames::{Message, Reader, Sender};
-use crate::t30::{self, Capabilities, Frame};
+use crate::page::{Page, Resolution};
+use crate::t30::{self, Capabilities, Command, Frame, Modulation};
+use crate::t4;
+
+/// Which end of the call this is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// The end that dialled, which sends the page.
+    Caller,
+    /// The end that answered, which receives it.
+    Answerer,
+}
+
+/// What the procedure wants on the line at this instant.
+///
+/// The rate is in bits per second rather than a modulation object, because
+/// which data pump carries it is not this crate's business.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Line {
+    /// Nothing at all. Every turnaround has one of these in it.
+    Quiet,
+    /// The calling tone, in its own on-and-off rhythm (5.1.1).
+    CallingTone,
+    /// The called tone, steadily (5.1.2).
+    CalledTone,
+    /// Frames going out on V.21 channel 2.
+    Control,
+    /// Listening on V.21 channel 2.
+    Listen,
+    /// A high-speed burst going out.
+    Fast(u32),
+    /// Listening for a high-speed burst.
+    FastListen(u32),
+}
 
 /// How far the call has got.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
-    /// Sending the calling tone and waiting for something to answer (5.1.1).
+    // Phase A and B, from the end that dialled.
     Calling,
-    /// Something answered. Waiting for it to say what it is.
     Listening,
-    /// It said. Everything below is known.
-    Heard,
-    /// Our own identification and command are going out.
+    Commanding,
+    Training,
+    AwaitingConfirm,
+    // Phase C and D, the same end.
+    Sending,
+    EndingPage,
+    AwaitingReceipt,
+    // Phase A and B, from the end that answered.
     Answering,
-    /// Sending the disconnect that ends the call politely (5.3.7).
+    Identifying,
+    AwaitingCommand,
+    CheckingTraining,
+    Confirming,
+    // Phase C and D, the same end.
+    Receiving,
+    AwaitingPostMessage,
+    Acknowledging,
+    AwaitingDisconnect,
+    // Phase E, and the two ends it can come to.
     Ending,
-    /// Nothing more to do.
     Done,
-    /// Nothing recognisable arrived in time.
     Failed,
 }
 
@@ -37,58 +88,195 @@ impl Phase {
         match self {
             Self::Calling => "calling",
             Self::Listening => "listening",
-            Self::Heard => "heard it",
+            Self::Commanding => "sending the command",
+            Self::Training => "sending the training check",
+            Self::AwaitingConfirm => "waiting to be let go",
+            Self::Sending => "sending the page",
+            Self::EndingPage => "end of page",
+            Self::AwaitingReceipt => "waiting for the receipt",
             Self::Answering => "answering",
+            Self::Identifying => "saying what we are",
+            Self::AwaitingCommand => "waiting for the command",
+            Self::CheckingTraining => "checking the training",
+            Self::Confirming => "confirming",
+            Self::Receiving => "receiving the page",
+            Self::AwaitingPostMessage => "waiting for the end of the page",
+            Self::Acknowledging => "acknowledging",
+            Self::AwaitingDisconnect => "waiting for the far end to hang up",
             Self::Ending => "hanging up",
             Self::Done => "done",
             Self::Failed => "failed",
         }
     }
+
+    /// Whether there is nothing left for the call to do.
+    pub fn is_over(self) -> bool {
+        matches!(self, Self::Done | Self::Failed)
+    }
 }
 
-/// T1: how long to wait in phase B before giving up (5.3.3.1).
+/// T1: how long to keep trying in phase B before giving up (5.3.3.1).
 ///
-/// "35 s +/- 5 s", which is generous and meant to be: a machine at the other
-/// end may be picking up paper, and the whole of phase B can pass before it
-/// says anything at all.
+/// "35 s +/- 5 s", and it is generous on purpose: a machine at the other end
+/// may be picking up paper, and the whole of phase B can pass before it says
+/// anything at all.
 pub const T1_SECONDS: f64 = 35.0;
 
-/// A fax call, from the end that dialled.
+/// T2: how long to wait for a command once the two ends are talking (5.4.2.2).
+pub const T2_SECONDS: f64 = 6.0;
+
+/// T4: the gap between one attempt at a command and the next (5.4.2.4).
+pub const T4_SECONDS: f64 = 3.0;
+
+/// The settling time either side of a change of modulation.
+///
+/// NOTE 3 and NOTE 4 under 5.1: "should be followed by a delay of 75 +/- 20
+/// ms before the signalling, utilizing a different modulation system,
+/// commences". Both directions, and both matter -- a machine that starts its
+/// training the instant its own closing flag has gone trains the far end
+/// while the far end is still shutting down its own receiver.
+pub const TURNAROUND_SECONDS: f64 = 0.075;
+
+/// The called tone, 2100 Hz, held for this long (5.1.2).
+pub const CED_SECONDS: f64 = 3.0;
+
+/// TCF: "A series of 0 for 1.5 s +/- 10%" (6.2.6).
+pub const TCF_SECONDS: f64 = 1.5;
+
+/// How much of a training check has to be zeros for the rate to be accepted.
+///
+/// T.30 does not give a number. It says only that the check exists "to verify
+/// training and to give a first indication of the acceptability of the
+/// channel", and leaves the judgement to the receiver. Half the expected
+/// length as one unbroken run is a deliberate compromise: the front of what
+/// arrives is the tail of a training sequence through a descrambler and is
+/// never zeros, and a line good enough to carry a page will hand back the
+/// rest of it clean.
+const TCF_MUST_BE_CLEAN: f64 = 0.5;
+
+/// The rates this modem can carry a page at, fastest first.
+///
+/// V.27 ter and nothing else yet. What goes in a DIS is this same fact in the
+/// form Table 2 wants it.
+pub const OUR_MODULATIONS: [Modulation; 1] = [Modulation::V27ter];
+
+/// A fax call.
 #[derive(Debug)]
 pub struct Call {
+    role: Role,
     phase: Phase,
     reader: Reader,
     sender: Sender,
     /// Seconds since the call began, which is what T1 counts.
     elapsed: f64,
     step: f64,
+    /// Seconds left before whatever is being waited for is given up on.
+    timer: f64,
+    /// A settling gap to sit out before the next thing happens.
+    pause: f64,
+    /// What to do once the pause is over.
+    after_pause: Option<Phase>,
+
     /// What the far end said, as it says it.
     pub identity: String,
     pub capabilities: Option<Capabilities>,
-    /// The capability field exactly as it arrived, so that anything wanting
-    /// to read it differently still can.
+    /// The capability field exactly as it arrived, so anything wanting to
+    /// read it differently still can.
     pub capability_field: Option<Vec<u8>>,
     /// Every frame either end sent, for the log.
     heard: Vec<Message>,
-    /// Our own identification, sent as a TSI. Twenty characters, and T.30
-    /// only allows digits, spaces and a plus.
+    /// This end's own identification, sent as a TSI or a CSI.
     identification: String,
+
+    /// The rate the page is being carried at, once it is settled.
+    modulation: Modulation,
+    rate: u32,
+    /// Rates still worth trying, should the far end refuse this one.
+    fallback: Vec<u32>,
+    /// The minimum scan line time the receiving end asked for, as the three
+    /// bits of Table 2 and as milliseconds.
+    scan_line_field: u8,
+    scan_line_ms: f64,
+    resolution: Resolution,
+
+    /// The page this end is sending, if it has one.
+    page: Option<Page>,
+    /// That page coded, and how far through it the line has got.
+    fast_out: Vec<bool>,
+    fast_at: usize,
+    /// Bits arriving on the high-speed carrier, while they are still being
+    /// judged rather than decoded.
+    fast_in: Vec<bool>,
+    /// Whether the far end's high-speed carrier is up, and whether it has
+    /// been up at all since this end started listening for it. A burst ends
+    /// when the carrier goes away, and the carrier being away before it ever
+    /// arrived is not the same thing.
+    fast_carrier: bool,
+    fast_seen: bool,
+    /// The page arriving, if one is.
+    decoder: t4::Decoder,
+    /// The page that arrived.
+    pub received: Option<Page>,
+    /// Whether the last thing judged was good, which decides what follows the
+    /// frame now going out.
+    accepted: bool,
+    /// Why the call ended, when it ended badly.
+    pub trouble: Option<String>,
 }
 
 impl Call {
-    pub fn new(fs: f64, identification: &str) -> Self {
+    /// The end that dialled. `page` is what it is calling to send, if
+    /// anything: a call with no page still identifies itself, learns what the
+    /// far end is, and hangs up politely.
+    pub fn originate(fs: f64, identification: &str, page: Option<Page>) -> Self {
+        Self::new(Role::Caller, fs, identification, page)
+    }
+
+    /// The end that answered.
+    pub fn answer(fs: f64, identification: &str) -> Self {
+        Self::new(Role::Answerer, fs, identification, None)
+    }
+
+    fn new(role: Role, fs: f64, identification: &str, page: Option<Page>) -> Self {
         Self {
-            phase: Phase::Calling,
+            role,
+            phase: match role {
+                Role::Caller => Phase::Calling,
+                Role::Answerer => Phase::Answering,
+            },
             reader: Reader::new(),
             sender: Sender::new(),
             elapsed: 0.0,
             step: 1.0 / fs,
+            timer: T1_SECONDS,
+            pause: 0.0,
+            after_pause: None,
             identity: String::new(),
             capabilities: None,
             capability_field: None,
             heard: Vec::new(),
             identification: identification.to_owned(),
+            modulation: Modulation::V27ter,
+            rate: 4800,
+            fallback: Vec::new(),
+            scan_line_field: 0b111,
+            scan_line_ms: 0.0,
+            resolution: Resolution::Standard,
+            page,
+            fast_out: Vec::new(),
+            fast_at: 0,
+            fast_in: Vec::new(),
+            fast_carrier: false,
+            fast_seen: false,
+            decoder: t4::Decoder::new(),
+            received: None,
+            accepted: false,
+            trouble: None,
         }
+    }
+
+    pub fn role(&self) -> Role {
+        self.role
     }
 
     pub fn phase(&self) -> Phase {
@@ -99,91 +287,333 @@ impl Call {
         self.elapsed
     }
 
+    /// The rate the page is being carried at.
+    pub fn rate(&self) -> u32 {
+        self.rate
+    }
+
+    pub fn modulation(&self) -> Modulation {
+        self.modulation
+    }
+
+    pub fn resolution(&self) -> Resolution {
+        self.resolution
+    }
+
     /// Frames seen since this was last asked, for a log.
     pub fn take_heard(&mut self) -> Vec<Message> {
         std::mem::take(&mut self.heard)
     }
 
-    /// Whether the calling tone should be going out just now.
+    /// How far through the page the call is, as a fraction.
+    ///
+    /// Bits for the end that is sending, because that is what it knows;
+    /// lines for the end that is receiving, because it does not know how many
+    /// are coming until they stop.
+    pub fn progress(&self) -> Option<f64> {
+        match self.role {
+            Role::Caller => {
+                if self.fast_out.is_empty() {
+                    return None;
+                }
+                Some(self.fast_at as f64 / self.fast_out.len() as f64)
+            }
+            Role::Answerer => {
+                let lines = self.decoder.lines().len();
+                if lines == 0 {
+                    return None;
+                }
+                Some((lines as f64 / self.resolution.lines() as f64).min(1.0))
+            }
+        }
+    }
+
+    /// Lines of the page that have arrived.
+    pub fn lines_received(&self) -> usize {
+        self.decoder.lines().len()
+    }
+
+    /// What the line should be doing at this instant.
+    pub fn line(&self) -> Line {
+        if self.pause > 0.0 {
+            return Line::Quiet;
+        }
+        match self.phase {
+            Phase::Calling => Line::CallingTone,
+            Phase::Answering => Line::CalledTone,
+            Phase::Listening
+            | Phase::AwaitingConfirm
+            | Phase::AwaitingReceipt
+            | Phase::AwaitingCommand
+            | Phase::AwaitingPostMessage
+            | Phase::AwaitingDisconnect => Line::Listen,
+            Phase::Commanding
+            | Phase::Identifying
+            | Phase::Confirming
+            | Phase::Acknowledging
+            | Phase::EndingPage
+            | Phase::Ending => Line::Control,
+            Phase::Training | Phase::Sending => Line::Fast(self.rate),
+            Phase::CheckingTraining | Phase::Receiving => Line::FastListen(self.rate),
+            Phase::Done | Phase::Failed => Line::Quiet,
+        }
+    }
+
+    /// Whether the calling tone should be sounding just now.
     ///
     /// 5.1.1 has it on for half a second in every three and a half, and only
     /// until something answers. It is a courtesy rather than a requirement:
-    /// it tells a person who picked up that a fax is waiting, and it tells a
-    /// machine in automatic answer which of the two it is talking to.
-    pub fn wants_calling_tone(&self) -> bool {
-        if self.phase != Phase::Calling {
+    /// it tells a person who picked up that a fax is waiting, and it tells an
+    /// answering machine which of the two it is talking to.
+    pub fn calling_tone_on(&self) -> bool {
+        if self.line() != Line::CallingTone {
             return false;
         }
         let period = crate::CNG_ON + crate::CNG_OFF;
         self.elapsed % period < crate::CNG_ON
     }
 
-    /// Whether we should be sending on V.21 just now.
-    pub fn wants_carrier(&self) -> bool {
-        matches!(self.phase, Phase::Answering | Phase::Ending)
-            && !self.sender.is_empty()
-    }
-
-    /// The next bit to put on V.21, if any.
-    pub fn next_bit(&mut self) -> Option<bool> {
+    /// The next bit for the control channel, if any.
+    pub fn next_control_bit(&mut self) -> Option<bool> {
         self.sender.next_bit()
     }
 
-    /// One sample of time passing, with whatever V.21 recovered from it.
+    /// The next bit for the high-speed carrier, if any.
+    pub fn next_fast_bit(&mut self) -> Option<bool> {
+        let bit = *self.fast_out.get(self.fast_at)?;
+        self.fast_at += 1;
+        Some(bit)
+    }
+
+    /// A bit recovered from the control channel.
+    pub fn control_bit(&mut self, bit: bool) {
+        if let Some(message) = self.reader.feed(bit) {
+            self.received(message);
+        }
+    }
+
+    /// Bits recovered from the high-speed carrier.
+    pub fn fast_bits(&mut self, bits: &[bool]) {
+        match self.phase {
+            Phase::CheckingTraining => self.fast_in.extend_from_slice(bits),
+            Phase::Receiving => self.decoder.feed_bits(bits),
+            _ => {}
+        }
+    }
+
+    /// Whether the far end's high-speed carrier is on the line.
+    pub fn set_fast_carrier(&mut self, up: bool) {
+        self.fast_carrier = up;
+        if up && matches!(self.phase, Phase::CheckingTraining | Phase::Receiving) {
+            self.fast_seen = true;
+        }
+    }
+
+    /// One sample of time passing.
     ///
-    /// `line_idle` says whether everything handed over has actually gone out.
+    /// `idle` says whether everything handed over has actually left the line.
     /// It is not the same question as whether this has any bits left: a
     /// transmitter is fed ahead of the line, so the last frame of a burst is
     /// still being modulated long after its last bit was handed over. Reading
     /// the two as one hung the call up before its own disconnect had reached
-    /// the far end, which is exactly the rudeness the disconnect exists to
+    /// the far end, which is exactly the rudeness a disconnect exists to
     /// avoid.
-    pub fn advance(&mut self, bit: Option<bool>, line_idle: bool) {
+    pub fn tick(&mut self, idle: bool) {
         self.elapsed += self.step;
-        if let Some(bit) = bit
-            && let Some(message) = self.reader.feed(bit)
-        {
-            self.received(message);
+        if self.phase.is_over() {
+            return;
         }
+        if self.pause > 0.0 {
+            self.pause -= self.step;
+            if self.pause <= 0.0
+                && let Some(next) = self.after_pause.take()
+            {
+                self.enter(next);
+            }
+            return;
+        }
+        self.timer -= self.step;
         match self.phase {
             Phase::Calling | Phase::Listening => {
                 if self.elapsed > T1_SECONDS {
-                    self.phase = Phase::Failed;
+                    self.give_up("nothing that sounded like a fax answered");
                 }
             }
-            Phase::Heard => self.reply(),
-            Phase::Answering | Phase::Ending if self.sender.is_empty() && line_idle => {
-                self.phase = if self.phase == Phase::Ending {
-                    Phase::Done
-                } else {
-                    Phase::Ending
-                };
-                if self.phase == Phase::Ending {
-                    self.hang_up();
+            Phase::Answering => {
+                if self.elapsed > CED_SECONDS {
+                    self.pause_then(Phase::Identifying);
                 }
+            }
+            Phase::Commanding
+            | Phase::Identifying
+            | Phase::Confirming
+            | Phase::Acknowledging
+            | Phase::EndingPage => {
+                if self.sender.is_empty() && idle {
+                    self.control_burst_ended();
+                }
+            }
+            Phase::Ending => {
+                if self.sender.is_empty() && idle {
+                    self.phase = Phase::Done;
+                }
+            }
+            Phase::Training | Phase::Sending => {
+                if self.fast_at >= self.fast_out.len() && idle {
+                    self.fast_burst_ended();
+                }
+            }
+            Phase::CheckingTraining | Phase::Receiving => {
+                // A high-speed burst has no closing flag. What ends it is the
+                // carrier going away, and for a page the return to control
+                // T.4 puts at the end of it as well.
+                if self.phase == Phase::Receiving && self.decoder.is_done() {
+                    self.page_ended();
+                } else if self.fast_seen && !self.fast_carrier {
+                    self.fast_burst_heard();
+                } else if self.timer <= 0.0 {
+                    self.timed_out();
+                }
+            }
+            Phase::AwaitingConfirm
+            | Phase::AwaitingReceipt
+            | Phase::AwaitingCommand
+            | Phase::AwaitingPostMessage
+            | Phase::AwaitingDisconnect => {
+                if self.timer <= 0.0 {
+                    self.timed_out();
+                }
+            }
+            Phase::Done | Phase::Failed => {}
+        }
+    }
+
+    // ---- entering a phase -------------------------------------------------
+
+    /// Sit out the settling time, then take up `next`.
+    fn pause_then(&mut self, next: Phase) {
+        self.pause = TURNAROUND_SECONDS;
+        self.after_pause = Some(next);
+        self.phase = next;
+    }
+
+    fn enter(&mut self, phase: Phase) {
+        self.phase = phase;
+        self.timer = match phase {
+            Phase::AwaitingConfirm | Phase::AwaitingReceipt => T4_SECONDS,
+            Phase::AwaitingCommand | Phase::AwaitingPostMessage => T2_SECONDS,
+            Phase::AwaitingDisconnect => T4_SECONDS,
+            Phase::CheckingTraining | Phase::Receiving => T2_SECONDS,
+            _ => T1_SECONDS,
+        };
+        match phase {
+            Phase::Commanding => self.send_command(),
+            Phase::Identifying => self.send_identity(),
+            Phase::Training => self.send_training_check(),
+            Phase::Sending => self.send_page(),
+            Phase::EndingPage => self.send_end_of_page(),
+            Phase::Confirming => self.send_confirmation(),
+            Phase::Acknowledging => self.send_acknowledgement(),
+            Phase::Ending => self.send_disconnect(),
+            Phase::CheckingTraining => {
+                self.fast_in.clear();
+                self.fast_seen = false;
+            }
+            Phase::Receiving => {
+                self.decoder.reset();
+                self.fast_seen = false;
             }
             _ => {}
         }
     }
 
+    fn give_up(&mut self, why: &str) {
+        if self.trouble.is_none() {
+            self.trouble = Some(why.to_owned());
+        }
+        self.phase = Phase::Failed;
+    }
+
+    // ---- what the far end said --------------------------------------------
+
     fn received(&mut self, message: Message) {
+        // Everything that arrives on the control channel resets the clock:
+        // the far end is there and is talking, which is what the timers are
+        // really asking about.
+        self.timer = T2_SECONDS;
         match message.frame {
-            // Any frame at all means something down there is a fax.
-            Frame::Csi | Frame::Nsf => {
-                if message.frame == Frame::Csi {
-                    self.identity = t30::identification(&message.fif);
+            Frame::Csi | Frame::Tsi => {
+                self.identity = t30::identification(&message.fif);
+                if self.phase == Phase::Calling {
+                    self.phase = Phase::Listening;
                 }
+            }
+            Frame::Nsf => {
                 if self.phase == Phase::Calling {
                     self.phase = Phase::Listening;
                 }
             }
             Frame::Dis => {
-                self.capabilities = Some(t30::capabilities(&message.fif));
+                let caps = t30::capabilities(&message.fif);
+                self.scan_line_ms = caps.scan_line_ms;
+                self.scan_line_field = t30::field_of(&message.fif, 21, 23);
+                self.capabilities = Some(caps);
                 self.capability_field = Some(message.fif.clone());
-                self.phase = Phase::Heard;
+                if self.role == Role::Caller {
+                    self.choose_rate();
+                    self.pause_then(Phase::Commanding);
+                }
             }
-            // 5.3.7: the far end may end the call at any point, and a
-            // disconnect needs no answer.
+            Frame::Dcs => {
+                if self.role == Role::Answerer {
+                    self.capability_field = Some(message.fif.clone());
+                    if let Some((modulation, rate)) = t30::command_rate(&message.fif) {
+                        self.modulation = modulation;
+                        self.rate = rate;
+                    }
+                    self.resolution = if t30::bit(&message.fif, 15) {
+                        Resolution::Fine
+                    } else {
+                        Resolution::Standard
+                    };
+                    self.pause_then(Phase::CheckingTraining);
+                }
+            }
+            Frame::Cfr => {
+                if self.phase == Phase::AwaitingConfirm {
+                    if self.fast_out_page().is_empty() {
+                        // Let go to send a page there is not one of. Say so
+                        // rather than holding the line.
+                        self.pause_then(Phase::Ending);
+                    } else {
+                        self.pause_then(Phase::Sending);
+                    }
+                }
+            }
+            Frame::Ftt => {
+                if self.phase == Phase::AwaitingConfirm {
+                    self.step_down();
+                }
+            }
+            Frame::Mcf | Frame::Rtp => {
+                if self.phase == Phase::AwaitingReceipt {
+                    self.pause_then(Phase::Ending);
+                }
+            }
+            Frame::Rtn => {
+                if self.phase == Phase::AwaitingReceipt {
+                    self.trouble = Some("the far end could not read the page".to_owned());
+                    self.pause_then(Phase::Ending);
+                }
+            }
+            Frame::Eop | Frame::Mps | Frame::Eom => {
+                if self.phase == Phase::AwaitingPostMessage {
+                    self.finish_page();
+                    self.pause_then(Phase::Acknowledging);
+                }
+            }
+            // 5.3.7: either end may disconnect at any point, and a disconnect
+            // needs no answer.
             Frame::Dcn => self.phase = Phase::Done,
             _ => {
                 if self.phase == Phase::Calling {
@@ -194,23 +624,221 @@ impl Call {
         self.heard.push(message);
     }
 
-    /// Say who we are, and then say goodbye.
-    ///
-    /// A page would go here. Until there is a modulation to carry one, the
-    /// polite thing is to identify ourselves and disconnect rather than fall
-    /// silent: a fax left waiting holds the line for its full T1 and then
-    /// reports a failed receive to whoever is standing at it.
-    fn reply(&mut self) {
-        let mut fif = [b' '; 20];
-        for (slot, c) in fif.iter_mut().zip(self.identification.bytes().rev()) {
-            *slot = c;
+    fn timed_out(&mut self) {
+        match self.phase {
+            Phase::AwaitingConfirm => self.step_down(),
+            Phase::AwaitingCommand => {
+                if self.elapsed > T1_SECONDS {
+                    self.give_up("the far end never said what it wanted");
+                } else {
+                    // 5.4.2: say it again. A DIS that was not heard is the
+                    // commonest way a fax call stalls, and the answer is to
+                    // repeat it until T1 runs out.
+                    self.pause_then(Phase::Identifying);
+                }
+            }
+            Phase::AwaitingReceipt => {
+                self.trouble = Some("no receipt for the page".to_owned());
+                self.pause_then(Phase::Ending);
+            }
+            Phase::AwaitingPostMessage => {
+                self.give_up("the page stopped and nothing said why");
+            }
+            Phase::AwaitingDisconnect => self.phase = Phase::Done,
+            Phase::CheckingTraining => {
+                // Nothing came up on the high-speed carrier at all. Say so
+                // with a failure to train rather than sit here: the far end
+                // drops a rate and tries again, which may well be the answer.
+                self.accepted = false;
+                self.pause_then(Phase::Confirming);
+            }
+            Phase::Receiving => {
+                if self.decoder.lines().is_empty() {
+                    self.give_up("the page never arrived");
+                } else {
+                    self.page_ended();
+                }
+            }
+            _ => {}
         }
-        self.sender.send(&[Message::new(Frame::Tsi, true).with_fif(&fif)]);
-        self.phase = Phase::Answering;
     }
 
-    fn hang_up(&mut self) {
-        self.sender.send(&[Message::new(Frame::Dcn, true)]);
+    // ---- the caller's side ------------------------------------------------
+
+    /// Pick the fastest rate both ends have (5.3.6.2.2).
+    fn choose_rate(&mut self) {
+        let Some(caps) = self.capabilities.as_ref() else {
+            return;
+        };
+        match caps.best_shared(&OUR_MODULATIONS) {
+            Some((modulation, rate)) => {
+                self.modulation = modulation;
+                self.rate = rate;
+                self.fallback = modulation
+                    .rates()
+                    .iter()
+                    .copied()
+                    .filter(|r| *r < rate)
+                    .collect();
+            }
+            None => {
+                self.give_up("nothing in common with the far end");
+            }
+        }
+    }
+
+    /// Try the next rate down after a failure to train (6.2.7).
+    fn step_down(&mut self) {
+        match self.fallback.first().copied() {
+            Some(rate) => {
+                self.fallback.remove(0);
+                self.rate = rate;
+                self.pause_then(Phase::Commanding);
+            }
+            None => self.give_up("the line would not carry a page at any rate"),
+        }
+    }
+
+    fn send_command(&mut self) {
+        let tsi = Message::new(Frame::Tsi, true)
+            .and_more()
+            .with_fif(&t30::identification_field(&self.identification));
+        let dcs = Message::new(Frame::Dcs, true).with_fif(&t30::command(Command {
+            modulation: self.modulation,
+            bits_per_second: self.rate,
+            fine: self.resolution == Resolution::Fine,
+            scan_line_field: self.scan_line_field,
+        }));
+        self.sender.send(&[tsi, dcs]);
+    }
+
+    fn send_training_check(&mut self) {
+        // 6.2.6: zeros for a second and a half, through the training that
+        // comes in front of them.
+        let bits = (TCF_SECONDS * f64::from(self.rate)) as usize;
+        self.fast_out = vec![false; bits];
+        self.fast_at = 0;
+    }
+
+    fn fast_out_page(&self) -> Vec<bool> {
+        let Some(page) = self.page.as_ref() else {
+            return Vec::new();
+        };
+        // The minimum scan line time is not a property of the picture but of
+        // the paper at the far end, and it arrived in the DIS.
+        let min_bits = (self.scan_line_ms / 1000.0 * f64::from(self.rate)).ceil() as usize;
+        t4::encode_padded(&page.lines, min_bits).to_bits()
+    }
+
+    fn send_page(&mut self) {
+        self.fast_out = self.fast_out_page();
+        self.fast_at = 0;
+    }
+
+    fn send_end_of_page(&mut self) {
+        // One page and no more, so end of procedure rather than multi-page
+        // signal (6.2.9).
+        self.sender
+            .send(&[Message::new(Frame::Eop, true)]);
+    }
+
+    // ---- the answerer's side ----------------------------------------------
+
+    fn send_identity(&mut self) {
+        let csi = Message::new(Frame::Csi, false)
+            .and_more()
+            .with_fif(&t30::identification_field(&self.identification));
+        let dis = Message::new(Frame::Dis, false).with_fif(&t30::our_capabilities());
+        self.sender.send(&[csi, dis]);
+    }
+
+    fn send_confirmation(&mut self) {
+        let frame = if self.accepted { Frame::Cfr } else { Frame::Ftt };
+        self.sender.send(&[Message::new(frame, false)]);
+    }
+
+    /// Confirm the page, or ask for it again (6.2.7 and 6.3.2).
+    ///
+    /// T.30 leaves the threshold to the receiver, as it does with the
+    /// training check: it says only that a machine decides whether the
+    /// signal it received is acceptable. A twentieth of the lines spoiled is
+    /// the ordinary limit, and it is generous -- a page that far gone is
+    /// still readable, and asking for it again costs another minute.
+    fn send_acknowledgement(&mut self) {
+        let lines = self.decoder.lines().len();
+        let good = lines > 0 && self.decoder.damaged() * 20 <= lines;
+        let frame = if good { Frame::Mcf } else { Frame::Rtn };
+        if !good {
+            self.trouble = Some(format!(
+                "{} of {lines} lines came out wrong",
+                self.decoder.damaged()
+            ));
+        }
+        self.sender.send(&[Message::new(frame, false)]);
+    }
+
+    /// Judge a training check (6.2.6).
+    fn fast_burst_heard(&mut self) {
+        if self.phase != Phase::CheckingTraining {
+            return;
+        }
+        let want = (TCF_SECONDS * f64::from(self.rate) * TCF_MUST_BE_CLEAN) as usize;
+        let mut longest = 0usize;
+        let mut run = 0usize;
+        for &bit in &self.fast_in {
+            run = if bit { 0 } else { run + 1 };
+            longest = longest.max(run);
+        }
+        self.accepted = longest >= want;
+        self.pause_then(Phase::Confirming);
+    }
+
+    fn page_ended(&mut self) {
+        self.finish_page();
+        self.enter(Phase::AwaitingPostMessage);
+    }
+
+    fn finish_page(&mut self) {
+        if self.received.is_none() && !self.decoder.lines().is_empty() {
+            self.received = Some(self.decoder.page(self.resolution));
+        }
+    }
+
+    // ---- both -------------------------------------------------------------
+
+    fn send_disconnect(&mut self) {
+        self.sender
+            .send(&[Message::new(Frame::Dcn, self.role == Role::Caller)]);
+    }
+
+    /// A burst of frames has finished leaving the line.
+    fn control_burst_ended(&mut self) {
+        match self.phase {
+            Phase::Commanding => self.pause_then(Phase::Training),
+            Phase::Identifying => self.enter(Phase::AwaitingCommand),
+            Phase::Confirming => {
+                if self.accepted {
+                    self.pause_then(Phase::Receiving);
+                } else {
+                    // A failure to train sends the far end back to its DCS.
+                    self.enter(Phase::AwaitingCommand);
+                }
+            }
+            Phase::Acknowledging => self.enter(Phase::AwaitingDisconnect),
+            Phase::EndingPage => self.enter(Phase::AwaitingReceipt),
+            _ => {}
+        }
+    }
+
+    /// A high-speed burst has finished leaving the line.
+    fn fast_burst_ended(&mut self) {
+        self.fast_out.clear();
+        self.fast_at = 0;
+        match self.phase {
+            Phase::Training => self.pause_then(Phase::AwaitingConfirm),
+            Phase::Sending => self.pause_then(Phase::EndingPage),
+            _ => {}
+        }
     }
 }
 
@@ -218,6 +846,7 @@ impl Call {
 mod tests {
     use super::*;
     use crate::frames;
+    use crate::t30::Frame;
 
     const FS: f64 = 16_000.0;
     /// A real machine's capability frame, off a recording of a public fax
@@ -226,21 +855,37 @@ mod tests {
     const CSI: &[u8; 20] = b"       909 863  0031";
 
     /// Run a call, feeding it whatever the far end is made to say.
+    ///
+    /// The far end only ever talks on the control channel here, so anything
+    /// past phase B stalls, which is the point of most of these.
     fn run(far: &[Message], seconds: f64) -> Call {
-        let mut call = Call::new(FS, "61400000000");
+        run_until(far, seconds, |c| c.phase().is_over())
+    }
+
+    /// The same, stopping the moment `done` is happy.
+    ///
+    /// Worth having because the far end here never answers a training check,
+    /// so a call left running long enough always ends up stepping down a rate
+    /// and then giving up -- which is right, and is not what most of these
+    /// are asking about.
+    fn run_until(far: &[Message], seconds: f64, done: impl Fn(&Call) -> bool) -> Call {
+        let mut call = Call::originate(FS, "61400000000", None);
         let mut tx = frames::Sender::new();
         tx.send(far);
         for _ in 0..(seconds * FS) as usize {
             // The far end speaks at 300 bit/s; one bit every so many samples.
-            let bit = if (call.seconds() * 300.0).fract() < 300.0 / FS {
-                tx.next_bit()
-            } else {
-                None
-            };
-            call.advance(bit, true);
-            // And drain whatever we are sending, as a line would.
-            while call.next_bit().is_some() {}
-            if call.phase() == Phase::Done || call.phase() == Phase::Failed {
+            let listening = matches!(call.line(), Line::Listen | Line::CallingTone);
+            if listening
+                && (call.seconds() * 300.0).fract() < 300.0 / FS
+                && let Some(bit) = tx.next_bit()
+            {
+                call.control_bit(bit);
+            }
+            call.tick(true);
+            // And drain whatever this end is sending, as a line would.
+            while call.next_control_bit().is_some() {}
+            while call.next_fast_bit().is_some() {}
+            if done(&call) {
                 break;
             }
         }
@@ -249,14 +894,14 @@ mod tests {
 
     #[test]
     fn the_calling_tone_is_on_for_half_a_second_in_every_three_and_a_half() {
-        let mut call = Call::new(FS, "1");
+        let mut call = Call::originate(FS, "1", None);
         let mut on = 0usize;
         let total = (FS * (crate::CNG_ON + crate::CNG_OFF)) as usize;
         for _ in 0..total {
-            if call.wants_calling_tone() {
+            if call.calling_tone_on() {
                 on += 1;
             }
-            call.advance(None, true);
+            call.tick(true);
         }
         let fraction = on as f64 / total as f64;
         let want = crate::CNG_ON / (crate::CNG_ON + crate::CNG_OFF);
@@ -268,29 +913,42 @@ mod tests {
 
     #[test]
     fn a_machine_that_says_what_it_is_gets_heard() {
-        let call = run(
+        let call = run_until(
             &[
                 Message::new(Frame::Csi, false).and_more().with_fif(CSI),
                 Message::new(Frame::Dis, false).with_fif(&DIS),
             ],
-            20.0,
+            10.0,
+            |c| c.phase() == Phase::Training,
         );
         assert_eq!(call.identity, "1300  368 909");
         let caps = call.capabilities.clone().expect("it said what it can do");
         assert_eq!(
             caps.modulations,
             vec![
-                t30::Modulation::V27ter,
-                t30::Modulation::V29,
-                t30::Modulation::V17
+                Modulation::V27ter,
+                Modulation::V29,
+                Modulation::V17
             ]
         );
         assert!(caps.receives);
-        assert_eq!(
-            call.phase(),
-            Phase::Done,
-            "it should identify itself and hang up, not sit there"
+        // Only V.27 ter is in common, and 4800 is the faster of its two.
+        assert_eq!(call.rate(), 4800);
+        assert_eq!(call.modulation(), Modulation::V27ter);
+    }
+
+    #[test]
+    fn a_machine_offering_only_the_fall_back_gets_the_fall_back() {
+        // Bits 11 to 14 as 0000: V.27 ter fall-back mode, 2400 and no more.
+        let mut fif = vec![0u8; 3];
+        t30::set_bit(&mut fif, 10, true);
+        t30::set_field(&mut fif, 11, 14, 0b0000);
+        let call = run_until(
+            &[Message::new(Frame::Dis, false).with_fif(&fif)],
+            10.0,
+            |c| c.phase() == Phase::Training,
         );
+        assert_eq!(call.rate(), 2400);
     }
 
     #[test]
@@ -299,30 +957,105 @@ mod tests {
         assert_eq!(call.phase(), Phase::Calling, "gave up early");
         let call = run(&[], T1_SECONDS + 2.0);
         assert_eq!(call.phase(), Phase::Failed);
+        assert!(call.trouble.is_some(), "it failed without saying why");
     }
 
     #[test]
     fn a_far_end_that_hangs_up_ends_the_call() {
-        let call = run(&[Message::new(Frame::Dcn, false)], 20.0);
+        let call = run(&[Message::new(Frame::Dcn, false)], 10.0);
         assert_eq!(call.phase(), Phase::Done);
         assert!(call.capabilities.is_none());
     }
 
     #[test]
-    fn our_identification_goes_out_backwards_as_the_recommendation_asks() {
-        let mut call = Call::new(FS, "61400000000");
+    fn the_command_names_one_rate_and_the_identification_goes_out_backwards() {
+        let mut call = Call::originate(FS, "61400000000", None);
         call.capabilities = Some(t30::capabilities(&DIS));
-        call.phase = Phase::Heard;
-        call.advance(None, true);
+        call.choose_rate();
+        call.enter(Phase::Commanding);
         let mut bits = Vec::new();
-        while let Some(b) = call.next_bit() {
+        while let Some(b) = call.next_control_bit() {
             bits.push(b);
         }
         let mut reader = Reader::new();
         let sent: Vec<Message> = bits.iter().filter_map(|b| reader.feed(*b)).collect();
-        assert_eq!(sent.len(), 1);
+        assert_eq!(sent.len(), 2, "a TSI and a DCS, in that order");
         assert_eq!(sent[0].frame, Frame::Tsi);
         assert!(sent[0].from_caller, "we are the end that dialled");
         assert_eq!(t30::identification(&sent[0].fif), "61400000000");
+        assert_eq!(sent[1].frame, Frame::Dcs);
+        assert_eq!(
+            t30::command_rate(&sent[1].fif),
+            Some((Modulation::V27ter, 4800))
+        );
+    }
+
+    #[test]
+    fn what_we_offer_reads_back_as_what_we_can_do() {
+        // The DIS this modem sends, read with the same reader that reads
+        // everybody else's. A capability frame that cannot be read by its own
+        // parser is one no far end will read either.
+        let caps = t30::capabilities(&t30::our_capabilities());
+        assert!(caps.receives);
+        assert!(!caps.can_be_polled, "there is nothing here to fetch");
+        assert_eq!(caps.modulations, vec![Modulation::V27ter]);
+        assert!(caps.fine_resolution);
+        assert!(!caps.two_dimensional, "only the one-dimensional code exists");
+        assert!(!caps.error_correction);
+        assert_eq!(caps.widths_mm, vec![215]);
+        assert_eq!(caps.length, "unlimited");
+        assert_eq!(caps.scan_line_ms, 0.0);
+        assert_eq!(caps.octets, 3, "a DIS with no extension is three octets");
+    }
+
+    #[test]
+    fn the_answering_end_holds_the_called_tone_and_then_says_what_it_is() {
+        let mut call = Call::answer(FS, "61399990000");
+        assert_eq!(call.line(), Line::CalledTone);
+        for _ in 0..(FS * (CED_SECONDS - 0.2)) as usize {
+            call.tick(true);
+        }
+        assert_eq!(call.line(), Line::CalledTone, "the tone stopped early");
+        for _ in 0..(FS * 0.4) as usize {
+            call.tick(true);
+        }
+        // The settling gap first, and then the frames.
+        assert_eq!(call.phase(), Phase::Identifying);
+        for _ in 0..(FS * TURNAROUND_SECONDS * 1.2) as usize {
+            call.tick(true);
+        }
+        assert_eq!(call.line(), Line::Control);
+        let mut bits = Vec::new();
+        while let Some(b) = call.next_control_bit() {
+            bits.push(b);
+        }
+        let mut reader = Reader::new();
+        let sent: Vec<Message> = bits.iter().filter_map(|b| reader.feed(*b)).collect();
+        let names: Vec<Frame> = sent.iter().map(|m| m.frame).collect();
+        assert_eq!(names, vec![Frame::Csi, Frame::Dis]);
+        assert_eq!(t30::identification(&sent[0].fif), "61399990000");
+    }
+
+    #[test]
+    fn every_change_of_modulation_has_a_settling_gap_in_front_of_it() {
+        // NOTE 3 under 5.1. The gap is the whole reason a fax call takes as
+        // long as it does, and leaving it out is invisible in a loopback and
+        // fatal on a line with an echo suppressor in it.
+        let mut call = Call::originate(FS, "1", None);
+        call.capabilities = Some(t30::capabilities(&DIS));
+        call.choose_rate();
+        call.pause_then(Phase::Commanding);
+        let mut quiet = 0usize;
+        while call.line() == Line::Quiet {
+            call.tick(true);
+            quiet += 1;
+        }
+        let seconds = quiet as f64 / FS;
+        assert!(
+            (seconds - TURNAROUND_SECONDS).abs() < 0.005,
+            "the gap was {:.0} ms, and 5.1 asks for {:.0}",
+            seconds * 1000.0,
+            TURNAROUND_SECONDS * 1000.0
+        );
     }
 }

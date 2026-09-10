@@ -367,6 +367,12 @@ pub struct Modem {
     /// The last fax call, kept after it ends so the window can still show
     /// what the far end was.
     fax_result: Option<FaxCall>,
+    /// The page waiting to be sent, taken by the next fax call that dials.
+    ///
+    /// Taken rather than borrowed, so that a second call does not send the
+    /// first one again by accident: putting a page in is a deliberate act and
+    /// so is putting the same one in twice.
+    pub fax_page: Option<fax::page::Page>,
     /// What this end calls itself in a fax call, sent as a TSI.
     ///
     /// Twenty characters of digits, spaces and a plus, and blank is legal:
@@ -415,6 +421,7 @@ impl Modem {
             negotiation: None,
             fax: None,
             fax_result: None,
+            fax_page: None,
             fax_identification: String::new(),
             far_menu: None,
             far_ec: Vec::new(),
@@ -1323,7 +1330,16 @@ impl Modem {
             self.negotiation = None;
             self.announce = None;
             self.state = State::Handshaking;
-            self.fax = Some(FaxCall::new(self.fs, &self.fax_identification));
+            // The end that dialled sends; the end that answered receives.
+            // T.30 has no way to swap those round on an ordinary call, and
+            // nothing here wants one: a page goes out of the machine whose
+            // operator put it in and asked for a number.
+            self.fax = Some(match role {
+                Role::Calling => {
+                    FaxCall::originate(self.fs, &self.fax_identification, self.fax_page.take())
+                }
+                Role::Answering => FaxCall::answer(self.fs, &self.fax_identification),
+            });
             return;
         }
         self.since_dial_ms = 0;
@@ -1415,13 +1431,11 @@ impl Modem {
 
     /// Carry a fax call one sample further.
     ///
-    /// The phases that need only 300 bit/s: the calling tone, the far end's
-    /// identification and capabilities, our own identification, and the
-    /// disconnect. What is missing from the middle of that is the page,
-    /// which wants a modulation this does not have yet -- so the call ends
-    /// politely rather than holding the line while the far end waits out its
-    /// own patience and reports a failed receive to whoever is standing at
-    /// it.
+    /// Every phase of one: the tones, the capabilities over 300 bit/s, the
+    /// training check and the page over V.27 ter, and the receipt and the
+    /// disconnect back on 300 again. Which of those is on the line at any
+    /// moment is [`FaxCall`]'s business; this only has to notice when there
+    /// is no longer a call.
     fn carry_fax(&mut self, line: f64) -> f64 {
         let Some(fax) = self.fax.as_mut() else { return 0.0 };
         let out = fax.step(line);

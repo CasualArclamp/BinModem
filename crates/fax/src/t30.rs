@@ -172,7 +172,7 @@ pub fn bit(fif: &[u8], n: usize) -> bool {
 /// for unlimited paper length, so the value wanted is 0b01 with bit 19 on the
 /// left -- read the other way it is 0b10, which is the row above and says the
 /// machine takes B4.
-fn field(fif: &[u8], from: usize, to: usize) -> u8 {
+pub fn field_of(fif: &[u8], from: usize, to: usize) -> u8 {
     let mut v = 0u8;
     for n in from..=to {
         v = v << 1 | u8::from(bit(fif, n));
@@ -264,7 +264,7 @@ fn modulations_of(code: u8) -> Vec<Modulation> {
 /// is what a real call's command frame did until this existed.
 pub fn command_rate(fif: &[u8]) -> Option<(Modulation, u32)> {
     use Modulation::{V17, V27ter, V29};
-    Some(match field(fif, 11, 14) {
+    Some(match field_of(fif, 11, 14) {
         0b0000 => (V27ter, 2400),
         0b0100 => (V27ter, 4800),
         0b1000 => (V29, 9600),
@@ -301,8 +301,8 @@ fn scan_line_ms(code: u8) -> f64 {
 
 /// Read a DIS or DTC parameter field.
 pub fn capabilities(fif: &[u8]) -> Capabilities {
-    let rate_field = field(fif, 11, 14);
-    let widths = match field(fif, 17, 18) {
+    let rate_field = field_of(fif, 11, 14);
+    let widths = match field_of(fif, 17, 18) {
         0b00 => vec![215],
         0b01 => vec![215, 255, 303],
         0b10 => vec![215, 255],
@@ -316,13 +316,13 @@ pub fn capabilities(fif: &[u8]) -> Capabilities {
         fine_resolution: bit(fif, 15),
         two_dimensional: bit(fif, 16),
         widths_mm: widths,
-        length: match field(fif, 19, 20) {
+        length: match field_of(fif, 19, 20) {
             0b00 => "A4, 297 mm",
             0b01 => "unlimited",
             0b10 => "A4 and B4, 364 mm",
             _ => "invalid",
         },
-        scan_line_ms: scan_line_ms(field(fif, 21, 23)),
+        scan_line_ms: scan_line_ms(field_of(fif, 21, 23)),
         error_correction: bit(fif, 27),
         t6_coding: bit(fif, 31),
         octets: fif.len(),
@@ -330,6 +330,20 @@ pub fn capabilities(fif: &[u8]) -> Capabilities {
 }
 
 impl Capabilities {
+    /// The fastest rate a modulation may be used at, given what was said.
+    ///
+    /// Table 2 has two rows that both come to V.27 ter: 0100 is the whole
+    /// Recommendation, and 0000 is what the table calls its fall-back mode,
+    /// which is 2400 bit/s and nothing else. Reading both as "V.27 ter" and
+    /// then taking the fastest rate it has offers a machine 4800 that it has
+    /// just finished saying it does not have.
+    pub fn ceiling(&self, modulation: Modulation) -> u32 {
+        match (modulation, self.rate_field) {
+            (Modulation::V27ter, 0b0000) => 2400,
+            _ => modulation.rates()[0],
+        }
+    }
+
     /// The fastest rate the two ends have in common.
     pub fn best_shared(&self, ours: &[Modulation]) -> Option<(Modulation, u32)> {
         let mut best: Option<(Modulation, u32)> = None;
@@ -337,7 +351,7 @@ impl Capabilities {
             if !ours.contains(m) {
                 continue;
             }
-            let rate = m.rates()[0];
+            let rate = self.ceiling(*m);
             if best.is_none_or(|(_, r)| rate > r) {
                 best = Some((*m, rate));
             }
@@ -429,6 +443,121 @@ pub fn identification(fif: &[u8]) -> String {
         .collect::<String>()
         .trim()
         .to_owned()
+}
+
+/// Set bit `n` of a parameter field being built, in Table 2 numbering.
+///
+/// Bit 1 is the first bit on the line, which is the least significant bit of
+/// the first octet. The field grows to reach whatever bit is asked for.
+pub fn set_bit(fif: &mut Vec<u8>, n: usize, on: bool) {
+    let (octet, within) = ((n - 1) / 8, (n - 1) % 8);
+    if fif.len() <= octet {
+        fif.resize(octet + 1, 0);
+    }
+    if on {
+        fif[octet] |= 1 << within;
+    } else {
+        fif[octet] &= !(1 << within);
+    }
+}
+
+/// Set bits `from` to `to` from a value written the way Table 2 writes it:
+/// first bit leftmost, which is the most significant bit of `value`.
+pub fn set_field(fif: &mut Vec<u8>, from: usize, to: usize, value: u8) {
+    let width = to - from + 1;
+    for (i, n) in (from..=to).enumerate() {
+        set_bit(fif, n, value >> (width - 1 - i) & 1 == 1);
+    }
+}
+
+/// What this modem can receive, as the parameter field of a DIS.
+///
+/// Three octets, which is the shortest a DIS can be: bit 24 is the extension
+/// bit and everything past it is optional, so leaving it clear says there is
+/// nothing more to say. Error correction, T.6 coding and every later
+/// extension live beyond it and are not offered, because they are not built.
+pub fn our_capabilities() -> Vec<u8> {
+    let mut fif = vec![0u8; 3];
+    // Bit 10: this machine can receive a document. Bit 9 stays clear -- there
+    // is nothing here for the far end to poll.
+    set_bit(&mut fif, 10, true);
+    // Bits 11 to 14: V.27 ter, meaning 4800 with 2400 behind it. Not the
+    // 0000 row, which is the fall-back alone and would cost half the rate.
+    set_field(&mut fif, 11, 14, 0b0100);
+    // Bit 15: 7.7 lines per millimetre as well as 3.85.
+    set_bit(&mut fif, 15, true);
+    // Bit 16 stays clear: two-dimensional coding is T.4 4.2 and only the
+    // one-dimensional code is written.
+    set_field(&mut fif, 17, 18, 0b00); // 215 mm across, and no wider.
+    set_field(&mut fif, 19, 20, 0b01); // Any length: nothing here is paper.
+    set_field(&mut fif, 21, 23, 0b111); // No minimum scan line time either.
+    fif
+}
+
+/// The four bits of Table 2 that name one modulation and rate in a DCS.
+///
+/// The reverse of [`command_rate`], and the same table read the same way.
+pub fn rate_field(modulation: Modulation, bits_per_second: u32) -> Option<u8> {
+    use Modulation::{V17, V27ter, V29};
+    Some(match (modulation, bits_per_second) {
+        (V27ter, 2400) => 0b0000,
+        (V27ter, 4800) => 0b0100,
+        (V29, 9600) => 0b1000,
+        (V29, 7200) => 0b1100,
+        (V17, 14_400) => 0b0001,
+        (V17, 12_000) => 0b0101,
+        (V17, 9600) => 0b1001,
+        (V17, 7200) => 0b1101,
+        _ => return None,
+    })
+}
+
+/// What a page is being sent as, for the parameter field of a DCS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Command {
+    pub modulation: Modulation,
+    pub bits_per_second: u32,
+    /// 7.7 lines per millimetre rather than 3.85.
+    pub fine: bool,
+    /// Bits 21 to 23, as the receiver asked for them in its DIS.
+    pub scan_line_field: u8,
+}
+
+/// A DCS parameter field: one rate, one resolution, one page ahead.
+///
+/// A command, not a list. 5.3.6.2.2 makes bits 1, 4 and 9 zero in a DCS, and
+/// bit 10 says the far end is to receive -- which is the whole point of
+/// sending one.
+pub fn command(command: Command) -> Vec<u8> {
+    let mut fif = vec![0u8; 3];
+    set_bit(&mut fif, 10, true);
+    if let Some(rate) = rate_field(command.modulation, command.bits_per_second) {
+        set_field(&mut fif, 11, 14, rate);
+    }
+    set_bit(&mut fif, 15, command.fine);
+    set_field(&mut fif, 17, 18, 0b00);
+    set_field(&mut fif, 19, 20, 0b01);
+    // Whatever the receiver asked for, given back to it: this is the one
+    // field of a DCS that is not the sender's choice.
+    set_field(&mut fif, 21, 23, command.scan_line_field & 0b111);
+    fif
+}
+
+/// An identification field: twenty characters, and the digits reversed.
+///
+/// 5.3.6.2.4 allows only digits, spaces and a plus, and the field is sent so
+/// that it fills from the right. A machine given fewer than twenty characters
+/// pads with spaces, and one given more keeps the last twenty.
+pub fn identification_field(text: &str) -> Vec<u8> {
+    let mut fif = vec![b' '; 20];
+    let kept: Vec<u8> = text
+        .bytes()
+        .filter(|c| c.is_ascii_digit() || *c == b' ' || *c == b'+')
+        .collect();
+    for (slot, c) in fif.iter_mut().zip(kept.iter().rev()) {
+        *slot = *c;
+    }
+    fif
 }
 
 #[cfg(test)]
