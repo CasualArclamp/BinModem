@@ -203,6 +203,12 @@ pub struct Session {
     network_request: Mutex<Option<NetRequest>>,
     /// And what it is doing, once there is one.
     network: Mutex<Option<NetView>>,
+    /// What this end calls itself in a fax call, sent as a TSI.
+    ///
+    /// A setting of the machine rather than of the call, which is why it
+    /// lives here beside the drive and not in a dial string. T.30 allows it
+    /// to be blank and plenty of machines send nothing at all.
+    fax_identification: Mutex<String>,
 }
 
 impl Default for Session {
@@ -216,6 +222,7 @@ impl Default for Session {
             transfer: Mutex::default(),
             network_request: Mutex::default(),
             network: Mutex::default(),
+            fax_identification: Mutex::default(),
             recording: AtomicBool::new(false),
         }
     }
@@ -232,6 +239,17 @@ impl Default for Session {
 const DEFAULT_DRIVE: f32 = 0.5;
 
 impl Session {
+    /// What this end calls itself in a fax call.
+    pub fn fax_identification(&self) -> String {
+        self.fax_identification.lock().map(|v| v.clone()).unwrap_or_default()
+    }
+
+    pub fn set_fax_identification(&self, who: &str) {
+        if let Ok(mut v) = self.fax_identification.lock() {
+            who.clone_into(&mut v);
+        }
+    }
+
     /// How hard the line is being driven.
     pub fn drive(&self) -> f32 {
         f32::from_bits(self.drive.load(Ordering::Relaxed))
@@ -696,6 +714,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         }
 
         to_line.clear();
+        // Cheap, once a block, and it has to be here rather than at the dial:
+        // the window is a different thread and the call may be placed by
+        // typing at the terminal rather than by pressing the button.
+        modem.fax_identification = session.fax_identification();
         let drive = session.drive();
         for &s in &from_line {
             let heard = f64::from(s);

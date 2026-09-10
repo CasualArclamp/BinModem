@@ -1072,6 +1072,10 @@ impl ScopeApp {
         let on_hook = self.frame.state == telemetry::CallState::Idle;
         if let Some(number) = self.fax.show(ui, on_hook) {
             self.fax.trouble = None;
+            // Who this end says it is, before the call rather than in it:
+            // the identification goes out inside the first frame this modem
+            // sends, which is well before the window is asked anything again.
+            session.set_fax_identification(self.fax.identification.trim());
             session.type_bytes(crate::faxwin::Fax::commands(&number).as_bytes());
         }
     }

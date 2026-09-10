@@ -118,10 +118,17 @@ impl Sender {
 /// Recovers bits from V.21 channel 2.
 ///
 /// Synchronous, unlike the start-stop receiver next door: there are no start
-/// bits to re-acquire on, so the bit clock is free-running and set going by
-/// the first transition after the carrier appears. A frame is a few hundred
-/// bits at most, so a clock that is right at the start is still right at the
-/// end without any tracking at all.
+/// bits to re-acquire on, so the clock is set going by the first transition
+/// after the carrier appears and then held to every transition after that.
+///
+/// Holding it matters more than it looks. A burst opens with a second of
+/// flags, which is three hundred bits, and the frame that matters comes
+/// after all of them -- so a clock left free-running has drifted for a second
+/// before it reads anything. On a real call to a real fax that cost the
+/// identification frame: the first six octets came off correctly and the rest
+/// was rubbish, and the frame check caught it, which is the good outcome of a
+/// bad situation. The far end's own bit rate is exact and its transitions say
+/// where it is; there is no reason to ignore them.
 #[derive(Debug)]
 pub struct Receiver {
     detector: FskDetector,
@@ -133,6 +140,14 @@ pub struct Receiver {
     /// The level at the last bit centre, for a scope to draw.
     level: f64,
 }
+
+/// How much of the error each transition takes out of the clock.
+///
+/// A transition says where the middle of the next bit should be, and the
+/// clock is nudged an eighth of the way there rather than jumped: a
+/// transition arrives with the noise of one bit on it, and a clock that
+/// believes any single one of them follows the noise instead of the far end.
+const PULL: f64 = 0.125;
 
 impl Receiver {
     pub fn new(fs: f64) -> Self {
@@ -167,6 +182,12 @@ impl Receiver {
             }
             self.running = true;
             self.countdown = self.sps / 2.0;
+        }
+        // Every transition is a bit boundary, so the next sample is due
+        // half a bit after it. Nudge rather than jump.
+        if (level > 0.0) != (self.last > 0.0) {
+            let want = self.sps / 2.0;
+            self.countdown += PULL * (want - self.countdown);
         }
         self.last = level;
         self.countdown -= 1.0;
@@ -259,6 +280,40 @@ mod tests {
         assert!(
             got.windows(sent.len()).any(|w| w == sent.as_slice()),
             "what was sent is not in what came back: {} bits in, {} out",
+            sent.len(),
+            got.len()
+        );
+    }
+
+    #[test]
+    fn the_clock_holds_over_a_burst_as_long_as_a_real_one() {
+        // A second of flags and then a frame, which is what a fax sends and
+        // what a free-running clock loses the end of.
+        let mut tx = Sender::new(FS);
+        let mut rx = Receiver::new(FS);
+        let mut sent: Vec<bool> = Vec::new();
+        for _ in 0..37 {
+            sent.extend([false, true, true, true, true, true, true, false]);
+        }
+        // Twenty octets of an identification field, sent low bit first as
+        // HDLC does, with the runs of ones that stuffing would break up.
+        for octet in b"       909 863  0031" {
+            for i in 0..8 {
+                sent.push(octet >> i & 1 == 1);
+            }
+        }
+        tx.set_transmitting(true);
+        tx.push_bits(&sent);
+        let mut got = Vec::new();
+        for _ in 0..(FS * 2.5) as usize {
+            let s = tx.next_sample();
+            if let Some(bit) = rx.feed(s) {
+                got.push(bit);
+            }
+        }
+        assert!(
+            got.windows(sent.len()).any(|w| w == sent.as_slice()),
+            "the frame after a second of flags did not survive: {} bits in,              {} out",
             sent.len(),
             got.len()
         );
