@@ -895,8 +895,31 @@ impl Modem {
         if self.state == State::Handshaking {
             self.since_dial_ms = self.since_dial_ms.saturating_add(ms);
         }
+        // V.42's clocks stop while the line is being rebuilt under them.
+        //
+        // On a link that is up a retrain is nothing: T401 expires on whatever
+        // was in flight and it is sent again, which is what the timer is for.
+        // On a link that is still being established it is fatal. N400 counts
+        // attempts at a SABME rather than seconds of silence, and a retrain
+        // supplies silence for as long as it takes -- so the attempts are
+        // spent on a line that is not there, N400 runs out, and 7.2.1's answer
+        // to a far end that will not do error control is applied to a far end
+        // that was never asked.
+        //
+        // That is how one call ended up in start-stop characters with a far
+        // end that had said LAPM in V.8 before any data carrier existed: it
+        // connected, spent its second of XID hearing nothing, began protocol
+        // establishment, and retrained 400 ms later. Every SABME after that
+        // went into the retrain. The terminal then got every noise byte on the
+        // line, which is what error control is for keeping off it.
+        //
+        // Nothing is lost by stopping: `drain` still runs, so anything that
+        // does arrive is still delivered. Only the clocks are held.
+        let retraining = self.pump.as_ref().is_some_and(|p| {
+            matches!(p.status(), Progress::Retraining)
+        });
         if let Some(ec) = self.ec.as_mut() {
-            ec.tick(ms);
+            ec.tick(if retraining { 0 } else { ms });
         }
         if self.state == State::Data && self.escape.idle(ms, &self.at.regs) {
             // V.250 6.1.4: the sequence is only an escape if it is surrounded
