@@ -849,24 +849,37 @@ impl ScopeApp {
                 // is right or wrong against what is arriving.
                 if state.rx_rms > 1.0e-4 && state.tx_rms > 1.0e-4 {
                     let over = 20.0 * (state.tx_rms / state.rx_rms).log10();
-                    let loud = over > 6.0;
+                    // Wrong in either direction, and it was only ever flagged
+                    // in one. Twenty decibels under the far end is as broken as
+                    // six over it and looks like nothing at all on a meter: the
+                    // handshake still happens, because the parts of it that are
+                    // tones survive anything, and then the far end spends eight
+                    // seconds deciding whether it can hear an 1800 Hz carrier
+                    // that is barely above its own noise floor. One call went
+                    // out at 20 dB down and this sat there in grey.
+                    let wrong = over > 6.0 || over < -10.0;
                     ui.label(
                         RichText::new(format!("{over:+5.1} dB vs far end"))
                             .monospace()
-                            .color(if loud {
+                            .color(if wrong {
                                 Color32::from_rgb(235, 100, 90)
                             } else {
                                 Color32::from_rgb(140, 150, 165)
                             }),
                     )
                     .on_hover_text(
-                        "How much louder this modem is than the one it is talking \
-                         to. Well above zero and something in the path is being \
-                         driven past what it can carry cleanly -- which does not \
+                        "How this modem's level compares with the one it is \
+                         talking to, which is the thing the slider is for -- a \
+                         transmit level is neither right nor wrong on its own. \
+                         Well above zero and something in the path is being \
+                         driven past what it can carry cleanly, which does not \
                          sound like silence at the far end, it sounds like a far \
                          end that answers the robust parts of a handshake and none \
-                         of the delicate ones. V.21 at 300 bit/s survives almost \
-                         anything; a sixteen-point constellation does not",
+                         of the delicate ones. Well below zero and the far end is \
+                         reading a signal near its own noise floor, with the same \
+                         result. V.21 at 300 bit/s survives either; a \
+                         hundred-and-twenty-eight-point constellation survives \
+                         neither",
                     );
                 }
             }
