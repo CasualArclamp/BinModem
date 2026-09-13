@@ -455,6 +455,9 @@ impl Modem {
 
     /// Which step of the handshake the line is on.
     pub fn line_phase(&self) -> &'static str {
+        if let Some(fax) = self.fax.as_ref() {
+            return fax.phase().name();
+        }
         if let Some(negotiation) = self.negotiation.as_ref() {
             return negotiation.phase();
         }
@@ -497,33 +500,51 @@ impl Modem {
 
     /// The point the receiver last decided on, for a constellation scope.
     pub fn constellation_point(&self) -> Option<(f64, f64)> {
+        if let Some(fax) = self.fax.as_ref() {
+            return fax.constellation_point();
+        }
         self.pump.as_ref().and_then(Pump::constellation_point)
     }
 
     /// Discriminator output, for the modulations whose scope is an eye.
     pub fn discriminator(&self) -> Option<f64> {
+        if let Some(fax) = self.fax.as_ref() {
+            return fax.discriminator();
+        }
         self.pump.as_ref().and_then(Pump::discriminator)
     }
 
     /// One discriminator reading per recovered bit, taken at the bit centre.
     pub fn take_symbol(&mut self) -> Option<f64> {
+        if let Some(fax) = self.fax.as_mut() {
+            return fax.take_symbol();
+        }
         self.pump.as_mut().and_then(Pump::take_symbol)
     }
 
     /// How far the received points are sitting from the decisions made about
     /// them, which is the one number that says whether a call is healthy.
     pub fn residual_error(&self) -> Option<f64> {
+        if let Some(fax) = self.fax.as_ref() {
+            return fax.residual_error();
+        }
         self.pump.as_ref().and_then(Pump::residual_error)
     }
 
     /// How far the receiver is missing by, in units of the distance between
     /// neighbouring points. See [`Pump::reception`].
     pub fn reception(&self) -> Option<f64> {
+        if let Some(fax) = self.fax.as_ref() {
+            return fax.reception();
+        }
         self.pump.as_ref().and_then(Pump::reception)
     }
 
     /// How many states the modulation in use has.
     pub fn states(&self) -> usize {
+        if let Some(fax) = self.fax.as_ref() {
+            return fax.states();
+        }
         self.pump.as_ref().map_or(2, Pump::states)
     }
 
@@ -548,11 +569,17 @@ impl Modem {
 
     /// Short name for the signal shape: "16QAM", "2FSK" and so on.
     pub fn shape(&self) -> &'static str {
+        if let Some(fax) = self.fax.as_ref() {
+            return fax.shape();
+        }
         self.pump.as_ref().map_or("-", Pump::shape)
     }
 
     /// The modulation in use, or the one the next call will use.
     pub fn standard(&self) -> &'static str {
+        if let Some(fax) = self.fax.as_ref() {
+            return fax.standard();
+        }
         if self.negotiation.is_some() {
             return "V.8";
         }

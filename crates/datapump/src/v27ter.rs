@@ -641,6 +641,23 @@ impl Receiver {
         self.last_symbol
     }
 
+    /// Mean distance from the decisions being made, in the same units the
+    /// constellation is drawn in.
+    pub fn residual_error(&self) -> f64 {
+        self.equalizer.error()
+    }
+
+    /// How far apart two neighbouring points are.
+    ///
+    /// Every point sits on the unit circle, so the gap between neighbours is
+    /// the chord: twice the sine of half the angle between them. Three
+    /// quarters of a unit at 4800 and nearly one and a half at 2400, which is
+    /// most of why the slower rate carries a page down a worse line.
+    pub fn point_spacing(&self) -> f64 {
+        let phases = f64::from(self.rate.phases());
+        2.0 * (std::f64::consts::PI / phases).sin()
+    }
+
     /// Forget the burst just gone and be ready for the next one.
     ///
     /// The equaliser is kept: it has learned the line, and the line does not

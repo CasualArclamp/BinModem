@@ -129,6 +129,76 @@ impl FaxCall {
         self.control_rx.carrier() || self.fast_rx.carrier()
     }
 
+    /// Whether the page carrier is the one being listened to.
+    ///
+    /// A fax call has two receivers and only ever one of them is the one that
+    /// matters. Which, decides what a scope should be drawing: the page
+    /// carrier has a constellation and the control channel has an eye, and
+    /// they are not the same picture at all.
+    fn on_the_page_carrier(&self) -> bool {
+        matches!(self.line, Line::Fast(_) | Line::FastListen(_))
+    }
+
+    /// The point the page carrier last decided on, while it is the one in use.
+    pub fn constellation_point(&self) -> Option<(f64, f64)> {
+        self.on_the_page_carrier()
+            .then(|| self.fast_rx.constellation_point())
+    }
+
+    /// The control channel's discriminator, while that is the one in use.
+    pub fn discriminator(&self) -> Option<f64> {
+        (!self.on_the_page_carrier()).then(|| self.control_rx.discriminator())
+    }
+
+    /// One reading per recovered bit of the control channel.
+    pub fn take_symbol(&mut self) -> Option<f64> {
+        if self.on_the_page_carrier() {
+            return None;
+        }
+        self.control_rx.take_symbol()
+    }
+
+    /// Mean distance from the decisions being made, where there are points to
+    /// decide between.
+    pub fn residual_error(&self) -> Option<f64> {
+        self.on_the_page_carrier()
+            .then(|| self.fast_rx.residual_error())
+    }
+
+    /// That distance as a fraction of the gap between neighbouring points,
+    /// where half is the decision boundary.
+    pub fn reception(&self) -> Option<f64> {
+        self.on_the_page_carrier()
+            .then(|| self.fast_rx.residual_error() / self.fast_rx.point_spacing())
+    }
+
+    /// How many points the scope should expect.
+    pub fn states(&self) -> usize {
+        if self.on_the_page_carrier() {
+            usize::from(self.fast_rx.rate().phases())
+        } else {
+            2
+        }
+    }
+
+    /// Short name for the signal shape, as a faceplate would print it.
+    pub fn shape(&self) -> &'static str {
+        match (self.on_the_page_carrier(), self.fast_rx.rate()) {
+            (false, _) => "2FSK",
+            (true, v27ter::Rate::R4800) => "8PSK",
+            (true, v27ter::Rate::R2400) => "4PSK",
+        }
+    }
+
+    /// The modulation carrying the line just now.
+    pub fn standard(&self) -> &'static str {
+        if self.on_the_page_carrier() {
+            "V.27ter"
+        } else {
+            "V.21"
+        }
+    }
+
     /// One sample in, one sample out.
     pub fn step(&mut self, input: f64) -> f64 {
         let want = self.call.line();
@@ -445,6 +515,84 @@ mod tests {
         through(&mut caller, &mut answerer, 40.0, &mut |s| s * 0.0316);
         let got = answerer.received().expect("no page arrived");
         assert_eq!(got.lines, page.lines, "the page came out different");
+    }
+
+
+    /// A fax call has something to put on the scope the whole way through.
+    ///
+    /// Two different pictures, because there are two carriers. The 300 bit/s
+    /// channel is frequency shift keying and what it has is an eye; the page
+    /// carrier is eight points on a circle and what it has is a
+    /// constellation. A panel showing neither for the whole of a call is a
+    /// panel that has nothing to say about the one modulation in the call
+    /// that can actually go wrong.
+    #[test]
+    fn both_carriers_of_a_fax_call_reach_the_scope() {
+        let page = a_page(6);
+        let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()));
+        let mut answerer = FaxCall::answer(FS, "61388880000");
+
+        let mut shapes: Vec<&str> = Vec::new();
+        let mut eye = 0usize;
+        let mut points: Vec<(f64, f64)> = Vec::new();
+        let mut worst_reception = 0.0f64;
+
+        let (mut to_caller, mut to_answerer) = (0.0, 0.0);
+        for _ in 0..(FS * 40.0) as usize {
+            let a = caller.step(to_caller);
+            let b = answerer.step(to_answerer);
+            to_caller = b;
+            to_answerer = a;
+
+            let shape = answerer.shape();
+            if shapes.last() != Some(&shape) {
+                shapes.push(shape);
+            }
+            if answerer.take_symbol().is_some() {
+                eye += 1;
+            }
+            if let Some(p) = answerer.constellation_point() {
+                points.push(p);
+            }
+            // Only while the page is actually moving: before the carrier
+            // arrives the equaliser has nothing to be right or wrong about.
+            if answerer.phase() == Phase::Receiving
+                && answerer.lines_received() > 2
+                && let Some(r) = answerer.reception()
+            {
+                worst_reception = worst_reception.max(r);
+            }
+            if caller.phase().is_over() && answerer.phase().is_over() {
+                break;
+            }
+        }
+
+        assert!(answerer.received().is_some(), "the page did not arrive");
+        assert!(
+            shapes.contains(&"2FSK") && shapes.contains(&"8PSK"),
+            "the scope was never told what it was drawing: {shapes:?}"
+        );
+        assert!(eye > 500, "only {eye} readings for the eye");
+        assert!(points.len() > 1000, "only {} points", points.len());
+
+        // Eight phases on the unit circle, so everything should land near it.
+        let strays = points
+            .iter()
+            .filter(|(x, y)| {
+                let r = (x * x + y * y).sqrt();
+                !(0.5..1.6).contains(&r)
+            })
+            .count();
+        assert!(
+            strays * 20 < points.len(),
+            "{strays} of {} points were nowhere near the circle",
+            points.len()
+        );
+        assert!(
+            worst_reception < 0.25,
+            "the receiver was missing by {worst_reception:.2} of a gap, and \
+             half is the decision boundary"
+        );
     }
 
     #[test]

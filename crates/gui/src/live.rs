@@ -482,6 +482,12 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         std::collections::VecDeque::with_capacity(SYMBOL_HISTORY);
     let mut points: std::collections::VecDeque<(f32, f32)> =
         std::collections::VecDeque::with_capacity(SYMBOL_HISTORY);
+    // What the scope was last drawing. A data call is one modulation from
+    // start to finish, so this never changed and nothing had to notice. A fax
+    // call changes eight or ten times: 300 bit/s frames, then a page carrier,
+    // then frames again, and the two want different pictures. Carrying the
+    // points of one into the other draws a constellation over an eye.
+    let mut drawing = modem.shape();
 
     let mut from_line: Vec<f32> = Vec::with_capacity(4096);
     let mut to_line: Vec<f32> = Vec::with_capacity(4096);
@@ -767,6 +773,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             let heard = f64::from(s);
             to_line.push(modem.step(heard) as f32 * drive);
 
+            if modem.shape() != drawing {
+                drawing = modem.shape();
+                symbols.clear();
+                points.clear();
+            }
             if let Some(sym) = modem.take_symbol() {
                 if symbols.len() == SYMBOL_HISTORY {
                     symbols.pop_front();

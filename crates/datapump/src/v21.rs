@@ -143,6 +143,8 @@ pub struct Receiver {
     last: f64,
     /// The level at the last bit centre, for a scope to draw.
     level: f64,
+    /// That same reading, until somebody takes it.
+    symbol: Option<f64>,
 }
 
 /// How much of the error each transition takes out of the clock.
@@ -163,6 +165,7 @@ impl Receiver {
             running: false,
             last: 0.0,
             level: 0.0,
+            symbol: None,
         }
     }
 
@@ -200,6 +203,7 @@ impl Receiver {
         }
         self.countdown += self.sps;
         self.level = level;
+        self.symbol = Some(level);
         // A mark is a one. The detector is positive towards the mark tone.
         Some(level > 0.0)
     }
@@ -211,6 +215,20 @@ impl Receiver {
     /// Decision margin at the last bit, which is what a scope plots.
     pub fn level(&self) -> f64 {
         self.level
+    }
+
+    /// Where the discriminator is right now, between the two tones.
+    ///
+    /// The whole trace rather than the decisions taken from it, which is what
+    /// an eye is: the interesting part of it is the bit in between, where the
+    /// signal is crossing and the noise decides how wide the opening is.
+    pub fn discriminator(&self) -> f64 {
+        self.last
+    }
+
+    /// The reading at the centre of each recovered bit, once each.
+    pub fn take_symbol(&mut self) -> Option<f64> {
+        self.symbol.take()
     }
 }
 
