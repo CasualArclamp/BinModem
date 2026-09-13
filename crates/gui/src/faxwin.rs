@@ -25,6 +25,14 @@ pub struct Fax {
     source: Option<Grey>,
     source_size: (usize, usize),
     page: Option<Page>,
+    /// How long the page codes to, worked out once when it is made.
+    ///
+    /// Coding a full page is two to four milliseconds, and the panel wants
+    /// the figure three times: once for itself and once for each rate it
+    /// could go out at. Three of those in every frame of a window that is
+    /// open for the whole of a call is ten milliseconds a frame spent
+    /// recomputing a number that cannot have changed.
+    coded_bits: usize,
     /// A small copy of the page for the window to draw.
     preview: Option<egui::TextureHandle>,
     pub resolution: Resolution,
@@ -133,7 +141,9 @@ impl Fax {
     /// Make the page from the picture already loaded.
     pub fn render(&mut self) {
         let Some(source) = self.source.as_ref() else { return };
-        self.page = Some(fax::page::render(source, self.resolution, self.halftone));
+        let page = fax::page::render(source, self.resolution, self.halftone);
+        self.coded_bits = page.encode().len();
+        self.page = Some(page);
         self.preview = None;
     }
 
@@ -337,7 +347,7 @@ impl Fax {
                     }
                     ui.vertical(|ui| {
                         if let Some(page) = self.page.as_ref() {
-                            let bits = page.encode().len();
+                            let bits = self.coded_bits;
                             let rows = [
                                 (
                                     "picture",
@@ -377,7 +387,7 @@ impl Fax {
                                             ui.label(
                                                 RichText::new(format!(
                                                     "{:.0} s  {}",
-                                                    page.seconds_at(*rate),
+                                                    bits as f64 / f64::from(*rate),
                                                     m.name()
                                                 ))
                                                 .monospace()
@@ -612,6 +622,60 @@ impl Fax {
         match start {
             Start::Dial(number) => format!("AT+FCLASS=1\rATD{number}\r"),
             Start::Answer => "AT+FCLASS=1\rATA\r".to_owned(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn page_of(lines: usize) -> Page {
+        Page {
+            lines: (0..lines)
+                .map(|y| (0..fax::page::WIDTH).map(|x| (x + y) % 7 == 0).collect())
+                .collect(),
+            resolution: Resolution::Standard,
+        }
+    }
+
+    #[test]
+    fn a_thumbnail_has_as_many_pixels_as_it_says_it_has() {
+        // The image and the size it declares are handed over separately, and
+        // the two disagreeing is a panic inside the drawing rather than a
+        // wrong picture. A page that arrives is whatever length the far end
+        // sent, including lengths nothing here would ever produce.
+        for lines in [0, 1, 5, 6, 7, 11, 191, 1143, 2287] {
+            let image = Fax::thumbnail(&page_of(lines));
+            assert_eq!(
+                image.pixels.len(),
+                image.size[0] * image.size[1],
+                "a page of {lines} lines"
+            );
+            assert!(image.size[1] > 0, "a page of {lines} lines has no rows");
+        }
+    }
+
+    #[test]
+    fn a_page_that_arrived_saves_at_the_shape_it_was_sent() {
+        // A fax pel is not square: 8.05 across the millimetre and 3.85 or 7.7
+        // down it. Written out on the grid it arrived on, a standard page is
+        // half the height it should be.
+        let dir = std::env::temp_dir().join("binmodem-faxwin-test");
+        let _ = std::fs::create_dir_all(&dir);
+        for (resolution, tall) in [(Resolution::Standard, 2), (Resolution::Fine, 1)] {
+            let mut fax = Fax::new();
+            let mut page = page_of(20);
+            page.resolution = resolution;
+            fax.arrived(page);
+            let path = dir.join(format!("{}.png", resolution.name().replace(['.', ',', ' ', '/'], "-")));
+            fax.save(&path);
+            let saved = fax.saved.clone().unwrap_or_default();
+            assert!(saved.starts_with("saved to"), "{saved}");
+            let image = image::open(&path).expect("it did not write a picture");
+            assert_eq!(image.width() as usize, fax::page::WIDTH);
+            assert_eq!(image.height() as usize, 20 * tall);
+            let _ = std::fs::remove_file(&path);
         }
     }
 }

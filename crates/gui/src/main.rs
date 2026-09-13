@@ -33,6 +33,7 @@
 
 mod answer;
 mod app;
+mod crashlog;
 mod faxwin;
 mod console;
 mod engine;
@@ -162,6 +163,10 @@ fn parse() -> Result<Option<Args>, String> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Before anything at all, so that whatever goes wrong next leaves a line
+    // behind saying where. Nothing else in here writes anything down.
+    crashlog::install();
+
     // The answering modem is a different program in the same file. It owns the
     // process rather than sharing it -- there is no window, and what it prints
     // is the whole of its output -- so it is dispatched before anything else
