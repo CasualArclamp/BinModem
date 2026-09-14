@@ -17,7 +17,10 @@
 //! they ride on, the probing signals and what they measure, and the procedure
 //! for both ends. Phases 3 and 4 and the data mode are next.
 
+pub mod constellation;
 pub mod dpsk;
 pub mod info;
+pub mod mp;
 pub mod phase2;
 pub mod probe;
+pub mod signals;
