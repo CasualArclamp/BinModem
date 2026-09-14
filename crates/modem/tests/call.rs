@@ -369,6 +369,61 @@ fn the_two_v32_carriers_are_two_ceilings() {
     assert_eq!(p.caller.states(), 128);
 }
 
+/// Two modems asked for V.34 agree on it in V.8 and go through its phase 2:
+/// capabilities, ranging, probing and the settlement. There is nothing after
+/// phase 2 yet, so both ends then hang up -- and what they found is kept.
+#[test]
+fn two_modems_asked_for_v34_probe_the_line_and_hang_up() {
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "AT+MS=V34");
+    Pair::type_at(&mut p.caller, "AT+MS=V34");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    let mut phases = Vec::new();
+    for _ in 0..1500 {
+        p.run(0.01);
+        let phase = p.caller.line_phase();
+        if phases.last() != Some(&phase) {
+            phases.push(phase);
+        }
+        if p.caller.state() == State::Command && p.host.state() == State::Command && phases.len() > 2 {
+            break;
+        }
+    }
+    assert!(phases.contains(&"V.34 ranging"), "never ranged: {phases:?}");
+    assert_eq!(p.caller.state(), State::Command, "still in {phases:?}");
+    assert_eq!(p.host.state(), State::Command);
+    assert!(p.caller_saw().contains("NO CARRIER"), "{}", p.caller_saw());
+
+    for (who, modem) in [("caller", &p.caller), ("host", &p.host)] {
+        let report = modem.v34_report().unwrap_or_else(|| panic!("{who}: no report"));
+        assert_eq!(report.failed, None, "{who}: {:?}", report.failed);
+        let info1a = report.info1a.expect("no INFO1a");
+        assert_eq!(info1a.answer_to_call.nominal(), 3429, "{who}: {info1a:?}");
+        assert_eq!(info1a.call_to_answer.nominal(), 3429, "{who}: {info1a:?}");
+        assert_eq!(info1a.probed.max_rate, 14, "{who}: {info1a:?}");
+        let rtd = report.round_trip.expect("no round trip");
+        assert!(rtd < 0.003, "{who}: {rtd} s round trip on a direct connection");
+        let rows = modem.distant();
+        assert!(rows.iter().any(|(k, v)| *k == "V.34 to this end" && v.contains("33600")), "{rows:?}");
+    }
+}
+
+/// A V.34 caller and a far end without it: V.8 settles on V.32bis, and the
+/// call goes ahead on that exactly as though V.34 had never been asked for.
+#[test]
+fn a_v34_caller_meets_a_v32bis_modem_on_v32bis() {
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "AT+MS=V32B");
+    Pair::type_at(&mut p.caller, "AT+MS=V34");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(14.0);
+    assert_eq!(p.caller.state(), State::Data, "{}", p.caller_saw());
+    assert_eq!(p.caller.rate(), Some(14_400));
+    assert!(p.caller.v34_report().is_none());
+}
+
 #[test]
 fn a_v32_call_carries_data_both_ways() {
     let mut p = Pair::new();

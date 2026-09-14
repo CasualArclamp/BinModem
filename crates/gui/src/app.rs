@@ -187,7 +187,12 @@ impl Modulation {
             2 => &[4800, 9600],
             // V.32bis 2.3: the two V.32 rates and the three it adds, all at
             // the same 2400 baud.
-            _ => &[4800, 7200, 9600, 12_000, 14_400],
+            3 => &[4800, 7200, 9600, 12_000, 14_400],
+            // V.34 5.1: "2400 bit/s to 33 600 bit/s in multiples of 2400".
+            _ => &[
+                2400, 4800, 7200, 9600, 12_000, 14_400, 16_800, 19_200, 21_600, 24_000, 26_400,
+                28_800, 31_200, 33_600,
+            ],
         }
     }
 
@@ -533,11 +538,15 @@ impl ScopeApp {
     }
 
     /// Modulations the modem will accept, in the order the box shows them.
-    const CARRIERS: [(&'static str, &'static str); 4] = [
+    const CARRIERS: [(&'static str, &'static str); 5] = [
         ("B103", "Bell 103 - 300 bit/s"),
         ("V22B", "V.22bis - 1200 or 2400"),
         ("V32", "V.32 - 4800 or 9600"),
         ("V32B", "V.32bis - 4800 to 14400"),
+        (
+            "V34",
+            "V.34 - phase 2 only: probes the line, reports, and hangs up.              A far end without V.34 gets V.32bis",
+        ),
     ];
 
     /// Boards to start from, because a text box on its own is a box nobody
@@ -2039,7 +2048,7 @@ impl ScopeApp {
     /// would only take 7200 away. Choosing V.32 on purpose -- which is worth
     /// doing against a far end that claims V.32bis and cannot hold it -- is in
     /// the Advanced window, where a deliberate choice belongs.
-    const CEILINGS: [(u32, usize, &'static str); 8] = [
+    const CEILINGS: [(u32, usize, &'static str); 9] = [
         (300, 0, "300"),
         (1200, 1, "1200"),
         (2400, 1, "2400"),
@@ -2048,6 +2057,7 @@ impl ScopeApp {
         (9600, 3, "9600"),
         (12_000, 3, "12000"),
         (14_400, 3, "14400"),
+        (33_600, 4, "33600"),
     ];
 
     /// How fast at most, and the three things that are simply on or off.
@@ -2640,7 +2650,10 @@ mod modulation_tests {
         assert_eq!(Modulation::rates(2), &[4800, 9600]);
         assert_eq!(ScopeApp::CARRIERS[3].0, "V32B");
         assert_eq!(Modulation::rates(3), &[4800, 7200, 9600, 12_000, 14_400]);
-        assert_eq!(ScopeApp::CARRIERS.len(), 4);
+        assert_eq!(ScopeApp::CARRIERS[4].0, "V34");
+        assert_eq!(Modulation::rates(4).len(), 14);
+        assert_eq!(Modulation::rates(4).last(), Some(&33_600));
+        assert_eq!(ScopeApp::CARRIERS.len(), 5);
     }
 
     /// The two V.32 carriers are two ceilings on one modulation, and the

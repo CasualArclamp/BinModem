@@ -147,6 +147,34 @@ impl Transmitter {
         self.pending.len()
     }
 
+    /// Turn the carrier half way round, on the very next sample.
+    ///
+    /// Tones A and B mark time with their phase reversals (10.1.2.1 and
+    /// 10.1.2.2), and a round trip is measured between two of them, so a
+    /// reversal belongs at a sample and not at the next symbol boundary a
+    /// millisecond and a half away. Every symbol the pulse is still spread
+    /// across is turned round with it, which turns the whole of the output
+    /// round at once: a carrier with nothing on it is the same point over and
+    /// over, and those points sum to exactly the carrier.
+    pub fn reverse(&mut self) {
+        self.point = -self.point;
+        for symbol in &mut self.history {
+            *symbol = -*symbol;
+        }
+    }
+
+    /// Stop dead: nothing queued, nothing still dying away, and the next
+    /// sequence starting from a point of its own.
+    ///
+    /// For the handover to a signal that is not this one -- L1 follows tone A
+    /// and tone B directly, and a tail of the tone underneath the probing
+    /// would be read as part of the line.
+    pub fn stop(&mut self) {
+        self.pending.clear();
+        self.history.fill(0.0);
+        self.on = false;
+    }
+
     /// Whether the carrier is on or still dying away.
     pub fn is_sending(&self) -> bool {
         self.on || !self.pending.is_empty() || self.history.iter().any(|s| *s != 0.0)
@@ -443,6 +471,26 @@ mod tests {
         }
         assert_eq!(found, vec![Info::Info0(capabilities())]);
         assert!(tx.is_sending(), "the tone stopped");
+    }
+
+    #[test]
+    fn a_reversal_turns_the_carrier_round_on_the_sample() {
+        let mut tx = Transmitter::new(Side::Call, FS);
+        let mut plain = Transmitter::new(Side::Call, FS);
+        tx.send(&[false; 40]);
+        plain.send(&[false; 40]);
+        for _ in 0..4000 {
+            tx.next_sample();
+            plain.next_sample();
+        }
+        tx.reverse();
+        for _ in 0..200 {
+            let (a, b) = (tx.next_sample(), plain.next_sample());
+            assert!((a + b).abs() < 1e-9, "{a} against {b}");
+        }
+        tx.stop();
+        assert!(!tx.is_sending());
+        assert_eq!(tx.next_sample(), 0.0);
     }
 
     #[test]

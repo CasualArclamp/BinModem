@@ -327,7 +327,7 @@ impl Interpreter {
             // separate carriers, and the difference is real: V32 tops out at
             // 9600 and V32B at 14 400. A far end that will not hold the faster
             // rates is asked for the slower carrier and gets exactly it.
-            modulations: ["V32B", "V32", "V22B", "B103"]
+            modulations: ["V34", "V32B", "V32", "V22B", "B103"]
                 .iter()
                 .map(|s| (*s).to_owned())
                 .collect(),

@@ -27,6 +27,7 @@ use datapump::AsyncBits;
 use datapump::bell103;
 use datapump::v22bis;
 use datapump::v32;
+use datapump::v34;
 mod faxcall;
 
 pub use faxcall::FaxCall;
@@ -94,6 +95,10 @@ enum Pump {
     V32(Box<v32::startup::Modem>),
     /// Bell 103: 300 bit/s, two tones a direction, and nothing else at all.
     Bell103(Box<bell103::Modem>),
+    /// V.34's phase 2 and nothing after it: the line probed and ranged, what
+    /// the two ends would use settled -- and the call ended there, because
+    /// phases 3 and 4 and the data mode are not written yet.
+    V34(Box<v34::phase2::Modem>),
 }
 
 impl Pump {
@@ -102,6 +107,7 @@ impl Pump {
             Self::V22bis(m) => m.step(line),
             Self::V32(m) => m.step(line),
             Self::Bell103(m) => m.step(line),
+            Self::V34(m) => m.step(line),
         }
     }
 
@@ -126,6 +132,12 @@ impl Pump {
                 bell103::Status::Connected(rate) => Progress::Connected(rate),
                 bell103::Status::Failed => Progress::Failed,
             },
+            // Done is not connected: there is nothing after phase 2 to connect
+            // with yet, so either way the call is over.
+            Self::V34(m) => match m.status() {
+                v34::phase2::Status::Running => Progress::Negotiating,
+                v34::phase2::Status::Done | v34::phase2::Status::Failed(_) => Progress::Failed,
+            },
         }
     }
 
@@ -140,6 +152,7 @@ impl Pump {
             // waiting for a carrier that had gone before it started waiting.
             Self::V32(m) => m.carrier(),
             Self::Bell103(m) => m.carrier(),
+            Self::V34(_) => false,
         }
     }
 
@@ -148,6 +161,7 @@ impl Pump {
             Self::V22bis(m) => m.take_bits(),
             Self::V32(m) => m.take_bits(),
             Self::Bell103(m) => m.take_bits(),
+            Self::V34(_) => Vec::new(),
         }
     }
 
@@ -156,6 +170,7 @@ impl Pump {
             Self::V22bis(m) => m.send_bits(bits),
             Self::V32(m) => m.send_bits(bits),
             Self::Bell103(m) => m.send_bits(bits),
+            Self::V34(_) => {}
         }
     }
 
@@ -164,6 +179,7 @@ impl Pump {
             Self::V22bis(m) => m.pending_bits(),
             Self::V32(m) => m.pending_bits(),
             Self::Bell103(m) => m.pending_bits(),
+            Self::V34(_) => 0,
         }
     }
 
@@ -175,7 +191,7 @@ impl Pump {
         match self {
             Self::V22bis(m) => Some(m.constellation_point()),
             Self::V32(m) => Some(m.constellation_point()),
-            Self::Bell103(_) => None,
+            Self::Bell103(_) | Self::V34(_) => None,
         }
     }
 
@@ -213,7 +229,7 @@ impl Pump {
         match self {
             Self::V22bis(m) => Some(m.residual_error()),
             Self::V32(m) => Some(m.residual_error()),
-            Self::Bell103(_) => None,
+            Self::Bell103(_) | Self::V34(_) => None,
         }
     }
 
@@ -230,7 +246,7 @@ impl Pump {
     fn reception(&self) -> Option<f64> {
         match self {
             Self::V32(m) => Some(m.residual_error() / m.point_spacing()),
-            Self::V22bis(_) | Self::Bell103(_) => None,
+            Self::V22bis(_) | Self::Bell103(_) | Self::V34(_) => None,
         }
     }
 
@@ -250,7 +266,7 @@ impl Pump {
                 }
                 _ => 4,
             },
-            Self::Bell103(_) => 2,
+            Self::Bell103(_) | Self::V34(_) => 2,
         }
     }
 
@@ -274,6 +290,7 @@ impl Pump {
                 _ => "4PSK",
             },
             Self::Bell103(_) => "2FSK",
+            Self::V34(_) => "DPSK",
         }
     }
 
@@ -289,6 +306,7 @@ impl Pump {
                 _ => "V.32",
             },
             Self::Bell103(_) => "Bell 103",
+            Self::V34(_) => "V.34",
         }
     }
 
@@ -299,7 +317,124 @@ impl Pump {
             Self::V22bis(m) => m.phase(),
             Self::V32(m) => m.phase(),
             Self::Bell103(m) => m.line_phase(),
+            Self::V34(m) => m.phase(),
         }
+    }
+}
+
+/// What V.34's phase 2 found, kept after the call it ended.
+///
+/// Phase 2 is all of V.34 there is so far, so this is the whole of what a V.34
+/// call can tell anybody: what the far end said it could do, how long the line
+/// takes there and back, what the probing measured, and what the two ends
+/// would have used had there been anything to use it with.
+#[derive(Debug, Clone)]
+pub struct V34Report {
+    pub role: v34::phase2::Role,
+    /// None if phase 2 got to the end of itself, and why not if it did not.
+    pub failed: Option<&'static str>,
+    pub far: Option<v34::info::Info0>,
+    pub round_trip: Option<f64>,
+    pub reading: Option<v34::probe::Reading>,
+    pub info1c: Option<v34::info::Info1c>,
+    pub info1a: Option<v34::info::Info1a>,
+}
+
+impl V34Report {
+    fn of(m: &v34::phase2::Modem) -> Self {
+        Self {
+            role: m.role(),
+            failed: match m.status() {
+                v34::phase2::Status::Failed(why) => Some(why),
+                _ => None,
+            },
+            far: m.far_capabilities(),
+            round_trip: m.round_trip(),
+            reading: m.reading().cloned(),
+            info1c: m.info1c(),
+            info1a: m.info1a(),
+        }
+    }
+
+    /// One direction's settlement, as the panel says it.
+    fn direction(rate: v34::info::SymbolRate, probed: v34::info::Probed) -> String {
+        if probed.max_rate == 0 {
+            return format!("{} symbols/s, unusable", rate.nominal());
+        }
+        format!(
+            "{} symbols/s, {} bit/s, {} carrier, pre-emphasis {}",
+            rate.nominal(),
+            u32::from(probed.max_rate) * 2400,
+            if probed.high_carrier { "high" } else { "low" },
+            probed.pre_emphasis
+        )
+    }
+
+    fn rows(&self) -> Vec<(&'static str, String)> {
+        let mut rows = vec![(
+            "V.34 phase 2",
+            match self.failed {
+                None => "done; phases 3 and 4 are not written yet, so the call ends here".to_owned(),
+                Some(why) => format!("stopped: {why}"),
+            },
+        )];
+        if let Some(far) = self.far {
+            let mut rates = vec!["2400", "3000", "3200"];
+            if far.rate_2743 {
+                rates.insert(1, "2743");
+            }
+            if far.rate_2800 {
+                rates.insert(rates.len() - 2, "2800");
+            }
+            if far.rate_3429 {
+                rates.push("3429");
+            }
+            rows.push((
+                "V.34 far end",
+                format!(
+                    "{} symbols/s{}{}",
+                    rates.join(" "),
+                    if far.constellation_1664 { ", 1664 points" } else { "" },
+                    if far.transmit_3429 { "" } else { ", 3429 not allowed" }
+                ),
+            ));
+        }
+        if let Some(rtd) = self.round_trip {
+            rows.push(("round trip", format!("{:.0} ms", rtd * 1000.0)));
+        }
+        if let Some(reading) = self.reading.as_ref() {
+            let mut snr: Vec<f64> = reading.tones.iter().map(|t| t.snr_db).collect();
+            snr.sort_by(f64::total_cmp);
+            let gain = |f: f64| reading.tones.iter().find(|t| t.frequency == f).map_or(0.0, |t| t.gain_db);
+            rows.push((
+                "probed line",
+                format!(
+                    "SNR {:.0} dB median ({:.0} to {:.0}), {:+.1} dB at 1050 Hz and {:+.1} at 3300{}",
+                    snr[snr.len() / 2],
+                    snr[0],
+                    snr[snr.len() - 1],
+                    gain(1050.0),
+                    gain(3300.0),
+                    reading
+                        .frequency_offset
+                        .map_or(String::new(), |hz| format!(", {hz:+.2} Hz offset"))
+                ),
+            ));
+        }
+        if let (Some(info1c), Some(info1a)) = (self.info1c, self.info1a) {
+            let answer_to_call = Self::direction(
+                info1a.answer_to_call,
+                info1c.probed[info1a.answer_to_call.index() as usize],
+            );
+            let call_to_answer = Self::direction(info1a.call_to_answer, info1a.probed);
+            let (towards_us, towards_them) = match self.role {
+                v34::phase2::Role::Call => (answer_to_call, call_to_answer),
+                v34::phase2::Role::Answer => (call_to_answer, answer_to_call),
+            };
+            rows.push(("V.34 to this end", towards_us));
+            rows.push(("V.34 from this end", towards_them));
+        }
+        rows
     }
 }
 
@@ -393,6 +528,9 @@ pub struct Modem {
     pub fax_identification: String,
     /// What V.8 heard the far end say, kept after the negotiation is put away.
     far_menu: Option<v8::Menu>,
+    /// What V.34's phase 2 found on the last call that ran it, kept after the
+    /// call it ended.
+    v34_report: Option<V34Report>,
     /// What the error control layer heard, kept after it is put away.
     ///
     /// A connection that ends up without error control drops the stack, and
@@ -438,6 +576,7 @@ impl Modem {
             fax_page: None,
             fax_identification: String::new(),
             far_menu: None,
+            v34_report: None,
             far_ec: Vec::new(),
             declared_lapm: false,
             announce: None,
@@ -603,6 +742,7 @@ impl Modem {
         match self.pump.as_ref() {
             Some(p) => p.standard(),
             None => match self.at.modulation.carrier.as_str() {
+                "V34" => "V.34",
                 "V32B" => "V.32bis",
                 "V32" => "V.32",
                 "B103" => "Bell 103",
@@ -694,6 +834,11 @@ impl Modem {
     ///
     /// Empty before there is a call, because saying nothing is the honest
     /// report of a far end that has not spoken.
+    /// What V.34's phase 2 found on the last call that ran it.
+    pub fn v34_report(&self) -> Option<&V34Report> {
+        self.v34_report.as_ref()
+    }
+
     pub fn distant(&self) -> Vec<(&'static str, String)> {
         let mut rows = Vec::new();
         if let Some(menu) = self.far_menu {
@@ -752,6 +897,9 @@ impl Modem {
             ));
         }
         rows.extend(self.error_control_rows());
+        if let Some(report) = self.v34_report.as_ref() {
+            rows.extend(report.rows());
+        }
         rows
     }
 
@@ -1118,7 +1266,17 @@ impl Modem {
                 self.announce = Some(rate);
                 self.announce_connect();
             }
-            Progress::Failed => self.end_call(Ended::NoAnswer),
+            Progress::Failed => {
+                if let Some(Pump::V34(m)) = self.pump.as_ref() {
+                    // Not a call that never answered: one that answered, got
+                    // through as much of V.34 as there is, and stopped. What it
+                    // learned is the point of having placed it.
+                    self.v34_report = Some(V34Report::of(m));
+                    self.end_call(Ended::CarrierLost);
+                } else {
+                    self.end_call(Ended::NoAnswer);
+                }
+            }
         }
     }
 
@@ -1403,6 +1561,7 @@ impl Modem {
         self.rate = 0;
         self.ec = None;
         self.far_menu = None;
+        self.v34_report = None;
         self.far_ec.clear();
         self.declared_lapm = false;
         self.announce = None;
@@ -1457,6 +1616,9 @@ impl Modem {
             // availability"), so the two carriers offer the same thing and
             // differ only in what they will then agree to.
             "V32" | "V32B" => Some(Modulation::V32bis),
+            // Offered first, and V.32bis and V.22bis beside it below: a far end
+            // without V.34 picks one of those, and the call goes ahead on it.
+            "V34" => Some(Modulation::V34Duplex),
             "B103" => None,
             _ => Some(Modulation::V22bis),
         }) else {
@@ -1566,6 +1728,7 @@ impl Modem {
     fn start_pump(&mut self, chosen: Option<Modulation>) {
         let role = self.role;
         let carrier = match chosen {
+            Some(Modulation::V34Duplex) => "V34".to_owned(),
             // V.8 cannot tell the two apart, so what it agreed does not
             // change which of them was asked for. Anything else -- a far end
             // that offered it when this end had chosen V.22bis, say -- takes
@@ -1576,9 +1739,22 @@ impl Modem {
             },
             Some(Modulation::V22bis) => "V22B".to_owned(),
             // Nothing else is ever offered, so nothing else can come back.
-            _ => self.at.modulation.carrier.clone(),
+            // Except that V.34 without V.8 is not V.34: 11.1.1.3 sends a call
+            // whose far end answered with a plain ANS on to V.32bis's own
+            // start-up, and so does a V.8 that was turned off.
+            _ => match self.at.modulation.carrier.as_str() {
+                "V34" => "V32B".to_owned(),
+                other => other.to_owned(),
+            },
         };
         self.pump = Some(match carrier.as_str() {
+            "V34" => {
+                let role = match role {
+                    Role::Calling => v34::phase2::Role::Call,
+                    Role::Answering => v34::phase2::Role::Answer,
+                };
+                Pump::V34(Box::new(v34::phase2::Modem::new(role, self.fs)))
+            }
             "V32" | "V32B" => {
                 let hs_role = match role {
                     Role::Calling => v32::startup::Role::Calling,
