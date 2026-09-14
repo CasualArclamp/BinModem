@@ -746,14 +746,12 @@ impl Receiver {
 
     /// Forget the burst just gone and be ready for the next one.
     ///
-    /// The equaliser is kept: it has learned the line, and the line does not
-    /// change between one turnaround and the next. Everything that belongs to
-    /// one burst goes -- the differential reference, the descrambler, any bits
-    /// not yet taken, and the carrier detector along with them. The detector
-    /// especially: what is on the line at the moment somebody starts listening
-    /// for a burst is the tail of the last one, and a detector that carries
-    /// its own state across a turnaround reports that tail as a burst that
-    /// arrived and ended.
+    /// Everything that belongs to one burst goes -- the differential
+    /// reference, the descrambler, the equaliser, any bits not yet taken, and
+    /// the carrier detector along with them. The detector especially: what is
+    /// on the line at the moment somebody starts listening for a burst is the
+    /// tail of the last one, and a detector that carries its own state across a
+    /// turnaround reports that tail as a burst that arrived and ended.
     pub fn restart(&mut self) {
         self.new_burst();
         self.carrier = false;
@@ -767,6 +765,13 @@ impl Receiver {
     /// decoding state left over from the last burst, and keep its own, since
     /// it is the thing that just decided there is a burst at all.
     fn new_burst(&mut self) {
+        // The equaliser starts again as well. Every burst carries a training
+        // sequence built to teach one from nothing, so nothing is lost by it,
+        // and keeping the old one turns a moment's trouble into a lasting one:
+        // a burst of noise walks its taps off, and a receiver that carries
+        // those taps into the next burst cannot read that one either, or the
+        // retransmission that was meant to put things right.
+        self.equalizer.reset();
         self.eighths = None;
         self.descrambler.reset();
         self.bits.clear();

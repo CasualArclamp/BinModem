@@ -726,7 +726,7 @@ impl Receiver {
         closest
     }
 
-    /// Forget the burst just gone, detector and all, but keep the equaliser.
+    /// Forget the burst just gone, detector, equaliser and all.
     pub fn restart(&mut self) {
         self.new_burst();
         self.carrier = false;
@@ -735,6 +735,13 @@ impl Receiver {
     }
 
     fn new_burst(&mut self) {
+        // The equaliser starts again as well. Every burst carries a training
+        // sequence built to teach one from nothing, so nothing is lost by it,
+        // and keeping the old one turns a moment's trouble into a lasting one:
+        // a burst of noise walks its taps off, and a receiver that carries
+        // those taps into the next burst cannot read that one either, or the
+        // retransmission that was meant to put things right.
+        self.equalizer.reset();
         self.previous = None;
         self.descrambler.reset();
         self.bits.clear();

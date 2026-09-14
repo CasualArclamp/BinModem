@@ -17,6 +17,7 @@
 //! are talking, and every turnaround has a settling time either side of it
 //! that is longer than it looks like it should be.
 
+use crate::ecm;
 use crate::frames::{Message, Reader, Sender};
 use crate::page::{Page, Resolution};
 use crate::t30::{self, Capabilities, Command, Frame, Modulation};
@@ -196,6 +197,17 @@ const FAST_CARRIER_GONE: f64 = 0.200;
 /// longest burst of frames anything sends in phase B.
 const HOLD_FOR_THE_FAR_END: f64 = 6.0;
 
+/// How long a page carrier may stay up with nothing readable in it before the
+/// receiving end stops waiting for it to end.
+///
+/// T5 of A.5.4.1, sixty seconds: the longest T.30 has anybody wait on a far end
+/// that is still there. A burst this end cannot read is still a burst, and the
+/// command that follows it cannot be heard until it is over -- giving up on it
+/// after T2's six seconds went back to listening for a partial page signal
+/// while the far end still had most of a retransmission to send, and then gave
+/// up on that too.
+const T5_SECONDS: f64 = 60.0;
+
 /// How many of a training check's bits have to be zeros for the rate to be
 /// accepted, and how many in a row mark where it starts.
 ///
@@ -217,6 +229,19 @@ const TCF_STARTS_AFTER: usize = 32;
 /// V.17 is not among them yet. What goes in a DIS is this same fact in the
 /// form Table 2 wants it.
 pub const OUR_MODULATIONS: [Modulation; 2] = [Modulation::V27ter, Modulation::V29];
+
+/// Which post-message command goes out next under error correction mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EcmCommand {
+    /// A partial page has ended (A.4.3 1).
+    Pps,
+    /// Frames asked for four times are given up on (A.4.3 2).
+    Eor,
+    /// The same frames again, at a slower rate (A.4.1 1).
+    Ctc,
+    /// Is the receiver ready yet (A.4.3 3).
+    Rr,
+}
 
 /// A fax call.
 #[derive(Debug)]
@@ -263,6 +288,28 @@ pub struct Call {
     /// How the page is coded: chosen by the end that sends it, from what the
     /// end that receives it said it could read.
     scheme: t4::Scheme,
+    /// Whether this end offers error correction mode, and whether this call is
+    /// using it.
+    error_correction_offered: bool,
+    ecm: bool,
+    /// Error correction mode, sending: the page cut into frames, the block of
+    /// them in hand, the frames of it asked for again and how many times, and
+    /// the page's number in the call.
+    ecm_frames: Vec<Vec<u8>>,
+    ecm_block: usize,
+    ecm_resend: Vec<usize>,
+    ecm_pprs: u32,
+    ecm_page: u8,
+    ecm_command: EcmCommand,
+    /// Error correction mode, receiving: the frames arriving, the page so far,
+    /// how many frames the block in hand has, the last block confirmed, what
+    /// to answer with, and where to go once the answer has gone.
+    collector: ecm::Collector,
+    ecm_octets: Vec<u8>,
+    ecm_expected: usize,
+    ecm_confirmed: Option<(u8, u8)>,
+    ecm_response: Option<Message>,
+    after_answering: Phase,
 
     /// The page this end is sending, if it has one.
     page: Option<Page>,
@@ -340,6 +387,20 @@ impl Call {
             scan_line_ms: 0.0,
             resolution: page.as_ref().map_or(Resolution::Standard, |p| p.resolution),
             scheme: t4::Scheme::OneDimensional,
+            error_correction_offered: true,
+            ecm: false,
+            ecm_frames: Vec::new(),
+            ecm_block: 0,
+            ecm_resend: Vec::new(),
+            ecm_pprs: 0,
+            ecm_page: 0,
+            ecm_command: EcmCommand::Pps,
+            collector: ecm::Collector::new(),
+            ecm_octets: Vec::new(),
+            ecm_expected: 0,
+            ecm_confirmed: None,
+            ecm_response: None,
+            after_answering: Phase::AwaitingDisconnect,
             page,
             fast_out: Vec::new(),
             fast_at: 0,
@@ -387,6 +448,20 @@ impl Call {
         }
     }
 
+    /// Offer error correction mode, or not.
+    ///
+    /// Offered by default. A far end that has it and is told this end does
+    /// too will use it, and a page that goes in frames is a page that arrives
+    /// whole or says exactly which parts did not.
+    pub fn set_error_correction(&mut self, on: bool) {
+        self.error_correction_offered = on;
+    }
+
+    /// Whether this call is in error correction mode.
+    pub fn error_correction(&self) -> bool {
+        self.ecm
+    }
+
     /// Use only these modulations, of the ones this end has.
     ///
     /// Anything not built is dropped, and an empty offer is V.27 ter: T.30
@@ -424,7 +499,12 @@ impl Call {
                 if self.fast_out.is_empty() {
                     return None;
                 }
-                Some(self.fast_at as f64 / self.fast_out.len() as f64)
+                let burst = self.fast_at as f64 / self.fast_out.len() as f64;
+                if self.ecm && !self.ecm_frames.is_empty() {
+                    // Blocks done, and how far through the one on the line.
+                    return Some((self.ecm_block as f64 + burst) / self.ecm_blocks() as f64);
+                }
+                Some(burst)
             }
             Role::Answerer => {
                 let lines = self.decoder.lines().len();
@@ -512,6 +592,14 @@ impl Call {
             Phase::CheckingTraining => {
                 self.fast_in.extend_from_slice(bits);
                 self.timer = T2_SECONDS;
+            }
+            Phase::Receiving if self.ecm => {
+                // A frame rather than a bit, for the same reason as a line.
+                let before = self.collector.count();
+                self.collector.feed_bits(bits);
+                if self.collector.count() != before {
+                    self.timer = T2_SECONDS;
+                }
             }
             Phase::Receiving => {
                 // A line rather than a bit, because noise is bits too. A
@@ -608,7 +696,12 @@ impl Call {
                 // A high-speed burst has no closing flag. What ends it is the
                 // carrier going away, and for a page the return to control
                 // T.4 puts at the end of it as well.
-                if self.phase == Phase::Receiving && self.decoder.is_done() {
+                let finished = if self.ecm {
+                    self.collector.ended()
+                } else {
+                    self.decoder.is_done()
+                };
+                if self.phase == Phase::Receiving && finished {
                     self.page_ended();
                 } else if self.fast_seen && self.fast_down > FAST_CARRIER_GONE {
                     self.fast_burst_heard();
@@ -620,7 +713,15 @@ impl Call {
                     // more than enough to judge.
                     self.fast_burst_heard();
                 } else if self.timer <= 0.0 {
-                    self.timed_out();
+                    if self.phase == Phase::Receiving
+                        && self.fast_carrier
+                        && self.held < T5_SECONDS
+                    {
+                        self.held += self.step;
+                    } else {
+                        self.held = 0.0;
+                        self.timed_out();
+                    }
                 }
             }
             Phase::AwaitingConfirm
@@ -677,7 +778,13 @@ impl Call {
                 self.fast_down = 0.0;
             }
             Phase::Receiving => {
-                self.decoder.reset_to(self.scheme);
+                if self.ecm {
+                    // A retransmission fills in the same block, so what has
+                    // arrived already stays.
+                    self.collector.next_partial_page();
+                } else {
+                    self.decoder.reset_to(self.scheme);
+                }
                 self.fast_seen = false;
                 self.fast_up = 0.0;
                 self.fast_down = 0.0;
@@ -756,12 +863,16 @@ impl Call {
                     } else {
                         t4::Scheme::OneDimensional
                     };
+                    self.ecm = t30::bit(&message.fif, 27);
+                    self.collector = ecm::Collector::new();
+                    self.ecm_octets.clear();
+                    self.ecm_confirmed = None;
                     self.pause_then(Phase::CheckingTraining);
                 }
             }
             Frame::Cfr => {
                 if self.phase == Phase::AwaitingConfirm {
-                    if self.fast_out_page().is_empty() {
+                    if self.page.is_none() {
                         // Let go to send a page there is not one of. Say so
                         // rather than holding the line.
                         self.pause_then(Phase::Ending);
@@ -777,7 +888,61 @@ impl Call {
             }
             Frame::Mcf | Frame::Rtp => {
                 if self.phase == Phase::AwaitingReceipt {
-                    self.pause_then(Phase::Ending);
+                    if self.ecm {
+                        self.next_block();
+                    } else {
+                        self.pause_then(Phase::Ending);
+                    }
+                }
+            }
+            Frame::Err => {
+                if self.phase == Phase::AwaitingReceipt && self.ecm {
+                    self.next_block();
+                }
+            }
+            Frame::Ppr => {
+                if self.phase == Phase::AwaitingReceipt && self.ecm {
+                    self.frames_wanted_again(&message.fif);
+                }
+            }
+            Frame::Ctr => {
+                if self.phase == Phase::AwaitingReceipt && self.ecm {
+                    self.ecm_command = EcmCommand::Pps;
+                    self.attempts = 0;
+                    self.pause_then(Phase::Sending);
+                }
+            }
+            Frame::Rnr => {
+                // A.5.4.5: "the transmitter immediately sends an RR command
+                // until an MCF ... is received correctly".
+                if self.phase == Phase::AwaitingReceipt && self.ecm {
+                    self.ecm_command = EcmCommand::Rr;
+                    self.attempts = 0;
+                    self.pause_then(Phase::EndingPage);
+                }
+            }
+            // The far end listens for these on the control channel even while
+            // it is waiting for the page carrier: a sender whose partial page
+            // signal went unanswered sends it again, and it has to be heard.
+            Frame::Pps => {
+                if self.ecm && matches!(self.phase, Phase::Receiving | Phase::AwaitingPostMessage) {
+                    self.partial_page_signal(&message.fif);
+                }
+            }
+            Frame::Eor => {
+                if self.ecm && matches!(self.phase, Phase::Receiving | Phase::AwaitingPostMessage) {
+                    self.end_of_retransmission(&message.fif);
+                }
+            }
+            Frame::Ctc => {
+                if self.ecm && matches!(self.phase, Phase::Receiving | Phase::AwaitingPostMessage) {
+                    // A.4.1: the FIF is bits 1 to 16 of a DCS, and "the
+                    // receiving terminal uses only bits 11-14".
+                    if let Some((modulation, rate)) = t30::command_rate(&message.fif) {
+                        self.modulation = modulation;
+                        self.rate = rate;
+                    }
+                    self.respond(Message::new(Frame::Ctr, false), Phase::Receiving);
                 }
             }
             Frame::Rtn => {
@@ -848,7 +1013,12 @@ impl Call {
                 self.pause_then(Phase::Confirming);
             }
             Phase::Receiving => {
-                if self.decoder.lines().is_empty() {
+                let nothing = if self.ecm {
+                    self.collector.count() == 0 && self.ecm_octets.is_empty()
+                } else {
+                    self.decoder.lines().is_empty()
+                };
+                if nothing {
                     self.bow_out("the page never arrived");
                 } else {
                     self.page_ended();
@@ -914,6 +1084,7 @@ impl Call {
             } else {
                 t4::Scheme::OneDimensional
             };
+            self.ecm = self.error_correction_offered && caps.error_correction;
         }
         true
     }
@@ -942,6 +1113,7 @@ impl Call {
             fine: self.resolution == Resolution::Fine,
             scan_line_field: self.scan_line_field,
             two_dimensional: self.scheme == t4::Scheme::TwoDimensional,
+            error_correction: self.ecm,
         }));
         self.sender.send(&[tsi, dcs]);
     }
@@ -959,8 +1131,13 @@ impl Call {
             return Vec::new();
         };
         // The minimum scan line time is not a property of the picture but of
-        // the paper at the far end, and it arrived in the DIS.
-        let min_bits = (self.scan_line_ms / 1000.0 * f64::from(self.rate)).ceil() as usize;
+        // the paper at the far end, and it arrived in the DIS. Under error
+        // correction mode there is none: Note 8, "0 ms".
+        let min_bits = if self.ecm {
+            0
+        } else {
+            (self.scan_line_ms / 1000.0 * f64::from(self.rate)).ceil() as usize
+        };
         // A fine page to a machine that only prints standard loses every
         // other line: 7.7 lines to the millimetre is exactly twice 3.85, so
         // that is the same page at the resolution it can take.
@@ -980,16 +1157,127 @@ impl Call {
     }
 
     fn send_page(&mut self) {
-        self.fast_out = self.fast_out_page();
+        if !self.ecm {
+            self.fast_out = self.fast_out_page();
+            self.fast_at = 0;
+            return;
+        }
+        if self.ecm_frames.is_empty() {
+            self.ecm_frames = ecm::frames(&ecm::pack(&self.fast_out_page()), ecm::FRAME_OCTETS);
+            self.ecm_block = 0;
+        }
+        let bits = {
+            let block = self.ecm_block_frames();
+            let numbers: Vec<usize> = if self.ecm_resend.is_empty() {
+                (0..block.len()).collect()
+            } else {
+                self.ecm_resend.clone()
+            };
+            let frames: Vec<(u8, &[u8])> = numbers
+                .iter()
+                .filter_map(|&n| block.get(n).map(|data| (n as u8, data.as_slice())))
+                .collect();
+            ecm::partial_page(&frames, self.rate)
+        };
+        self.fast_out = bits;
         self.fast_at = 0;
+    }
+
+    /// The frames of the block in hand.
+    fn ecm_block_frames(&self) -> &[Vec<u8>] {
+        let start = (self.ecm_block * ecm::BLOCK_FRAMES).min(self.ecm_frames.len());
+        let end = (start + ecm::BLOCK_FRAMES).min(self.ecm_frames.len());
+        &self.ecm_frames[start..end]
+    }
+
+    fn ecm_blocks(&self) -> usize {
+        self.ecm_frames.len().div_ceil(ecm::BLOCK_FRAMES).max(1)
     }
 
     fn send_end_of_page(&mut self) {
         self.attempts += 1;
-        // One page and no more, so end of procedure rather than multi-page
-        // signal (6.2.9).
-        self.sender
-            .send(&[Message::new(Frame::Eop, true)]);
+        if !self.ecm {
+            // One page and no more, so end of procedure rather than
+            // multi-page signal (6.2.9).
+            self.sender.send(&[Message::new(Frame::Eop, true)]);
+            return;
+        }
+        let frames = self.ecm_block_frames().len();
+        let last = self.ecm_block + 1 >= self.ecm_blocks();
+        let command = if last {
+            ecm::PostMessage::Eop
+        } else {
+            ecm::PostMessage::Null
+        };
+        let message = match self.ecm_command {
+            EcmCommand::Pps => Message::new(Frame::Pps, true).with_fif(&ecm::pps_field(
+                command,
+                self.ecm_page,
+                self.ecm_block as u8,
+                frames,
+            )),
+            EcmCommand::Eor => Message::new(Frame::Eor, true).with_fif(&[command.code()]),
+            EcmCommand::Ctc => {
+                let dcs = t30::command(Command {
+                    modulation: self.modulation,
+                    bits_per_second: self.rate,
+                    fine: self.resolution == Resolution::Fine,
+                    scan_line_field: self.scan_line_field,
+                    two_dimensional: self.scheme == t4::Scheme::TwoDimensional,
+                    error_correction: true,
+                });
+                Message::new(Frame::Ctc, true).with_fif(&dcs[..2])
+            }
+            EcmCommand::Rr => Message::new(Frame::Rr, true),
+        };
+        self.sender.send(&[message]);
+    }
+
+    /// The block in hand has arrived, or been given up on: on to the next,
+    /// or to the end of the call.
+    fn next_block(&mut self) {
+        self.ecm_block += 1;
+        self.ecm_resend.clear();
+        self.ecm_pprs = 0;
+        self.ecm_command = EcmCommand::Pps;
+        self.attempts = 0;
+        if self.ecm_block < self.ecm_blocks() {
+            self.pause_then(Phase::Sending);
+        } else {
+            self.pause_then(Phase::Ending);
+        }
+    }
+
+    /// A PPR: send the frames it asks for, or, the fourth time, change the
+    /// terms (A.1.3).
+    fn frames_wanted_again(&mut self, fif: &[u8]) {
+        let wanted = ecm::read_ppr(fif, self.ecm_block_frames().len());
+        if wanted.is_empty() {
+            // A PPR asking for nothing is a confirmation in all but name.
+            self.next_block();
+            return;
+        }
+        self.ecm_resend = wanted;
+        self.ecm_pprs += 1;
+        self.attempts = 0;
+        if self.ecm_pprs < ecm::PPRS_BEFORE_GIVING_WAY {
+            self.pause_then(Phase::Sending);
+        } else if !self.fallback.is_empty() {
+            // "The modem speed may fall back or continue at the same speed in
+            // accordance with the decision of the transmitting terminal." A
+            // block that has failed four times at a rate is a rate to leave.
+            let next = self.fallback.remove(0);
+            self.modulation = next.modulation;
+            self.rate = next.bits_per_second;
+            self.ecm_pprs = 0;
+            self.ecm_command = EcmCommand::Ctc;
+            self.pause_then(Phase::EndingPage);
+        } else {
+            // Nowhere slower to go: give up on what is still missing, and let
+            // the coding make what it can of the rest.
+            self.ecm_command = EcmCommand::Eor;
+            self.pause_then(Phase::EndingPage);
+        }
     }
 
     // ---- the answerer's side ----------------------------------------------
@@ -998,7 +1286,7 @@ impl Call {
         let csi = Message::new(Frame::Csi, false)
             .and_more()
             .with_fif(&t30::identification_field(&self.identification));
-        let dis = Message::new(Frame::Dis, false).with_fif(&t30::our_capabilities(&self.offer));
+        let dis = Message::new(Frame::Dis, false).with_fif(&t30::our_capabilities(&self.offer, self.error_correction_offered));
         self.sender.send(&[csi, dis]);
     }
 
@@ -1015,6 +1303,10 @@ impl Call {
     /// the ordinary limit, and it is generous -- a page that far gone is
     /// still readable, and asking for it again costs another minute.
     fn send_acknowledgement(&mut self) {
+        if let Some(message) = self.ecm_response.take() {
+            self.sender.send(&[message]);
+            return;
+        }
         let lines = self.decoder.lines().len();
         let good = lines > 0 && self.decoder.damaged() * 20 <= lines;
         let frame = if good { Frame::Mcf } else { Frame::Rtn };
@@ -1068,8 +1360,84 @@ impl Call {
     }
 
     fn page_ended(&mut self) {
-        self.finish_page();
+        // Under error correction mode a burst is a partial page, and what it
+        // was part of is only known once the post-message command says.
+        if !self.ecm {
+            self.finish_page();
+        }
         self.enter(Phase::AwaitingPostMessage);
+    }
+
+    /// Answer under error correction mode, then go on to `next`.
+    fn respond(&mut self, message: Message, next: Phase) {
+        self.ecm_response = Some(message);
+        self.after_answering = next;
+        self.pause_then(Phase::Acknowledging);
+    }
+
+    /// Where a post-message command leaves the call once it has been answered.
+    fn after(command: ecm::PostMessage) -> Phase {
+        match command {
+            ecm::PostMessage::Null | ecm::PostMessage::Mps => Phase::Receiving,
+            ecm::PostMessage::Eop => Phase::AwaitingDisconnect,
+            ecm::PostMessage::Eom => Phase::AwaitingCommand,
+        }
+    }
+
+    /// A PPS: confirm the block if it is whole, or ask for what is missing.
+    fn partial_page_signal(&mut self, fif: &[u8]) {
+        let Some((command, page, block, frames)) = ecm::read_pps(fif) else {
+            return;
+        };
+        self.ecm_expected = frames;
+        if self.collector.count() == 0 && self.ecm_confirmed == Some((page, block)) {
+            // This block was confirmed and the confirmation was lost, so the
+            // same PPS has come again. The block is already in the page; say
+            // so again rather than asking for it all over.
+            self.respond(Message::new(Frame::Mcf, false), Self::after(command));
+            return;
+        }
+        if self.collector.complete(frames) {
+            let data = self.collector.take_block(frames);
+            self.ecm_octets.extend_from_slice(&data);
+            self.ecm_confirmed = Some((page, block));
+            self.block_accepted(command, Frame::Mcf);
+        } else {
+            let fif = ecm::ppr_field(frames, |i| self.collector.has(i));
+            self.respond(Message::new(Frame::Ppr, false).with_fif(&fif), Phase::Receiving);
+        }
+    }
+
+    /// An EOR: the sender has given up on what is still missing.
+    fn end_of_retransmission(&mut self, fif: &[u8]) {
+        let command = fif
+            .first()
+            .and_then(|&code| ecm::PostMessage::from_code(code))
+            .unwrap_or(ecm::PostMessage::Null);
+        let data = self.collector.take_block(self.ecm_expected.max(1));
+        self.ecm_octets.extend_from_slice(&data);
+        self.block_accepted(command, Frame::Err);
+    }
+
+    /// A block is done with: finish the page if the command says it is over,
+    /// and answer.
+    fn block_accepted(&mut self, command: ecm::PostMessage, answer: Frame) {
+        if command != ecm::PostMessage::Null {
+            self.finish_ecm_page();
+            self.ecm_octets.clear();
+        }
+        self.respond(Message::new(answer, false), Self::after(command));
+    }
+
+    /// Decode a page that arrived in frames.
+    fn finish_ecm_page(&mut self) {
+        let bits = ecm::unpack(&self.ecm_octets);
+        let mut decoder = t4::Decoder::with_scheme(crate::page::WIDTH, self.scheme);
+        decoder.feed_bits(&bits);
+        if self.received.is_none() && !decoder.lines().is_empty() {
+            self.received = Some(decoder.page(self.resolution));
+        }
+        self.decoder = decoder;
     }
 
     fn finish_page(&mut self) {
@@ -1098,7 +1466,18 @@ impl Call {
                     self.enter(Phase::AwaitingCommand);
                 }
             }
-            Phase::Acknowledging => self.enter(Phase::AwaitingDisconnect),
+            Phase::Acknowledging => {
+                if self.ecm {
+                    match self.after_answering {
+                        // The sender turns its carrier round and trains; the
+                        // settling gap is this end's half of that.
+                        Phase::Receiving => self.pause_then(Phase::Receiving),
+                        next => self.enter(next),
+                    }
+                } else {
+                    self.enter(Phase::AwaitingDisconnect);
+                }
+            }
             Phase::EndingPage => self.enter(Phase::AwaitingReceipt),
             _ => {}
         }
@@ -1278,7 +1657,9 @@ mod tests {
     fn a_page_that_stops_arriving_does_not_wait_for_ever() {
         // And noise is not a page. What arrives when a carrier detector has
         // latched onto the hiss on a line is a bit every symbol for ever,
-        // which is bits without lines.
+        // which is bits without lines. A carrier that is still there is waited
+        // on, because a burst this end cannot read is still a burst -- but for
+        // T5 and no longer.
         let mut call = Call::answer(FS, "1");
         call.enter(Phase::Receiving);
         call.set_fast_carrier(true);
@@ -1288,7 +1669,28 @@ mod tests {
         for _ in 0..(FS * (T2_SECONDS + 1.0)) as usize {
             call.tick(true);
         }
+        assert_eq!(
+            call.phase(),
+            Phase::Receiving,
+            "gave up on a carrier that was still on the line"
+        );
+        for _ in 0..(FS * T5_SECONDS) as usize {
+            call.tick(true);
+        }
         assert_ne!(call.phase(), Phase::Receiving, "it waited for ever");
+    }
+
+    #[test]
+    fn a_page_carrier_that_goes_away_is_not_waited_on() {
+        // The carrier gone and nothing readable arrived: six seconds, not
+        // sixty.
+        let mut call = Call::answer(FS, "1");
+        call.enter(Phase::Receiving);
+        call.set_fast_carrier(false);
+        for _ in 0..(FS * (T2_SECONDS + 1.0)) as usize {
+            call.tick(true);
+        }
+        assert_ne!(call.phase(), Phase::Receiving, "it waited on silence");
     }
 
     #[test]
@@ -1407,13 +1809,13 @@ mod tests {
         // It was not: the end that dialled never took its resolution from the
         // page, so every page went out saying standard, and a fine page arrived
         // at twice its height.
-        let dcs = command_for(Some(fine_page(10)), &t30::our_capabilities(&OUR_MODULATIONS));
+        let dcs = command_for(Some(fine_page(10)), &t30::our_capabilities(&OUR_MODULATIONS, true));
         assert!(t30::bit(&dcs, 15), "a fine page was commanded as standard");
     }
 
     #[test]
     fn a_fine_page_to_a_standard_machine_is_sent_standard_and_halved() {
-        let mut fif = t30::our_capabilities(&OUR_MODULATIONS);
+        let mut fif = t30::our_capabilities(&OUR_MODULATIONS, true);
         t30::set_bit(&mut fif, 15, false);
         let page = fine_page(10);
         let dcs = command_for(Some(page.clone()), &fif);
@@ -1430,7 +1832,7 @@ mod tests {
     #[test]
     fn two_dimensional_coding_is_used_exactly_when_the_far_end_reads_it() {
         let page = fine_page(10);
-        let ours = t30::our_capabilities(&OUR_MODULATIONS);
+        let ours = t30::our_capabilities(&OUR_MODULATIONS, true);
         assert!(t30::bit(&command_for(Some(page.clone()), &ours), 16));
         // The real machine's DIS, which does not offer it.
         assert!(!t30::bit(&command_for(Some(page), &DIS), 16));
@@ -1539,17 +1941,23 @@ mod tests {
         // The DIS this modem sends, read with the same reader that reads
         // everybody else's. A capability frame that cannot be read by its own
         // parser is one no far end will read either.
-        let caps = t30::capabilities(&t30::our_capabilities(&OUR_MODULATIONS));
+        let caps = t30::capabilities(&t30::our_capabilities(&OUR_MODULATIONS, true));
         assert!(caps.receives);
         assert!(!caps.can_be_polled, "there is nothing here to fetch");
         assert_eq!(caps.modulations, vec![Modulation::V27ter, Modulation::V29]);
         assert!(caps.fine_resolution);
         assert!(caps.two_dimensional, "T.4 4.2 is offered as well as 4.1");
-        assert!(!caps.error_correction);
+        assert!(caps.error_correction, "T.30 Annex A is offered");
         assert_eq!(caps.widths_mm, vec![215]);
         assert_eq!(caps.length, "unlimited");
         assert_eq!(caps.scan_line_ms, 0.0);
-        assert_eq!(caps.octets, 3, "a DIS with no extension is three octets");
+        assert_eq!(caps.octets, 4, "bit 27 is in the fourth octet");
+
+        // And without it, the three octets of a DIS with no extension.
+        let plain = t30::our_capabilities(&OUR_MODULATIONS, false);
+        assert_eq!(plain.len(), 3);
+        assert!(!t30::capabilities(&plain).error_correction);
+        assert!(!t30::bit(&plain, 24), "an extension bit with nothing after it");
     }
 
     #[test]
@@ -1561,7 +1969,7 @@ mod tests {
             // Nothing at all is V.27 ter, which every machine must have.
             (vec![], vec![Modulation::V27ter]),
         ] {
-            let caps = t30::capabilities(&t30::our_capabilities(&offer));
+            let caps = t30::capabilities(&t30::our_capabilities(&offer, true));
             assert_eq!(caps.modulations, want, "offering {offer:?}");
         }
     }

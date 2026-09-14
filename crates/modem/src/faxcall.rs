@@ -100,6 +100,18 @@ impl FaxCall {
         self
     }
 
+    /// Offer error correction mode, or not.
+    #[must_use]
+    pub fn with_error_correction(mut self, on: bool) -> Self {
+        self.call.set_error_correction(on);
+        self
+    }
+
+    /// Whether this call is in error correction mode.
+    pub fn error_correction(&self) -> bool {
+        self.call.error_correction()
+    }
+
     pub fn role(&self) -> Role {
         self.call.role()
     }
@@ -369,6 +381,14 @@ impl FaxCall {
                 self.call.set_control_carrier(self.control_rx.carrier());
             }
             Line::FastListen(speed) => {
+                // The control channel too. Waiting for a page carrier is when
+                // a sender whose last command went unanswered sends it again,
+                // and under error correction mode that is the ordinary way to
+                // recover a lost confirmation. What a V.21 receiver makes of a
+                // page carrier is noise, and noise does not pass a frame check.
+                if let Some(bit) = self.control_rx.feed(input) {
+                    self.call.control_bit(bit);
+                }
                 let (bits, carrier) = match Carrier::of(speed) {
                     Some(Carrier::V27ter(_)) => {
                         self.v27ter_rx.feed(input);
@@ -828,6 +848,112 @@ mod tests {
         let got = answerer.received().expect("no page arrived");
         assert_eq!(got.resolution, Resolution::Fine, "it arrived as standard");
         assert_eq!(got.lines, page.lines, "the page came out different");
+    }
+
+    /// Run a call with a burst of noise dropped onto the page the first time
+    /// it goes out, and hand back every frame the answering end heard.
+    fn with_a_burst_of_noise(caller: &mut FaxCall, answerer: &mut FaxCall) -> Vec<Frame> {
+        let mut heard = Vec::new();
+        let mut hit = false;
+        let (mut to_caller, mut to_answerer) = (0.0, 0.0);
+        let mut seed = 0x1234_5678u32;
+        let mut started: Option<f64> = None;
+        for _ in 0..(FS * 60.0) as usize {
+            let a = caller.step(to_caller);
+            let b = answerer.step(to_answerer);
+            if started.is_none()
+                && caller.phase() == Phase::Sending
+                && caller.progress().is_some_and(|p| p > 0.3)
+            {
+                started = Some(caller.seconds());
+            }
+            let during = !hit && started.is_some_and(|t| caller.seconds() - t < 0.1);
+            to_answerer = if during {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                // Loud enough to spoil every symbol it lands on.
+                a + (f64::from(seed) / f64::from(u32::MAX) - 0.5) * 2.0
+            } else {
+                a
+            };
+            if caller.phase() == Phase::EndingPage && caller.progress().is_some() {
+                hit = true;
+            }
+            to_caller = b;
+            heard.extend(answerer.take_heard().into_iter().map(|m| m.frame));
+            if caller.phase().is_over() && answerer.phase().is_over() {
+                break;
+            }
+        }
+        heard
+    }
+
+    fn a_long_page(rows: usize) -> Page {
+        let width = fax::page::WIDTH;
+        Page {
+            lines: (0..rows)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| (x / 7 + y / 3).is_multiple_of(3) && (x * 13 + y * 7) % 11 < 6)
+                        .collect()
+                })
+                .collect(),
+            resolution: Resolution::Standard,
+        }
+    }
+
+    #[test]
+    fn two_of_these_use_error_correction_mode() {
+        let page = a_page(8);
+        let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()));
+        let mut answerer = FaxCall::answer(FS, "61388880000");
+        let mut sent = Vec::new();
+        let (mut to_caller, mut to_answerer) = (0.0, 0.0);
+        for _ in 0..(FS * 40.0) as usize {
+            let a = caller.step(to_caller);
+            let b = answerer.step(to_answerer);
+            to_caller = b;
+            to_answerer = a;
+            sent.extend(answerer.take_heard().into_iter().map(|m| m.frame));
+            if caller.phase().is_over() && answerer.phase().is_over() {
+                break;
+            }
+        }
+        assert!(caller.error_correction(), "the caller did not choose it");
+        assert!(answerer.error_correction(), "the answerer was not told");
+        assert!(sent.contains(&Frame::Pps), "no partial page signal: {sent:?}");
+        assert!(!sent.contains(&Frame::Eop), "a bare EOP under error correction");
+        assert_eq!(answerer.received().expect("no page").lines, page.lines);
+    }
+
+    #[test]
+    fn a_burst_of_noise_costs_a_retransmission_and_not_the_page() {
+        // What error correction mode is for. Without it the same burst spoils
+        // lines that nobody can ask for again; with it the frames it landed on
+        // are asked for, sent again, and the page arrives exactly as it left.
+        let page = a_long_page(120);
+        let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()));
+        let mut answerer = FaxCall::answer(FS, "61388880000");
+        let heard = with_a_burst_of_noise(&mut caller, &mut answerer);
+        let pps = heard.iter().filter(|f| **f == Frame::Pps).count();
+        assert!(caller.error_correction());
+        assert!(pps >= 2, "the damaged block was never sent again: {heard:?}");
+        let got = answerer.received().unwrap_or_else(|| panic!("no page ({:?})", answerer.trouble()));
+        assert_eq!(got.lines, page.lines, "the page was not put right");
+    }
+
+    #[test]
+    fn without_it_the_same_burst_spoils_the_page() {
+        // The control for the test above: the same noise, the same place, and
+        // error correction turned off at the answering end.
+        let page = a_long_page(120);
+        let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()));
+        let mut answerer = FaxCall::answer(FS, "61388880000").with_error_correction(false);
+        with_a_burst_of_noise(&mut caller, &mut answerer);
+        assert!(!caller.error_correction(), "used it with a far end that has not got it");
+        let got = answerer.received().map(|p| p.lines.clone()).unwrap_or_default();
+        assert_ne!(got, page.lines, "the noise missed the page, so this proves nothing");
     }
 
     #[test]

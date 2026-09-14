@@ -51,6 +51,19 @@ pub enum Frame {
     Mps,
     /// Disconnect.
     Dcn,
+    /// Error correction mode, T.30 A.4: a partial page has ended (PPS), the
+    /// sender has given up on some frames (EOR), is asking whether the
+    /// receiver is ready (RR), or will correct at a new rate (CTC).
+    Pps,
+    Eor,
+    Rr,
+    Ctc,
+    /// And the answers: these frames again (PPR), not ready (RNR), end of
+    /// retransmission acknowledged (ERR), the new rate accepted (CTR).
+    Ppr,
+    Rnr,
+    Err,
+    Ctr,
     Unknown(u8),
 }
 
@@ -84,6 +97,14 @@ impl Frame {
             0x8E => Self::Eom,
             0x4E => Self::Mps,
             0xFA => Self::Dcn,
+            0xBE => Self::Pps,
+            0xCE => Self::Eor,
+            0x6E => Self::Rr,
+            0x12 => Self::Ctc,
+            0xBC => Self::Ppr,
+            0xEC => Self::Rnr,
+            0x1C => Self::Err,
+            0xC4 => Self::Ctr,
             other => Self::Unknown(other),
         }
     }
@@ -110,6 +131,17 @@ impl Frame {
             Self::Eom => 0x8E,
             Self::Mps => 0x4E,
             Self::Dcn => 0xFA,
+            // A.4.1 to A.4.4, first bit on the left: X111 1101, X111 0011,
+            // X111 0110, X100 1000, X011 1101, X011 0111, X011 1000 and
+            // X010 0011.
+            Self::Pps => 0xBE,
+            Self::Eor => 0xCE,
+            Self::Rr => 0x6E,
+            Self::Ctc => 0x12,
+            Self::Ppr => 0xBC,
+            Self::Rnr => 0xEC,
+            Self::Err => 0x1C,
+            Self::Ctr => 0xC4,
             Self::Unknown(code) => code,
         };
         base | u8::from(from_caller)
@@ -131,6 +163,14 @@ impl Frame {
             Self::Eom => "EOM",
             Self::Mps => "MPS",
             Self::Dcn => "DCN",
+            Self::Pps => "PPS",
+            Self::Eor => "EOR",
+            Self::Rr => "RR",
+            Self::Ctc => "CTC",
+            Self::Ppr => "PPR",
+            Self::Rnr => "RNR",
+            Self::Err => "ERR",
+            Self::Ctr => "CTR",
             Self::Unknown(_) => "?",
         }
     }
@@ -151,6 +191,14 @@ impl Frame {
             Self::Eom => "end of message",
             Self::Mps => "another page follows",
             Self::Dcn => "disconnect",
+            Self::Pps => "end of a partial page",
+            Self::Eor => "end of retransmission",
+            Self::Rr => "are you ready",
+            Self::Ctc => "continue to correct, at this rate",
+            Self::Ppr => "these frames again",
+            Self::Rnr => "not ready",
+            Self::Err => "end of retransmission understood",
+            Self::Ctr => "correcting at that rate",
             Self::Unknown(_) => "not a frame this knows",
         }
     }
@@ -476,7 +524,7 @@ pub fn set_field(fif: &mut Vec<u8>, from: usize, to: usize, value: u8) {
 /// bit and everything past it is optional, so leaving it clear says there is
 /// nothing more to say. Error correction, T.6 coding and every later
 /// extension live beyond it and are not offered, because they are not built.
-pub fn our_capabilities(offer: &[Modulation]) -> Vec<u8> {
+pub fn our_capabilities(offer: &[Modulation], error_correction: bool) -> Vec<u8> {
     let mut fif = vec![0u8; 3];
     // Bit 10: this machine can receive a document. Bit 9 stays clear -- there
     // is nothing here for the far end to poll.
@@ -502,6 +550,13 @@ pub fn our_capabilities(offer: &[Modulation]) -> Vec<u8> {
     set_field(&mut fif, 17, 18, 0b00); // 215 mm across, and no wider.
     set_field(&mut fif, 19, 20, 0b01); // Any length: nothing here is paper.
     set_field(&mut fif, 21, 23, 0b111); // No minimum scan line time either.
+    if error_correction {
+        // Bit 24 says another octet follows, and bit 27 in it is error
+        // correction mode. Bit 28 is "set to 0" in a DIS: the frame size is
+        // the sender's choice, and A.1.3 has a receiver take either.
+        set_bit(&mut fif, 24, true);
+        set_bit(&mut fif, 27, true);
+    }
     fif
 }
 
@@ -534,6 +589,8 @@ pub struct Command {
     pub scan_line_field: u8,
     /// Bit 16: the page is Modified READ rather than Modified Huffman.
     pub two_dimensional: bool,
+    /// Bit 27: the page goes in frames under T.30 Annex A.
+    pub error_correction: bool,
 }
 
 /// A DCS parameter field: one rate, one resolution, one page ahead.
@@ -552,8 +609,20 @@ pub fn command(command: Command) -> Vec<u8> {
     set_field(&mut fif, 17, 18, 0b00);
     set_field(&mut fif, 19, 20, 0b01);
     // Whatever the receiver asked for, given back to it: this is the one
-    // field of a DCS that is not the sender's choice.
-    set_field(&mut fif, 21, 23, command.scan_line_field & 0b111);
+    // field of a DCS that is not the sender's choice -- except under error
+    // correction mode, where Note 8 has the sender say "1, 1, 1" and send no
+    // fill at all.
+    let scan_line = if command.error_correction {
+        0b111
+    } else {
+        command.scan_line_field & 0b111
+    };
+    set_field(&mut fif, 21, 23, scan_line);
+    if command.error_correction {
+        // Bit 28 clear: frames of 256 octets.
+        set_bit(&mut fif, 24, true);
+        set_bit(&mut fif, 27, true);
+    }
     fif
 }
 
