@@ -241,14 +241,20 @@ impl Default for Session {
 }
 
 /// How hard to drive the line by default, as a multiple of what the modem
-/// hands over.
+/// hands over: twenty decibels down.
 ///
-/// Six decibels of headroom. Pulse shaping puts the peak of a modem well above
-/// its own average, so a modem written out at unity clips on the peaks, and a
-/// clipped constellation is one whose outer points have all moved inwards
-/// together -- which is to say a receiver that will train happily on a
-/// constellation that is not the one being sent.
-const DEFAULT_DRIVE: f32 = 0.5;
+/// Headroom first. Pulse shaping puts the peak of a modem well above its own
+/// average, so a modem written out at unity clips on the peaks, and a clipped
+/// constellation is one whose outer points have all moved inwards together --
+/// which is to say a receiver that will train happily on a constellation that
+/// is not the one being sent.
+///
+/// Every transmitter here leaves at a root mean square of 0.707, and the
+/// shaped constellations peak close to 2 -- tests/levels.rs in the data pump
+/// measures both. At the old default of half, V.32's peaks reached the very
+/// top of the scale. Twenty down leaves them fourteen decibels under it, and is
+/// the level the calls through a softphone have been placed at.
+const DEFAULT_DRIVE: f32 = 0.1;
 
 impl Session {
     /// What this end calls itself in a fax call.
