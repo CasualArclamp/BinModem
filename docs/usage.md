@@ -90,6 +90,33 @@ it says what it was derived from.
 
 Tell the board to send first. This end answers; it does not ask.
 
+## Sending a fax
+
+The **Fax** button opens T.30. **Browse** loads a picture and makes a page of
+it: 1728 pels across, at 3.85 or 7.7 lines per millimetre, thresholded or
+dithered. The panel says what that page comes to and how long it takes at each
+rate before anything is dialled.
+
+**Send fax** types `AT+FCLASS=1` and then `ATD` with the number in the box. On
+a softphone, place the call there first and press it once the far end has
+answered; the calling tone goes out, the far end says what it is, and the page
+follows. **Wait for a fax** types `AT+FCLASS=1` and `ATA` instead: this end
+answers with 2100 Hz, says what it can receive, and keeps whatever page
+arrives. The window draws it, and **Save as PNG** writes it out with each scan
+line drawn tall enough to make the pels square, which they are not.
+
+The **offer** boxes are what this end will use. V.29 carries a page at 9600 and
+7200; V.27 ter at 4800 and 2400, and every fax machine has it. A call starts at
+the fastest rate both ends have and drops a rung each time the far end refuses
+the training check. Untick V.29 to hold a call to V.27 ter on a bad line.
+
+The far end's number and what its DIS says appear as soon as they arrive,
+whether or not a page follows. One page to a call, and no error correction
+mode yet.
+
+The modem stays in fax class after a call, as V.250 asks, so `AT+FCLASS=0`
+makes it a modem again before dialling a board.
+
 ## Two of them on a network
 
 The **Network** button brings up PPP over a call that is already connected, so

@@ -9,7 +9,7 @@ one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
 source for every normative constant, and against the RFCs for everything
-carried over the top of them. 927 tests.
+carried over the top of them. 1057 tests.
 
 ## What works
 
@@ -45,9 +45,20 @@ been checked three other ways: two documents, two methods, one table.
 | **Terminal** | ANSI/CP437 with mouse reporting; telnet (RFC 854) to use it alone |
 | **Settings** | remembered between runs, so the modem comes back where it was left |
 | **Files** | ZMODEM send and receive |
+| **Fax** | T.30 group 3, sending and receiving; V.29 (7200/9600) and V.27 ter (2400/4800); T.4 Modified Huffman |
 | **Network** | PPP (RFC 1661/1662) with LCP and IPCP, and a ping over it |
 | **Internet** | our own TCP (RFC 9293) and a SOCKS 5 proxy: a browser on one machine, the internet on the other |
 | **Line** | full-duplex sound card, or a WAV to replay |
+
+It is a fax machine as well. A picture loaded in the Fax window becomes a
+group 3 page and goes out under T.30; a public fax service over the same VoIP
+trunk accepts the training check and confirms the page, and a page it sends
+back arrives and saves as a PNG. V.29 carries it at 9600 and 7200, falling back
+to V.27 ter at 4800 and 2400, and every point and training sequence of both was
+read off the figures -- the extracted text turns the square root of two into
+"2". What finally let a real machine's page in was twenty milliseconds of
+silence that its transmitter puts in front of every training sequence on
+purpose, and that this end had been taking for the end of the burst.
 
 Two of these on a call carry the internet. The Network panel brings up PPP:
 the end that answered hands out an address, the end that dialled asks for one
@@ -148,9 +159,9 @@ OS-specific code — but only built and run on Windows so far.
 
 ## Next
 
-The fax data pumps — V.27ter, V.29, V.33 and V.17 — which share most of their
-machinery with what is already here: V.33 and V.17 are the same trellis code
-again, on a leased line and a fax call respectively. Then V.34 at 33 600.
+V.17, for fax at 14 400, and V.33 beside it -- the same trellis code as
+V.32bis again, on a fax call and a leased line respectively. More than one page
+to a call, and T.30's error correction mode. Then V.34 at 33 600.
 
 Alongside them: PAP and CHAP, so something other than another BinModem can
 dial in; and MNP as an alternative to LAPM, since it is what a modem without
