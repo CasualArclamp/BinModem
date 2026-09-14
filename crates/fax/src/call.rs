@@ -306,6 +306,10 @@ pub struct Call {
     /// to answer with, and where to go once the answer has gone.
     collector: ecm::Collector,
     ecm_octets: Vec<u8>,
+    /// How much of the page, counted in octets from its start, has gone into
+    /// the decoder: confirmed blocks and then the unbroken run of the block in
+    /// hand.
+    ecm_fed: usize,
     ecm_expected: usize,
     ecm_confirmed: Option<(u8, u8)>,
     ecm_response: Option<Message>,
@@ -397,6 +401,7 @@ impl Call {
             ecm_command: EcmCommand::Pps,
             collector: ecm::Collector::new(),
             ecm_octets: Vec::new(),
+            ecm_fed: 0,
             ecm_expected: 0,
             ecm_confirmed: None,
             ecm_response: None,
@@ -521,6 +526,12 @@ impl Call {
         self.decoder.lines().len()
     }
 
+    /// The lines themselves, as far as the page has been decoded: the whole
+    /// page once it is over, and the top of it while it is arriving.
+    pub fn lines(&self) -> &[Vec<bool>] {
+        self.decoder.lines()
+    }
+
     /// What the line should be doing at this instant.
     pub fn line(&self) -> Line {
         if self.pause > 0.0 {
@@ -599,6 +610,7 @@ impl Call {
                 self.collector.feed_bits(bits);
                 if self.collector.count() != before {
                     self.timer = T2_SECONDS;
+                    self.follow_ecm_page();
                 }
             }
             Phase::Receiving => {
@@ -782,6 +794,12 @@ impl Call {
                     // A retransmission fills in the same block, so what has
                     // arrived already stays.
                     self.collector.next_partial_page();
+                    if self.ecm_octets.is_empty() && self.collector.count() == 0 {
+                        // Nothing of this page is here yet, so it is a new
+                        // one and the last page's lines can go.
+                        self.decoder.reset_to(self.scheme);
+                        self.ecm_fed = 0;
+                    }
                 } else {
                     self.decoder.reset_to(self.scheme);
                 }
@@ -1422,6 +1440,7 @@ impl Call {
     /// A block is done with: finish the page if the command says it is over,
     /// and answer.
     fn block_accepted(&mut self, command: ecm::PostMessage, answer: Frame) {
+        self.follow_ecm_page();
         if command != ecm::PostMessage::Null {
             self.finish_ecm_page();
             self.ecm_octets.clear();
@@ -1429,15 +1448,39 @@ impl Call {
         self.respond(Message::new(answer, false), Self::after(command));
     }
 
-    /// Decode a page that arrived in frames.
-    fn finish_ecm_page(&mut self) {
-        let bits = ecm::unpack(&self.ecm_octets);
-        let mut decoder = t4::Decoder::with_scheme(crate::page::WIDTH, self.scheme);
-        decoder.feed_bits(&bits);
-        if self.received.is_none() && !decoder.lines().is_empty() {
-            self.received = Some(decoder.page(self.resolution));
+    /// Decode as much of a page arriving in frames as has arrived in order.
+    ///
+    /// The blocks already confirmed, and then the run of the block in hand
+    /// that has arrived unbroken from its first frame -- so that the page can
+    /// be watched arriving, as it can without error correction, rather than
+    /// appearing whole at the end. Nothing after a missing frame goes in until
+    /// that frame does: the coding is a stream, and what follows a gap in it
+    /// is not the page that follows the gap.
+    fn follow_ecm_page(&mut self) {
+        let mut at = 0;
+        let confirmed = std::iter::once(self.ecm_octets.as_slice());
+        for chunk in confirmed.chain(self.collector.leading()) {
+            let end = at + chunk.len();
+            if end > self.ecm_fed {
+                // Everything before `at` is in already, so this is where the
+                // decoder has got to.
+                self.decoder.feed_bits(&ecm::unpack(&chunk[self.ecm_fed - at..]));
+                self.ecm_fed = end;
+            }
+            at = end;
         }
-        self.decoder = decoder;
+    }
+
+    /// Finish a page that arrived in frames.
+    ///
+    /// Everything confirmed has gone into the decoder by now, bar what the
+    /// last block brought, and a block the sender gave up on goes in with its
+    /// missing frames left out, which is what T.4's coding resynchronizes on.
+    fn finish_ecm_page(&mut self) {
+        self.follow_ecm_page();
+        if self.received.is_none() && !self.decoder.lines().is_empty() {
+            self.received = Some(self.decoder.page(self.resolution));
+        }
     }
 
     fn finish_page(&mut self) {

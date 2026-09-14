@@ -15,7 +15,7 @@
 
 use datapump::{v21, v27ter, v29};
 use fax::call::{Call, Line, Phase, Role, Speed};
-use fax::page::Page;
+use fax::page::{Page, Resolution};
 use fax::t30::Modulation;
 
 /// Which page carrier a speed calls for, and at which of its rates.
@@ -155,6 +155,16 @@ impl FaxCall {
     /// Lines of a page that have arrived.
     pub fn lines_received(&self) -> usize {
         self.call.lines_received()
+    }
+
+    /// The lines of the page arriving, as far as it has been decoded.
+    pub fn lines(&self) -> &[Vec<bool>] {
+        self.call.lines()
+    }
+
+    /// The resolution the page is arriving at, as the DCS said.
+    pub fn resolution(&self) -> Resolution {
+        self.call.resolution()
     }
 
     /// The page that arrived, once one has.
@@ -925,6 +935,59 @@ mod tests {
         assert!(sent.contains(&Frame::Pps), "no partial page signal: {sent:?}");
         assert!(!sent.contains(&Frame::Eop), "a bare EOP under error correction");
         assert_eq!(answerer.received().expect("no page").lines, page.lines);
+    }
+
+    /// Run a call and watch the answering end's lines, handing back every
+    /// count of them seen while the page was still arriving.
+    fn watch_it_arrive(caller: &mut FaxCall, answerer: &mut FaxCall) -> Vec<usize> {
+        let (mut to_caller, mut to_answerer) = (0.0, 0.0);
+        let mut seen = Vec::new();
+        for _ in 0..(FS * 60.0) as usize {
+            let a = caller.step(to_caller);
+            let b = answerer.step(to_answerer);
+            to_caller = b;
+            to_answerer = a;
+            if answerer.phase() == Phase::Receiving && answerer.received().is_none() {
+                let lines = answerer.lines().len();
+                assert_eq!(lines, answerer.lines_received());
+                if seen.last() != Some(&lines) {
+                    seen.push(lines);
+                }
+            }
+            if caller.phase().is_over() && answerer.phase().is_over() {
+                break;
+            }
+        }
+        seen
+    }
+
+    #[test]
+    fn a_page_can_be_watched_arriving_with_error_correction_or_without() {
+        // Without it the lines come off the decoder as the bits do. With it
+        // they used to come all at once at the end, because the page was only
+        // decoded once every block of it was in -- and a page that appears
+        // whole a minute after it started is not one anybody can watch
+        // arriving.
+        for error_correction in [true, false] {
+            let page = a_page(400);
+            let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()));
+            let mut answerer =
+                FaxCall::answer(FS, "61388880000").with_error_correction(error_correction);
+            let seen = watch_it_arrive(&mut caller, &mut answerer);
+            assert_eq!(caller.error_correction(), error_correction);
+            let got = answerer.received().expect("no page");
+            assert_eq!(got.lines, page.lines, "error correction {error_correction}");
+            assert_eq!(answerer.lines(), &page.lines[..], "the lines are not the page");
+            // A page drawn as it comes is one seen at many heights on the way:
+            // at 9600 a frame of 256 octets is a fifth of a second, and this
+            // page is ninety of them.
+            let partway = seen.iter().filter(|&&n| n > 0 && n < page.lines.len()).count();
+            assert!(
+                partway >= 10,
+                "error correction {error_correction}: seen at {partway} heights on the way ({seen:?})"
+            );
+            assert!(seen.windows(2).all(|w| w[0] < w[1]), "lines went away: {seen:?}");
+        }
     }
 
     #[test]

@@ -263,6 +263,12 @@ impl Collector {
         self.frames.get(number).is_some_and(Option::is_some)
     }
 
+    /// The frames of the block in hand that have arrived without a gap,
+    /// counting from the first.
+    pub fn leading(&self) -> impl Iterator<Item = &[u8]> {
+        self.frames.iter().map_while(|f| f.as_deref())
+    }
+
     /// How many frames have arrived intact.
     pub fn count(&self) -> usize {
         self.frames.iter().filter(|f| f.is_some()).count()
