@@ -546,6 +546,10 @@ impl Decoder {
         self.scheme
     }
 
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
     /// The lines decoded so far.
     pub fn lines(&self) -> &[Vec<bool>] {
         &self.lines

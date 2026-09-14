@@ -159,9 +159,11 @@ pub struct Frame {
     pub fax_progress: Option<f64>,
     pub fax_rate: u32,
     pub fax_lines: usize,
-    /// Whether the page is going in error correction mode's frames, which is
-    /// settled by the DCS and so false until one has gone.
+    /// Whether the page is going in error correction mode's frames, and in
+    /// which coding: both settled by the DCS, so false and "-" until one has
+    /// gone.
     pub fax_error_correction: bool,
+    pub fax_coding: &'static str,
     /// Whether this end is the one sending.
     pub fax_sending: bool,
     /// What went wrong with the fax, if anything did.
@@ -209,6 +211,7 @@ impl Frame {
             fax_rate: 0,
             fax_lines: 0,
             fax_error_correction: false,
+            fax_coding: "-",
             fax_sending: false,
             fax_trouble: None,
             fax_class: false,

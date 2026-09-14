@@ -9,7 +9,7 @@ one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
 source for every normative constant, and against the RFCs for everything
-carried over the top of them. 1088 tests.
+carried over the top of them. 1112 tests.
 
 ## What works
 
@@ -45,7 +45,7 @@ been checked three other ways: two documents, two methods, one table.
 | **Terminal** | ANSI/CP437 with mouse reporting; telnet (RFC 854) to use it alone |
 | **Settings** | remembered between runs, so the modem comes back where it was left |
 | **Files** | ZMODEM send and receive |
-| **Fax** | T.30 group 3, sending and receiving; V.29 (7200/9600) and V.27 ter (2400/4800); T.4 Modified Huffman and Modified READ; T.30 Annex A error correction mode |
+| **Fax** | T.30 group 3, sending and receiving; V.29 (7200/9600) and V.27 ter (2400/4800); T.4 Modified Huffman and Modified READ, T.6 MMR; T.30 Annex A error correction mode; pages drawn as they arrive |
 | **Network** | PPP (RFC 1661/1662) with LCP and IPCP, and a ping over it |
 | **Internet** | our own TCP (RFC 9293) and a SOCKS 5 proxy: a browser on one machine, the internet on the other |
 | **Line** | full-duplex sound card, or a WAV to replay |
@@ -60,11 +60,14 @@ read off the figures -- the extracted text turns the square root of two into
 silence that its transmitter puts in front of every training sequence on
 purpose, and that this end had been taking for the end of the burst.
 
-Between two of these the page goes in Modified READ, T.4's two-dimensional
-code, and under T.30's error correction mode: numbered frames, and a partial
-page request for any the far end could not read. A tenth of a second of loud
-noise dropped onto a page costs a few frames sent again, and the page arrives
-exactly as it left; without error correction the same noise prints as streaks.
+Between two of these the page goes under T.30's error correction mode:
+numbered frames, and a partial page request for any the far end could not read.
+A tenth of a second of loud noise dropped onto a page costs a few frames sent
+again, and the page arrives exactly as it left; without error correction the
+same noise prints as streaks. That in turn lets the page go in MMR, T.6's
+coding, which has no end-of-line codes to find its place again by and comes to
+under half the size of the Modified Huffman every machine reads. A page arriving
+is drawn a row at a time as it comes in, the way slow-scan television is.
 
 Two of these on a call carry the internet. The Network panel brings up PPP:
 the end that answered hands out an address, the end that dialled asks for one
@@ -167,8 +170,8 @@ OS-specific code — but only built and run on Windows so far.
 
 V.17, for fax at 14 400, and V.33 beside it -- the same trellis code as
 V.32bis again, on a fax call and a leased line respectively. More than one page
-to a call, and the codings that only run under error correction mode: T.6's
-MMR, then JBIG, and the colour ones. Then V.34 at 33 600.
+to a call, and the rest of the codings that only run under error correction
+mode: JBIG, and the colour ones. Then V.34 at 33 600.
 
 Alongside them: PAP and CHAP, so something other than another BinModem can
 dial in; and MNP as an alternative to LAPM, since it is what a modem without

@@ -1105,6 +1105,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     f.fax_rate = call.rate();
                     f.fax_lines = call.lines_received();
                     f.fax_error_correction = call.error_correction();
+                    f.fax_coding = call.coding().name();
                     f.fax_sending = call.role() == fax::call::Role::Caller;
                     f.fax_trouble = call.trouble().map(str::to_owned);
                 }

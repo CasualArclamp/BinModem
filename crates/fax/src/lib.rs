@@ -7,8 +7,10 @@
 //! agree on, and all three of those live in the data pump.
 
 pub mod call;
+pub mod coding;
 pub mod ecm;
 pub mod frames;
+pub mod mmr;
 pub mod mr;
 pub mod page;
 pub mod t30;

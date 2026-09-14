@@ -17,11 +17,11 @@
 //! are talking, and every turnaround has a settling time either side of it
 //! that is longer than it looks like it should be.
 
+use crate::coding::{self, Coding};
 use crate::ecm;
 use crate::frames::{Message, Reader, Sender};
 use crate::page::{Page, Resolution};
 use crate::t30::{self, Capabilities, Command, Frame, Modulation};
-use crate::t4;
 
 /// Which end of the call this is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -287,7 +287,7 @@ pub struct Call {
     resolution: Resolution,
     /// How the page is coded: chosen by the end that sends it, from what the
     /// end that receives it said it could read.
-    scheme: t4::Scheme,
+    coding: Coding,
     /// Whether this end offers error correction mode, and whether this call is
     /// using it.
     error_correction_offered: bool,
@@ -337,7 +337,7 @@ pub struct Call {
     control_carrier: bool,
     held: f64,
     /// The page arriving, if one is.
-    decoder: t4::Decoder,
+    decoder: coding::Decoder,
     /// The page that arrived.
     pub received: Option<Page>,
     /// Whether the last thing judged was good, which decides what follows the
@@ -390,7 +390,7 @@ impl Call {
             scan_line_field: 0b111,
             scan_line_ms: 0.0,
             resolution: page.as_ref().map_or(Resolution::Standard, |p| p.resolution),
-            scheme: t4::Scheme::OneDimensional,
+            coding: Coding::ModifiedHuffman,
             error_correction_offered: true,
             ecm: false,
             ecm_frames: Vec::new(),
@@ -416,7 +416,7 @@ impl Call {
             fast_down: 0.0,
             control_carrier: false,
             held: 0.0,
-            decoder: t4::Decoder::new(),
+            decoder: coding::Decoder::new(Coding::ModifiedHuffman),
             received: None,
             accepted: false,
             attempts: 0,
@@ -465,6 +465,11 @@ impl Call {
     /// Whether this call is in error correction mode.
     pub fn error_correction(&self) -> bool {
         self.ecm
+    }
+
+    /// The coding the page goes in, once a DCS has settled it.
+    pub fn coding(&self) -> Coding {
+        self.coding
     }
 
     /// Use only these modulations, of the ones this end has.
@@ -797,11 +802,11 @@ impl Call {
                     if self.ecm_octets.is_empty() && self.collector.count() == 0 {
                         // Nothing of this page is here yet, so it is a new
                         // one and the last page's lines can go.
-                        self.decoder.reset_to(self.scheme);
+                        self.decoder.reset_to(self.coding);
                         self.ecm_fed = 0;
                     }
                 } else {
-                    self.decoder.reset_to(self.scheme);
+                    self.decoder.reset_to(self.coding);
                 }
                 self.fast_seen = false;
                 self.fast_up = 0.0;
@@ -876,12 +881,17 @@ impl Call {
                     } else {
                         Resolution::Standard
                     };
-                    self.scheme = if t30::bit(&message.fif, 16) {
-                        t4::Scheme::TwoDimensional
-                    } else {
-                        t4::Scheme::OneDimensional
-                    };
                     self.ecm = t30::bit(&message.fif, 27);
+                    // Bit 31 first: a sender that sets bit 16 beside it is
+                    // still sending MMR. And only with bit 27, as Note 17 has
+                    // it -- without error correction there is no MMR page.
+                    self.coding = if self.ecm && t30::bit(&message.fif, 31) {
+                        Coding::Mmr
+                    } else if t30::bit(&message.fif, 16) {
+                        Coding::ModifiedRead
+                    } else {
+                        Coding::ModifiedHuffman
+                    };
                     self.collector = ecm::Collector::new();
                     self.ecm_octets.clear();
                     self.ecm_confirmed = None;
@@ -1097,12 +1107,17 @@ impl Call {
             } else {
                 Resolution::Standard
             };
-            self.scheme = if caps.two_dimensional {
-                t4::Scheme::TwoDimensional
-            } else {
-                t4::Scheme::OneDimensional
-            };
             self.ecm = self.error_correction_offered && caps.error_correction;
+            // The smallest coding the far end reads, since the page is the
+            // same page in any of them: MMR where error correction allows it,
+            // Modified READ, and Modified Huffman, which every machine reads.
+            self.coding = if self.ecm && caps.t6_coding {
+                Coding::Mmr
+            } else if caps.two_dimensional {
+                Coding::ModifiedRead
+            } else {
+                Coding::ModifiedHuffman
+            };
         }
         true
     }
@@ -1130,7 +1145,7 @@ impl Call {
             bits_per_second: self.rate,
             fine: self.resolution == Resolution::Fine,
             scan_line_field: self.scan_line_field,
-            two_dimensional: self.scheme == t4::Scheme::TwoDimensional,
+            coding: self.coding,
             error_correction: self.ecm,
         }));
         self.sender.send(&[tsi, dcs]);
@@ -1166,12 +1181,7 @@ impl Call {
         } else {
             &page.lines
         };
-        match self.scheme {
-            t4::Scheme::OneDimensional => t4::encode_padded(lines, min_bits).to_bits(),
-            t4::Scheme::TwoDimensional => {
-                crate::mr::encode(lines, crate::mr::k_for(self.resolution), min_bits).to_bits()
-            }
-        }
+        self.coding.encode(lines, self.resolution, min_bits)
     }
 
     fn send_page(&mut self) {
@@ -1241,7 +1251,7 @@ impl Call {
                     bits_per_second: self.rate,
                     fine: self.resolution == Resolution::Fine,
                     scan_line_field: self.scan_line_field,
-                    two_dimensional: self.scheme == t4::Scheme::TwoDimensional,
+                    coding: self.coding,
                     error_correction: true,
                 });
                 Message::new(Frame::Ctc, true).with_fif(&dcs[..2])
@@ -1543,6 +1553,7 @@ mod tests {
     use super::*;
     use crate::frames;
     use crate::t30::Frame;
+    use crate::t4;
 
     const FS: f64 = 16_000.0;
     /// A real machine's capability frame, off a recording of a public fax
@@ -1867,18 +1878,74 @@ mod tests {
         let mut call = Call::originate(FS, "1", Some(page));
         call.capabilities = Some(t30::capabilities(&fif));
         assert!(call.choose_rate());
-        let mut decoder = t4::Decoder::with_scheme(crate::page::WIDTH, call.scheme);
+        let mut decoder = coding::Decoder::new(call.coding);
         decoder.feed_bits(&call.fast_out_page());
         assert_eq!(decoder.lines().len(), 5, "ten fine lines are five standard ones");
     }
 
     #[test]
-    fn two_dimensional_coding_is_used_exactly_when_the_far_end_reads_it() {
-        let page = fine_page(10);
+    fn the_page_goes_in_the_smallest_coding_the_far_end_reads() {
+        // Bit 16 for Modified READ, bit 31 for MMR, and neither for Modified
+        // Huffman -- never both, since a page is in one coding.
+        let coding_of = |dis: &[u8]| {
+            let dcs = command_for(Some(fine_page(10)), dis);
+            (t30::bit(&dcs, 16), t30::bit(&dcs, 31), t30::bit(&dcs, 27))
+        };
+        // Another of these, with error correction: MMR.
         let ours = t30::our_capabilities(&OUR_MODULATIONS, true);
-        assert!(t30::bit(&command_for(Some(page.clone()), &ours), 16));
-        // The real machine's DIS, which does not offer it.
-        assert!(!t30::bit(&command_for(Some(page), &DIS), 16));
+        assert_eq!(coding_of(&ours), (false, true, true));
+        // Without error correction T.4 4.3 rules MMR out, and Modified READ is
+        // next.
+        let plain = t30::our_capabilities(&OUR_MODULATIONS, false);
+        assert_eq!(coding_of(&plain), (true, false, false));
+        // A machine that says bit 31 without bit 27 has said nothing, as
+        // Note 9 has it.
+        let mut odd = plain.clone();
+        t30::set_bit(&mut odd, 24, true);
+        t30::set_bit(&mut odd, 31, true);
+        assert_eq!(coding_of(&odd), (true, false, false));
+        // The real machine's DIS, which offers neither.
+        assert_eq!(coding_of(&DIS), (false, false, false));
+    }
+
+    #[test]
+    fn an_end_that_will_not_use_error_correction_does_not_send_mmr_either() {
+        let mut call = Call::originate(FS, "1", Some(fine_page(10)));
+        call.set_error_correction(false);
+        call.capabilities = Some(t30::capabilities(&t30::our_capabilities(&OUR_MODULATIONS, true)));
+        assert!(call.choose_rate());
+        assert!(!call.error_correction());
+        assert_eq!(call.coding, Coding::ModifiedRead);
+    }
+
+    #[test]
+    fn a_dcs_is_read_for_the_coding_the_page_will_arrive_in() {
+        for (bits, want) in [
+            (vec![], Coding::ModifiedHuffman),
+            (vec![16], Coding::ModifiedRead),
+            (vec![24, 27, 31], Coding::Mmr),
+            // Both 16 and 31: bit 31 is what says MMR.
+            (vec![16, 24, 27, 31], Coding::Mmr),
+            // 31 without 27 is nothing.
+            (vec![16, 24, 31], Coding::ModifiedRead),
+        ] {
+            let mut dcs = t30::command(Command {
+                modulation: Modulation::V29,
+                bits_per_second: 9600,
+                fine: false,
+                scan_line_field: 0b111,
+                coding: Coding::ModifiedHuffman,
+                error_correction: false,
+            });
+            for bit in &bits {
+                t30::set_bit(&mut dcs, *bit, true);
+            }
+            let mut call = Call::answer(FS, "1");
+            call.enter(Phase::AwaitingCommand);
+            call.received(Message::new(Frame::Dcs, true).with_fif(&dcs));
+            assert_eq!(call.coding, want, "bits {bits:?}");
+            assert_eq!(call.decoder.coding(), Coding::ModifiedHuffman, "decoding before the page starts");
+        }
     }
 
     #[test]

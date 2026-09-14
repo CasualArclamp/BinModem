@@ -15,6 +15,7 @@
 
 use datapump::{v21, v27ter, v29};
 use fax::call::{Call, Line, Phase, Role, Speed};
+use fax::coding::Coding;
 use fax::page::{Page, Resolution};
 use fax::t30::Modulation;
 
@@ -110,6 +111,11 @@ impl FaxCall {
     /// Whether this call is in error correction mode.
     pub fn error_correction(&self) -> bool {
         self.call.error_correction()
+    }
+
+    /// The coding the page goes in, once a DCS has settled it.
+    pub fn coding(&self) -> Coding {
+        self.call.coding()
     }
 
     pub fn role(&self) -> Role {
@@ -845,19 +851,25 @@ mod tests {
 
     /// A fine page goes both ways as a fine page, coded two-dimensionally.
     ///
-    /// Two of these offer each other both of T.4's codings and both
-    /// resolutions, so this is the page as it should arrive: every line, at the
-    /// resolution it was drawn at, in the coding that makes it smallest.
+    /// Two of these offer each other every coding and both resolutions, so
+    /// this is the page as it should arrive: every line, at the resolution it
+    /// was drawn at, in the smallest coding the two ends share -- MMR with
+    /// error correction, and Modified READ without.
     #[test]
-    fn a_fine_page_arrives_fine_and_coded_two_dimensionally() {
-        let mut page = a_page(12);
-        page.resolution = Resolution::Fine;
-        let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()));
-        let mut answerer = FaxCall::answer(FS, "61388880000");
-        between(&mut caller, &mut answerer, 40.0);
-        let got = answerer.received().expect("no page arrived");
-        assert_eq!(got.resolution, Resolution::Fine, "it arrived as standard");
-        assert_eq!(got.lines, page.lines, "the page came out different");
+    fn a_fine_page_arrives_fine_in_the_smallest_coding_both_ends_have() {
+        for (error_correction, want) in [(true, Coding::Mmr), (false, Coding::ModifiedRead)] {
+            let mut page = a_page(12);
+            page.resolution = Resolution::Fine;
+            let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()));
+            let mut answerer =
+                FaxCall::answer(FS, "61388880000").with_error_correction(error_correction);
+            between(&mut caller, &mut answerer, 40.0);
+            assert_eq!(caller.coding(), want, "sent in the wrong coding");
+            assert_eq!(answerer.coding(), want, "read in the wrong coding");
+            let got = answerer.received().expect("no page arrived");
+            assert_eq!(got.resolution, Resolution::Fine, "it arrived as standard");
+            assert_eq!(got.lines, page.lines, "the page came out different in {want:?}");
+        }
     }
 
     /// Run a call with a burst of noise dropped onto the page the first time
@@ -932,6 +944,7 @@ mod tests {
         }
         assert!(caller.error_correction(), "the caller did not choose it");
         assert!(answerer.error_correction(), "the answerer was not told");
+        assert_eq!(answerer.coding(), Coding::Mmr, "error correction and no MMR");
         assert!(sent.contains(&Frame::Pps), "no partial page signal: {sent:?}");
         assert!(!sent.contains(&Frame::Eop), "a bare EOP under error correction");
         assert_eq!(answerer.received().expect("no page").lines, page.lines);

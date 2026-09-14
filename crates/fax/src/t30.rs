@@ -372,7 +372,8 @@ pub fn capabilities(fif: &[u8]) -> Capabilities {
         },
         scan_line_ms: scan_line_ms(field_of(fif, 21, 23)),
         error_correction: bit(fif, 27),
-        t6_coding: bit(fif, 31),
+        // Note 9: "valid only when bit 27 (error correction mode) is set".
+        t6_coding: bit(fif, 31) && bit(fif, 27),
         octets: fif.len(),
     }
 }
@@ -556,6 +557,9 @@ pub fn our_capabilities(offer: &[Modulation], error_correction: bool) -> Vec<u8>
         // the sender's choice, and A.1.3 has a receiver take either.
         set_bit(&mut fif, 24, true);
         set_bit(&mut fif, 27, true);
+        // Bit 31: T.6's coding, which Note 9 makes meaningless without bit 27
+        // and T.4 4.3 limits to error correction mode.
+        set_bit(&mut fif, 31, true);
     }
     fif
 }
@@ -587,8 +591,9 @@ pub struct Command {
     pub fine: bool,
     /// Bits 21 to 23, as the receiver asked for them in its DIS.
     pub scan_line_field: u8,
-    /// Bit 16: the page is Modified READ rather than Modified Huffman.
-    pub two_dimensional: bool,
+    /// Bit 16 for Modified READ, bit 31 for MMR, and neither for Modified
+    /// Huffman.
+    pub coding: crate::coding::Coding,
     /// Bit 27: the page goes in frames under T.30 Annex A.
     pub error_correction: bool,
 }
@@ -605,7 +610,10 @@ pub fn command(command: Command) -> Vec<u8> {
         set_field(&mut fif, 11, 14, rate);
     }
     set_bit(&mut fif, 15, command.fine);
-    set_bit(&mut fif, 16, command.two_dimensional);
+    // Bit 16 is T.4 4.2's coding, and an MMR page is not in it: T.6 says its
+    // coding is "in principle the same", and a DCS says which of the two with
+    // bit 31 alone.
+    set_bit(&mut fif, 16, command.coding == crate::coding::Coding::ModifiedRead);
     set_field(&mut fif, 17, 18, 0b00);
     set_field(&mut fif, 19, 20, 0b01);
     // Whatever the receiver asked for, given back to it: this is the one
@@ -622,6 +630,10 @@ pub fn command(command: Command) -> Vec<u8> {
         // Bit 28 clear: frames of 256 octets.
         set_bit(&mut fif, 24, true);
         set_bit(&mut fif, 27, true);
+        // Bit 31, "T.6 coding enabled", which Note 17 allows only beside bit
+        // 27. A page asked to go in MMR without error correction goes out
+        // saying nothing of the kind, and T.4 4.3 would not have it go at all.
+        set_bit(&mut fif, 31, command.coding == crate::coding::Coding::Mmr);
     }
     fif
 }

@@ -124,8 +124,13 @@ any the far end cannot read are asked for and sent again rather than printed as
 streaks. It is used only when the far end offers it too -- the panel on the far
 end's DIS says whether it does -- and the progress line says *with error
 correction* while a call is using it. Untick it to see what the same line does
-to a page without it. Pages go in Modified READ whenever the far end reads it,
-and Modified Huffman when not.
+to a page without it.
+
+A page goes in the smallest coding both ends have, and the progress line names
+it: MMR, T.6's coding, when there is error correction; Modified READ when the far
+end reads it; and Modified Huffman, which every machine reads, when nothing else
+is shared. The **coded** row under the page to send gives its size in all three,
+and the times beside each rate run from MMR's to Modified Huffman's.
 
 The far end's number and what its DIS says appear as soon as they arrive,
 whether or not a page follows. One page to a call.

@@ -7,6 +7,7 @@
 
 use eframe::egui;
 use egui::{Color32, RichText};
+use fax::coding::Coding;
 use fax::page::{Grey, Halftone, Page, Resolution};
 use fax::t30;
 
@@ -27,14 +28,15 @@ pub struct Fax {
     source: Option<Grey>,
     source_size: (usize, usize),
     page: Option<Page>,
-    /// How long the page codes to, worked out once when it is made.
+    /// How long the page codes to in each coding -- MH, MR and MMR -- worked
+    /// out once when it is made.
     ///
     /// Coding a full page is two to four milliseconds, and the panel wants
-    /// the figure three times: once for itself and once for each rate it
-    /// could go out at. Three of those in every frame of a window that is
-    /// open for the whole of a call is ten milliseconds a frame spent
-    /// recomputing a number that cannot have changed.
-    coded_bits: usize,
+    /// the figures once for itself and again for each rate it could go out
+    /// at. All of those in every frame of a window that is open for the whole
+    /// of a call is tens of milliseconds a frame spent recomputing numbers
+    /// that cannot have changed.
+    coded_bits: [usize; 3],
     /// A small copy of the page for the window to draw.
     preview: Option<egui::TextureHandle>,
     pub resolution: Resolution,
@@ -55,8 +57,10 @@ pub struct Fax {
     pub progress: Option<f64>,
     pub rate: u32,
     pub lines: usize,
-    /// Whether the call in progress is using error correction mode.
+    /// Whether the call in progress is using error correction mode, and the
+    /// coding the page is in.
     pub correcting: bool,
+    pub coding: &'static str,
     pub sending: bool,
     /// Whether the modem is a fax rather than a modem just now.
     pub fax_class: bool,
@@ -304,7 +308,8 @@ impl Fax {
     pub fn render(&mut self) {
         let Some(source) = self.source.as_ref() else { return };
         let page = fax::page::render(source, self.resolution, self.halftone);
-        self.coded_bits = page.encode().len();
+        self.coded_bits = [Coding::ModifiedHuffman, Coding::ModifiedRead, Coding::Mmr]
+            .map(|coding| coding.encode(&page.lines, page.resolution, 0).len());
         self.page = Some(page);
         self.preview = None;
     }
@@ -360,6 +365,7 @@ impl Fax {
         self.rate = frame.fax_rate;
         self.lines = frame.fax_lines;
         self.correcting = frame.fax_error_correction;
+        self.coding = frame.fax_coding;
         self.sending = frame.fax_sending;
         self.fax_class = frame.fax_class;
         if !frame.fax_identity.is_empty() {
@@ -571,7 +577,7 @@ impl Fax {
                             }
                             ui.vertical(|ui| {
                                 if let Some(page) = self.page.as_ref() {
-                                    let bits = self.coded_bits;
+                                    let [mh, mr, mmr] = self.coded_bits;
                                     let rows = [
                                         (
                                             "picture",
@@ -585,7 +591,15 @@ impl Fax {
                                             format!("{} by {} pels", page.width(), page.height()),
                                         ),
                                         ("ink", format!("{:.1}% of the paper", page.coverage() * 100.0)),
-                                        ("coded", format!("{} bits, MH", bits)),
+                                        (
+                                            "coded",
+                                            format!(
+                                                "MH {}k, MR {}k, MMR {}k bits",
+                                                mh / 1000,
+                                                mr / 1000,
+                                                mmr / 1000
+                                            ),
+                                        ),
                                     ];
                                     egui::Grid::new("fax-page")
                                         .num_columns(2)
@@ -600,7 +614,10 @@ impl Fax {
                                             }
                                             // What it costs at each rate this end is
                                             // willing to use, which is the number
-                                            // anybody actually wants from this window.
+                                            // anybody actually wants from this window:
+                                            // from MMR, if the far end has error
+                                            // correction, to MH, which every machine
+                                            // reads.
                                             for m in self.ours() {
                                                 for rate in m.rates() {
                                                     ui.label(
@@ -610,8 +627,9 @@ impl Fax {
                                                     );
                                                     ui.label(
                                                         RichText::new(format!(
-                                                            "{:.0} s  {}",
-                                                            bits as f64 / f64::from(*rate),
+                                                            "{:.0} to {:.0} s  {}",
+                                                            mmr as f64 / f64::from(*rate),
+                                                            mh as f64 / f64::from(*rate),
                                                             m.name()
                                                         ))
                                                         .monospace()
@@ -764,7 +782,7 @@ impl Fax {
             ui.label(RichText::new(format!("{side}: {what}")).small().color(bright));
             if self.rate > 0 {
                 ui.label(
-                    RichText::new(format!("at {} bit/s", self.rate))
+                    RichText::new(format!("at {} bit/s in {}", self.rate, self.coding))
                         .small()
                         .color(dim),
                 );
