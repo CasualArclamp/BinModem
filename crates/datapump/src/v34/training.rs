@@ -477,7 +477,7 @@ pub struct Modem {
     far_asked: Option<Size>,
     phase3_snr: Option<f64>,
     phase4_snr: Option<f64>,
-    ours: Mp,
+    ours: Option<Mp>,
     far_mp: Option<Mp>,
     far_acknowledged: bool,
     far_e: bool,
@@ -517,7 +517,7 @@ impl Modem {
             far_asked: None,
             phase3_snr: None,
             phase4_snr: None,
-            ours: Mp::default(),
+            ours: None,
             far_mp: None,
             far_acknowledged: false,
             far_e: false,
@@ -601,8 +601,7 @@ impl Modem {
 
     /// The MP this end sends, once it has been made.
     pub fn our_mp(&self) -> Option<Mp> {
-        (self.stage == Stage::CallMp || self.stage == Stage::AnswerMp || self.stage == Stage::Finished)
-            .then_some(self.ours)
+        self.ours
     }
 
     pub fn far_mp(&self) -> Option<Mp> {
@@ -838,8 +837,9 @@ impl Modem {
                 let sent = if self.source.segment == Segment::Trn { self.source.count } else { 0 };
                 let trained = self.rx.is_trained() && self.listening.trn_symbols >= HEARD_TRN;
                 if sent >= LEAST_TRN && (trained || sent as f64 >= MOST_TRN * baud) {
-                    self.ours = self.make_mp();
-                    self.source.mp = self.ours;
+                    let ours = self.make_mp();
+                    self.ours = Some(ours);
+                    self.source.mp = ours;
                     self.source.change(Segment::Mp);
                     self.enter(Stage::CallMp);
                 }
@@ -850,17 +850,21 @@ impl Modem {
                 let sent = if self.source.segment == Segment::Trn { self.source.count } else { 0 };
                 let heard = self.listening.j_prime && self.listening.trn_symbols + self.listening.grace >= LEAST_TRN;
                 if sent >= LEAST_TRN && (heard || sent as f64 >= (MOST_TRN + self.rtd()) * baud) {
-                    self.ours = self.make_mp();
-                    self.source.mp = self.ours;
+                    let ours = self.make_mp();
+                    self.ours = Some(ours);
+                    self.source.mp = ours;
                     self.source.change(Segment::Mp);
                     self.enter(Stage::AnswerMp);
                 }
             }
             Stage::CallMp | Stage::AnswerMp => {
-                if self.far_mp.is_some() && !self.source.mp.acknowledge {
+                if self.far_mp.is_some()
+                    && !self.source.mp.acknowledge
+                    && let Some(ours) = self.ours
+                {
                     // "complete sending the current MP sequence and then send
                     // MP' sequences" -- which the next repetition is.
-                    self.source.mp = self.ours.acknowledged();
+                    self.source.mp = ours.acknowledged();
                 }
                 if !self.sent_e && self.source.acknowledged >= 1 && (self.far_acknowledged || self.far_e) {
                     self.source.change(Segment::E);
