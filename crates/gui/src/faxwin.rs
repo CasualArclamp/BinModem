@@ -107,6 +107,15 @@ const UNSCANNED: Color32 = Color32::from_rgb(24, 28, 36);
 /// answer and a training sequence, which is two or three seconds at most.
 const STILL_ARRIVING: f64 = 4.0;
 
+/// How big to draw `rows` rows of a page arriving, across `width` points.
+///
+/// The width is the width whatever the rows, and the rows are as tall as the
+/// width makes them: the page's own shape, scaled to fit across and growing
+/// only downwards.
+fn picture_size(width: f32, rows: usize) -> egui::Vec2 {
+    egui::vec2(width, rows as f32 * width / SCAN_WIDTH as f32)
+}
+
 /// A page arriving, drawn as it comes in.
 ///
 /// The way slow-scan television draws: a row at a time from the top, so what
@@ -852,22 +861,26 @@ impl Fax {
                         // bottom, and staying put once scrolled up to look.
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
-                            let drawn = ui.add(
-                                egui::Image::new(&texture)
-                                    .uv(egui::Rect::from_min_max(
-                                        egui::pos2(0.0, 0.0),
-                                        egui::pos2(1.0, bottom),
-                                    ))
-                                    .fit_to_exact_size(egui::vec2(
-                                        SCAN_WIDTH as f32,
-                                        shown as f32,
-                                    )),
+                            // The whole width of the panel from the first row,
+                            // and only ever taller. Painted into a rectangle of
+                            // its own rather than through an image widget: that
+                            // keeps the texture's proportions, and the texture
+                            // is a whole sheet tall, so the top ten rows of a
+                            // page came out a few pels wide and widened as the
+                            // rest arrived.
+                            let size = picture_size(ui.available_width(), shown);
+                            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+                            ui.painter().image(
+                                texture.id(),
+                                rect,
+                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, bottom)),
+                                Color32::WHITE,
                             );
                             if arriving {
                                 // Where the page has got to.
                                 ui.painter().hline(
-                                    drawn.rect.x_range(),
-                                    drawn.rect.bottom() - 1.0,
+                                    rect.x_range(),
+                                    rect.bottom() - 1.0,
                                     egui::Stroke::new(2.0, Color32::from_rgb(90, 220, 130)),
                                 );
                             }
@@ -1086,6 +1099,89 @@ mod tests {
         assert_eq!(texture.size()[1], largest);
         assert_eq!(scan.shown(), largest);
         assert_eq!(scan.uploaded, largest);
+    }
+
+    /// Every rectangle painted with `texture`, however deep in the shapes and
+    /// whichever way it was painted: a mesh from a painter, or a rectangle
+    /// filled with the texture, which is how an image widget does it.
+    fn painted_with(shapes: &[egui::Shape], texture: egui::TextureId, out: &mut Vec<egui::Rect>) {
+        for shape in shapes {
+            match shape {
+                egui::Shape::Rect(filled)
+                    if filled.brush.as_ref().is_some_and(|b| b.fill_texture_id == texture) =>
+                {
+                    out.push(filled.rect);
+                }
+                egui::Shape::Mesh(mesh) if mesh.texture_id == texture => {
+                    let mut rect = egui::Rect::NOTHING;
+                    for vertex in &mesh.vertices {
+                        rect.extend_with(vertex.pos);
+                    }
+                    out.push(rect);
+                }
+                egui::Shape::Vec(inner) => painted_with(inner, texture, out),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn a_page_arriving_is_drawn_the_width_of_the_panel_from_its_first_row() {
+        // It was not. The top of a page came out a sliver a few pels wide in
+        // the middle of the panel and widened as the page came in, because the
+        // picture was made to keep the proportions of a texture a whole sheet
+        // tall. Drawn here the way the window draws it, in a real frame.
+        let ctx = egui::Context::default();
+        let page = page_of(1143);
+        let mut fax = Fax::new();
+        let mut widths = Vec::new();
+        let mut heights = Vec::new();
+        let mut had = 0;
+        for lines in [3, 12, 200, 1143] {
+            fax.arriving(
+                Arriving {
+                    page: 0,
+                    resolution: Resolution::Standard,
+                    from: had,
+                    lines: page.lines[had..lines].to_vec(),
+                },
+                0.0,
+            );
+            had = lines;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(640.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| {
+                fax.receive_row(ui, Color32::GRAY, Color32::WHITE);
+            });
+            // What a renderer would have uploaded. There is none here.
+            output.textures_delta.clear();
+            let texture = fax
+                .scan
+                .as_ref()
+                .and_then(|scan| scan.texture.as_ref())
+                .expect("no texture")
+                .id();
+            let shapes: Vec<egui::Shape> = output.shapes.into_iter().map(|c| c.shape).collect();
+            let mut drawn = Vec::new();
+            painted_with(&shapes, texture, &mut drawn);
+            let rect = *drawn.first().unwrap_or_else(|| panic!("{lines} lines: the page was not drawn"));
+            widths.push(rect.width());
+            heights.push(rect.height());
+        }
+        assert!(widths[0] > 500.0, "the first rows are {} across", widths[0]);
+        assert!(
+            widths.iter().all(|w| (w - widths[0]).abs() < 0.5),
+            "the page changed width as it arrived: {widths:?}"
+        );
+        assert!(heights.windows(2).all(|h| h[0] < h[1]), "not growing downwards: {heights:?}");
+        // And the page's own shape at the end: 795 rows of 576 across.
+        let whole = heights[3] / widths[3];
+        assert!((whole - 795.0 / 576.0).abs() < 0.01, "a sheet {whole} times as tall as it is wide");
     }
 
     #[test]
