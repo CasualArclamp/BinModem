@@ -122,10 +122,10 @@ pub const SCRAMBLED_ONES: u32 = 8;
 ///
 /// Indexed by the tribit read as a binary number, the left-hand digit being
 /// the one that entered the modulator first.
-const TRIBIT_TURN: [u8; 8] = [1, 0, 2, 3, 6, 7, 5, 4];
+pub(crate) const TRIBIT_TURN: [u8; 8] = [1, 0, 2, 3, 6, 7, 5, 4];
 
 /// Table 1 backwards: eighths of a turn to the tribit that asked for it.
-const TURN_TRIBIT: [u8; 8] = [0b001, 0b000, 0b010, 0b011, 0b111, 0b110, 0b100, 0b101];
+pub(crate) const TURN_TRIBIT: [u8; 8] = [0b001, 0b000, 0b010, 0b011, 0b111, 0b110, 0b100, 0b101];
 
 /// Table 2: a dibit's phase change, in eighths of a turn.
 ///

@@ -17,7 +17,7 @@
 //! a tone to nearly 2 for the crowded V.32 constellations, which is what the
 //! headroom in the drive setting is for.
 
-use datapump::{v21, v27ter, v32};
+use datapump::{v21, v27ter, v29, v32};
 
 const FS: f64 = 16_000.0;
 
@@ -84,6 +84,25 @@ fn the_page_carrier() {
             }
         }
         check(&format!("V.27 ter at {}", rate.bits_per_second()), &out);
+    }
+}
+
+#[test]
+fn the_faster_page_carrier() {
+    for rate in [v29::Rate::R9600, v29::Rate::R7200, v29::Rate::R4800] {
+        let mut tx = v29::Transmitter::new(FS);
+        tx.start(rate);
+        let mut out = Vec::new();
+        for i in 0..(FS * 2.0) as usize {
+            if tx.pending_bits() < 32 {
+                tx.push_bytes(&[i as u8, 0x5a, 0xc3]);
+            }
+            let sample = tx.next_sample();
+            if tx.trained() {
+                out.push(sample);
+            }
+        }
+        check(&format!("V.29 at {}", rate.bits_per_second()), &out);
     }
 }
 
