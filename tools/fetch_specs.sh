@@ -5,7 +5,8 @@
 # Usually the in-force edition, but not always: a Recommendation can be revised
 # by having something taken out of it, and then the current text is not the one
 # to implement against. Naming an edition explicitly, as "V.42@200011", fetches
-# that one instead.
+# that one instead, and naming a part of it as well, as "T.85@199610!Amd1",
+# fetches an amendment or corrigendum published under that edition's date.
 set -u
 OUT="${1:-docs/specs}"
 JAR="$(mktemp)"
@@ -25,6 +26,14 @@ mkdir -p "$OUT"
 #                left the heading behind: "Note that Annex A and Appendix V
 #                were deleted from ITU-T Rec. V.42 in the 2002 revision." The
 #                deletion says nothing about the modems still using it.
+#
+# The page codings that only run under T.30's error correction mode: T.6's MMR,
+# JBIG as T.82 codes it and T.85 profiles it for fax, and the colour ones --
+# T.42's colour space, T.43's lossless colour, T.44's mixed raster content and
+# T.45's run lengths. T.85 was amended twice and T.43 once, and the amendments
+# are part of what a fax machine does. The JPEG that T.4 Annex E builds on,
+# T.81, is not here: it is joint with ISO and IEC, and ITU sells it rather than
+# publishing it.
 RECS="
 V.8 V.8bis
 V.21 V.22 V.22bis V.23
@@ -37,11 +46,16 @@ V.42@200011
 V.24 V.25 V.25bis V.250
 V.2 V.56bis
 T.30 T.4
+T.6 T.82 T.85 T.85@199610!Amd1 T.85@199710!Amd2
+T.42 T.43 T.43@200002!Amd1 T.44 T.45
 "
 
 fetch_one() {
-  local spec="$1" rec want page ed url code
+  local spec="$1" rec want part page ed file url code
   # "V.42@200011" asks for one edition; a bare name takes whichever is current.
+  # "T.85@199610!Amd1" asks for a part published under that edition's date.
+  part=""
+  case "$spec" in *!*) part="${spec#*!}"; spec="${spec%%!*}" ;; esac
   rec="${spec%%@*}"
   want=""
   [ "$spec" != "$rec" ] && want="${spec#*@}"
@@ -57,12 +71,13 @@ fetch_one() {
     [ -z "$ed" ] && ed=$(grep -o "parent=T-REC-${rec}-[0-9]\{6\}-S" "$JAR.html" | sort -u | tail -1 | sed 's/.*parent=//')
   fi
   if [ -z "$ed" ]; then echo "  !! no edition found for $spec"; return 1; fi
-  url="https://www.itu.int/rec/dologin_pub.asp?lang=e&id=${ed}!!PDF-E&type=items"
-  code=$(curl -sSL -b "$JAR" -c "$JAR" -A "$UA" -e "$page" -o "$OUT/${ed}.pdf" -w '%{http_code}' "$url")
-  if [ "$code" = "200" ] && head -c 4 "$OUT/${ed}.pdf" | grep -q '%PDF'; then
-    printf '  ok  %-28s %8s bytes\n' "${ed}.pdf" "$(wc -c < "$OUT/${ed}.pdf")"
+  file="${ed}${part:+-$part}.pdf"
+  url="https://www.itu.int/rec/dologin_pub.asp?lang=e&id=${ed}!${part}!PDF-E&type=items"
+  code=$(curl -sSL -b "$JAR" -c "$JAR" -A "$UA" -e "$page" -o "$OUT/$file" -w '%{http_code}' "$url")
+  if [ "$code" = "200" ] && head -c 4 "$OUT/$file" | grep -q '%PDF'; then
+    printf '  ok  %-32s %8s bytes\n' "$file" "$(wc -c < "$OUT/$file")"
   else
-    echo "  !! $rec download failed (HTTP $code)"; rm -f "$OUT/${ed}.pdf"; return 1
+    echo "  !! $rec download failed (HTTP $code)"; rm -f "$OUT/$file"; return 1
   fi
 }
 
