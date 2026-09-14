@@ -31,6 +31,17 @@
 //! The equaliser samples twice a symbol. That makes it indifferent to where in
 //! the symbol the sampling falls, which is why a timing loop has so little to
 //! do: it only has to stop the drift, not find the eye.
+//!
+//! Slips. A VoIP call's jitter buffer now and then plays twenty milliseconds
+//! of made-up audio, or drops twenty, and everything after it arrives that
+//! much later or earlier -- 69 symbols at 3429 a second, and a carrier turned
+//! by whatever 20 ms of 1959 Hz comes to. The first live call to reach phase 4
+//! had two in two seconds. No loop follows a jump like that, and a loop that
+//! tries learns garbage: so a sudden rise in the decisions' error holds every
+//! loop still, and once there is clean signal again the receiver reads the
+//! last few dozen symbols afresh from the raw samples at each fraction of a
+//! symbol either side, and takes up again at whichever reads back as the
+//! constellation.
 
 use std::collections::VecDeque;
 
@@ -69,6 +80,11 @@ const TRN_SKIPPED: usize = 16;
 /// the search tries.
 const SEARCH: i64 = 8;
 
+/// The same for a second try further into TRN, after the first found nothing
+/// that fitted: wide enough for a jitter buffer's slip of twenty milliseconds
+/// and more to have come in between.
+const WIDE_SEARCH: i64 = 200;
+
 /// Signal to noise below which training on the known sequence is taken to
 /// have trained on the wrong one.
 const KNOWN_ENOUGH: f64 = 12.0;
@@ -76,6 +92,18 @@ const KNOWN_ENOUGH: f64 = 12.0;
 /// Least signal a half-symbol sample has to carry to be S: 37 dB under the
 /// nominal level.
 const AUDIBLE: f64 = 4e-4;
+
+/// Mixed-down samples kept for reading again after a slip: a second at
+/// 16 kHz.
+const HISTORY: usize = 16_384;
+
+/// Symbols read afresh to find where the signal went after a slip, and how
+/// often to look while it is lost.
+const RESYNC_WINDOW: usize = 48;
+const RESYNC_EVERY: usize = 32;
+
+/// Fractions of a half symbol tried either side, when looking.
+const RESYNC_STEPS: usize = 8;
 
 /// Normalised least-mean-squares step.
 const STEP: f64 = 0.02;
@@ -129,7 +157,7 @@ pub struct Symbol {
 enum Mode3 {
     Idle,
     Hunting(Hunt),
-    Collecting { reference: Reference, far: Mode, start: u64 },
+    Collecting { reference: Reference, far: Mode, start: u64, second: bool },
     Trained,
 }
 
@@ -242,8 +270,9 @@ pub struct Receiver {
     /// Mixer phase, as a fraction of a turn, and its step a sample.
     phase: f64,
     step: f64,
-    /// The last few mixed-down samples, newest last.
-    mixed: VecDeque<Complex>,
+    /// Mixed-down samples, newest last, and the index of the oldest.
+    history: VecDeque<Complex>,
+    history_first: u64,
     /// Samples taken in.
     taken: u64,
     /// Where the next half-symbol sample falls, in samples since the start.
@@ -255,6 +284,8 @@ pub struct Receiver {
     table: Vec<f64>,
 
     halves: VecDeque<Complex>,
+    /// When each of them was taken, in samples.
+    times: VecDeque<f64>,
     /// Index of the first sample in `halves`, and of the next to be made.
     first: u64,
     made: u64,
@@ -280,6 +311,14 @@ pub struct Receiver {
     last: Complex,
     /// Whether anything has trained this receiver yet.
     ever_trained: bool,
+    /// The last few symbols' squared errors, and what they come to when all is
+    /// well.
+    recent: VecDeque<f64>,
+    settled: f64,
+    /// Symbols since the error jumped, while every loop is held.
+    lost: Option<usize>,
+    /// Slips found and followed.
+    slips: u32,
 }
 
 impl Receiver {
@@ -308,13 +347,15 @@ impl Receiver {
             band,
             phase: 0.0,
             step: band.carrier() / fs,
-            mixed: std::iter::repeat_n(Complex::ZERO, FILTER_TAPS).collect(),
+            history: VecDeque::with_capacity(HISTORY),
+            history_first: 0,
             taken: 0,
             due: FILTER_TAPS as f64,
             half: fs / baud / 2.0,
             drift: 0.0,
             table,
             halves: VecDeque::with_capacity(KEPT),
+            times: VecDeque::with_capacity(KEPT),
             first: 0,
             made: 0,
             mode: Mode3::Idle,
@@ -329,6 +370,10 @@ impl Receiver {
             trained_snr: 0.0,
             last: Complex::ZERO,
             ever_trained: false,
+            recent: VecDeque::new(),
+            settled: 1.0,
+            lost: None,
+            slips: 0,
         }
     }
 
@@ -346,7 +391,7 @@ impl Receiver {
     /// `far`'s.
     pub fn train(&mut self, reference: Reference, far: Mode, s_bar: u64) {
         let start = s_bar + 2 * signals::S_BAR_SYMBOLS as u64;
-        self.mode = Mode3::Collecting { reference, far, start };
+        self.mode = Mode3::Collecting { reference, far, start, second: false };
         self.size = match reference {
             Reference::PpThenTrn => Size::Four,
             Reference::Trn(size) => size,
@@ -381,6 +426,16 @@ impl Receiver {
         self.is_trained().then_some(self.last)
     }
 
+    /// Slips found and followed since the start.
+    pub fn slips(&self) -> u32 {
+        self.slips
+    }
+
+    /// Whether the signal has jumped and not been found again yet.
+    pub fn is_lost(&self) -> bool {
+        self.lost.is_some()
+    }
+
     /// What training left.
     pub fn trained_snr_db(&self) -> f64 {
         self.trained_snr
@@ -407,42 +462,47 @@ impl Receiver {
         let mixed = Complex::new(angle.cos(), -angle.sin()).scale(2.0 * sample);
         self.phase += self.step;
         self.phase -= self.phase.floor();
-        self.mixed.pop_front();
-        self.mixed.push_back(mixed);
+        self.history.push_back(mixed);
+        if self.history.len() > HISTORY {
+            self.history.pop_front();
+            self.history_first += 1;
+        }
         self.taken += 1;
-        let newest = self.taken - 1;
-        // The filter's taps reach FILTER_TAPS/2 samples past the time it is
-        // evaluated at.
-        while self.due.floor() as u64 + (FILTER_TAPS / 2) as u64 <= newest {
-            let base = self.due.floor();
-            let mut ph = ((self.due - base) * FILTER_PHASES as f64).round() as usize;
-            let mut base = base as u64;
-            if ph == FILTER_PHASES {
-                ph = 0;
-                base += 1;
-                if base + (FILTER_TAPS / 2) as u64 > newest {
-                    break;
-                }
-            }
-            let offset = (base + (FILTER_TAPS / 2) as u64 - newest) as usize;
-            let row = &self.table[ph * FILTER_TAPS..(ph + 1) * FILTER_TAPS];
-            let mut value = Complex::ZERO;
-            for (i, tap) in row.iter().enumerate() {
-                if let Some(x) = self.mixed.get(offset + i) {
-                    value += *x * *tap;
-                }
-            }
+        while let Some(value) = self.interpolate(self.due) {
+            let at = self.due;
             self.due += self.half * (1.0 + self.drift);
-            self.on_half(value);
+            self.on_half(value, at);
         }
     }
 
-    fn on_half(&mut self, half: Complex) {
+    /// The mixed-down signal at `time` samples, filtered, if every sample the
+    /// filter reaches is here.
+    fn interpolate(&self, time: f64) -> Option<Complex> {
+        let floor = time.floor();
+        let mut ph = ((time - floor) * FILTER_PHASES as f64).round() as usize;
+        let mut base = floor as i64;
+        if ph == FILTER_PHASES {
+            ph = 0;
+            base += 1;
+        }
+        let from = base - (FILTER_TAPS / 2) as i64 + 1;
+        let to = base + (FILTER_TAPS / 2) as i64;
+        if from < self.history_first as i64 || to >= self.taken as i64 {
+            return None;
+        }
+        let offset = (from - self.history_first as i64) as usize;
+        let row = &self.table[ph * FILTER_TAPS..(ph + 1) * FILTER_TAPS];
+        Some(row.iter().enumerate().fold(Complex::ZERO, |sum, (i, tap)| sum + self.history[offset + i] * *tap))
+    }
+
+    fn on_half(&mut self, half: Complex, at: f64) {
         let index = self.made;
         self.made += 1;
         self.halves.push_back(half);
+        self.times.push_back(at);
         if self.halves.len() > KEPT {
             self.halves.pop_front();
+            self.times.pop_front();
             self.first += 1;
         }
         match &mut self.mode {
@@ -453,12 +513,13 @@ impl Receiver {
                     self.heard.push_back(Heard::Reversal { at });
                 }
             }
-            Mode3::Collecting { reference, far, start } => {
-                let (reference, far, start) = (*reference, *far, *start);
-                let (_, end) = windows(reference).1;
-                let needed = start + SEARCH as u64 + 2 * end as u64 + REACH as u64;
+            Mode3::Collecting { reference, far, start, second } => {
+                let (reference, far, start, second) = (*reference, *far, *start, *second);
+                let (_, end) = windows(reference, second).1;
+                let search = if second { WIDE_SEARCH } else { SEARCH };
+                let needed = start + search as u64 + 2 * end as u64 + REACH as u64;
                 if self.made > needed {
-                    self.finish_training(reference, far, start);
+                    self.finish_training(reference, far, start, second);
                 }
             }
             Mode3::Trained => {
@@ -469,6 +530,12 @@ impl Receiver {
                     }
                     let symbol = self.symbol();
                     self.heard.push_back(Heard::Symbol(symbol));
+                    if let Some(lost) = self.lost
+                        && lost >= RESYNC_WINDOW / 2
+                        && lost % RESYNC_EVERY == 0
+                    {
+                        self.resync();
+                    }
                 }
             }
         }
@@ -486,14 +553,21 @@ impl Receiver {
         (to <= self.halves.len()).then(|| self.halves.range(from..to).copied().collect())
     }
 
-    fn finish_training(&mut self, reference: Reference, far: Mode, start: u64) {
-        let known = self.solve_known(reference, far, start);
+    fn finish_training(&mut self, reference: Reference, far: Mode, start: u64, second: bool) {
+        let known = self.solve_known(reference, far, start, second);
         let enough = |s: &Solution| -10.0 * s.mse.max(1e-9).log10() >= KNOWN_ENOUGH;
         let solution = match (known, reference) {
             (Some(s), _) if enough(&s) => Some(s),
-            (known, Reference::Trn(size)) if self.ever_trained => self.reacquire(size, far, start).or(known),
+            (known, Reference::Trn(size)) if self.ever_trained && !second => self.reacquire(size, far, start).or(known),
             (known, _) => known,
         };
+        if !second && solution.as_ref().is_none_or(|s| !enough(s)) {
+            // Nothing fitted where S-bar said. A slip in the middle of the
+            // window spoils a fit that way; so try again further into TRN,
+            // searching wide for where it went.
+            self.mode = Mode3::Collecting { reference, far, start, second: true };
+            return;
+        }
         let Some(solution) = solution else {
             self.mode = Mode3::Idle;
             self.heard.push_back(Heard::Untrained);
@@ -511,6 +585,9 @@ impl Receiver {
             return;
         }
         self.ever_trained = true;
+        self.lost = None;
+        self.recent.clear();
+        self.settled = solution.mse;
         self.mode = Mode3::Trained;
         self.heard.push_back(Heard::Trained { snr_db: self.trained_snr });
         // Everything already here past the window.
@@ -521,12 +598,34 @@ impl Receiver {
     }
 
     /// The equaliser solved for from the known sequence.
-    fn solve_known(&self, reference: Reference, far: Mode, start: u64) -> Option<Solution> {
-        let ((search_from, search_to), (from, to)) = windows(reference);
+    fn solve_known(&self, reference: Reference, far: Mode, start: u64, second: bool) -> Option<Solution> {
+        let ((search_from, search_to), (from, to)) = windows(reference, second);
         let targets = sequence(reference, far, to);
+        let deltas: Vec<i64> = if second {
+            // Too many places to solve at each, so the samples themselves are
+            // set against the sequence first -- on a line with one strong path,
+            // as a VoIP call is, that alone points to the place -- and only the
+            // few around the best are solved at.
+            let mut scored: Vec<(f64, i64)> = (-WIDE_SEARCH..=WIDE_SEARCH)
+                .filter_map(|delta| {
+                    let origin = start.checked_add_signed(delta)?;
+                    let mut sum = Complex::ZERO;
+                    for (k, target) in targets.iter().enumerate().take(search_to).skip(search_from) {
+                        let index = (origin + 2 * k as u64).checked_sub(self.first)? as usize;
+                        sum += *self.halves.get(index)? * target.conj();
+                    }
+                    Some((sum.norm_sqr(), delta))
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+            let best = scored.first()?.1;
+            (best - 3..=best + 3).collect()
+        } else {
+            (-SEARCH..=SEARCH).collect()
+        };
         // Each alignment either side of where S-bar put the sequence.
         let mut best: Option<(f64, i64, Vec<Complex>)> = None;
-        for delta in -SEARCH..=SEARCH {
+        for delta in deltas {
             let Some(origin) = start.checked_add_signed(delta) else { continue };
             let rows: Option<Vec<Vec<Complex>>> = (search_from..search_to).map(|k| self.row(origin + 2 * k as u64)).collect();
             let Some(rows) = rows else { continue };
@@ -638,38 +737,145 @@ impl Receiver {
         let z = y * spin;
         let (decided, target) = decide(z, self.size);
         let e = z - target;
-        // The equaliser learns in its own frame, before the carrier is taken
-        // out.
-        let energy: f64 = row.iter().map(|x| x.norm_sqr()).sum::<f64>() + 1e-9;
-        let back = e * spin.conj() * (STEP / energy);
-        for (tap, x) in self.taps.iter_mut().zip(row) {
-            *tap -= back * x.conj();
+        let squared = e.norm_sqr();
+        // Half the way to the nearest other point, squared: an error past it
+        // is more likely a wrong decision than a right one.
+        let doubtful = 0.25 * min_distance_squared(self.size);
+        self.recent.push_back(squared);
+        if self.recent.len() > 8 {
+            self.recent.pop_front();
         }
-        let power = target.norm_sqr().max(0.1);
-        let wrong = (z * target.conj()).im / power;
-        self.turn += FREQUENCY_GAIN * wrong;
-        self.rotation += self.turn + PHASE_GAIN * wrong;
+        let recent = self.recent.iter().sum::<f64>() / self.recent.len() as f64;
+        match self.lost {
+            None if self.recent.len() == 8 && recent > (8.0 * self.settled).max(doubtful) => {
+                // The signal has jumped, or gone. Hold everything.
+                self.lost = Some(0);
+            }
+            Some(n) => self.lost = Some(n + 1),
+            None => {}
+        }
+        self.rotation += self.turn;
+        if self.lost.is_none() && squared < doubtful {
+            // The equaliser learns in its own frame, before the carrier is
+            // taken out.
+            let energy: f64 = row.iter().map(|x| x.norm_sqr()).sum::<f64>() + 1e-9;
+            let back = e * spin.conj() * (STEP / energy);
+            for (tap, x) in self.taps.iter_mut().zip(row) {
+                *tap -= back * x.conj();
+            }
+            let power = target.norm_sqr().max(0.1);
+            let wrong = (z * target.conj()).im / power;
+            self.turn += FREQUENCY_GAIN * wrong;
+            self.rotation += PHASE_GAIN * wrong;
+            // Timing. An output sampled late by a fraction of a half symbol is
+            // out by that fraction of its rate of change, so the error's share
+            // along the rate of change is how late.
+            let rate = rate * spin;
+            self.slope += 0.01 * (rate.norm_sqr() - self.slope);
+            let late = ((e * rate.conj()).re / self.slope.max(1e-9)).clamp(-0.5, 0.5);
+            self.due -= TIMING_GAIN * late * self.half;
+            self.drift = (self.drift - DRIFT_GAIN * late).clamp(-0.001, 0.001);
+            self.settled += 0.01 * (squared - self.settled);
+        }
         self.rotation = self.rotation.rem_euclid(std::f64::consts::TAU);
-        // Timing. An output sampled late by a fraction of a half symbol is out
-        // by that fraction of its rate of change, so the error's share along
-        // the rate of change is how late.
-        let rate = rate * spin;
-        self.slope += 0.01 * (rate.norm_sqr() - self.slope);
-        let late = ((e * rate.conj()).re / self.slope.max(1e-9)).clamp(-0.5, 0.5);
-        self.due -= TIMING_GAIN * late * self.half;
-        self.drift = (self.drift - DRIFT_GAIN * late).clamp(-0.001, 0.001);
-        self.error += 0.01 * (e.norm_sqr() - self.error);
+        self.error += 0.01 * (squared - self.error);
         self.last = z;
-        Symbol { point: z, decided, error: e.norm_sqr() }
+        Symbol { point: z, decided, error: squared }
+    }
+
+    /// After a jump: read the last few dozen symbols again from the raw
+    /// samples at each fraction of a half symbol either side, and take up at
+    /// whichever reads back as the constellation.
+    ///
+    /// Only the fraction has to be searched. Where the symbols fall in whole
+    /// half symbols does not matter to anything reading them: bits come out
+    /// of J, MP and E from the change between one symbol and the next, and a
+    /// slip loses or repeats some whichever way the grid is counted. The
+    /// carrier's turn is found again from the symbols' fourth power, to within
+    /// a quarter -- which the same differential coding does not mind either.
+    fn resync(&mut self) {
+        let half = self.half * (1.0 + self.drift);
+        // The newest window of symbols that every shift can be read for.
+        let reach = REACH as u64 + 1;
+        let Some(last) = self.next_symbol.checked_sub(2) else { return };
+        let Some(first_centre) = last.checked_sub(2 * (RESYNC_WINDOW as u64 - 1)) else { return };
+        let Some(from) = first_centre.checked_sub(reach) else { return };
+        if from < self.first || last + reach >= self.made {
+            return;
+        }
+        let start_time = self.times[(from - self.first) as usize];
+        let count = (last + reach - from + 1) as usize;
+        let doubtful = 0.25 * min_distance_squared(self.size);
+        let mut best: Option<(f64, f64, f64)> = None;
+        for step in 0..2 * RESYNC_STEPS {
+            let shift = (step as f64 - RESYNC_STEPS as f64) / RESYNC_STEPS as f64;
+            let read: Option<Vec<Complex>> = (0..count).map(|m| self.interpolate(start_time + (m as f64 + shift) * half)).collect();
+            let Some(read) = read else { continue };
+            let outputs: Vec<Complex> = (0..RESYNC_WINDOW)
+                .map(|j| apply(&self.taps, &read[2 * j + 1..2 * j + 2 + 2 * REACH]))
+                .collect();
+            let fourth = outputs.iter().fold(Complex::ZERO, |sum, y| sum + *y * *y * *y * *y);
+            let base = (fourth.arg() - std::f64::consts::PI) / 4.0;
+            // Of the four turns that fit, the one nearest the turn before.
+            let turned = (0..4)
+                .map(|q| base + std::f64::consts::FRAC_PI_2 * f64::from(q))
+                .min_by(|a, b| angle_between(*a, self.rotation).total_cmp(&angle_between(*b, self.rotation)))
+                .unwrap_or(base);
+            let spin = Complex::from_polar(1.0, -turned);
+            let mse = outputs.iter().map(|y| (*y * spin - decide(*y * spin, self.size).1).norm_sqr()).sum::<f64>()
+                / RESYNC_WINDOW as f64;
+            if best.is_none_or(|b| mse < b.0) {
+                best = Some((mse, shift, turned));
+            }
+        }
+        let Some((mse, shift, turned)) = best else { return };
+        if mse > (4.0 * self.settled).max(0.25 * doubtful) {
+            return;
+        }
+        // Found. Everything from the window on is read again on the moved
+        // grid, and anything the moved grid needs samples for that have not
+        // come yet is made again when they have.
+        let moved = shift * half;
+        let redo = (from - self.first) as usize;
+        let mut keep = self.halves.len();
+        for m in redo..self.halves.len() {
+            let time = self.times[m] + moved;
+            match self.interpolate(time) {
+                Some(value) => {
+                    self.halves[m] = value;
+                    self.times[m] = time;
+                }
+                None => {
+                    keep = m;
+                    break;
+                }
+            }
+        }
+        if keep < self.halves.len() {
+            self.due = self.times[keep] + moved;
+            self.halves.truncate(keep);
+            self.times.truncate(keep);
+            self.made = self.first + keep as u64;
+        } else {
+            self.due += moved;
+        }
+        self.rotation = (turned + self.turn * (RESYNC_WINDOW as f64 / 2.0)).rem_euclid(std::f64::consts::TAU);
+        self.lost = None;
+        self.recent.clear();
+        self.slips += 1;
     }
 }
 
 /// Where training searches for alignment, and the whole window it trains on,
-/// as symbol ranges of the reference.
-fn windows(reference: Reference) -> ((usize, usize), (usize, usize)) {
-    match reference {
-        Reference::PpThenTrn => ((PP_SKIPPED, signals::PP_SYMBOLS), (PP_SKIPPED, signals::PP_SYMBOLS + TRN_AFTER_PP)),
-        Reference::Trn(_) => ((TRN_SKIPPED, 256), (TRN_SKIPPED, TRN_ALONE)),
+/// as symbol ranges of the reference; for a second try, further into TRN and
+/// still inside the 512 symbols it is sent for at least.
+fn windows(reference: Reference, second: bool) -> ((usize, usize), (usize, usize)) {
+    let trn = signals::PP_SYMBOLS;
+    match (reference, second) {
+        (Reference::PpThenTrn, false) => ((PP_SKIPPED, trn), (PP_SKIPPED, trn + TRN_AFTER_PP)),
+        (Reference::PpThenTrn, true) => ((trn + 256, trn + 512), (trn + 256, trn + 512)),
+        (Reference::Trn(_), false) => ((TRN_SKIPPED, 256), (TRN_SKIPPED, TRN_ALONE)),
+        (Reference::Trn(_), true) => ((TRN_ALONE - 64, 512), (TRN_ALONE - 64, 512)),
     }
 }
 
@@ -702,6 +908,19 @@ fn decide(z: Complex, size: Size) -> (Point, Complex) {
     let scale = unit(size);
     let grid = signals::decide((z.re / scale, z.im / scale), size);
     (grid, Complex::new(f64::from(grid.0), f64::from(grid.1)).scale(scale))
+}
+
+/// The least squared distance between two points of a constellation at unit
+/// mean power: 2 for four points, 0.4 for sixteen.
+fn min_distance_squared(size: Size) -> f64 {
+    let d = 2.0 * unit(size);
+    d * d
+}
+
+/// How far apart two angles are, the short way round.
+fn angle_between(a: f64, b: f64) -> f64 {
+    let d = (a - b).rem_euclid(std::f64::consts::TAU);
+    d.min(std::f64::consts::TAU - d)
 }
 
 fn apply(taps: &[Complex], row: &[Complex]) -> Complex {
@@ -974,6 +1193,124 @@ mod tests {
             assert!(trainings[1] > 25.0, "restarted {restarted}: phase 4 trained to {:.1} dB", trainings[1]);
             assert!(ones > 4 * (read - 12) * 99 / 100, "restarted {restarted}: {ones} ones of {} bits", 4 * (read - 12));
         }
+    }
+
+    /// Phase 4 as the call modem hears it: S, S-bar, TRN at sixteen points,
+    /// and then MP' after MP' for `seconds`.
+    fn phase4_with_mps(band: Band, seconds: f64) -> Vec<f64> {
+        let mut tx = Transmitter::new(band, 0, 0, FS);
+        let mut sender = Sender::new(Mode::Answer);
+        let grid = |p: Point, size: Size| Complex::new(f64::from(p.0), f64::from(p.1)).scale(unit(size));
+        let mut symbols: VecDeque<Complex> = VecDeque::new();
+        symbols.extend(std::iter::repeat_n(Complex::ZERO, 400));
+        symbols.extend((0..signals::S_SYMBOLS).map(|n| grid(signals::s(n), Size::Four)));
+        symbols.extend((0..signals::S_BAR_SYMBOLS).map(|n| grid(signals::s_bar(n), Size::Four)));
+        sender.restart();
+        symbols.extend((0..800).map(|_| grid(sender.trn(Size::Sixteen), Size::Sixteen)));
+        let mp = crate::v34::mp::Mp { call_to_answer: 14, answer_to_call: 14, rates: 0x3fff, asymmetric: true, ..Default::default() }
+            .acknowledged();
+        let bits: Vec<bool> = mp.to_bits().repeat((seconds * band.baud() / 22.0) as usize);
+        symbols.extend(sender.sequence(&bits, Size::Sixteen).into_iter().map(|p| grid(p, Size::Sixteen)));
+        let total = symbols.len();
+        let mut out = Vec::new();
+        while tx.symbols() < total as u64 + 50 {
+            out.push(tx.next_sample(|| symbols.pop_front().unwrap_or(Complex::ZERO)));
+        }
+        out
+    }
+
+    /// A jitter buffer's slip at sample `at`: twenty milliseconds made up --
+    /// the twenty before, faded across both joins as concealment does -- or
+    /// twenty dropped.
+    fn slip(samples: &mut Vec<f64>, at: usize, inserted: bool) {
+        let n = (0.020 * FS) as usize;
+        if inserted {
+            let fade = 40;
+            let mut made: Vec<f64> = samples[at - n..at].to_vec();
+            for (i, x) in made.iter_mut().enumerate() {
+                let edge = i.min(n - 1 - i);
+                if edge < fade {
+                    *x *= edge as f64 / fade as f64;
+                }
+            }
+            samples.splice(at..at, made);
+        } else {
+            samples.drain(at..at + n);
+        }
+    }
+
+    #[test]
+    fn a_voip_slip_either_way_is_found_and_mp_is_read_again() {
+        let band = Band::new(SymbolRate::S3429, false);
+        let mut sent = phase4_with_mps(band, 4.0);
+        // Twenty milliseconds made up at 1.5 s, and twenty dropped at 3 s --
+        // the first live call to reach phase 4 had the first kind twice.
+        slip(&mut sent, (3.0 * FS) as usize, false);
+        slip(&mut sent, (1.5 * FS) as usize, true);
+        let samples = line(&sent, 114.0, 15.0, 45.0);
+        let mut rx = Receiver::new(band, FS);
+        rx.hunt();
+        let mut reader = Reader::new(Mode::Answer);
+        let mut finder = crate::v34::mp::Finder::new();
+        let (mut trn, mut grace) = (true, 12);
+        let mut found = Vec::new();
+        for (i, &x) in samples.iter().enumerate() {
+            rx.feed(x);
+            while let Some(heard) = rx.heard() {
+                match heard {
+                    Heard::Reversal { at } => rx.train(Reference::Trn(Size::Sixteen), Mode::Answer, at),
+                    Heard::Trained { .. } => {}
+                    Heard::Untrained => panic!("did not train"),
+                    Heard::Symbol(symbol) => {
+                        if trn {
+                            let before = reader.clone();
+                            let bits = reader.trn(symbol.decided, Size::Sixteen);
+                            if grace > 0 {
+                                grace -= 1;
+                                continue;
+                            }
+                            if bits.iter().all(|b| *b) {
+                                continue;
+                            }
+                            reader = before;
+                            trn = false;
+                        }
+                        for bit in reader.differential(symbol.decided, Size::Sixteen) {
+                            if let Some(crate::v34::mp::Found::Mp(_)) = finder.feed(bit) {
+                                found.push(i as f64 / FS);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(rx.slips(), 2, "slips followed");
+        // MP' after MP' between and after the slips, each back within a
+        // tenth of a second of the slip. The slips are at 1.5 s and, with
+        // the twenty inserted before it, 3.02 s -- and the line delays both.
+        let first_after = |t: f64| found.iter().copied().find(|&x| x > t).unwrap_or(f64::MAX);
+        let before = found.iter().filter(|&&t| t < 1.49).count();
+        assert!(before > 50, "{before} MPs before the first slip");
+        assert!(first_after(1.51) < 1.65, "first MP after the insertion at {:.3} s", first_after(1.51));
+        assert!(first_after(3.03) < 3.17, "first MP after the drop at {:.3} s", first_after(3.03));
+        let after = found.iter().filter(|&&t| t > 3.2).count();
+        assert!(after > 100, "{after} MPs after the second slip");
+    }
+
+    #[test]
+    fn a_slip_in_the_middle_of_training_is_trained_past() {
+        // Twenty milliseconds made up in the middle of PP: the first fit finds
+        // nothing, and the second, further into TRN, finds the sequence where
+        // the slip moved it.
+        let band = Band::new(SymbolRate::S3429, false);
+        let mut sent = phase3(band, 2000, 40);
+        // PP starts 400 silent symbols, S and S-bar in, plus the pulse's
+        // lead: about 0.165 s.
+        slip(&mut sent, (0.20 * FS) as usize, true);
+        let heard = listen(&line(&sent, 114.0, 15.0, 45.0), band);
+        let snr = heard.snr.expect("never trained");
+        assert!(snr > 25.0, "trained to {snr:.1} dB");
+        assert!(heard.j.is_some(), "no J");
     }
 
     #[test]

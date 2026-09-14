@@ -217,11 +217,19 @@ impl Analyzer {
                 let mean = derotated.iter().fold((0.0, 0.0), |m, x| (m.0 + x.0, m.1 + x.1));
                 let mean = (mean.0 / windows as f64, mean.1 / windows as f64);
                 let power = mean.0 * mean.0 + mean.1 * mean.1;
-                let noise = derotated
-                    .iter()
-                    .map(|x| (x.0 - mean.0).powi(2) + (x.1 - mean.1).powi(2))
-                    .sum::<f64>()
-                    / (windows - 1) as f64;
+                // The noise, from how far each window's reading is from the
+                // one before it -- the median of those, not the mean. A VoIP
+                // call's jitter buffer makes up twenty milliseconds of audio
+                // every so often, and the fade across each join throws the two
+                // windows either side of it tens of degrees out. The second real
+                // call to probe had two such in its L1 and L2, and counted as
+                // noise they read a clean line at 17 dB. The median does not
+                // see them. For noise of power p in each reading, a difference
+                // has 2p, and the median of its square is ln 2 of that.
+                let mut steps: Vec<f64> =
+                    derotated.windows(2).map(|w| (w[1].0 - w[0].0).powi(2) + (w[1].1 - w[0].1).powi(2)).collect();
+                steps.sort_by(f64::total_cmp);
+                let noise = steps[steps.len() / 2] / (2.0 * std::f64::consts::LN_2);
                 Tone {
                     frequency,
                     gain_db: 10.0 * (power / (sent * sent)).max(1e-12).log10(),
@@ -498,6 +506,38 @@ mod tests {
         let (low, high) = snr.iter().fold((f64::MAX, f64::MIN), |(l, h), &s| (l.min(s), h.max(s)));
         assert!(high - low < 6.0, "the tones read {snr:?}");
         assert!(low > 30.0, "the tones read {snr:?}");
+    }
+
+    #[test]
+    fn a_slip_in_the_middle_of_l2_is_not_counted_as_noise() {
+        // Twenty milliseconds of L2 played twice, faded out and in across the
+        // joins as a jitter buffer's concealment does, with noise 40 dB under
+        // every tone. Twenty milliseconds is three repetitions of L2, so the
+        // tones come out of it where they would have been; only the windows
+        // across the fades are spoiled.
+        let mut g = Generator::new(FS);
+        let mut signal: Vec<f64> = (0..8000).map(|_| g.next_sample(false)).collect();
+        let (at, n, fade) = (4000, 320, 60);
+        let mut copy = signal[at - n..at].to_vec();
+        for (i, x) in copy.iter_mut().enumerate() {
+            let edge = i.min(n - 1 - i);
+            if edge < fade {
+                *x *= edge as f64 / fade as f64;
+            }
+        }
+        signal.splice(at..at, copy);
+        let mut a = Analyzer::new(FS);
+        let mut seed = 5u32;
+        for x in &signal {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let noise = (f64::from(seed) / f64::from(u32::MAX) - 0.5) * 2.0 * nominal_amplitude() * 0.01 * 3f64.sqrt() * 4.0;
+            a.feed(x + noise);
+        }
+        let reading = a.reading().expect("no reading");
+        let snr: Vec<f64> = reading.tones.iter().map(|t| t.snr_db).collect();
+        assert!(snr.iter().all(|&s| s > 32.0), "the tones read {snr:?}");
     }
 
     #[test]

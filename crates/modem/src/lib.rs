@@ -365,6 +365,9 @@ pub struct V34Training {
     pub phase4_snr: Option<f64>,
     /// The far end's clock against this one, in parts per million.
     pub drift_ppm: f64,
+    /// Slips in the far end's signal followed: jumps a VoIP jitter buffer
+    /// makes when it plays audio it made up, or drops some.
+    pub slips: u32,
     pub our_mp: Option<v34::mp::Mp>,
     pub far_mp: Option<v34::mp::Mp>,
     /// This end's transmit and receive rates, as multiples of 2400.
@@ -396,6 +399,7 @@ impl V34Report {
                 phase3_snr: t.phase3_snr(),
                 phase4_snr: t.phase4_snr(),
                 drift_ppm: t.drift_ppm(),
+                slips: t.slips(),
                 our_mp: t.our_mp(),
                 far_mp: t.far_mp(),
                 rates: t.rates(),
@@ -518,10 +522,12 @@ impl V34Report {
             rows.push((
                 "V.34 trained",
                 format!(
-                    "phase 3 {}, phase 4 {}, far clock {:+.0} ppm",
+                    "phase 3 {}, phase 4 {}, far clock {:+.0} ppm, {} slip{} followed",
                     db(t.phase3_snr),
                     db(t.phase4_snr),
-                    t.drift_ppm
+                    t.drift_ppm,
+                    t.slips,
+                    if t.slips == 1 { "" } else { "s" }
                 ),
             ));
             rows.push((

@@ -128,6 +128,18 @@ const HEARD_TRN: usize = 64;
 /// detection and transmit delays.
 const SLACK: f64 = 0.3;
 
+/// Whole MP' sequences sent before E. The recommendation asks only that the
+/// one going out be finished, but on a VoIP call one of a jitter buffer's
+/// twenty-millisecond slips can swallow a sequence whole -- three of sixteen
+/// points' MP' fit in one -- and E after a single MP' is then E after none.
+const MP_PRIME_REPEATS: usize = 8;
+
+/// The round trips over the recommendation's own that this end waits for E
+/// before giving up. The far end that answered the first call to reach phase 4
+/// sent TRN for two and a half seconds of it, and its E came with less than a
+/// second to spare; waiting longer costs nothing but the wait.
+const E_PATIENCE: f64 = 1.0;
+
 /// What this end sends, and how it moves from one signal to the next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Segment {
@@ -599,6 +611,12 @@ impl Modem {
         self.rx.drift_ppm()
     }
 
+    /// Jumps in the far end's signal the receiver found and followed: a VoIP
+    /// jitter buffer's slips.
+    pub fn slips(&self) -> u32 {
+        self.rx.slips()
+    }
+
     /// The MP this end sends, once it has been made.
     pub fn our_mp(&self) -> Option<Mp> {
         self.ours
@@ -720,7 +738,7 @@ impl Modem {
                 self.source.change(Segment::JPrime);
                 self.enter(Stage::CallTraining4);
                 // 11.4.2.1.2: E within 2500 ms and two round trips of J'.
-                let wait = if self.settings.far_cme { 30.0 } else { 2.5 + 2.0 * self.rtd() + SLACK };
+                let wait = if self.settings.far_cme { 30.0 } else { 2.5 + (2.0 + E_PATIENCE) * self.rtd() + SLACK };
                 self.deadline = Some((self.samples(wait), "no E from the answer modem"));
             }
             _ => {}
@@ -749,7 +767,7 @@ impl Modem {
                 self.source.change(Segment::S);
                 self.enter(Stage::AnswerPhase4);
                 // 11.4.2.2.2: E within 2500 ms and three round trips of S-bar.
-                let wait = if self.settings.far_cme { 30.0 } else { 2.5 + 3.0 * self.rtd() + SLACK + 0.05 };
+                let wait = if self.settings.far_cme { 30.0 } else { 2.5 + (3.0 + E_PATIENCE) * self.rtd() + SLACK + 0.05 };
                 self.deadline = Some((self.samples(wait), "no E from the call modem"));
             }
             (Stage::AnswerPhase4, Event::JPrime) => {
@@ -866,7 +884,7 @@ impl Modem {
                     // MP' sequences" -- which the next repetition is.
                     self.source.mp = ours.acknowledged();
                 }
-                if !self.sent_e && self.source.acknowledged >= 1 && (self.far_acknowledged || self.far_e) {
+                if !self.sent_e && self.source.acknowledged >= MP_PRIME_REPEATS && (self.far_acknowledged || self.far_e) {
                     self.source.change(Segment::E);
                     self.sent_e = true;
                 }
