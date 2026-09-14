@@ -172,24 +172,38 @@ impl Analyzer {
         if windows < 4 {
             return None;
         }
-        // A frequency offset turns every tone by the same angle from one
-        // window to the next. Measured on 1050 Hz, the tone the tables name,
-        // and taken out of all of them before anything is averaged.
+        // How far each tone turns from one window to the next, measured on
+        // that tone and taken out of it before anything is averaged.
+        //
+        // Each tone's own, and not 1050 Hz's applied to all of them. A line
+        // that shifts every frequency by the same few hertz turns every tone
+        // alike, but a line whose two ends run on different clocks turns each
+        // in proportion to its frequency -- and that is what a sound card
+        // talking to a VoIP call is. On the first real call this reached,
+        // every tone sat 114 parts per million low, 1050 Hz read 45 dB of
+        // signal to noise, and the tones either side of it fell away to 11 dB
+        // at 3750, because each was being turned back by the wrong amount and
+        // the difference was counted as noise. Turned back by their own, all
+        // twenty-one read 42 to 45 dB.
+        let turn_of = |t: usize| {
+            let mut turn = (0.0, 0.0);
+            for pair in self.readings.windows(2) {
+                let (a, b) = (pair[0][t], pair[1][t]);
+                turn.0 += b.0 * a.0 + b.1 * a.1;
+                turn.1 += b.1 * a.0 - b.0 * a.1;
+            }
+            turn.1.atan2(turn.0)
+        };
         let at_1050 = TONES.iter().position(|&(f, _)| f == 1050.0).expect("1050 Hz is a probing tone");
-        let mut turn = (0.0, 0.0);
-        for pair in self.readings.windows(2) {
-            let (a, b) = (pair[0][at_1050], pair[1][at_1050]);
-            turn.0 += b.0 * a.0 + b.1 * a.1;
-            turn.1 += b.1 * a.0 - b.0 * a.1;
-        }
-        let per_window = turn.1.atan2(turn.0);
         let seconds = self.window as f64 / self.fs;
-        let offset = per_window / (std::f64::consts::TAU * seconds);
+        // The field names 1050 Hz, so the offset is 1050 Hz's.
+        let offset = turn_of(at_1050) / (std::f64::consts::TAU * seconds);
         let sent = nominal_amplitude();
         let tones = TONES
             .iter()
             .enumerate()
             .map(|(t, &(frequency, _))| {
+                let per_window = turn_of(t);
                 let derotated: Vec<(f64, f64)> = self
                     .readings
                     .iter()
@@ -453,6 +467,37 @@ mod tests {
         assert!((first.gain_db + 20.0).abs() < 0.5, "{first:?}");
         assert!((last.gain_db + 26.0).abs() < 0.8, "{last:?}");
         assert!(reading.tones.iter().all(|t| t.snr_db > 20.0 && t.snr_db < 45.0), "{reading:?}");
+    }
+
+    #[test]
+    fn two_clocks_apart_are_not_counted_as_noise() {
+        // Every frequency 114 parts per million low, as the first real call
+        // measured, and noise 40 dB under the signal: the reading should be
+        // 40 dB at every tone, not 40 at 1050 Hz and less the further away.
+        let ratio = 1.0 - 114e-6;
+        let mut a = Analyzer::new(FS);
+        let mut seed = 11u32;
+        for i in 0..8000 {
+            let t = i as f64 / FS;
+            let signal: f64 = TONES
+                .iter()
+                .map(|&(f, phase)| (std::f64::consts::TAU * f * ratio * t + phase.to_radians()).cos())
+                .sum::<f64>()
+                * nominal_amplitude();
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            // Uniform noise 40 dB under each tone, as a per-tone ratio.
+            let noise = (f64::from(seed) / f64::from(u32::MAX) - 0.5) * 2.0 * nominal_amplitude() * 0.01 * 3f64.sqrt() * 4.0;
+            a.feed(signal + noise);
+        }
+        let reading = a.reading().expect("no reading");
+        let offset = reading.frequency_offset.expect("no offset");
+        assert!((offset + 1050.0 * 114e-6).abs() < 0.02, "offset {offset}");
+        let snr: Vec<f64> = reading.tones.iter().map(|t| t.snr_db).collect();
+        let (low, high) = snr.iter().fold((f64::MAX, f64::MIN), |(l, h), &s| (l.min(s), h.max(s)));
+        assert!(high - low < 6.0, "the tones read {snr:?}");
+        assert!(low > 30.0, "the tones read {snr:?}");
     }
 
     #[test]

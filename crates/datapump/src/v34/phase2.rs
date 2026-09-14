@@ -179,6 +179,13 @@ impl Presence {
         }
     }
 
+    /// Whether what is either side of the tone is louder than the tone, which
+    /// is what a probing signal looks like from here: L2 has tones 150 Hz
+    /// either side of 1200 and 2400 Hz and nothing at either.
+    fn probing(&self) -> bool {
+        self.below.amplitude().max(self.above.amplitude()) > self.tone.amplitude()
+    }
+
     fn feed(&mut self, x: f64) {
         self.tone.feed(x);
         self.below.feed(x);
@@ -234,6 +241,8 @@ pub struct Modem {
     reading: Option<Reading>,
     info1c: Option<Info1c>,
     info1a: Option<Info1a>,
+    /// Times a timeout of 11.2.2 was taken instead of the signal it waited for.
+    recoveries: u32,
 }
 
 impl Modem {
@@ -274,6 +283,7 @@ impl Modem {
             reading: None,
             info1c: None,
             info1a: None,
+            recoveries: 0,
         };
         // 11.2.1.1.1 and 11.2.1.2.1: INFO0 "with bit 28 set to 0, followed by"
         // this end's tone -- which the modulator carries on into by itself.
@@ -336,6 +346,13 @@ impl Modem {
         self.reading.as_ref()
     }
 
+    /// How many times a timeout of 11.2.2 was taken instead of the signal
+    /// it was waiting for. Phase 2 survives them, and a clean line should
+    /// need none.
+    pub fn recoveries(&self) -> u32 {
+        self.recoveries
+    }
+
     pub fn info1c(&self) -> Option<Info1c> {
         self.info1c
     }
@@ -365,10 +382,18 @@ impl Modem {
     pub fn step(&mut self, line: f64) -> f64 {
         self.now += 1;
         let info = self.rx.feed(line);
+        self.presence.feed(line);
+        // A probing signal -- the far end's, or the echo of this end's own --
+        // leaves the reversal detector sure the tone after it is far off
+        // frequency, and it refuses that tone's reversal. Tone A reverses 50 ms
+        // after the far end's L2 ends (11.2.1.2.6), so the detector starts
+        // again for as long as probing is what it hears.
+        if self.presence.probing() {
+            self.reversals.restart();
+        }
         let reversed = self.reversals.feed(line) && self.now >= self.ignore_reversals_until;
         // Where the reversal was on the line, as against where it was noticed.
         let reversal = reversed.then(|| self.now.saturating_sub(u64::from(self.reversals.latency())));
-        self.presence.feed(line);
         if (self.read_from..self.read_until).contains(&self.now) {
             self.analyzer.feed(line);
         }
@@ -532,6 +557,7 @@ impl Modem {
                 if self.deadline.is_some_and(|d| now > d) {
                     // 11.2.2.1.3: silence, and tone B again once tone A is
                     // heard, back to waiting for its reversal.
+                    self.recoveries += 1;
                     self.first_reversal_at = None;
                     self.reversed_at = None;
                     self.enter(Stage::CallFirstReversal);
@@ -551,6 +577,7 @@ impl Modem {
                 if self.deadline.is_some_and(|d| now > d) && self.reverse_at.is_none() {
                     // 11.2.2.1.4: no reversal, so wait 40 ms and go on as
                     // though there had been one.
+                    self.recoveries += 1;
                     self.reverse_at = Some(now + self.ms(TURN));
                     self.probe_at = self.reverse_at.map(|r| r + self.ms(AFTER_REVERSAL));
                     self.enter(Stage::CallSendProbe);
@@ -626,6 +653,7 @@ impl Modem {
                 }
                 if self.deadline.is_some_and(|d| now > d) {
                     // 11.2.2.2.2: listen for tone B again and reverse again.
+                    self.recoveries += 1;
                     self.reversed_at = None;
                     self.enter(Stage::AnswerAwaitTone);
                 }
@@ -645,6 +673,7 @@ impl Modem {
                     self.ignore_reversals_until = now + self.ms(TONE_A_FIRST + AFTER_REVERSAL);
                 } else if self.deadline.is_some_and(|d| now > d) {
                     // 11.2.2.2.3: tone A, and back to 11.2.1.2.3.
+                    self.recoveries += 1;
                     self.tx.stop();
                     self.start_tone();
                     self.reversed_at = None;
@@ -788,6 +817,7 @@ mod tests {
         for (who, m) in [("call", &caller), ("answer", &answerer)] {
             let rtd = m.round_trip().expect("no round trip");
             assert!((rtd - 0.020).abs() < 0.002, "{who} measured {rtd}");
+            assert_eq!(m.recoveries(), 0, "{who} timed out rather than hearing a reversal");
         }
     }
 
@@ -802,6 +832,7 @@ mod tests {
         for (who, m) in [("call", &caller), ("answer", &answerer)] {
             let rtd = m.round_trip().expect("no round trip");
             assert!((rtd - 1.5).abs() < 0.002, "{who} measured {rtd}");
+            assert_eq!(m.recoveries(), 0, "{who} timed out rather than hearing a reversal");
         }
     }
 

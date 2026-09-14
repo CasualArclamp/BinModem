@@ -424,6 +424,31 @@ impl ReversalDetector {
         self.count
     }
 
+    /// Forget every direction and every turn measured so far, and start
+    /// comparing afresh from the next sample.
+    ///
+    /// The filter and the envelope carry on, since the tone they hold is still
+    /// the tone. What goes is what was learned from whatever came before it:
+    /// the history the reversal is judged against, and above all the drift.
+    ///
+    /// Which is not a detail. V.34's probing signal L2 has tones 150 Hz either
+    /// side of both 1200 and 2400, and through this detector's skirt they make
+    /// a phasor turning at 150 Hz -- which the half-second drift average takes
+    /// for a carrier 150 Hz off. Tone A follows L2 directly and reverses 50 ms
+    /// later (V.34 11.2.1.2.6), long before that average has let go, and the
+    /// gate refuses the reversal as the turn of an off-frequency tone. Measured
+    /// against a real modem: after half a second of L2 the detector heard no
+    /// reversal until the tone was 800 ms old.
+    pub fn restart(&mut self) {
+        self.history.iter_mut().for_each(|d| *d = None);
+        self.opposed = 0;
+        self.quiet = 0;
+        self.previous = None;
+        self.drift = 0.0;
+        self.null = 0;
+        self.settled = 0;
+    }
+
     /// Whether the tone is there at all.
     ///
     /// Judged on a slow envelope rather than the instant, so that the dip a
@@ -457,6 +482,49 @@ mod tests {
             }
         }
         found
+    }
+
+    #[test]
+    fn a_restart_hears_a_reversal_that_the_signal_before_would_have_hidden() {
+        // Half a second of V.34's L2 -- every probing tone, 150 Hz apart, with
+        // nothing at 2400 -- then tone A, reversing 50 ms in and stopping
+        // 12 ms after, as a real modem sent it.
+        let fs = 16_000.0;
+        let tones = [
+            (150.0, 0.0), (300.0, 180.0), (450.0, 0.0), (600.0, 0.0), (750.0, 0.0),
+            (1050.0, 0.0), (1350.0, 0.0), (1500.0, 0.0), (1650.0, 180.0), (1950.0, 0.0),
+            (2100.0, 0.0), (2250.0, 180.0), (2550.0, 0.0), (2700.0, 180.0), (2850.0, 0.0),
+            (3000.0, 180.0), (3150.0, 180.0), (3300.0, 180.0), (3450.0, 180.0), (3600.0, 0.0),
+            (3750.0, 0.0f64),
+        ];
+        let heard = |restart: bool| {
+            let mut d = ReversalDetector::new(2400.0, 60.0, 0.008, fs);
+            let mut heard = Vec::new();
+            for i in 0..(fs * 1.0) as usize {
+                let t = i as f64 / fs;
+                let x = if t < 0.5 {
+                    tones
+                        .iter()
+                        .map(|&(f, ph)| 0.035 * (std::f64::consts::TAU * f * t + ph.to_radians()).cos())
+                        .sum::<f64>()
+                } else if t < 0.562 {
+                    let sign = if t < 0.55 { 1.0 } else { -1.0 };
+                    0.15 * sign * (std::f64::consts::TAU * 2400.0 * t).cos()
+                } else {
+                    0.0
+                };
+                if restart && t < 0.505 {
+                    d.restart();
+                }
+                if d.feed(x) {
+                    heard.push(t - 0.55);
+                }
+            }
+            heard
+        };
+        let at_the_reversal = |h: &[f64]| h.iter().any(|&late| (0.0..0.010).contains(&late));
+        assert!(!at_the_reversal(&heard(false)), "the fault this is for is not the fault it thinks");
+        assert!(at_the_reversal(&heard(true)), "not heard after a restart: {:?}", heard(true));
     }
 
     #[test]
