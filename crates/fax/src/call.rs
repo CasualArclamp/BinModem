@@ -260,6 +260,9 @@ pub struct Call {
     scan_line_field: u8,
     scan_line_ms: f64,
     resolution: Resolution,
+    /// How the page is coded: chosen by the end that sends it, from what the
+    /// end that receives it said it could read.
+    scheme: t4::Scheme,
 
     /// The page this end is sending, if it has one.
     page: Option<Page>,
@@ -335,7 +338,8 @@ impl Call {
             offer: OUR_MODULATIONS.to_vec(),
             scan_line_field: 0b111,
             scan_line_ms: 0.0,
-            resolution: Resolution::Standard,
+            resolution: page.as_ref().map_or(Resolution::Standard, |p| p.resolution),
+            scheme: t4::Scheme::OneDimensional,
             page,
             fast_out: Vec::new(),
             fast_at: 0,
@@ -673,7 +677,7 @@ impl Call {
                 self.fast_down = 0.0;
             }
             Phase::Receiving => {
-                self.decoder.reset();
+                self.decoder.reset_to(self.scheme);
                 self.fast_seen = false;
                 self.fast_up = 0.0;
                 self.fast_down = 0.0;
@@ -746,6 +750,11 @@ impl Call {
                         Resolution::Fine
                     } else {
                         Resolution::Standard
+                    };
+                    self.scheme = if t30::bit(&message.fif, 16) {
+                        t4::Scheme::TwoDimensional
+                    } else {
+                        t4::Scheme::OneDimensional
                     };
                     self.pause_then(Phase::CheckingTraining);
                 }
@@ -890,6 +899,22 @@ impl Call {
         self.rate = first.bits_per_second;
         self.fallback = ladder;
         self.attempts = 0;
+        // The page's own resolution if the far end can print it, and standard
+        // if not. And the two-dimensional coding whenever the far end reads
+        // it, since on anything with lines in it the page comes out smaller.
+        if let Some(caps) = self.capabilities.as_ref() {
+            let wanted = self.page.as_ref().map_or(Resolution::Standard, |p| p.resolution);
+            self.resolution = if wanted == Resolution::Fine && caps.fine_resolution {
+                Resolution::Fine
+            } else {
+                Resolution::Standard
+            };
+            self.scheme = if caps.two_dimensional {
+                t4::Scheme::TwoDimensional
+            } else {
+                t4::Scheme::OneDimensional
+            };
+        }
         true
     }
 
@@ -916,6 +941,7 @@ impl Call {
             bits_per_second: self.rate,
             fine: self.resolution == Resolution::Fine,
             scan_line_field: self.scan_line_field,
+            two_dimensional: self.scheme == t4::Scheme::TwoDimensional,
         }));
         self.sender.send(&[tsi, dcs]);
     }
@@ -935,7 +961,22 @@ impl Call {
         // The minimum scan line time is not a property of the picture but of
         // the paper at the far end, and it arrived in the DIS.
         let min_bits = (self.scan_line_ms / 1000.0 * f64::from(self.rate)).ceil() as usize;
-        t4::encode_padded(&page.lines, min_bits).to_bits()
+        // A fine page to a machine that only prints standard loses every
+        // other line: 7.7 lines to the millimetre is exactly twice 3.85, so
+        // that is the same page at the resolution it can take.
+        let halved: Vec<Vec<bool>>;
+        let lines = if page.resolution == Resolution::Fine && self.resolution == Resolution::Standard {
+            halved = page.lines.iter().step_by(2).cloned().collect();
+            &halved
+        } else {
+            &page.lines
+        };
+        match self.scheme {
+            t4::Scheme::OneDimensional => t4::encode_padded(lines, min_bits).to_bits(),
+            t4::Scheme::TwoDimensional => {
+                crate::mr::encode(lines, crate::mr::k_for(self.resolution), min_bits).to_bits()
+            }
+        }
     }
 
     fn send_page(&mut self) {
@@ -1336,6 +1377,65 @@ mod tests {
         assert_ne!(call.phase(), Phase::AwaitingCommand, "it waited for ever");
     }
 
+
+    fn fine_page(rows: usize) -> Page {
+        Page {
+            lines: (0..rows)
+                .map(|y| (0..crate::page::WIDTH).map(|x| (x + y) % 50 < 5).collect())
+                .collect(),
+            resolution: Resolution::Fine,
+        }
+    }
+
+    /// The command this end sends, for a page, to a far end that sent `dis`.
+    fn command_for(page: Option<Page>, dis: &[u8]) -> Vec<u8> {
+        let mut call = Call::originate(FS, "1", page);
+        call.capabilities = Some(t30::capabilities(dis));
+        assert!(call.choose_rate());
+        call.enter(Phase::Commanding);
+        let bits: Vec<bool> = std::iter::from_fn(|| call.next_control_bit()).collect();
+        let mut reader = Reader::new();
+        let sent: Vec<Message> = bits.iter().filter_map(|b| reader.feed(*b)).collect();
+        sent.into_iter()
+            .find(|m| m.frame == Frame::Dcs)
+            .expect("no DCS")
+            .fif
+    }
+
+    #[test]
+    fn a_fine_page_is_commanded_as_fine() {
+        // It was not: the end that dialled never took its resolution from the
+        // page, so every page went out saying standard, and a fine page arrived
+        // at twice its height.
+        let dcs = command_for(Some(fine_page(10)), &t30::our_capabilities(&OUR_MODULATIONS));
+        assert!(t30::bit(&dcs, 15), "a fine page was commanded as standard");
+    }
+
+    #[test]
+    fn a_fine_page_to_a_standard_machine_is_sent_standard_and_halved() {
+        let mut fif = t30::our_capabilities(&OUR_MODULATIONS);
+        t30::set_bit(&mut fif, 15, false);
+        let page = fine_page(10);
+        let dcs = command_for(Some(page.clone()), &fif);
+        assert!(!t30::bit(&dcs, 15), "commanded fine to a machine without it");
+
+        let mut call = Call::originate(FS, "1", Some(page));
+        call.capabilities = Some(t30::capabilities(&fif));
+        assert!(call.choose_rate());
+        let mut decoder = t4::Decoder::with_scheme(crate::page::WIDTH, call.scheme);
+        decoder.feed_bits(&call.fast_out_page());
+        assert_eq!(decoder.lines().len(), 5, "ten fine lines are five standard ones");
+    }
+
+    #[test]
+    fn two_dimensional_coding_is_used_exactly_when_the_far_end_reads_it() {
+        let page = fine_page(10);
+        let ours = t30::our_capabilities(&OUR_MODULATIONS);
+        assert!(t30::bit(&command_for(Some(page.clone()), &ours), 16));
+        // The real machine's DIS, which does not offer it.
+        assert!(!t30::bit(&command_for(Some(page), &DIS), 16));
+    }
+
     #[test]
     fn the_calling_tone_is_on_for_half_a_second_in_every_three_and_a_half() {
         let mut call = Call::originate(FS, "1", None);
@@ -1444,7 +1544,7 @@ mod tests {
         assert!(!caps.can_be_polled, "there is nothing here to fetch");
         assert_eq!(caps.modulations, vec![Modulation::V27ter, Modulation::V29]);
         assert!(caps.fine_resolution);
-        assert!(!caps.two_dimensional, "only the one-dimensional code exists");
+        assert!(caps.two_dimensional, "T.4 4.2 is offered as well as 4.1");
         assert!(!caps.error_correction);
         assert_eq!(caps.widths_mm, vec![215]);
         assert_eq!(caps.length, "unlimited");

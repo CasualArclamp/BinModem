@@ -496,8 +496,9 @@ pub fn our_capabilities(offer: &[Modulation]) -> Vec<u8> {
     set_field(&mut fif, 11, 14, rates);
     // Bit 15: 7.7 lines per millimetre as well as 3.85.
     set_bit(&mut fif, 15, true);
-    // Bit 16 stays clear: two-dimensional coding is T.4 4.2 and only the
-    // one-dimensional code is written.
+    // Bit 16: T.4 4.2's two-dimensional coding as well as the
+    // one-dimensional.
+    set_bit(&mut fif, 16, true);
     set_field(&mut fif, 17, 18, 0b00); // 215 mm across, and no wider.
     set_field(&mut fif, 19, 20, 0b01); // Any length: nothing here is paper.
     set_field(&mut fif, 21, 23, 0b111); // No minimum scan line time either.
@@ -531,6 +532,8 @@ pub struct Command {
     pub fine: bool,
     /// Bits 21 to 23, as the receiver asked for them in its DIS.
     pub scan_line_field: u8,
+    /// Bit 16: the page is Modified READ rather than Modified Huffman.
+    pub two_dimensional: bool,
 }
 
 /// A DCS parameter field: one rate, one resolution, one page ahead.
@@ -545,6 +548,7 @@ pub fn command(command: Command) -> Vec<u8> {
         set_field(&mut fif, 11, 14, rate);
     }
     set_bit(&mut fif, 15, command.fine);
+    set_bit(&mut fif, 16, command.two_dimensional);
     set_field(&mut fif, 17, 18, 0b00);
     set_field(&mut fif, 19, 20, 0b01);
     // Whatever the receiver asked for, given back to it: this is the one

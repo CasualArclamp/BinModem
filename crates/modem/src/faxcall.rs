@@ -812,6 +812,24 @@ mod tests {
         assert_eq!(off, 0, "{off} points sent were not points of the constellation");
     }
 
+
+    /// A fine page goes both ways as a fine page, coded two-dimensionally.
+    ///
+    /// Two of these offer each other both of T.4's codings and both
+    /// resolutions, so this is the page as it should arrive: every line, at the
+    /// resolution it was drawn at, in the coding that makes it smallest.
+    #[test]
+    fn a_fine_page_arrives_fine_and_coded_two_dimensionally() {
+        let mut page = a_page(12);
+        page.resolution = Resolution::Fine;
+        let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()));
+        let mut answerer = FaxCall::answer(FS, "61388880000");
+        between(&mut caller, &mut answerer, 40.0);
+        let got = answerer.received().expect("no page arrived");
+        assert_eq!(got.resolution, Resolution::Fine, "it arrived as standard");
+        assert_eq!(got.lines, page.lines, "the page came out different");
+    }
+
     #[test]
     fn the_two_ends_learn_each_others_numbers() {
         let mut caller = FaxCall::originate(FS, "61399990000", Some(a_page(4)));

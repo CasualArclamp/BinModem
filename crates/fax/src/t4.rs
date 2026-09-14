@@ -250,6 +250,12 @@ pub fn runs(line: &[bool]) -> Vec<u32> {
 /// Code one scan line, EOL first.
 pub fn write_line(out: &mut Bits, line: &[bool]) {
     out.push_code(EOL);
+    write_runs(out, line);
+}
+
+/// Code one scan line's runs alone, with no EOL: the data of 4.1.1, which
+/// Modified READ puts after its own EOL and tag bit.
+pub fn write_runs(out: &mut Bits, line: &[bool]) {
     let mut colour = Colour::White;
     for run in runs(line) {
         write_run(out, colour, run);
@@ -306,11 +312,18 @@ const LONGEST: u8 = 13;
 
 /// The fewest zeros in a row that can only be an EOL.
 ///
-/// The end-of-line code is eleven zeros and a one, and no other code word in
-/// any table has eleven leading zeros. That is the whole reason 4.1.2 chose
-/// it: fill may be added in front of it, and a receiver that has lost its
-/// place can find the next line by counting zeros.
+/// The end-of-line code is eleven zeros and a one, and no sequence of other
+/// code words contains eleven zeros. That is the whole reason 4.1.2 chose it:
+/// fill may be added in front of it, and a receiver that has lost its place
+/// can find the next line by counting zeros.
 const EOL_ZEROS: usize = 11;
+
+/// The longest a line is let grow before it is given up on.
+///
+/// A line of 1728 alternating pels codes to about eight thousand bits; this is
+/// several times that. What it guards against is a carrier that stays up with
+/// nothing in it that ever looks like an end of line.
+const LONGEST_LINE: usize = 65_536;
 
 /// What a code word turned out to mean.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -339,31 +352,162 @@ fn table(colour: Colour) -> std::collections::HashMap<(u8, u16), Word> {
     map
 }
 
-/// Modified Huffman going the other way: bits in, scan lines out.
+/// The tables for one colour, built once.
+fn lookup(colour: Colour) -> &'static std::collections::HashMap<(u8, u16), Word> {
+    static WHITE: std::sync::OnceLock<std::collections::HashMap<(u8, u16), Word>> =
+        std::sync::OnceLock::new();
+    static BLACK: std::sync::OnceLock<std::collections::HashMap<(u8, u16), Word>> =
+        std::sync::OnceLock::new();
+    match colour {
+        Colour::White => WHITE.get_or_init(|| table(Colour::White)),
+        Colour::Black => BLACK.get_or_init(|| table(Colour::Black)),
+    }
+}
+
+/// Bits being read, first bit first.
+#[derive(Debug, Clone)]
+pub struct Reader<'a> {
+    bits: &'a [bool],
+    at: usize,
+}
+
+impl<'a> Reader<'a> {
+    pub fn new(bits: &'a [bool]) -> Self {
+        Self { bits, at: 0 }
+    }
+
+    /// How many bits have been read.
+    pub fn position(&self) -> usize {
+        self.at
+    }
+
+    /// Whether every bit has been read.
+    pub fn is_empty(&self) -> bool {
+        self.at >= self.bits.len()
+    }
+
+    /// Whether anything but zeros is left unread.
+    pub fn ones_left(&self) -> bool {
+        self.bits[self.at.min(self.bits.len())..].contains(&true)
+    }
+}
+
+impl Iterator for Reader<'_> {
+    type Item = bool;
+
+    fn next(&mut self) -> Option<bool> {
+        let bit = *self.bits.get(self.at)?;
+        self.at += 1;
+        Some(bit)
+    }
+}
+
+/// What reading a line went wrong on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Spoiled {
+    /// The bits stopped before the line was complete.
+    Short,
+    /// Something that is not a code word of any table in force.
+    NotACode,
+    /// A code that would put a change past the end of the line.
+    PastTheEnd,
+    /// The line was complete with ones still to come before the next EOL.
+    Leftover,
+}
+
+/// Read one run of a colour: any make-up codes, then its terminating code.
 ///
-/// It starts out looking for an end-of-line code and throwing away everything
-/// else, which is not a special case but the ordinary way a page is found.
-/// What arrives before the first line is the tail of a training sequence and
-/// whatever the descrambler made of it, and 4.1.2 puts an EOL in front of the
-/// first line precisely so that a receiver can start there.
+/// The note under Table 3b allows more than one make-up code for runs past
+/// 2560, so they are added up until a terminating code arrives.
+pub fn read_run(reader: &mut Reader<'_>, colour: Colour) -> Result<u32, Spoiled> {
+    let table = lookup(colour);
+    let mut total = 0u32;
+    loop {
+        let mut value: u16 = 0;
+        let mut found = None;
+        for len in 1..=LONGEST {
+            let bit = reader.next().ok_or(Spoiled::Short)?;
+            value = value << 1 | u16::from(bit);
+            if let Some(&word) = table.get(&(len, value)) {
+                found = Some(word);
+                break;
+            }
+        }
+        match found.ok_or(Spoiled::NotACode)? {
+            Word::MakeUp(n) => total += n,
+            Word::Run(n) => return Ok(total + n),
+        }
+    }
+}
+
+/// Read one one-dimensional line of `width` pels (4.1.1).
+///
+/// Stops at the end of the line and leaves whatever follows it unread. A line
+/// whose runs overshoot the width is spoiled rather than trimmed: runs that add
+/// up to more than the paper are runs that were misread.
+pub fn read_runs(reader: &mut Reader<'_>, width: usize) -> Result<Vec<bool>, Spoiled> {
+    let mut line = Vec::with_capacity(width);
+    let mut colour = Colour::White;
+    while line.len() < width {
+        let run = read_run(reader, colour)? as usize;
+        if line.len() + run > width {
+            return Err(Spoiled::PastTheEnd);
+        }
+        line.extend(std::iter::repeat_n(colour == Colour::Black, run));
+        colour = match colour {
+            Colour::White => Colour::Black,
+            Colour::Black => Colour::White,
+        };
+    }
+    Ok(line)
+}
+
+/// Which of T.4's two codings a page is in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Scheme {
+    /// Modified Huffman, 4.1: every line on its own.
+    #[default]
+    OneDimensional,
+    /// Modified READ, 4.2: a tag bit after every EOL saying whether the next
+    /// line is on its own or coded against the one above it.
+    TwoDimensional,
+}
+
+/// T.4 going the other way: bits in, scan lines out.
+///
+/// Line by line rather than code word by code word. Every line ends at an EOL,
+/// which nothing else can look like, so the bits between two of them are one
+/// line and can be read as one -- which is what reading a two-dimensional line
+/// needs, since it depends on the whole of the line above.
+///
+/// It starts out looking for an EOL and throwing away everything else. That is
+/// not a special case but the ordinary way a page is found: what arrives
+/// before the first line is the tail of a training sequence through a
+/// descrambler, and 4.1.2 puts an EOL in front of the first line precisely so
+/// that a receiver can start there.
 #[derive(Debug)]
 pub struct Decoder {
-    white: std::collections::HashMap<(u8, u16), Word>,
-    black: std::collections::HashMap<(u8, u16), Word>,
-    /// Bits not yet decoded, oldest first.
-    bits: std::collections::VecDeque<bool>,
-    colour: Colour,
-    /// Make-up length waiting for the terminating code that completes it.
-    carried: u32,
-    line: Vec<bool>,
+    scheme: Scheme,
+    width: usize,
+    /// The bits since the last EOL, with any run of zeros kept only as long as
+    /// it takes to recognise the next one.
+    segment: Vec<bool>,
+    /// Zeros at the end of what has arrived, counting towards an EOL.
+    zeros: usize,
+    /// Whether everything up to the next EOL is being thrown away.
+    hunting: bool,
+    /// Modified READ: an EOL has arrived and the tag bit after it has not.
+    awaiting_tag: bool,
+    /// Modified READ: whether the line being collected is two-dimensional.
+    two_dimensional: bool,
+    /// The last line read, which a two-dimensional line is coded against, or
+    /// nothing if that line was spoiled.
+    above: Option<Vec<bool>>,
     lines: Vec<Vec<bool>>,
     /// EOLs seen in a row, with no line between them.
     eols: u32,
-    /// Whether everything up to the next EOL is being thrown away.
-    hunting: bool,
     done: bool,
     damaged: usize,
-    width: usize,
 }
 
 impl Default for Decoder {
@@ -378,20 +522,28 @@ impl Decoder {
     }
 
     pub fn with_width(width: usize) -> Self {
+        Self::with_scheme(width, Scheme::OneDimensional)
+    }
+
+    pub fn with_scheme(width: usize, scheme: Scheme) -> Self {
         Self {
-            white: table(Colour::White),
-            black: table(Colour::Black),
-            bits: std::collections::VecDeque::new(),
-            colour: Colour::White,
-            carried: 0,
-            line: Vec::new(),
+            scheme,
+            width,
+            segment: Vec::new(),
+            zeros: 0,
+            hunting: true,
+            awaiting_tag: false,
+            two_dimensional: false,
+            above: None,
             lines: Vec::new(),
             eols: 0,
-            hunting: true,
             done: false,
             damaged: 0,
-            width,
         }
+    }
+
+    pub fn scheme(&self) -> Scheme {
+        self.scheme
     }
 
     /// The lines decoded so far.
@@ -404,7 +556,8 @@ impl Decoder {
         self.done
     }
 
-    /// Lines that did not come out the width they should have.
+    /// Lines that could not be read, or did not come out the width they should
+    /// have.
     ///
     /// What T.30 6.3.2 wants counted: a receiver totals its bad lines and
     /// decides from that whether to accept the page or ask for it again.
@@ -420,18 +573,51 @@ impl Decoder {
         }
     }
 
-    /// Start again for the next page, keeping nothing.
+    /// Start again for the next page, in the same scheme, keeping nothing
+    /// else.
     pub fn reset(&mut self) {
-        let width = self.width;
-        *self = Self::with_width(width);
+        *self = Self::with_scheme(self.width, self.scheme);
+    }
+
+    /// Start again in a different scheme, for a page the far end has said is
+    /// coded differently.
+    pub fn reset_to(&mut self, scheme: Scheme) {
+        *self = Self::with_scheme(self.width, scheme);
     }
 
     pub fn feed(&mut self, bit: bool) {
         if self.done {
             return;
         }
-        self.bits.push_back(bit);
-        while self.step() {}
+        if self.awaiting_tag {
+            // 4.2.2: "EOL + 1: one-dimensional coding of next line. EOL + 0:
+            // two-dimensional coding of next line."
+            self.two_dimensional = !bit;
+            self.awaiting_tag = false;
+            return;
+        }
+        if bit && self.zeros >= EOL_ZEROS {
+            self.end_of_line();
+            return;
+        }
+        self.zeros = if bit { 0 } else { self.zeros + 1 };
+        if self.hunting {
+            // Only the zeros that might yet be the front of an EOL are worth
+            // keeping, and the counter keeps those.
+            return;
+        }
+        // Eleven zeros in a row are fill or an EOL and never data, so a long
+        // run of fill is kept no longer than it takes to notice where it ends.
+        if !bit && self.zeros > EOL_ZEROS {
+            return;
+        }
+        self.segment.push(bit);
+        if self.segment.len() > LONGEST_LINE {
+            self.damaged += 1;
+            self.hunting = true;
+            self.segment.clear();
+            self.above = None;
+        }
     }
 
     pub fn feed_bits(&mut self, bits: &[bool]) {
@@ -440,118 +626,62 @@ impl Decoder {
         }
     }
 
-    /// Take one code word off the front. Returns whether anything was taken.
-    fn step(&mut self) -> bool {
-        if self.done {
-            self.bits.clear();
-            return false;
-        }
-        // An EOL first, always: it outranks every code word, and while hunting
-        // it is the only thing being looked for.
-        let zeros = self.bits.iter().take_while(|b| !**b).count();
-        if zeros >= EOL_ZEROS {
-            if self.bits.len() > zeros {
-                self.bits.drain(..zeros + 1);
-                self.end_of_line();
-                return true;
-            }
-            // Nothing but zeros so far. Fill can be any length, so keep only
-            // as many as it takes to still recognise the EOL when the one
-            // finally arrives.
-            if zeros > EOL_ZEROS {
-                self.bits.drain(..zeros - EOL_ZEROS);
-            }
-            return false;
-        }
-        if self.hunting {
-            // Everything with eleven zeros in front of it went to the branch
-            // above, so what is here either starts with a one inside the
-            // first eleven bits or is all zeros and too short to tell yet.
-            // Waiting on the second is the whole point: dropping a bit at a
-            // time throws away the leading zeros of the very code being
-            // looked for, and the hunt then never ends.
-            if zeros == self.bits.len() {
-                return false;
-            }
-            // No end of line can begin at any of these, so all of them go.
-            self.bits.drain(..zeros + 1);
-            return true;
-        }
-
-        let table = match self.colour {
-            Colour::White => &self.white,
-            Colour::Black => &self.black,
-        };
-        let mut value: u16 = 0;
-        for len in 1..=LONGEST {
-            let Some(&bit) = self.bits.get(usize::from(len) - 1) else {
-                // Not enough bits yet to rule the rest of the table out.
-                return false;
-            };
-            value = value << 1 | u16::from(bit);
-            if let Some(&word) = table.get(&(len, value)) {
-                self.bits.drain(..usize::from(len));
-                self.apply(word);
-                return true;
-            }
-        }
-        // Thirteen bits that are no code word at all. The line is spoiled, and
-        // the answer is to find the next EOL and carry on from there, which
-        // loses one line rather than the rest of the page.
-        self.spoil();
-        true
-    }
-
-    fn apply(&mut self, word: Word) {
-        match word {
-            Word::MakeUp(n) => self.carried += n,
-            Word::Run(n) => {
-                let total = self.carried + n;
-                self.carried = 0;
-                let ink = self.colour == Colour::Black;
-                // A line longer than the paper is a decoding error rather than
-                // a wider page: stop growing it, and let the width check at
-                // the end of the line notice.
-                let room = (self.width * 2).saturating_sub(self.line.len());
-                let count = (total as usize).min(room);
-                self.line.extend(std::iter::repeat_n(ink, count));
-                self.colour = match self.colour {
-                    Colour::White => Colour::Black,
-                    Colour::Black => Colour::White,
-                };
-            }
-        }
-    }
-
-    /// Give up on the line in hand and look for the next EOL.
-    fn spoil(&mut self) {
-        self.damaged += 1;
-        self.hunting = true;
-        self.line.clear();
-        self.carried = 0;
-        self.colour = Colour::White;
-        self.bits.pop_front();
-    }
-
+    /// An EOL has arrived: read the line in front of it.
     fn end_of_line(&mut self) {
-        if self.line.is_empty() {
-            self.eols += 1;
-        } else {
-            self.eols = 1;
-            let mut line = std::mem::take(&mut self.line);
-            if line.len() != self.width {
-                self.damaged += 1;
-            }
-            line.resize(self.width, false);
-            self.lines.push(line);
+        let segment = std::mem::take(&mut self.segment);
+        self.zeros = 0;
+        if self.scheme == Scheme::TwoDimensional {
+            self.awaiting_tag = true;
         }
-        self.colour = Colour::White;
-        self.carried = 0;
-        self.line.clear();
-        self.hunting = false;
-        if self.eols >= RTC_EOLS {
-            self.done = true;
-            self.bits.clear();
+        if std::mem::replace(&mut self.hunting, false) {
+            // The first EOL found: whatever was in front of it was not a page.
+            self.two_dimensional = false;
+            return;
+        }
+        // A line of nothing but zeros is no line at all -- every run and every
+        // mode has a one in it -- so this is one EOL following another.
+        if !segment.contains(&true) {
+            self.eols += 1;
+            if self.eols >= RTC_EOLS {
+                self.done = true;
+            }
+            return;
+        }
+        self.eols = 1;
+        let mut reader = Reader::new(&segment);
+        let read = if self.two_dimensional {
+            match self.above.as_deref() {
+                Some(above) => crate::mr::read_line(&mut reader, above),
+                // The line this one was coded against was lost, so this one is
+                // too, and so is every two-dimensional line until the next
+                // one-dimensional one. That is exactly what K is there to cap.
+                None => Err(Spoiled::NotACode),
+            }
+        } else {
+            read_runs(&mut reader, self.width)
+        }
+        // A line that came out the right width with ones still unread was
+        // misread somewhere, however plausible it looks: 4.1.3 and 4.2.3 allow
+        // only zeros between the end of a line's data and its EOL. Without
+        // this, a burst of errors in a two-dimensional line -- whose code words
+        // are so short that almost any bits are some of them -- reads as a
+        // perfectly good line of the wrong picture.
+        .and_then(|line| {
+            if reader.ones_left() {
+                Err(Spoiled::Leftover)
+            } else {
+                Ok(line)
+            }
+        });
+        match read {
+            Ok(line) => {
+                self.above = Some(line.clone());
+                self.lines.push(line);
+            }
+            Err(_) => {
+                self.damaged += 1;
+                self.above = None;
+            }
         }
     }
 }
@@ -679,7 +809,7 @@ mod tests {
         for _ in 0..100_000 {
             decoder.feed(false);
         }
-        assert!(decoder.bits.len() <= EOL_ZEROS + 1);
+        assert!(decoder.segment.len() <= EOL_ZEROS + 1);
         assert!(!decoder.is_done());
     }
 

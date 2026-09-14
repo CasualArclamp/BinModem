@@ -8,6 +8,7 @@
 
 pub mod call;
 pub mod frames;
+pub mod mr;
 pub mod page;
 pub mod t30;
 pub mod t4;
