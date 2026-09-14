@@ -102,8 +102,17 @@ a softphone, place the call there first and press it once the far end has
 answered; the calling tone goes out, the far end says what it is, and the page
 follows. **Wait for a fax** types `AT+FCLASS=1` and `ATA` instead: this end
 answers with 2100 Hz, says what it can receive, and keeps whatever page
-arrives. The window draws it, and **Save as PNG** writes it out with each scan
-line drawn tall enough to make the pels square, which they are not.
+arrives.
+
+A page arriving is drawn as it comes in, a row at a time from the top the way
+slow-scan television is, under **page arriving**. The view follows the newest
+line, with a green line marking it; scrolling up to look at the top stops it
+following until it is scrolled back down. With error correction the page draws
+a block's frames at a time, and waits at a damaged frame until it has been sent
+again. **Save as PNG** writes out the page, or as much of it as has arrived,
+with each scan line drawn tall enough to make the pels square, which they are
+not. **page to send** and **page arriving** both fold away, for a window that
+is taller than the screen.
 
 The **offer** boxes are what this end will use. V.29 carries a page at 9600 and
 7200; V.27 ter at 4800 and 2400, and every fax machine has it. A call starts at

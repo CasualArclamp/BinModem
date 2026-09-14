@@ -10,6 +10,8 @@ use egui::{Color32, RichText};
 use fax::page::{Grey, Halftone, Page, Resolution};
 use fax::t30;
 
+use crate::live::Arriving;
+
 /// What the window is holding.
 ///
 /// Not `Debug`: a texture handle is not, and a page is a megabyte of booleans
@@ -61,9 +63,10 @@ pub struct Fax {
     /// The number to dial, and what this end calls itself.
     pub number: String,
     pub identification: String,
-    /// A page that arrived, and a small copy of it to draw.
+    /// A page that arrived.
     incoming: Option<Page>,
-    incoming_preview: Option<egui::TextureHandle>,
+    /// The page arriving, or the last one that did, drawn as it came in.
+    scan: Option<Scan>,
     /// What was said about saving the last page.
     pub saved: Option<String>,
 }
@@ -79,6 +82,160 @@ pub enum Start {
 
 /// The preview is drawn at a size a window can hold, not at 1728 across.
 const PREVIEW_WIDTH: usize = 288;
+
+/// Pels of the page to one texel of the picture of it arriving, across it.
+const SCAN_ACROSS: usize = 3;
+
+/// Texels across that picture: a third of 1728, which is twice the preview of
+/// the page going out -- this one is for watching, and that one for checking.
+const SCAN_WIDTH: usize = fax::page::WIDTH / SCAN_ACROSS;
+
+/// How tall the picture of a page arriving gets before it scrolls, in points.
+const SCAN_HEIGHT: f32 = 440.0;
+
+/// What the picture's texture holds below the last row drawn.
+const UNSCANNED: Color32 = Color32::from_rgb(24, 28, 36);
+
+/// How long after the last line the page still counts as arriving, in seconds.
+///
+/// Longer than any gap inside a page: the longest is error correction's
+/// turnaround between one block and the next, a partial page signal and its
+/// answer and a training sequence, which is two or three seconds at most.
+const STILL_ARRIVING: f64 = 4.0;
+
+/// A page arriving, drawn as it comes in.
+///
+/// The way slow-scan television draws: a row at a time from the top, so what
+/// is on the paper can be seen long before the paper is finished. A row is one
+/// texel for every three pels across and as many lines down as make the texel
+/// square on the paper, worked out once every line under it is in and never
+/// again -- so each new row costs the texture a strip of 576 texels rather
+/// than the whole page every time a line comes off the decoder.
+struct Scan {
+    /// Which page this is, as the line numbered it.
+    page: u64,
+    resolution: Resolution,
+    lines: Vec<Vec<bool>>,
+    /// The rows finished so far, SCAN_WIDTH texels to a row.
+    pixels: Vec<Color32>,
+    rows: usize,
+    /// When the last line came in, by the window's clock.
+    last_line: f64,
+    /// The rows the texture has room for, and how many it has been given.
+    texture: Option<egui::TextureHandle>,
+    capacity: usize,
+    uploaded: usize,
+}
+
+impl Scan {
+    fn new(page: u64, resolution: Resolution) -> Self {
+        Self {
+            page,
+            resolution,
+            lines: Vec::new(),
+            pixels: Vec::new(),
+            rows: 0,
+            last_line: f64::NEG_INFINITY,
+            texture: None,
+            capacity: 0,
+            uploaded: 0,
+        }
+    }
+
+    /// Lines of the page under one row of the picture.
+    ///
+    /// Three pels across is 3/8.04 mm of paper, and that much paper down the
+    /// page is 1.44 lines at standard and 2.87 at fine. Drawn that way a page
+    /// comes out the shape of the sheet at either resolution, rather than a
+    /// standard one half the height of the same page sent fine.
+    fn lines_per_row(&self) -> f64 {
+        SCAN_ACROSS as f64 * self.resolution.lines_per_mm() / fax::page::PELS_PER_MM
+    }
+
+    /// The lines under row `row`: at least one, since a row covers more than
+    /// a line at both resolutions.
+    fn span(&self, row: usize) -> std::ops::Range<usize> {
+        let k = self.lines_per_row();
+        (row as f64 * k).round() as usize..((row + 1) as f64 * k).round() as usize
+    }
+
+    /// Lines starting at line `from`, and every row they finish.
+    ///
+    /// Lines already here are skipped, which is what a batch that overlaps the
+    /// page it continues needs. A batch that starts past the end leaves a gap
+    /// that nothing can fill, and is left out.
+    fn extend(&mut self, from: usize, lines: Vec<Vec<bool>>) {
+        let have = self.lines.len();
+        if from > have {
+            return;
+        }
+        self.lines.extend(lines.into_iter().skip(have - from));
+        while self.span(self.rows).end <= self.lines.len() {
+            self.finish_row();
+        }
+    }
+
+    /// Average the pels under the next row into it.
+    fn finish_row(&mut self) {
+        let span = self.span(self.rows);
+        let under = &self.lines[span];
+        for tx in 0..SCAN_WIDTH {
+            let mut ink = 0;
+            for line in under {
+                for x in tx * SCAN_ACROSS..(tx + 1) * SCAN_ACROSS {
+                    ink += usize::from(line.get(x).is_some_and(|pel| *pel));
+                }
+            }
+            let v = (255 - ink * 255 / (under.len() * SCAN_ACROSS)) as u8;
+            self.pixels.push(Color32::from_rgb(v, v, v));
+        }
+        self.rows += 1;
+    }
+
+    /// Rows that can be drawn: all of them, unless the page has run longer
+    /// than the largest texture the graphics card takes.
+    fn shown(&self) -> usize {
+        self.rows.min(self.capacity)
+    }
+
+    /// The texture, given whatever rows have been finished since last time.
+    ///
+    /// Made with room for a whole sheet, so that an ordinary page only ever
+    /// adds strips to it, and made again half as big again if a page runs
+    /// longer -- T.30 allows unlimited length.
+    fn texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+        if self.rows == 0 {
+            return None;
+        }
+        let largest = ctx.input(|i| i.max_texture_side);
+        let outgrown = self.rows > self.capacity && self.capacity < largest;
+        if self.texture.is_none() || outgrown {
+            let sheet = (self.resolution.lines() as f64 / self.lines_per_row()).ceil() as usize;
+            self.capacity = sheet.max(self.rows + self.rows / 2).min(largest);
+            let upto = self.shown();
+            let mut pixels = self.pixels[..upto * SCAN_WIDTH].to_vec();
+            pixels.resize(SCAN_WIDTH * self.capacity, UNSCANNED);
+            self.texture = Some(ctx.load_texture(
+                "fax-arriving",
+                egui::ColorImage::new([SCAN_WIDTH, self.capacity], pixels),
+                egui::TextureOptions::LINEAR,
+            ));
+            self.uploaded = upto;
+        }
+        let upto = self.shown();
+        if self.uploaded < upto
+            && let Some(texture) = self.texture.as_mut()
+        {
+            let strip = egui::ColorImage::new(
+                [SCAN_WIDTH, upto - self.uploaded],
+                self.pixels[self.uploaded * SCAN_WIDTH..upto * SCAN_WIDTH].to_vec(),
+            );
+            texture.set_partial([0, self.uploaded], strip, egui::TextureOptions::LINEAR);
+            self.uploaded = upto;
+        }
+        self.texture.clone()
+    }
+}
 
 impl Fax {
     pub fn new() -> Self {
@@ -222,10 +379,48 @@ impl Fax {
     }
 
     /// A page has arrived.
+    ///
+    /// Usually it has been drawn already, line by line on the way in. If the
+    /// window did not get every line of it -- or got the page before the last
+    /// few, which the two threads are free to do -- the picture is made again
+    /// from the page itself.
     pub fn arrived(&mut self, page: Page) {
+        let drawn = self.scan.as_ref().is_some_and(|scan| {
+            scan.lines.len() == page.lines.len() && scan.resolution == page.resolution
+        });
+        if !drawn {
+            // Keep the number of the page being drawn, so the lines of it
+            // still on their way are known for what they are.
+            let number = self.scan.as_ref().map_or(u64::MAX, |scan| scan.page);
+            let mut scan = Scan::new(number, page.resolution);
+            scan.extend(0, page.lines.clone());
+            self.scan = Some(scan);
+        }
         self.incoming = Some(page);
-        self.incoming_preview = None;
         self.saved = None;
+    }
+
+    /// More lines of a page arriving. True if they start a page not seen
+    /// before.
+    pub fn arriving(&mut self, arriving: Arriving, now: f64) -> bool {
+        // A new number starting at the top is a new page. A new number part
+        // way down is the page this window already has: it made the picture
+        // from the finished page before it was told which number that was.
+        let fresh = self
+            .scan
+            .as_ref()
+            .is_none_or(|scan| scan.page != arriving.page && arriving.from == 0);
+        if fresh {
+            self.scan = Some(Scan::new(arriving.page, arriving.resolution));
+            self.incoming = None;
+            self.saved = None;
+        }
+        if let Some(scan) = self.scan.as_mut() {
+            scan.page = arriving.page;
+            scan.extend(arriving.from, arriving.lines);
+            scan.last_line = now;
+        }
+        fresh
     }
 
     /// Write a received page out as a picture.
@@ -235,31 +430,34 @@ impl Fax {
     /// across and 3.85 or 7.7 lines per millimetre down it. Saved at the pel
     /// grid it came in on, a standard-resolution page is half the height it
     /// should be and everything on it looks squashed.
+    ///
+    /// A page still arriving saves as far as it has got, which is also what
+    /// is left of a call that ended part way down the page.
     pub fn save(&mut self, path: &std::path::Path) {
-        let Some(page) = self.incoming.as_ref() else { return };
-        let tall = (fax::page::PELS_PER_MM / page.resolution.lines_per_mm())
+        let (lines, resolution) = match (self.incoming.as_ref(), self.scan.as_ref()) {
+            (Some(page), _) => (&page.lines, page.resolution),
+            (None, Some(scan)) if !scan.lines.is_empty() => (&scan.lines, scan.resolution),
+            _ => return,
+        };
+        let tall = (fax::page::PELS_PER_MM / resolution.lines_per_mm())
             .round()
             .max(1.0) as usize;
         let width = fax::page::WIDTH;
-        let height = page.lines.len() * tall;
+        let height = lines.len() * tall;
         let mut pixels = Vec::with_capacity(width * height);
-        for line in &page.lines {
+        for line in lines {
             for _ in 0..tall {
                 pixels.extend(line.iter().map(|ink| if *ink { 0u8 } else { 255u8 }));
             }
         }
-        let image: image::GrayImage =
-            match image::ImageBuffer::from_raw(width as u32, height as u32, pixels) {
-                Some(image) => image,
-                None => {
-                    self.saved = Some("the page did not come out rectangular".to_owned());
-                    return;
-                }
-            };
-        self.saved = Some(match image.save(path) {
-            Ok(()) => format!("saved to {}", path.display()),
-            Err(e) => format!("{e}"),
-        });
+        let said = match image::GrayImage::from_raw(width as u32, height as u32, pixels) {
+            None => "the page did not come out rectangular".to_owned(),
+            Some(image) => match image.save(path) {
+                Ok(()) => format!("saved to {}", path.display()),
+                Err(e) => format!("{e}"),
+            },
+        };
+        self.saved = Some(said);
     }
 
     /// Draw the window. Returns what the user asked the modem to do.
@@ -344,76 +542,89 @@ impl Fax {
 
                 ui.separator();
                 let texture = self.texture(ui.ctx());
-                ui.horizontal_top(|ui| {
-                    if let Some(texture) = texture {
-                        let size = texture.size_vec2();
-                        let height = (size.y * 260.0 / size.x).min(340.0);
-                        ui.add(
-                            egui::Image::new(&texture)
-                                .fit_to_exact_size(egui::vec2(260.0, height)),
-                        );
-                    } else {
-                        ui.label(
-                            RichText::new("Nothing to send yet.")
-                                .small()
-                                .color(dim),
-                        );
-                    }
-                    ui.vertical(|ui| {
-                        if let Some(page) = self.page.as_ref() {
-                            let bits = self.coded_bits;
-                            let rows = [
-                                (
-                                    "picture",
-                                    format!(
-                                        "{} by {}",
-                                        self.source_size.0, self.source_size.1
-                                    ),
-                                ),
-                                (
-                                    "page",
-                                    format!("{} by {} pels", page.width(), page.height()),
-                                ),
-                                ("ink", format!("{:.1}% of the paper", page.coverage() * 100.0)),
-                                ("coded", format!("{} bits, MH", bits)),
-                            ];
-                            egui::Grid::new("fax-page")
-                                .num_columns(2)
-                                .spacing([10.0, 4.0])
-                                .show(ui, |ui| {
-                                    for (k, v) in rows {
-                                        ui.label(RichText::new(k).monospace().color(dim));
-                                        ui.label(
-                                            RichText::new(v).monospace().color(bright),
-                                        );
-                                        ui.end_row();
-                                    }
-                                    // What it costs at each rate this end is
-                                    // willing to use, which is the number
-                                    // anybody actually wants from this window.
-                                    for m in self.ours() {
-                                        for rate in m.rates() {
-                                            ui.label(
-                                                RichText::new(format!("at {rate}"))
-                                                    .monospace()
-                                                    .color(dim),
-                                            );
-                                            ui.label(
-                                                RichText::new(format!(
-                                                    "{:.0} s  {}",
-                                                    bits as f64 / f64::from(*rate),
-                                                    m.name()
-                                                ))
-                                                .monospace()
-                                                .color(bright),
-                                            );
-                                            ui.end_row();
-                                        }
-                                    }
-                                });
-                        }
+                let heading = match self.page.as_ref() {
+                    Some(page) => format!(
+                        "page to send: {} lines, {}",
+                        page.height(),
+                        page.resolution.name()
+                    ),
+                    None => "page to send".to_owned(),
+                };
+                egui::CollapsingHeader::new(RichText::new(heading).color(dim))
+                    .id_salt("fax-send")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.horizontal_top(|ui| {
+                            if let Some(texture) = texture {
+                                let size = texture.size_vec2();
+                                let height = (size.y * 260.0 / size.x).min(340.0);
+                                ui.add(
+                                    egui::Image::new(&texture)
+                                        .fit_to_exact_size(egui::vec2(260.0, height)),
+                                );
+                            } else {
+                                ui.label(
+                                    RichText::new("Nothing to send yet.")
+                                        .small()
+                                        .color(dim),
+                                );
+                            }
+                            ui.vertical(|ui| {
+                                if let Some(page) = self.page.as_ref() {
+                                    let bits = self.coded_bits;
+                                    let rows = [
+                                        (
+                                            "picture",
+                                            format!(
+                                                "{} by {}",
+                                                self.source_size.0, self.source_size.1
+                                            ),
+                                        ),
+                                        (
+                                            "page",
+                                            format!("{} by {} pels", page.width(), page.height()),
+                                        ),
+                                        ("ink", format!("{:.1}% of the paper", page.coverage() * 100.0)),
+                                        ("coded", format!("{} bits, MH", bits)),
+                                    ];
+                                    egui::Grid::new("fax-page")
+                                        .num_columns(2)
+                                        .spacing([10.0, 4.0])
+                                        .show(ui, |ui| {
+                                            for (k, v) in rows {
+                                                ui.label(RichText::new(k).monospace().color(dim));
+                                                ui.label(
+                                                    RichText::new(v).monospace().color(bright),
+                                                );
+                                                ui.end_row();
+                                            }
+                                            // What it costs at each rate this end is
+                                            // willing to use, which is the number
+                                            // anybody actually wants from this window.
+                                            for m in self.ours() {
+                                                for rate in m.rates() {
+                                                    ui.label(
+                                                        RichText::new(format!("at {rate}"))
+                                                            .monospace()
+                                                            .color(dim),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(format!(
+                                                            "{:.0} s  {}",
+                                                            bits as f64 / f64::from(*rate),
+                                                            m.name()
+                                                        ))
+                                                        .monospace()
+                                                        .color(bright),
+                                                    );
+                                                    ui.end_row();
+                                                }
+                                            }
+                                        });
+                                }
+                            });
+                        });
                     });
-                });
 
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -460,7 +671,7 @@ impl Fax {
                 });
                 self.call_progress(ui, on_hook, dim, bright);
 
-                self.incoming_page(ui, dim, bright);
+                self.receive_row(ui, dim, bright);
 
                 ui.separator();
                 ui.label(RichText::new("the machine at the far end").color(dim));
@@ -578,58 +789,113 @@ impl Fax {
         }
     }
 
-    /// The page that arrived, and what to do with it.
-    fn incoming_page(&mut self, ui: &mut egui::Ui, dim: Color32, bright: Color32) {
-        let Some(page) = self.incoming.as_ref() else { return };
-        let lines = page.lines.len();
-        let coverage = page.coverage();
-        let resolution = page.resolution.name();
-        if self.incoming_preview.is_none() {
-            let image = Self::thumbnail(page);
-            self.incoming_preview = Some(ui.ctx().load_texture(
-                "fax-incoming",
-                image,
-                egui::TextureOptions::LINEAR,
-            ));
-        }
+    /// The page arriving, drawn as it comes, or the page that last arrived.
+    fn receive_row(&mut self, ui: &mut egui::Ui, dim: Color32, bright: Color32) {
         ui.separator();
-        ui.label(RichText::new("the page that arrived").color(dim));
-        ui.horizontal_top(|ui| {
-            if let Some(texture) = self.incoming_preview.clone() {
-                let size = texture.size_vec2();
-                let height = (size.y * 200.0 / size.x).min(300.0);
-                ui.add(
-                    egui::Image::new(&texture)
-                        .fit_to_exact_size(egui::vec2(200.0, height)),
-                );
+        let now = ui.input(|i| i.time);
+        let arriving = self
+            .scan
+            .as_ref()
+            .is_some_and(|scan| self.incoming.is_none() && now - scan.last_line < STILL_ARRIVING);
+        let heading = match (self.scan.as_ref(), self.incoming.is_some(), arriving) {
+            (None, _, _) => "page received".to_owned(),
+            (Some(scan), _, true) => format!("page arriving: {} lines", scan.lines.len()),
+            (Some(scan), true, false) => format!("page received: {} lines", scan.lines.len()),
+            // A call that ended part way down a page, or one whose page has
+            // stopped and not yet been handed over.
+            (Some(scan), false, false) => {
+                format!("page, as far as it came: {} lines", scan.lines.len())
             }
-            ui.vertical(|ui| {
-                ui.label(
-                    RichText::new(format!("{lines} lines, {resolution}"))
-                        .monospace()
-                        .color(bright),
-                );
-                ui.label(
-                    RichText::new(format!(
-                        "{:.1}% of the paper is ink",
-                        coverage * 100.0
-                    ))
-                    .monospace()
-                    .color(dim),
-                );
-                if ui.button("Save as PNG").clicked()
-                    && let Some(chosen) = rfd::FileDialog::new()
-                        .add_filter("pictures", &["png"])
-                        .set_file_name("fax.png")
-                        .save_file()
-                {
-                    self.save(&chosen);
+        };
+        let mut save = false;
+        egui::CollapsingHeader::new(RichText::new(heading).color(dim))
+            .id_salt("fax-receive")
+            .default_open(true)
+            .show(ui, |ui| {
+                let Some(scan) = self.scan.as_mut() else {
+                    ui.label(
+                        RichText::new(
+                            "Nothing yet. Press Wait for a fax, and a page \
+                             that arrives is drawn here a line at a time as it \
+                             comes in.",
+                        )
+                        .small()
+                        .color(dim),
+                    );
+                    return;
+                };
+                if let Some(texture) = scan.texture(ui.ctx()) {
+                    let shown = scan.shown();
+                    let bottom = shown as f32 / scan.capacity as f32;
+                    egui::ScrollArea::vertical()
+                        .id_salt("fax-receive-scroll")
+                        .max_height(SCAN_HEIGHT)
+                        // Following the newest line while the view is at the
+                        // bottom, and staying put once scrolled up to look.
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            let drawn = ui.add(
+                                egui::Image::new(&texture)
+                                    .uv(egui::Rect::from_min_max(
+                                        egui::pos2(0.0, 0.0),
+                                        egui::pos2(1.0, bottom),
+                                    ))
+                                    .fit_to_exact_size(egui::vec2(
+                                        SCAN_WIDTH as f32,
+                                        shown as f32,
+                                    )),
+                            );
+                            if arriving {
+                                // Where the page has got to.
+                                ui.painter().hline(
+                                    drawn.rect.x_range(),
+                                    drawn.rect.bottom() - 1.0,
+                                    egui::Stroke::new(2.0, Color32::from_rgb(90, 220, 130)),
+                                );
+                            }
+                        });
                 }
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(scan.resolution.name())
+                            .monospace()
+                            .color(bright),
+                    );
+                    if let Some(page) = self.incoming.as_ref() {
+                        ui.label(
+                            RichText::new(format!(
+                                "{:.1}% of the paper is ink",
+                                page.coverage() * 100.0
+                            ))
+                            .monospace()
+                            .color(dim),
+                        );
+                    }
+                    save = ui
+                        .button("Save as PNG")
+                        .on_hover_text(
+                            "The page as far as it has got, if it is still \
+                             arriving or the call ended part way down it",
+                        )
+                        .clicked();
+                });
                 if let Some(saved) = &self.saved {
                     ui.label(RichText::new(saved).small().color(dim));
                 }
             });
-        });
+        if arriving {
+            // The green line goes when the page stops, and nothing else may
+            // be about to ask for a frame when it does.
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        }
+        if save
+            && let Some(chosen) = rfd::FileDialog::new()
+                .add_filter("pictures", &["png"])
+                .set_file_name("fax.png")
+                .save_file()
+        {
+            self.save(&chosen);
+        }
     }
 
     /// What to type at the modem to start one.
@@ -654,6 +920,154 @@ mod tests {
                 .collect(),
             resolution: Resolution::Standard,
         }
+    }
+
+    fn lines_of(count: usize, ink: bool) -> Vec<Vec<bool>> {
+        vec![vec![ink; fax::page::WIDTH]; count]
+    }
+
+    #[test]
+    fn a_page_arriving_is_drawn_the_shape_of_the_sheet() {
+        // A whole A4 sheet at either resolution is the same picture, 297 mm
+        // down and 215 across -- not a standard page half the height of the
+        // same page sent fine.
+        for resolution in [Resolution::Standard, Resolution::Fine] {
+            let mut scan = Scan::new(0, resolution);
+            scan.extend(0, lines_of(resolution.lines(), false));
+            let tall = scan.rows as f64 / SCAN_WIDTH as f64;
+            assert!(
+                (tall - 297.0 / 215.0).abs() < 0.01,
+                "{resolution:?}: {} rows for {SCAN_WIDTH} across",
+                scan.rows
+            );
+            assert_eq!(scan.pixels.len(), scan.rows * SCAN_WIDTH);
+        }
+    }
+
+    #[test]
+    fn a_row_is_drawn_once_its_lines_are_in_and_never_again() {
+        // Which is what lets the texture take a strip at a time: a row that
+        // could still change would have to be sent again.
+        for resolution in [Resolution::Standard, Resolution::Fine] {
+            let page = page_of(300);
+            let mut scan = Scan::new(0, resolution);
+            let mut before: Vec<Color32> = Vec::new();
+            for (i, line) in page.lines.iter().enumerate() {
+                scan.extend(i, vec![line.clone()]);
+                assert!(scan.span(scan.rows).end > scan.lines.len(), "a finished row was left");
+                assert_eq!(&scan.pixels[..before.len()], &before[..], "a finished row changed");
+                before.clone_from(&scan.pixels);
+            }
+            let mut whole = Scan::new(0, resolution);
+            whole.extend(0, page.lines.clone());
+            assert_eq!(scan.pixels, whole.pixels, "a line at a time is not the same picture");
+        }
+    }
+
+    #[test]
+    fn ink_draws_dark_and_paper_light() {
+        let mut scan = Scan::new(0, Resolution::Standard);
+        scan.extend(0, lines_of(20, true));
+        scan.extend(20, lines_of(20, false));
+        assert_eq!(scan.pixels.first(), Some(&Color32::from_rgb(0, 0, 0)));
+        assert_eq!(scan.pixels.last(), Some(&Color32::from_rgb(255, 255, 255)));
+    }
+
+    #[test]
+    fn lines_that_come_twice_are_drawn_once_and_lines_past_a_gap_not_at_all() {
+        let mut scan = Scan::new(0, Resolution::Standard);
+        scan.extend(0, lines_of(10, false));
+        scan.extend(5, lines_of(10, false));
+        assert_eq!(scan.lines.len(), 15);
+        scan.extend(20, lines_of(5, false));
+        assert_eq!(scan.lines.len(), 15, "lines after a gap went in");
+    }
+
+    #[test]
+    fn a_page_handed_over_before_its_last_lines_is_not_drawn_twice() {
+        // The line thread hands over lines and then the page, and the window
+        // takes them in whatever order it happens to look.
+        let page = page_of(40);
+        let batch = |from: usize, to: usize| Arriving {
+            page: 3,
+            resolution: Resolution::Standard,
+            from,
+            lines: page.lines[from..to].to_vec(),
+        };
+        let mut fax = Fax::new();
+        assert!(fax.arriving(batch(0, 30), 1.0), "the top of a page is a new page");
+        fax.arrived(page.clone());
+        assert!(!fax.arriving(batch(30, 40), 1.1), "its own last lines are not");
+        assert_eq!(fax.scan.as_ref().map(|s| &s.lines), Some(&page.lines));
+        assert!(fax.incoming.is_some(), "the page that arrived was forgotten");
+
+        // A page handed over whole before any of its lines were.
+        let mut fax = Fax::new();
+        fax.arrived(page.clone());
+        assert!(!fax.arriving(batch(35, 40), 2.0));
+        assert_eq!(fax.scan.as_ref().map(|s| &s.lines), Some(&page.lines));
+
+        // And the next page is new, and the last one goes.
+        let next = Arriving {
+            page: 4,
+            resolution: Resolution::Fine,
+            from: 0,
+            lines: page.lines[..5].to_vec(),
+        };
+        assert!(fax.arriving(next, 3.0));
+        assert!(fax.incoming.is_none(), "the last page is still there");
+        assert_eq!(fax.scan.as_ref().map(|s| s.lines.len()), Some(5));
+    }
+
+    #[test]
+    fn a_page_still_arriving_saves_as_far_as_it_has_got() {
+        let dir = std::env::temp_dir().join("binmodem-faxwin-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let mut fax = Fax::new();
+        fax.arriving(
+            Arriving {
+                page: 0,
+                resolution: Resolution::Standard,
+                from: 0,
+                lines: page_of(25).lines,
+            },
+            0.0,
+        );
+        let path = dir.join("partial.png");
+        fax.save(&path);
+        let saved = fax.saved.clone().unwrap_or_default();
+        assert!(saved.starts_with("saved to"), "{saved}");
+        let image = image::open(&path).expect("it did not write a picture");
+        assert_eq!(image.height(), 50, "25 standard lines, two pixels each");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_texture_has_room_for_a_sheet_and_grows_for_a_longer_page() {
+        let ctx = egui::Context::default();
+        let largest = ctx.input(|i| i.max_texture_side);
+        let mut scan = Scan::new(0, Resolution::Standard);
+        assert!(scan.texture(&ctx).is_none(), "a texture for nothing");
+        scan.extend(0, lines_of(100, false));
+        let texture = scan.texture(&ctx).expect("no texture");
+        assert_eq!(texture.size()[0], SCAN_WIDTH);
+        assert!(texture.size()[1] >= 795, "{} rows is not a sheet", texture.size()[1]);
+        assert_eq!(scan.uploaded, scan.rows);
+
+        // Half as long again as a sheet.
+        scan.extend(100, lines_of(1700, false));
+        let texture = scan.texture(&ctx).expect("no texture");
+        assert!(texture.size()[1] >= scan.rows, "the page ran off the texture");
+        assert_eq!(scan.uploaded, scan.rows);
+
+        // And longer than the card takes: the texture stops at its largest
+        // and the picture at the texture.
+        let enough = (largest as f64 * scan.lines_per_row()) as usize + 10;
+        scan.extend(1800, lines_of(enough, false));
+        let texture = scan.texture(&ctx).expect("no texture");
+        assert_eq!(texture.size()[1], largest);
+        assert_eq!(scan.shown(), largest);
+        assert_eq!(scan.uploaded, largest);
     }
 
     #[test]

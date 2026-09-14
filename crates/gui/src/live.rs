@@ -220,6 +220,24 @@ pub struct Session {
     fax_page: Mutex<Option<fax::page::Page>>,
     /// A page that arrived, waiting for the window to take it.
     fax_received: Mutex<Option<fax::page::Page>>,
+    /// Lines of a page that is still arriving, waiting for the window.
+    fax_arriving: Mutex<Option<Arriving>>,
+}
+
+/// Lines of a page on their way from the line to the window.
+///
+/// Only the new ones cross, a batch at a time. A page is a megabyte or two of
+/// booleans by the end, and handing the whole of it over every time another
+/// line came off the decoder would copy it hundreds of times over.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Arriving {
+    /// Which page these lines belong to. A different number is a different
+    /// page, and whatever the window had drawn of the last one goes.
+    pub page: u64,
+    pub resolution: fax::page::Resolution,
+    /// Where in the page the first of `lines` goes.
+    pub from: usize,
+    pub lines: Vec<Vec<bool>>,
 }
 
 impl Default for Session {
@@ -238,6 +256,7 @@ impl Default for Session {
             fax_error_correction: AtomicBool::new(true),
             fax_page: Mutex::default(),
             fax_received: Mutex::default(),
+            fax_arriving: Mutex::default(),
             recording: AtomicBool::new(false),
         }
     }
@@ -311,6 +330,27 @@ impl Session {
     /// A page that arrived, once and only once.
     pub fn take_fax_received(&self) -> Option<fax::page::Page> {
         self.fax_received.lock().ok().and_then(|mut v| v.take())
+    }
+
+    /// More lines of the page arriving.
+    ///
+    /// Added to whatever the window has not taken yet if they carry straight on
+    /// from it, and in place of it if they are a new page: a window that fell
+    /// behind wants the page that is arriving, not the one before.
+    fn push_fax_lines(&self, arriving: Arriving) {
+        let Ok(mut waiting) = self.fax_arriving.lock() else { return };
+        match waiting.as_mut() {
+            Some(w) if w.page == arriving.page && w.from + w.lines.len() == arriving.from => {
+                w.resolution = arriving.resolution;
+                w.lines.extend(arriving.lines);
+            }
+            _ => *waiting = Some(arriving),
+        }
+    }
+
+    /// The lines that have arrived since the window last asked.
+    pub fn take_fax_lines(&self) -> Option<Arriving> {
+        self.fax_arriving.lock().ok().and_then(|mut v| v.take())
     }
 
     /// How hard the line is being driven.
@@ -520,6 +560,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // then frames again, and the two want different pictures. Carrying the
     // points of one into the other draws a constellation over an eye.
     let mut drawing = modem.shape();
+    // How much of the page arriving the window has been handed, and which
+    // page that was. A page that starts again -- a new call, or the next page
+    // of this one -- has fewer lines than were handed over, and gets a new
+    // number.
+    let (mut fax_page_number, mut fax_lines_handed) = (0u64, 0usize);
 
     let mut from_line: Vec<f32> = Vec::with_capacity(4096);
     let mut to_line: Vec<f32> = Vec::with_capacity(4096);
@@ -756,6 +801,25 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         modem.fax_error_correction = session.fax_error_correction();
         if let Some(page) = session.take_fax_page() {
             modem.fax_page = Some(page);
+        }
+        if let Some(call) = modem
+            .fax_call()
+            .filter(|c| c.role() == fax::call::Role::Answerer)
+        {
+            let lines = call.lines();
+            if lines.len() < fax_lines_handed {
+                fax_page_number += 1;
+                fax_lines_handed = 0;
+            }
+            if lines.len() > fax_lines_handed {
+                session.push_fax_lines(Arriving {
+                    page: fax_page_number,
+                    resolution: call.resolution(),
+                    from: fax_lines_handed,
+                    lines: lines[fax_lines_handed..].to_vec(),
+                });
+                fax_lines_handed = lines.len();
+            }
         }
         if let Some(page) = modem.take_received_page() {
             session.set_fax_received(page);
@@ -1390,5 +1454,38 @@ mod level_tests {
         assert_eq!(both_carrying(0.05, 0.0), None);
         assert_eq!(both_carrying(0.0, 0.04), None);
         assert_eq!(both_carrying(0.0, 0.0), None);
+    }
+}
+
+#[cfg(test)]
+mod arriving_tests {
+    use super::{Arriving, Session};
+    use fax::page::Resolution;
+
+    fn batch(page: u64, from: usize, count: usize) -> Arriving {
+        Arriving {
+            page,
+            resolution: Resolution::Standard,
+            from,
+            lines: (from..from + count).map(|y| vec![y % 2 == 0; 4]).collect(),
+        }
+    }
+
+    #[test]
+    fn lines_the_window_has_not_taken_yet_are_kept_together() {
+        let session = Session::default();
+        session.push_fax_lines(batch(0, 0, 3));
+        session.push_fax_lines(batch(0, 3, 2));
+        assert_eq!(session.take_fax_lines(), Some(batch(0, 0, 5)));
+        assert_eq!(session.take_fax_lines(), None, "taken twice");
+    }
+
+    #[test]
+    fn a_new_page_replaces_what_was_waiting_of_the_last_one() {
+        // A window that fell behind wants the page arriving, not the last.
+        let session = Session::default();
+        session.push_fax_lines(batch(0, 40, 3));
+        session.push_fax_lines(batch(1, 0, 2));
+        assert_eq!(session.take_fax_lines(), Some(batch(1, 0, 2)));
     }
 }

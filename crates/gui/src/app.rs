@@ -1065,6 +1065,15 @@ impl ScopeApp {
         self.transfer_window(ui, &session);
         self.network_window(ui, &session);
         self.fax.observe(&self.frame);
+        // Lines before the page they belong to: a page handed over first
+        // would be drawn from scratch and then its own last lines ignored.
+        if let Some(lines) = session.take_fax_lines() {
+            let now = ui.input(|i| i.time);
+            if self.fax.arriving(lines, now) {
+                // Open for a page as it starts rather than once it is over.
+                self.fax.open = true;
+            }
+        }
         if let Some(page) = session.take_fax_received() {
             self.fax.arrived(page);
             self.fax.open = true;
