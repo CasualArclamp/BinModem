@@ -13,7 +13,9 @@
 //! and power in INFO1c and INFO1a. Phase 3 trains the equalisers and echo
 //! cancellers, and phase 4 the rest, before data.
 //!
-//! Built from phase 2 up. So far: the INFO sequences and the DPSK they ride on.
+//! Built from phase 2 up, and phase 2 is done: the INFO sequences and the DPSK
+//! they ride on, the probing signals and what they measure, and the procedure
+//! for both ends. Phases 3 and 4 and the data mode are next.
 
 pub mod dpsk;
 pub mod info;
