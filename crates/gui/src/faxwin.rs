@@ -82,10 +82,10 @@ impl Fax {
             resolution: Resolution::Standard,
             halftone: Halftone::Threshold,
             v27ter: true,
-            // Neither is written yet, so neither is offered. A DIS that lists
-            // a modulation this end cannot raise is an invitation to a call
-            // that dies at the training check.
-            v29: false,
+            v29: true,
+            // Not written yet, so not offered. A DIS that lists a modulation
+            // this end cannot raise is an invitation to a call that dies at the
+            // training check.
             v17: false,
             ..Self::default()
         }
@@ -314,14 +314,19 @@ impl Fax {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("offer ").monospace().color(dim));
                     ui.checkbox(&mut self.v27ter, "V.27ter")
-                        .on_hover_text("2400 and 4800, and the one every fax has");
+                        .on_hover_text(
+                            "2400 and 4800, and the one every fax has. Left \
+                             unticked with nothing else ticked, it is offered \
+                             anyway",
+                        );
+                    ui.checkbox(&mut self.v29, "V.29").on_hover_text(
+                        "7200 and 9600. Untick it to hold a call to V.27ter, \
+                         which is slower and more forgiving of a bad line",
+                    );
                     ui.add_enabled_ui(false, |ui| {
-                        ui.checkbox(&mut self.v29, "V.29")
-                            .on_hover_text("7200 and 9600. Not written yet");
-                        ui.checkbox(&mut self.v17, "V.17")
-                            .on_hover_text(
-                                "7200 to 14 400, trellis coded. Not written yet",
-                            );
+                        ui.checkbox(&mut self.v17, "V.17").on_hover_text(
+                            "7200 to 14 400, trellis coded. Not written yet",
+                        );
                     });
                 });
                 if again {

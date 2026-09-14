@@ -189,3 +189,65 @@ fn what_the_fast_receiver_saw() {
         }
     }
 }
+
+/// Every stretch of page carrier in a recording, and what was in it.
+///
+/// ```text
+/// FAX_CAPTURE=... FAX_FROM=2.0 FAX_TO=4.8 cargo test -p fax --test replay \
+///     what_the_page_carrier_carried -- --ignored --nocapture
+/// ```
+///
+/// Reads the far end's channel with the V.27 ter receiver across the window
+/// given, as one burst however the carrier detector chops it up, and reports
+/// what a training check reader would: where the zeros start, how long they
+/// run, and what fraction of the next second and a half is zeros.
+#[test]
+#[ignore = "needs a recording"]
+fn what_the_page_carrier_carried() {
+    let path = std::env::var("FAX_CAPTURE").expect("set FAX_CAPTURE");
+    let from: f64 = std::env::var("FAX_FROM").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
+    let to: f64 = std::env::var("FAX_TO").ok().and_then(|v| v.parse().ok()).unwrap_or(f64::MAX);
+    let wav = line::wav::read(&path).expect("could not read the recording");
+    let fs = f64::from(wav.sample_rate);
+    let samples = wav.channel(0);
+    let start = (from * fs) as usize;
+    let end = ((to * fs) as usize).min(samples.len());
+
+    let mut rx = datapump::v27ter::Receiver::new(fs);
+    rx.set_rate(datapump::v27ter::Rate::R4800);
+    let mut bits = Vec::new();
+    for &s in &samples[start..end] {
+        rx.feed(f64::from(s));
+        bits.extend(rx.take_bits());
+    }
+
+    let mut run = 0usize;
+    let mut longest = 0usize;
+    let mut first32 = None;
+    for (i, &b) in bits.iter().enumerate() {
+        run = if b { 0 } else { run + 1 };
+        longest = longest.max(run);
+        if run == 32 && first32.is_none() {
+            first32 = Some(i + 1 - 32);
+        }
+    }
+    println!("\n{path}  {from:.2}s to {to:.2}s");
+    println!("  bits out           {}", bits.len());
+    println!("  longest zeros      {longest}");
+    match first32 {
+        None => println!("  no run of 32 zeros anywhere"),
+        Some(at) => {
+            let window = &bits[at..(at + 7200).min(bits.len())];
+            let zeros = window.iter().filter(|b| !**b).count();
+            println!(
+                "  zeros start at bit {at}, and {zeros} of the next {} are zeros ({:.1}%)",
+                window.len(),
+                100.0 * zeros as f64 / window.len().max(1) as f64
+            );
+        }
+    }
+    println!(
+        "  residual error     {:.3} of a gap",
+        rx.residual_error() / rx.point_spacing()
+    );
+}

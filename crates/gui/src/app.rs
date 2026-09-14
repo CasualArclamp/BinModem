@@ -1077,6 +1077,7 @@ impl ScopeApp {
             // this modem sends, which is well before the window is asked
             // anything again.
             session.set_fax_identification(self.fax.identification.trim());
+            session.set_fax_offer(&self.fax.ours());
             session.set_fax_page(self.fax.page().cloned());
             session.type_bytes(crate::faxwin::Fax::commands(&start).as_bytes());
         }

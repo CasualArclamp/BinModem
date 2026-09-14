@@ -207,6 +207,10 @@ impl Scrambler {
 enum Stage {
     /// Off the line.
     Silent,
+    /// Segment 1, with protection against talker echo: unmodulated carrier.
+    Unmodulated(u32),
+    /// Segment 2, the same: no transmitted energy.
+    Gap(u32),
     /// Segment 3.
     Reversals(u32),
     /// Segment 4.
@@ -218,6 +222,18 @@ enum Stage {
     /// The turn-off sequence: scrambled ones for 5 to 10 ms, then nothing
     /// (Table 5). Counted in symbols.
     TurnOff(u32),
+}
+
+/// Table 3's segment 1 with protection against talker echo: "185 ms to 200
+/// ms" of unmodulated carrier. The middle of that.
+const UNMODULATED_SECONDS: f64 = 0.1925;
+
+/// Segment 2: "20 ms to 25 ms" of no transmitted energy.
+const GAP_SECONDS: f64 = 0.0225;
+
+/// A duration as whole symbols at a rate.
+fn symbols_in(seconds: f64, rate: Rate) -> u32 {
+    (seconds * rate.baud()).round() as u32
 }
 
 /// Segment A of the turn-off sequence, in symbols.
@@ -249,6 +265,10 @@ pub struct Transmitter {
     nco: Nco,
     scrambler: Scrambler,
     stage: Stage,
+    /// Whether segments 1 and 2 go in front of each burst.
+    echo_protection: bool,
+    /// The symbol most recently put on the line.
+    sent: (f64, f64),
     /// The phase the last symbol went out at, in eighths of a turn. Every
     /// symbol is a change from this one, which is what differential encoding
     /// means.
@@ -269,6 +289,8 @@ impl Transmitter {
             nco: Nco::new(CARRIER, fs),
             scrambler: Scrambler::new(),
             stage: Stage::Silent,
+            echo_protection: false,
+            sent: (0.0, 0.0),
             eighths: 0,
             history: vec![(0.0, 0.0); 2 * SPAN + 1],
             phase: 0.0,
@@ -279,18 +301,33 @@ impl Transmitter {
     /// Raise the carrier and begin the turn-on sequence.
     ///
     /// Segments 1 and 2, unmodulated carrier and then a gap to turn echo
-    /// suppressors around, are not sent. Table 3 makes them optional, and on a
-    /// fax call the far end has just stopped talking, so the suppressors are
-    /// already pointing this way.
+    /// suppressors around, are sent only if asked for. Table 3 makes them
+    /// optional, and on a fax call the far end has just stopped talking, so
+    /// the suppressors are already pointing this way.
     pub fn start(&mut self, rate: Rate, training: Training) {
         self.rate = rate;
         self.training = training;
         self.scrambler = Scrambler::seeded();
-        self.stage = Stage::Reversals(training.reversals());
+        self.stage = if self.echo_protection {
+            Stage::Unmodulated(symbols_in(UNMODULATED_SECONDS, rate))
+        } else {
+            Stage::Reversals(training.reversals())
+        };
         self.eighths = 0;
         self.phase = 0.0;
         self.history.fill((0.0, 0.0));
         self.pending.clear();
+    }
+
+    /// Send segments 1 and 2 in front of every burst from now on.
+    ///
+    /// Not what this modem does by default, and nothing a fax needs from it.
+    /// It is what real machines send, though -- a public fax service sends it
+    /// in front of every training check -- and a receiver that has only ever
+    /// heard its own transmitter has never heard a carrier that comes up, goes
+    /// away for twenty milliseconds, and comes back.
+    pub fn set_echo_protection(&mut self, on: bool) {
+        self.echo_protection = on;
     }
 
     /// Finish the burst: whatever is queued, then scrambled ones, then off.
@@ -312,6 +349,16 @@ impl Transmitter {
 
     pub fn rate(&self) -> Rate {
         self.rate
+    }
+
+    /// The point most recently sent, for a constellation display, or `None`
+    /// while nothing is going out.
+    ///
+    /// A fax is half duplex, so while this end is sending there is nothing
+    /// arriving to draw -- and what is going out is the one constellation on
+    /// the line.
+    pub fn last_point(&self) -> Option<(f64, f64)> {
+        (self.is_transmitting() && self.sent != (0.0, 0.0)).then_some(self.sent)
     }
 
     pub fn is_transmitting(&self) -> bool {
@@ -372,6 +419,23 @@ impl Transmitter {
     fn next_symbol(&mut self) -> (f64, f64) {
         match self.stage {
             Stage::Silent => (0.0, 0.0),
+            Stage::Unmodulated(left) => {
+                self.stage = if left > 1 {
+                    Stage::Unmodulated(left - 1)
+                } else {
+                    Stage::Gap(symbols_in(GAP_SECONDS, self.rate))
+                };
+                // The carrier at the reference phase, turned by nothing.
+                self.turn(0)
+            }
+            Stage::Gap(left) => {
+                self.stage = if left > 1 {
+                    Stage::Gap(left - 1)
+                } else {
+                    Stage::Reversals(self.training.reversals())
+                };
+                (0.0, 0.0)
+            }
             Stage::Reversals(left) => {
                 self.stage = if left > 1 {
                     Stage::Reversals(left - 1)
@@ -464,6 +528,7 @@ impl Transmitter {
             self.history.remove(0);
             let symbol = self.next_symbol();
             self.history.push(symbol);
+            self.sent = symbol;
         }
 
         let centre = SPAN as f64;
@@ -522,6 +587,20 @@ const LOUDEST_DECAY: f64 = 3.1e-5;
 const FLOOR_FALL: f64 = 6.25e-4;
 const FLOOR_RISE: f64 = 1.25e-5;
 
+/// Where the floor goes when a burst ends, as a fraction of the level then.
+const FLOOR_AFTER_BURST: f64 = 0.5;
+
+/// Symbols of a burst ignored while the filters fill.
+const SETTLING: u64 = 8;
+
+/// Symbols the carrier is then measured over.
+///
+/// Everything at the front of a turn-on sequence is two-phase: the plain
+/// carrier of segment 1, the reversals of segment 3, the conditioning pattern
+/// of segment 4. The short sequence has seventy-two symbols of that, so eight
+/// and forty-eight is inside even the short one.
+const ACQUIRING: u64 = 48;
+
 /// What one symbol should come off the equaliser at.
 const UNIT: f64 = 1.0;
 
@@ -570,6 +649,11 @@ pub struct Receiver {
     last_symbol: (f64, f64),
     /// The averaged phase error the carrier loop works on.
     track: f64,
+    /// The front of the burst as it arrived, before the carrier loop has
+    /// touched it.
+    front: Vec<(f64, f64)>,
+    /// What the timing loop's input is multiplied by.
+    timing_scale: f64,
 }
 
 impl Receiver {
@@ -603,6 +687,8 @@ impl Receiver {
             bits: Vec::new(),
             last_symbol: (0.0, 0.0),
             track: 0.0,
+            front: Vec::new(),
+            timing_scale: 1.0,
         }
     }
 
@@ -685,6 +771,7 @@ impl Receiver {
         self.descrambler.reset();
         self.bits.clear();
         self.symbols = 0;
+        self.front.clear();
     }
 
     pub fn take_bits(&mut self) -> Vec<bool> {
@@ -713,6 +800,20 @@ impl Receiver {
         if self.carrier && !was {
             self.new_burst();
         }
+        if !self.carrier && was {
+            // The burst just went. Whatever is on the line now is the line
+            // with nothing on it, or on its way there, so the floor starts
+            // from half of where the level is rather than from wherever it was
+            // left. Left at nothing -- which it is, for the first burst of a
+            // call, since this receiver hears nothing between bursts -- the
+            // noise on the line clears the threshold the moment the carrier
+            // drops, the carrier comes straight back, and the burst never
+            // ends. Half puts the way back on at half the burst's own level:
+            // out of reach of the noise, and well within reach of a burst that
+            // stopped for twenty milliseconds on purpose and carried on. It
+            // falls from there to the real noise within a fraction of a second.
+            self.floor = self.floor.max(level * FLOOR_AFTER_BURST);
+        }
         let filtered = self.matched.process(selected);
 
         let previous = std::mem::replace(&mut self.previous_filtered, filtered);
@@ -727,13 +828,75 @@ impl Receiver {
             previous.1 + mu * (filtered.1 - previous.1),
         );
         self.countdown += self.gardner.interval();
-        let Some(symbol) = self.gardner.feed(at) else {
+        // The timing loop is handed the signal at about unit level, whatever
+        // the line delivered: it divides its error by a power estimate that
+        // starts at one and moves slowly, and a short training thirty
+        // decibels down is over before that estimate has come down far enough
+        // to let it move. Held while there is no carrier, so silence is not
+        // scaled up into something to lock onto.
+        if self.carrier {
+            self.timing_scale = 1.0 / self.level.value().max(CARRIER_OFF);
+        }
+        let scale = self.timing_scale;
+        let Some(scaled) = self.gardner.feed((at.0 * scale, at.1 * scale)) else {
             return;
         };
-        self.on_symbol(symbol);
+        self.on_symbol((scaled.0 / scale, scaled.1 / scale));
+    }
+
+    /// Measure the carrier from the two-phase front of the burst.
+    ///
+    /// Squaring a symbol that is either a point or its opposite leaves the
+    /// same thing either way: twice the carrier's phase and none of the data.
+    /// So the squares, each times the conjugate of the one before, turn by
+    /// twice the carrier's frequency, and their sum points at twice its phase.
+    /// Halving both gives the phase to within half a turn, which a
+    /// differential code cannot tell from the truth.
+    ///
+    /// The loop that steers by its own decisions could not do this. At 2400,
+    /// seven hertz is two degrees of turn a symbol and the loop corrects less
+    /// than that for any error it can see, so it slipped from one phase to the
+    /// next for the whole of the training and never caught up: every one of
+    /// forty tries at plus or minus seven hertz failed.
+    fn acquire(&mut self) {
+        let squares: Vec<(f64, f64)> = self
+            .front
+            .iter()
+            .map(|&(x, y)| (x * x - y * y, 2.0 * x * y))
+            .collect();
+        if squares.len() < 2 {
+            return;
+        }
+        let conj_times = |r: (f64, f64), p: (f64, f64)| {
+            (r.0 * p.0 + r.1 * p.1, r.1 * p.0 - r.0 * p.1)
+        };
+        let twice = squares
+            .windows(2)
+            .map(|w| conj_times(w[1], w[0]))
+            .fold((0.0, 0.0), |a, z| (a.0 + z.0, a.1 + z.1));
+        let per_symbol = twice.1.atan2(twice.0) / 2.0;
+        let last = (squares.len() - 1) as f64;
+        let middle = last / 2.0;
+        let (re, im) = squares.iter().enumerate().fold((0.0, 0.0), |a, (n, z)| {
+            let back = -2.0 * per_symbol * (n as f64 - middle);
+            let (c, s) = (back.cos(), back.sin());
+            (a.0 + z.0 * c - z.1 * s, a.1 + z.0 * s + z.1 * c)
+        });
+        let now = im.atan2(re) / 2.0 + per_symbol * (last - middle);
+        let tau = std::f64::consts::TAU;
+        self.frequency = -per_symbol / tau;
+        self.phase = (-now / tau).rem_euclid(1.0);
+        self.track = 0.0;
     }
 
     fn on_symbol(&mut self, symbol: (f64, f64)) {
+        if self.carrier && self.symbols >= SETTLING && self.symbols < SETTLING + ACQUIRING {
+            self.front.push(symbol);
+            if self.symbols + 1 == SETTLING + ACQUIRING {
+                self.acquire();
+            }
+        }
+        let acquired = self.symbols >= SETTLING + ACQUIRING;
         let power = symbol.0 * symbol.0 + symbol.1 * symbol.1;
         let mean = if self.carrier {
             self.agc.process(power)
@@ -761,9 +924,9 @@ impl Receiver {
         let want = point_at(coarse);
         let raw = point.1 * want.0 - point.0 * want.1;
         self.track += 0.20 * (raw - self.track);
-        if self.carrier {
-            // Second order, so the seven hertz clause 3 allows for is removed
-            // rather than merely followed.
+        if self.carrier && acquired {
+            // Second order, so what is left of the seven hertz clause 3
+            // allows for is removed rather than merely followed.
             self.frequency = (self.frequency - 2.0e-5 * self.track).clamp(-0.02, 0.02);
             self.phase -= 0.010 * self.track;
         }
@@ -775,7 +938,7 @@ impl Receiver {
         let decision = point_at(decided);
 
         self.symbols += 1;
-        if self.carrier && self.symbols > 16 {
+        if self.carrier && acquired {
             self.equalizer.adapt(equalized, decision);
         }
         self.last_symbol = equalized;
@@ -880,6 +1043,49 @@ mod tests {
                 "{rate:?} {training:?} trains for {ms:.0} ms, Table 3 says {want_ms:.0}"
             );
         }
+    }
+
+    #[test]
+    fn with_echo_protection_the_turn_on_is_as_long_as_table_3_says() {
+        // 923 ms at 4800 and 1158 ms at 2400 for the long sequence, which is
+        // segments 1 and 2 in front of the 708 and 943 without them. The
+        // table's figures are nominal and segments 1 and 2 are ranges, so
+        // within a few milliseconds.
+        for (rate, want_ms) in [(Rate::R4800, 923.0), (Rate::R2400, 1158.0)] {
+            let mut tx = Transmitter::new(FS);
+            tx.set_echo_protection(true);
+            tx.start(rate, Training::Long);
+            let mut samples = 0usize;
+            while !tx.trained() {
+                tx.next_sample();
+                samples += 1;
+                assert!(samples < FS as usize * 2, "the training never ended");
+            }
+            let ms = 1000.0 * samples as f64 / FS;
+            assert!(
+                (ms - want_ms).abs() < 8.0,
+                "{rate:?} took {ms:.0} ms to train, Table 3 says {want_ms:.0}"
+            );
+        }
+    }
+
+    #[test]
+    fn with_echo_protection_there_is_a_carrier_then_a_silence_then_the_training() {
+        let mut tx = Transmitter::new(FS);
+        tx.set_echo_protection(true);
+        tx.start(Rate::R4800, Training::Long);
+        let power = |tx: &mut Transmitter, seconds: f64| -> f64 {
+            let n = (FS * seconds) as usize;
+            (0..n).map(|_| tx.next_sample().powi(2)).sum::<f64>() / n as f64
+        };
+        let carrier = power(&mut tx, 0.15);
+        // Past the end of segment 1 and the shaping pulse's tail.
+        power(&mut tx, 0.048);
+        let gap = power(&mut tx, 0.008);
+        let training = power(&mut tx, 0.2);
+        assert!(carrier > 0.1, "no carrier in segment 1: {carrier}");
+        assert!(gap < carrier / 100.0, "segment 2 was not silent: {gap}");
+        assert!(training > 0.1, "no training after the gap: {training}");
     }
 
     #[test]
@@ -1013,6 +1219,73 @@ mod tests {
             longest >= 7100,
             "the longest run of zeros was {longest}, and 7200 were sent"
         );
+    }
+
+
+    /// One burst from a transmitter `hz` off, into a receiver started `skew`
+    /// samples early, down a line `scale` times as loud.
+    fn survives(rate: Rate, training: Training, echo: bool, hz: f64, skew: usize, scale: f64) -> bool {
+        let data: Vec<u8> = (0..120u32).map(|i| (i * 37 + 11) as u8).collect();
+        let mut tx = Transmitter::new(FS);
+        tx.nco = Nco::new(CARRIER + hz, FS);
+        tx.set_echo_protection(echo);
+        let mut rx = Receiver::new(FS);
+        rx.set_rate(rate);
+        for _ in 0..skew {
+            rx.feed(0.0);
+        }
+        tx.start(rate, training);
+        tx.push_bytes(&data);
+        let mut out = Vec::new();
+        for _ in 0..(FS * 2.0) as usize {
+            if tx.trained() && tx.pending_bits() == 0 {
+                tx.stop();
+            }
+            rx.feed(tx.next_sample() * scale);
+            out.extend(rx.take_bits());
+        }
+        find(&out, &bits_of(&data)).is_some()
+    }
+
+    #[test]
+    fn the_carrier_is_found_wherever_it_starts() {
+        // Clause 3 wants a receiver to accept seven hertz of error, and two
+        // modems never start their oscillators on the same sample. At 2400,
+        // seven hertz defeated a loop that steered by its own decisions in
+        // every one of forty tries.
+        for rate in [Rate::R4800, Rate::R2400] {
+            for (training, echo) in [(Training::Long, false), (Training::Short, false), (Training::Long, true)] {
+                for (hz, skew) in [(0.0, 0), (7.0, 5), (-7.0, 7)] {
+                    for scale in [1.0, 0.0316] {
+                        assert!(
+                            survives(rate, training, echo, hz, skew, scale),
+                            "{rate:?} {training:?} echo {echo}: {hz} Hz off, {skew} late, {:.0} dB",
+                            20.0 * scale.log10()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "hundreds of bursts; run it in release"]
+    fn the_carrier_is_found_wherever_it_starts_every_way() {
+        let mut failed = Vec::new();
+        for rate in [Rate::R4800, Rate::R2400] {
+            for (training, echo) in [(Training::Long, false), (Training::Short, false), (Training::Long, true)] {
+                for hz in [0.0, 3.0, -3.0, 7.0, -7.0] {
+                    for skew in 0..10 {
+                        for scale in [1.0, 0.0316] {
+                            if !survives(rate, training, echo, hz, skew, scale) {
+                                failed.push((rate, training, echo, hz, skew, scale));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(failed.is_empty(), "{} failed: {failed:?}", failed.len());
     }
 
     #[test]

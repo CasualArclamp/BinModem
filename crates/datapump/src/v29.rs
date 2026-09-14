@@ -289,6 +289,8 @@ pub struct Transmitter {
     history: Vec<(f64, f64)>,
     phase: f64,
     pending: Vec<bool>,
+    /// The symbol most recently put on the line, in the units of Figure 1.
+    sent: (f64, f64),
 }
 
 impl Transmitter {
@@ -304,7 +306,18 @@ impl Transmitter {
             history: vec![(0.0, 0.0); 2 * SPAN + 1],
             phase: 0.0,
             pending: Vec::new(),
+            sent: (0.0, 0.0),
         }
+    }
+
+    /// The point most recently sent, scaled as the receiver reports points,
+    /// or `None` while nothing is going out.
+    pub fn last_point(&self) -> Option<(f64, f64)> {
+        if !self.is_transmitting() || self.sent == (0.0, 0.0) {
+            return None;
+        }
+        let rms = self.rate.rms();
+        Some((self.sent.0 / rms, self.sent.1 / rms))
     }
 
     /// Raise the carrier and begin the synchronizing signal.
@@ -495,6 +508,7 @@ impl Transmitter {
             self.history.remove(0);
             let symbol = self.next_symbol().map_or((0.0, 0.0), Point::xy);
             self.history.push(symbol);
+            self.sent = symbol;
         }
 
         let centre = SPAN as f64;
@@ -525,7 +539,30 @@ const LOUDEST_DECAY: f64 = 3.1e-5;
 const FLOOR_FALL: f64 = 6.25e-4;
 const FLOOR_RISE: f64 = 1.25e-5;
 
+/// Where the floor goes when a burst ends, as a fraction of the level then.
+const FLOOR_AFTER_BURST: f64 = 0.5;
+
 const MAX_GAIN: f64 = 400.0;
+
+/// Symbols ignored at the start of a burst while the filters fill, before
+/// any of them count towards the power.
+const SETTLING: u32 = 8;
+
+/// Symbols averaged plainly after that, and the equaliser left alone until
+/// they are done. An even number, so it is whole pairs of A and B.
+const AVERAGED: u32 = 32;
+
+/// How much of each later symbol goes into the power, which is a time
+/// constant of about thirty milliseconds at 2400 baud.
+const POWER_TRACKING: f64 = 1.0 / 72.0;
+
+/// Symbols of segment 2 the carrier is measured over, after the settling.
+///
+/// Segment 2 is 128 symbols, and the carrier is found within a few of the
+/// start of it. Sixty-four more after the eight of settling ends the
+/// measurement with over fifty of the alternations still to come, which is
+/// the margin for a carrier found late on a quiet or noisy line.
+const ACQUIRING: u32 = 64;
 
 /// The least the carrier loop divides a phase error by, as a fraction of the
 /// mean power.
@@ -555,7 +592,14 @@ pub struct Receiver {
     previous_filtered: (f64, f64),
     phase: f64,
     frequency: f64,
-    agc: OnePole,
+    /// The power of what is arriving, and how many symbols of this burst
+    /// have gone into it.
+    power: f64,
+    burst_symbols: u32,
+    /// Segment 2 as it arrived, before the carrier loop has touched it.
+    alternations: Vec<(f64, f64)>,
+    /// What the timing loop's input is multiplied by.
+    timing_scale: f64,
     equalizer: Equalizer,
     level: OnePole,
     floor: f64,
@@ -588,7 +632,10 @@ impl Receiver {
             previous_filtered: (0.0, 0.0),
             phase: 0.0,
             frequency: 0.0,
-            agc: OnePole::starting_at(1.0, 0.030, BAUD),
+            power: 1.0,
+            burst_symbols: 0,
+            alternations: Vec::new(),
+            timing_scale: 1.0,
             equalizer: Equalizer::new(31, 1.0),
             level: OnePole::new(0.010, fs),
             floor: 0.0,
@@ -692,6 +739,8 @@ impl Receiver {
         self.descrambler.reset();
         self.bits.clear();
         self.symbols = 0;
+        self.burst_symbols = 0;
+        self.alternations.clear();
     }
 
     pub fn take_bits(&mut self) -> Vec<bool> {
@@ -733,6 +782,20 @@ impl Receiver {
         if self.carrier && !was {
             self.new_burst();
         }
+        if !self.carrier && was {
+            // The burst just went. Whatever is on the line now is the line
+            // with nothing on it, or on its way there, so the floor starts
+            // from half of where the level is rather than from wherever it was
+            // left. Left at nothing -- which it is, for the first burst of a
+            // call, since this receiver hears nothing between bursts -- the
+            // noise on the line clears the threshold the moment the carrier
+            // drops, the carrier comes straight back, and the burst never
+            // ends. Half puts the way back on at half the burst's own level:
+            // out of reach of the noise, and well within reach of a burst that
+            // stopped for twenty milliseconds on purpose and carried on. It
+            // falls from there to the real noise within a fraction of a second.
+            self.floor = self.floor.max(level * FLOOR_AFTER_BURST);
+        }
         let filtered = self.matched.process(selected);
 
         let previous = std::mem::replace(&mut self.previous_filtered, filtered);
@@ -747,20 +810,139 @@ impl Receiver {
             previous.1 + mu * (filtered.1 - previous.1),
         );
         self.countdown += self.gardner.interval();
-        let Some(symbol) = self.gardner.feed(at) else {
+        // The timing loop is handed the signal at a level of about one,
+        // whatever the line delivered. It divides its error by its own running
+        // estimate of the power, which starts at one and moves two per cent a
+        // symbol, so thirty decibels down it spends the whole of segment 2 a
+        // thousand times too timid to move -- and a receiver started half a
+        // symbol out of step stays there. At full level the same start was
+        // found in a few symbols.
+        //
+        // The level meter is what does the scaling because it is the only
+        // estimate that is right from the first symbols of a burst; the gain
+        // control is not settled until forty in. It is held while there is no
+        // carrier, so silence is not scaled up into something to lock onto.
+        if self.carrier {
+            self.timing_scale = 1.0 / self.level.value().max(CARRIER_OFF);
+        }
+        let scale = self.timing_scale;
+        let Some(scaled) = self.gardner.feed((at.0 * scale, at.1 * scale)) else {
             return;
         };
-        self.on_symbol(symbol);
+        self.on_symbol((scaled.0 / scale, scaled.1 / scale));
+    }
+
+    /// Follow the power of what is arriving.
+    ///
+    /// A plain average over the first symbols of a burst, then an exponential
+    /// one. The average is there because an exponential one has to start
+    /// somewhere, and starting it at one leaves it crawling towards a line
+    /// that may be forty decibels quieter than that: it was still four times
+    /// too high when the data began, so the equaliser learned the whole
+    /// training at the wrong gain and then had to unlearn it on the page.
+    /// Eight phases on a circle did not mind. Two radii do.
+    ///
+    /// Segment 2 is what the average lands on, and A and B together have
+    /// exactly the mean power of the constellation, so the average over any
+    /// even number of them is not an estimate but the answer.
+    fn follow_power(&mut self, power: f64) {
+        self.burst_symbols += 1;
+        if self.burst_symbols <= SETTLING {
+            return;
+        }
+        let averaged = self.burst_symbols - SETTLING;
+        let k = if averaged <= AVERAGED {
+            1.0 / f64::from(averaged)
+        } else {
+            POWER_TRACKING
+        };
+        self.power += k * (power - self.power);
+    }
+
+    fn gain(&self) -> f64 {
+        (1.0 / self.power.max(1e-12)).sqrt().clamp(0.0, MAX_GAIN)
+    }
+
+    /// Measure the carrier against the points segment 2 is known to send.
+    ///
+    /// A loop that decides each symbol and steers towards the decision can
+    /// only find a carrier it is already close to: turn sixteen points of two
+    /// radii by more than about a sixteenth of a turn and the nearest point is
+    /// the wrong one, the steering goes the wrong way, and the loop settles
+    /// somewhere that is not a lock at all. A tenth of a sample's difference in
+    /// when the two ends started, or a few hertz between their oscillators,
+    /// was enough for that in forty-five of eighty tries.
+    ///
+    /// Segment 2 is there so nothing has to be decided. It alternates A and B,
+    /// and both are known. Each symbol times the conjugate of the point it is
+    /// is the carrier alone; each of those times the conjugate of the one
+    /// before is the carrier's turn per symbol. Which of the two came first is
+    /// not known, but it does not need to be: guessed wrong, at 9600 and 7200
+    /// the second sum cancels to nothing, so the larger one is the right one.
+    /// At 4800 the guesses tie, and there A and B are a quarter turn apart --
+    /// a lock a quarter turn out, which the differential phase coding does not
+    /// notice.
+    fn acquire(&mut self) {
+        let pair = [A, b(self.rate)].map(|p| p.xy());
+        let conj_times = |r: (f64, f64), p: (f64, f64)| {
+            (r.0 * p.0 + r.1 * p.1, r.1 * p.0 - r.0 * p.1)
+        };
+        let mut best = (0.0f64, 0.0f64, Vec::new());
+        for first in 0..2 {
+            let carrier: Vec<(f64, f64)> = self
+                .alternations
+                .iter()
+                .enumerate()
+                .map(|(n, &r)| conj_times(r, pair[(n + first) % 2]))
+                .collect();
+            let turn = carrier
+                .windows(2)
+                .map(|w| conj_times(w[1], w[0]))
+                .fold((0.0, 0.0), |a, z| (a.0 + z.0, a.1 + z.1));
+            let strength = turn.0.hypot(turn.1);
+            if strength > best.0 {
+                best = (strength, turn.1.atan2(turn.0), carrier);
+            }
+        }
+        let (_, per_symbol, carrier) = best;
+        if carrier.is_empty() {
+            return;
+        }
+        // The phase at the middle of the measurement, with the turn taken out,
+        // carried forward to the last symbol of it -- which is the one about to
+        // be turned by what this sets, since this runs as it arrives.
+        let last = (carrier.len() - 1) as f64;
+        let middle = last / 2.0;
+        let (re, im) = carrier.iter().enumerate().fold((0.0, 0.0), |a, (n, z)| {
+            let back = -per_symbol * (n as f64 - middle);
+            let (c, s) = (back.cos(), back.sin());
+            (a.0 + z.0 * c - z.1 * s, a.1 + z.0 * s + z.1 * c)
+        });
+        let now = im.atan2(re) + per_symbol * (last - middle);
+        let tau = std::f64::consts::TAU;
+        // The loop turns each symbol by the phase and then adds the frequency
+        // to the phase, so both go in with the sign that undoes them.
+        self.frequency = -per_symbol / tau;
+        self.phase = (-now / tau).rem_euclid(1.0);
+        self.track = 0.0;
+    }
+
+    fn acquiring(&self) -> bool {
+        self.burst_symbols > SETTLING && self.burst_symbols <= SETTLING + ACQUIRING
     }
 
     fn on_symbol(&mut self, symbol: (f64, f64)) {
         let power = symbol.0 * symbol.0 + symbol.1 * symbol.1;
-        let mean = if self.carrier {
-            self.agc.process(power)
-        } else {
-            self.agc.value()
-        };
-        let gain = (1.0 / mean.max(1e-12)).sqrt().clamp(0.0, MAX_GAIN);
+        if self.carrier {
+            self.follow_power(power);
+            if self.acquiring() {
+                self.alternations.push(symbol);
+                if self.burst_symbols == SETTLING + ACQUIRING {
+                    self.acquire();
+                }
+            }
+        }
+        let gain = self.gain();
 
         let turn = self.phase * std::f64::consts::TAU;
         let (c, s) = (turn.cos(), turn.sin());
@@ -779,7 +961,9 @@ impl Receiver {
         let d2 = (want.0 * want.0 + want.1 * want.1).max(MIN_DECISION_POWER);
         let raw = (point.1 * want.0 - point.0 * want.1) / d2;
         self.track += 0.20 * (raw - self.track);
-        if self.carrier {
+        // Not while segment 2 is being measured: steering by decisions about
+        // a carrier that has not been found yet is what this replaces.
+        if self.carrier && self.burst_symbols > SETTLING + ACQUIRING {
             self.frequency = (self.frequency - 1.5e-5 * self.track).clamp(-0.02, 0.02);
             self.phase -= 0.008 * self.track;
         }
@@ -790,7 +974,7 @@ impl Receiver {
         let (decided, decision) = self.nearest(equalized);
 
         self.symbols += 1;
-        if self.carrier && self.symbols > 16 {
+        if self.carrier && self.burst_symbols > SETTLING + ACQUIRING {
             self.equalizer.adapt(equalized, decision);
         }
         self.last_symbol = equalized;
@@ -1046,6 +1230,112 @@ mod tests {
         assert!((up as f64) > FS * 0.019, "found a carrier in the silence");
         assert!((up as f64) < FS * 0.1, "took {} ms", up as f64 * 1000.0 / FS);
         assert!(down.is_some(), "the carrier never went away");
+    }
+
+
+    #[test]
+    fn a_line_forty_decibels_down_is_the_same_line_quieter() {
+        // The receiver is linear from the line to the slicer, so how loud the
+        // line is should make no difference at all -- and did, because the
+        // gain control started at one and was still four times too high by
+        // the time the data began at forty decibels down. The equaliser had
+        // learned the training at the wrong gain.
+        let data = b"V.29 carries a page at twice the speed of V.27 ter.";
+        let mut reference = None;
+        for scale in [1.0, 0.1, 0.0316, 0.01] {
+            let mut tx = Transmitter::new(FS);
+            let mut rx = Receiver::new(FS);
+            rx.set_rate(Rate::R9600);
+            tx.start(Rate::R9600);
+            tx.push_bytes(data);
+            let mut out = Vec::new();
+            let mut at_data = None;
+            for _ in 0..(FS * 1.5) as usize {
+                if tx.trained() && tx.pending_bits() == 0 {
+                    tx.stop();
+                }
+                let was = tx.trained();
+                rx.feed(tx.next_sample() * scale);
+                if !was && tx.trained() && at_data.is_none() {
+                    at_data = Some(rx.power / (scale * scale));
+                }
+                out.extend(rx.take_bits());
+            }
+            assert!(
+                find(&out, &bits_of(data)).is_some(),
+                "nothing came back at {:.0} dB",
+                20.0 * scale.log10()
+            );
+            let power = at_data.expect("the data never started");
+            let reference = *reference.get_or_insert(power);
+            assert!(
+                (power / reference - 1.0).abs() < 0.01,
+                "at {:.0} dB the gain control had {power} where full level had {reference}",
+                20.0 * scale.log10()
+            );
+        }
+    }
+
+
+    /// Run one burst through a transmitter whose carrier is `hz` off, into a
+    /// receiver that started `skew` samples before it, down a line `scale`
+    /// times as loud. Returns whether the data came back.
+    fn survives(hz: f64, skew: usize, scale: f64) -> bool {
+        let data: Vec<u8> = (0..120u32).map(|i| (i * 37 + 11) as u8).collect();
+        let mut tx = Transmitter::new(FS);
+        tx.nco = Nco::new(CARRIER + hz, FS);
+        let mut rx = Receiver::new(FS);
+        rx.set_rate(Rate::R9600);
+        for _ in 0..skew {
+            rx.feed(0.0);
+        }
+        tx.start(Rate::R9600);
+        tx.push_bytes(&data);
+        let mut out = Vec::new();
+        for _ in 0..(FS * 1.0) as usize {
+            if tx.trained() && tx.pending_bits() == 0 {
+                tx.stop();
+            }
+            rx.feed(tx.next_sample() * scale);
+            out.extend(rx.take_bits());
+        }
+        find(&out, &bits_of(&data)).is_some()
+    }
+
+    #[test]
+    fn the_carrier_is_found_wherever_it_starts() {
+        // Clause 4: a receiver "must be able to accept errors of at least +/- 7
+        // Hz". And nothing makes two modems start their oscillators on the same
+        // sample. Every loopback before this had both, which is why a receiver
+        // that could only find a carrier it was already locked to passed every
+        // one of them -- and failed forty-five of these eighty.
+        for hz in [0.0, 7.0, -7.0] {
+            for skew in [0, 3, 5] {
+                for scale in [1.0, 0.0316] {
+                    assert!(
+                        survives(hz, skew, scale),
+                        "{hz} Hz off, {skew} samples late, {:.0} dB",
+                        20.0 * scale.log10()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "eighty bursts; run it in release"]
+    fn the_carrier_is_found_wherever_it_starts_every_way() {
+        let mut failed = Vec::new();
+        for hz in [0.0, 3.0, -3.0, 7.0, -7.0] {
+            for skew in 0..8 {
+                for scale in [1.0, 0.0316] {
+                    if !survives(hz, skew, scale) {
+                        failed.push((hz, skew, scale));
+                    }
+                }
+            }
+        }
+        assert!(failed.is_empty(), "{} failed: {failed:?}", failed.len());
     }
 
     #[test]

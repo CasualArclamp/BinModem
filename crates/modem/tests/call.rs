@@ -1517,3 +1517,59 @@ fn a_fax_that_answers_does_not_go_looking_for_v8() {
         "the 2100 Hz tone was not continuous: {magnitude:.4} of {rms:.4}"
     );
 }
+
+/// Run a dialling and an answering fax against each other until both are
+/// done, handing back the page and the speed it went at.
+fn fax_between(caller: &mut Modem, answerer: &mut Modem) -> (Option<fax::page::Page>, u32) {
+    let (mut to_caller, mut to_answerer) = (0.0, 0.0);
+    let mut arrived = None;
+    let mut rate = 0;
+    for _ in 0..(FS * 40.0) as usize {
+        let from_caller = caller.step(to_caller);
+        let from_answerer = answerer.step(to_answerer);
+        to_caller = from_answerer;
+        to_answerer = from_caller;
+        let _ = caller.take_dte();
+        let _ = answerer.take_dte();
+        if let Some(call) = caller.fax_call()
+            && matches!(call.phase(), fax::call::Phase::Sending)
+        {
+            rate = call.rate();
+        }
+        if arrived.is_none() {
+            arrived = answerer.take_received_page();
+        }
+        let done = caller.fax_call().is_some_and(|c| c.phase().is_over())
+            && answerer.fax_call().is_some_and(|c| c.phase().is_over());
+        if done && arrived.is_some() {
+            break;
+        }
+    }
+    (arrived, rate)
+}
+
+#[test]
+fn a_fax_goes_at_9600_unless_it_is_told_not_to() {
+    // Two of these offer V.29 and V.27 ter to each other, so the page goes at
+    // V.29's 9600. Told to use V.27 ter alone -- the box in the window -- the
+    // same call goes at 4800, and the page arrives just the same.
+    for (offer, want) in [
+        (fax::call::OUR_MODULATIONS.to_vec(), 9600),
+        (vec![fax::t30::Modulation::V27ter], 4800),
+    ] {
+        let page = a_test_page(6);
+        let mut caller = Modem::new(FS);
+        caller.fax_page = Some(page.clone());
+        caller.fax_offer = offer.clone();
+        Pair::type_at(&mut caller, "AT+FCLASS=1");
+        Pair::type_at(&mut caller, "ATD1");
+        let mut answerer = Modem::new(FS);
+        Pair::type_at(&mut answerer, "AT+FCLASS=1");
+        Pair::type_at(&mut answerer, "ATA");
+
+        let (arrived, rate) = fax_between(&mut caller, &mut answerer);
+        let got = arrived.unwrap_or_else(|| panic!("offering {offer:?}, no page arrived"));
+        assert_eq!(got.lines, page.lines, "offering {offer:?}");
+        assert_eq!(rate, want, "offering {offer:?}");
+    }
+}

@@ -209,6 +209,8 @@ pub struct Session {
     /// lives here beside the drive and not in a dial string. T.30 allows it
     /// to be blank and plenty of machines send nothing at all.
     fax_identification: Mutex<String>,
+    /// The modulations the window allows a fax call to use.
+    fax_offer: Mutex<Vec<fax::t30::Modulation>>,
     /// A page the window has loaded, waiting for the line thread to take it.
     ///
     /// Taken rather than read, and a page is megabytes of booleans, so it
@@ -230,6 +232,7 @@ impl Default for Session {
             network_request: Mutex::default(),
             network: Mutex::default(),
             fax_identification: Mutex::default(),
+            fax_offer: Mutex::new(fax::call::OUR_MODULATIONS.to_vec()),
             fax_page: Mutex::default(),
             fax_received: Mutex::default(),
             recording: AtomicBool::new(false),
@@ -256,6 +259,17 @@ impl Session {
     pub fn set_fax_identification(&self, who: &str) {
         if let Ok(mut v) = self.fax_identification.lock() {
             who.clone_into(&mut v);
+        }
+    }
+
+    /// The modulations a fax call may use.
+    pub fn fax_offer(&self) -> Vec<fax::t30::Modulation> {
+        self.fax_offer.lock().map(|v| v.clone()).unwrap_or_default()
+    }
+
+    pub fn set_fax_offer(&self, offer: &[fax::t30::Modulation]) {
+        if let Ok(mut v) = self.fax_offer.lock() {
+            *v = offer.to_vec();
         }
     }
 
@@ -720,6 +734,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         // thread, and a call can be placed by typing at the terminal instead
         // of by pressing the button.
         modem.fax_identification = session.fax_identification();
+        modem.fax_offer = session.fax_offer();
         if let Some(page) = session.take_fax_page() {
             modem.fax_page = Some(page);
         }

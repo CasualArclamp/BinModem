@@ -1,26 +1,43 @@
-//! A fax call on the line: the tones, V.21, V.27 ter, and T.30 above them.
+//! A fax call on the line: the tones, V.21, the page carriers, and T.30 above
+//! them.
 //!
 //! The join between the two halves. [`fax::call`] knows the procedure and
-//! nothing about signals; [`datapump::v21`] and [`datapump::v27ter`] know the
-//! signals and nothing about the procedure. This puts one on top of the other
-//! and gives the result a sample at a time, which is the only thing a line
-//! understands.
+//! nothing about signals; [`datapump::v21`], [`datapump::v27ter`] and
+//! [`datapump::v29`] know the signals and nothing about the procedure. This
+//! puts one on top of the other and gives the result a sample at a time, which
+//! is the only thing a line understands.
 //!
 //! The whole of the join is one question asked once a sample: what should be
 //! on the line just now. A fax call answers it with a different thing eight or
 //! ten times before a page has moved -- a tone, then 300 bit/s, then silence,
-//! then 4800, then silence, then 300 again -- and every one of those changes
+//! then 9600, then silence, then 300 again -- and every one of those changes
 //! is a carrier going up or down at both ends.
 
-use datapump::{v21, v27ter};
-use fax::call::{Call, Line, Phase, Role};
+use datapump::{v21, v27ter, v29};
+use fax::call::{Call, Line, Phase, Role, Speed};
 use fax::page::Page;
+use fax::t30::Modulation;
 
-/// Which V.27 ter rate a number of bits per second is.
-fn rate_of(bits_per_second: u32) -> v27ter::Rate {
-    match bits_per_second {
-        4800 => v27ter::Rate::R4800,
-        _ => v27ter::Rate::R2400,
+/// Which page carrier a speed calls for, and at which of its rates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Carrier {
+    V27ter(v27ter::Rate),
+    V29(v29::Rate),
+}
+
+impl Carrier {
+    /// `None` for anything this end has no pump for, which only ever happens
+    /// when the far end's DCS names one: the ladder this end climbs is built
+    /// from what it has.
+    fn of(speed: Speed) -> Option<Self> {
+        Some(match (speed.modulation, speed.bits_per_second) {
+            (Modulation::V27ter, 4800) => Self::V27ter(v27ter::Rate::R4800),
+            (Modulation::V27ter, 2400) => Self::V27ter(v27ter::Rate::R2400),
+            (Modulation::V29, 9600) => Self::V29(v29::Rate::R9600),
+            (Modulation::V29, 7200) => Self::V29(v29::Rate::R7200),
+            (Modulation::V29, 4800) => Self::V29(v29::Rate::R4800),
+            _ => return None,
+        })
     }
 }
 
@@ -30,8 +47,10 @@ pub struct FaxCall {
     call: Call,
     control_tx: v21::Sender,
     control_rx: v21::Receiver,
-    fast_tx: v27ter::Transmitter,
-    fast_rx: v27ter::Receiver,
+    v27ter_tx: v27ter::Transmitter,
+    v27ter_rx: v27ter::Receiver,
+    v29_tx: v29::Transmitter,
+    v29_rx: v29::Receiver,
     cng: v21::Tone,
     ced: v21::Tone,
     /// What the line was doing on the last sample, so a change can be seen.
@@ -54,12 +73,31 @@ impl FaxCall {
             call,
             control_tx: v21::Sender::new(fs),
             control_rx: v21::Receiver::new(fs),
-            fast_tx: v27ter::Transmitter::new(fs),
-            fast_rx: v27ter::Receiver::new(fs),
+            v27ter_tx: v27ter::Transmitter::new(fs),
+            v27ter_rx: v27ter::Receiver::new(fs),
+            v29_tx: v29::Transmitter::new(fs),
+            v29_rx: v29::Receiver::new(fs),
             cng: v21::Tone::new(v21::CNG, fs),
             ced: v21::Tone::new(v21::CED, fs),
             line: Line::Quiet,
         }
+    }
+
+    /// Use only these modulations: what goes in this end's DIS, and what it
+    /// will choose from when it sends.
+    #[must_use]
+    pub fn offering(mut self, modulations: &[Modulation]) -> Self {
+        self.call.set_offer(modulations);
+        self
+    }
+
+    /// Put V.27 ter's protection against talker echo in front of every burst:
+    /// a fifth of a second of plain carrier, then twenty milliseconds of
+    /// nothing, then the training.
+    #[must_use]
+    pub fn with_echo_protection(mut self, on: bool) -> Self {
+        self.v27ter_tx.set_echo_protection(on);
+        self
     }
 
     pub fn role(&self) -> Role {
@@ -90,6 +128,11 @@ impl FaxCall {
     /// The rate the page is being carried at.
     pub fn rate(&self) -> u32 {
         self.call.rate()
+    }
+
+    /// The modulation and rate the page is being carried at.
+    pub fn speed(&self) -> Speed {
+        self.call.speed()
     }
 
     /// How far through the page the call has got.
@@ -126,76 +169,132 @@ impl FaxCall {
 
     /// Whether anything of the far end's is on the line.
     pub fn carrier(&self) -> bool {
-        self.control_rx.carrier() || self.fast_rx.carrier()
+        self.control_rx.carrier() || self.v27ter_rx.carrier() || self.v29_rx.carrier()
     }
 
-    /// Whether the page carrier is the one being listened to.
+    /// The page carrier the line is on just now, if it is on one.
     ///
-    /// A fax call has two receivers and only ever one of them is the one that
-    /// matters. Which, decides what a scope should be drawing: the page
-    /// carrier has a constellation and the control channel has an eye, and
-    /// they are not the same picture at all.
-    fn on_the_page_carrier(&self) -> bool {
-        matches!(self.line, Line::Fast(_) | Line::FastListen(_))
+    /// A fax call has three receivers and only ever one of them is the one
+    /// that matters. Which, decides what a scope should be drawing: the page
+    /// carriers have constellations and the control channel has an eye, and
+    /// those are not the same picture at all.
+    fn page_carrier(&self) -> Option<Carrier> {
+        match self.line {
+            Line::Fast(speed) | Line::FastListen(speed) => Carrier::of(speed),
+            _ => None,
+        }
     }
 
-    /// The point the page carrier last decided on, while it is the one in use.
+    /// The constellation on the line just now, while a page carrier is.
+    ///
+    /// Whichever end of it this is. Sending, it is the points going out --
+    /// there is nothing arriving on a half-duplex line to draw instead, and a
+    /// scope that froze on the last point it received would show a training
+    /// sequence as a single dot. Listening, it is the points the receiver
+    /// decided on, but only while it hears a carrier: the silence either side
+    /// of a burst comes out of an equaliser as a smear at the centre that is
+    /// not a picture of anything.
     pub fn constellation_point(&self) -> Option<(f64, f64)> {
-        self.on_the_page_carrier()
-            .then(|| self.fast_rx.constellation_point())
+        match self.line {
+            Line::Fast(speed) => match Carrier::of(speed)? {
+                Carrier::V27ter(_) => self.v27ter_tx.last_point(),
+                Carrier::V29(_) => self.v29_tx.last_point(),
+            },
+            Line::FastListen(speed) => match Carrier::of(speed)? {
+                Carrier::V27ter(_) => self
+                    .v27ter_rx
+                    .carrier()
+                    .then(|| self.v27ter_rx.constellation_point()),
+                Carrier::V29(_) => self
+                    .v29_rx
+                    .carrier()
+                    .then(|| self.v29_rx.constellation_point()),
+            },
+            _ => None,
+        }
+    }
+
+    /// How far out that constellation reaches.
+    ///
+    /// One for V.27 ter, whose points are on the unit circle. V.29's outer
+    /// ring on the axes is a third beyond it, and a scope drawn to the unit
+    /// circle would put four of its sixteen points off the edge.
+    pub fn constellation_peak(&self) -> f64 {
+        match self.page_carrier() {
+            Some(Carrier::V29(_)) => self.v29_rx.constellation_peak(),
+            _ => 1.0,
+        }
     }
 
     /// The control channel's discriminator, while that is the one in use.
     pub fn discriminator(&self) -> Option<f64> {
-        (!self.on_the_page_carrier()).then(|| self.control_rx.discriminator())
+        self.on_the_control_channel()
+            .then(|| self.control_rx.discriminator())
     }
 
     /// One reading per recovered bit of the control channel.
     pub fn take_symbol(&mut self) -> Option<f64> {
-        if self.on_the_page_carrier() {
+        if !self.on_the_control_channel() {
             return None;
         }
         self.control_rx.take_symbol()
     }
 
+    fn on_the_control_channel(&self) -> bool {
+        !matches!(self.line, Line::Fast(_) | Line::FastListen(_))
+    }
+
     /// Mean distance from the decisions being made, where there are points to
     /// decide between.
     pub fn residual_error(&self) -> Option<f64> {
-        self.on_the_page_carrier()
-            .then(|| self.fast_rx.residual_error())
+        Some(match self.page_carrier()? {
+            Carrier::V27ter(_) => self.v27ter_rx.residual_error(),
+            Carrier::V29(_) => self.v29_rx.residual_error(),
+        })
     }
 
     /// That distance as a fraction of the gap between neighbouring points,
     /// where half is the decision boundary.
     pub fn reception(&self) -> Option<f64> {
-        self.on_the_page_carrier()
-            .then(|| self.fast_rx.residual_error() / self.fast_rx.point_spacing())
+        Some(match self.page_carrier()? {
+            Carrier::V27ter(_) => {
+                self.v27ter_rx.residual_error() / self.v27ter_rx.point_spacing()
+            }
+            Carrier::V29(_) => self.v29_rx.residual_error() / self.v29_rx.point_spacing(),
+        })
     }
 
     /// How many points the scope should expect.
     pub fn states(&self) -> usize {
-        if self.on_the_page_carrier() {
-            usize::from(self.fast_rx.rate().phases())
-        } else {
-            2
+        match self.page_carrier() {
+            None => 2,
+            Some(Carrier::V27ter(rate)) => usize::from(rate.phases()),
+            Some(Carrier::V29(rate)) => rate.constellation().len(),
         }
     }
 
     /// Short name for the signal shape, as a faceplate would print it.
+    ///
+    /// V.29 is amplitude and phase rather than a square grid, so its names
+    /// say so: two radii on each of the eight phases is not what "16QAM" makes
+    /// anybody picture.
     pub fn shape(&self) -> &'static str {
-        match (self.on_the_page_carrier(), self.fast_rx.rate()) {
-            (false, _) => "2FSK",
-            (true, v27ter::Rate::R4800) => "8PSK",
-            (true, v27ter::Rate::R2400) => "4PSK",
+        match self.page_carrier() {
+            None => "2FSK",
+            Some(Carrier::V27ter(v27ter::Rate::R4800)) => "8PSK",
+            Some(Carrier::V27ter(v27ter::Rate::R2400)) => "4PSK",
+            Some(Carrier::V29(v29::Rate::R9600)) => "16APM",
+            Some(Carrier::V29(v29::Rate::R7200)) => "8APM",
+            Some(Carrier::V29(v29::Rate::R4800)) => "4PSK",
         }
     }
 
     /// The modulation carrying the line just now.
     pub fn standard(&self) -> &'static str {
-        if self.on_the_page_carrier() {
-            "V.27ter"
-        } else {
-            "V.21"
+        match self.page_carrier() {
+            None => "V.21",
+            Some(Carrier::V27ter(_)) => "V.27ter",
+            Some(Carrier::V29(_)) => "V.29",
         }
     }
 
@@ -219,22 +318,36 @@ impl FaxCall {
             // Nothing should be left running by the time the procedure moves
             // on, since it waits for the line to go idle first. This is only
             // in case something ends a call in the middle of a burst.
-            Line::Fast(_) => self.fast_tx.abort(),
+            Line::Fast(_) => {
+                self.v27ter_tx.abort();
+                self.v29_tx.abort();
+            }
             _ => {}
         }
         match want {
             Line::Control => self.control_tx.set_transmitting(true),
-            Line::Fast(rate) => {
-                // Always the long turn-on sequence. T.30 leaves the choice to
-                // the sender for V.27 ter, and a fax turns the line around
-                // between every message, so nothing is remembered from the
-                // last burst that a short one could refresh.
-                self.fast_tx.start(rate_of(rate), v27ter::Training::Long);
-            }
-            Line::FastListen(rate) => {
-                self.fast_rx.set_rate(rate_of(rate));
-                self.fast_rx.restart();
-            }
+            Line::Fast(speed) => match Carrier::of(speed) {
+                // Always V.27 ter's long turn-on sequence. T.30 leaves the
+                // choice to the sender, and a fax turns the line around between
+                // every message, so nothing is remembered from the last burst
+                // that a short one could refresh. V.29 has only the one.
+                Some(Carrier::V27ter(rate)) => {
+                    self.v27ter_tx.start(rate, v27ter::Training::Long);
+                }
+                Some(Carrier::V29(rate)) => self.v29_tx.start(rate),
+                None => {}
+            },
+            Line::FastListen(speed) => match Carrier::of(speed) {
+                Some(Carrier::V27ter(rate)) => {
+                    self.v27ter_rx.set_rate(rate);
+                    self.v27ter_rx.restart();
+                }
+                Some(Carrier::V29(rate)) => {
+                    self.v29_rx.set_rate(rate);
+                    self.v29_rx.restart();
+                }
+                None => {}
+            },
             _ => {}
         }
         self.line = want;
@@ -253,14 +366,27 @@ impl FaxCall {
                 if let Some(bit) = self.control_rx.feed(input) {
                     self.call.control_bit(bit);
                 }
+                self.call.set_control_carrier(self.control_rx.carrier());
             }
-            Line::FastListen(_) => {
-                self.fast_rx.feed(input);
-                let bits = self.fast_rx.take_bits();
+            Line::FastListen(speed) => {
+                let (bits, carrier) = match Carrier::of(speed) {
+                    Some(Carrier::V27ter(_)) => {
+                        self.v27ter_rx.feed(input);
+                        (self.v27ter_rx.take_bits(), self.v27ter_rx.carrier())
+                    }
+                    Some(Carrier::V29(_)) => {
+                        self.v29_rx.feed(input);
+                        (self.v29_rx.take_bits(), self.v29_rx.carrier())
+                    }
+                    // A speed this end has no receiver for hears nothing, and
+                    // the training check that never arrives is refused, which
+                    // sends the far end down its own ladder.
+                    None => (Vec::new(), false),
+                };
                 if !bits.is_empty() {
                     self.call.fast_bits(&bits);
                 }
-                self.call.set_fast_carrier(self.fast_rx.carrier());
+                self.call.set_fast_carrier(carrier);
             }
             Line::Control | Line::Fast(_) | Line::CalledTone => {}
         }
@@ -279,22 +405,38 @@ impl FaxCall {
                 let idle = self.control_tx.pending_bits() == 0;
                 (self.control_tx.next_sample(), idle)
             }
-            Line::Fast(_) => {
-                while self.fast_tx.pending_bits() < 32 {
-                    match self.call.next_fast_bit() {
-                        Some(bit) => self.fast_tx.push_bits(&[bit]),
-                        None => break,
+            Line::Fast(speed) => match Carrier::of(speed) {
+                Some(Carrier::V27ter(_)) => {
+                    while self.v27ter_tx.pending_bits() < 32 {
+                        match self.call.next_fast_bit() {
+                            Some(bit) => self.v27ter_tx.push_bits(&[bit]),
+                            None => break,
+                        }
                     }
+                    // Nothing left to hand over and nothing left in the
+                    // modulator: the burst is over, so take the carrier down
+                    // with a turn-off rather than cutting it.
+                    if self.v27ter_tx.trained() && self.v27ter_tx.pending_bits() == 0 {
+                        self.v27ter_tx.stop();
+                    }
+                    let idle = !self.v27ter_tx.is_transmitting();
+                    (self.v27ter_tx.next_sample(), idle)
                 }
-                // Nothing left to hand over and nothing left in the
-                // modulator: the burst is over, so take the carrier down the
-                // way V.27 ter asks rather than cutting it.
-                if self.fast_tx.trained() && self.fast_tx.pending_bits() == 0 {
-                    self.fast_tx.stop();
+                Some(Carrier::V29(_)) => {
+                    while self.v29_tx.pending_bits() < 32 {
+                        match self.call.next_fast_bit() {
+                            Some(bit) => self.v29_tx.push_bits(&[bit]),
+                            None => break,
+                        }
+                    }
+                    if self.v29_tx.trained() && self.v29_tx.pending_bits() == 0 {
+                        self.v29_tx.stop();
+                    }
+                    let idle = !self.v29_tx.is_transmitting();
+                    (self.v29_tx.next_sample(), idle)
                 }
-                let idle = !self.fast_tx.is_transmitting();
-                (self.fast_tx.next_sample(), idle)
-            }
+                None => (0.0, true),
+            },
             Line::CallingTone => {
                 let on = self.call.calling_tone_on();
                 // The tone keeps running while it is silent, so its phase is
@@ -522,8 +664,8 @@ mod tests {
     ///
     /// Two different pictures, because there are two carriers. The 300 bit/s
     /// channel is frequency shift keying and what it has is an eye; the page
-    /// carrier is eight points on a circle and what it has is a
-    /// constellation. A panel showing neither for the whole of a call is a
+    /// carrier -- V.29 at 9600, between two of these -- is sixteen points on
+    /// two radii, and what it has is a constellation. A panel showing neither for the whole of a call is a
     /// panel that has nothing to say about the one modulation in the call
     /// that can actually go wrong.
     #[test]
@@ -569,18 +711,20 @@ mod tests {
 
         assert!(answerer.received().is_some(), "the page did not arrive");
         assert!(
-            shapes.contains(&"2FSK") && shapes.contains(&"8PSK"),
+            shapes.contains(&"2FSK") && shapes.contains(&"16APM"),
             "the scope was never told what it was drawing: {shapes:?}"
         );
         assert!(eye > 500, "only {eye} readings for the eye");
         assert!(points.len() > 1000, "only {} points", points.len());
 
-        // Eight phases on the unit circle, so everything should land near it.
+        // V.29's points run from the inner diagonals, at the square root of
+        // 2 over that of 13.5, to the outer axes at 5 over it: 0.38 to 1.36
+        // with the mean power made one. Anything well outside is not a point.
         let strays = points
             .iter()
             .filter(|(x, y)| {
                 let r = (x * x + y * y).sqrt();
-                !(0.5..1.6).contains(&r)
+                !(0.2..1.6).contains(&r)
             })
             .count();
         assert!(
@@ -593,6 +737,79 @@ mod tests {
             "the receiver was missing by {worst_reception:.2} of a gap, and \
              half is the decision boundary"
         );
+    }
+
+    /// What a real fax machine sends in front of its training.
+    ///
+    /// A public fax service sending to this modem put V.27 ter's protection
+    /// against talker echo in front of every training check: a fifth of a
+    /// second of plain carrier, twenty milliseconds of silence, then the
+    /// training. The carrier going away for those twenty milliseconds was
+    /// taken for the end of the burst, so the answering end judged a training
+    /// check made of nothing but that plain carrier, refused it, and did the
+    /// same again at 2400 until the far end gave up. Its receiver had read the
+    /// training check perfectly -- 7195 zeros out of 7200, both times.
+    #[test]
+    fn a_silence_inside_the_training_is_not_the_end_of_the_burst() {
+        let page = a_page(6);
+        let mut caller = FaxCall::originate(FS, "1300368909", Some(page.clone()))
+            .offering(&[Modulation::V27ter])
+            .with_echo_protection(true);
+        let mut answerer = FaxCall::answer(FS, "61388880000");
+        between(&mut caller, &mut answerer, 40.0);
+        let got = answerer
+            .received()
+            .unwrap_or_else(|| panic!("no page arrived ({:?})", answerer.trouble()));
+        assert_eq!(got.lines, page.lines, "the page came out different");
+        assert_eq!(caller.rate(), 4800, "the far end had to drop a rate to get through");
+    }
+
+
+    /// The end that is sending draws what it sends.
+    ///
+    /// A fax is half duplex, so while the training goes out there is nothing
+    /// arriving to draw. The panel showed the control channel's eye instead,
+    /// which reads as frequency shift keying in the middle of a burst that is
+    /// nothing of the kind.
+    #[test]
+    fn the_sending_end_draws_the_constellation_it_is_sending() {
+        let mut caller = FaxCall::originate(FS, "61399990000", Some(a_page(4)));
+        let mut answerer = FaxCall::answer(FS, "61388880000");
+        let mut during_training: Vec<&str> = Vec::new();
+        let mut radii: Vec<f64> = Vec::new();
+        let (mut to_caller, mut to_answerer) = (0.0, 0.0);
+        for _ in 0..(FS * 40.0) as usize {
+            let a = caller.step(to_caller);
+            let b = answerer.step(to_answerer);
+            to_caller = b;
+            to_answerer = a;
+            if matches!(caller.phase(), Phase::Training | Phase::Sending) {
+                let shape = caller.shape();
+                if during_training.last() != Some(&shape) {
+                    during_training.push(shape);
+                }
+                if let Some((x, y)) = caller.constellation_point() {
+                    radii.push((x * x + y * y).sqrt());
+                }
+            }
+            if caller.phase().is_over() && answerer.phase().is_over() {
+                break;
+            }
+        }
+        assert!(
+            during_training.contains(&"16APM"),
+            "the sending end never said it was sending V.29: {during_training:?}"
+        );
+        assert!(radii.len() > 10_000, "only {} points while sending", radii.len());
+        // Every one of them exactly a point of Figure 1, since these are the
+        // points that were sent rather than a receiver's guess at them.
+        let rms = 13.5f64.sqrt();
+        let figure = [2f64.sqrt(), 3.0, 18f64.sqrt(), 5.0].map(|r| r / rms);
+        let off = radii
+            .iter()
+            .filter(|r| figure.iter().all(|f| (*r - f).abs() > 1e-9))
+            .count();
+        assert_eq!(off, 0, "{off} points sent were not points of the constellation");
     }
 
     #[test]

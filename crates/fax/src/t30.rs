@@ -476,14 +476,24 @@ pub fn set_field(fif: &mut Vec<u8>, from: usize, to: usize, value: u8) {
 /// bit and everything past it is optional, so leaving it clear says there is
 /// nothing more to say. Error correction, T.6 coding and every later
 /// extension live beyond it and are not offered, because they are not built.
-pub fn our_capabilities() -> Vec<u8> {
+pub fn our_capabilities(offer: &[Modulation]) -> Vec<u8> {
     let mut fif = vec![0u8; 3];
     // Bit 10: this machine can receive a document. Bit 9 stays clear -- there
     // is nothing here for the far end to poll.
     set_bit(&mut fif, 10, true);
-    // Bits 11 to 14: V.27 ter, meaning 4800 with 2400 behind it. Not the
-    // 0000 row, which is the fall-back alone and would cost half the rate.
-    set_field(&mut fif, 11, 14, 0b0100);
+    // Bits 11 to 14, as Table 2 writes the rows that apply. Never the 0000
+    // row, which is V.27 ter's fall-back alone and would cost half its rate.
+    let rates = match (
+        offer.contains(&Modulation::V27ter),
+        offer.contains(&Modulation::V29),
+    ) {
+        (true, true) => 0b1100,
+        (false, true) => 0b1000,
+        // V.27 ter is what every group 3 machine must have, so it is also
+        // what an empty offer comes to.
+        _ => 0b0100,
+    };
+    set_field(&mut fif, 11, 14, rates);
     // Bit 15: 7.7 lines per millimetre as well as 3.85.
     set_bit(&mut fif, 15, true);
     // Bit 16 stays clear: two-dimensional coding is T.4 4.2 and only the

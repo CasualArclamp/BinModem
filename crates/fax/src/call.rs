@@ -31,10 +31,20 @@ pub enum Role {
     Answerer,
 }
 
+/// What carries a page: a modulation, and one of its rates.
+///
+/// Both, because neither is enough alone. 9600 is V.29 or V.17 and 7200 is
+/// either of those too, and they are not remotely the same signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Speed {
+    pub modulation: Modulation,
+    pub bits_per_second: u32,
+}
+
 /// What the procedure wants on the line at this instant.
 ///
-/// The rate is in bits per second rather than a modulation object, because
-/// which data pump carries it is not this crate's business.
+/// A modulation and a rate rather than a data pump, because which pump
+/// carries them is not this crate's business.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Line {
     /// Nothing at all. Every turnaround has one of these in it.
@@ -48,9 +58,9 @@ pub enum Line {
     /// Listening on V.21 channel 2.
     Listen,
     /// A high-speed burst going out.
-    Fast(u32),
+    Fast(Speed),
     /// Listening for a high-speed burst.
-    FastListen(u32),
+    FastListen(Speed),
 }
 
 /// How far the call has got.
@@ -154,6 +164,38 @@ pub const TCF_SECONDS: f64 = 1.5;
 /// arrived and ended is what the procedure reads that as.
 const FAST_CARRIER_SETTLED: f64 = 0.040;
 
+/// How long the high-speed carrier has to have been gone before the burst is
+/// over.
+///
+/// Not the instant it goes, because a real transmitter takes it away on
+/// purpose in the middle of a burst. V.27 ter's protection against talker echo
+/// is a fifth of a second of plain carrier and then "20 ms to 25 ms" of
+/// nothing before the training starts, and a public fax service sends exactly
+/// that. Read as the end of the burst, it had this end judge a training check
+/// made of nothing but the plain carrier -- and refuse it, every time, while
+/// the check itself was still arriving and would have read as 7195 zeros out
+/// of 7200.
+///
+/// A fifth of a second bridges that gap many times over, and the short
+/// dropouts a packet network leaves in the middle of a page with it. Against
+/// the three seconds T.30 gives a receiver to answer, it is nothing.
+const FAST_CARRIER_GONE: f64 = 0.200;
+
+/// How long a timer that has run out may be held open while the far end is
+/// audibly talking on the control channel.
+///
+/// A timeout in a waiting phase means sending something: a DIS again, a DCS
+/// again, a failure to train. Sending it while the far end's flags are on the
+/// line talks over the very answer being waited for, and a half-duplex modem
+/// cannot hear while it talks, so the answer is lost for certain. A recorded
+/// call did exactly that -- repeated its DIS over the far end's TSI and DCS,
+/// and never heard either.
+///
+/// Held, but not for ever: a carrier detector stuck on by a noisy line would
+/// otherwise wait out the whole call. Six seconds is T2, and longer than the
+/// longest burst of frames anything sends in phase B.
+const HOLD_FOR_THE_FAR_END: f64 = 6.0;
+
 /// How many of a training check's bits have to be zeros for the rate to be
 /// accepted, and how many in a row mark where it starts.
 ///
@@ -170,11 +212,11 @@ const FAST_CARRIER_SETTLED: f64 = 0.040;
 const TCF_ZEROS_WANTED: f64 = 0.95;
 const TCF_STARTS_AFTER: usize = 32;
 
-/// The rates this modem can carry a page at, fastest first.
+/// The modulations this modem can carry a page with.
 ///
-/// V.27 ter and nothing else yet. What goes in a DIS is this same fact in the
+/// V.17 is not among them yet. What goes in a DIS is this same fact in the
 /// form Table 2 wants it.
-pub const OUR_MODULATIONS: [Modulation; 1] = [Modulation::V27ter];
+pub const OUR_MODULATIONS: [Modulation; 2] = [Modulation::V27ter, Modulation::V29];
 
 /// A fax call.
 #[derive(Debug)]
@@ -207,8 +249,12 @@ pub struct Call {
     /// The rate the page is being carried at, once it is settled.
     modulation: Modulation,
     rate: u32,
-    /// Rates still worth trying, should the far end refuse this one.
-    fallback: Vec<u32>,
+    /// Speeds still worth trying, fastest first, should the far end refuse
+    /// this one.
+    fallback: Vec<Speed>,
+    /// The modulations this end is willing to use, which is what goes in its
+    /// DIS and what it will choose from when it sends.
+    offer: Vec<Modulation>,
     /// The minimum scan line time the receiving end asked for, as the three
     /// bits of Table 2 and as milliseconds.
     scan_line_field: u8,
@@ -229,8 +275,13 @@ pub struct Call {
     /// arrived is not the same thing.
     fast_carrier: bool,
     fast_seen: bool,
-    /// How long it has been up for, without a break.
+    /// How long it has been up for, and gone for, without a break.
     fast_up: f64,
+    fast_down: f64,
+    /// Whether the far end's control channel is on the line, and how long a
+    /// timeout has been held open because of it.
+    control_carrier: bool,
+    held: f64,
     /// The page arriving, if one is.
     decoder: t4::Decoder,
     /// The page that arrived.
@@ -281,6 +332,7 @@ impl Call {
             modulation: Modulation::V27ter,
             rate: 4800,
             fallback: Vec::new(),
+            offer: OUR_MODULATIONS.to_vec(),
             scan_line_field: 0b111,
             scan_line_ms: 0.0,
             resolution: Resolution::Standard,
@@ -291,6 +343,9 @@ impl Call {
             fast_carrier: false,
             fast_seen: false,
             fast_up: 0.0,
+            fast_down: 0.0,
+            control_carrier: false,
+            held: 0.0,
             decoder: t4::Decoder::new(),
             received: None,
             accepted: false,
@@ -318,6 +373,31 @@ impl Call {
 
     pub fn modulation(&self) -> Modulation {
         self.modulation
+    }
+
+    /// The modulation and rate the page is being carried at.
+    pub fn speed(&self) -> Speed {
+        Speed {
+            modulation: self.modulation,
+            bits_per_second: self.rate,
+        }
+    }
+
+    /// Use only these modulations, of the ones this end has.
+    ///
+    /// Anything not built is dropped, and an empty offer is V.27 ter: T.30
+    /// makes it the one every machine must have, so a call that offered
+    /// nothing at all would be a call nobody could answer.
+    pub fn set_offer(&mut self, offer: &[Modulation]) {
+        let mut kept: Vec<Modulation> = offer
+            .iter()
+            .copied()
+            .filter(|m| OUR_MODULATIONS.contains(m))
+            .collect();
+        if kept.is_empty() {
+            kept.push(Modulation::V27ter);
+        }
+        self.offer = kept;
     }
 
     pub fn resolution(&self) -> Resolution {
@@ -377,8 +457,8 @@ impl Call {
             | Phase::Acknowledging
             | Phase::EndingPage
             | Phase::Ending => Line::Control,
-            Phase::Training | Phase::Sending => Line::Fast(self.rate),
-            Phase::CheckingTraining | Phase::Receiving => Line::FastListen(self.rate),
+            Phase::Training | Phase::Sending => Line::Fast(self.speed()),
+            Phase::CheckingTraining | Phase::Receiving => Line::FastListen(self.speed()),
             Phase::Done | Phase::Failed => Line::Quiet,
         }
     }
@@ -442,6 +522,11 @@ impl Call {
             }
             _ => {}
         }
+    }
+
+    /// Whether the far end's control channel is on the line.
+    pub fn set_control_carrier(&mut self, up: bool) {
+        self.control_carrier = up;
     }
 
     /// Whether the far end's high-speed carrier is on the line.
@@ -509,16 +594,19 @@ impl Call {
             Phase::CheckingTraining | Phase::Receiving => {
                 if self.fast_carrier {
                     self.fast_up += self.step;
+                    self.fast_down = 0.0;
                     if self.fast_up > FAST_CARRIER_SETTLED {
                         self.fast_seen = true;
                     }
+                } else {
+                    self.fast_down += self.step;
                 }
                 // A high-speed burst has no closing flag. What ends it is the
                 // carrier going away, and for a page the return to control
                 // T.4 puts at the end of it as well.
                 if self.phase == Phase::Receiving && self.decoder.is_done() {
                     self.page_ended();
-                } else if self.fast_seen && !self.fast_carrier {
+                } else if self.fast_seen && self.fast_down > FAST_CARRIER_GONE {
                     self.fast_burst_heard();
                 } else if self.phase == Phase::CheckingTraining && self.check_is_long_enough()
                 {
@@ -537,7 +625,14 @@ impl Call {
             | Phase::AwaitingPostMessage
             | Phase::AwaitingDisconnect => {
                 if self.timer <= 0.0 {
-                    self.timed_out();
+                    if self.control_carrier && self.held < HOLD_FOR_THE_FAR_END {
+                        self.held += self.step;
+                    } else {
+                        self.held = 0.0;
+                        self.timed_out();
+                    }
+                } else {
+                    self.held = 0.0;
                 }
             }
             Phase::Done | Phase::Failed => {}
@@ -575,11 +670,13 @@ impl Call {
                 self.fast_in.clear();
                 self.fast_seen = false;
                 self.fast_up = 0.0;
+                self.fast_down = 0.0;
             }
             Phase::Receiving => {
                 self.decoder.reset();
                 self.fast_seen = false;
                 self.fast_up = 0.0;
+                self.fast_down = 0.0;
             }
             _ => {}
         }
@@ -754,42 +851,59 @@ impl Call {
 
     // ---- the caller's side ------------------------------------------------
 
-    /// Pick the fastest rate both ends have (5.3.6.2.2).
-    fn choose_rate(&mut self) -> bool {
+    /// Every speed both ends have, fastest first.
+    ///
+    /// One ladder across modulations rather than one per modulation, because
+    /// a line that will not carry V.29 at 7200 may well carry V.27 ter at 4800,
+    /// and stopping at the bottom of V.29 would give up on a call that had two
+    /// more rungs in it.
+    pub fn ladder(&self) -> Vec<Speed> {
         let Some(caps) = self.capabilities.as_ref() else {
-            return false;
+            return Vec::new();
         };
-        match caps.best_shared(&OUR_MODULATIONS) {
-            Some((modulation, rate)) => {
-                self.modulation = modulation;
-                self.rate = rate;
-                self.attempts = 0;
-                self.fallback = modulation
+        let mut speeds: Vec<Speed> = caps
+            .modulations
+            .iter()
+            .filter(|m| self.offer.contains(m))
+            .flat_map(|&modulation| {
+                let ceiling = caps.ceiling(modulation);
+                modulation
                     .rates()
                     .iter()
-                    .copied()
-                    .filter(|r| *r < rate && *r <= caps.ceiling(modulation))
-                    .collect();
-                true
-            }
-            None => {
-                self.bow_out("nothing in common with the far end");
-                false
-            }
-        }
+                    .filter(move |r| **r <= ceiling)
+                    .map(move |&bits_per_second| Speed { modulation, bits_per_second })
+            })
+            .collect();
+        speeds.sort_by_key(|s| std::cmp::Reverse(s.bits_per_second));
+        speeds
     }
 
-    /// Try the next rate down after a failure to train (6.2.7).
-    fn step_down(&mut self) {
-        match self.fallback.first().copied() {
-            Some(rate) => {
-                self.fallback.remove(0);
-                self.rate = rate;
-                self.attempts = 0;
-                self.pause_then(Phase::Commanding);
-            }
-            None => self.bow_out("the line would not carry a page at any rate"),
+    /// Pick the fastest speed both ends have (5.3.6.2.2).
+    fn choose_rate(&mut self) -> bool {
+        let mut ladder = self.ladder();
+        if ladder.is_empty() {
+            self.bow_out("nothing in common with the far end");
+            return false;
         }
+        let first = ladder.remove(0);
+        self.modulation = first.modulation;
+        self.rate = first.bits_per_second;
+        self.fallback = ladder;
+        self.attempts = 0;
+        true
+    }
+
+    /// Try the next speed down after a failure to train (6.2.7).
+    fn step_down(&mut self) {
+        if self.fallback.is_empty() {
+            self.bow_out("the line would not carry a page at any rate");
+            return;
+        }
+        let next = self.fallback.remove(0);
+        self.modulation = next.modulation;
+        self.rate = next.bits_per_second;
+        self.attempts = 0;
+        self.pause_then(Phase::Commanding);
     }
 
     fn send_command(&mut self) {
@@ -843,7 +957,7 @@ impl Call {
         let csi = Message::new(Frame::Csi, false)
             .and_more()
             .with_fif(&t30::identification_field(&self.identification));
-        let dis = Message::new(Frame::Dis, false).with_fif(&t30::our_capabilities());
+        let dis = Message::new(Frame::Dis, false).with_fif(&t30::our_capabilities(&self.offer));
         self.sender.send(&[csi, dis]);
     }
 
@@ -988,7 +1102,16 @@ mod tests {
     /// and then giving up -- which is right, and is not what most of these
     /// are asking about.
     fn run_until(far: &[Message], seconds: f64, done: impl Fn(&Call) -> bool) -> Call {
-        let mut call = Call::originate(FS, "61400000000", None);
+        run_call(Call::originate(FS, "61400000000", None), far, seconds, done)
+    }
+
+    /// The same, with a call already made.
+    fn run_call(
+        mut call: Call,
+        far: &[Message],
+        seconds: f64,
+        done: impl Fn(&Call) -> bool,
+    ) -> Call {
         let mut tx = frames::Sender::new();
         tx.send(far);
         for _ in 0..(seconds * FS) as usize {
@@ -1130,14 +1253,15 @@ mod tests {
     #[test]
     fn a_command_is_tried_again_before_the_rate_is_dropped() {
         // 5.4.2 allows three goes. A DCS that was not heard is not a line
-        // that cannot carry the rate, and dropping to 2400 on the first
-        // silence doubles how long the page takes for no reason.
+        // that cannot carry the rate, and dropping a rung on the first
+        // silence makes the page take longer for no reason.
         let call = run_until(
             &[Message::new(Frame::Dis, false).with_fif(&DIS)],
             30.0,
-            |c| c.rate() == 2400,
+            |c| c.rate() == 7200,
         );
-        assert_eq!(call.rate(), 2400, "it never dropped a rate at all");
+        assert_eq!(call.rate(), 7200, "it never dropped a rate at all");
+        assert_eq!(call.modulation(), Modulation::V29, "it skipped a rung");
         let commands = call
             .heard
             .iter()
@@ -1157,11 +1281,59 @@ mod tests {
         // the line for its whole T1 and then reporting a failure.
         let mut fif = vec![0u8; 3];
         t30::set_bit(&mut fif, 10, true);
-        // Bits 11 to 14 as 1000: V.29 alone, which this end cannot raise.
+        // Bits 11 to 14 as 1000: V.29 alone, and this end told to use only
+        // V.27 ter, so there is nothing both of them have.
         t30::set_field(&mut fif, 11, 14, 0b1000);
-        let call = run(&[Message::new(Frame::Dis, false).with_fif(&fif)], 20.0);
+        let mut ours = Call::originate(FS, "1", None);
+        ours.set_offer(&[Modulation::V27ter]);
+        let call = run_call(
+            ours,
+            &[Message::new(Frame::Dis, false).with_fif(&fif)],
+            20.0,
+            |c| c.phase().is_over(),
+        );
         assert_eq!(call.phase(), Phase::Done, "it did not hang up politely");
         assert!(call.trouble.is_some(), "it gave up without saying why");
+    }
+
+
+    #[test]
+    fn a_timeout_waits_for_the_far_end_to_stop_talking() {
+        // The far end's flags are on the line when the six seconds run out.
+        // Repeating the DIS now would talk over its command.
+        let mut call = Call::answer(FS, "1");
+        call.phase = Phase::AwaitingCommand;
+        call.timer = 0.01;
+        call.set_control_carrier(true);
+        for _ in 0..(FS * 2.0) as usize {
+            call.tick(true);
+        }
+        assert_eq!(
+            call.phase(),
+            Phase::AwaitingCommand,
+            "it talked over the far end"
+        );
+        call.set_control_carrier(false);
+        for _ in 0..(FS * 0.2) as usize {
+            call.tick(true);
+        }
+        assert_ne!(
+            call.phase(),
+            Phase::AwaitingCommand,
+            "it went on waiting after the far end stopped"
+        );
+    }
+
+    #[test]
+    fn a_carrier_that_never_goes_away_does_not_hold_the_call_for_ever() {
+        let mut call = Call::answer(FS, "1");
+        call.phase = Phase::AwaitingCommand;
+        call.timer = 0.01;
+        call.set_control_carrier(true);
+        for _ in 0..(FS * (HOLD_FOR_THE_FAR_END + 1.0)) as usize {
+            call.tick(true);
+        }
+        assert_ne!(call.phase(), Phase::AwaitingCommand, "it waited for ever");
     }
 
     #[test]
@@ -1204,9 +1376,9 @@ mod tests {
             ]
         );
         assert!(caps.receives);
-        // Only V.27 ter is in common, and 4800 is the faster of its two.
-        assert_eq!(call.rate(), 4800);
-        assert_eq!(call.modulation(), Modulation::V27ter);
+        // V.17 is not built, so the fastest thing in common is V.29 at 9600.
+        assert_eq!(call.rate(), 9600);
+        assert_eq!(call.modulation(), Modulation::V29);
     }
 
     #[test]
@@ -1258,7 +1430,7 @@ mod tests {
         assert_eq!(sent[1].frame, Frame::Dcs);
         assert_eq!(
             t30::command_rate(&sent[1].fif),
-            Some((Modulation::V27ter, 4800))
+            Some((Modulation::V29, 9600))
         );
     }
 
@@ -1267,10 +1439,10 @@ mod tests {
         // The DIS this modem sends, read with the same reader that reads
         // everybody else's. A capability frame that cannot be read by its own
         // parser is one no far end will read either.
-        let caps = t30::capabilities(&t30::our_capabilities());
+        let caps = t30::capabilities(&t30::our_capabilities(&OUR_MODULATIONS));
         assert!(caps.receives);
         assert!(!caps.can_be_polled, "there is nothing here to fetch");
-        assert_eq!(caps.modulations, vec![Modulation::V27ter]);
+        assert_eq!(caps.modulations, vec![Modulation::V27ter, Modulation::V29]);
         assert!(caps.fine_resolution);
         assert!(!caps.two_dimensional, "only the one-dimensional code exists");
         assert!(!caps.error_correction);
@@ -1278,6 +1450,80 @@ mod tests {
         assert_eq!(caps.length, "unlimited");
         assert_eq!(caps.scan_line_ms, 0.0);
         assert_eq!(caps.octets, 3, "a DIS with no extension is three octets");
+    }
+
+    #[test]
+    fn a_narrower_offer_reads_back_as_narrower() {
+        for (offer, want) in [
+            (vec![Modulation::V27ter], vec![Modulation::V27ter]),
+            (vec![Modulation::V29], vec![Modulation::V29]),
+            (vec![Modulation::V29, Modulation::V27ter], vec![Modulation::V27ter, Modulation::V29]),
+            // Nothing at all is V.27 ter, which every machine must have.
+            (vec![], vec![Modulation::V27ter]),
+        ] {
+            let caps = t30::capabilities(&t30::our_capabilities(&offer));
+            assert_eq!(caps.modulations, want, "offering {offer:?}");
+        }
+    }
+
+    #[test]
+    fn the_ladder_runs_down_through_v29_and_on_into_v27ter() {
+        // The real machine's DIS offers all three. Without V.17 here, the
+        // ladder is V.29's two rates and then V.27 ter's two, in that order:
+        // a line that will not carry 7200 may well carry 4800, and a call
+        // that stopped at the bottom of one modulation would give up with two
+        // rungs left.
+        let mut call = Call::originate(FS, "1", None);
+        call.capabilities = Some(t30::capabilities(&DIS));
+        let ladder: Vec<(Modulation, u32)> = call
+            .ladder()
+            .iter()
+            .map(|s| (s.modulation, s.bits_per_second))
+            .collect();
+        assert_eq!(
+            ladder,
+            vec![
+                (Modulation::V29, 9600),
+                (Modulation::V29, 7200),
+                (Modulation::V27ter, 4800),
+                (Modulation::V27ter, 2400),
+            ]
+        );
+    }
+
+    #[test]
+    fn what_this_end_will_not_use_is_not_on_the_ladder() {
+        let mut call = Call::originate(FS, "1", None);
+        call.set_offer(&[Modulation::V27ter]);
+        call.capabilities = Some(t30::capabilities(&DIS));
+        assert!(call.ladder().iter().all(|s| s.modulation == Modulation::V27ter));
+        // And V.17, which the far end offers and this end has not got, is
+        // never offered no matter what is asked for.
+        call.set_offer(&[Modulation::V17]);
+        assert_eq!(call.offer, vec![Modulation::V27ter]);
+    }
+
+    #[test]
+    fn every_failure_to_train_takes_one_rung_down() {
+        let mut call = Call::originate(FS, "1", None);
+        call.capabilities = Some(t30::capabilities(&DIS));
+        assert!(call.choose_rate());
+        let mut seen = vec![(call.modulation(), call.rate())];
+        for _ in 0..3 {
+            call.step_down();
+            seen.push((call.modulation(), call.rate()));
+        }
+        assert_eq!(
+            seen,
+            vec![
+                (Modulation::V29, 9600),
+                (Modulation::V29, 7200),
+                (Modulation::V27ter, 4800),
+                (Modulation::V27ter, 2400),
+            ]
+        );
+        call.step_down();
+        assert!(call.trouble.is_some(), "ran off the bottom without saying so");
     }
 
     #[test]

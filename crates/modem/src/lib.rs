@@ -367,6 +367,12 @@ pub struct Modem {
     /// The last fax call, kept after it ends so the window can still show
     /// what the far end was.
     fax_result: Option<FaxCall>,
+    /// The modulations a fax call may carry a page with.
+    ///
+    /// What goes in this end's DIS when it answers, and what it chooses from
+    /// when it dials. Anything not built is ignored, and nothing at all comes
+    /// to V.27 ter, which every fax must have.
+    pub fax_offer: Vec<fax::t30::Modulation>,
     /// The page waiting to be sent, taken by the next fax call that dials.
     ///
     /// Taken rather than borrowed, so that a second call does not send the
@@ -421,6 +427,7 @@ impl Modem {
             negotiation: None,
             fax: None,
             fax_result: None,
+            fax_offer: fax::call::OUR_MODULATIONS.to_vec(),
             fax_page: None,
             fax_identification: String::new(),
             far_menu: None,
@@ -556,6 +563,9 @@ impl Modem {
     /// of sqrt(10), and the eight with a coordinate of four reach a quarter
     /// beyond it.
     pub fn constellation_peak(&self) -> f32 {
+        if let Some(fax) = self.fax.as_ref() {
+            return fax.constellation_peak() as f32;
+        }
         match self.pump.as_ref() {
             Some(Pump::V32(m)) => match m.status() {
                 v32::startup::Status::Connected(rate) => {
@@ -1370,12 +1380,13 @@ impl Modem {
             // T.30 has no way to swap those round on an ordinary call, and
             // nothing here wants one: a page goes out of the machine whose
             // operator put it in and asked for a number.
-            self.fax = Some(match role {
+            let call = match role {
                 Role::Calling => {
                     FaxCall::originate(self.fs, &self.fax_identification, self.fax_page.take())
                 }
                 Role::Answering => FaxCall::answer(self.fs, &self.fax_identification),
-            });
+            };
+            self.fax = Some(call.offering(&self.fax_offer));
             return;
         }
         self.since_dial_ms = 0;

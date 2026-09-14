@@ -1,6 +1,6 @@
 //! A whole A4 page across a simulated line.
 //!
-//! Ignored by default: a page at 4800 bit/s takes about a minute, and a
+//! Ignored by default: a page at 9600 bit/s takes most of a minute, and a
 //! minute of audio at both ends is a minute of arithmetic. Worth having
 //! anyway, because every other test here sends a handful of lines and a real
 //! one sends eleven hundred and forty-three.
@@ -35,10 +35,10 @@ fn a_whole_page_crosses() {
         let page = a_full_page(resolution);
         let coded = fax::t4::encode(&page.lines).len();
         eprintln!(
-            "{}: {} lines, {coded} bits, {:.0} s at 4800",
+            "{}: {} lines, {coded} bits, {:.0} s at 9600",
             resolution.name(),
             page.lines.len(),
-            coded as f64 / 4800.0
+            coded as f64 / 9600.0
         );
 
         let mut caller = Modem::new(FS);
