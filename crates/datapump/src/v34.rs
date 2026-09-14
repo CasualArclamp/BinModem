@@ -13,9 +13,11 @@
 //! and power in INFO1c and INFO1a. Phase 3 trains the equalisers and echo
 //! cancellers, and phase 4 the rest, before data.
 //!
-//! Built from phase 2 up, and phase 2 is done: the INFO sequences and the DPSK
-//! they ride on, the probing signals and what they measure, and the procedure
-//! for both ends. Phases 3 and 4 and the data mode are next.
+//! Built from phase 2 up, and the start-up is done: the INFO sequences and the
+//! DPSK they ride on, the probing signals and what they measure, the QAM of
+//! phases 3 and 4 and a receiver that trains on them, the J and MP exchanges,
+//! and the procedures for both ends, each checked against real modems where a
+//! recording has it. The data mode is next.
 
 pub mod constellation;
 pub mod dpsk;
@@ -26,3 +28,5 @@ pub mod probe;
 pub mod qam;
 pub mod receiver;
 pub mod signals;
+pub mod startup;
+pub mod training;

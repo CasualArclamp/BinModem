@@ -369,11 +369,12 @@ fn the_two_v32_carriers_are_two_ceilings() {
     assert_eq!(p.caller.states(), 128);
 }
 
-/// Two modems asked for V.34 agree on it in V.8 and go through its phase 2:
-/// capabilities, ranging, probing and the settlement. There is nothing after
-/// phase 2 yet, so both ends then hang up -- and what they found is kept.
+/// Two modems asked for V.34 agree on it in V.8 and go through its start-up:
+/// capabilities, ranging, probing and the settlement in phase 2, training and
+/// the MP exchange in phases 3 and 4. There is no data mode yet, so both ends
+/// then hang up -- and what they found is kept.
 #[test]
-fn two_modems_asked_for_v34_probe_the_line_and_hang_up() {
+fn two_modems_asked_for_v34_train_exchange_mp_and_hang_up() {
     let mut p = Pair::new();
     Pair::type_at(&mut p.host, "AT+MS=V34");
     Pair::type_at(&mut p.caller, "AT+MS=V34");
@@ -391,6 +392,7 @@ fn two_modems_asked_for_v34_probe_the_line_and_hang_up() {
         }
     }
     assert!(phases.contains(&"V.34 ranging"), "never ranged: {phases:?}");
+    assert!(phases.contains(&"V.34 phase 4: MP"), "never reached MP: {phases:?}");
     assert_eq!(p.caller.state(), State::Command, "still in {phases:?}");
     assert_eq!(p.host.state(), State::Command);
     assert!(p.caller_saw().contains("NO CARRIER"), "{}", p.caller_saw());
@@ -404,8 +406,14 @@ fn two_modems_asked_for_v34_probe_the_line_and_hang_up() {
         assert_eq!(info1a.probed.max_rate, 14, "{who}: {info1a:?}");
         let rtd = report.round_trip.expect("no round trip");
         assert!(rtd < 0.003, "{who}: {rtd} s round trip on a direct connection");
+        let training = report.training.as_ref().expect("phases 3 and 4 never started");
+        assert!(training.done, "{who}: {:?}", training.stopped);
+        assert_eq!(training.far_asked, Some(datapump::v34::signals::Size::Sixteen), "{who}");
+        assert!(training.phase3_snr.unwrap() > 30.0, "{who}: {:?}", training.phase3_snr);
+        assert_eq!(training.rates, Some((14, 14)), "{who}");
         let rows = modem.distant();
         assert!(rows.iter().any(|(k, v)| *k == "V.34 to this end" && v.contains("33600")), "{rows:?}");
+        assert!(rows.iter().any(|(k, v)| *k == "V.34 rates" && v == "33600 bit/s to this end, 33600 from it"), "{rows:?}");
     }
 }
 

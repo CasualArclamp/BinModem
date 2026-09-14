@@ -95,10 +95,10 @@ enum Pump {
     V32(Box<v32::startup::Modem>),
     /// Bell 103: 300 bit/s, two tones a direction, and nothing else at all.
     Bell103(Box<bell103::Modem>),
-    /// V.34's phase 2 and nothing after it: the line probed and ranged, what
-    /// the two ends would use settled -- and the call ended there, because
-    /// phases 3 and 4 and the data mode are not written yet.
-    V34(Box<v34::phase2::Modem>),
+    /// V.34's start-up: the line probed and ranged in phase 2, both receivers
+    /// trained and data mode's parameters exchanged in phases 3 and 4 -- and
+    /// the call ended there, because the data mode is not written yet.
+    V34(Box<v34::startup::Modem>),
 }
 
 impl Pump {
@@ -132,11 +132,11 @@ impl Pump {
                 bell103::Status::Connected(rate) => Progress::Connected(rate),
                 bell103::Status::Failed => Progress::Failed,
             },
-            // Done is not connected: there is nothing after phase 2 to connect
+            // Done is not connected: there is nothing after phase 4 to connect
             // with yet, so either way the call is over.
             Self::V34(m) => match m.status() {
-                v34::phase2::Status::Running => Progress::Negotiating,
-                v34::phase2::Status::Done | v34::phase2::Status::Failed(_) => Progress::Failed,
+                v34::startup::Status::Running => Progress::Negotiating,
+                v34::startup::Status::Done | v34::startup::Status::Failed(_) => Progress::Failed,
             },
         }
     }
@@ -191,7 +191,8 @@ impl Pump {
         match self {
             Self::V22bis(m) => Some(m.constellation_point()),
             Self::V32(m) => Some(m.constellation_point()),
-            Self::Bell103(_) | Self::V34(_) => None,
+            Self::V34(m) => m.constellation_point(),
+            Self::Bell103(_) => None,
         }
     }
 
@@ -266,7 +267,12 @@ impl Pump {
                 }
                 _ => 4,
             },
-            Self::Bell103(_) | Self::V34(_) => 2,
+            Self::Bell103(_) => 2,
+            // Phase 3's TRN and J are four points, and phase 4 is sixteen.
+            Self::V34(m) => match m.training() {
+                Some(_) => 16,
+                None => 2,
+            },
         }
     }
 
@@ -290,7 +296,10 @@ impl Pump {
                 _ => "4PSK",
             },
             Self::Bell103(_) => "2FSK",
-            Self::V34(_) => "DPSK",
+            Self::V34(m) => match m.training() {
+                Some(_) => "QAM",
+                None => "DPSK",
+            },
         }
     }
 
@@ -322,12 +331,12 @@ impl Pump {
     }
 }
 
-/// What V.34's phase 2 found, kept after the call it ended.
+/// What a V.34 start-up found, kept after the call it ended.
 ///
-/// Phase 2 is all of V.34 there is so far, so this is the whole of what a V.34
-/// call can tell anybody: what the far end said it could do, how long the line
-/// takes there and back, what the probing measured, and what the two ends
-/// would have used had there been anything to use it with.
+/// The start-up is all of V.34 there is so far, so this is the whole of what a
+/// V.34 call can tell anybody: what the far end said it could do, how long the
+/// line takes there and back, what the probing measured, what the two ends
+/// settled on, how well each trained, and the data mode each asked for.
 #[derive(Debug, Clone)]
 pub struct V34Report {
     pub role: v34::phase2::Role,
@@ -338,10 +347,33 @@ pub struct V34Report {
     pub reading: Option<v34::probe::Reading>,
     pub info1c: Option<v34::info::Info1c>,
     pub info1a: Option<v34::info::Info1a>,
+    /// Phases 3 and 4, if phase 2 got as far as starting them.
+    pub training: Option<V34Training>,
+}
+
+/// What phases 3 and 4 came to.
+#[derive(Debug, Clone)]
+pub struct V34Training {
+    /// Whether they got to the end, and if not where they stopped and why.
+    pub done: bool,
+    pub stopped: Option<(&'static str, &'static str)>,
+    /// The constellation each end's J asked the other to use in phase 4.
+    pub far_asked: Option<v34::signals::Size>,
+    pub asked: v34::signals::Size,
+    /// Signal to noise this end's receiver trained to in each phase.
+    pub phase3_snr: Option<f64>,
+    pub phase4_snr: Option<f64>,
+    /// The far end's clock against this one, in parts per million.
+    pub drift_ppm: f64,
+    pub our_mp: Option<v34::mp::Mp>,
+    pub far_mp: Option<v34::mp::Mp>,
+    /// This end's transmit and receive rates, as multiples of 2400.
+    pub rates: Option<(u8, u8)>,
 }
 
 impl V34Report {
-    fn of(m: &v34::phase2::Modem) -> Self {
+    fn of(startup: &v34::startup::Modem) -> Self {
+        let m = startup.phase2();
         Self {
             role: m.role(),
             failed: match m.status() {
@@ -353,7 +385,42 @@ impl V34Report {
             reading: m.reading().cloned(),
             info1c: m.info1c(),
             info1a: m.info1a(),
+            training: startup.training().map(|t| V34Training {
+                done: t.status() == v34::training::Status::Done,
+                stopped: match t.status() {
+                    v34::training::Status::Failed(why) => Some((t.phase(), why)),
+                    _ => None,
+                },
+                far_asked: t.far_asked(),
+                asked: t.asked(),
+                phase3_snr: t.phase3_snr(),
+                phase4_snr: t.phase4_snr(),
+                drift_ppm: t.drift_ppm(),
+                our_mp: t.our_mp(),
+                far_mp: t.far_mp(),
+                rates: t.rates(),
+            }),
         }
+    }
+
+    /// An MP sequence, as the panel says it.
+    fn mp(mp: &v34::mp::Mp) -> String {
+        let enabled = (1..=14).filter(|r| mp.rates >> (r - 1) & 1 == 1).count();
+        format!(
+            "up to {} call to answer and {} answer to call, {}-state trellis{}{}, {} rates{}, {}",
+            u32::from(mp.call_to_answer) * 2400,
+            u32::from(mp.answer_to_call) * 2400,
+            match mp.trellis {
+                v34::mp::Trellis::States16 => 16,
+                v34::mp::Trellis::States32 => 32,
+                v34::mp::Trellis::States64 => 64,
+            },
+            if mp.non_linear { ", non-linear" } else { "" },
+            if mp.expanded_shaping { ", expanded shaping" } else { "" },
+            enabled,
+            if mp.asymmetric { " either way" } else { ", the same both ways" },
+            if mp.precoding.is_some() { "precoding coefficients" } else { "no precoding" }
+        )
     }
 
     /// One direction's settlement, as the panel says it.
@@ -374,7 +441,7 @@ impl V34Report {
         let mut rows = vec![(
             "V.34 phase 2",
             match self.failed {
-                None => "done; phases 3 and 4 are not written yet, so the call ends here".to_owned(),
+                None => "done".to_owned(),
                 Some(why) => format!("stopped: {why}"),
             },
         )];
@@ -433,6 +500,54 @@ impl V34Report {
             };
             rows.push(("V.34 to this end", towards_us));
             rows.push(("V.34 from this end", towards_them));
+        }
+        if let Some(t) = self.training.as_ref() {
+            let points = |size: v34::signals::Size| match size {
+                v34::signals::Size::Four => "4",
+                v34::signals::Size::Sixteen => "16",
+            };
+            let db = |snr: Option<f64>| snr.map_or("not reached".to_owned(), |x| format!("{x:.0} dB"));
+            rows.push((
+                "V.34 phases 3 and 4",
+                match (t.done, t.stopped) {
+                    (true, _) => "done; the data mode is not written yet, so the call ends here".to_owned(),
+                    (_, Some((stage, why))) => format!("stopped at {stage}: {why}"),
+                    _ => "still going".to_owned(),
+                },
+            ));
+            rows.push((
+                "V.34 trained",
+                format!(
+                    "phase 3 {}, phase 4 {}, far clock {:+.0} ppm",
+                    db(t.phase3_snr),
+                    db(t.phase4_snr),
+                    t.drift_ppm
+                ),
+            ));
+            rows.push((
+                "V.34 J",
+                format!(
+                    "far end asked for {}, this end for {} points",
+                    t.far_asked.map_or("nothing yet".to_owned(), |s| format!("{} points", points(s))),
+                    points(t.asked)
+                ),
+            ));
+            if let Some(mp) = t.far_mp.as_ref() {
+                rows.push(("V.34 far MP", Self::mp(mp)));
+            }
+            if let Some(mp) = t.our_mp.as_ref() {
+                rows.push(("V.34 our MP", Self::mp(mp)));
+            }
+            if let Some((transmit, receive)) = t.rates {
+                rows.push((
+                    "V.34 rates",
+                    format!(
+                        "{} bit/s to this end, {} from it",
+                        u32::from(receive) * 2400,
+                        u32::from(transmit) * 2400
+                    ),
+                ));
+            }
         }
         rows
     }
@@ -1753,7 +1868,7 @@ impl Modem {
                     Role::Calling => v34::phase2::Role::Call,
                     Role::Answering => v34::phase2::Role::Answer,
                 };
-                Pump::V34(Box::new(v34::phase2::Modem::new(role, self.fs)))
+                Pump::V34(Box::new(v34::startup::Modem::new(role, self.fs)))
             }
             "V32" | "V32B" => {
                 let hs_role = match role {

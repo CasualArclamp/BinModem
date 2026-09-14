@@ -80,17 +80,22 @@ binmodem --answer --in "<input device>" --out "<output device>" --carrier V22B
 V.32bis and V.22bis. A far end without V.34 picks one of those and the call
 goes ahead as usual.
 
-A far end with it goes into V.34's phase 2, and so far that is all of V.34
-there is. The two modems swap capabilities, measure the round trip with
-reversals of tones A and B, probe the line with L1 and L2 in each direction,
-and settle symbol rates and data rates -- and then this end hangs up with
-`NO CARRIER`, since phases 3 and 4 and the data mode are not written yet. The
-terminal logs each step as it goes (`V.34 INFO0`, `V.34 ranging`, `V.34
-sending the probe` and so on), and the far-end panel keeps what was found
-after the call: the far end's capabilities, the round trip, the probed line's
-signal to noise, and the symbol and data rate each direction would have used.
-Press **Record** first: a capture of a real V.34 start-up is what the rest of
-it gets built against.
+A far end with it goes through V.34's start-up, and so far that is all of
+V.34 there is. In phase 2 the two modems swap capabilities, measure the round
+trip with reversals of tones A and B, probe the line with L1 and L2 in each
+direction, and settle symbol rates and carriers. In phase 3 each end sends S,
+PP and TRN for the other to train its equaliser on, and J to say what
+constellation it wants next; in phase 4 they train again and swap MP
+sequences, which carry the data rates, trellis code and precoding each wants
+-- and then this end hangs up with `NO CARRIER`, since the data mode itself is
+not written yet. The terminal logs each step as it goes (`V.34 INFO0`, `V.34
+ranging`, `V.34 phase 3: training`, `V.34 phase 4: MP` and so on), the
+constellation scope shows the far end's points once phase 3 has trained the
+receiver, and the far-end panel keeps what was found after the call: the far
+end's capabilities, the round trip, the probed line, how well each phase
+trained, what each end's J asked for, both MP sequences, and the rates the two
+would have run at. Press **Record** first: a capture of a real V.34 start-up
+is what the rest of it gets built against.
 
 ## Moving a file
 

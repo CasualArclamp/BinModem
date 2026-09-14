@@ -9,7 +9,7 @@ one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
 source for every normative constant, and against the RFCs for everything
-carried over the top of them. 1112 tests.
+carried over the top of them. 1185 tests.
 
 ## What works
 
@@ -37,7 +37,7 @@ been checked three other ways: two documents, two methods, one table.
 
 | | |
 |---|---|
-| **Modulations** | Bell 103 (300), V.22 (1200), V.22bis (1200/2400), V.32 (4800/9600, both codings), V.32bis (7200/12000/14400) |
+| **Modulations** | Bell 103 (300), V.22 (1200), V.22bis (1200/2400), V.32 (4800/9600, both codings), V.32bis (7200/12000/14400); V.34's start-up, probing through MP, with its data mode to come |
 | **Negotiation** | V.8 CM/JM/CI/CJ and ANSam; V.25 answer tone told apart from it |
 | **Error control** | V.42 LAPM — detection, HDLC, XID, REJ/SREJ, mod-128 |
 | **Compression** | V.42bis, negotiated in XID or followed in band |
@@ -168,10 +168,17 @@ OS-specific code — but only built and run on Windows so far.
 
 ## Next
 
-V.17, for fax at 14 400, and V.33 beside it -- the same trellis code as
-V.32bis again, on a fax call and a leased line respectively. More than one page
-to a call, and the rest of the codings that only run under error correction
-mode: JBIG, and the colour ones. Then V.34 at 33 600.
+V.34's data mode. The start-up now gets all the way to it: phase 2 probes the
+line, phases 3 and 4 train both receivers -- checked against a Conexant
+recording and the modem that answered a live call over VoIP, whose PP, TRN and
+J this receiver reads -- and the two ends swap MP sequences and agree rates.
+What is left is what those rates are carried in: the superframe, the shell
+mapper, the four-dimensional trellis code, precoding, and V.42 over the top at
+33 600.
+
+After it, V.17 for fax at 14 400, and V.33 beside it -- the same trellis code
+as V.32bis again, on a fax call and a leased line respectively -- and more than
+one page to a fax call.
 
 Alongside them: PAP and CHAP, so something other than another BinModem can
 dial in; and MNP as an alternative to LAPM, since it is what a modem without

@@ -69,6 +69,10 @@ const TRN_SKIPPED: usize = 16;
 /// the search tries.
 const SEARCH: i64 = 8;
 
+/// Signal to noise below which training on the known sequence is taken to
+/// have trained on the wrong one.
+const KNOWN_ENOUGH: f64 = 12.0;
+
 /// Least signal a half-symbol sample has to carry to be S: 37 dB under the
 /// nominal level.
 const AUDIBLE: f64 = 4e-4;
@@ -127,6 +131,21 @@ enum Mode3 {
     Hunting(Hunt),
     Collecting { reference: Reference, far: Mode, start: u64 },
     Trained,
+}
+
+/// An equaliser training came to.
+#[derive(Debug, Clone)]
+struct Solution {
+    taps: Vec<Complex>,
+    /// The carrier's turn a symbol, and its phase at the first symbol after
+    /// the window.
+    turn: f64,
+    rotation: f64,
+    /// The half-symbol sample the sequence's first symbol is centred on, and
+    /// the symbol after the window.
+    origin: u64,
+    end: usize,
+    mse: f64,
 }
 
 /// Looks for S and its change to S-bar in half-symbol samples.
@@ -257,6 +276,10 @@ pub struct Receiver {
     /// Mean squared error of the decisions.
     error: f64,
     trained_snr: f64,
+    /// The last symbol, equalised.
+    last: Complex,
+    /// Whether anything has trained this receiver yet.
+    ever_trained: bool,
 }
 
 impl Receiver {
@@ -304,6 +327,8 @@ impl Receiver {
             slope: 1.0,
             error: 1.0,
             trained_snr: 0.0,
+            last: Complex::ZERO,
+            ever_trained: false,
         }
     }
 
@@ -349,6 +374,11 @@ impl Receiver {
     /// Signal to noise of the decisions, in decibels.
     pub fn snr_db(&self) -> f64 {
         -10.0 * self.error.max(1e-9).log10()
+    }
+
+    /// The last symbol, equalised, while trained.
+    pub fn last_point(&self) -> Option<Complex> {
+        self.is_trained().then_some(self.last)
     }
 
     /// What training left.
@@ -457,6 +487,41 @@ impl Receiver {
     }
 
     fn finish_training(&mut self, reference: Reference, far: Mode, start: u64) {
+        let known = self.solve_known(reference, far, start);
+        let enough = |s: &Solution| -10.0 * s.mse.max(1e-9).log10() >= KNOWN_ENOUGH;
+        let solution = match (known, reference) {
+            (Some(s), _) if enough(&s) => Some(s),
+            (known, Reference::Trn(size)) if self.ever_trained => self.reacquire(size, far, start).or(known),
+            (known, _) => known,
+        };
+        let Some(solution) = solution else {
+            self.mode = Mode3::Idle;
+            self.heard.push_back(Heard::Untrained);
+            return;
+        };
+        self.taps = solution.taps;
+        self.turn = solution.turn;
+        self.rotation = solution.rotation;
+        self.next_symbol = solution.origin + 2 * solution.end as u64;
+        self.error = solution.mse;
+        self.trained_snr = -10.0 * solution.mse.max(1e-9).log10();
+        if self.trained_snr < 6.0 {
+            self.mode = Mode3::Idle;
+            self.heard.push_back(Heard::Untrained);
+            return;
+        }
+        self.ever_trained = true;
+        self.mode = Mode3::Trained;
+        self.heard.push_back(Heard::Trained { snr_db: self.trained_snr });
+        // Everything already here past the window.
+        while self.next_symbol + REACH as u64 + 2 <= self.made {
+            let symbol = self.symbol();
+            self.heard.push_back(Heard::Symbol(symbol));
+        }
+    }
+
+    /// The equaliser solved for from the known sequence.
+    fn solve_known(&self, reference: Reference, far: Mode, start: u64) -> Option<Solution> {
         let ((search_from, search_to), (from, to)) = windows(reference);
         let targets = sequence(reference, far, to);
         // Each alignment either side of where S-bar put the sequence.
@@ -473,11 +538,7 @@ impl Receiver {
                 best = Some((mse, delta, taps));
             }
         }
-        let Some((_, delta, taps)) = best else {
-            self.mode = Mode3::Idle;
-            self.heard.push_back(Heard::Untrained);
-            return;
-        };
+        let (_, delta, taps) = best?;
         let origin = start.saturating_add_signed(delta);
         // How fast the constellation turns, from the rough fit's residual
         // phase early and late in its window.
@@ -491,37 +552,73 @@ impl Receiver {
         // The whole window, with the turn put into the targets for the
         // equaliser to follow and the carrier loop to take back out.
         let rows: Option<Vec<Vec<Complex>>> = (from..to).map(|k| self.row(origin + 2 * k as u64)).collect();
-        let Some(rows) = rows else {
-            self.mode = Mode3::Idle;
-            self.heard.push_back(Heard::Untrained);
-            return;
-        };
+        let rows = rows?;
         let turned: Vec<Complex> = (from..to).map(|k| targets[k] * Complex::from_polar(1.0, turn * k as f64)).collect();
         let refs: Vec<&[Complex]> = rows.iter().map(Vec::as_slice).collect();
-        let Some(taps) = least_squares(&refs, &turned, ridge(&rows)) else {
-            self.mode = Mode3::Idle;
-            self.heard.push_back(Heard::Untrained);
-            return;
-        };
+        let taps = least_squares(&refs, &turned, ridge(&rows))?;
         let mse = residual(&rows, &turned, &taps);
-        self.taps = taps;
-        self.turn = turn;
-        self.rotation = turn * to as f64;
-        self.next_symbol = origin + 2 * to as u64;
-        self.error = mse;
-        self.trained_snr = -10.0 * mse.max(1e-9).log10();
-        if self.trained_snr < 6.0 {
-            self.mode = Mode3::Idle;
-            self.heard.push_back(Heard::Untrained);
-            return;
+        Some(Solution { taps, turn, rotation: turn * to as f64, origin, end: to, mse })
+    }
+
+    /// Phase 4's TRN read with the equaliser the last training left, for a far
+    /// end whose TRN does not start from a scrambler at zero after all.
+    ///
+    /// Nothing about the sequence is assumed but that it is TRN: scrambled
+    /// ones, which a descrambler turns back into ones whatever state the
+    /// scrambler started in. Every alignment and quarter turn is tried, and the
+    /// one whose decisions descramble to ones is the one kept. The line has not
+    /// changed since the last training, so the equaliser that training left
+    /// still fits it; only where the symbols fall and how the carrier is turned
+    /// are new.
+    fn reacquire(&self, size: Size, far: Mode, start: u64) -> Option<Solution> {
+        let (from, to) = (TRN_SKIPPED, 256);
+        let mut best: Option<(f64, Solution)> = None;
+        for delta in -SEARCH..=SEARCH {
+            let Some(origin) = start.checked_add_signed(delta) else { continue };
+            let outputs: Option<Vec<Complex>> =
+                (from..to).map(|k| self.row(origin + 2 * k as u64).map(|row| apply(&self.taps, &row))).collect();
+            let Some(outputs) = outputs else { continue };
+            let power = outputs.iter().map(|y| y.norm_sqr()).sum::<f64>() / outputs.len() as f64;
+            if power < 1e-12 {
+                continue;
+            }
+            // A square constellation's fourth power points the opposite way to
+            // the real axis on average, which gives the turn to within a
+            // quarter.
+            let fourth = outputs.iter().fold(Complex::ZERO, |sum, y| sum + *y * *y * *y * *y);
+            let base = (fourth.arg() - std::f64::consts::PI) / 4.0;
+            for quarter in 0..4 {
+                let turned = base + std::f64::consts::FRAC_PI_2 * f64::from(quarter);
+                let spin = Complex::from_polar(1.0 / power.sqrt(), -turned);
+                let mut reader = signals::Reader::new(far);
+                let (mut ones, mut counted, mut squared) = (0usize, 0usize, 0.0);
+                for (i, y) in outputs.iter().enumerate() {
+                    let z = *y * spin;
+                    let (point, target) = decide(z, size);
+                    squared += (z - target).norm_sqr();
+                    let bits = reader.trn(point, size);
+                    if i >= 12 {
+                        counted += bits.len();
+                        ones += bits.iter().filter(|b| **b).count();
+                    }
+                }
+                let share = ones as f64 / counted.max(1) as f64;
+                if best.as_ref().is_none_or(|b| share > b.0) {
+                    let taps = self.taps.iter().map(|w| *w * spin).collect();
+                    let middle = (from + to) as f64 / 2.0;
+                    let solution = Solution {
+                        taps,
+                        turn: self.turn,
+                        rotation: self.turn * (to as f64 - middle),
+                        origin,
+                        end: to,
+                        mse: squared / outputs.len() as f64,
+                    };
+                    best = Some((share, solution));
+                }
+            }
         }
-        self.mode = Mode3::Trained;
-        self.heard.push_back(Heard::Trained { snr_db: self.trained_snr });
-        // Everything already here past the window.
-        while self.next_symbol + REACH as u64 + 2 <= self.made {
-            let symbol = self.symbol();
-            self.heard.push_back(Heard::Symbol(symbol));
-        }
+        best.filter(|(share, _)| *share > 0.95).map(|(_, solution)| solution)
     }
 
     /// Equalise, decide and track the symbol at `next_symbol`.
@@ -562,6 +659,7 @@ impl Receiver {
         self.due -= TIMING_GAIN * late * self.half;
         self.drift = (self.drift - DRIFT_GAIN * late).clamp(-0.001, 0.001);
         self.error += 0.01 * (e.norm_sqr() - self.error);
+        self.last = z;
         Symbol { point: z, decided, error: e.norm_sqr() }
     }
 }
@@ -793,6 +891,89 @@ mod tests {
         let snr = heard.snr.expect("never trained");
         assert!(snr > 28.0, "trained to {snr:.1} dB");
         assert!(heard.j.is_some(), "no J");
+    }
+
+    /// Phase 3 and then phase 4 from one answer modem: TRN in phase 4 at
+    /// sixteen points, from a scrambler restarted at zero if `restarted` and
+    /// carried on from J if not.
+    fn phases_3_and_4(band: Band, restarted: bool) -> Vec<f64> {
+        let mut tx = Transmitter::new(band, 0, 0, FS);
+        let mut sender = Sender::new(Mode::Answer);
+        let grid = |p: Point, size: Size| Complex::new(f64::from(p.0), f64::from(p.1)).scale(unit(size));
+        let mut symbols: VecDeque<Complex> = VecDeque::new();
+        symbols.extend(std::iter::repeat_n(Complex::ZERO, 400));
+        symbols.extend((0..signals::S_SYMBOLS).map(|n| grid(signals::s(n), Size::Four)));
+        symbols.extend((0..signals::S_BAR_SYMBOLS).map(|n| grid(signals::s_bar(n), Size::Four)));
+        symbols.extend((0..signals::PP_SYMBOLS).map(|n| Complex::from(signals::pp(n))));
+        symbols.extend((0..900).map(|_| grid(sender.trn(Size::Four), Size::Four)));
+        let j: Vec<bool> = J_SIXTEEN.repeat(20);
+        symbols.extend(sender.sequence(&j, Size::Four).into_iter().map(|p| grid(p, Size::Four)));
+        symbols.extend(std::iter::repeat_n(Complex::ZERO, 1500));
+        symbols.extend((0..signals::S_SYMBOLS).map(|n| grid(signals::s(n), Size::Four)));
+        symbols.extend((0..signals::S_BAR_SYMBOLS).map(|n| grid(signals::s_bar(n), Size::Four)));
+        if restarted {
+            sender.restart();
+        }
+        symbols.extend((0..1200).map(|_| grid(sender.trn(Size::Sixteen), Size::Sixteen)));
+        symbols.extend(std::iter::repeat_n(Complex::ZERO, 200));
+        let total = symbols.len();
+        let mut out = Vec::new();
+        while tx.symbols() < total as u64 + 50 {
+            out.push(tx.next_sample(|| symbols.pop_front().unwrap_or(Complex::ZERO)));
+        }
+        out
+    }
+
+    #[test]
+    fn phase_4_trains_whether_or_not_its_trn_starts_from_zero() {
+        // 10.1.3.8 starts the scrambler at zero before every TRN, and both
+        // real modems' phase 3 TRN does. Phase 4's has not been seen on its
+        // own -- on the recording it has the call modem's J on top -- so a far
+        // end that carried its scrambler on is read too, with what phase 3
+        // trained.
+        let band = Band::new(SymbolRate::S3429, false);
+        for restarted in [true, false] {
+            let samples = line(&phases_3_and_4(band, restarted), 114.0, 20.0, 45.0);
+            let mut rx = Receiver::new(band, FS);
+            rx.hunt();
+            let (mut trainings, mut ones, mut read) = (Vec::new(), 0usize, 0usize);
+            let mut reader = Reader::new(Mode::Answer);
+            let mut phase4 = false;
+            for &x in &samples {
+                rx.feed(x);
+                while let Some(heard) = rx.heard() {
+                    match heard {
+                        Heard::Reversal { at } if !phase4 && trainings.is_empty() => rx.train(Reference::PpThenTrn, Mode::Answer, at),
+                        Heard::Reversal { at } => {
+                            phase4 = true;
+                            rx.train(Reference::Trn(Size::Sixteen), Mode::Answer, at);
+                        }
+                        Heard::Trained { snr_db } => {
+                            trainings.push(snr_db);
+                            if trainings.len() == 2 {
+                                reader = Reader::new(Mode::Answer);
+                            }
+                        }
+                        Heard::Untrained => panic!("restarted {restarted}: training {} failed", trainings.len() + 1),
+                        Heard::Symbol(symbol) => {
+                            if trainings.len() == 1 && symbol.error > 0.2 && !phase4 {
+                                // Phase 3's J is over and the line has gone quiet.
+                                rx.hunt();
+                            } else if trainings.len() == 2 && read < 700 {
+                                let bits = reader.trn(symbol.decided, Size::Sixteen);
+                                read += 1;
+                                if read > 12 {
+                                    ones += bits.iter().filter(|b| **b).count();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            assert_eq!(trainings.len(), 2, "restarted {restarted}: trained {trainings:?}");
+            assert!(trainings[1] > 25.0, "restarted {restarted}: phase 4 trained to {:.1} dB", trainings[1]);
+            assert!(ones > 4 * (read - 12) * 99 / 100, "restarted {restarted}: {ones} ones of {} bits", 4 * (read - 12));
+        }
     }
 
     #[test]
