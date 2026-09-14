@@ -23,4 +23,6 @@ pub mod info;
 pub mod mp;
 pub mod phase2;
 pub mod probe;
+pub mod qam;
+pub mod receiver;
 pub mod signals;

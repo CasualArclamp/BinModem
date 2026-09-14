@@ -9,6 +9,7 @@
 //! whose `modulate(bits) -> samples` / `demodulate(samples) -> bits` shape
 //! forced every loop to re-acquire on each block.
 
+pub mod complex;
 pub mod echo;
 pub mod equalizer;
 pub mod fft;
@@ -19,6 +20,7 @@ pub mod resample;
 pub mod shaping;
 pub mod tone;
 
+pub use complex::{Complex, least_squares, solve_hermitian};
 pub use echo::{EchoCanceller, EchoFinder, Reflection};
 pub use equalizer::Equalizer;
 pub use fft::{Fft, Spectrum};
