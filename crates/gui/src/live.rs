@@ -1100,6 +1100,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 if let Some(call) = modem.fax_call() {
                     f.fax_phase = Some(call.phase().name());
                     f.fax_identity = call.identity().to_owned();
+                    f.fax_non_standard = call.non_standard().map(<[u8]>::to_vec);
                     f.fax_capabilities = call.capability_field().map(<[u8]>::to_vec);
                     f.fax_progress = call.progress();
                     f.fax_rate = call.rate();

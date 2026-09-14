@@ -276,8 +276,10 @@ pub struct Capabilities {
     pub widths_mm: Vec<u32>,
     /// Bits 19 and 20.
     pub length: &'static str,
-    /// Bits 21 to 23, in milliseconds at 3.85 lines/mm.
+    /// Bits 21 to 23, in milliseconds at 3.85 lines/mm, and whether that
+    /// halves at 7.7.
     pub scan_line_ms: f64,
+    pub scan_line_halves: bool,
     /// Bit 27.
     pub error_correction: bool,
     /// Bit 31.
@@ -331,7 +333,10 @@ pub fn command_rate(fif: &[u8]) -> Option<(Modulation, u32)> {
 /// thermal head can only print so fast, so the sender pads each coded line
 /// with fill bits until it has taken this long. Zero means the machine can
 /// take them as fast as they come.
-fn scan_line_ms(code: u8) -> f64 {
+///
+/// In milliseconds at 3.85 lines/mm. For the five codes a DCS can carry that
+/// is also the time at 7.7, and so the time the page is padded to.
+pub fn scan_line_ms(code: u8) -> f64 {
     match code {
         0b000 => 20.0,
         0b001 => 40.0,
@@ -344,6 +349,38 @@ fn scan_line_ms(code: u8) -> f64 {
         0b101 => 40.0,
         0b111 => 0.0,
         _ => 20.0,
+    }
+}
+
+/// Whether a DIS scan line code is one of the three that halve at 7.7
+/// lines/mm: "T7.7 = 1/2 T3.85" (Note 4).
+fn scan_line_halves(code: u8) -> bool {
+    matches!(code & 0b111, 0b011 | 0b110 | 0b101)
+}
+
+/// Bits 21 to 23 of a DCS, from the same bits of the receiver's DIS.
+///
+/// Table 2 gives a DIS eight values here and a DCS five: 20, 40, 10, 5 and
+/// 0 ms. The three a DCS has no row for are the DIS's "T7.7 = 1/2 T3.85" --
+/// 10, 20 or 40 ms at 3.85 lines/mm and half that at 7.7 (Note 4) -- and a
+/// DCS does not say those back. It says the time that applies to the page
+/// actually going, which is what Note 8 means by "set to the appropriateness
+/// according to the capabilities of the two terminals".
+///
+/// Copied back unchanged, as it was, 110 went out in a DCS for a fine page:
+/// a value Table 2 gives a DCS no meaning for, and a real machine answered it
+/// by disconnecting.
+pub fn dcs_scan_line(dis_field: u8, fine: bool) -> u8 {
+    match (dis_field & 0b111, fine) {
+        (0b011, false) => 0b010, // 10 ms
+        (0b011, true) => 0b100,  // 5 ms
+        (0b110, false) => 0b000, // 20 ms
+        (0b110, true) => 0b010,  // 10 ms
+        (0b101, false) => 0b001, // 40 ms
+        (0b101, true) => 0b000,  // 20 ms
+        // 20, 40, 10 and 5 ms at both resolutions, and none at all: a DCS
+        // has a row for every one of them.
+        (field, _) => field,
     }
 }
 
@@ -371,6 +408,7 @@ pub fn capabilities(fif: &[u8]) -> Capabilities {
             _ => "invalid",
         },
         scan_line_ms: scan_line_ms(field_of(fif, 21, 23)),
+        scan_line_halves: scan_line_halves(field_of(fif, 21, 23)),
         error_correction: bit(fif, 27),
         // Note 9: "valid only when bit 27 (error correction mode) is set".
         t6_coding: bit(fif, 31) && bit(fif, 27),
@@ -467,6 +505,12 @@ impl Capabilities {
                 "scan line",
                 if self.scan_line_ms == 0.0 {
                     "no minimum".to_owned()
+                } else if self.scan_line_halves {
+                    format!(
+                        "{:.0} ms minimum, {:.0} ms at 7.7 lines/mm",
+                        self.scan_line_ms,
+                        self.scan_line_ms / 2.0
+                    )
                 } else {
                     format!("{:.0} ms minimum", self.scan_line_ms)
                 },
@@ -616,14 +660,14 @@ pub fn command(command: Command) -> Vec<u8> {
     set_bit(&mut fif, 16, command.coding == crate::coding::Coding::ModifiedRead);
     set_field(&mut fif, 17, 18, 0b00);
     set_field(&mut fif, 19, 20, 0b01);
-    // Whatever the receiver asked for, given back to it: this is the one
-    // field of a DCS that is not the sender's choice -- except under error
+    // What the receiver asked for, said the way a DCS says it: this is the
+    // one field of a DCS that is not the sender's choice -- except under error
     // correction mode, where Note 8 has the sender say "1, 1, 1" and send no
     // fill at all.
     let scan_line = if command.error_correction {
         0b111
     } else {
-        command.scan_line_field & 0b111
+        dcs_scan_line(command.scan_line_field, command.fine)
     };
     set_field(&mut fif, 21, 23, scan_line);
     if command.error_correction {
@@ -658,6 +702,43 @@ pub fn identification_field(text: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dcs_only_ever_says_a_scan_line_time_a_dcs_has_a_row_for() {
+        // Table 2's DCS column: 20, 40, 10 and 5 ms, and 0. Every DIS value
+        // at either resolution comes to one of them, and to the time Note 4
+        // says applies at that resolution.
+        let dcs_rows = [0b000, 0b001, 0b010, 0b100, 0b111];
+        for dis in 0..8u8 {
+            for fine in [false, true] {
+                let dcs = dcs_scan_line(dis, fine);
+                assert!(dcs_rows.contains(&dcs), "DIS {dis:03b}, fine {fine}: DCS {dcs:03b}");
+                let want = if fine && scan_line_halves(dis) {
+                    scan_line_ms(dis) / 2.0
+                } else {
+                    scan_line_ms(dis)
+                };
+                assert_eq!(scan_line_ms(dcs), want, "DIS {dis:03b}, fine {fine}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_command_carries_the_scan_line_time_for_its_own_resolution() {
+        let command = |fine: bool, scan_line_field: u8, error_correction: bool| Command {
+            modulation: Modulation::V29,
+            bits_per_second: 9600,
+            fine,
+            scan_line_field,
+            coding: crate::coding::Coding::ModifiedHuffman,
+            error_correction,
+        };
+        assert_eq!(field_of(&super::command(command(true, 0b110, false)), 21, 23), 0b010);
+        assert_eq!(field_of(&super::command(command(false, 0b110, false)), 21, 23), 0b000);
+        assert_eq!(field_of(&super::command(command(true, 0b001, false)), 21, 23), 0b001);
+        // And error correction is none at all, whatever was asked.
+        assert_eq!(field_of(&super::command(command(true, 0b110, true)), 21, 23), 0b111);
+    }
 
     /// A DIS off the line from a real fax machine.
     ///

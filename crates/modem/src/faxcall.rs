@@ -134,6 +134,11 @@ impl FaxCall {
         &self.call.identity
     }
 
+    /// The far end's NSF, as it arrived.
+    pub fn non_standard(&self) -> Option<&[u8]> {
+        self.call.non_standard.as_deref()
+    }
+
     pub fn capabilities(&self) -> Option<&fax::t30::Capabilities> {
         self.call.capabilities.as_ref()
     }

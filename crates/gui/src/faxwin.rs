@@ -50,6 +50,8 @@ pub struct Fax {
     /// What the far end said, once it has said anything.
     pub far: Option<t30::Capabilities>,
     pub far_identity: String,
+    /// The far end's NSF, if it sent one.
+    pub far_non_standard: Option<Vec<u8>>,
     /// Where the call has got to, straight off the modem.
     pub phase: Option<&'static str>,
     /// How far through the page, at what rate, and how many lines have
@@ -106,6 +108,31 @@ const UNSCANNED: Color32 = Color32::from_rgb(24, 28, 36);
 /// turnaround between one block and the next, a partial page signal and its
 /// answer and a training sequence, which is two or three seconds at most.
 const STILL_ARRIVING: f64 = 4.0;
+
+/// What a far end's NSF comes to, as rows for its table.
+///
+/// How long it is, the T.35 country code it starts with, and its first few
+/// octets. The rest is the maker's own and T.30 says nothing more of it
+/// (5.3.6.2.7), so neither does this. The country code goes down the line
+/// most significant bit first -- the other way round from every other octet
+/// in a frame -- so it is turned round to be read, and T.30 warns that some
+/// machines send it the wrong way round regardless.
+fn non_standard_rows(fif: &[u8]) -> Vec<(&'static str, String)> {
+    let Some(country) = fif.first() else {
+        return vec![("non-standard", "an empty NSF".to_owned())];
+    };
+    let start: Vec<String> = fif.iter().take(8).map(|o| format!("{o:02x}")).collect();
+    vec![
+        (
+            "non-standard",
+            format!("{} octets, country code {:02x}", fif.len(), country.reverse_bits()),
+        ),
+        (
+            "  starting",
+            format!("{}{}", start.join(" "), if fif.len() > 8 { " ..." } else { "" }),
+        ),
+    ]
+}
 
 /// How big to draw `rows` rows of a page arriving, across `width` points.
 ///
@@ -379,6 +406,9 @@ impl Fax {
         self.fax_class = frame.fax_class;
         if !frame.fax_identity.is_empty() {
             self.far_identity = frame.fax_identity.clone();
+        }
+        if let Some(fif) = frame.fax_non_standard.as_deref() {
+            self.far_non_standard = Some(fif.to_vec());
         }
         if let Some(fif) = frame.fax_capabilities.as_deref() {
             self.far = Some(t30::capabilities(fif));
@@ -729,6 +759,13 @@ impl Fax {
                                     );
                                     ui.end_row();
                                 }
+                                if let Some(fif) = self.far_non_standard.as_deref() {
+                                    for (k, v) in non_standard_rows(fif) {
+                                        ui.label(RichText::new(k).monospace().color(dim));
+                                        ui.label(RichText::new(v).monospace().color(bright));
+                                        ui.end_row();
+                                    }
+                                }
                                 for (k, v) in caps.rows() {
                                     ui.label(RichText::new(k).monospace().color(dim));
                                     ui.label(RichText::new(v).monospace().color(bright));
@@ -951,6 +988,21 @@ mod tests {
                 .collect(),
             resolution: Resolution::Standard,
         }
+    }
+
+    #[test]
+    fn an_nsf_shows_its_length_and_its_country_code_turned_round() {
+        // The one off the recording, as far as it read.
+        let fif = [0x00, 0x00, 0x51, 0x00, 0x00, 0x10, 0xb1, 0x2a, 0x12, 0xa2];
+        let rows = non_standard_rows(&fif);
+        assert_eq!(rows[0].1, "10 octets, country code 00");
+        assert_eq!(rows[1].1, "00 00 51 00 00 10 b1 2a ...");
+        // Most significant bit first on the line: 0x01 as read is 0x80.
+        assert_eq!(non_standard_rows(&[0x01, 0x02]), vec![
+            ("non-standard", "2 octets, country code 80".to_owned()),
+            ("  starting", "01 02".to_owned()),
+        ]);
+        assert_eq!(non_standard_rows(&[]).len(), 1);
     }
 
     fn lines_of(count: usize, ink: bool) -> Vec<Vec<bool>> {

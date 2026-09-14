@@ -33,6 +33,12 @@ fn read(path: &str) -> Vec<(f64, usize, frames::Message)> {
                 out.push((i as f64 / fs, channel, message));
             }
         }
+        // A frame that fails its check is not a frame, but it is worth knowing
+        // there was one: a long burst that reads as one short DIS has had most
+        // of itself lost.
+        if reader.bad > 0 {
+            println!("channel {channel}: {} frames failed their check", reader.bad);
+        }
     }
     out.sort_by(|a, b| a.0.total_cmp(&b.0));
     // A recording of a two-wire line has both directions in both channels,

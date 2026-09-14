@@ -154,6 +154,8 @@ pub struct Frame {
     pub fax_phase: Option<&'static str>,
     pub fax_identity: String,
     pub fax_capabilities: Option<Vec<u8>>,
+    /// The far end's NSF field, raw, for the same reason.
+    pub fax_non_standard: Option<Vec<u8>>,
     /// How far through the page, the rate it is going at, and how many lines
     /// have arrived. None for the fraction until there is a page moving.
     pub fax_progress: Option<f64>,
@@ -207,6 +209,7 @@ impl Frame {
             fax_phase: None,
             fax_identity: String::new(),
             fax_capabilities: None,
+            fax_non_standard: None,
             fax_progress: None,
             fax_rate: 0,
             fax_lines: 0,

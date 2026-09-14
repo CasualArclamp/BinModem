@@ -266,6 +266,9 @@ pub struct Call {
     /// The capability field exactly as it arrived, so anything wanting to
     /// read it differently still can.
     pub capability_field: Option<Vec<u8>>,
+    /// The far end's NSF, if it sent one: a T.35 country code and whatever
+    /// its maker put after it.
+    pub non_standard: Option<Vec<u8>>,
     /// Every frame either end sent, for the log.
     heard: Vec<Message>,
     /// This end's own identification, sent as a TSI or a CSI.
@@ -281,9 +284,8 @@ pub struct Call {
     /// DIS and what it will choose from when it sends.
     offer: Vec<Modulation>,
     /// The minimum scan line time the receiving end asked for, as the three
-    /// bits of Table 2 and as milliseconds.
+    /// bits of its DIS.
     scan_line_field: u8,
-    scan_line_ms: f64,
     resolution: Resolution,
     /// How the page is coded: chosen by the end that sends it, from what the
     /// end that receives it said it could read.
@@ -381,6 +383,7 @@ impl Call {
             identity: String::new(),
             capabilities: None,
             capability_field: None,
+            non_standard: None,
             heard: Vec::new(),
             identification: identification.to_owned(),
             modulation: Modulation::V27ter,
@@ -388,7 +391,6 @@ impl Call {
             fallback: Vec::new(),
             offer: OUR_MODULATIONS.to_vec(),
             scan_line_field: 0b111,
-            scan_line_ms: 0.0,
             resolution: page.as_ref().map_or(Resolution::Standard, |p| p.resolution),
             coding: Coding::ModifiedHuffman,
             error_correction_offered: true,
@@ -851,13 +853,16 @@ impl Call {
                 }
             }
             Frame::Nsf => {
+                // A maker's own capabilities (5.3.6.2.7), which this end has
+                // none of and ignores -- but keeps, since it is often most of
+                // what a far end says and somebody will want to know what.
+                self.non_standard = Some(message.fif.clone());
                 if self.phase == Phase::Calling {
                     self.phase = Phase::Listening;
                 }
             }
             Frame::Dis => {
                 let caps = t30::capabilities(&message.fif);
-                self.scan_line_ms = caps.scan_line_ms;
                 self.scan_line_field = t30::field_of(&message.fif, 21, 23);
                 self.capabilities = Some(caps);
                 self.capability_field = Some(message.fif.clone());
@@ -986,8 +991,20 @@ impl Call {
                 }
             }
             // 5.3.7: either end may disconnect at any point, and a disconnect
-            // needs no answer.
-            Frame::Dcn => self.phase = Phase::Done,
+            // needs no answer. Only one is the ordinary end of a call, though:
+            // the one that answers this end's confirmation of the last page.
+            // Any other says the far end gave up, which it does without a word
+            // of why -- so this end at least says when.
+            Frame::Dcn => {
+                let expected = self.role == Role::Answerer && self.phase == Phase::AwaitingDisconnect;
+                if !expected && !self.phase.is_over() && self.trouble.is_none() {
+                    self.trouble = Some(format!(
+                        "the far end hung up while this end was {}",
+                        self.phase.name()
+                    ));
+                }
+                self.phase = Phase::Done;
+            }
             _ => {
                 if self.phase == Phase::Calling {
                     self.phase = Phase::Listening;
@@ -1164,12 +1181,14 @@ impl Call {
             return Vec::new();
         };
         // The minimum scan line time is not a property of the picture but of
-        // the paper at the far end, and it arrived in the DIS. Under error
-        // correction mode there is none: Note 8, "0 ms".
+        // the paper at the far end, and it arrived in the DIS -- as the time
+        // the DCS commands, which for a fine page may be half what the DIS
+        // said. Under error correction mode there is none: Note 8, "0 ms".
         let min_bits = if self.ecm {
             0
         } else {
-            (self.scan_line_ms / 1000.0 * f64::from(self.rate)).ceil() as usize
+            let code = t30::dcs_scan_line(self.scan_line_field, self.resolution == Resolution::Fine);
+            (t30::scan_line_ms(code) / 1000.0 * f64::from(self.rate)).ceil() as usize
         };
         // A fine page to a machine that only prints standard loses every
         // other line: 7.7 lines to the millimetre is exactly twice 3.85, so
@@ -1844,10 +1863,14 @@ mod tests {
     }
 
     /// The command this end sends, for a page, to a far end that sent `dis`.
+    ///
+    /// The DIS arrives as a frame does, rather than being set: a DIS sets more
+    /// than the capabilities, and a test that skips that tests a call that
+    /// cannot happen. The scan line time was exactly such a thing.
     fn command_for(page: Option<Page>, dis: &[u8]) -> Vec<u8> {
         let mut call = Call::originate(FS, "1", page);
-        call.capabilities = Some(t30::capabilities(dis));
-        assert!(call.choose_rate());
+        call.received(Message::new(Frame::Dis, false).with_fif(dis));
+        assert!(call.trouble.is_none(), "{:?}", call.trouble);
         call.enter(Phase::Commanding);
         let bits: Vec<bool> = std::iter::from_fn(|| call.next_control_bit()).collect();
         let mut reader = Reader::new();
@@ -2021,6 +2044,55 @@ mod tests {
         let call = run(&[Message::new(Frame::Dcn, false)], 10.0);
         assert_eq!(call.phase(), Phase::Done);
         assert!(call.capabilities.is_none());
+        // And says so: this end was never told why, but it can say when.
+        let trouble = call.trouble.clone().unwrap_or_default();
+        assert!(trouble.contains("hung up"), "nothing said: {trouble:?}");
+    }
+
+    #[test]
+    fn the_disconnect_that_ends_an_ordinary_call_is_not_trouble() {
+        let mut call = Call::answer(FS, "1");
+        call.enter(Phase::AwaitingDisconnect);
+        call.received(Message::new(Frame::Dcn, true));
+        assert_eq!(call.phase(), Phase::Done);
+        assert_eq!(call.trouble, None);
+    }
+
+    /// The DIS of the machine that hung up, off a screen recording of the call:
+    /// V.27 ter and V.29, fine, MH only, and 110 in bits 21 to 23 -- 20 ms at
+    /// 3.85 lines/mm and half that at 7.7.
+    const HALVING_DIS: [u8; 6] = [0x00, 0x4e, 0xb8, 0x80, 0x80, 0x11];
+
+    fn blank_page(rows: usize, resolution: Resolution) -> Page {
+        Page {
+            lines: vec![vec![false; crate::page::WIDTH]; rows],
+            resolution,
+        }
+    }
+
+    #[test]
+    fn a_fine_page_to_that_machine_is_commanded_at_ten_milliseconds_a_line() {
+        let caps = t30::capabilities(&HALVING_DIS);
+        assert_eq!(caps.scan_line_ms, 20.0);
+        assert!(caps.scan_line_halves);
+        let fine = command_for(Some(blank_page(10, Resolution::Fine)), &HALVING_DIS);
+        assert_eq!(t30::field_of(&fine, 21, 23), 0b010, "not 10 ms");
+        let standard = command_for(Some(blank_page(10, Resolution::Standard)), &HALVING_DIS);
+        assert_eq!(t30::field_of(&standard, 21, 23), 0b000, "not 20 ms");
+    }
+
+    #[test]
+    fn a_page_is_padded_to_the_time_the_command_said() {
+        // A blank MH line is 29 bits, so ten of them padded to 10 ms at 9600
+        // are 960 bits, and the RTC after them six EOLs of twelve. Padded to
+        // the DIS's 20 ms, as they were, the fine lines came to twice that.
+        for (resolution, per_line) in [(Resolution::Fine, 96), (Resolution::Standard, 192)] {
+            let mut call = Call::originate(FS, "1", Some(blank_page(10, resolution)));
+            call.received(Message::new(Frame::Dis, false).with_fif(&HALVING_DIS));
+            assert_eq!(call.rate, 9600);
+            assert_eq!(call.resolution, resolution);
+            assert_eq!(call.fast_out_page().len(), 10 * per_line + 72, "{resolution:?}");
+        }
     }
 
     #[test]
