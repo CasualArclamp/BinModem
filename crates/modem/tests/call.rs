@@ -1520,10 +1520,18 @@ fn a_fax_that_answers_does_not_go_looking_for_v8() {
 
 /// Run a dialling and an answering fax against each other until both are
 /// done, handing back the page and the speed it went at.
-fn fax_between(caller: &mut Modem, answerer: &mut Modem) -> (Option<fax::page::Page>, u32) {
+/// What a fax call between two modems came to.
+struct Faxed {
+    page: Option<fax::page::Page>,
+    rate: u32,
+    error_correction: bool,
+}
+
+fn fax_between(caller: &mut Modem, answerer: &mut Modem) -> Faxed {
     let (mut to_caller, mut to_answerer) = (0.0, 0.0);
     let mut arrived = None;
     let mut rate = 0;
+    let mut error_correction = false;
     for _ in 0..(FS * 40.0) as usize {
         let from_caller = caller.step(to_caller);
         let from_answerer = answerer.step(to_answerer);
@@ -1535,6 +1543,7 @@ fn fax_between(caller: &mut Modem, answerer: &mut Modem) -> (Option<fax::page::P
             && matches!(call.phase(), fax::call::Phase::Sending)
         {
             rate = call.rate();
+            error_correction = call.error_correction();
         }
         if arrived.is_none() {
             arrived = answerer.take_received_page();
@@ -1545,7 +1554,11 @@ fn fax_between(caller: &mut Modem, answerer: &mut Modem) -> (Option<fax::page::P
             break;
         }
     }
-    (arrived, rate)
+    Faxed {
+        page: arrived,
+        rate,
+        error_correction,
+    }
 }
 
 #[test]
@@ -1567,9 +1580,36 @@ fn a_fax_goes_at_9600_unless_it_is_told_not_to() {
         Pair::type_at(&mut answerer, "AT+FCLASS=1");
         Pair::type_at(&mut answerer, "ATA");
 
-        let (arrived, rate) = fax_between(&mut caller, &mut answerer);
-        let got = arrived.unwrap_or_else(|| panic!("offering {offer:?}, no page arrived"));
+        let faxed = fax_between(&mut caller, &mut answerer);
+        let got = faxed.page.unwrap_or_else(|| panic!("offering {offer:?}, no page arrived"));
         assert_eq!(got.lines, page.lines, "offering {offer:?}");
-        assert_eq!(rate, want, "offering {offer:?}");
+        assert_eq!(faxed.rate, want, "offering {offer:?}");
+    }
+}
+
+#[test]
+fn a_fax_uses_error_correction_unless_either_end_is_told_not_to() {
+    // On at both ends by default, so two of these use it. Turned off at
+    // either end -- the box in the window -- the call goes without, since it
+    // takes both ends offering it, and the page arrives just the same.
+    for (at_caller, at_answerer, want) in
+        [(true, true, true), (false, true, false), (true, false, false)]
+    {
+        let page = a_test_page(6);
+        let mut caller = Modem::new(FS);
+        caller.fax_page = Some(page.clone());
+        caller.fax_error_correction = at_caller;
+        Pair::type_at(&mut caller, "AT+FCLASS=1");
+        Pair::type_at(&mut caller, "ATD1");
+        let mut answerer = Modem::new(FS);
+        answerer.fax_error_correction = at_answerer;
+        Pair::type_at(&mut answerer, "AT+FCLASS=1");
+        Pair::type_at(&mut answerer, "ATA");
+
+        let faxed = fax_between(&mut caller, &mut answerer);
+        let case = format!("caller {at_caller}, answerer {at_answerer}");
+        let got = faxed.page.unwrap_or_else(|| panic!("{case}: no page arrived"));
+        assert_eq!(got.lines, page.lines, "{case}");
+        assert_eq!(faxed.error_correction, want, "{case}");
     }
 }

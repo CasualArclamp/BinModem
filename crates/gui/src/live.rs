@@ -211,6 +211,8 @@ pub struct Session {
     fax_identification: Mutex<String>,
     /// The modulations the window allows a fax call to use.
     fax_offer: Mutex<Vec<fax::t30::Modulation>>,
+    /// Whether the window allows error correction mode.
+    fax_error_correction: AtomicBool,
     /// A page the window has loaded, waiting for the line thread to take it.
     ///
     /// Taken rather than read, and a page is megabytes of booleans, so it
@@ -233,6 +235,7 @@ impl Default for Session {
             network: Mutex::default(),
             fax_identification: Mutex::default(),
             fax_offer: Mutex::new(fax::call::OUR_MODULATIONS.to_vec()),
+            fax_error_correction: AtomicBool::new(true),
             fax_page: Mutex::default(),
             fax_received: Mutex::default(),
             recording: AtomicBool::new(false),
@@ -277,6 +280,15 @@ impl Session {
         if let Ok(mut v) = self.fax_offer.lock() {
             *v = offer.to_vec();
         }
+    }
+
+    /// Whether a fax call may use error correction mode.
+    pub fn fax_error_correction(&self) -> bool {
+        self.fax_error_correction.load(Ordering::Relaxed)
+    }
+
+    pub fn set_fax_error_correction(&self, on: bool) {
+        self.fax_error_correction.store(on, Ordering::Relaxed);
     }
 
     /// Leave a page for the next fax call that dials.
@@ -741,6 +753,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         // of by pressing the button.
         modem.fax_identification = session.fax_identification();
         modem.fax_offer = session.fax_offer();
+        modem.fax_error_correction = session.fax_error_correction();
         if let Some(page) = session.take_fax_page() {
             modem.fax_page = Some(page);
         }
@@ -1027,6 +1040,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     f.fax_progress = call.progress();
                     f.fax_rate = call.rate();
                     f.fax_lines = call.lines_received();
+                    f.fax_error_correction = call.error_correction();
                     f.fax_sending = call.role() == fax::call::Role::Caller;
                     f.fax_trouble = call.trouble().map(str::to_owned);
                 }

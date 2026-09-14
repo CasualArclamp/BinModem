@@ -41,6 +41,8 @@ pub struct Fax {
     pub v27ter: bool,
     pub v29: bool,
     pub v17: bool,
+    /// Whether this end offers error correction mode.
+    pub error_correction: bool,
     /// What the far end said, once it has said anything.
     pub far: Option<t30::Capabilities>,
     pub far_identity: String,
@@ -51,6 +53,8 @@ pub struct Fax {
     pub progress: Option<f64>,
     pub rate: u32,
     pub lines: usize,
+    /// Whether the call in progress is using error correction mode.
+    pub correcting: bool,
     pub sending: bool,
     /// Whether the modem is a fax rather than a modem just now.
     pub fax_class: bool,
@@ -87,6 +91,7 @@ impl Fax {
             // this end cannot raise is an invitation to a call that dies at the
             // training check.
             v17: false,
+            error_correction: true,
             ..Self::default()
         }
     }
@@ -197,6 +202,7 @@ impl Fax {
         self.progress = frame.fax_progress;
         self.rate = frame.fax_rate;
         self.lines = frame.fax_lines;
+        self.correcting = frame.fax_error_correction;
         self.sending = frame.fax_sending;
         self.fax_class = frame.fax_class;
         if !frame.fax_identity.is_empty() {
@@ -328,6 +334,9 @@ impl Fax {
                             "7200 to 14 400, trellis coded. Not written yet",
                         );
                     });
+                    ui.checkbox(&mut self.error_correction, "ECM").on_hover_text(
+                        "Error correction mode, T.30 Annex A: the page goes in                          numbered frames, and any the far end cannot read are                          sent again instead of printed as streaks. Used only                          when the far end offers it too",
+                    );
                 });
                 if again {
                     self.render();
@@ -548,6 +557,9 @@ impl Fax {
                         .small()
                         .color(dim),
                 );
+            }
+            if self.correcting {
+                ui.label(RichText::new("with error correction").small().color(dim));
             }
             if !self.sending && self.lines > 0 {
                 ui.label(

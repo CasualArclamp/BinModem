@@ -373,6 +373,12 @@ pub struct Modem {
     /// when it dials. Anything not built is ignored, and nothing at all comes
     /// to V.27 ter, which every fax must have.
     pub fax_offer: Vec<fax::t30::Modulation>,
+    /// Whether a fax call offers T.30 Annex A's error correction mode.
+    ///
+    /// On unless told otherwise. It is only used when the far end offers it
+    /// too, so leaving it on costs nothing against a machine without it; the
+    /// reason to turn it off is to see what a page looks like without it.
+    pub fax_error_correction: bool,
     /// The page waiting to be sent, taken by the next fax call that dials.
     ///
     /// Taken rather than borrowed, so that a second call does not send the
@@ -428,6 +434,7 @@ impl Modem {
             fax: None,
             fax_result: None,
             fax_offer: fax::call::OUR_MODULATIONS.to_vec(),
+            fax_error_correction: true,
             fax_page: None,
             fax_identification: String::new(),
             far_menu: None,
@@ -1386,7 +1393,10 @@ impl Modem {
                 }
                 Role::Answering => FaxCall::answer(self.fs, &self.fax_identification),
             };
-            self.fax = Some(call.offering(&self.fax_offer));
+            self.fax = Some(
+                call.offering(&self.fax_offer)
+                    .with_error_correction(self.fax_error_correction),
+            );
             return;
         }
         self.since_dial_ms = 0;
