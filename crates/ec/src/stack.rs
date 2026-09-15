@@ -167,11 +167,30 @@ enum Detect {
 struct Compressor {
     encoder: v42bis::Encoder,
     decoder: v42bis::Decoder,
+    /// What the two ends agreed to, kept so the dictionaries can be built
+    /// again from nothing when the link is established again (5.6).
+    params: v42bis::Params,
     /// Turned on without an XID exchange, on the strength of the far end
     /// saying so in the data stream. Decodes only: this end goes on sending
     /// uncompressed, because nothing has agreed that the far end would read
     /// anything else.
     speculative: bool,
+}
+
+impl Compressor {
+    /// 5.6's C-INIT: both dictionaries back to nothing.
+    ///
+    /// V.42bis builds its dictionary out of the data that has gone past, and
+    /// the two ends only agree because they have seen the same data. A link
+    /// that re-establishes discards whatever was unacknowledged (V.42
+    /// 8.2.4.3), which takes a piece out of the middle of that stream -- so
+    /// from there on the encoder's dictionary and the far decoder's disagree,
+    /// every codeword means something else, and nothing that crosses is what
+    /// was sent. It never recovers on its own.
+    fn reinitialize(&mut self) {
+        self.encoder = v42bis::Encoder::new(self.params);
+        self.decoder = v42bis::Decoder::new(self.params);
+    }
 }
 
 
@@ -305,6 +324,7 @@ impl Stack {
         self.compression = Some(Compressor {
             encoder: v42bis::Encoder::new(params),
             decoder: v42bis::Decoder::new(params),
+            params,
             speculative: false,
         });
     }
@@ -763,7 +783,26 @@ impl Stack {
         while let Some(event) = self.lapm.poll_event() {
             match event {
                 Event::Data(d) => arrived.extend_from_slice(&d),
-                Event::Connected => self.established = true,
+                // 5.6 a): a C-INIT on "L-ESTABLISH indication or confirm",
+                // which is this. The first one costs nothing -- no data has
+                // been through the codec yet -- and every one after it is a
+                // link that came back, where it is the whole difference
+                // between a connection that carries something and one that
+                // stays up carrying nonsense.
+                Event::Connected => {
+                    self.established = true;
+                    if let Some(compression) = self.compression.as_mut() {
+                        compression.reinitialize();
+                    }
+                }
+                // The far end re-established under us: 8.2.4.3 discards what
+                // was unacknowledged, so the stream both dictionaries were
+                // built from has a hole in it and they have to start again.
+                Event::Reset => {
+                    if let Some(compression) = self.compression.as_mut() {
+                        compression.reinitialize();
+                    }
+                }
                 // N400 attempts at a SABME that nothing answered, or a far end
                 // that refused. Whatever it said earlier, it is not doing LAPM
                 // now -- and a connection without error control is still a
@@ -1035,6 +1074,74 @@ mod tests {
         a.send(&payload);
         settle(&mut a, &mut b, 80_000, |_, bit| bit);
         assert_eq!(b.take_received(), payload);
+    }
+
+    /// V.42bis 5.6 a): the dictionaries start again whenever the link is
+    /// established, and a link that re-establishes mid-call has done that.
+    ///
+    /// The dictionary is built out of the data that has gone past, and the two
+    /// ends only agree because they have seen the same data. Re-establishment
+    /// discards whatever was unacknowledged (V.42 8.2.4.3), taking a piece out
+    /// of the middle of that stream. Unless both ends start again, every
+    /// codeword after it means something else, and the connection stays up
+    /// carrying nonsense for the rest of the call -- which is what a real one
+    /// did: error control re-established fourteen seconds in and nothing
+    /// crossed afterwards, on a link whose every other number looked healthy.
+    #[test]
+    fn compression_starts_again_when_the_link_does() {
+        let params = v42bis::Params::default();
+        let mut a = Stack::new(Role::Originator, Params::default()).with_compression(params);
+        let mut b = Stack::new(Role::Answerer, Params::default()).with_compression(params);
+        a.connect();
+        settle(&mut a, &mut b, 20_000, |_, bit| bit);
+        assert!(a.is_connected() && b.is_connected());
+
+        let block = |from: usize| {
+            let mut out = Vec::new();
+            for i in from..from + 200 {
+                out.extend_from_slice(
+                    format!("the same words over and over, line {i}\r\n").as_bytes(),
+                );
+            }
+            out
+        };
+
+        // Enough to put compression properly to work, so both dictionaries
+        // are full of the same strings.
+        let warmed = block(0);
+        a.send(&warmed);
+        settle(&mut a, &mut b, 200_000, |_, bit| bit);
+        assert!(a.compressing(), "compression never engaged, so nothing could diverge");
+        assert_eq!(b.take_received().len(), warmed.len());
+
+        // Then a second lot, cut off partway. What is still unacknowledged
+        // when the link goes is discarded, so the far decoder never sees the
+        // data the encoder learned its newest strings from.
+        let lost = block(1_000);
+        a.send(&lost);
+        settle(&mut a, &mut b, 4_000, |_, bit| bit);
+        let crossed = b.take_received().len();
+        assert!(crossed < lost.len(), "all {crossed} of it crossed before the link went");
+
+        // The far end re-establishes underneath it, which is what a line that
+        // went away and came back does.
+        b.connect();
+        settle(&mut a, &mut b, 60_000, |_, bit| bit);
+        assert!(a.is_connected() && b.is_connected(), "it did not come back");
+        // What survived the discard is not the point and is not checked: V.42
+        // 8.2.4.3 throws unacknowledged frames away and whatever is above asks
+        // for them again. What has to be true is that everything from here on
+        // means what it says.
+        let _ = a.take_received();
+        let _ = b.take_received();
+
+        let after = block(2_000);
+        a.send(&after);
+        settle(&mut a, &mut b, 200_000, |_, bit| bit);
+        assert_eq!(b.take_received(), after, "what arrived was not what was sent");
+        b.send(&after);
+        settle(&mut a, &mut b, 200_000, |_, bit| bit);
+        assert_eq!(a.take_received(), after, "and not the other way either");
     }
 
     #[test]
