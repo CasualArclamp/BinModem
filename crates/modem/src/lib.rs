@@ -383,6 +383,8 @@ pub struct V34Training {
     /// Rate renegotiations and cleardowns from data mode, either end's, and
     /// whether the last was a cleardown that ended the call.
     pub renegotiations: u32,
+    /// Full retrains from data mode, all the way back through phase 2 (11.5).
+    pub retrains: u32,
     pub cleared_down: bool,
     /// Times data mode's frames were found again from the data: after a slip,
     /// or an E the line lost.
@@ -431,6 +433,7 @@ impl V34Report {
                 far_mp: t.far_mp(),
                 rates: t.rates(),
                 renegotiations: t.renegotiations(),
+                retrains: startup.retrains(),
                 cleared_down: t.status() == v34::training::Status::ClearedDown,
                 found_again: t.found_again(),
             }),
@@ -559,6 +562,16 @@ impl V34Report {
                 rows.push((
                     "V.34 renegotiated",
                     format!("{} time{}", t.renegotiations, if t.renegotiations == 1 { "" } else { "s" }),
+                ));
+            }
+            if t.retrains > 0 {
+                rows.push((
+                    "V.34 retrained",
+                    format!(
+                        "{} time{}, back through phase 2",
+                        t.retrains,
+                        if t.retrains == 1 { "" } else { "s" }
+                    ),
                 ));
             }
             if t.found_again > 0 {
@@ -1608,7 +1621,7 @@ impl Modem {
     pub fn retrains(&self) -> u32 {
         match self.pump.as_ref() {
             Some(Pump::V32(m)) => m.retrains(),
-            Some(Pump::V34(m)) => m.renegotiations(),
+            Some(Pump::V34(m)) => m.renegotiations() + m.retrains(),
             _ => 0,
         }
     }

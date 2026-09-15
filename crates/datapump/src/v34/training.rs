@@ -189,6 +189,65 @@ const STRAYED_SYMBOLS: usize = 1000;
 const UNLIKE_ERROR: f64 = 0.02;
 const UNLIKE_SYMBOLS: usize = 150;
 
+/// A retrain's tone is detected when it has stood this long: "for more than
+/// 50 ms" (11.5.1.2, 11.5.2.2).
+const RETRAIN_TONE_HELD: f64 = 0.055;
+
+/// How far above what sits 150 Hz either side of it the far end's tone has to
+/// stand to be a retrain rather than the data or the four-point renegotiation
+/// signal it might be mistaken for. A pure tone puts everything at its own
+/// frequency; a data or MP signal fills the band and its neighbours alike.
+const RETRAIN_TONE_CLEAR: f64 = 6.0;
+
+/// The far end's role, whose tone this end listens for.
+fn far_role(role: Role) -> Role {
+    match role {
+        Role::Call => Role::Answer,
+        Role::Answer => Role::Call,
+    }
+}
+
+/// A tone the far end holds to start a retrain (11.5), told from the data or a
+/// renegotiation's four-point signal by being a pure tone: all of its energy
+/// at one frequency and next to none 150 Hz off it.
+#[derive(Debug, Clone)]
+struct RetrainWatch {
+    on: dsp::ToneDetector,
+    below: dsp::ToneDetector,
+    above: dsp::ToneDetector,
+    held: u64,
+}
+
+impl RetrainWatch {
+    /// `far` is the tone the far end sends to start a retrain: Tone A at
+    /// 2400 Hz from the answer modem, Tone B at 1200 Hz from the call modem.
+    fn new(far: Role, fs: f64) -> Self {
+        let freq = match far {
+            Role::Call => 1200.0,
+            Role::Answer => 2400.0,
+        };
+        Self {
+            on: dsp::ToneDetector::new(freq, 10.0, fs),
+            below: dsp::ToneDetector::new(freq - 150.0, 10.0, fs),
+            above: dsp::ToneDetector::new(freq + 150.0, 10.0, fs),
+            held: 0,
+        }
+    }
+
+    /// Hear one sample, and say whether the tone has now stood long enough to
+    /// be a retrain.
+    fn feed(&mut self, x: f64, fs: f64) -> bool {
+        self.on.feed(x);
+        self.below.feed(x);
+        self.above.feed(x);
+        let clear = self.on.amplitude()
+            > RETRAIN_TONE_CLEAR * self.below.amplitude().max(self.above.amplitude())
+            && self.on.amplitude() > 0.008;
+        self.held = if clear { self.held + 1 } else { 0 };
+        self.held == (RETRAIN_TONE_HELD * fs) as u64
+    }
+}
+
 /// What this end sends, and how it moves from one signal to the next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Segment {
@@ -686,6 +745,13 @@ pub struct Modem {
     off_run: usize,
     /// Times the frames were found again.
     found_again: u32,
+
+    /// The far end's retrain tone, watched for whenever a call is up (11.5).
+    retrain_watch: RetrainWatch,
+    /// Set once a full retrain is called for -- the far end's tone was heard,
+    /// or a renegotiation this end began went unanswered (11.6.2) -- so the
+    /// start-up above can go back to phase 2. Read once and cleared.
+    wants_retrain: bool,
 }
 
 impl Modem {
@@ -744,6 +810,8 @@ impl Modem {
             unlike_run: 0,
             off_run: 0,
             found_again: 0,
+            retrain_watch: RetrainWatch::new(far_role(settings.role), fs),
+            wants_retrain: false,
         };
         match settings.role {
             Role::Call => {
@@ -1051,6 +1119,13 @@ impl Modem {
         self.now += 1;
         self.rx.feed(line);
         let live = |status: Status| matches!(status, Status::Running | Status::Connected { .. } | Status::Retraining);
+        // The far end's retrain tone can come at any point a call is up: it is
+        // how a far end falls back when a renegotiation goes unanswered or the
+        // line changes too much for one (11.5). Watched on the raw line, since
+        // it is a pure tone and not one of the demodulator's signals.
+        if live(self.status) && self.stage != Stage::Finished && self.retrain_watch.feed(line, self.fs) {
+            self.wants_retrain = true;
+        }
         while let Some(heard) = self.rx.heard() {
             if live(self.status) {
                 self.heard(heard);
@@ -1060,13 +1135,42 @@ impl Modem {
             if let Some((at, why)) = self.deadline
                 && self.now > at
             {
-                self.fail(why);
+                self.deadline_reached(why);
             } else {
                 self.stage_step();
             }
         }
         let source = &mut self.source;
         self.tx.next_sample(|| source.next())
+    }
+
+    /// A deadline came without the signal it waited for. In a rate
+    /// renegotiation this end began, 11.6.2 has it "initiate the retrain
+    /// procedure" rather than give up -- the far end could not follow the
+    /// renegotiation, but the line may still carry a call trained from the
+    /// top. Everywhere else the deadline is still the end of the call.
+    fn deadline_reached(&mut self, why: &'static str) {
+        if self.stage == Stage::Renegotiation && self.initiated && !self.clearing {
+            self.wants_retrain = true;
+        } else {
+            self.fail(why);
+        }
+    }
+
+    /// Whether phase 2 should be run again (11.5): read once, and cleared, by
+    /// the start-up that owns this.
+    pub fn take_retrain(&mut self) -> bool {
+        std::mem::take(&mut self.wants_retrain)
+    }
+
+    /// Ask for a full retrain from data mode (11.5.1.1, 11.5.2.1). False, and
+    /// nothing done, outside data mode.
+    pub fn start_retrain(&mut self) -> bool {
+        if self.stage != Stage::Data {
+            return false;
+        }
+        self.wants_retrain = true;
+        true
     }
 
     fn heard(&mut self, heard: Heard) {
@@ -1842,6 +1946,29 @@ mod tests {
             let received = |m: &Modem| m.rates().map(|r| r.1);
             assert_eq!(received(link.end(other)), Some(6), "{other:?}");
         }
+    }
+
+    /// 11.6.2: a modem that began a rate renegotiation and does not get an E
+    /// back "shall initiate the retrain procedure" -- the far end could not
+    /// follow the renegotiation, but the line may carry a call trained from
+    /// scratch. It asks for a retrain rather than dropping the call.
+    #[test]
+    fn a_renegotiation_that_goes_unanswered_asks_for_a_retrain() {
+        let mut link = Link::new(0.030, 45.0, 60.0);
+        assert!(link.run_until(20.0, Link::both_connected), "never connected");
+        assert!(link.caller.renegotiate(8));
+        // The far end is gone: nothing comes back. The call end sends its S,
+        // S-bar, TRN and MP into silence and never hears an E.
+        let mut wanted = false;
+        for _ in 0..(12.0 * FS) as usize {
+            link.caller.step(0.0);
+            if link.caller.take_retrain() {
+                wanted = true;
+                break;
+            }
+            assert!(!matches!(link.caller.status(), Status::Failed(_)), "it gave up instead of retraining");
+        }
+        assert!(wanted, "the unanswered renegotiation never asked for a retrain");
     }
 
     #[test]

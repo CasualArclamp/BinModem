@@ -25,11 +25,23 @@ pub struct Modem {
     fs: f64,
     phase2: phase2::Modem,
     training: Option<training::Modem>,
+    /// Set while a retrain is under way: phase 2 is running again after a call
+    /// was up, so the call is recovering rather than being placed. Cleared
+    /// when the new phases 3 and 4 connect.
+    retraining: bool,
+    /// Full retrains since the call began (11.5), as against the in-band rate
+    /// renegotiations [`training::Modem`] counts.
+    retrains: u32,
 }
 
 impl Modem {
     pub fn new(role: Role, fs: f64) -> Self {
-        Self { fs, phase2: phase2::Modem::new(role, fs), training: None }
+        Self { fs, phase2: phase2::Modem::new(role, fs), training: None, retraining: false, retrains: 0 }
+    }
+
+    /// Full retrains since the call began.
+    pub fn retrains(&self) -> u32 {
+        self.retrains
     }
 
     pub fn role(&self) -> Role {
@@ -53,8 +65,18 @@ impl Modem {
             (_, Some(training::Status::Connected { transmit, receive })) => Status::Connected { transmit, receive },
             (_, Some(training::Status::Retraining)) => Status::Retraining,
             (_, Some(training::Status::ClearedDown)) => Status::ClearedDown,
+            // Phase 2 running again after a call was up is a retrain, not a
+            // call being placed: the call is up as far as anything above is
+            // concerned, and recovering.
+            _ if self.retraining => Status::Retraining,
             _ => Status::Running,
         }
+    }
+
+    /// Begin a full retrain from data mode (11.5): go back through phase 2 and
+    /// train again. False, and nothing done, outside data mode.
+    pub fn retrain(&mut self) -> bool {
+        self.training.as_mut().is_some_and(training::Modem::start_retrain)
     }
 
     /// Data received.
@@ -121,7 +143,24 @@ impl Modem {
     /// Carry the start-up one sample further.
     pub fn step(&mut self, line: f64) -> f64 {
         if let Some(training) = self.training.as_mut() {
-            return training.step(line);
+            let out = training.step(line);
+            if training.take_retrain() {
+                // 11.5: go back to phase 2, keeping the capabilities the first
+                // start-up settled -- a retrain does not exchange INFO0 again.
+                // The very sample is the retrain's first, so its tone follows
+                // the data with no gap the far end has to wait through.
+                let far = self.phase2.far_capabilities().unwrap_or_default();
+                self.phase2 = phase2::Modem::retrain(self.phase2.role(), self.fs, far);
+                self.training = None;
+                self.retraining = true;
+                self.retrains += 1;
+                return self.phase2.step(line);
+            }
+            // The recovery is over the moment the new training connects.
+            if matches!(training.status(), training::Status::Connected { .. }) {
+                self.retraining = false;
+            }
+            return out;
         }
         let out = self.phase2.step(line);
         if self.phase2.status() == phase2::Status::Done {
@@ -236,6 +275,56 @@ mod tests {
         let contains = |haystack: &[bool], needle: &[bool]| haystack.windows(needle.len()).any(|w| w == needle);
         assert!(contains(&at_answer, &from_call), "call to answer lost ({} bits)", at_answer.len());
         assert!(contains(&at_call, &from_answer), "answer to call lost ({} bits)", at_call.len());
+    }
+
+    /// A call that is up, a retrain, and the call up again -- the whole of
+    /// 11.5, both ends going back through phase 2 on the capabilities they
+    /// already have and training again, without a byte of the capabilities
+    /// exchange repeated.
+    #[test]
+    fn a_retrain_takes_a_connected_call_back_through_phase_2_and_up_again() {
+        let delay = (0.030 * FS) as usize;
+        let mut caller = Modem::new(Role::Call, FS);
+        let mut answerer = Modem::new(Role::Answer, FS);
+        let mut to_answer: std::collections::VecDeque<f64> = std::iter::repeat_n(0.0, delay).collect();
+        let mut to_call: std::collections::VecDeque<f64> = std::iter::repeat_n(0.0, delay).collect();
+        let up = |m: &Modem| matches!(m.status(), Status::Connected { .. });
+
+        let mut asked = false;
+        let mut dropped = false;
+        let mut reconnected_at = None;
+        for i in 0..(45.0 * FS) as usize {
+            let out_call = caller.step(to_call.pop_front().unwrap() * 0.3);
+            let out_answer = answerer.step(to_answer.pop_front().unwrap() * 0.3);
+            to_answer.push_back(out_call);
+            to_call.push_back(out_answer);
+            // Once both are in data mode, the answer modem starts a retrain.
+            if !asked && up(&caller) && up(&answerer) {
+                asked = true;
+                assert!(answerer.retrain(), "a connected modem would not retrain");
+            }
+            // Both must leave data mode -- the call is recovering, not up.
+            if asked && !dropped {
+                if matches!(caller.status(), Status::Retraining)
+                    && matches!(answerer.status(), Status::Retraining)
+                {
+                    dropped = true;
+                }
+            } else if dropped && up(&caller) && up(&answerer) {
+                reconnected_at = Some(i as f64 / FS);
+                break;
+            }
+        }
+        assert!(asked, "never connected in the first place");
+        assert!(dropped, "the retrain never took the call back to phase 2");
+        let at = reconnected_at.expect("the call never came back up after the retrain");
+        assert!(matches!(caller.status(), Status::Connected { .. }));
+        assert!(matches!(answerer.status(), Status::Connected { .. }));
+        // The retrain settled the same rates the first start-up did.
+        let (call, answer) = (caller.training().unwrap(), answerer.training().unwrap());
+        assert_eq!(call.rates(), Some((14, 14)));
+        assert_eq!(answer.rates(), Some((14, 14)));
+        println!("  back up at {at:.1}s");
     }
 
     #[test]

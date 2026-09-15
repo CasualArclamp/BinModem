@@ -246,24 +246,21 @@ pub struct Modem {
 }
 
 impl Modem {
-    /// Phase 2 from its start: the 75 ms of silence that end phase 1 have
-    /// already gone.
-    pub fn new(role: Role, fs: f64) -> Self {
+    /// Every field at rest: silent, at the finished stage, nothing heard. The
+    /// two ways in fill in the rest.
+    fn blank(role: Role, fs: f64) -> Self {
         let far_tone = role.far().carrier();
-        let mut modem = Self {
+        Self {
             role,
             fs,
             now: 0,
-            stage: match role {
-                Role::Call => Stage::CallInfo0,
-                Role::Answer => Stage::AnswerInfo0,
-            },
+            stage: Stage::Finished,
             status: Status::Running,
             since: 0,
             deadline: None,
             tx: dpsk::Transmitter::new(role.side(), fs),
             probe: probe::Generator::new(fs),
-            speaking: Speaking::Carrier,
+            speaking: Speaking::Silent,
             reverse_at: None,
             reversed_at: None,
             silence_at: None,
@@ -284,11 +281,50 @@ impl Modem {
             info1c: None,
             info1a: None,
             recoveries: 0,
+        }
+    }
+
+    /// Phase 2 from its start: the 75 ms of silence that end phase 1 have
+    /// already gone.
+    pub fn new(role: Role, fs: f64) -> Self {
+        let mut modem = Self::blank(role, fs);
+        modem.stage = match role {
+            Role::Call => Stage::CallInfo0,
+            Role::Answer => Stage::AnswerInfo0,
         };
+        modem.speaking = Speaking::Carrier;
         // 11.2.1.1.1 and 11.2.1.2.1: INFO0 "with bit 28 set to 0, followed by"
         // this end's tone -- which the modulator carries on into by itself.
         let bits = modem.ours.to_bits();
         modem.tx.send(&bits);
+        modem
+    }
+
+    /// Phase 2 as a retrain (11.5): the capabilities were settled the first
+    /// time and are not exchanged again, so INFO0 is skipped and this end goes
+    /// straight to its tone and the reversal handshake. `far` is what the far
+    /// end's INFO0 said the first time round, kept so INFO1 has it.
+    ///
+    /// 11.5.1.2 has the responding call modem "transmit Tone B ... and proceed
+    /// in accordance with 11.2.1.1.3", which is the reversal this end waits for
+    /// in [`Stage::CallFirstReversal`]. 11.5.2.2 has the responding answer
+    /// modem "transmit Tone A and proceed in accordance with 11.2.1.2.3", which
+    /// is [`Stage::AnswerAwaitTone`]. An end initiating (11.5.1.1, 11.5.2.1)
+    /// starts its tone first and waits for the far end's; from the reversal on
+    /// the two are the same, so both enter the same way.
+    pub fn retrain(role: Role, fs: f64, far: Info0) -> Self {
+        let mut modem = Self::blank(role, fs);
+        modem.far = Some(far);
+        modem.far_info0_count = 1;
+        modem.ours.acknowledge = true;
+        modem.start_tone();
+        // The step from data or a renegotiation tone into this one is not a
+        // reversal, however it reads.
+        modem.ignore_reversals_until = modem.ms(0.050);
+        modem.stage = match role {
+            Role::Call => Stage::CallFirstReversal,
+            Role::Answer => Stage::AnswerAwaitTone,
+        };
         modem
     }
 
