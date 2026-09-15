@@ -34,6 +34,9 @@ struct Relayed {
     /// Without this a browser reading to the end of a page waits for ever for
     /// an end that has already happened somewhere else.
     told_socket: bool,
+    /// Whether the connection across the link has been answered. Until it is,
+    /// the browser is waiting on something that may not be there.
+    established: bool,
 }
 
 /// The proxy on the machine that dialled.
@@ -48,6 +51,15 @@ pub struct Client {
     /// Where the listener actually ended up, which is not what was asked for
     /// when port zero was.
     bound: std::net::SocketAddr,
+    /// Whether anything has ever been answered at the far end.
+    ///
+    /// The far end only answers if it is running the other half of this, which
+    /// it does when the machine that answered the call has been asked to carry
+    /// web traffic too. Without it there is nothing listening, and nothing
+    /// says so: the connections are not refused, they go unanswered, and the
+    /// browser is left with a socket that opens and closes having carried
+    /// nothing. Worth telling somebody about rather than counting as traffic.
+    answered: bool,
 }
 
 impl Client {
@@ -66,6 +78,7 @@ impl Client {
             relays: HashMap::new(),
             log: Vec::new(),
             bound,
+            answered: false,
         })
     }
 
@@ -88,8 +101,20 @@ impl Client {
         self.server = Endpoint::new(address, SOCKS_PORT);
     }
 
+    /// Connections the far end has answered and is carrying.
     pub fn open(&self) -> usize {
-        self.relays.len()
+        self.relays.values().filter(|r| r.established).count()
+    }
+
+    /// Connections a browser is waiting on that the far end has not answered.
+    pub fn waiting(&self) -> usize {
+        self.relays.values().filter(|r| !r.established).count()
+    }
+
+    /// Whether the far end has ever answered one. False with connections
+    /// waiting is the other half of the proxy not being there at all.
+    pub fn answered(&self) -> bool {
+        self.answered
     }
 
     pub fn take_log(&mut self) -> Vec<String> {
@@ -116,7 +141,13 @@ impl Client {
                         self.log.push("proxy: a connection ended".to_owned());
                     }
                 }
-                Report::Established | Report::Data | Report::Closing => {}
+                Report::Established => {
+                    self.answered = true;
+                    if let Some(relay) = self.relays.get_mut(&event.handle) {
+                        relay.established = true;
+                    }
+                }
+                Report::Data | Report::Closing => {}
             }
         }
 
@@ -152,6 +183,7 @@ impl Client {
                             to_link: Vec::new(),
                             socket_finished: false,
                             told_socket: false,
+                            established: false,
                         },
                     );
                 }
@@ -240,5 +272,38 @@ impl Client {
         if gone || (finished && far_finished && !still_waiting) {
             self.relays.remove(&handle);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::net::TcpStream;
+
+    /// The far end only answers when the machine that answered the call is
+    /// carrying web traffic too. Without it there is nothing listening, and
+    /// nothing to refuse the connection either: it goes unanswered. That is
+    /// not traffic, and the panel has to be able to tell the difference.
+    #[test]
+    fn a_far_end_that_is_not_there_leaves_the_connections_waiting() {
+        let mut client = Client::new("127.0.0.1:0", [10, 0, 0, 2], [10, 0, 0, 1], 7)
+            .expect("could not listen");
+        assert_eq!((client.open(), client.waiting(), client.answered()), (0, 0, false));
+
+        // A browser connects and asks for something. Nothing at the far end
+        // will ever answer, because nothing is there.
+        let mut browser = TcpStream::connect(client.bound()).expect("connect");
+        let _ = browser.write_all(&[5, 1, 0]);
+        for _ in 0..2_000 {
+            client.tick(1);
+            let _ = client.take_outgoing();
+            if client.waiting() > 0 {
+                break;
+            }
+        }
+        assert_eq!(client.waiting(), 1, "the browser's connection was not waiting on anything");
+        assert_eq!(client.open(), 0, "an unanswered connection was counted as carried");
+        assert!(!client.answered(), "it claimed the far end had answered");
     }
 }

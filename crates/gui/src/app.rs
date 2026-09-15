@@ -1286,14 +1286,38 @@ impl ScopeApp {
                 });
 
                 let Some(view) = link else { return };
-                if let Some(p) = &view.proxy
-                    && p.open > 0
-                {
-                    ui.label(
-                        RichText::new(format!("{} connections being carried", p.open))
+                if let Some(p) = &view.proxy {
+                    // Connections nobody has answered are not traffic. The far
+                    // end only answers when the machine that answered the call
+                    // is carrying web traffic as well, and when it is not there
+                    // is nothing to refuse them -- they go unanswered, and a
+                    // browser is left with a socket that carried nothing.
+                    if !p.serving && p.waiting > 0 && !p.answered {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} waiting: {} is not answering. Tick carry web \
+                                 traffic on the machine that answered the call.",
+                                p.waiting, view.remote
+                            ))
                             .small()
-                            .color(dim),
-                    );
+                            .color(bad),
+                        );
+                    } else {
+                        if p.open > 0 {
+                            ui.label(
+                                RichText::new(format!("{} connections being carried", p.open))
+                                    .small()
+                                    .color(dim),
+                            );
+                        }
+                        if p.waiting > 0 {
+                            ui.label(
+                                RichText::new(format!("{} waiting to be answered", p.waiting))
+                                    .small()
+                                    .color(dim),
+                            );
+                        }
+                    }
                 }
                 ui.separator();
                 egui::Grid::new("ppp addresses")

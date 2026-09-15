@@ -261,14 +261,25 @@ far end put the link down.
 
 ### Web traffic over it
 
-Tick **carry web traffic** and the two ends become a proxy once the link is
-up. The setting is kept for the next link, so a machine answering with a login
-prompt can offer it before anyone has called. The end that answered the call has the internet and offers it; the end
-that dialled listens on `127.0.0.1:1080` and the panel says so. Point a
-browser's SOCKS 5 proxy setting there — in Firefox, Settings → Network
-Settings → Manual, SOCKS Host `127.0.0.1` port `1080`, SOCKS v5, and tick
-*Proxy DNS when using SOCKS v5* so names are resolved at the far end where
-there is something to resolve them with.
+Tick **carry web traffic** on **both machines**. It is one proxy in two
+halves and each machine runs the half its end of the call calls for, so a
+single tick is half a proxy and carries nothing. The setting is kept for the
+next link, so a machine answering with a login prompt can offer it before
+anyone has called.
+
+The end that answered the call has the internet and offers it, and says
+*offering the internet at 10.0.0.1:1080*; the end that dialled listens on
+`127.0.0.1:1080` and says so. Point a browser's SOCKS 5 proxy setting there —
+in Firefox, Settings → Network Settings → Manual, SOCKS Host `127.0.0.1` port
+`1080`, SOCKS v5, and tick *Proxy DNS when using SOCKS v5* so names are
+resolved at the far end where there is something to resolve them with.
+
+If the far end is not carrying web traffic there is nothing at its port to
+refuse the connections, so they are not refused: they go unanswered, and a
+browser is left with a socket that opened and closed having carried nothing,
+which Firefox reports as an empty page. The panel says so rather than counting
+them as traffic — *2 waiting: 10.0.0.1 is not answering* — which is the tick
+missing at the other end.
 
 The loopback rather than every interface, deliberately: a proxy listening on
 the network is one anybody on the network can use to reach the far end of

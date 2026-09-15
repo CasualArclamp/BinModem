@@ -92,6 +92,10 @@ pub struct ProxyView {
     pub at: String,
     /// Connections being carried right now.
     pub open: usize,
+    /// Connections a browser is waiting on that the far end has not answered.
+    pub waiting: usize,
+    /// Whether the far end has ever answered one of them.
+    pub answered: bool,
     pub trouble: Option<String>,
 }
 
@@ -356,12 +360,16 @@ impl Networking {
                     serving: true,
                     at: format!("{}:{}", dotted(server.address()), server.port()),
                     open: server.open(),
+                    waiting: 0,
+                    answered: true,
                     trouble: None,
                 }),
                 Some(Proxy::Using(client)) => Some(ProxyView {
                     serving: false,
                     at: client.bound().to_string(),
                     open: client.open(),
+                    waiting: client.waiting(),
+                    answered: client.answered(),
                     trouble: None,
                 }),
                 Some(Proxy::Refused(why)) => Some(ProxyView {
