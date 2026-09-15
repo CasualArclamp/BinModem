@@ -9,7 +9,7 @@ one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
 source for every normative constant, and against the RFCs for everything
-carried over the top of them. 1326 tests.
+carried over the top of them. 1361 tests.
 
 ## What works
 
@@ -46,7 +46,7 @@ been checked three other ways: two documents, two methods, one table.
 | **Settings** | remembered between runs, so the modem comes back where it was left |
 | **Files** | ZMODEM send and receive |
 | **Fax** | T.30 group 3, sending and receiving; V.29 (7200/9600) and V.27 ter (2400/4800); T.4 Modified Huffman and Modified READ, T.6 MMR; T.30 Annex A error correction mode; pages drawn as they arrive |
-| **Network** | PPP (RFC 1661/1662) with LCP, PAP and CHAP, and IPCP, and a ping over it; a dial-in login prompt, and a login script for dialling out |
+| **Network** | PPP (RFC 1661/1662) with LCP, PAP and CHAP, and IPCP, Van Jacobson header compression (RFC 1144), and a ping over it; a dial-in login prompt, and a login script for dialling out |
 | **Internet** | our own TCP (RFC 9293), and a proxy that speaks both SOCKS 5 (RFC 1928) and HTTP (RFC 9112) on one port: a browser on one machine, the internet on the other |
 | **Line** | full-duplex sound card, or a WAV to replay |
 

@@ -310,6 +310,17 @@ The loopback rather than every interface, deliberately: a proxy listening on
 the network is one anybody on the network can use to reach the far end of
 somebody else's telephone call.
 
+The transcript says whether the headers are being compressed — *ppp: headers
+compressed both ways, 16 slots*. That is RFC 1144, and it matters more here
+than almost anywhere: every TCP segment carries forty octets of IP and TCP
+header, and on this link an acknowledgement is nothing else and a keystroke is
+forty-one octets of which one is the keystroke. What crosses instead is three
+or four, because almost nothing in a header changes between one segment and
+the next and what does usually changes by exactly the amount of data that went
+past. Measured on the same conversation with it turned off, thirty-six of the
+forty go. A far end that will not do it says so and the link carries on
+without it, which the transcript also says.
+
 What crosses is our own TCP (RFC 9293) over our own IP over PPP over the
 modem. The only part of the path belonging to the operating system is the
 socket the answering end opens to the site. Expect a page in tens of seconds
@@ -318,7 +329,8 @@ will not be pleasant, and a page from 1996 will be exactly as it was.
 
 The clause numbers in `crates/ppp` are RFC numbers: 1662 for the framing, 1661
 for the negotiation, 1334 and 1994 for PAP and CHAP with 1321's MD5 under it,
-1332 for the addresses, and 791, 792 and 1071 for the datagram, the echo and
+1332 for the addresses and for negotiating header compression, 1144 for the
+compression itself, and 791, 792 and 1071 for the datagram, the echo and
 the checksum over both. `crates/login` has no RFC behind it, because the text
 before PPP never had one. `crates/tcp` is RFC 9293, with
 6298 for the retransmission timer and 5681 for what to do about a loss;

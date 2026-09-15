@@ -17,6 +17,7 @@ use crate::ip;
 use crate::ipcp::Ipcp;
 use crate::lcp::{Auth, Lcp};
 use crate::session::{Report, Session};
+use crate::vj;
 
 /// 3.2's phase diagram, as far as this goes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +78,12 @@ pub struct Link {
     /// Datagrams carrying something other than an echo, for whatever is above
     /// this to make sense of.
     carried: Vec<ip::Carried>,
+    /// RFC 1144, once IPCP has agreed to it. One for each direction, because
+    /// RFC 1332 4 negotiates each direction on its own: a link may compress
+    /// one way and not the other, and between different implementations it
+    /// often does.
+    compressor: Option<vj::Compressor>,
+    decompressor: Option<vj::Decompressor>,
     /// 791's Identification field, which only has to differ between datagrams
     /// that are alive at once.
     next_id: u16,
@@ -123,6 +130,8 @@ impl Link {
             line: Vec::new(),
             arrived: Vec::new(),
             carried: Vec::new(),
+            compressor: None,
+            decompressor: None,
             next_id: 1,
             trouble: None,
             closing: false,
@@ -143,6 +152,21 @@ impl Link {
     /// The addresses the two ends settled on.
     pub fn addresses(&self) -> ([u8; 4], [u8; 4]) {
         (self.ipcp.protocol.local(), self.ipcp.protocol.remote())
+    }
+
+    /// Do not ask the far end for header compression.
+    ///
+    /// Nothing needs this on a real call. It is here because a test that wants
+    /// to watch what a datagram does has to be able to stop the layer below
+    /// rewriting it.
+    pub fn without_header_compression(mut self) -> Self {
+        self.ipcp.protocol = self.ipcp.protocol.without_header_compression();
+        self
+    }
+
+    /// What header compression was agreed, each way round.
+    pub fn header_compression(&self) -> crate::ipcp::Compression {
+        self.ipcp.protocol.compression
     }
 
     /// Why the link is down or going, if there is a reason to give.
@@ -196,9 +220,20 @@ impl Link {
     pub fn feed(&mut self, bytes: &[u8]) {
         for &byte in bytes {
             // A frame that did not survive the line is counted where it was
-            // counted and otherwise ignored: every protocol here has its own
+            // counted, and told to the decompressor: RFC 1144 4.1 has it
+            // rebuild each header from the one before, so after a gap it must
+            // throw packets away until one names its connection again.
+            // Otherwise the changes in the next packet are applied to
+            // whichever conversation went last, and the TCP checksum has one
+            // chance in 65536 of not noticing. Every protocol here has its own
             // timer and will ask again.
-            if let Ok(Some(packet)) = self.deframer.feed(byte) {
+            let read = self.deframer.feed(byte);
+            if read.is_err()
+                && let Some(d) = self.decompressor.as_mut()
+            {
+                d.error();
+            }
+            if let Ok(Some(packet)) = read {
                 self.deliver(packet);
                 // Round by round rather than once at the end: what one frame
                 // agreed to governs how the next one is read, and the next one
@@ -254,7 +289,7 @@ impl Link {
         let (local, remote) = self.addresses();
         let datagram = ip::build(local, remote, protocol, payload, self.next_id);
         self.next_id = self.next_id.wrapping_add(1);
-        self.send(crate::protocol::IP, datagram);
+        self.send_datagram(datagram);
         true
     }
 
@@ -275,8 +310,24 @@ impl Link {
         };
         let datagram = ip::datagram(local, remote, &echo, self.next_id);
         self.next_id = self.next_id.wrapping_add(1);
-        self.send(crate::protocol::IP, datagram);
+        self.send_datagram(datagram);
         true
+    }
+
+    /// Put one datagram on the link, through the compressor if there is one.
+    ///
+    /// Everything that sends IP goes through here, including a ping: RFC 1144
+    /// 3.2.3 sends anything that is not compressible TCP as it stands and
+    /// leaves the compressor's state alone, so there is nothing to decide
+    /// above this and nothing gained by deciding it.
+    fn send_datagram(&mut self, datagram: Vec<u8>) {
+        match self.compressor.as_mut() {
+            Some(c) => {
+                let (kind, packet) = c.compress(&datagram);
+                self.send(kind.protocol(), packet);
+            }
+            None => self.send(crate::protocol::IP, datagram),
+        }
     }
 
     fn deliver(&mut self, packet: Packet) {
@@ -321,14 +372,32 @@ impl Link {
                     p.receive(&packet.payload);
                 }
             }
-            crate::protocol::IP => {
+            crate::protocol::IP
+            | crate::protocol::COMPRESSED_TCP
+            | crate::protocol::UNCOMPRESSED_TCP => {
                 // 3.6: "IP packets received before this phase is reached
                 // SHOULD be silently discarded", and one arriving after it
                 // that is not an echo is not this layer's business either.
                 if !self.up() {
                     return;
                 }
-                let Some(carried) = ip::read(&packet.payload) else {
+                let Some(kind) = vj::Kind::from_protocol(packet.protocol) else {
+                    return;
+                };
+                let datagram = match (kind, self.decompressor.as_mut()) {
+                    (vj::Kind::Ip, _) => packet.payload,
+                    // A far end sending these without having been told this
+                    // end can read them. Nothing can be done with it, and
+                    // 5.7's Protocol-Reject is for a protocol number this end
+                    // does not run at all rather than one it did not agree to,
+                    // so it is dropped.
+                    (_, None) => return,
+                    (kind, Some(d)) => match d.decompress(kind, &packet.payload) {
+                        Some(datagram) => datagram,
+                        None => return,
+                    },
+                };
+                let Some(carried) = ip::read(&datagram) else {
                     return;
                 };
                 if carried.protocol != ip::PROTOCOL_ICMP {
@@ -351,7 +420,7 @@ impl Link {
                         let datagram =
                             ip::datagram(arrived.to, arrived.from, &reply, self.next_id);
                         self.next_id = self.next_id.wrapping_add(1);
-                        self.send(crate::protocol::IP, datagram);
+                        self.send_datagram(datagram);
                     }
                     self.arrived.push(arrived);
                 }
@@ -538,6 +607,8 @@ impl Link {
                     // exchange in force.
                     self.framer = Framer::new();
                     self.deframer.set_accm(crate::frame::DEFAULT_ACCM);
+                    self.compressor = None;
+                    self.decompressor = None;
                     self.ipcp.down();
                     self.prover = None;
                     self.authenticator = None;
@@ -568,8 +639,17 @@ impl Link {
         for report in self.ipcp.take_reports() {
             anything = true;
             match report {
-                Report::Up => self.phase = Phase::Network,
+                Report::Up => {
+                    self.phase = Phase::Network;
+                    // Built here rather than at negotiation, so a slot table
+                    // never outlives the agreement that sized it.
+                    let agreed = self.ipcp.protocol.compression;
+                    self.compressor = agreed.sending.map(vj::Compressor::new);
+                    self.decompressor = agreed.receiving.map(vj::Decompressor::new);
+                }
                 Report::Down | Report::Finished => {
+                    self.compressor = None;
+                    self.decompressor = None;
                     if self.phase == Phase::Network {
                         self.phase = Phase::Establish;
                     }

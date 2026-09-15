@@ -404,6 +404,25 @@ impl Networking {
                 Direction::Note,
                 format!("ppp: up, {} talking to {}{who}", dotted(local), dotted(remote)),
             );
+            // Worth a line of its own: it is the difference between forty
+            // octets of header on every segment and three, and a far end that
+            // declined is the commonest reason a link feels slower than its
+            // rate says it should.
+            let vj = self.link.header_compression();
+            tx.log(
+                Direction::Note,
+                match (vj.sending, vj.receiving) {
+                    (Some(p), Some(_)) => format!(
+                        "ppp: headers compressed both ways, {} slots",
+                        u16::from(p.max_slot) + 1
+                    ),
+                    (Some(_), None) => "ppp: headers compressed outbound only".to_owned(),
+                    (None, Some(_)) => "ppp: headers compressed inbound only".to_owned(),
+                    (None, None) => {
+                        "ppp: headers uncompressed, the far end declined".to_owned()
+                    }
+                },
+            );
         }
         if self.link.ended() && !self.ended_reported {
             self.ended_reported = true;

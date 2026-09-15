@@ -20,6 +20,7 @@ pub mod link;
 pub mod md5;
 pub mod ping;
 pub mod session;
+pub mod vj;
 
 pub use control::{Action, Code, ConfigOption, Event, Message, State, transition};
 pub use frame::{Deframer, Discarded, Framer, Packet};
@@ -37,4 +38,9 @@ pub mod protocol {
     pub const CHAP: u16 = 0xc223;
     /// IP Control Protocol: addresses and header compression (RFC 1332).
     pub const IPCP: u16 = 0x8021;
+    /// A TCP/IP datagram whose headers have been replaced by a compressed one
+    /// (RFC 1144), and one carrying a slot identifier in place of its protocol
+    /// field. Both only appear once IPCP has agreed to them (RFC 1332 4).
+    pub const COMPRESSED_TCP: u16 = 0x002d;
+    pub const UNCOMPRESSED_TCP: u16 = 0x002f;
 }
