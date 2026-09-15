@@ -24,6 +24,7 @@
 //! per data frame, which is exactly one step of the rate ladder -- see [`RATE_STEP`].
 
 pub mod modulus;
+pub mod sign;
 pub mod ucode;
 
 /// Data frame intervals per data frame (5.4): "data frames in the digital
