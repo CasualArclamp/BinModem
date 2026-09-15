@@ -95,6 +95,16 @@ impl Modem {
         self.training.as_ref().map_or(0, training::Modem::pending_bits)
     }
 
+    /// Whether there is anything to send bits into.
+    ///
+    /// False while a retrain is running phase 2 again: there is no data mode
+    /// to carry them, [`Self::send_bits`] drops what it is given and
+    /// [`Self::pending_bits`] stays at zero. Whatever is above has to know
+    /// that, or it will feed a transmitter that never fills.
+    pub fn accepts_bits(&self) -> bool {
+        self.training.is_some()
+    }
+
     /// Start a rate renegotiation from data mode, offering to receive no
     /// faster than `receive` times 2400 bit/s. False outside data mode.
     pub fn renegotiate(&mut self, receive: u8) -> bool {

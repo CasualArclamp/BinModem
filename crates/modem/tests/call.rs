@@ -456,6 +456,54 @@ fn two_modems_asked_for_v34_connect_at_33600_and_carry_data() {
     assert!(rows.iter().any(|(k, v)| *k == "V.34 renegotiated" && v == "1 time"), "{rows:?}");
 }
 
+/// The Retrain button: a full retrain (11.5) from data mode, back through
+/// phase 2 and up again on the same call, with the terminals still talking
+/// afterwards. The whole stack, as the window drives it.
+#[test]
+fn a_v34_call_retrains_the_whole_way_and_comes_back() {
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "AT+MS=V34");
+    Pair::type_at(&mut p.caller, "AT+MS=V34");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    for _ in 0..2000 {
+        p.run(0.01);
+        if p.caller.state() == State::Data && p.host.state() == State::Data {
+            break;
+        }
+    }
+    assert_eq!(p.caller.state(), State::Data, "never connected: {}", p.caller_saw());
+    assert_eq!(p.caller.rate(), Some(33_600));
+
+    p.at_caller.clear();
+    p.at_host.clear();
+    p.caller.retrain();
+    // Phase 2 and phases 3 and 4 again: longer than a renegotiation.
+    for _ in 0..60 {
+        p.run(0.5);
+        if p.caller.retraining() {
+            break;
+        }
+    }
+    assert!(p.caller.retraining() || p.caller.rate().is_some(), "the retrain never started");
+    p.run(25.0);
+    assert_eq!(
+        (p.caller.state(), p.host.state()),
+        (State::Data, State::Data),
+        "{} / {}",
+        p.caller_saw(),
+        p.host_saw()
+    );
+    assert!(!p.caller_saw().contains("NO CARRIER"), "the call dropped: {}", p.caller_saw());
+    assert_eq!(p.caller.rate(), Some(33_600), "came back at a different rate");
+    // And the terminals are still talking over it.
+    for b in b"after\r" {
+        p.caller.feed_dte(*b);
+    }
+    p.run(4.0);
+    assert!(p.host_saw().contains("after"), "the host saw {:?}", p.host_saw());
+}
+
 /// A V.34 caller and a far end without it: V.8 settles on V.32bis, and the
 /// call goes ahead on that exactly as though V.34 had never been asked for.
 #[test]

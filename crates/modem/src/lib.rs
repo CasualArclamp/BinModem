@@ -179,6 +179,19 @@ impl Pump {
         }
     }
 
+    /// Whether the pump has anything to send bits into right now.
+    ///
+    /// A V.34 retrain (11.5) takes data mode away while it runs phase 2
+    /// again: the pump holds nothing and accepts nothing until it is back.
+    /// Feeding one that cannot take them never ends, and every bit handed
+    /// over is lost.
+    fn accepts_bits(&self) -> bool {
+        match self {
+            Self::V34(m) => m.accepts_bits(),
+            Self::V22bis(_) | Self::V32(_) | Self::Bell103(_) => true,
+        }
+    }
+
     fn pending_bits(&self) -> usize {
         match self {
             Self::V22bis(m) => m.pending_bits(),
@@ -1705,7 +1718,14 @@ impl Modem {
                 // Keep the transmitter fed. Running it dry would put the
                 // pump's own idle pattern on the line in the middle of a
                 // frame, which the far end would read as an abort.
-                while pump.pending_bits() < 64 {
+                //
+                // Only while there is a transmitter to feed. A V.34 retrain
+                // takes data mode away for the seconds phase 2 and the
+                // training after it need, and a pump that cannot hold a bit
+                // never fills: this asked for one for ever, and threw away
+                // every frame the error control handed over on the way. The
+                // frames wait instead, and go when data mode is back.
+                while pump.accepts_bits() && pump.pending_bits() < 64 {
                     let bit = ec.next_bit();
                     pump.send_bits(&[bit]);
                 }
