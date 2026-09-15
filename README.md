@@ -9,7 +9,7 @@ one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
 source for every normative constant, and against the RFCs for everything
-carried over the top of them. 1298 tests.
+carried over the top of them. 1326 tests.
 
 ## What works
 
@@ -47,7 +47,7 @@ been checked three other ways: two documents, two methods, one table.
 | **Files** | ZMODEM send and receive |
 | **Fax** | T.30 group 3, sending and receiving; V.29 (7200/9600) and V.27 ter (2400/4800); T.4 Modified Huffman and Modified READ, T.6 MMR; T.30 Annex A error correction mode; pages drawn as they arrive |
 | **Network** | PPP (RFC 1661/1662) with LCP, PAP and CHAP, and IPCP, and a ping over it; a dial-in login prompt, and a login script for dialling out |
-| **Internet** | our own TCP (RFC 9293) and a SOCKS 5 proxy: a browser on one machine, the internet on the other |
+| **Internet** | our own TCP (RFC 9293), and a proxy that speaks both SOCKS 5 (RFC 1928) and HTTP (RFC 9112) on one port: a browser on one machine, the internet on the other |
 | **Line** | full-duplex sound card, or a WAV to replay |
 
 It is a fax machine as well. A picture loaded in the Fax window becomes a
@@ -73,8 +73,8 @@ Two of these on a call carry the internet. The Network panel brings up PPP:
 the end that answered hands out an address, the end that dialled asks for one
 and is told, and an ICMP echo crosses and comes back with a round trip on it.
 Tick *carry web traffic* and the end that answered offers its connection —
-point a browser on the dialling machine at `socks5://127.0.0.1:1080` and it
-goes out through the modem.
+point a browser on the dialling machine at `127.0.0.1:1080`, as an HTTP proxy
+or a SOCKS host, and it goes out through the modem.
 
 The answering end can be a dial-in server, the way a provider's modem pool
 was. A caller gets a banner, `login:` and `Password:`, and a prompt where `ppp`
@@ -90,7 +90,8 @@ belongs to the operating system except the socket at the far end that actually
 reaches the internet — no driver, no adapter, no route, no administrator.
 
 The tallest test does the whole of it against a simulated line: V.8, V.22bis,
-V.42, V.42bis, PPP, IPCP, TCP, SOCKS 5, and a real web server on the loopback.
+V.42, V.42bis, PPP, IPCP, TCP, the proxy, and a real web server on the
+loopback.
 Connected six seconds into the call, network phase at seven, a page back at
 2400 bit/s — and it runs without a sound card.
 

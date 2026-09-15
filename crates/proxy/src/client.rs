@@ -2,9 +2,12 @@
 //!
 //! A listener on the local machine, and for everything that connects to it one
 //! connection across the link to the far end's proxy. Nothing here understands
-//! SOCKS: the browser's side of that conversation is forwarded untouched and
+//! either proxy protocol: whatever the browser says is forwarded untouched and
 //! answered by the machine that can actually open the connection. This end is
 //! a pipe with a modem in the middle of it.
+//!
+//! Which is why supporting HTTP as well as SOCKS cost this file nothing. A
+//! pipe does not care what is going through it.
 
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
@@ -14,7 +17,7 @@ use tcp::connection::Report;
 use tcp::stack::{Handle, Outgoing, Stack};
 use tcp::Endpoint;
 
-use crate::{CHUNK, SOCKS_PORT};
+use crate::{CHUNK, PROXY_PORT};
 
 /// One browser connection and the link connection carrying it.
 #[derive(Debug)]
@@ -77,7 +80,7 @@ impl Client {
         Ok(Self {
             listener,
             stack: Stack::new(address, seed),
-            server: Endpoint::new(server_address, SOCKS_PORT),
+            server: Endpoint::new(server_address, PROXY_PORT),
             relays: HashMap::new(),
             log: Vec::new(),
             bound,
@@ -101,7 +104,7 @@ impl Client {
 
     /// And says what the far end is called.
     pub fn set_server(&mut self, address: [u8; 4]) {
-        self.server = Endpoint::new(address, SOCKS_PORT);
+        self.server = Endpoint::new(address, PROXY_PORT);
     }
 
     /// Connections the far end has answered and is carrying.

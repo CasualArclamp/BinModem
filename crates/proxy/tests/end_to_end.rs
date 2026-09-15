@@ -1,10 +1,10 @@
 //! A page fetched through the whole thing.
 //!
 //! A real socket at each end and everything in between ours: a browser
-//! connects to the client's listener and speaks SOCKS 5 at it, the request
-//! crosses our TCP over a link that behaves like a modem, the server reads it,
-//! opens a real connection to a real web server on the loopback, and the page
-//! comes back the same way.
+//! connects to the client's listener and speaks SOCKS 5 or HTTP at it, the
+//! request crosses our TCP over a link that behaves like a modem, the server
+//! reads it, opens a real connection to a real web server on the loopback, and
+//! the page comes back the same way.
 //!
 //! The only thing missing from the picture is the modem itself, and the tests
 //! in `crates/modem` put one under a link like this one.
@@ -379,4 +379,239 @@ fn a_page_still_arrives_when_the_browser_is_slow_to_read_it() {
     );
     assert_eq!(page[split + 4..], body[..], "the page came back changed");
     let _ = web_thread.join();
+}
+
+/// A web server that keeps the connection and answers by length.
+///
+/// The HTTP/1.0 one above closes to say where the body ended, which ends the
+/// browser's connection with it. Persistence is the whole point of the HTTP
+/// proxy, so testing it needs an origin that does not hang up: HTTP/1.1 with a
+/// Content-Length, RFC 9112 6.3 item 6.
+fn a_patient_web_server(
+    name: &'static str,
+    answers: usize,
+) -> (String, thread::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let address = listener.local_addr().expect("addr").to_string();
+    let handle = thread::spawn(move || {
+        let mut seen = Vec::new();
+        let Ok((mut socket, _)) = listener.accept() else {
+            return seen;
+        };
+        let _ = socket.set_read_timeout(Some(Duration::from_secs(60)));
+        let mut held: Vec<u8> = Vec::new();
+        let mut buffer = [0u8; 512];
+        while seen.len() < answers {
+            let end = held.windows(4).position(|w| w == b"\r\n\r\n");
+            let Some(end) = end else {
+                match socket.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(n) => held.extend_from_slice(&buffer[..n]),
+                    Err(_) => break,
+                }
+                continue;
+            };
+            let request: Vec<u8> = held.drain(..end + 4).collect();
+            seen.push(String::from_utf8_lossy(&request).into_owned());
+            let body = format!("this is {name}");
+            let answer = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            if socket.write_all(answer.as_bytes()).is_err() {
+                break;
+            }
+        }
+        // And then wait to be let go rather than hanging up. An origin that
+        // closes is saying the response ended there (RFC 9112 6.3 item 8), and
+        // a proxy that did not pass that on would leave the browser waiting
+        // for an end that had already happened -- so the closing has to be the
+        // proxy's decision to make, not this test's.
+        let mut sink = [0u8; 256];
+        while matches!(socket.read(&mut sink), Ok(n) if n > 0) {}
+        seen
+    });
+    (address, handle)
+}
+
+/// The browser's side when it is configured with an HTTP proxy rather than a
+/// SOCKS host: no handshake at all, just the request with the whole target in
+/// it (RFC 9112 3.2.2).
+fn an_http_browser(proxy: String, asks: Vec<String>) -> thread::JoinHandle<Result<Vec<String>, String>> {
+    thread::spawn(move || {
+        let mut socket = TcpStream::connect(&proxy).map_err(|e| format!("{proxy}: {e}"))?;
+        socket
+            .set_read_timeout(Some(Duration::from_secs(60)))
+            .map_err(|e| e.to_string())?;
+        let mut got = Vec::new();
+        let mut held: Vec<u8> = Vec::new();
+        for url in asks {
+            let request = format!("GET {url} HTTP/1.1\r\nHost: ignored.invalid\r\n\r\n");
+            socket
+                .write_all(request.as_bytes())
+                .map_err(|e| e.to_string())?;
+            // Read one whole response: head, then Content-Length octets.
+            let mut buffer = [0u8; 512];
+            loop {
+                if let Some(end) = held.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&held[..end]).into_owned();
+                    let length: usize = head
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|v| v.trim().parse().ok())
+                        })
+                        .ok_or("no length")?;
+                    if held.len() >= end + 4 + length {
+                        let whole: Vec<u8> = held.drain(..end + 4 + length).collect();
+                        got.push(String::from_utf8_lossy(&whole).into_owned());
+                        break;
+                    }
+                }
+                match socket.read(&mut buffer) {
+                    Ok(0) => return Err(format!("the proxy hung up after {} answers", got.len())),
+                    Ok(n) => held.extend_from_slice(&buffer[..n]),
+                    Err(e) => return Err(format!("{e}")),
+                }
+            }
+        }
+        Ok(got)
+    })
+}
+
+/// Run a browser thread against the link until it is done.
+fn alongside<T: Send + 'static>(
+    link: &mut Link,
+    seconds: u32,
+    work: thread::JoinHandle<T>,
+) -> T {
+    let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watching = finished.clone();
+    let waiter = thread::spawn(move || {
+        let got = work.join().expect("the browser thread panicked");
+        watching.store(true, std::sync::atomic::Ordering::SeqCst);
+        got
+    });
+    let done = finished.clone();
+    link.run_until(seconds, || done.load(std::sync::atomic::Ordering::SeqCst));
+    for line in link.server.take_log() {
+        println!("  server: {line}");
+    }
+    waiter.join().expect("the waiting thread panicked")
+}
+
+/// A page through the proxy with no handshake in front of it.
+#[test]
+fn a_page_comes_back_through_the_http_proxy() {
+    let (web, web_thread) = a_patient_web_server("the page", 1);
+    let mut link = Link::new(0);
+    let proxy = link.client.bound().to_string();
+    // By name, so the far end is the one that resolves it -- which is what a
+    // proxy is for, as against a route.
+    let target = web.replace("127.0.0.1", "localhost");
+    let browser = an_http_browser(proxy, vec![format!("http://{target}/page")]);
+
+    let got = alongside(&mut link, 120, browser).expect("no page");
+    assert_eq!(got.len(), 1);
+    assert!(got[0].starts_with("HTTP/1.1 200 OK"), "not a page: {}", got[0]);
+    assert!(got[0].ends_with("this is the page"), "{}", got[0]);
+
+    drop(link);
+    let seen = web_thread.join().expect("the web thread panicked");
+    assert_eq!(seen.len(), 1, "the web server saw {seen:?}");
+    // 3.2.2 in, 3.2.1 out: the origin server is sent a path, and a Host taken
+    // from the request-target rather than the one the browser wrote.
+    assert!(seen[0].starts_with("GET /page HTTP/1.1\r\n"), "asked for {:?}", seen[0]);
+    assert!(
+        seen[0].to_ascii_lowercase().contains(&format!("host: {target}\r\n").to_ascii_lowercase()),
+        "the wrong Host reached the origin: {:?}",
+        seen[0]
+    );
+    assert!(!seen[0].contains("ignored.invalid"), "{:?}", seen[0]);
+}
+
+/// Two pages from the same host down one connection, opening one socket.
+///
+/// This is the saving. SOCKS pays a greeting and a connect request -- two round
+/// trips, most of a second on this link -- for every connection a browser
+/// makes; here the second page costs nothing before the request itself.
+#[test]
+fn a_second_page_from_the_same_host_opens_no_second_socket() {
+    let (web, web_thread) = a_patient_web_server("the page", 2);
+    let mut link = Link::new(0);
+    let proxy = link.client.bound().to_string();
+    let target = web.replace("127.0.0.1", "localhost");
+    let browser = an_http_browser(
+        proxy,
+        vec![
+            format!("http://{target}/one"),
+            format!("http://{target}/two"),
+        ],
+    );
+
+    let got = alongside(&mut link, 120, browser).expect("no pages");
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert!(got.iter().all(|g| g.starts_with("HTTP/1.1 200 OK")), "{got:?}");
+
+    drop(link);
+    let seen = web_thread.join().expect("the web thread panicked");
+    // Both on the one socket: the server only ever accepted once, so two
+    // requests arriving is proof the connection was kept.
+    assert_eq!(seen.len(), 2, "the origin saw {seen:?}");
+    assert!(seen[0].starts_with("GET /one HTTP/1.1"), "{:?}", seen[0]);
+    assert!(seen[1].starts_with("GET /two HTTP/1.1"), "{:?}", seen[1]);
+}
+
+/// And a browser that changes host on a connection it is already using.
+///
+/// A browser talking to an HTTP proxy is entitled to do this and Firefox does
+/// it constantly, especially with few connections allowed. The socket
+/// underneath has to change while the one to the browser stays.
+#[test]
+fn one_browser_connection_can_visit_two_different_hosts() {
+    let (first, first_thread) = a_patient_web_server("the first", 1);
+    let (second, second_thread) = a_patient_web_server("the second", 1);
+    let mut link = Link::new(0);
+    let proxy = link.client.bound().to_string();
+    let browser = an_http_browser(
+        proxy,
+        vec![
+            format!("http://{}/a", first.replace("127.0.0.1", "localhost")),
+            // By address rather than by name, so the two targets differ in
+            // more than their port and a proxy that compared them loosely
+            // would be caught.
+            format!("http://{second}/b"),
+        ],
+    );
+
+    let got = alongside(&mut link, 120, browser).expect("no pages");
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert!(got[0].ends_with("this is the first"), "{}", got[0]);
+    assert!(got[1].ends_with("this is the second"), "{}", got[1]);
+
+    drop(link);
+    let seen = first_thread.join().expect("the first web thread panicked");
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert!(seen[0].starts_with("GET /a HTTP/1.1"), "{:?}", seen[0]);
+    let seen = second_thread.join().expect("the second web thread panicked");
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert!(seen[0].starts_with("GET /b HTTP/1.1"), "{:?}", seen[0]);
+}
+
+/// The same page over a link that loses things, because a real one does.
+#[test]
+fn an_http_page_comes_back_over_a_line_that_loses_things() {
+    let (web, web_thread) = a_patient_web_server("the page", 1);
+    let mut link = Link::new(11);
+    let proxy = link.client.bound().to_string();
+    let target = web.replace("127.0.0.1", "localhost");
+    let browser = an_http_browser(proxy, vec![format!("http://{target}/page")]);
+
+    let got = alongside(&mut link, 240, browser).expect("no page");
+    assert!(got[0].ends_with("this is the page"), "{}", got[0]);
+    assert!(link.crossed > 0, "nothing crossed, so nothing was lost either");
+    drop(link);
+    let seen = web_thread.join().expect("the web thread panicked");
+    assert_eq!(seen.len(), 1, "{seen:?}");
 }

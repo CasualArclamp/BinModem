@@ -1,8 +1,15 @@
 //! The end with the internet.
 //!
-//! Connections arrive over the link, each one a SOCKS conversation. When one
-//! says where it wants to go, a real socket is opened to it and from then on
-//! the two streams are each other's.
+//! Connections arrive over the link, each one a browser asking for somewhere.
+//! When one says where, a real socket is opened to it and from then on the two
+//! streams are each other's.
+//!
+//! What it is asking in is decided by the first octet: SOCKS 5 opens with its
+//! version number and every HTTP method starts with a letter, so one octet
+//! separates them and neither has to be configured. That matters beyond
+//! tidiness -- a browser pointed at the wrong one of the two used to open, say
+//! nothing this end understood, and leave a blank page with no explanation
+//! anywhere.
 //!
 //! The only blocking thing a proxy does is open the outbound connection: a
 //! name has to be resolved and a handshake has to complete, either of which
@@ -15,11 +22,11 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::Duration;
 
-use socks::{Reply, Session};
+use socks::Reply;
 use tcp::connection::Report;
 use tcp::stack::{Handle, Outgoing, Stack};
 
-use crate::{CHUNK, SOCKS_PORT};
+use crate::{CHUNK, PROXY_PORT};
 
 /// How long to wait for the far side of the internet before giving up on it.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -31,22 +38,140 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// a limit the buffer between them is however large the page is.
 const MOST_BUFFERED: usize = 64 * 1024;
 
-/// Whether what a client opened with is an HTTP request.
+/// Somewhere a socket has to be opened, whichever protocol asked for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Want {
+    /// Host and port, as it was asked for.
+    authority: String,
+    /// Whether what follows is nobody else's business (an HTTP CONNECT).
+    tunnel: bool,
+}
+
+/// What a browser turned out to be speaking.
 ///
-/// A SOCKS greeting opens with 0x05. An HTTP one opens with a method and a
-/// space, which is what a browser sends when its HTTP proxy is pointed here
-/// rather than its SOCKS host.
-fn looks_like_http(bytes: &[u8]) -> bool {
-    const METHODS: [&[u8]; 8] = [
-        b"GET ", b"POST ", b"HEAD ", b"PUT ", b"CONNECT ", b"OPTIONS ", b"DELETE ", b"PATCH ",
-    ];
-    METHODS.iter().any(|m| bytes.starts_with(m))
+/// Decided on the first octet and not before: RFC 1928 3 fixes the SOCKS
+/// greeting's first octet at 5, and every HTTP method name is uppercase
+/// letters, so there is no overlap and nothing to configure. Until something
+/// arrives there is nothing to decide, which is what `Silent` is.
+#[derive(Debug)]
+enum Conversation {
+    Silent,
+    Socks(socks::Session),
+    Http(http::Session),
+}
+
+impl Conversation {
+    /// Octets from the browser; returns what should go to the origin server.
+    fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
+        if matches!(self, Conversation::Silent)
+            && let Some(&first) = bytes.first()
+        {
+            *self = if http::speaks_http(first) {
+                Conversation::Http(http::Session::new())
+            } else {
+                Conversation::Socks(socks::Session::new())
+            };
+        }
+        match self {
+            Conversation::Silent => Vec::new(),
+            Conversation::Socks(s) => s.feed(bytes),
+            Conversation::Http(h) => h.feed(bytes),
+        }
+    }
+
+    /// What to call it on the panel.
+    fn name(&self) -> &'static str {
+        match self {
+            Conversation::Silent => "nothing yet",
+            Conversation::Socks(_) => "SOCKS 5",
+            Conversation::Http(_) => "HTTP",
+        }
+    }
+
+    /// Somewhere that needs a socket, if anywhere does.
+    fn wants(&self) -> Option<Want> {
+        match self {
+            Conversation::Silent => None,
+            Conversation::Socks(s) => s.request().map(|r| Want {
+                authority: format!("{}:{}", r.destination, r.port),
+                tunnel: false,
+            }),
+            Conversation::Http(h) => h.request().map(|t| Want {
+                authority: t.authority.clone(),
+                tunnel: t.tunnel,
+            }),
+        }
+    }
+
+    /// It opened. Returns anything that was waiting to go out of it.
+    fn opened(&mut self, bound: ([u8; 4], u16)) -> Vec<u8> {
+        match self {
+            Conversation::Silent => Vec::new(),
+            Conversation::Socks(s) => s.answer(Reply::Succeeded, bound),
+            Conversation::Http(h) => h.answer(http::Answer::Opened),
+        }
+    }
+
+    /// It did not. The browser is told in its own protocol, which is what
+    /// makes it show the right page rather than an empty one.
+    fn would_not_open(&mut self, why: &str) {
+        match self {
+            Conversation::Silent => {}
+            Conversation::Socks(s) => {
+                let reply = if why.contains("refused") {
+                    Reply::ConnectionRefused
+                } else if why.contains("resolve") {
+                    Reply::HostUnreachable
+                } else {
+                    Reply::GeneralFailure
+                };
+                let _ = s.answer(reply, ([0, 0, 0, 0], 0));
+            }
+            Conversation::Http(h) => {
+                let answer = if why.contains("refused") {
+                    http::Answer::Refused
+                } else if why.contains("resolve") {
+                    http::Answer::Unreachable
+                } else if why.contains("timed out") {
+                    http::Answer::TimedOut
+                } else {
+                    http::Answer::Failed
+                };
+                let _ = h.answer(answer);
+            }
+        }
+    }
+
+    /// Octets for the browser.
+    fn take_out(&mut self) -> Vec<u8> {
+        match self {
+            Conversation::Silent => Vec::new(),
+            Conversation::Socks(s) => s.take_out(),
+            Conversation::Http(h) => h.take_out(),
+        }
+    }
+
+    fn trouble(&self) -> Option<&'static str> {
+        match self {
+            Conversation::Silent => None,
+            Conversation::Socks(s) => s.trouble(),
+            Conversation::Http(h) => h.trouble(),
+        }
+    }
+
+    fn open(&self) -> bool {
+        match self {
+            Conversation::Silent => false,
+            Conversation::Socks(s) => s.open(),
+            Conversation::Http(h) => h.open(),
+        }
+    }
 }
 
 /// One connection over the link, and the socket it turned into.
 #[derive(Debug)]
 struct Relayed {
-    socks: Session,
+    talk: Conversation,
     /// The real connection, once there is one.
     socket: Option<TcpStream>,
     /// The thread opening it, while it is being opened.
@@ -61,14 +186,11 @@ struct Relayed {
     to_link: Vec<u8>,
     /// Where it was going, for the log.
     going_to: String,
-    /// Whether anything has been heard from the browser yet, so the first
-    /// thing it says is reported once rather than every round.
+    /// Whether anything has been heard from the browser yet, so which
+    /// protocol it turned out to be is reported once rather than every round.
     heard: bool,
-    /// Whether the SOCKS conversation has already been complained about.
+    /// Whether the conversation has already been complained about.
     complained: bool,
-    /// Whether what arrived was an HTTP request rather than a SOCKS greeting,
-    /// which says what to change rather than only that it is wrong.
-    spoke_http: bool,
     /// Whether the socket has said it has no more to give.
     socket_finished: bool,
     /// And whether the far side of the internet has been told that the
@@ -86,15 +208,15 @@ pub struct Server {
 }
 
 impl Server {
-    /// Listen for SOCKS connections at `address` over the link.
+    /// Listen for browsers at `address` over the link, in either protocol.
     pub fn new(address: [u8; 4], seed: u32) -> Self {
         let mut stack = Stack::new(address, seed);
-        stack.listen(SOCKS_PORT);
+        stack.listen(PROXY_PORT);
         Self {
             stack,
             relays: HashMap::new(),
             log: Vec::new(),
-            port: SOCKS_PORT,
+            port: PROXY_PORT,
         }
     }
 
@@ -143,7 +265,7 @@ impl Server {
             self.relays.insert(
                 handle,
                 Relayed {
-                    socks: Session::new(),
+                    talk: Conversation::Silent,
                     socket: None,
                     opening: None,
                     to_socket: Vec::new(),
@@ -151,7 +273,6 @@ impl Server {
                     going_to: String::new(),
                     heard: false,
                     complained: false,
-                    spoke_http: false,
                     socket_finished: false,
                     told_socket: false,
                 },
@@ -193,52 +314,62 @@ impl Server {
             return;
         };
         if !from_link.is_empty() {
-            // The first thing a browser says settles what it is speaking. A
-            // SOCKS 5 greeting opens with 0x05; anything else is a browser
-            // set to something this does not do, which used to fail here in
-            // silence -- the session gave up and nothing said so.
+            let forward = relay.talk.feed(&from_link);
+            relay.to_socket.extend(forward);
+            // The first octet settles which protocol this is, so it is worth
+            // saying which -- a browser configured one way and reaching a
+            // proxy expecting the other used to stall here in silence.
             if !relay.heard {
                 relay.heard = true;
-                relay.spoke_http = looks_like_http(&from_link);
-                let opening: Vec<String> =
-                    from_link.iter().take(4).map(|b| format!("{b:02x}")).collect();
-                self.log.push(format!(
-                    "proxy: the browser opened with {} ({} octets)",
-                    opening.join(" "),
-                    from_link.len()
-                ));
+                self.log
+                    .push(format!("proxy: a browser speaking {}", relay.talk.name()));
             }
-            let forward = relay.socks.feed(&from_link);
-            relay.to_socket.extend(forward);
         }
-        // Whatever SOCKS made of it, said once. Without this a browser
-        // speaking anything else stalls with nothing on the panel at all.
+        // Whatever it made of it, said once. Without this a browser speaking
+        // neither stalls with nothing on the panel at all.
         if !relay.complained
-            && let Some(why) = relay.socks.trouble()
+            && let Some(why) = relay.talk.trouble()
         {
             relay.complained = true;
             self.log.push(format!("proxy: the connection made no sense: {why}"));
-            // The commonest way to get here, and not a fault in anything: a
-            // browser whose HTTP proxy is pointed at this rather than its
-            // SOCKS host. It then asks in HTTP, which is a different protocol
-            // on the same port, and nothing here speaks it.
-            if relay.spoke_http {
-                self.log.push(
-                    "proxy: that is an HTTP proxy request, not SOCKS. Clear the \
-                     browser's HTTP Proxy box and put this address in its SOCKS \
-                     Host box instead, as SOCKS v5"
-                        .to_owned(),
-                );
-            }
         }
 
-        // A request nobody has answered yet: open it.
-        if relay.socket.is_none() && relay.opening.is_none()
-            && let Some(request) = relay.socks.request()
+        // Somewhere to open, and possibly not the place already open. A
+        // browser talking to an HTTP proxy keeps one connection and asks it
+        // for whatever host it needs next, so the socket underneath has to be
+        // allowed to change -- which is also most of the saving, since the
+        // ones that do not change cost nothing at all.
+        if relay.opening.is_none()
+            && let Some(want) = relay.talk.wants()
+            // Nothing already taken off the old socket is abandoned. What has
+            // not reached the link yet is the tail of the last page, and the
+            // swap can wait the round or two it takes to go.
+            && (relay.socket.is_none()
+                || (relay.going_to != want.authority && relay.to_link.is_empty()))
         {
-            let where_to = format!("{}:{}", request.destination, request.port);
+            if let Some(socket) = relay.socket.as_mut() {
+                // One last look before it goes. A browser only asks for
+                // somewhere else once it has read the last response to its
+                // declared end (RFC 9112 6.3), so there should be nothing --
+                // but "should be nothing" is not a reason to drop it unread.
+                let mut buffer = [0u8; CHUNK];
+                while let Ok(n) = socket.read(&mut buffer) {
+                    if n == 0 {
+                        break;
+                    }
+                    relay.to_link.extend_from_slice(&buffer[..n]);
+                }
+                self.log
+                    .push(format!("proxy: {} is finished with", relay.going_to));
+                relay.socket = None;
+            }
+            // Both of these belong to the socket that has just gone.
+            relay.socket_finished = false;
+            relay.told_socket = false;
+            let where_to = want.authority.clone();
             relay.going_to = where_to.clone();
-            self.log.push(format!("proxy: opening {where_to}"));
+            let how = if want.tunnel { " to tunnel through" } else { "" };
+            self.log.push(format!("proxy: opening {where_to}{how}"));
             let (sender, receiver) = channel();
             std::thread::spawn(move || {
                 let _ = sender.send(open(&where_to));
@@ -259,37 +390,28 @@ impl Server {
                             std::net::SocketAddr::V6(_) => None,
                         })
                         .unwrap_or(([0, 0, 0, 0], 0));
-                    let early = relay.socks.answer(Reply::Succeeded, bound);
+                    let early = relay.talk.opened(bound);
                     relay.to_socket.extend(early);
                     relay.socket = Some(socket);
                     self.log.push(format!("proxy: {} open", relay.going_to));
                 }
                 Ok(Err(why)) => {
                     relay.opening = None;
-                    // The client is told in its own terms, which is what makes
-                    // a browser show the right page rather than "proxy error".
-                    let reply = if why.contains("refused") {
-                        Reply::ConnectionRefused
-                    } else if why.contains("resolve") {
-                        Reply::HostUnreachable
-                    } else {
-                        Reply::GeneralFailure
-                    };
-                    let _ = relay.socks.answer(reply, ([0, 0, 0, 0], 0));
+                    relay.talk.would_not_open(&why);
                     self.log
                         .push(format!("proxy: {} would not open: {why}", relay.going_to));
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => {
                     relay.opening = None;
-                    let _ = relay.socks.answer(Reply::GeneralFailure, ([0, 0, 0, 0], 0));
+                    relay.talk.would_not_open("the thread opening it went away");
                 }
             }
         }
 
-        // What SOCKS has to say goes back over the link, along with anything
-        // the far end sent.
-        let for_link = relay.socks.take_out();
+        // What the proxy conversation has to say goes back over the link,
+        // along with anything the far end sent.
+        let for_link = relay.talk.take_out();
         relay.to_link.extend(for_link);
         let mut gone = false;
         if let Some(socket) = relay.socket.as_mut() {
@@ -339,7 +461,7 @@ impl Server {
             }
         }
         let finished = relay.socket_finished;
-        let trouble = relay.socks.trouble().is_some() && !relay.socks.open();
+        let trouble = relay.talk.trouble().is_some() && !relay.talk.open();
         let going_to = relay.going_to.clone();
         if gone {
             relay.socket = None;
@@ -417,7 +539,8 @@ mod tests {
         assert!(too_much(MOST_BUFFERED));
     }
 
-    /// The server listens where RFC 1928 3 says a SOCKS server lives.
+    /// The server listens where RFC 1928 3 says a SOCKS server lives, and an
+    /// HTTP proxy is served from the same place.
     #[test]
     fn it_listens_where_socks_belongs() {
         let server = Server::new([10, 0, 0, 1], 1);
@@ -429,20 +552,36 @@ mod tests {
 
 #[cfg(test)]
 mod opening {
-    use super::looks_like_http;
+    use super::Conversation;
 
-    /// The commonest misconfiguration there is: the browser's HTTP proxy
-    /// pointed at the SOCKS port. It asks in HTTP and nothing here speaks it,
-    /// so it is worth recognising and saying what to change.
+    /// One octet decides, because one octet may be all there is for a while.
     #[test]
-    fn an_http_request_is_told_apart_from_a_socks_greeting() {
-        assert!(looks_like_http(b"GET http://example.com/ HTTP/1.1\r\n"));
-        assert!(looks_like_http(b"CONNECT example.com:443 HTTP/1.1\r\n"));
-        assert!(looks_like_http(b"POST / HTTP/1.1"));
-        // A SOCKS 5 greeting, and a request for an address that starts with
-        // the same octets as no method does.
-        assert!(!looks_like_http(&[5, 1, 0]));
-        assert!(!looks_like_http(&[5, 1, 0, 3, 11]));
-        assert!(!looks_like_http(b""));
+    fn the_first_octet_says_which_proxy_a_browser_is_asking_for() {
+        let mut http = Conversation::Silent;
+        http.feed(b"GET http://example.invalid/ HTTP/1.1\r\n\r\n");
+        assert_eq!(http.name(), "HTTP");
+        assert_eq!(
+            http.wants().map(|w| w.authority),
+            Some("example.invalid:80".to_owned())
+        );
+
+        let mut socks = Conversation::Silent;
+        socks.feed(&[5, 1, 0]);
+        assert_eq!(socks.name(), "SOCKS 5");
+
+        // And until something arrives there is nothing to decide.
+        let quiet = Conversation::Silent;
+        assert_eq!(quiet.name(), "nothing yet");
+        assert!(quiet.wants().is_none());
+    }
+
+    /// A CONNECT names a tunnel, which is how https goes over the link.
+    #[test]
+    fn a_connect_is_recognised_as_a_tunnel() {
+        let mut talk = Conversation::Silent;
+        talk.feed(b"CONNECT example.invalid:443 HTTP/1.1\r\n\r\n");
+        let want = talk.wants().expect("it asked for nowhere");
+        assert_eq!(want.authority, "example.invalid:443");
+        assert!(want.tunnel);
     }
 }

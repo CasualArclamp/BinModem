@@ -1275,7 +1275,7 @@ impl ScopeApp {
                                 RichText::new(if p.serving {
                                     format!("offering the internet at {}", p.at)
                                 } else {
-                                    format!("socks5://{}", p.at)
+                                    format!("HTTP proxy or SOCKS v5 at {}", p.at)
                                 })
                                 .monospace()
                                 .small()

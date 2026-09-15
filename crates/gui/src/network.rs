@@ -244,7 +244,10 @@ impl Networking {
             Ok(client) => {
                 tx.log(
                     Direction::Note,
-                    format!("proxy: point a browser at socks5://{}", client.bound()),
+                    format!(
+                        "proxy: point a browser at {} -- as its HTTP proxy,                          which is the faster of the two here, or as its SOCKS                          v5 host",
+                        client.bound()
+                    ),
                 );
                 self.proxy = Some(Proxy::Using(Box::new(client)));
             }

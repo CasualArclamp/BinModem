@@ -269,18 +269,35 @@ anyone has called.
 
 The end that answered the call has the internet and offers it, and says
 *offering the internet at 10.0.0.1:1080*; the end that dialled listens on
-`127.0.0.1:1080` and says so. Point a browser's SOCKS 5 proxy setting there —
-in Firefox, Settings → Network Settings → Manual, **SOCKS Host** `127.0.0.1`
-port `1080`, SOCKS v5, and tick *Proxy DNS when using SOCKS v5* so names are
-resolved at the far end where there is something to resolve them with.
+`127.0.0.1:1080` and says so.
 
-The **SOCKS Host** box, not the **HTTP Proxy** box above it. They are both
-proxies on the same page and this one speaks only SOCKS; a browser whose HTTP
-proxy is pointed here asks in HTTP instead, which is a different protocol on
-the same port. The panel says so — *the browser opened with 47 45 54 20*, which
-is `GET `, and *that is an HTTP proxy request, not SOCKS* — and the page comes
-back empty until the box is moved. Leave the HTTP Proxy box empty, and with it
-*Also use this proxy for HTTPS*.
+It speaks both proxy protocols on that one port and tells them apart from the
+first octet a browser sends, so either box in Firefox's Settings → Network
+Settings → Manual will work. **Use the HTTP Proxy box**, and tick *Also use
+this proxy for HTTPS*:
+
+    HTTP Proxy  127.0.0.1    Port 1080
+
+SOCKS still works — **SOCKS Host** `127.0.0.1` port `1080`, SOCKS v5, with
+*Proxy DNS when using SOCKS v5* ticked — but it is slower here, and on this
+link the difference is not small. SOCKS agrees what to open before the request
+crosses: a greeting and its answer, then a connect request and its answer (RFC
+1928 3 and 4). That is two round trips, and a round trip on a V.34 call between
+two of these is about 460 ms, so it is close to a second of silence before a
+browser has asked for anything — once per connection, and a page needs several.
+An HTTP proxy spends none of it, because RFC 9112 3.2.2 puts the whole target
+in the request line: the first thing the browser says is already the request,
+and the far end starts opening the socket while the rest of it is still
+arriving. It also keeps the connection to the far end between requests, so a
+second page from the same site opens no second socket.
+
+Whichever is used, names are resolved at the far end, where there is something
+to resolve them with.
+
+Firefox opens up to six connections per proxy by default, and on a link this
+slow that is six lots of setting up at once rather than six lots of progress.
+Setting `network.http.max-persistent-connections-per-proxy` to `2` in
+`about:config` is worth doing.
 
 If the far end is not carrying web traffic there is nothing at its port to
 refuse the connections, so they are not refused: they go unanswered, and a
@@ -305,7 +322,8 @@ for the negotiation, 1334 and 1994 for PAP and CHAP with 1321's MD5 under it,
 the checksum over both. `crates/login` has no RFC behind it, because the text
 before PPP never had one. `crates/tcp` is RFC 9293, with
 6298 for the retransmission timer and 5681 for what to do about a loss;
-`crates/socks` is RFC 1928.
+`crates/socks` is RFC 1928 and `crates/http` is RFC 9112 with RFC 9110 for
+what a proxy may do to a message as it goes past.
 
 ## One file
 

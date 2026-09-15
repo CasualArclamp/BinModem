@@ -2,9 +2,17 @@
 //!
 //! On the machine that dialled, [`client::Client`] listens on a local port and
 //! hands whatever connects to it across the link. On the machine that
-//! answered, [`server::Server`] takes those, reads the SOCKS request out of
-//! each, opens the real connection it asks for, and passes the two streams
-//! through each other.
+//! answered, [`server::Server`] takes those, reads out of each what it is
+//! asking for, opens the real connection, and passes the two streams through
+//! each other.
+//!
+//! Either protocol, on the one port. A browser may be pointed at it as a SOCKS
+//! host or as an HTTP proxy and the far end tells which from the first octet
+//! it sends. On a call this slow the HTTP side is the faster of the two by
+//! about a second a connection, because SOCKS spends two round trips agreeing
+//! what to open before the request crosses and HTTP spends none -- but the
+//! choice belongs to whoever is setting up the browser, and getting it wrong
+//! is no longer a way to see an empty page.
 //!
 //! Between them is our own TCP over our own IP over PPP over a modem. Nothing
 //! in the path is the operating system's, except the sockets at the far end
@@ -21,8 +29,9 @@ pub mod server;
 pub use client::Client;
 pub use server::Server;
 
-/// The port SOCKS is "conventionally located on" (RFC 1928 3).
-pub const SOCKS_PORT: u16 = 1080;
+/// The port both proxies live on: where SOCKS is "conventionally located on"
+/// (RFC 1928 3), and where an HTTP proxy is equally happy to be.
+pub const PROXY_PORT: u16 = 1080;
 
 /// How much to move between a socket and a connection in one go.
 ///
