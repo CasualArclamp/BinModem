@@ -12,6 +12,7 @@ use crate::engine::{Control, FFT_SIZE, SCOPE_LEN, SPECTRUM_BINS};
 use crate::live;
 use crate::net;
 use crate::scopes::{self, Waterfall};
+use crate::speed;
 
 /// Where what is on the scope comes from.
 pub enum Source {
@@ -1485,10 +1486,10 @@ impl ScopeApp {
                 let busy = running.as_ref().is_some_and(|t| !t.finished);
                 let online = self.frame.state == telemetry::CallState::Connected;
 
-                ui.add_enabled_ui(online && !busy, |ui| {
+                ui.add_enabled_ui(!busy, |ui| {
                     egui::Grid::new("xfer")
-                        .num_columns(3)
-                        .spacing([10.0, 8.0])
+                        .num_columns(4)
+                        .spacing([8.0, 8.0])
                         .show(ui, |ui| {
                             ui.label(RichText::new("send").monospace().color(dim));
                             ui.add(
@@ -1496,7 +1497,14 @@ impl ScopeApp {
                                     .desired_width(300.0)
                                     .hint_text("path to a file"),
                             );
-                            if ui.button("Send").clicked() && !self.send_path.trim().is_empty() {
+                            // Browsing works with no call up: choosing the
+                            // file first is the natural order.
+                            if browse_button(ui, "Choose a file to send")
+                                && let Some(chosen) = rfd::FileDialog::new().pick_file()
+                            {
+                                self.send_path = chosen.display().to_string();
+                            }
+                            if ui.add_enabled(online, egui::Button::new("Send")).clicked() && !self.send_path.trim().is_empty() {
                                 session.send_file(self.send_path.trim().into());
                             }
                             ui.end_row();
@@ -1507,8 +1515,13 @@ impl ScopeApp {
                                     .desired_width(300.0)
                                     .hint_text("directory to keep files in"),
                             );
+                            if browse_button(ui, "Choose the folder received files go in")
+                                && let Some(chosen) = rfd::FileDialog::new().pick_folder()
+                            {
+                                self.receive_dir = chosen.display().to_string();
+                            }
                             if ui
-                                .button("Receive")
+                                .add_enabled(online, egui::Button::new("Receive"))
                                 .on_hover_text(
                                     "Wait for the far end to start sending. Tell the \
                                      board to send first: this end answers, it does \
@@ -1533,6 +1546,7 @@ impl ScopeApp {
 
                 let Some(t) = running else { return };
                 ui.separator();
+                let bright = Color32::from_rgb(220, 225, 235);
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(if t.sending { "sending" } else { "receiving" })
@@ -1542,8 +1556,11 @@ impl ScopeApp {
                     ui.label(
                         RichText::new(if t.name.is_empty() { "-" } else { &t.name })
                             .monospace()
-                            .color(Color32::from_rgb(220, 225, 235)),
+                            .color(bright),
                     );
+                    if let Some(total) = t.total.filter(|n| *n > 0) {
+                        ui.label(RichText::new(speed::bytes(total as f64)).monospace().color(dim));
+                    }
                 });
                 ui.add_space(4.0);
 
@@ -1558,21 +1575,66 @@ impl ScopeApp {
                             egui::ProgressBar::new(part)
                                 .desired_width(480.0)
                                 .text(format!(
-                                    "{} of {} bytes  ({:.0}%)",
-                                    t.position,
-                                    total,
+                                    "{} of {}  ({:.0}%)",
+                                    speed::bytes(t.position as f64),
+                                    speed::bytes(total as f64),
                                     part * 100.0
                                 )),
                         );
                     }
                     None => {
                         ui.label(
-                            RichText::new(format!("{} bytes", t.position))
+                            RichText::new(speed::bytes(t.position as f64))
                                 .monospace()
                                 .color(dim),
                         );
                     }
                 }
+
+                // How fast: the last few seconds, which is the line now, and
+                // the whole file, which is what the transfer will come to.
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let big = |ui: &mut egui::Ui, label: &str, rate: Option<f64>| {
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(label).small().color(dim));
+                            ui.label(
+                                RichText::new(rate.map_or("-".to_owned(), |r| format!("{}/s", speed::bytes(r))))
+                                    .monospace()
+                                    .size(18.0)
+                                    .color(bright),
+                            );
+                        });
+                    };
+                    big(ui, "now", if t.finished { None } else { t.recent });
+                    ui.add_space(18.0);
+                    big(ui, "average", t.average);
+                    ui.add_space(18.0);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(if t.finished { "took" } else { "left" }).small().color(dim));
+                        let time = if t.finished {
+                            speed::clock(t.elapsed)
+                        } else {
+                            t.remaining.map_or("-".to_owned(), speed::clock)
+                        };
+                        ui.label(RichText::new(time).monospace().size(18.0).color(bright));
+                    });
+                    // What share of the line's bits the file is getting: eight
+                    // a byte, so async framing's ten and V.42's overhead show
+                    // as less than all of it, and V.42bis as more.
+                    if let (Some(rate), Some(line)) = (t.recent.or(t.average), t.line_bps.filter(|l| *l > 0)) {
+                        ui.add_space(18.0);
+                        ui.vertical(|ui| {
+                            ui.label(RichText::new(format!("of {line} bit/s")).small().color(dim));
+                            ui.label(
+                                RichText::new(format!("{:.0}%", rate * 8.0 / f64::from(line) * 100.0))
+                                    .monospace()
+                                    .size(18.0)
+                                    .color(bright),
+                            );
+                        });
+                    }
+                });
 
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
@@ -1583,7 +1645,7 @@ impl ScopeApp {
                             dim
                         }));
                     };
-                    stat(ui, format!("{:.0} bytes/s", t.rate), false);
+                    stat(ui, format!("{} so far", speed::clock(t.elapsed)), false);
                     ui.separator();
                     // What an error costs, which is the number worth watching:
                     // 8.2 recovers by sending the sender back, so a rewind is
@@ -2642,6 +2704,11 @@ impl eframe::App for ScopeApp {
             scopes::discriminator(ui, &self.frame.baseband, 84.0);
         });
     }
+}
+
+/// A small folder button, true when clicked.
+fn browse_button(ui: &mut egui::Ui, hover: &str) -> bool {
+    ui.add(egui::Button::new(RichText::new("\u{1F4C2}").size(15.0))).on_hover_text(hover).clicked()
 }
 
 /// One line-rate box, offering only the rates the modulation has.

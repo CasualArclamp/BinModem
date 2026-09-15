@@ -42,6 +42,7 @@ mod net;
 mod network;
 mod remembered;
 mod scopes;
+mod speed;
 
 use std::path::PathBuf;
 use std::sync::Arc;

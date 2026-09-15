@@ -156,8 +156,15 @@ pub struct TransferView {
     pub resent: u64,
     /// Subpackets that failed their check sequence.
     pub damaged: u32,
-    /// Bytes a second, averaged over the transfer so far.
-    pub rate: f64,
+    /// Bytes a second over the last few seconds, and over the file so far --
+    /// both from when the file started moving, and counting new ground only.
+    pub recent: Option<f64>,
+    pub average: Option<f64>,
+    /// Seconds since the file started moving, and left at the recent rate.
+    pub elapsed: f64,
+    pub remaining: Option<f64>,
+    /// The line's own rate in bit/s, for what share of it the file is getting.
+    pub line_bps: Option<u32>,
     /// Empty while it runs; what happened, once it is over.
     pub outcome: String,
     pub finished: bool,
@@ -601,9 +608,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // carrying before it started.
     let mut was_retraining = false;
     let mut rate_before = 0;
-    // The transfer, while there is one, and when it started -- for the rate.
+    // The transfer, while there is one, when it started, and how fast it is
+    // going.
     let mut job: Option<Job> = None;
     let mut job_started = Instant::now();
+    let mut meter = crate::speed::Speedometer::new();
     // The PPP link, while one is up. Like a transfer it owns the byte stream
     // while it runs, and for the same reason.
     let mut networking: Option<Networking> = None;
@@ -742,6 +751,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                             transfer::zmodem::Sender::new(info, data, rate),
                         )));
                         job_started = Instant::now();
+                        meter = crate::speed::Speedometer::new();
                     }
                     Err(e) => tx.log(Direction::Note, format!("cannot send it: {e}")),
                 },
@@ -749,6 +759,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     tx.log(Direction::Note, "waiting for the far end to send");
                     job = Some(Job::Receiving(Box::default(), into));
                     job_started = Instant::now();
+                    meter = crate::speed::Speedometer::new();
                 }
                 TransferRequest::Cancel => {
                     match job.as_mut() {
@@ -770,16 +781,22 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             // has to drain first is two seconds and not the rest of the file.
             let ahead = (modem.rate().unwrap_or(2400) as usize / 4).max(1024);
             let room = ahead.saturating_sub(modem.queued());
-            let (out, done) = step_job(active, &tx, job_started, room);
+            let (out, mut done) = step_job(active, &tx, room);
             for b in out {
                 modem.feed_dte(b);
             }
+            meter.update(job_started.elapsed().as_secs_f64(), done.0.position);
+            done.0.recent = meter.recent();
+            done.0.average = meter.average();
+            done.0.elapsed = meter.elapsed();
+            done.0.remaining = done.0.total.and_then(|total| meter.remaining(total));
+            done.0.line_bps = modem.rate();
             session.set_transfer(Some(done.0));
             if done.1 {
+                // The last of it stays on the window: what it came to, and how
+                // fast, is what anyone who watched it will want to read.
                 job = None;
             }
-        } else {
-            session.set_transfer(None);
         }
 
         // Everything the terminal has typed since last time. This goes in
@@ -1304,14 +1321,8 @@ fn read_to_send(path: &std::path::Path) -> Result<(transfer::zmodem::FileInfo, V
 /// One round of a transfer: what it wants to say, and where it has got to.
 ///
 /// Returns the view for the window and whether the job is over.
-fn step_job(
-    job: &mut Job,
-    tx: &Publisher,
-    started: Instant,
-    room: usize,
-) -> (Vec<u8>, (TransferView, bool)) {
+fn step_job(job: &mut Job, tx: &Publisher, room: usize) -> (Vec<u8>, (TransferView, bool)) {
     use transfer::zmodem::State;
-    let elapsed = started.elapsed().as_secs_f64().max(0.001);
     let (out, mut view, over) = match job {
         Job::Sending(s) => {
             s.tick(TICK_MS);
@@ -1328,10 +1339,10 @@ fn step_job(
                     rewinds: p.rewinds,
                     resent: p.resent,
                     damaged: 0,
-                    rate: p.position as f64 / elapsed,
                     outcome: describe(state),
                     finished: matches!(state, State::Done | State::Failed(_)),
                     written_to: None,
+                    ..TransferView::default()
                 },
                 matches!(state, State::Done | State::Failed(_)),
             )
@@ -1374,10 +1385,10 @@ fn step_job(
                     rewinds: p.rewinds,
                     resent: 0,
                     damaged: r.damaged(),
-                    rate: p.position as f64 / elapsed,
                     outcome: describe(state),
                     finished: matches!(state, State::Done | State::Failed(_)),
                     written_to: written,
+                    ..TransferView::default()
                 },
                 matches!(state, State::Done | State::Failed(_)),
             )
