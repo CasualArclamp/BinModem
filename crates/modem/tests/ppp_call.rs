@@ -220,3 +220,99 @@ fn a_ping_crosses_a_slow_call() {
 fn two_ends_on_one_cable_can_ping_each_other() {
     check("one cable", ping_across("V22B", Line::Cable, 2), 2);
 }
+
+/// A PPP link carried over V.34, through a full retrain (11.5) in the middle.
+///
+/// The retrain takes data mode away for the seconds phase 2 and the training
+/// after it need. V.42 holds what it had and sends it again, so the link above
+/// should not notice more than a pause: the addresses stay, and echoes cross
+/// again afterwards.
+#[test]
+fn a_ppp_link_survives_a_v34_retrain() {
+    let mut caller = Modem::new(FS);
+    let mut host = Modem::new(FS);
+    for m in [&mut caller, &mut host] {
+        for b in b"AT+MS=V34\r" {
+            m.feed_dte(*b);
+        }
+        m.take_dte();
+    }
+    for b in b"ATA\r" {
+        host.feed_dte(*b);
+    }
+    for b in b"ATD5551234\r" {
+        caller.feed_dte(*b);
+    }
+
+    let mut server = Link::new(SERVER, CLIENT);
+    let mut client = Link::new([0, 0, 0, 0], [0, 0, 0, 0]);
+    let mut pinger = Pinger::new(0x0b17);
+    pinger.every_ms = 500;
+    pinger.timeout_ms = 20_000;
+
+    let mut started = false;
+    let per_ms = FS as usize / 1000;
+    let (mut from_caller, mut from_host) = (0.0, 0.0);
+    let mut asked = false;
+    let mut before = 0;
+    let mut retrained_at = None;
+    let mut after_retrain = 0;
+
+    for i in 0..(180.0 * FS) as usize {
+        let (a, b) = (from_caller, from_host);
+        from_caller = caller.step(b);
+        from_host = host.step(a);
+
+        if caller.state() != State::Data || host.state() != State::Data {
+            caller.take_dte();
+            host.take_dte();
+            continue;
+        }
+        if !started {
+            started = true;
+            client.open();
+            server.open();
+            pinger.start();
+        }
+
+        client.feed(&caller.take_dte());
+        server.feed(&host.take_dte());
+        if i % per_ms == 0 {
+            client.tick(1);
+            server.tick(1);
+            let _ = pinger.poll(&mut client, 1);
+        }
+        for byte in client.take_line() {
+            caller.feed_dte(byte);
+        }
+        for byte in server.take_line() {
+            host.feed_dte(byte);
+        }
+
+        // Once a few echoes have crossed, retrain the line the whole way.
+        if !asked && client.up() && server.up() && pinger.stats.received >= 2 {
+            asked = true;
+            before = pinger.stats.received;
+            caller.retrain();
+        }
+        if asked && retrained_at.is_none() && !caller.retraining() && caller.rate().is_some() && i % per_ms == 0 {
+            // Back in data mode, with the retrain behind it.
+            if caller.retrains() > 0 {
+                retrained_at = Some(i as f64 / FS);
+            }
+        }
+        if retrained_at.is_some() {
+            after_retrain = pinger.stats.received.saturating_sub(before);
+            if after_retrain >= 3 {
+                break;
+            }
+        }
+    }
+
+    assert!(asked, "never got echoes across to begin with");
+    assert!(retrained_at.is_some(), "the retrain never finished");
+    assert!(client.up() && server.up(), "PPP went down over the retrain");
+    assert_eq!(client.addresses().0, CLIENT, "the address changed");
+    assert!(after_retrain >= 3, "only {after_retrain} echoes crossed after the retrain");
+    println!("  retrained and {after_retrain} echoes crossed after it");
+}
