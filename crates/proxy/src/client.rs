@@ -194,15 +194,18 @@ impl Client {
     }
 
     fn carry(&mut self, handle: Handle) {
-        let (from_link, far_finished) = match self.stack.get_mut(handle) {
+        // A connection the stack has forgotten is one that is over, not one
+        // that never happened: what it handed over before it went is still
+        // owed to the browser. Dropping the relay here would close the socket
+        // with a page still in hand, and a browser whose connection closes
+        // having carried nothing reports an empty page -- which is not what
+        // happened, and sends whoever is looking at it after the wrong thing.
+        let (from_link, far_finished, forgotten) = match self.stack.get_mut(handle) {
             Some(connection) => {
                 let data = connection.take_received();
-                (data, connection.finished() && connection.available() == 0)
+                (data, connection.finished() && connection.available() == 0, false)
             }
-            None => {
-                self.relays.remove(&handle);
-                return;
-            }
+            None => (Vec::new(), true, true),
         };
         let Some(relay) = self.relays.get_mut(&handle) else {
             return;
@@ -235,6 +238,7 @@ impl Client {
         }
 
         if !gone
+            && !forgotten
             && !relay.socket_finished
             && !crate::server::too_much(relay.to_link.len())
         {
@@ -247,16 +251,19 @@ impl Client {
             }
         }
         let finished = relay.socket_finished;
+        // What came off the link and has not reached the browser yet. The
+        // relay has to outlive the connection that brought it.
+        let owed_to_socket = !relay.to_socket.is_empty();
         let mut to_link = std::mem::take(&mut relay.to_link);
 
-        let Some(connection) = self.stack.get_mut(handle) else {
-            return;
-        };
-        // Whatever the connection will take now; the rest waits rather than
-        // being dropped, because the rest is the middle of a request.
-        let took = connection.send(&to_link);
-        to_link.drain(..took);
-        let still_waiting = !to_link.is_empty();
+        let mut still_waiting = false;
+        if let Some(connection) = self.stack.get_mut(handle) {
+            // Whatever the connection will take now; the rest waits rather
+            // than being dropped, because the rest is the middle of a request.
+            let took = connection.send(&to_link);
+            to_link.drain(..took);
+            still_waiting = !to_link.is_empty();
+        }
         if let Some(relay) = self.relays.get_mut(&handle) {
             relay.to_link = to_link;
         }
@@ -266,10 +273,12 @@ impl Client {
         {
             connection.close();
         }
-        // Both halves are over: nothing more will come off the socket and
-        // nothing more will come off the link. Dropping the relay closes what
-        // is left of the socket.
-        if gone || (finished && far_finished && !still_waiting) {
+        // Both halves are over and nothing is owed either way: nothing more
+        // will come off the socket, nothing more will come off the link, and
+        // everything that did has gone where it was going. Dropping the relay
+        // closes what is left of the socket, so it happens last of all.
+        let over = forgotten || (finished && far_finished && !still_waiting);
+        if gone || (over && !owed_to_socket) {
             self.relays.remove(&handle);
         }
     }

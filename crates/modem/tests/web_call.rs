@@ -92,6 +92,18 @@ fn a_browser(proxy: String, target: String) -> thread::JoinHandle<Result<Vec<u8>
 
 #[test]
 fn a_page_comes_back_over_a_call() {
+    a_page_over("V22B,0");
+}
+
+/// The same page over V.34, which is what a real call between two of these
+/// settles on now. Fourteen times the rate, a constellation of hundreds
+/// instead of sixteen, and a start-up with phase 2 in front of it.
+#[test]
+fn a_page_comes_back_over_a_v34_call() {
+    a_page_over("V34");
+}
+
+fn a_page_over(carrier: &str) {
     // Small enough to cross a 2400 bit/s line in a test and large enough to
     // need many segments and several windows.
     let body: Vec<u8> = (0..3_000u32)
@@ -105,8 +117,8 @@ fn a_page_comes_back_over_a_call() {
         // V.22bis, which is the modulation that has carried a real session
         // over a real trunk. The point here is the layers above, not the one
         // below.
-        for b in b"AT+MS=V22B,0\r" {
-            m.feed_dte(*b);
+        for b in format!("AT+MS={carrier}\r").bytes() {
+            m.feed_dte(b);
         }
         m.take_dte();
     }

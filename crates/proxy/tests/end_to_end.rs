@@ -304,3 +304,77 @@ fn a_destination_that_is_not_there_is_refused() {
     // RFC 1928 6: X'05' is "Connection refused".
     assert_eq!(reply, 5, "it was not told the connection was refused");
 }
+
+/// A browser that asks and then takes its time reading the answer.
+fn a_slow_browser(proxy: String, target: String, wait: Duration) -> thread::JoinHandle<Result<Vec<u8>, String>> {
+    thread::spawn(move || {
+        let mut socket = TcpStream::connect(&proxy).map_err(|e| format!("{proxy}: {e}"))?;
+        socket
+            .set_read_timeout(Some(Duration::from_secs(60)))
+            .map_err(|e| e.to_string())?;
+        socket.write_all(&[5, 1, 0]).map_err(|e| e.to_string())?;
+        let mut greeting = [0u8; 2];
+        socket.read_exact(&mut greeting).map_err(|e| e.to_string())?;
+        let (name, port) = target.rsplit_once(':').ok_or("no port")?;
+        let port: u16 = port.parse().map_err(|_| "bad port")?;
+        let mut request = vec![5, 1, 0, 3, name.len() as u8];
+        request.extend_from_slice(name.as_bytes());
+        request.extend_from_slice(&port.to_be_bytes());
+        socket.write_all(&request).map_err(|e| e.to_string())?;
+        let mut reply = [0u8; 10];
+        socket.read_exact(&mut reply).map_err(|e| e.to_string())?;
+        socket
+            .write_all(b"GET /page HTTP/1.0\r\nHost: example\r\n\r\n")
+            .map_err(|e| e.to_string())?;
+        // The page arrives while nobody is reading it, so it waits in the
+        // relay rather than going into the socket.
+        thread::sleep(wait);
+        let mut page = Vec::new();
+        socket.read_to_end(&mut page).map_err(|e| e.to_string())?;
+        Ok(page)
+    })
+}
+
+/// A page big enough to fill the socket between the proxy and the browser,
+/// read only after the far end has finished sending it.
+///
+/// What comes off the link waits in the relay until the socket will take it.
+/// The connection that brought it is over by then and the stack has forgotten
+/// it, and dropping the relay at that point takes the rest of the page with
+/// it -- which a browser sees as a connection that closed carrying nothing,
+/// and calls an empty page.
+#[test]
+fn a_page_still_arrives_when_the_browser_is_slow_to_read_it() {
+    let body: Vec<u8> = (0..400_000u32).map(|i| (i % 251) as u8).collect();
+    let (web, web_thread) = a_web_server(body.clone());
+
+    let mut link = Link::new(0);
+    let proxy = link.client.bound().to_string();
+    let target = web.replace("127.0.0.1", "localhost");
+    let browser = a_slow_browser(proxy, target, Duration::from_secs(3));
+
+    let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watching = finished.clone();
+    let waiter = thread::spawn(move || {
+        let got = browser.join().expect("the browser thread panicked");
+        watching.store(true, std::sync::atomic::Ordering::SeqCst);
+        got
+    });
+
+    let done = finished.clone();
+    link.run_until(600, || done.load(std::sync::atomic::Ordering::SeqCst));
+
+    let page = waiter.join().expect("the waiting thread panicked").expect("no page");
+    let text = String::from_utf8_lossy(&page[..60.min(page.len())]);
+    assert!(text.starts_with("HTTP/1.0 200 OK"), "not a page: {text:?}");
+    let split = page.windows(4).position(|w| w == b"\r\n\r\n").expect("no end of headers");
+    assert_eq!(
+        page[split + 4..].len(),
+        body.len(),
+        "the page was cut short: {} of {} octets",
+        page[split + 4..].len(),
+        body.len()
+    );
+    assert_eq!(page[split + 4..], body[..], "the page came back changed");
+    let _ = web_thread.join();
+}
