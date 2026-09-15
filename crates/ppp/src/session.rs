@@ -59,6 +59,9 @@ pub struct Session<P: Protocol> {
     /// Configure-Nak. The automaton has one event for both -- "this end
     /// cannot agree" -- and only the packet knows which.
     nak_is_reject: bool,
+    /// 4.6's Max-Failure count: Configure-Naks sent since the last
+    /// Configure-Ack.
+    failures: u32,
     /// A code this end did not recognise, for the rejection that owes it.
     unknown: Option<Message>,
     /// An Echo-Request waiting for its reply.
@@ -79,6 +82,7 @@ impl<P: Protocol> Session<P> {
             next_id: 1,
             answering: None,
             nak_is_reject: false,
+            failures: 0,
             unknown: None,
             echo: None,
             out: Vec::new(),
@@ -152,13 +156,28 @@ impl<P: Protocol> Session<P> {
                     crate::lcp::Review::Ack => {
                         // 5.2: an acknowledgement is the request echoed back
                         // exactly as it arrived.
+                        self.failures = 0;
                         self.answering = Some((message.id, options));
                         self.fire(Event::ReceiveConfigureRequestGood);
                     }
                     // The automaton has one event for both -- this end cannot
                     // agree -- and which packet says so is settled here, since
                     // only here is the difference still known.
+                    crate::lcp::Review::Nak(counter) if self.failures >= self.limits.max_failure => {
+                        // 4.6: not converging, so the options this end keeps
+                        // suggesting alternatives to are refused instead. A
+                        // Configure-Reject carries them as they arrived (5.4),
+                        // not as this end would have had them.
+                        let refused = options
+                            .into_iter()
+                            .filter(|o| counter.iter().any(|c| c.kind == o.kind))
+                            .collect();
+                        self.answering = Some((message.id, refused));
+                        self.nak_is_reject = true;
+                        self.fire(Event::ReceiveConfigureRequestBad);
+                    }
                     crate::lcp::Review::Nak(counter) => {
+                        self.failures += 1;
                         self.answering = Some((message.id, counter));
                         self.nak_is_reject = false;
                         self.fire(Event::ReceiveConfigureRequestBad);
@@ -226,8 +245,12 @@ impl<P: Protocol> Session<P> {
             // that they are forbidden. Nothing is done and nothing is broken.
             return;
         };
+        // 4.6 keeps two counts in one counter: Max-Terminate when what is
+        // being counted is Terminate-Requests. The table writes both as irc,
+        // and only the action beside it says which.
+        let terminating = t.actions.contains(&Action::SendTerminateRequest);
         for action in t.actions {
-            self.perform(action);
+            self.perform(action, terminating);
         }
         // 4.1: "The Restart timer is stopped when transitioning from any state
         // where the timer is running to a state where the timer is not."
@@ -238,16 +261,30 @@ impl<P: Protocol> Session<P> {
         self.state = t.next;
     }
 
-    fn perform(&mut self, action: Action) {
+    fn perform(&mut self, action: Action, terminating: bool) {
         match action {
             Action::ThisLayerUp => self.reports.push(Report::Up),
             Action::ThisLayerDown => self.reports.push(Report::Down),
             Action::ThisLayerStarted => self.reports.push(Report::Started),
             Action::ThisLayerFinished => self.reports.push(Report::Finished),
             Action::InitializeRestartCount => {
-                self.restarts = self.limits.max_configure;
+                self.restarts = if terminating {
+                    self.limits.max_terminate
+                } else {
+                    self.limits.max_configure
+                };
             }
-            Action::ZeroRestartCount => self.restarts = 0,
+            Action::ZeroRestartCount => {
+                // 4.4: zrc "enables the FSA to pause before proceeding to the
+                // desired final state", and "in addition to zeroing the
+                // Restart counter, the implementation MUST set the timeout
+                // period to an appropriate value". Without the timer the pause
+                // never ends: a far end that sent Terminate-Request left this
+                // end in Stopping for good, where no Configure-Request could
+                // bring it back.
+                self.restarts = 0;
+                self.timer = Some(self.limits.restart_ms);
+            }
             Action::SendConfigureRequest => {
                 self.id = self.next_id;
                 self.next_id = self.next_id.wrapping_add(1);
@@ -309,6 +346,31 @@ impl<P: Protocol> Session<P> {
                 }
             }
         }
+    }
+
+    /// 5.7: a packet arrived for a protocol this end does not run. Only an
+    /// open link can say so -- "Protocol-Reject packets can only be sent in
+    /// the LCP Opened state" -- and anywhere else the packet is just dropped.
+    pub fn reject_protocol(&mut self, protocol: u16, information: &[u8]) {
+        if self.state != State::Opened {
+            return;
+        }
+        // "The Rejected-Information MUST be truncated to comply with the peer's
+        // established MRU." Six octets of header in front of it.
+        let mut data = protocol.to_be_bytes().to_vec();
+        let room = usize::from(crate::lcp::DEFAULT_MRU) - 6;
+        data.extend_from_slice(&information[..information.len().min(room)]);
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+        self.send(Code::ProtocolReject, id, data);
+    }
+
+    /// The far end has refused this protocol outright, with a Protocol-Reject
+    /// of its own. 5.7: "the implementation MUST stop sending packets of the
+    /// indicated protocol at the earliest opportunity", which 4.3 calls a
+    /// catastrophic RXJ- for the protocol that was refused.
+    pub fn refused(&mut self) {
+        self.fire(Event::ReceiveRejectFatal);
     }
 
     fn restart(&mut self) {
@@ -478,6 +540,74 @@ mod tests {
         assert_eq!(out[0].code, Code::CodeReject);
         assert_eq!(out[0].data[0], 0x5a, "the rejected packet is copied in");
         assert_eq!(s.state(), State::ReqSent, "the link was dropped over it");
+    }
+
+    fn opened() -> Session<Agreeable> {
+        let mut s = started();
+        let id = s.take_output()[0].id;
+        s.receive(Message { code: Code::ConfigureAck, id, data: vec![] });
+        s.receive(Message { code: Code::ConfigureRequest, id: 1, data: vec![] });
+        let _ = s.take_output();
+        let _ = s.take_reports();
+        assert_eq!(s.state(), State::Opened);
+        s
+    }
+
+    /// 4.6's Max-Failure: a far end asking for something this end can only
+    /// offer an alternative to, over and over, is refused on the sixth time.
+    /// MS-CHAP is the case that happens: a Windows server wants it and this
+    /// end suggests CHAP back for as long as it keeps asking.
+    #[test]
+    fn naks_that_are_not_converging_become_a_reject() {
+        use crate::lcp::{Lcp, Wanted};
+        let mut s = Session::new(Lcp::new(Wanted::default()), Limits::default());
+        s.open();
+        s.up();
+        let _ = s.take_output();
+        let ms_chap = vec![3, 5, 0xc2, 0x23, 0x80];
+        let mut answers = Vec::new();
+        for id in 0..7u8 {
+            s.receive(Message { code: Code::ConfigureRequest, id: 100 + id, data: ms_chap.clone() });
+            answers.extend(
+                s.take_output()
+                    .into_iter()
+                    .filter(|m| matches!(m.code, Code::ConfigureNak | Code::ConfigureReject)),
+            );
+        }
+        let codes: Vec<_> = answers.iter().map(|m| m.code).collect();
+        assert_eq!(codes[..5], [Code::ConfigureNak; 5]);
+        assert_eq!(codes[5..], [Code::ConfigureReject; 2]);
+        // 5.4: the reject carries the option as the far end sent it, not the
+        // alternative this end had been suggesting.
+        assert_eq!(answers[5].data, ms_chap);
+    }
+
+    /// 4.6: "Max-Terminate ... A suggested value is 2", and it is the count a
+    /// Terminate-Request is repeated to, not Max-Configure's ten.
+    #[test]
+    fn a_terminate_request_goes_twice_and_not_ten_times() {
+        let mut s = opened();
+        s.close();
+        let mut requests = 0;
+        for _ in 0..60_000 {
+            requests += s.take_output().iter().filter(|m| m.code == Code::TerminateRequest).count();
+            s.tick(1);
+        }
+        assert_eq!(requests, 2);
+        assert_eq!(s.state(), State::Closed);
+    }
+
+    /// 4.4's zrc: the pause after acknowledging a far end's Terminate-Request
+    /// ends, so the automaton reaches Stopped and says so.
+    #[test]
+    fn the_pause_after_a_terminate_request_ends() {
+        let mut s = opened();
+        s.receive(Message { code: Code::TerminateRequest, id: 9, data: vec![] });
+        assert_eq!(s.state(), State::Stopping);
+        assert!(s.take_reports().contains(&Report::Down));
+        s.tick(Limits::default().restart_ms);
+        assert_eq!(s.state(), State::Stopped, "stuck in Stopping");
+        assert!(s.take_reports().contains(&Report::Finished));
     }
 
     /// 5.5: a peer that wants to hang up is acknowledged.

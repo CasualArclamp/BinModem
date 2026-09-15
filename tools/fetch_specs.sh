@@ -94,7 +94,8 @@ echo "done -> $OUT"
 # on arrival.
 #
 # The link: 1661 is PPP itself and 1662 the framing under it; 1334 and 1994 are
-# the two ways a far end asks who is calling; 1332 is how an address is agreed;
+# the two ways a far end asks who is calling, and 1321 the MD5 that CHAP hashes
+# with; 1332 is how an address is agreed;
 # 1144 is Van Jacobson header compression, which is what made dial-up bearable.
 #
 # What crosses it: 791 the datagram, 792 the echo, 1071 the checksum over both,
@@ -106,7 +107,7 @@ echo "done -> $OUT"
 # and where anything reading them expects to look.
 TEXT="${2:-$OUT/text}"
 mkdir -p "$TEXT"
-RFCS="1661 1662 1332 1334 1994 1144 791 792 1071 9293 1122 6298 5681 7323"
+RFCS="1661 1662 1332 1334 1994 1321 1144 791 792 1071 9293 1122 6298 5681 7323"
 n=0
 for rfc in $RFCS; do
   if curl -sS --fail --max-time 30 -o "$TEXT/rfc$rfc.txt" \

@@ -62,7 +62,15 @@ impl Auth {
         }
     }
 
-    fn from_value(value: &[u8]) -> Option<Self> {
+    /// What a person would call it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Pap => "PAP",
+            Self::ChapMd5 => "CHAP",
+        }
+    }
+
+    pub fn from_value(value: &[u8]) -> Option<Self> {
         match value {
             [0xc0, 0x23] => Some(Self::Pap),
             [0xc2, 0x23, 5] => Some(Self::ChapMd5),
@@ -87,6 +95,8 @@ pub struct Wanted {
     pub magic: u32,
     pub pfc: bool,
     pub acfc: bool,
+    /// 6.2: that the far end say who it is, and how. None asks nothing.
+    pub auth: Option<Auth>,
 }
 
 impl Default for Wanted {
@@ -97,6 +107,7 @@ impl Default for Wanted {
             magic: 0,
             pfc: true,
             acfc: true,
+            auth: None,
         }
     }
 }
@@ -123,6 +134,11 @@ impl Wanted {
                 kind: option::ACCM,
                 value: self.accm.to_be_bytes().to_vec(),
             });
+        }
+        // 6.2's default is no authentication at all, so a demand is always
+        // something that has to be said.
+        if let Some(auth) = self.auth {
+            out.push(ConfigOption { kind: option::AUTHENTICATION, value: auth.to_value() });
         }
         if self.magic != 0 {
             out.push(ConfigOption {
@@ -263,15 +279,47 @@ pub fn review(options: &[ConfigOption], agreed: &mut Agreed) -> Review {
 }
 
 /// LCP as one end sees it: what it will ask for, and what it has agreed to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Lcp {
     pub wanted: Wanted,
     pub agreed: Agreed,
+    /// The ways this end will let the far end prove who it is, best first,
+    /// when it asks at all.
+    pub acceptable: Vec<Auth>,
+    /// Set when the far end will not authenticate in any of those: it
+    /// refused the option, or offered only something else. The demand stays
+    /// in the request regardless -- dropping it would be letting in a caller
+    /// by giving up on asking -- and the link above ends the call instead.
+    pub refused: Option<String>,
+    /// The Authentication-Protocol the far end last demanded that this end
+    /// cannot do, for saying why a link that never came up did not.
+    pub unknown_auth: Option<Vec<u8>>,
 }
 
 impl Lcp {
     pub fn new(wanted: Wanted) -> Self {
-        Self { wanted, agreed: Agreed::default() }
+        Self { wanted, ..Self::default() }
+    }
+
+    /// An end that asks the far end to say who it is, in one of `methods`.
+    pub fn demanding(wanted: Wanted, methods: Vec<Auth>) -> Self {
+        Self {
+            wanted: Wanted { auth: methods.first().copied(), ..wanted },
+            acceptable: methods,
+            ..Self::default()
+        }
+    }
+}
+
+/// Describe an Authentication-Protocol value for a person.
+pub fn describe_auth(value: &[u8]) -> String {
+    match value {
+        [0xc0, 0x23] => "PAP".to_owned(),
+        [0xc2, 0x23, 5] => "CHAP with MD5".to_owned(),
+        [0xc2, 0x23, 0x80] => "MS-CHAP".to_owned(),
+        [0xc2, 0x23, 0x81] => "MS-CHAPv2".to_owned(),
+        [0xc2, 0x27, ..] => "EAP".to_owned(),
+        other => other.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "),
     }
 }
 
@@ -285,6 +333,11 @@ impl crate::session::Protocol for Lcp {
     }
 
     fn review(&mut self, options: &[ConfigOption]) -> Review {
+        for option in options {
+            if option.kind == option::AUTHENTICATION && Auth::from_value(&option.value).is_none() {
+                self.unknown_auth = Some(option.value.clone());
+            }
+        }
         review(options, &mut self.agreed)
     }
 
@@ -312,6 +365,26 @@ impl crate::session::Protocol for Lcp {
                     // answer is a different one rather than the one suggested.
                     self.wanted.magic = u32::from_be_bytes([a, b, c, d]) ^ 0x5555_5555;
                 }
+                (option::AUTHENTICATION, value) => {
+                    // 6.2: a Nak here suggests another protocol. Take it if it
+                    // is one this end accepts; otherwise offer the next one
+                    // this end has not tried, and when those run out the far
+                    // end is not going to say who it is.
+                    let suggested = Auth::from_value(value).filter(|a| self.acceptable.contains(a));
+                    let next = suggested.or_else(|| {
+                        let at = self.wanted.auth.and_then(|w| self.acceptable.iter().position(|a| *a == w));
+                        at.and_then(|i| self.acceptable.get(i + 1).copied())
+                    });
+                    match next {
+                        Some(auth) => self.wanted.auth = Some(auth),
+                        None => {
+                            self.refused = Some(format!(
+                                "the far end will only authenticate with {}, which this end does not accept",
+                                describe_auth(value)
+                            ));
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -322,6 +395,11 @@ impl crate::session::Protocol for Lcp {
         // without.
         for option in options {
             match option.kind {
+                // 6.2 again: the far end will not authenticate at all. The
+                // demand is kept, and noted, for the link to act on.
+                option::AUTHENTICATION => {
+                    self.refused = Some("the far end will not say who it is".to_owned());
+                }
                 option::MAGIC => self.wanted.magic = 0,
                 option::PFC => self.wanted.pfc = false,
                 option::ACFC => self.wanted.acfc = false,
@@ -462,7 +540,7 @@ mod tests {
     /// the peer may argue with.
     #[test]
     fn a_request_carries_only_what_is_not_already_the_default() {
-        let bare = Wanted { mru: DEFAULT_MRU, accm: 0, magic: 0, pfc: false, acfc: false };
+        let bare = Wanted { mru: DEFAULT_MRU, accm: 0, magic: 0, pfc: false, acfc: false, auth: None };
         // ACCM is the exception: its default is everything escaped, so asking
         // for nothing escaped is a thing that has to be said.
         let options = bare.to_options();
@@ -483,6 +561,39 @@ mod tests {
         let wanted = Wanted { magic: 0xdead_beef, ..Wanted::default() };
         let kinds: Vec<u8> = wanted.to_options().iter().map(|o| o.kind).collect();
         assert_eq!(kinds, vec![option::ACCM, option::MAGIC, option::PFC, option::ACFC]);
+    }
+
+    /// 6.2: an end that wants to know who is calling asks, and a Nak moves it
+    /// to the next way it accepts rather than to not asking.
+    #[test]
+    fn a_demand_moves_down_the_list_and_never_off_the_end() {
+        use crate::session::Protocol;
+        let mut lcp = Lcp::demanding(Wanted::default(), vec![Auth::ChapMd5, Auth::Pap]);
+        let asked: Vec<_> = lcp.request().into_iter().filter(|o| o.kind == option::AUTHENTICATION).collect();
+        assert_eq!(asked, vec![ConfigOption { kind: option::AUTHENTICATION, value: vec![0xc2, 0x23, 5] }]);
+
+        // The far end suggests MS-CHAP, which this end does not do: next on
+        // the list instead.
+        lcp.naked(&[ConfigOption { kind: option::AUTHENTICATION, value: vec![0xc2, 0x23, 0x80] }]);
+        assert_eq!(lcp.wanted.auth, Some(Auth::Pap));
+        assert_eq!(lcp.refused, None);
+
+        // And again, with nothing left: still asking for PAP, and the refusal
+        // is noted for the link to end the call over.
+        lcp.naked(&[ConfigOption { kind: option::AUTHENTICATION, value: vec![0xc2, 0x23, 0x80] }]);
+        assert_eq!(lcp.wanted.auth, Some(Auth::Pap), "the demand was dropped");
+        assert!(lcp.refused.as_deref().is_some_and(|r| r.contains("MS-CHAP")));
+    }
+
+    /// 5.4: a far end that rejects the option outright will not authenticate,
+    /// and that is not the same as agreeing not to.
+    #[test]
+    fn a_rejected_demand_is_not_withdrawn() {
+        use crate::session::Protocol;
+        let mut lcp = Lcp::demanding(Wanted::default(), vec![Auth::Pap]);
+        lcp.rejected(&[ConfigOption { kind: option::AUTHENTICATION, value: vec![0xc0, 0x23] }]);
+        assert_eq!(lcp.wanted.auth, Some(Auth::Pap));
+        assert!(lcp.refused.is_some());
     }
 
     /// A request that was answered with anything but an Ack changes nothing.

@@ -10,12 +10,14 @@
 //! than against a memory of them, with section numbers on the constants.
 //! `tools/fetch_specs.sh` downloads the RFCs beside the ITU Recommendations.
 
+pub mod auth;
 pub mod control;
 pub mod frame;
 pub mod ip;
 pub mod ipcp;
 pub mod lcp;
 pub mod link;
+pub mod md5;
 pub mod ping;
 pub mod session;
 

@@ -2,19 +2,20 @@
 //!
 //! RFC 1661 3.2 draws the phases this walks through: the link is dead until
 //! something below carries octets, then LCP settles what the two ends can do,
-//! then -- if anyone asked for it -- authentication, then the network
+//! then -- if either end asked for it -- authentication, then the network
 //! protocols, one of which is IP.
 //!
-//! Authentication is the gap. Neither end here demands it, so two of these
-//! reach the network phase directly; a far end that does demand it will get as
-//! far as agreeing to LCP and no further, which is at least a failure with a
-//! name on it.
+//! Authentication is RFC 1334's PAP or RFC 1994's CHAP, in [`crate::auth`],
+//! and it runs in whichever directions were asked for: a provider asks the
+//! caller who it is, and this end can be either. Two of these that nobody has
+//! given an account to still go straight from LCP to addresses.
 
-use crate::control::Limits;
+use crate::auth::{self, Account, Authenticator, Outcome, Prover};
+use crate::control::{Code, Limits, Message, State};
 use crate::frame::{Deframer, Framer, Packet};
 use crate::ip;
 use crate::ipcp::Ipcp;
-use crate::lcp::Lcp;
+use crate::lcp::{Auth, Lcp};
 use crate::session::{Report, Session};
 
 /// 3.2's phase diagram, as far as this goes.
@@ -22,19 +23,39 @@ use crate::session::{Report, Session};
 pub enum Phase {
     /// 3.3: nothing below is carrying anything.
     Dead,
-    /// 3.4: LCP is negotiating.
+    /// 3.4: LCP is negotiating, or -- once it is up and anyone who had to has
+    /// said who they are -- IPCP is.
     Establish,
+    /// 3.5: one end is proving who it is to the other.
+    Authenticate,
     /// 3.6: IP can flow.
     Network,
     /// 3.7: going away.
     Terminate,
 }
 
+/// Who this end is, and whom it lets in.
+#[derive(Debug, Clone, Default)]
+pub struct Authentication {
+    /// What this end says when a far end asks who it is. Nothing set and a
+    /// far end that asks is told an empty name, and refuses it, which is a
+    /// failure with a reason rather than a link that hangs.
+    pub account: Option<Account>,
+    /// Whether this end insists a caller say who it is, and the accounts it
+    /// will take. None asks nobody anything.
+    pub callers: Option<Vec<Account>>,
+    /// What this end calls itself, in a CHAP challenge.
+    pub name: String,
+    /// For CHAP's challenges, which must differ from call to call.
+    pub seed: u64,
+}
+
 /// How many times round [`Link::round`] before giving up on it settling.
 ///
-/// LCP coming up starts IPCP, and IPCP has a Configure-Request to send. That
-/// is two rounds and a third to find there is no more; the rest is slack.
-const ROUNDS: usize = 4;
+/// LCP coming up starts authentication or IPCP, each of which has something
+/// to send, and the end of authentication starts IPCP. That is three rounds
+/// and a fourth to find there is no more; the rest is slack.
+const ROUNDS: usize = 6;
 
 /// One end of the link.
 #[derive(Debug)]
@@ -43,6 +64,13 @@ pub struct Link {
     deframer: Deframer,
     lcp: Session<Lcp>,
     ipcp: Session<Ipcp>,
+    authentication: Authentication,
+    /// This end proving who it is, while it is.
+    prover: Option<Prover>,
+    /// And this end checking the far end.
+    authenticator: Option<Authenticator>,
+    /// The name the far end proved, once it has.
+    who: Option<String>,
     phase: Phase,
     line: Vec<u8>,
     arrived: Vec<ip::Arrived>,
@@ -52,6 +80,14 @@ pub struct Link {
     /// 791's Identification field, which only has to differ between datagrams
     /// that are alive at once.
     next_id: u16,
+    /// Why the link is not up, once there is a reason worth telling a person.
+    trouble: Option<String>,
+    /// Whether this end asked for the link to close, so a close is not
+    /// reported as the far end's doing.
+    closing: bool,
+    opened: bool,
+    /// Whether LCP has ever come up on this link.
+    was_up: bool,
 }
 
 impl Link {
@@ -59,20 +95,39 @@ impl Link {
     /// offer the other; zeroes for either mean it is asking rather than
     /// telling (RFC 1332 3.3).
     pub fn new(local: [u8; 4], remote: [u8; 4]) -> Self {
+        Self::with_authentication(local, remote, Authentication::default())
+    }
+
+    /// The same, with an account to prove who this end is and, if
+    /// `callers` is set, a demand that the far end prove who it is.
+    pub fn with_authentication(local: [u8; 4], remote: [u8; 4], authentication: Authentication) -> Self {
         // A modem call has a round trip measured in whole seconds once a VoIP
         // trunk is in it, so the Restart timer is the long end of what 4.6
         // suggests rather than the short.
         let limits = Limits { restart_ms: 3000, ..Limits::default() };
+        let wanted = crate::lcp::Wanted::default();
+        let lcp = match &authentication.callers {
+            Some(accounts) => Lcp::demanding(wanted, auth::methods_for(accounts)),
+            None => Lcp::new(wanted),
+        };
         Self {
             framer: Framer::new(),
             deframer: Deframer::new(),
-            lcp: Session::new(Lcp::new(crate::lcp::Wanted::default()), limits),
+            lcp: Session::new(lcp, limits),
             ipcp: Session::new(Ipcp::new(local, remote), limits),
+            authentication,
+            prover: None,
+            authenticator: None,
+            who: None,
             phase: Phase::Dead,
             line: Vec::new(),
             arrived: Vec::new(),
             carried: Vec::new(),
             next_id: 1,
+            trouble: None,
+            closing: false,
+            opened: false,
+            was_up: false,
         }
     }
 
@@ -90,8 +145,37 @@ impl Link {
         (self.ipcp.protocol.local(), self.ipcp.protocol.remote())
     }
 
+    /// Why the link is down or going, if there is a reason to give.
+    pub fn trouble(&self) -> Option<&str> {
+        self.trouble.as_deref()
+    }
+
+    /// The name the far end proved to this end, if it was asked for one.
+    pub fn who(&self) -> Option<&str> {
+        self.who.as_deref()
+    }
+
+    /// How the far end was asked to prove who it is, if it was.
+    pub fn checked_with(&self) -> Option<Auth> {
+        self.authenticator.as_ref().map(Authenticator::method)
+    }
+
+    /// And how this end was, if the far end asked.
+    pub fn proved_with(&self) -> Option<Auth> {
+        self.prover.as_ref().map(Prover::method)
+    }
+
+    /// Whether the link has been opened and has since given up: LCP is back
+    /// where nothing more will happen unless the far end starts again.
+    pub fn ended(&self) -> bool {
+        self.opened
+            && self.phase == Phase::Dead
+            && matches!(self.lcp.state(), State::Closed | State::Stopped | State::Initial | State::Starting)
+    }
+
     /// The modem has connected: there is something under this now.
     pub fn open(&mut self) {
+        self.opened = true;
         self.phase = Phase::Establish;
         self.lcp.open();
         self.lcp.up();
@@ -100,8 +184,10 @@ impl Link {
 
     /// And has hung up.
     pub fn close(&mut self) {
-        self.lcp.close();
+        self.closing = true;
+        // 3.7 closes the network protocols before the link under them.
         self.ipcp.close();
+        self.lcp.close();
         self.phase = Phase::Terminate;
         self.pump();
     }
@@ -129,7 +215,13 @@ impl Link {
     /// Time passing, for the Restart timers.
     pub fn tick(&mut self, ms: u32) {
         self.lcp.tick(ms);
-        if self.phase == Phase::Network || self.ipcp.state() != crate::control::State::Initial {
+        if let Some(prover) = self.prover.as_mut() {
+            prover.tick(ms);
+        }
+        if let Some(authenticator) = self.authenticator.as_mut() {
+            authenticator.tick(ms);
+        }
+        if self.phase == Phase::Network || self.ipcp.state() != State::Initial {
             self.ipcp.tick(ms);
         }
         self.pump();
@@ -190,13 +282,43 @@ impl Link {
     fn deliver(&mut self, packet: Packet) {
         match packet.protocol {
             crate::protocol::LCP => {
-                if let Some(message) = crate::control::Message::parse(&packet.payload) {
+                if let Some(message) = Message::parse(&packet.payload) {
+                    if message.code == Code::ProtocolReject {
+                        self.protocol_rejected(&message.data);
+                    }
                     self.lcp.receive(message);
                 }
             }
             crate::protocol::IPCP => {
-                if let Some(message) = crate::control::Message::parse(&packet.payload) {
+                // 3.5: during authentication "all other packets received
+                // during this phase MUST be silently discarded", and IPCP has
+                // not been opened before then, so its session drops them
+                // itself.
+                if let Some(message) = Message::parse(&packet.payload) {
                     self.ipcp.receive(message);
+                }
+            }
+            crate::protocol::PAP | crate::protocol::CHAP => {
+                // Each packet is for whichever end of the exchange it is
+                // addressed to. The codes say which: a request or a response
+                // is for the end checking, and everything else for the end
+                // being checked. A packet for an exchange that is not running
+                // is dropped, as 1334 2.2.1 and 1994 4.1 both say.
+                let code = packet.payload.first().copied().unwrap_or(0);
+                let for_checker = match packet.protocol {
+                    crate::protocol::PAP => code == auth::pap::AUTHENTICATE_REQUEST,
+                    _ => code == auth::chap::RESPONSE,
+                };
+                if for_checker {
+                    if let Some(a) = self.authenticator.as_mut()
+                        && auth::protocol(a.method()) == packet.protocol
+                    {
+                        a.receive(&packet.payload);
+                    }
+                } else if let Some(p) = self.prover.as_mut()
+                    && auth::protocol(p.method()) == packet.protocol
+                {
+                    p.receive(&packet.payload);
                 }
             }
             crate::protocol::IP => {
@@ -234,14 +356,133 @@ impl Link {
                     self.arrived.push(arrived);
                 }
             }
-            // Anything else. 5.7 asks for a Protocol-Reject, which is worth
-            // having once there is something that would send one.
+            // 5.7: "Upon reception of a packet with an unknown Protocol field,
+            // the implementation MUST transmit a Protocol-Reject." A far end
+            // running pppd offers compression and IPv6 as a matter of course,
+            // and without this it asks for them every three seconds for half a
+            // minute.
+            other => self.lcp.reject_protocol(other, &packet.payload),
+        }
+    }
+
+    /// The far end has refused one of this end's protocols.
+    fn protocol_rejected(&mut self, data: &[u8]) {
+        let [hi, lo, ..] = *data else { return };
+        match u16::from_be_bytes([hi, lo]) {
+            crate::protocol::IPCP | crate::protocol::IP => {
+                self.ipcp.refused();
+                self.note("the far end does not carry IP");
+            }
+            // An authentication protocol refused is authentication failed:
+            // the exchange cannot finish, and 3.5 has nowhere else to go.
+            crate::protocol::PAP | crate::protocol::CHAP => {
+                self.note("the far end refused the authentication protocol it had agreed to");
+                self.close_link();
+            }
             _ => {}
         }
     }
 
-    /// Move whatever the two sessions have produced onto the line, and follow
-    /// the phase they put the link in.
+    /// Keep the first reason: it is the cause, and what follows is the effect.
+    fn note(&mut self, why: &str) {
+        if self.trouble.is_none() {
+            self.trouble = Some(why.to_owned());
+        }
+    }
+
+    /// End the link for a reason of this end's own, as 3.5 has an
+    /// authenticator do when a caller fails: "the authenticator SHOULD proceed
+    /// instead to the Link Termination phase."
+    fn close_link(&mut self) {
+        self.prover = None;
+        self.authenticator = None;
+        self.ipcp.close();
+        self.lcp.close();
+        self.phase = Phase::Terminate;
+    }
+
+    /// LCP is up: 3.5 if anyone asked for it, 3.6 if not.
+    fn begin_authentication(&mut self) {
+        // What the far end demands of this end is in what this end agreed to.
+        let theirs = self.lcp.protocol.agreed.auth;
+        // What this end demands of the far end is what it asked for -- never
+        // what came back in the acknowledgement, which a far end could have
+        // trimmed. A demand is not something the other side gets a say in.
+        let ours = self.authentication.callers.as_ref().and(self.lcp.protocol.wanted.auth);
+        if self.authentication.callers.is_some() && ours.is_none() {
+            self.note("this end would have asked the caller who it is, and did not");
+            self.close_link();
+            return;
+        }
+        if let Some(method) = theirs {
+            let account = self.authentication.account.clone().unwrap_or_default();
+            self.prover = Some(Prover::new(method, account));
+        }
+        if let (Some(method), Some(accounts)) = (ours, self.authentication.callers.clone()) {
+            let name = if self.authentication.name.is_empty() { "binmodem" } else { &self.authentication.name };
+            self.authenticator = Some(Authenticator::new(method, accounts, name, self.authentication.seed));
+        }
+        if self.prover.is_some() || self.authenticator.is_some() {
+            self.phase = Phase::Authenticate;
+        } else {
+            self.begin_network();
+        }
+    }
+
+    fn begin_network(&mut self) {
+        self.phase = Phase::Establish;
+        self.ipcp.open();
+        self.ipcp.up();
+    }
+
+    /// Where authentication has got to, and what follows from it.
+    fn follow_authentication(&mut self) {
+        if self.phase != Phase::Authenticate {
+            return;
+        }
+        let proving = self.prover.as_ref().map(|p| p.outcome().clone());
+        let checking = self.authenticator.as_ref().map(|a| a.outcome().clone());
+        for outcome in [&proving, &checking].into_iter().flatten() {
+            if let Outcome::Failed(why) = outcome {
+                let why = why.clone();
+                self.note(&why);
+                // One more round first, so the refusal itself goes out ahead
+                // of the Terminate-Request: a caller told why is better off
+                // than one that is just hung up on.
+                self.flush_authentication();
+                self.close_link();
+                return;
+            }
+        }
+        let done = |o: &Option<Outcome>| o.as_ref().is_none_or(|o| *o == Outcome::Passed);
+        if done(&proving) && done(&checking) {
+            if let Some(a) = &self.authenticator {
+                self.who = a.who().map(str::to_owned);
+            }
+            // Both are kept, not dropped: 1334 and 1994 both require a
+            // repeated request or response after success to be answered the
+            // same way, and CHAP's challenger may ask again at any time.
+            self.begin_network();
+        }
+    }
+
+    fn flush_authentication(&mut self) {
+        let mut out = Vec::new();
+        if let Some(p) = self.prover.as_mut() {
+            let protocol = auth::protocol(p.method());
+            out.extend(p.take_output().into_iter().map(|b| (protocol, b)));
+        }
+        if let Some(a) = self.authenticator.as_mut() {
+            let protocol = auth::protocol(a.method());
+            out.extend(a.take_output().into_iter().map(|b| (protocol, b)));
+        }
+        for (protocol, bytes) in out {
+            self.send(protocol, bytes);
+        }
+    }
+
+    /// Move whatever the sessions have produced onto the line, and follow the
+    /// phase they put the link in.
     ///
     /// Output before reports, and that order is the whole of it. What a
     /// session produced, it produced under the settings that were in force
@@ -265,38 +506,67 @@ impl Link {
     fn round(&mut self) -> bool {
         let lcp: Vec<_> = self.lcp.take_output();
         let ipcp: Vec<_> = self.ipcp.take_output();
-        let anything = !lcp.is_empty() || !ipcp.is_empty();
+        let mut anything = !lcp.is_empty() || !ipcp.is_empty();
         for message in lcp {
             self.send(crate::protocol::LCP, message.to_bytes());
         }
+        let before = self.line.len();
+        self.flush_authentication();
+        anything |= self.line.len() != before;
         for message in ipcp {
             self.send(crate::protocol::IPCP, message.to_bytes());
         }
-        let mut reports = false;
+
+        let phase = self.phase;
         for report in self.lcp.take_reports() {
-            reports = true;
+            anything = true;
             match report {
                 Report::Up => {
+                    self.was_up = true;
                     // 3.4: what LCP agreed takes effect now, and the framer is
                     // where most of it lands.
                     let agreed = self.lcp.protocol.agreed;
                     self.framer.set_accm(agreed.accm);
                     self.framer.set_compression(agreed.acfc, agreed.pfc);
                     self.deframer.set_accm(self.lcp.protocol.wanted.accm);
-                    // 3.5 would put authentication here. Nothing does yet, so
-                    // 3.6 follows directly.
-                    self.ipcp.open();
-                    self.ipcp.up();
+                    self.begin_authentication();
                 }
                 Report::Down | Report::Finished => {
+                    // 3.4: "All Configuration Options are assumed to be at
+                    // default values unless altered by the configuration
+                    // exchange", and a link that has gone down has no
+                    // exchange in force.
+                    self.framer = Framer::new();
+                    self.deframer.set_accm(crate::frame::DEFAULT_ACCM);
                     self.ipcp.down();
+                    self.prover = None;
+                    self.authenticator = None;
+                    if report == Report::Finished && !self.closing {
+                        let why = if self.was_up {
+                            "the far end ended the link".to_owned()
+                        } else if let Some(value) = &self.lcp.protocol.unknown_auth {
+                            format!(
+                                "the far end wants {} to say who is calling, which this end does not do",
+                                crate::lcp::describe_auth(value)
+                            )
+                        } else {
+                            "the far end never agreed to a link".to_owned()
+                        };
+                        self.note(&why);
+                    }
                     self.phase = Phase::Dead;
                 }
                 Report::Started => {}
             }
         }
+        if let Some(why) = self.lcp.protocol.refused.take() {
+            anything = true;
+            self.note(&why);
+            self.close_link();
+        }
+        self.follow_authentication();
         for report in self.ipcp.take_reports() {
-            reports = true;
+            anything = true;
             match report {
                 Report::Up => self.phase = Phase::Network,
                 Report::Down | Report::Finished => {
@@ -307,10 +577,22 @@ impl Link {
                 Report::Started => {}
             }
         }
-        anything || reports
+        anything || self.phase != phase
     }
 
     fn send(&mut self, protocol: u16, payload: Vec<u8>) {
-        self.framer.frame(&Packet { protocol, payload }, &mut self.line);
+        // 5: "Regardless of which Configuration Options are enabled, all LCP
+        // Link Configuration, Link Termination, and Code-Reject packets (codes
+        // 1 through 7) are always sent as if no Configuration Options were
+        // negotiated." Which is what lets a far end that has already gone back
+        // to its defaults read a Terminate-Request, or a new Configure-Request
+        // for a link it thinks is open, at all.
+        let unconfigured = protocol == crate::protocol::LCP && matches!(payload.first(), Some(1..=7));
+        let packet = Packet { protocol, payload };
+        if unconfigured {
+            Framer::new().frame(&packet, &mut self.line);
+        } else {
+            self.framer.frame(&packet, &mut self.line);
+        }
     }
 }

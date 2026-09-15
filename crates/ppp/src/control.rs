@@ -386,14 +386,21 @@ pub fn transition(state: State, event: Event) -> Option<Transition> {
 /// second of round trip in it wants the longer end of both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
+    /// Max-Configure: Configure-Requests sent without an answer.
     pub max_configure: u32,
+    /// Max-Terminate: Terminate-Requests, "a suggested value is 2".
     pub max_terminate: u32,
+    /// Max-Failure: "the number of Configure-Nak packets sent without sending
+    /// a Configure-Ack before assuming that configuration is not converging.
+    /// Any further Configure-Nak packets for peer requested options are
+    /// converted to Configure-Reject packets". Suggested 5.
+    pub max_failure: u32,
     pub restart_ms: u32,
 }
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { max_configure: 10, max_terminate: 2, restart_ms: 3000 }
+        Self { max_configure: 10, max_terminate: 2, max_failure: 5, restart_ms: 3000 }
     }
 }
 
