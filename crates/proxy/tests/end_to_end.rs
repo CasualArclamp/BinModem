@@ -21,9 +21,11 @@ const CLIENT: [u8; 4] = [10, 0, 0, 2];
 
 /// A step of the link, and the delay across it.
 ///
-/// Sixty milliseconds each way is a modem call without a VoIP trunk in it.
+/// Two hundred and thirty milliseconds each way is what a real call between
+/// two of these measures: 460 ms round trip, which is four times what a modem
+/// alone costs and is the number every timer above this has to live with.
 const STEP_MS: u32 = 10;
-const DELAY_MS: u32 = 60;
+const DELAY_MS: u32 = 230;
 
 /// The two ends and the link between them.
 struct Link {

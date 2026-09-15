@@ -37,6 +37,9 @@ struct Relayed {
     /// Whether the connection across the link has been answered. Until it is,
     /// the browser is waiting on something that may not be there.
     established: bool,
+    /// Whether the browser has said anything yet, so the first thing it says
+    /// is reported once rather than every round.
+    said: bool,
 }
 
 /// The proxy on the machine that dialled.
@@ -200,6 +203,7 @@ impl Client {
                             socket_finished: false,
                             told_socket: false,
                             established: false,
+                            said: false,
                         },
                     );
                 }
@@ -261,7 +265,18 @@ impl Client {
             let mut buffer = [0u8; CHUNK];
             match relay.socket.read(&mut buffer) {
                 Ok(0) => relay.socket_finished = true,
-                Ok(n) => relay.to_link.extend_from_slice(&buffer[..n]),
+                Ok(n) => {
+                    if !relay.said {
+                        relay.said = true;
+                        let opening: Vec<String> =
+                            buffer[..n.min(4)].iter().map(|b| format!("{b:02x}")).collect();
+                        self.log.push(format!(
+                            "proxy: the browser said {} ({n} octets)",
+                            opening.join(" ")
+                        ));
+                    }
+                    relay.to_link.extend_from_slice(&buffer[..n]);
+                }
                 Err(e) if e.kind() == ErrorKind::WouldBlock => {}
                 Err(_) => gone = true,
             }

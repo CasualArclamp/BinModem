@@ -49,6 +49,11 @@ struct Relayed {
     to_link: Vec<u8>,
     /// Where it was going, for the log.
     going_to: String,
+    /// Whether anything has been heard from the browser yet, so the first
+    /// thing it says is reported once rather than every round.
+    heard: bool,
+    /// Whether the SOCKS conversation has already been complained about.
+    complained: bool,
     /// Whether the socket has said it has no more to give.
     socket_finished: bool,
     /// And whether the far side of the internet has been told that the
@@ -129,6 +134,8 @@ impl Server {
                     to_socket: Vec::new(),
                     to_link: Vec::new(),
                     going_to: String::new(),
+                    heard: false,
+                    complained: false,
                     socket_finished: false,
                     told_socket: false,
                 },
@@ -170,8 +177,30 @@ impl Server {
             return;
         };
         if !from_link.is_empty() {
+            // The first thing a browser says settles what it is speaking. A
+            // SOCKS 5 greeting opens with 0x05; anything else is a browser
+            // set to something this does not do, which used to fail here in
+            // silence -- the session gave up and nothing said so.
+            if !relay.heard {
+                relay.heard = true;
+                let opening: Vec<String> =
+                    from_link.iter().take(4).map(|b| format!("{b:02x}")).collect();
+                self.log.push(format!(
+                    "proxy: the browser opened with {} ({} octets)",
+                    opening.join(" "),
+                    from_link.len()
+                ));
+            }
             let forward = relay.socks.feed(&from_link);
             relay.to_socket.extend(forward);
+        }
+        // Whatever SOCKS made of it, said once. Without this a browser
+        // speaking anything else stalls with nothing on the panel at all.
+        if !relay.complained
+            && let Some(why) = relay.socks.trouble()
+        {
+            relay.complained = true;
+            self.log.push(format!("proxy: the connection made no sense: {why}"));
         }
 
         // A request nobody has answered yet: open it.
