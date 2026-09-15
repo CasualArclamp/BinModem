@@ -300,6 +300,10 @@ pub struct ScopeApp {
     ping_repeatedly: bool,
     /// And whether it has asked for web traffic to be carried.
     carry_web: bool,
+    /// Whether to ask the far end to compress the headers (RFC 1144). On
+    /// unless somebody turns it off, because there is no reason to want forty
+    /// octets of header on a link this slow.
+    compress_headers: bool,
     /// The account, the command typed after logging in, and whether calls
     /// are answered with a login prompt; and what the line thread was last
     /// told of them.
@@ -390,6 +394,7 @@ impl ScopeApp {
             constellation_open: false,
             ping_repeatedly: false,
             carry_web: false,
+            compress_headers: true,
             dialin: crate::dialin::Settings::default(),
             dialin_sent: None,
             fax: crate::faxwin::Fax::new(),
@@ -1254,6 +1259,25 @@ impl ScopeApp {
                     };
                     ui.label(RichText::new(text).small().color(colour));
                 }
+                ui.horizontal(|ui| {
+                    if ui
+                        .checkbox(&mut self.compress_headers, "compress headers")
+                        .on_hover_text(
+                            "RFC 1144: every TCP segment carries forty octets of IP \
+                             and TCP header, and almost nothing in one changes from \
+                             the segment before. What crosses instead is three or \
+                             four octets saying what did. Agreed when the link \
+                             starts, so this applies to the next one",
+                        )
+                        .changed()
+                    {
+                        session.compress_headers(self.compress_headers);
+                    }
+                    if let Some(v) = link.as_ref().filter(|v| !v.headers.is_empty()) {
+                        let colour = if v.headers.starts_with("compressed,") { dim } else { bad };
+                        ui.label(RichText::new(&v.headers).small().color(colour));
+                    }
+                });
                 ui.horizontal(|ui| {
                     if ui
                         .checkbox(&mut self.carry_web, "carry web traffic")

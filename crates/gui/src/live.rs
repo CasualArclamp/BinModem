@@ -226,6 +226,9 @@ pub struct Session {
     /// sent to a link, because a dial-in caller's link starts without anyone
     /// at this end pressing anything.
     carry_web: AtomicBool,
+    /// Whether to ask the far end for RFC 1144 header compression. Settled
+    /// when the link starts, so changing it applies to the next one.
+    compress_headers: AtomicBool,
     /// What this end calls itself in a fax call, sent as a TSI.
     ///
     /// A setting of the machine rather than of the call, which is why it
@@ -277,6 +280,7 @@ impl Default for Session {
             dialin: Mutex::default(),
             login: Mutex::default(),
             carry_web: AtomicBool::new(false),
+            compress_headers: AtomicBool::new(true),
             fax_identification: Mutex::default(),
             fax_offer: Mutex::new(fax::call::OUR_MODULATIONS.to_vec()),
             fax_error_correction: AtomicBool::new(true),
@@ -493,6 +497,11 @@ impl Session {
     }
 
     /// Carry web traffic over the link, or stop.
+    /// Ask for header compression on the next link.
+    pub fn compress_headers(&self, on: bool) {
+        self.compress_headers.store(on, Ordering::Relaxed);
+    }
+
     pub fn carry_web(&self, on: bool) {
         self.carry_web.store(on, Ordering::Relaxed);
         self.ask_network(NetRequest::Proxy(on));
@@ -1667,7 +1676,12 @@ fn start_link(
         name: "binmodem".to_owned(),
         seed: crate::dialin::challenge_seed(),
     };
-    let mut link = Networking::start(role, authentication, tx);
+    let mut link = Networking::start(
+        role,
+        authentication,
+        session.compress_headers.load(Ordering::Relaxed),
+        tx,
+    );
     if session.carry_web.load(Ordering::Relaxed) {
         link.carry_web(true, tx);
     }

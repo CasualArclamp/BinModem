@@ -81,6 +81,9 @@ pub struct View {
     pub who: Option<String>,
     /// Why the link is down, once there is a reason.
     pub trouble: Option<String>,
+    /// What RFC 1144 header compression was agreed, in words, once the link is
+    /// up. Empty before then, because nothing has been agreed to report.
+    pub headers: String,
 }
 
 /// What the proxy is doing, for the window to show.
@@ -161,7 +164,12 @@ impl Networking {
     /// Nothing in RFC 1332 says it has to be that way round -- 3.3 makes it
     /// whichever end has an address to give -- but a modem call already has an
     /// end that answered, so there is no need to ask anybody which is which.
-    pub fn start(role: Role, authentication: Authentication, tx: &Publisher) -> Self {
+    pub fn start(
+        role: Role,
+        authentication: Authentication,
+        compress_headers: bool,
+        tx: &Publisher,
+    ) -> Self {
         let serving = role == Role::Answering;
         let asking = authentication.callers.is_some();
         let (local, remote) = if serving {
@@ -187,6 +195,11 @@ impl Networking {
             tx.log(Direction::Note, "ppp: asking the far end who it is, with CHAP or PAP");
         }
         let mut link = Link::with_authentication(local, remote, authentication);
+        if !compress_headers {
+            // Asked for before the link opens, because RFC 1332 negotiates it
+            // once and there is nothing to change afterwards.
+            link = link.without_header_compression();
+        }
         link.open();
         Self {
             link,
@@ -387,6 +400,19 @@ impl Networking {
                 None => who.to_owned(),
             }),
             trouble: self.link.trouble().map(str::to_owned),
+            headers: if self.link.up() {
+                let vj = self.link.header_compression();
+                match (vj.sending, vj.receiving) {
+                    (Some(p), Some(_)) => {
+                        format!("compressed, {} slots", u16::from(p.max_slot) + 1)
+                    }
+                    (Some(_), None) => "compressed outbound only".to_owned(),
+                    (None, Some(_)) => "compressed inbound only".to_owned(),
+                    (None, None) => "not compressed".to_owned(),
+                }
+            } else {
+                String::new()
+            },
         }
     }
 
@@ -468,11 +494,11 @@ mod tests {
     #[test]
     fn the_answering_end_is_the_one_with_addresses_to_give() {
         let (tx, _rx) = telemetry::channel(64, 32, 8_000.0);
-        let answering = Networking::start(Role::Answering, Authentication::default(), &tx);
+        let answering = Networking::start(Role::Answering, Authentication::default(), true, &tx);
         assert!(answering.serving);
         assert_eq!(answering.view().local, "10.0.0.1");
 
-        let calling = Networking::start(Role::Calling, Authentication::default(), &tx);
+        let calling = Networking::start(Role::Calling, Authentication::default(), true, &tx);
         assert!(!calling.serving);
         assert_eq!(calling.view().local, "0.0.0.0", "it made an address up");
     }
@@ -482,8 +508,8 @@ mod tests {
     #[test]
     fn two_ends_of_a_call_come_up_and_ping() {
         let (tx, _rx) = telemetry::channel(64, 32, 8_000.0);
-        let mut answering = Networking::start(Role::Answering, Authentication::default(), &tx);
-        let mut calling = Networking::start(Role::Calling, Authentication::default(), &tx);
+        let mut answering = Networking::start(Role::Answering, Authentication::default(), true, &tx);
+        let mut calling = Networking::start(Role::Calling, Authentication::default(), true, &tx);
 
         let mut came_up = None;
         for ms in 0..30_000u32 {
