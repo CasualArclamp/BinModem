@@ -170,7 +170,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
                     stamp(),
                     host.rate().unwrap_or(0),
                     host.error_control_detail(),
-                    if host.compressing() { "V.42bis" } else { "off" }
+                    host.compression_name().unwrap_or("off")
                 );
                 let mut server = Box::new(Server::new(config.clone()));
                 print_notes(&mut server, stamp());

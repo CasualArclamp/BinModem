@@ -1204,12 +1204,12 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         let ec = modem.error_control_phase();
         if ec != last_ec {
             if !ec.is_empty() {
-                let detail = if modem.compressing() {
-                    ", V.42bis"
+                let detail = if let Some(name) = modem.compression_name() {
+                    format!(", {name}")
                 } else if ec == "connected" {
-                    ", no compression"
+                    ", no compression".to_owned()
                 } else {
-                    ""
+                    String::new()
                 };
                 tx.log(Direction::Note, format!("V.42: {ec}{detail}"));
             }
@@ -1240,7 +1240,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                         modem.standard(),
                         modem.rate().unwrap_or(0),
                         modem.error_control_detail(),
-                        if modem.compressing() { "V.42bis" } else { "off" }
+                        modem.compression_name().unwrap_or("off")
                     );
                     // A count that climbs while the terminal still reads
                     // correctly is LAPM doing its job, and is the only view of

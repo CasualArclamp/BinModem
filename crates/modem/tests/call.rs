@@ -1457,8 +1457,11 @@ fn a_retrain_is_not_mistaken_for_the_far_end_hanging_up() {
     Pair::type_at(&mut p.caller, "AT+MS=V32B,1,4800,9600");
     Pair::type_at(&mut p.host, "ATA");
     Pair::type_at(&mut p.caller, "ATD5551234");
-    p.run(14.0);
+    // Long enough for error control and compression to have finished
+    // negotiating, which is what a call asking for a retrain has behind it.
+    p.run(20.0);
     assert_eq!(p.caller.state(), State::Data, "never connected to begin with");
+    assert!(p.caller.compressing(), "compression never came up");
     let before = p.caller.retrains();
 
     p.at_caller.clear();
@@ -1493,8 +1496,9 @@ fn a_retrain_is_not_mistaken_for_the_far_end_hanging_up() {
     assert!(
         p.host_saw().contains("still here"),
         "nothing crossed after the retrain: {:?}",
-        p.host_saw()
+        p.host_saw(),
     );
+    
 }
 
 #[test]

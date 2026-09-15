@@ -1011,7 +1011,7 @@ impl ScopeApp {
             if ui
                 .selectable_label(self.protection_open, "Error control")
                 .on_hover_text(
-                    "AT+ES and AT+DS: V.42 error control and V.42bis compression, \
+                    "AT+ES and AT+DS: V.42 error control and V.44 or V.42bis compression, \
                      and whether the modem should report what it negotiated",
                 )
                 .clicked()
@@ -2357,12 +2357,15 @@ impl ScopeApp {
             // error control there is nothing for this to be checked against.
             let mut compress = self.protection.compress && protect;
             let response = ui
-                .add_enabled(protect, egui::Checkbox::new(&mut compress, "V.42bis"))
+                .add_enabled(protect, egui::Checkbox::new(&mut compress, "compress"))
                 .on_hover_text(
                     "Compression, which needs error control underneath it                      (AT+DS).",
                 )
                 .on_disabled_hover_text(
-                    "V.42bis rides on LAPM and there is nowhere else for it                      to be, so error control off is compression off.",
+                    "V.44 and V.42bis both ride on LAPM and there is nowhere \
+                     else for them to be, so error control off is compression \
+                     off. Both are offered and the far end picks the one it \
+                     knows; V.44 is much the better of the two on text.",
                 );
             if response.clicked() {
                 self.protection.compress = compress;

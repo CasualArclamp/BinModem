@@ -16,7 +16,7 @@ use crate::detect::{Answer, Answerer, Originator, Outcome};
 use crate::frame::{Address, Frame, Kind, Role};
 use crate::hdlc::{Decoder, Encoder, Fcs};
 use crate::lapm::{Cause, Event, Lapm, Params, State};
-use crate::v42bis;
+use crate::{v42bis, v44};
 use crate::xid::{Compression, Xid};
 
 /// The data link both ends use for user data (V.42 8.1.2).
@@ -121,6 +121,8 @@ pub struct Stack {
     limits: (u16, u8),
     /// Whether the far end has already said it does LAPM, in V.8.
     declared: bool,
+    /// Whether V.44 is offered alongside V.42bis.
+    offer_v44: bool,
     /// Whether this end is answering the detection phase with a refusal.
     ///
     /// It still runs: 7.2.1.3 has the answerer reply to the ODP whatever its
@@ -172,13 +174,45 @@ enum Detect {
     Done,
 }
 
+/// Whichever compression the two ends settled on.
+///
+/// V.44 7.3 has the responder "include parameters for at most one compression
+/// algorithm (V.42 bis or V.44) in the response XID", so exactly one of these
+/// runs on a call and the choice is made once, during negotiation.
 #[derive(Debug)]
-struct Compressor {
+enum Codec {
+    V42bis(Box<Btlz>),
+    V44(Box<Lzjh>),
+}
+
+/// V.42bis, whose dictionary is a few hundred bytes of node.
+#[derive(Debug)]
+struct Btlz {
     encoder: v42bis::Encoder,
     decoder: v42bis::Decoder,
     /// What the two ends agreed to, kept so the dictionaries can be built
     /// again from nothing when the link is established again (5.6).
     params: v42bis::Params,
+}
+
+/// V.44, whose history alone is thousands.
+///
+/// Boxed, with its neighbour, because the two differ enough in size that
+/// leaving them inline would make every `Option<Compressor>` the size of the
+/// larger one -- and a call without compression would carry it too.
+#[derive(Debug)]
+struct Lzjh {
+    encoder: v44::Encoder,
+    decoder: v44::Decoder,
+    /// V.44 sizes the two directions separately (7.4), so an encoder and its
+    /// peer decoder agree while this end's own pair need not.
+    transmit: v44::Params,
+    receive: v44::Params,
+}
+
+#[derive(Debug)]
+struct Compressor {
+    codec: Codec,
     /// Turned on without an XID exchange, on the strength of the far end
     /// saying so in the data stream. Decodes only: this end goes on sending
     /// uncompressed, because nothing has agreed that the far end would read
@@ -197,8 +231,55 @@ impl Compressor {
     /// every codeword means something else, and nothing that crosses is what
     /// was sent. It never recovers on its own.
     fn reinitialize(&mut self) {
-        self.encoder = v42bis::Encoder::new(self.params);
-        self.decoder = v42bis::Decoder::new(self.params);
+        match &mut self.codec {
+            Codec::V42bis(c) => {
+                c.encoder = v42bis::Encoder::new(c.params);
+                c.decoder = v42bis::Decoder::new(c.params);
+            }
+            // V.44 7.5 asks for the same thing in the same circumstances:
+            // a C-INIT on "receipt of L-ESTABLISH_indication or
+            // L-ESTABLISH_confirm".
+            Codec::V44(c) => {
+                c.encoder = v44::Encoder::new(c.transmit);
+                c.decoder = v44::Decoder::new(c.receive);
+            }
+        }
+    }
+
+    /// What to call it on a panel.
+    fn name(&self) -> &'static str {
+        match self.codec {
+            Codec::V42bis(_) => "V.42bis",
+            Codec::V44(_) => "V.44",
+        }
+    }
+
+    /// Compress, and flush so nothing waits for a better match.
+    ///
+    /// The terminal has no idea it is being compressed and will sit waiting
+    /// for an echo of what it typed; a dictionary coder holding the last few
+    /// characters back looks exactly like a hung line.
+    fn encode(&mut self, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        match &mut self.codec {
+            Codec::V42bis(c) => {
+                c.encoder.encode(data, &mut out);
+                c.encoder.flush(&mut out);
+            }
+            Codec::V44(c) => {
+                c.encoder.encode(data, &mut out);
+                c.encoder.flush(&mut out);
+            }
+        }
+        out
+    }
+
+    /// Decompress, or say that it would not.
+    fn decode(&mut self, data: &[u8], out: &mut Vec<u8>) -> bool {
+        match &mut self.codec {
+            Codec::V42bis(c) => c.decoder.decode(data, out).is_ok(),
+            Codec::V44(c) => c.decoder.decode(data, out).is_ok(),
+        }
     }
 }
 
@@ -229,6 +310,7 @@ impl Stack {
             limits: (v42bis::OFFERED_N2, v42bis::OFFERED_N7),
             guessed_wrong: false,
             declared: false,
+            offer_v44: true,
             declining: false,
             heard_adp: None,
             heard_xid: None,
@@ -304,6 +386,14 @@ impl Stack {
         self.offer = compression;
     }
 
+    /// Do not offer V.44, leaving V.42bis.
+    ///
+    /// For talking to a far end that predates it, and for showing that the
+    /// fall-back 7.3 provides for actually happens.
+    pub fn without_v44(&mut self) {
+        self.offer_v44 = false;
+    }
+
     /// Cap the V.42bis parameters this end proposes.
     ///
     /// V.250 Table 27's `<max_dict>` and `<max_string>`, which a terminal sets
@@ -317,6 +407,9 @@ impl Stack {
         let mut xid = Xid::proposal(self.offer);
         xid.codewords = Some(self.limits.0.min(v42bis::OFFERED_N2));
         xid.max_string = Some(self.limits.1.min(v42bis::OFFERED_N7));
+        if !self.offer_v44 {
+            xid.v44 = None;
+        }
         xid
     }
 
@@ -332,11 +425,31 @@ impl Stack {
 
     fn enable_compression(&mut self, params: v42bis::Params) {
         self.compression = Some(Compressor {
-            encoder: v42bis::Encoder::new(params),
-            decoder: v42bis::Decoder::new(params),
-            params,
+            codec: Codec::V42bis(Box::new(Btlz {
+                encoder: v42bis::Encoder::new(params),
+                decoder: v42bis::Decoder::new(params),
+                params,
+            })),
             speculative: false,
         });
+    }
+
+    /// The same, for the newer one.
+    fn enable_v44(&mut self, transmit: v44::Params, receive: v44::Params) {
+        self.compression = Some(Compressor {
+            codec: Codec::V44(Box::new(Lzjh {
+                encoder: v44::Encoder::new(transmit),
+                decoder: v44::Decoder::new(receive),
+                transmit,
+                receive,
+            })),
+            speculative: false,
+        });
+    }
+
+    /// Which compression is running, if any.
+    pub fn compression_name(&self) -> Option<&'static str> {
+        self.compression.as_ref().map(Compressor::name)
     }
 
     /// Whether an unnegotiated switch to compressed data should be followed.
@@ -512,13 +625,7 @@ impl Stack {
             // now.
             Some(c) if c.speculative => self.lapm.send_data(data),
             Some(c) => {
-                let mut out = Vec::new();
-                c.encoder.encode(data, &mut out);
-                // Flush, because the terminal has no idea it is being
-                // compressed and will sit waiting for an echo of what it
-                // typed. A dictionary coder that holds the last few characters
-                // back for a better match would look exactly like a hung line.
-                c.encoder.flush(&mut out);
+                let out = c.encode(data);
                 self.lapm.send_data(&out);
             }
             None => self.lapm.send_data(data),
@@ -649,7 +756,13 @@ impl Stack {
         };
         self.heard_xid = Some(theirs);
         let agreed = self.proposal().resolve(&theirs);
-        if let Some(params) = agreed.v42bis_params() {
+        // V.44 first where both were offered and both ends know it, and
+        // V.42bis otherwise. 7.3 has the responder answer about at most one of
+        // the two, so a far end that named neither leaves this alone and the
+        // call carries on uncompressed.
+        if let Some(offer) = agreed.v44 {
+            self.enable_v44(offer.transmit, offer.receive);
+        } else if let Some(params) = agreed.v42bis_params() {
             self.enable_compression(params);
         }
         if agreed.fcs32 {
@@ -871,7 +984,7 @@ impl Stack {
         match &mut self.compression {
             Some(c) => {
                 let speculative = c.speculative;
-                if c.decoder.decode(&arrived, &mut self.delivered).is_err() {
+                if !c.decode(&arrived, &mut self.delivered) {
                     if speculative {
                         // A guess that did not come off. Nothing negotiated
                         // this, so nothing is owed to it: put the stream back
@@ -1220,6 +1333,48 @@ mod tests {
         assert!(a.is_connected() && b.is_connected(), "the link did not survive");
         assert_eq!(b.take_received(), up, "what reached the answerer was not what was sent");
         assert_eq!(a.take_received(), down, "and not the other way either");
+    }
+
+    /// Two ends that both know V.44 use it, and V.42bis is what is left for
+    /// an end that does not.
+    ///
+    /// V.44 7.3: "the responder shall include parameters for at most one
+    /// compression algorithm (V.42 bis or V.44) in the response XID", so the
+    /// choice is made once, in the negotiation, and the call runs one of them.
+    #[test]
+    fn two_ends_that_know_v44_use_it_and_fall_back_when_one_does_not() {
+        let (mut a, mut b) = negotiated_pair();
+        a.connect();
+        settle(&mut a, &mut b, 40_000, |_, bit| bit);
+        assert_eq!(a.compression_name(), Some("V.44"));
+        assert_eq!(b.compression_name(), Some("V.44"));
+
+        // The same text through each, to see that the choice is worth making.
+        let text: Vec<u8> = b"the same line of text over and over and over
+"
+            .iter()
+            .copied()
+            .cycle()
+            .take(24_000)
+            .collect();
+        a.send(&text);
+        settle(&mut a, &mut b, 3_000_000, |_, bit| bit);
+        assert_eq!(b.take_received(), text, "V.44 did not carry it");
+
+        // A far end that never heard of V.44 answers about V.42bis instead,
+        // and nothing is lost but the newer algorithm.
+        let mut a = Stack::new(Role::Originator, Params::default());
+        let mut b = Stack::new(Role::Answerer, Params::default());
+        a.offer_compression(Compression::Both);
+        b.offer_compression(Compression::Both);
+        b.without_v44();
+        a.connect();
+        settle(&mut a, &mut b, 40_000, |_, bit| bit);
+        assert_eq!(a.compression_name(), Some("V.42bis"));
+        assert_eq!(b.compression_name(), Some("V.42bis"));
+        a.send(b"and this still crosses");
+        settle(&mut a, &mut b, 200_000, |_, bit| bit);
+        assert_eq!(b.take_received(), b"and this still crosses");
     }
 
     #[test]

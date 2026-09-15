@@ -1277,6 +1277,11 @@ impl Modem {
         self.ec.as_ref().is_some_and(Stack::compressing)
     }
 
+    /// Which compression is running, if any.
+    pub fn compression_name(&self) -> Option<&'static str> {
+        self.ec.as_ref().and_then(Stack::compression_name)
+    }
+
     /// Bytes for the terminal.
     pub fn take_dte(&mut self) -> Vec<u8> {
         let mut out = self.at.take_output();
