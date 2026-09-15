@@ -316,10 +316,10 @@ pub fn symbol_scope(
     label: &str,
     quality: Option<u32>,
     height: f32,
-) {
+) -> eframe::egui::Response {
     let Constellation { points: constellation, tones, peak } = dots;
     let size = vec2(ui.available_width(), height);
-    let (response, painter) = ui.allocate_painter(size, Sense::hover());
+    let (response, painter) = ui.allocate_painter(size, Sense::click());
     let rect = response.rect;
     painter.rect_filled(rect, 0.0, Color32::BLACK);
 
@@ -374,20 +374,41 @@ pub fn symbol_scope(
     // Thirty-two clusters need enough dots to show their shape, and enough
     // dots need smaller dots or the clusters run together into one blob.
     let dot = if m > 200 { 1.5 } else { 2.4 };
-    for (i, &(re, im)) in constellation.iter().enumerate() {
-        let p = pos2(
+    let at = |re: f32, im: f32| {
+        pos2(
             centre.x + (re * fit).clamp(-1.4, 1.4) * radius,
             centre.y - (im * fit).clamp(-1.4, 1.4) * radius,
-        );
-        let fade = 0.45 + 0.55 * (i as f32 / m as f32);
-        let magnitude = (re * re + im * im).sqrt().min(1.0);
-        painter.circle_filled(p, dot, margin_colour(magnitude).gamma_multiply(fade));
+        )
+    };
+    if tones > 128 {
+        // Hundreds of points and thousands of symbols: colouring each by its
+        // distance from the centre would paint the outer rings green and the
+        // inner ones red, which says nothing. One colour instead, faint
+        // enough that the symbols landing on a point build up into it, and
+        // drawn as one mesh rather than thousands of shapes.
+        let mut mesh = eframe::egui::Mesh::default();
+        let side = (radius / 180.0).clamp(1.0, 2.5);
+        let colour = Color32::from_rgba_unmultiplied(120, 220, 160, 110);
+        for &(re, im) in constellation {
+            mesh.add_colored_rect(Rect::from_center_size(at(re, im), vec2(side, side)), colour);
+        }
+        painter.add(eframe::egui::Shape::mesh(mesh));
+    } else {
+        for (i, &(re, im)) in constellation.iter().enumerate() {
+            let fade = 0.45 + 0.55 * (i as f32 / m as f32);
+            let magnitude = (re * re + im * im).sqrt().min(1.0);
+            painter.circle_filled(at(re, im), dot, margin_colour(magnitude).gamma_multiply(fade));
+        }
     }
 
     // Always say something. A silent, empty scope gives no way to tell a modem
     // that is not decoding from a display that is not being fed.
     let (text, colour) = match quality {
         Some(q) => (format!("{label} Quality: {q}"), margin_colour(q as f32 / 100.0)),
+        None if tones > 128 && !constellation.is_empty() => (
+            format!("{label}  {tones} points, last {} symbols", constellation.len()),
+            Color32::from_rgb(150, 160, 175),
+        ),
         None if !constellation.is_empty() => (
             format!("{label}  {} points", constellation.len()),
             Color32::from_rgb(150, 160, 175),
@@ -402,6 +423,7 @@ pub fn symbol_scope(
         colour,
     );
     frame_border(&painter, rect);
+    response
 }
 
 /// Green at a full decision margin, through yellow, to red at the threshold.

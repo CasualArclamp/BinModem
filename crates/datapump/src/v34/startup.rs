@@ -12,6 +12,10 @@ pub enum Status {
     Done,
     /// In data mode, at these rates in bit/s.
     Connected { transmit: u32, receive: u32 },
+    /// Back from data mode at MP, for a rate renegotiation or a cleardown.
+    Retraining,
+    /// A cleardown has ended the call.
+    ClearedDown,
     Failed(&'static str),
 }
 
@@ -47,6 +51,8 @@ impl Modem {
             (_, Some(training::Status::Failed(why))) => Status::Failed(why),
             (_, Some(training::Status::Done)) => Status::Done,
             (_, Some(training::Status::Connected { transmit, receive })) => Status::Connected { transmit, receive },
+            (_, Some(training::Status::Retraining)) => Status::Retraining,
+            (_, Some(training::Status::ClearedDown)) => Status::ClearedDown,
             _ => Status::Running,
         }
     }
@@ -67,6 +73,22 @@ impl Modem {
         self.training.as_ref().map_or(0, training::Modem::pending_bits)
     }
 
+    /// Start a rate renegotiation from data mode, offering to receive no
+    /// faster than `receive` times 2400 bit/s. False outside data mode.
+    pub fn renegotiate(&mut self, receive: u8) -> bool {
+        self.training.as_mut().is_some_and(|t| t.renegotiate(receive))
+    }
+
+    /// Rate renegotiations and cleardowns since the call began.
+    pub fn renegotiations(&self) -> u32 {
+        self.training.as_ref().map_or(0, training::Modem::renegotiations)
+    }
+
+    /// Clear the call down from data mode (11.7). False outside data mode.
+    pub fn clear_down(&mut self) -> bool {
+        self.training.as_mut().is_some_and(training::Modem::clear_down)
+    }
+
     /// Whether the far end's data signal is there.
     pub fn carrier(&self) -> bool {
         self.training.as_ref().is_some_and(training::Modem::carrier)
@@ -75,6 +97,18 @@ impl Modem {
     /// The far end's last symbol, once phase 3 has trained the receiver.
     pub fn constellation_point(&self) -> Option<(f64, f64)> {
         self.training.as_ref().and_then(training::Modem::constellation_point)
+    }
+
+    /// Points in the constellation the far end is read against, once phase 3
+    /// has trained the receiver.
+    pub fn constellation_size(&self) -> Option<usize> {
+        self.training.as_ref().map(training::Modem::constellation_size)
+    }
+
+    /// The largest coordinate those points reach, in the units of
+    /// [`Self::constellation_point`].
+    pub fn constellation_peak(&self) -> Option<f64> {
+        self.training.as_ref().map(training::Modem::constellation_peak)
     }
 
     pub fn phase(&self) -> &'static str {
@@ -190,6 +224,9 @@ mod tests {
                 after += 1;
                 at_call.extend(caller.take_bits());
                 at_answer.extend(answerer.take_bits());
+                // The scope's constellation: 1408 points, minimum shaping.
+                assert_eq!(caller.constellation_size(), Some(1408));
+                assert!(caller.constellation_peak().is_some_and(|p| (1.3..2.0).contains(&p)), "{:?}", caller.constellation_peak());
                 if after > (0.5 * FS) as usize {
                     break;
                 }

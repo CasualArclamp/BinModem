@@ -146,6 +146,13 @@ pub struct Stack {
     /// Whether the run of flags that opens the protocol phase has been queued.
     opened: bool,
     waited_ms: u32,
+    /// Whether the far end turned out to be talking to this end's terminal
+    /// rather than doing V.42.
+    heard_text: bool,
+    /// What the line brought that nothing here claimed: the detection phase's
+    /// bits once it has failed, and every bit after, for the terminal
+    /// (Appendix I.3's second option).
+    unclaimed: Vec<bool>,
 }
 
 /// One end of the detection phase (7.2.1). Which one depends on the role.
@@ -202,6 +209,8 @@ impl Stack {
             gave_up: false,
             opened: false,
             waited_ms: 0,
+            heard_text: false,
+            unclaimed: Vec::new(),
         }
     }
 
@@ -333,6 +342,21 @@ impl Stack {
     /// What the far end proposed in XID, if it sent one.
     pub fn far_xid(&self) -> Option<Xid> {
         self.heard_xid
+    }
+
+    /// Whether the detection phase ended on the far end's terminal's text.
+    pub fn far_text(&self) -> bool {
+        self.heard_text
+    }
+
+    /// The line's bits that error control did not claim, once the connection
+    /// has gone without it: what arrived during a detection phase that
+    /// failed, and everything since. V.42 Appendix I.3 has the choice of
+    /// throwing them away or giving them to the terminal, and they are very
+    /// often exactly what the terminal is waiting for -- a login prompt sent
+    /// the moment the far end connected.
+    pub fn take_unclaimed(&mut self) -> Vec<bool> {
+        std::mem::take(&mut self.unclaimed)
     }
 
     /// Whether the question of error control has been answered.
@@ -535,6 +559,7 @@ impl Stack {
             return;
         }
         if self.phase == Phase::Transparent {
+            self.unclaimed.push(bit);
             return;
         }
         let Some(result) = self.decoder.feed(bit) else {
@@ -630,6 +655,13 @@ impl Stack {
         }
         match outcome {
             Outcome::Pending => {}
+            // The far end's terminal is already talking, whatever V.8 said:
+            // there is no V.42 to wait out a timer for, and what it said goes
+            // to this end's terminal.
+            Outcome::Text => {
+                self.heard_text = true;
+                self.detect_failed();
+            }
             Outcome::Answered(a) if a.error_controlled() => {
                 if matches!(&self.detect, Detect::Answer(a) if !a.finished_sending()) {
                     return;
@@ -653,8 +685,7 @@ impl Stack {
                 if matches!(&self.detect, Detect::Answer(a) if !a.finished_sending()) {
                     return;
                 }
-                self.detect = Detect::Done;
-                self.phase = Phase::Transparent;
+                self.detect_failed();
             }
             Outcome::OriginatorDetected => {
                 // The answerer has to finish saying what it is saying: cutting
@@ -687,10 +718,22 @@ impl Stack {
                 // No error control at the far end, or nothing there that
                 // recognised the question. Either way there is nothing to
                 // establish, and the connection carries on without it.
-                self.detect = Detect::Done;
-                self.phase = Phase::Transparent;
+                self.detect_failed();
             }
         }
+    }
+
+    /// No error control: the connection goes on without it, and what the
+    /// detection phase heard is kept for the terminal.
+    fn detect_failed(&mut self) {
+        let heard = match &mut self.detect {
+            Detect::Origin(o) => o.take_heard(),
+            Detect::Answer(a) => a.take_heard(),
+            Detect::Done => Vec::new(),
+        };
+        self.unclaimed.extend(heard);
+        self.detect = Detect::Done;
+        self.phase = Phase::Transparent;
     }
 
     fn begin_protocol(&mut self) {

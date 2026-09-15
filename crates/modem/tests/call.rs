@@ -429,6 +429,31 @@ fn two_modems_asked_for_v34_connect_at_33600_and_carry_data() {
         assert!(rows.iter().any(|(k, v)| *k == "V.34 to this end" && v.contains("33600")), "{rows:?}");
         assert!(rows.iter().any(|(k, v)| *k == "V.34 rates" && v == "33600 bit/s to this end, 33600 from it"), "{rows:?}");
     }
+
+    // A rate renegotiation from the caller (11.6): down two steps towards it,
+    // and the call goes on -- no NO CARRIER, no second CONNECT, and the
+    // terminals carry on talking once V.42 has sent again what was in flight.
+    p.at_caller.clear();
+    p.at_host.clear();
+    p.caller.ask_for_retrain();
+    p.run(3.0);
+    assert_eq!(p.caller.retrains(), 1);
+    assert_eq!(p.host.retrains(), 1, "the host never heard S");
+    assert_eq!((p.caller.state(), p.host.state()), (State::Data, State::Data), "{} / {}", p.caller_saw(), p.host_saw());
+    assert!(!p.caller_saw().contains("NO CARRIER") && !p.caller_saw().contains("CONNECT"), "{}", p.caller_saw());
+    assert_eq!(p.caller.rate(), Some(28_800));
+    for b in b"ls -l\r" {
+        p.caller.feed_dte(*b);
+    }
+    for b in b"total 42" {
+        p.host.feed_dte(*b);
+    }
+    p.run(4.0);
+    assert!(p.host_saw().contains("ls -l"), "the host saw {:?}", p.host_saw());
+    assert!(p.caller_saw().contains("total 42"), "the caller saw {:?}", p.caller_saw());
+    let rows = p.caller.distant();
+    assert!(rows.iter().any(|(k, v)| *k == "V.34 rates" && v == "28800 bit/s to this end, 33600 from it"), "{rows:?}");
+    assert!(rows.iter().any(|(k, v)| *k == "V.34 renegotiated" && v == "1 time"), "{rows:?}");
 }
 
 /// A V.34 caller and a far end without it: V.8 settles on V.32bis, and the

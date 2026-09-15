@@ -136,7 +136,12 @@ impl Pump {
             Self::V34(m) => match m.status() {
                 v34::startup::Status::Running => Progress::Negotiating,
                 v34::startup::Status::Connected { receive, .. } => Progress::Connected(receive),
-                v34::startup::Status::Done | v34::startup::Status::Failed(_) => Progress::Failed,
+                // A rate renegotiation keeps the call up as a V.32bis retrain
+                // does; a cleardown is the far end hanging up politely.
+                v34::startup::Status::Retraining => Progress::Retraining,
+                v34::startup::Status::Done
+                | v34::startup::Status::ClearedDown
+                | v34::startup::Status::Failed(_) => Progress::Failed,
             },
         }
     }
@@ -268,11 +273,9 @@ impl Pump {
                 _ => 4,
             },
             Self::Bell103(_) => 2,
-            // Phase 3's TRN and J are four points, and phase 4 is sixteen.
-            Self::V34(m) => match m.training() {
-                Some(_) => 16,
-                None => 2,
-            },
+            // Phase 3's TRN and J are four points, phase 4 is sixteen, and
+            // data mode is however many hundred its rate and shaping make.
+            Self::V34(m) => m.constellation_size().unwrap_or(2),
         }
     }
 
@@ -296,7 +299,9 @@ impl Pump {
                 _ => "4PSK",
             },
             Self::Bell103(_) => "2FSK",
-            Self::V34(m) => match m.training() {
+            Self::V34(m) => match m.constellation_size() {
+                Some(4) => "4PSK",
+                Some(16) => "16QAM",
                 Some(_) => "QAM",
                 None => "DPSK",
             },
@@ -375,6 +380,10 @@ pub struct V34Training {
     pub far_mp: Option<v34::mp::Mp>,
     /// This end's transmit and receive rates, as multiples of 2400.
     pub rates: Option<(u8, u8)>,
+    /// Rate renegotiations and cleardowns from data mode, either end's, and
+    /// whether the last was a cleardown that ended the call.
+    pub renegotiations: u32,
+    pub cleared_down: bool,
 }
 
 impl V34Report {
@@ -392,7 +401,15 @@ impl V34Report {
             info1c: m.info1c(),
             info1a: m.info1a(),
             training: startup.training().map(|t| V34Training {
-                done: matches!(t.status(), v34::training::Status::Done | v34::training::Status::Connected { .. }),
+                // Data mode reached is the start-up done, whatever happened in
+                // data mode afterwards.
+                done: t.renegotiations() > 0
+                    || matches!(
+                        t.status(),
+                        v34::training::Status::Done
+                            | v34::training::Status::Connected { .. }
+                            | v34::training::Status::ClearedDown
+                    ),
                 connected: match t.status() {
                     v34::training::Status::Connected { transmit, receive } => Some((transmit, receive)),
                     _ => None,
@@ -410,6 +427,8 @@ impl V34Report {
                 our_mp: t.our_mp(),
                 far_mp: t.far_mp(),
                 rates: t.rates(),
+                renegotiations: t.renegotiations(),
+                cleared_down: t.status() == v34::training::Status::ClearedDown,
             }),
         }
     }
@@ -522,11 +541,22 @@ impl V34Report {
                 "V.34 phases 3 and 4",
                 match (t.done, t.stopped) {
                     (true, _) if t.connected.is_some() => "done, and in data mode".to_owned(),
+                    (true, _) if t.cleared_down => "done; data mode ended in a cleardown".to_owned(),
+                    (true, Some((stage, why))) if t.renegotiations > 0 => {
+                        format!("done; data mode then stopped at {stage}: {why}")
+                    }
+                    (true, _) if t.renegotiations > 0 => "done; data mode is renegotiating".to_owned(),
                     (true, _) => "done, but the two MPs left no rate to run data at".to_owned(),
                     (_, Some((stage, why))) => format!("stopped at {stage}: {why}"),
                     _ => "still going".to_owned(),
                 },
             ));
+            if t.renegotiations > 0 {
+                rows.push((
+                    "V.34 renegotiated",
+                    format!("{} time{}", t.renegotiations, if t.renegotiations == 1 { "" } else { "s" }),
+                ));
+            }
             rows.push((
                 "V.34 trained",
                 format!(
@@ -668,6 +698,9 @@ pub struct Modem {
     /// has defined, or said nothing at all are three different faults, and
     /// afterwards they look identical.
     far_ec: Vec<(&'static str, String)>,
+    /// Characters that arrived while error control was being asked about and
+    /// turned out not to be there, waiting for the terminal.
+    recovered: Vec<u8>,
     /// Whether V.8 settled on LAPM before the data carriers went up.
     declared_lapm: bool,
     /// The rate of a connection the terminal has not been told about yet.
@@ -707,6 +740,7 @@ impl Modem {
             far_menu: None,
             v34_report: None,
             far_ec: Vec::new(),
+            recovered: Vec::new(),
             declared_lapm: false,
             announce: None,
         }
@@ -848,6 +882,10 @@ impl Modem {
                 }
                 _ => 1.0,
             },
+            // A shaped constellation of several hundred points at unit mean
+            // power reaches about one and a half: drawn at one, its outer
+            // rings were all piled up along the edge of the box.
+            Some(Pump::V34(m)) => m.constellation_peak().map_or(1.0, |peak| peak.max(1.0) as f32),
             _ => 1.0,
         }
     }
@@ -1046,6 +1084,7 @@ impl Modem {
                         format!("E{}, V.42 and more", c as char)
                     }
                     Some(ec::detect::Answer::Reserved(c)) => format!("E {c:#04x}, reserved"),
+                    None if ec.far_text() => "text, so no V.42 at the far end".to_owned(),
                     None => "nothing".to_owned(),
                 },
             ));
@@ -1171,6 +1210,7 @@ impl Modem {
     pub fn take_dte(&mut self) -> Vec<u8> {
         let mut out = self.at.take_output();
         if self.state == State::Data {
+            out.append(&mut self.recovered);
             match self.ec.as_mut() {
                 Some(ec) => out.extend(ec.take_received()),
                 None => {
@@ -1491,10 +1531,19 @@ impl Modem {
             Progress::Connected(rate) if self.retraining => {
                 self.retraining = false;
                 self.rate = rate;
+                // A V.34 renegotiation settles new MPs and new rates.
+                if let Some(Pump::V34(m)) = self.pump.as_ref() {
+                    self.v34_report = Some(V34Report::of(m));
+                }
             }
             // A retrain that never finishes is a call that has ended, whatever
             // the line is still carrying.
-            Progress::Failed if self.retraining => self.end_call(Ended::CarrierLost),
+            Progress::Failed if self.retraining => {
+                if let Some(Pump::V34(m)) = self.pump.as_ref() {
+                    self.v34_report = Some(V34Report::of(m));
+                }
+                self.end_call(Ended::CarrierLost);
+            }
             _ => {}
         }
     }
@@ -1511,9 +1560,17 @@ impl Modem {
     /// same door from outside, for a test that wants a retrain without having
     /// to build a line bad enough to earn one. Nothing on a real call calls
     /// it. Ignored by the modulations that have no such procedure.
+    ///
+    /// V.34 has a rate renegotiation for this (11.6), and that is what it is
+    /// asked for: two steps below the rate arriving now.
     pub fn ask_for_retrain(&mut self) {
-        if let Some(Pump::V32(m)) = self.pump.as_mut() {
-            m.ask_for_retrain();
+        let arriving = self.rate;
+        match self.pump.as_mut() {
+            Some(Pump::V32(m)) => m.ask_for_retrain(),
+            Some(Pump::V34(m)) => {
+                m.renegotiate(((arriving / 2400) as u8).saturating_sub(2).max(1));
+            }
+            _ => {}
         }
     }
 
@@ -1524,6 +1581,7 @@ impl Modem {
     pub fn retrains(&self) -> u32 {
         match self.pump.as_ref() {
             Some(Pump::V32(m)) => m.retrains(),
+            Some(Pump::V34(m)) => m.renegotiations(),
             _ => 0,
         }
     }
@@ -1561,7 +1619,17 @@ impl Modem {
             // will want to know why there is no error control, and it is the
             // moment the answer would otherwise be thrown away.
             self.far_ec = self.error_control_rows();
-            self.ec = None;
+            // And what the line brought while the question was being asked,
+            // for the terminal: a far end without V.42 has usually said
+            // something already, a banner or a prompt, by the time this end
+            // stops listening for a pattern.
+            if let Some(mut ec) = self.ec.take() {
+                for bit in ec.take_unclaimed() {
+                    if let Some(c) = self.async_bits.feed(bit) {
+                        self.recovered.push(c);
+                    }
+                }
+            }
         }
         self.announce_connect();
 
@@ -1695,6 +1763,7 @@ impl Modem {
         self.far_menu = None;
         self.v34_report = None;
         self.far_ec.clear();
+        self.recovered.clear();
         self.declared_lapm = false;
         self.announce = None;
         self.outbound.clear();

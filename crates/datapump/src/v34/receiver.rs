@@ -483,7 +483,7 @@ impl Receiver {
     /// The constellation decisions are made against from here on.
     pub fn set_size(&mut self, size: Size) {
         self.size = size;
-        self.slicer = Slicer::Points(size);
+        self.set_slicer(Slicer::Points(size));
     }
 
     pub fn size(&self) -> Size {
@@ -493,7 +493,22 @@ impl Receiver {
     /// Decide against data mode's grid from here on: `scale` grid units to a
     /// unit-power symbol, out to `limit`.
     pub fn set_grid(&mut self, scale: f64, limit: i32) {
-        self.slicer = Slicer::Grid { scale, limit };
+        self.set_slicer(Slicer::Grid { scale, limit });
+    }
+
+    /// Decide against `slicer` from here, forgetting what the last one made of
+    /// the errors.
+    ///
+    /// A loss judged against the old constellation is not a loss against the
+    /// new one. Data mode's grid judged the few symbols where data runs into
+    /// a renegotiation's S as lost, and once the slicer had moved to four
+    /// points the count went on: a resync fired on S itself, which reads back
+    /// as well an eighth of a half symbol out as it does in step, and TRN
+    /// after it came in 25 dB down.
+    fn set_slicer(&mut self, slicer: Slicer) {
+        self.slicer = slicer;
+        self.lost = None;
+        self.recent.clear();
     }
 
     /// Signal to noise of the decisions, in decibels.
@@ -829,7 +844,7 @@ impl Receiver {
         let doubtful = 0.25 * self.slicer.min_distance_squared();
         let (_, judged) = self.slicer.window();
         self.recent.push_back(squared);
-        if self.recent.len() > judged {
+        while self.recent.len() > judged {
             self.recent.pop_front();
         }
         let recent = self.recent.iter().sum::<f64>() / self.recent.len() as f64;

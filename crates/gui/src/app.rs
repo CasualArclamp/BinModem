@@ -293,6 +293,8 @@ pub struct ScopeApp {
     protection_open: bool,
     /// The PPP window.
     network_open: bool,
+    /// The constellation drawn large, in a window of its own.
+    constellation_open: bool,
     /// Whether the window has asked for a stream of echoes rather than one.
     ping_repeatedly: bool,
     /// And whether it has asked for web traffic to be carried.
@@ -379,6 +381,7 @@ impl ScopeApp {
             protection: Protection::default(),
             protection_open: false,
             network_open: false,
+            constellation_open: false,
             ping_repeatedly: false,
             carry_web: false,
             fax: crate::faxwin::Fax::new(),
@@ -2432,6 +2435,38 @@ impl ScopeApp {
     fn symbol_label(&self) -> String {
         self.frame.symbol_label.to_string()
     }
+
+    /// The symbol scope again, as large as the window it is in.
+    ///
+    /// The one in the panel is a couple of hundred pixels across, which is
+    /// plenty for sixteen points and nowhere near it for V.34's hundreds: at
+    /// that size neighbouring points of an 832-point constellation are a few
+    /// pixels apart, and whether they are clusters or a smear is exactly what
+    /// cannot be seen.
+    fn constellation_window(&mut self, ui: &mut egui::Ui) {
+        let mut open = self.constellation_open;
+        egui::Window::new("constellation")
+            .open(&mut open)
+            .resizable(true)
+            .default_size([620.0, 640.0])
+            .show(ui.ctx(), |ui| {
+                let label = self.symbol_label();
+                let side = ui.available_width().min(ui.available_height()).max(240.0);
+                scopes::symbol_scope(
+                    ui,
+                    &self.frame.symbols,
+                    scopes::Constellation {
+                        points: &self.frame.constellation,
+                        tones: self.frame.tones,
+                        peak: self.frame.constellation_peak,
+                    },
+                    &label,
+                    self.frame.symbol_quality(),
+                    side,
+                );
+            });
+        self.constellation_open = open;
+    }
 }
 
 /// Every setting worth carrying from one run to the next, as name and value.
@@ -2556,7 +2591,7 @@ impl eframe::App for ScopeApp {
                 ui.add_space(8.0);
                 ui.label(RichText::new("symbols").strong());
                 let label = self.symbol_label();
-                scopes::symbol_scope(
+                let scope = scopes::symbol_scope(
                     ui,
                     &self.frame.symbols,
                     scopes::Constellation {
@@ -2568,6 +2603,9 @@ impl eframe::App for ScopeApp {
                     self.frame.symbol_quality(),
                     PANEL_W - 20.0,
                 );
+                if scope.on_hover_text("Click to draw it large").clicked() {
+                    self.constellation_open = !self.constellation_open;
+                }
 
                 ui.add_space(8.0);
                 ui.label(RichText::new("receive level").strong());
@@ -2576,6 +2614,8 @@ impl eframe::App for ScopeApp {
                 ui.add_space(10.0);
                 self.status(ui);
             });
+
+        self.constellation_window(ui);
 
         egui::Panel::bottom("lower")
             .resizable(true)

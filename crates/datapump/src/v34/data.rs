@@ -60,9 +60,26 @@ impl Params {
 /// The average energy of the points the mapper makes, in grid units squared,
 /// and of the same after the non-linear encoder: over the rings as often as
 /// the shell mapper uses them, and the points within each ring evenly.
+///
+/// Which is what keeps data mode at the power of TRN, as 10.1.3 asks: "the
+/// average signal power transmitted in Phases 3 and 4 is maintained in segment
+/// B1 and the subsequent data mode". A low mapping frame gives the shell mapper
+/// a zero for its top bit (9.3.1), and so only the cheaper half of the
+/// combinations -- at 33 600 nine frames in fifteen are low, and counting them
+/// as high left data mode 7.5% short of TRN's power.
 fn energies(params: &Params, shell: &Shell) -> (f64, f64) {
     let f = &params.framing;
-    let shares = if f.k > 0 { shell.ring_shares(f.k) } else { vec![1.0] };
+    let shares = if f.k > 0 {
+        let high = f.r as f64 / f.p as f64;
+        shell
+            .ring_shares(f.k)
+            .iter()
+            .zip(shell.ring_shares(f.k - 1))
+            .map(|(h, l)| high * h + (1.0 - high) * l)
+            .collect()
+    } else {
+        vec![1.0]
+    };
     let per_ring = 1usize << f.q;
     let ring_energy = |ring: usize, bend: &dyn Fn(f64) -> f64| {
         (0..per_ring)
@@ -360,6 +377,21 @@ pub fn extent(framing: &Framing) -> i32 {
     largest + 2 * framing.precoder_scale() as i32
 }
 
+/// The largest coordinate any point of a direction's constellation reaches,
+/// non-linear encoding's stretch of the outer points included, in grid units.
+pub fn peak(params: &Params) -> f64 {
+    let shell = Shell::new(params.framing.m);
+    let (energy, _) = energies(params, &shell);
+    let theta = params.theta();
+    (0..(params.framing.l / 4).min(QUARTER))
+        .map(|n| {
+            let (x, y) = quarter(n);
+            let phi = projection(theta * f64::from(x * x + y * y) / energy);
+            f64::from(x.abs().max(y.abs())) * phi
+        })
+        .fold(1.0, f64::max)
+}
+
 /// The label of each point of the quarter superconstellation, by position.
 fn quarter_label(point: Point) -> Option<usize> {
     static LABELS: std::sync::OnceLock<std::collections::HashMap<Point, usize>> = std::sync::OnceLock::new();
@@ -416,6 +448,8 @@ pub struct Decoder {
     labels: [usize; 8],
     energy: f64,
     scale: f64,
+    /// The largest coordinate a point reaches, at unit mean power.
+    peak: f64,
     bits: Vec<bool>,
     /// Points the decisions put outside the constellation.
     outside: u64,
@@ -455,6 +489,7 @@ impl Decoder {
             labels: [0; 8],
             energy,
             scale: bent.sqrt(),
+            peak: peak(&params) / bent.sqrt(),
             bits: Vec::new(),
             outside: 0,
             cost: 0.0,
@@ -462,9 +497,19 @@ impl Decoder {
         }
     }
 
+    pub fn params(&self) -> &Params {
+        &self.params
+    }
+
     /// What a unit-power symbol is multiplied by to be in grid units.
     pub fn grid_scale(&self) -> f64 {
         self.scale
+    }
+
+    /// The largest coordinate a point of the constellation reaches, at the
+    /// unit mean power symbols are fed in at.
+    pub fn peak(&self) -> f64 {
+        self.peak
     }
 
     /// How far out the constellation's points reach, in grid units.
@@ -742,11 +787,16 @@ mod tests {
 
     #[test]
     fn a_unit_power_signal_leaves_at_unit_power() {
-        for nonlinear in [false, true] {
-            let p = params(SymbolRate::S3429, 31_200, Code::States64, true, nonlinear);
+        // Every rate at 3429 symbols a second, both shapings, and non-linear
+        // encoding at the rates that stretch the most: high and low mapping
+        // frames alike, since TRN's power is the one to keep (10.1.3).
+        let mut cases: Vec<(u32, bool, bool)> = (2..=14).flat_map(|r| [(r * 2400, false, false), (r * 2400, true, false)]).collect();
+        cases.extend([(33_600, true, true), (31_200, false, true), (28_800, true, true)]);
+        for (primary, expanded, nonlinear) in cases {
+            let p = params(SymbolRate::S3429, primary, Code::States64, expanded, nonlinear);
             let mut encoder = Encoder::new(p);
             let mut seed = 77u32;
-            let n = 40_000;
+            let n = 120_000;
             let power = (0..n)
                 .map(|_| {
                     encoder
@@ -758,8 +808,34 @@ mod tests {
                 })
                 .sum::<f64>()
                 / n as f64;
-            assert!((power - 1.0).abs() < 0.03, "nonlinear {nonlinear}: {power}");
+            assert!((power - 1.0).abs() < 0.012, "{primary} expanded {expanded} nonlinear {nonlinear}: {power}");
         }
+    }
+
+    #[test]
+    fn the_peak_is_as_far_as_any_symbol_goes() {
+        let mut peaks = Vec::new();
+        for nonlinear in [false, true] {
+            let p = params(SymbolRate::S3429, 33_600, Code::States16, true, nonlinear);
+            let mut encoder = Encoder::new(p);
+            let peak = Decoder::new(p).peak();
+            let mut seed = 5u32;
+            let furthest = (0..60_000)
+                .map(|_| {
+                    let s = encoder.next_symbol(&mut || {
+                        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                        seed >> 16 & 1 == 1
+                    });
+                    s.re.abs().max(s.im.abs())
+                })
+                .fold(0.0, f64::max);
+            assert!(furthest <= peak * 1.000_001, "nonlinear {nonlinear}: a symbol at {furthest} past {peak}");
+            assert!(furthest > 0.9 * peak, "nonlinear {nonlinear}: nothing near {peak}, {furthest} at most");
+            peaks.push(peak);
+        }
+        // Stretched outwards, and a shaped constellation reaches about one
+        // and a half at unit power.
+        assert!(peaks[1] > peaks[0] && (1.3..2.0).contains(&peaks[0]), "{peaks:?}");
     }
 
     #[test]

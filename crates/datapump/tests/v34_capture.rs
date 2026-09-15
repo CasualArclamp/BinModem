@@ -14,6 +14,22 @@
 //! It prints what a receiver makes of everything the end sent: S-bar, how
 //! well PP and TRN trained, J, J', phase 4's S-bar and TRN, each MP with its
 //! acknowledge bit, E, and the bits after E.
+//!
+//! Data mode after E is read at `V34_DATA_RATE` (31200 unless told), with
+//! what the receiving end's MP asked for: `V34_CODE` 16, 32 or 64 states,
+//! `V34_NONLINEAR` and `V34_EXPANDED` 1 for either. `V34_DUMP` writes every
+//! equalised point between `V34_DUMP_FROM` and `V34_DUMP_TO` seconds as
+//! `time,re,im,error,data` -- `data` 1 once data mode's grid is in use, when
+//! re and im are in its grid units -- for `tools/plot_constellation.py`.
+//!
+//! When data mode turns into four points again, the end has gone back to S,
+//! TRN and MP for a rate renegotiation, and its new MP is read the same way.
+//! `V34_RENEGOTIATION=1` starts there, for a stretch that begins with one.
+//!
+//! The second test, `a_captured_call_through_the_start_up`, runs the far end's
+//! channel through the start-up the modem itself runs, from where V.8 handed
+//! over (`V34_SKIP`): what the modem's own receiver made of the data, and when
+//! it changed stage.
 
 use std::collections::VecDeque;
 
@@ -71,7 +87,9 @@ fn a_captured_end_of_phases_3_and_4() {
 
     let mut rx = Receiver::new(band, fs);
     rx.hunt();
-    let mut stage = Stage::Phase3Hunt;
+    // A rate renegotiation (11.6) is S, S-bar, TRN and MP at four points,
+    // the way phase 4 is: `V34_RENEGOTIATION=1` starts there.
+    let mut stage = if number("V34_RENEGOTIATION", 0.0) != 0.0 { Stage::Phase4Hunt } else { Stage::Phase3Hunt };
     let mut reader = Reader::new(sender);
     let mut finder = Finder::new();
     let mut size = Size::Four;
@@ -86,12 +104,23 @@ fn a_captured_end_of_phases_3_and_4() {
     let mut last_report = 0.0;
     let mut mp_count = 0usize;
     let (mut slips, mut lost) = (0, false);
-    // Data mode after E, as this end's MP asked the far end to send it: the
-    // rate the two MPs came to, 16 states, minimum shaping, no precoding.
+    // Data mode after E, as the receiving end's MP asked for it: the rate the
+    // two MPs came to, the trellis code, non-linear encoding and shaping. No
+    // precoding, which a Type 0 MP or zero coefficients both come to.
     let data_rate = number("V34_DATA_RATE", 31_200.0) as u32;
+    let code = match number("V34_CODE", 16.0) as u32 {
+        32 => Code::States32,
+        64 => Code::States64,
+        _ => Code::States16,
+    };
+    let nonlinear = number("V34_NONLINEAR", 0.0) != 0.0;
+    let expanded = number("V34_EXPANDED", 0.0) != 0.0;
     let mut data: Option<Decoder> = None;
     let mut data_bits: Vec<bool> = Vec::new();
     let mut e_seen = false;
+    // How far data mode's points are from four points: near nothing when the
+    // far end has gone back to S, TRN and MP for a rate renegotiation.
+    let mut four_fit: VecDeque<f64> = VecDeque::new();
     // Equalised points between two times, for looking at.
     let (dump_from, dump_to) = (number("V34_DUMP_FROM", 0.0), number("V34_DUMP_TO", 0.0));
     let mut dump = std::env::var("V34_DUMP").ok().map(|path| std::fs::File::create(path).expect("could not make the dump"));
@@ -123,9 +152,9 @@ fn a_captured_end_of_phases_3_and_4() {
                     symbols += 1;
                     if e_seen && data.is_none() {
                         let params = Params {
-                            framing: Framing::new(rate, data_rate, false, false).expect("a rate Table 8 has"),
-                            code: Code::States16,
-                            nonlinear: false,
+                            framing: Framing::new(rate, data_rate, false, expanded).expect("a rate Table 8 has"),
+                            code,
+                            nonlinear,
                             precoding: [(0, 0); 3],
                             mode: sender,
                         };
@@ -133,6 +162,40 @@ fn a_captured_end_of_phases_3_and_4() {
                         rx.set_grid(decoder.grid_scale(), decoder.extent());
                         println!("{now:8.3} B1 and data at {data_rate} from here, grid scale {:.2}", decoder.grid_scale());
                         data = Some(decoder);
+                    }
+                    if let Some(dump) = dump.as_mut()
+                        && (dump_from..dump_to).contains(&now)
+                    {
+                        use std::io::Write;
+                        let (scale, grid) = data.as_ref().map_or((1.0, 0), |d| (d.grid_scale(), 1));
+                        writeln!(dump, "{now:.5},{:.4},{:.4},{:.5},{grid}", symbol.point.re * scale, symbol.point.im * scale, symbol.error).unwrap();
+                    }
+                    if data.is_some() {
+                        let corner = std::f64::consts::FRAC_1_SQRT_2;
+                        let off = (symbol.point.re.abs() - corner).powi(2) + (symbol.point.im.abs() - corner).powi(2);
+                        four_fit.push_back(off);
+                        if four_fit.len() > 48 {
+                            four_fit.pop_front();
+                        }
+                        if four_fit.len() == 48 && four_fit.iter().sum::<f64>() / 48.0 < 0.02 {
+                            println!("{now:8.3} four points again, after {} data bits: S, TRN and MP of a renegotiation", data_bits.len());
+                            data = None;
+                            four_fit.clear();
+                            size = Size::Four;
+                            rx.set_size(size);
+                            reader = Reader::new(sender);
+                            finder = Finder::new();
+                            trn = true;
+                            // Past the rest of S and S-bar before TRN.
+                            grace = 64;
+                            trn_symbols = 0;
+                            bits.clear();
+                            mp_count = 0;
+                            after_e = None;
+                            e_seen = false;
+                            stage = Stage::Phase4;
+                            continue;
+                        }
                     }
                     if let Some(decoder) = data.as_mut() {
                         decoder.feed(symbol.point);
@@ -160,12 +223,6 @@ fn a_captured_end_of_phases_3_and_4() {
                         if lost {
                             println!("{now:8.3} lost the signal");
                         }
-                    }
-                    if let Some(dump) = dump.as_mut()
-                        && (dump_from..dump_to).contains(&now)
-                    {
-                        use std::io::Write;
-                        writeln!(dump, "{now:.5},{:.4},{:.4},{:.5}", symbol.point.re, symbol.point.im, symbol.error).unwrap();
                     }
                     errors.push_back(symbol.error);
                     if errors.len() > 64 {
@@ -294,5 +351,67 @@ fn a_captured_end_of_phases_3_and_4() {
             let text: String = data_bits.iter().map(|b| if *b { '1' } else { '0' }).collect();
             std::fs::write(path, text).unwrap();
         }
+    }
+}
+
+/// The same capture through the start-up the modem runs, from where V.8
+/// handed over: what the modem's own receiver made of the far end's data.
+///
+/// ```text
+/// V34_CAPTURE=dist/captures/live-1789442205.wav V34_SKIP=6.525 \
+///     cargo test -p datapump --test v34_capture start_up -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "needs a capture; see the module comment"]
+fn a_captured_call_through_the_start_up() {
+    use datapump::v34::phase2::Role;
+    use datapump::v34::startup::{Modem, Status};
+
+    let Ok(path) = std::env::var("V34_CAPTURE") else {
+        println!("set V34_CAPTURE to a recording to run this");
+        return;
+    };
+    let skip = std::env::var("V34_SKIP").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+    let role = match std::env::var("V34_ROLE").as_deref() {
+        Ok("answer") => Role::Answer,
+        _ => Role::Call,
+    };
+    let wav = line::wav::read(&path).expect("could not read the capture");
+    let fs = f64::from(wav.sample_rate);
+    let samples = wav.channel(0);
+    let mut modem = Modem::new(role, fs);
+    let (mut phase, mut status) = ("", Status::Running);
+    let mut bits: Vec<bool> = Vec::new();
+    let mut last_report = 0.0;
+    for (i, &x) in samples[(skip * fs) as usize..].iter().enumerate() {
+        let now = skip + i as f64 / fs;
+        modem.step(f64::from(x));
+        if modem.phase() != phase || modem.status() != status {
+            (phase, status) = (modem.phase(), modem.status());
+            println!("{now:8.3} {phase}, {status:?}");
+        }
+        let got = modem.take_bits();
+        bits.extend(&got);
+        if let Some(training) = modem.training()
+            && matches!(status, Status::Connected { .. } | Status::Retraining)
+            && now - last_report > 0.1
+        {
+            last_report = now;
+            let recent = &bits[bits.len().saturating_sub(500)..];
+            println!(
+                "{now:8.3}   {} bits, last 500 {:.2} ones, B1 errors {}, path cost {:.2?}, {:.1} dB, slips {}, far MP {:?}",
+                bits.len(),
+                recent.iter().filter(|b| **b).count() as f64 / recent.len().max(1) as f64,
+                training.b1_errors(),
+                training.path_cost(),
+                training.snr(),
+                training.slips(),
+                training.far_mp().map(|m| (m.call_to_answer, m.answer_to_call, m.acknowledge)),
+            );
+        }
+    }
+    if let Ok(path) = std::env::var("V34_BITS") {
+        let text: String = bits.iter().map(|b| if *b { '1' } else { '0' }).collect();
+        std::fs::write(path, text).unwrap();
     }
 }

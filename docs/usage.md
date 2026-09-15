@@ -96,11 +96,34 @@ trip, the probed line, how well each phase trained, the far clock and the VoIP
 slips followed, what each end's J asked for, both MP sequences, and the rates
 each way.
 
+Data mode's constellation is hundreds of points -- 832 at 31 200, 1664 at
+33 600 -- and the scope in the panel is too small to tell them apart. Click it
+for a window of its own, as large as you drag it: it keeps the last few seconds
+of symbols, so each point shows as a spot, and noise shows as spots that have
+grown into each other.
+
+Either end can go back to MP from data mode without starting again. A far end
+whose receiver is struggling asks for a slower rate with a rate renegotiation
+-- S, S-bar, TRN and a new MP -- and this end answers it at once and carries on
+at the rates the new MPs come to, with `V.34 rate renegotiation` in the log
+while it happens and no `NO CARRIER` or second `CONNECT`. A far end hanging up
+with a cleardown ends the call the same way. The panel counts the
+renegotiations and shows the rates they came to.
+
+A far end without V.42 often has something to say the moment it connects -- a
+login banner, a prompt. That is recognised as text rather than read as an
+answer pattern, and goes to the terminal.
+
 A VoIP call's jitter buffer now and then plays twenty milliseconds of audio it
 made up, and the receiver notices the jump and finds the signal again. In the
 start-up that costs nothing; in data mode it costs the data in flight, which
 V.42 sends again. Press **Record** first on any V.34 call that goes wrong: the
 capture is what gets it fixed.
+
+A capture can be drawn afterwards, too. The data pump's capture test dumps
+every equalised symbol of one direction, and `tools/plot_constellation.py`
+draws any stretches of it as constellations side by side -- training, data
+mode, a renegotiation -- with instructions at the top of the script.
 
 ## Moving a file
 

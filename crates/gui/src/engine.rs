@@ -37,6 +37,18 @@ pub const SPECTRUM_BINS: usize = FFT_SIZE / 2;
 /// line is doing now.
 pub const SYMBOL_HISTORY: usize = 512;
 
+/// Points the scope keeps for a constellation of `states` points.
+///
+/// Sixteen a cluster is right for anything up to V.32bis's hundred and
+/// twenty-eight. V.34's data mode is another matter: 832 points at 31 200 and
+/// 1664 at 33 600, which five hundred symbols do not land on even once each,
+/// so what was drawn was a speckled disc rather than a constellation. A dozen
+/// a point, up to sixteen thousand -- which at 3429 baud is still only the
+/// last three to five seconds.
+pub fn scope_depth(states: usize) -> usize {
+    if states > 128 { (12 * states).min(16_384) } else { SYMBOL_HISTORY }
+}
+
 /// Which standard a capture holds, and whether we can yet demodulate it.
 ///
 /// Running the Bell 103 receiver against a V.22bis capture produces confident
@@ -658,6 +670,16 @@ fn run(
 
 #[cfg(test)]
 mod tests {
+
+    /// Everything up to V.32bis keeps what it always did, and V.34's data
+    /// mode keeps enough to land on each of its points a dozen times.
+    #[test]
+    fn the_scope_keeps_more_of_a_larger_constellation() {
+        assert_eq!(super::scope_depth(16), super::SYMBOL_HISTORY);
+        assert_eq!(super::scope_depth(128), super::SYMBOL_HISTORY);
+        assert_eq!(super::scope_depth(832), 9984);
+        assert_eq!(super::scope_depth(1664), 16_384);
+    }
 
     /// The capture the program carries, opened the way a fresh machine opens
     /// it.

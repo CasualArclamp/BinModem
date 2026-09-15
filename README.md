@@ -9,7 +9,7 @@ one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
 source for every normative constant, and against the RFCs for everything
-carried over the top of them. 1215 tests.
+carried over the top of them. 1226 tests.
 
 ## What works
 
@@ -168,14 +168,15 @@ OS-specific code — but only built and run on Windows so far.
 
 ## Next
 
-V.34 on a real call. Every part of it has met a real modem: the start-up
-against a Conexant recording and three live VoIP calls, and data mode against
-the B1 a real modem sent at 31 200, which this receiver reads as the 1092 ones
-it is. Two of these connect at 33 600 and carry V.42 over it. What a live call
-has not yet shown is the other direction -- whether the far modem reads this
-end's 64-state, non-linear, expanded-shaping signal, which is what it asks
-for -- and how data mode lives through a VoIP jitter buffer's slips, which
-lose symbols and so the frame alignment with them.
+V.34 on a real call. A live call has reached data mode with a real modem at
+31 200 towards this end: its login banner came through without an error, and
+the far end heard this end's 33 600 well enough to ask, six seconds in, for a
+rate renegotiation down to 28 800. That renegotiation is now answered -- two of
+these renegotiate from either end and carry V.42 on through it, and the capture
+replays through the modem to the banner on the terminal and the far end's new
+MP read. What is left is what the far end did when nobody answered, a full
+retrain from phase 2, and how data mode lives through a VoIP jitter buffer's
+slips, which lose symbols and so the frame alignment with them.
 
 After it, V.17 for fax at 14 400, and V.33 beside it -- the same trellis code
 as V.32bis again, on a fax call and a leased line respectively -- and more than

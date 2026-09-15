@@ -22,7 +22,7 @@ use line::AudioSink;
 use modem::{Modem, Role, State};
 use telemetry::{CallState, Direction, Leds, Publisher};
 
-use crate::engine::{Control, FFT_SIZE, Ring, SCOPE_LEN, SPECTRUM_BINS, SYMBOL_HISTORY};
+use crate::engine::{Control, FFT_SIZE, Ring, SCOPE_LEN, SPECTRUM_BINS, SYMBOL_HISTORY, scope_depth};
 use crate::network::{Networking, Request as NetRequest, View as NetView};
 
 /// The rate the modem runs at, whatever the sound card is doing.
@@ -867,6 +867,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
 
         to_line.clear();
         let drive = session.drive();
+        let depth = scope_depth(modem.states());
         for &s in &from_line {
             let heard = f64::from(s);
             to_line.push(modem.step(heard) as f32 * drive);
@@ -887,7 +888,8 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 // Only when it moves, so a motionless constellation is not
                 // filled with copies of one point.
                 if points.back() != Some(&p) {
-                    if points.len() == SYMBOL_HISTORY {
+                    // Down to the depth, which falls when data mode ends.
+                    while points.len() >= depth {
                         points.pop_front();
                     }
                     points.push_back(p);

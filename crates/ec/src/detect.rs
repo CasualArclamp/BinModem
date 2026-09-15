@@ -35,6 +35,27 @@ pub const ADP_P: u8 = b'P';
 /// Ones between characters. V.42 permits 8 to 16; the middle is a safe choice.
 const FILL_ONES: usize = 12;
 
+/// The ones Table 3 puts between an ADP's characters, "8 to 16".
+const FILL: std::ops::RangeInclusive<u32> = 8..=16;
+
+/// Characters of plain text in a row -- framed, printable, and sent back to
+/// back rather than with a detection pattern's fill between them -- after
+/// which the far end is taken to be talking to this end's terminal rather
+/// than doing V.42 at all.
+///
+/// A far end that has already given its terminal the go-ahead does exactly
+/// this: the first live V.34 call to reach data mode came up to a login
+/// banner, whose `**EMSI_REQ` spelt out `EM` and then `EQ` and was read as
+/// two answer patterns. Noise is no worry: a random bit stream frames a
+/// character with its stop bit in place half the time, and that character is
+/// printable less than half of that, so sixteen in a row is a few times in a
+/// trillion.
+const TEXT_RUN: u32 = 16;
+
+/// Bits of the line kept while the detection phase runs, for the terminal if
+/// it fails (Appendix I.3): a second or so at the fastest rates.
+const HEARD_LIMIT: usize = 1 << 16;
+
 /// Repetitions of the ADP before the answerer will consider stopping.
 ///
 /// V.42 7.2.1.3 requires "at least ten times", and it is a floor rather than a
@@ -128,6 +149,9 @@ pub enum Outcome {
     ProtocolStarted,
     /// T400 elapsed with nothing recognised (V.42 7.2.1.2, 7.2.1.3).
     TimedOut,
+    /// The far end is sending its terminal's characters: it is not doing V.42,
+    /// and has already given its terminal the go-ahead (Appendix I.3).
+    Text,
 }
 
 /// Recovers async-framed characters from a synchronous bit stream.
@@ -135,18 +159,47 @@ pub enum Outcome {
 /// The detection patterns are sent as start-stop characters even though the
 /// link is synchronous at this point, which is why this cannot simply read
 /// octets off the wire.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct CharacterScanner {
     /// Bits collected since the start bit, or `None` while idle.
     collecting: Option<(u8, u32)>,
+    /// Ones since the last character's stop bit.
+    idle: u32,
+}
+
+impl Default for CharacterScanner {
+    fn default() -> Self {
+        // The line before the first character has been idle for as long as
+        // anyone knows.
+        Self { collecting: None, idle: u32::MAX }
+    }
+}
+
+/// What a scanner makes of a character's worth of bits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scanned {
+    /// A character, and the ones on the line before its start bit.
+    Character { value: u8, gap: u32 },
+    /// Eight data bits with no stop bit after them.
+    FramingError,
 }
 
 impl CharacterScanner {
+    #[cfg(test)]
     fn feed(&mut self, bit: bool) -> Option<u8> {
+        match self.scan(bit) {
+            Some(Scanned::Character { value, .. }) => Some(value),
+            _ => None,
+        }
+    }
+
+    fn scan(&mut self, bit: bool) -> Option<Scanned> {
         match self.collecting {
             None => {
                 // A space on an idle line is a start bit.
-                if !bit {
+                if bit {
+                    self.idle = self.idle.saturating_add(1);
+                } else {
                     self.collecting = Some((0, 0));
                 }
                 None
@@ -159,11 +212,18 @@ impl CharacterScanner {
             }
             Some((value, _)) => {
                 self.collecting = None;
+                let gap = self.idle;
+                self.idle = 0;
                 // A framing error means this was not one of our characters.
-                bit.then_some(value)
+                Some(if bit { Scanned::Character { value, gap } } else { Scanned::FramingError })
             }
         }
     }
+}
+
+/// Whether a character is what a terminal would print, or a line ending.
+fn texty(c: u8) -> bool {
+    matches!(c, 0x20..=0x7e | b'\r' | b'\n' | b'\t')
 }
 
 /// Render one character as start bit, eight data bits and stop bit, followed by
@@ -184,10 +244,14 @@ fn push_character(bits: &mut VecDeque<bool>, value: u8) {
 pub struct Originator {
     out: VecDeque<bool>,
     scanner: CharacterScanner,
-    /// Characters recognised from the answerer, in order.
-    seen: Vec<u8>,
-    /// Complete ADPs observed. Two adjacent ones are required.
+    /// The last four characters from the answerer, and the ones before each.
+    seen: VecDeque<(u8, u32)>,
+    /// Pairs of adjacent ADPs observed, by what they said.
     adps: Vec<Answer>,
+    /// Characters of plain text in a row.
+    text: u32,
+    /// Everything heard while detecting.
+    heard: Vec<bool>,
     elapsed: u32,
     t400_ms: u32,
     outcome: Outcome,
@@ -204,8 +268,10 @@ impl Originator {
         let mut me = Self {
             out: VecDeque::new(),
             scanner: CharacterScanner::default(),
-            seen: Vec::new(),
+            seen: VecDeque::new(),
             adps: Vec::new(),
+            text: 0,
+            heard: Vec::new(),
             elapsed: 0,
             t400_ms,
             outcome: Outcome::Pending,
@@ -237,14 +303,41 @@ impl Originator {
         if self.outcome != Outcome::Pending {
             return self.outcome;
         }
-        if let Some(c) = self.scanner.feed(bit) {
-            self.seen.push(c);
-            self.classify();
+        if self.heard.len() < HEARD_LIMIT {
+            self.heard.push(bit);
+        }
+        match self.scanner.scan(bit) {
+            Some(Scanned::Character { value, gap }) => {
+                self.text = if texty(value) && gap < *FILL.start() { self.text + 1 } else { 0 };
+                if self.text >= TEXT_RUN {
+                    self.outcome = Outcome::Text;
+                    return self.outcome;
+                }
+                self.seen.push_back((value, gap));
+                if self.seen.len() > 4 {
+                    self.seen.pop_front();
+                }
+                self.classify();
+            }
+            Some(Scanned::FramingError) => self.text = 0,
+            None => {}
         }
         self.outcome
     }
 
-    /// Look for `E` followed by a type character, twice over.
+    /// Everything the line brought while the detection phase ran: the far
+    /// end's terminal's, if it turned out not to be doing V.42.
+    pub fn take_heard(&mut self) -> Vec<bool> {
+        std::mem::take(&mut self.heard)
+    }
+
+    /// Look for two adjacent ADPs saying the same thing: `E`, the type
+    /// character, `E` and the type character again, each after the "8 to 16
+    /// ones" of Table 3.
+    ///
+    /// The fill is what makes a pattern a pattern. Without it, text that
+    /// happens to have an `E` in it twice is an answer: `**EMSI_REQ`, which a
+    /// login banner over a real call sent, is `EM` and then `EQ`.
     ///
     /// An extended pattern is recorded and listened past rather than acted on.
     /// Appendix VI.1 describes real modems that send `EM` five times or `EP`
@@ -254,18 +347,19 @@ impl Originator {
     /// is treated this way: 7.2.1.2 says to act on the ADP received, and an
     /// unknown reserved code point is not documented as a prefix to anything.
     fn classify(&mut self) {
-        let n = self.seen.len();
-        if n < 2 {
+        let [(first, _), (second, gap2), (third, gap3), (fourth, gap4)] = match self.seen.make_contiguous() {
+            [a, b, c, d] => [*a, *b, *c, *d],
+            _ => return,
+        };
+        let filled = [gap2, gap3, gap4].iter().all(|gap| FILL.contains(gap));
+        if !(filled && first == ADP_E && third == ADP_E && second == fourth) {
             return;
         }
-        if self.seen[n - 2] != ADP_E {
-            return;
-        }
-        let answer = Answer::from_char(self.seen[n - 1]);
+        let answer = Answer::from_char(second);
         self.adps.push(answer);
         // V.42 7.2.1.2: characters from at least two adjacent ADPs are needed
         // before the pattern counts as observed.
-        if self.adps.len() >= 2 && !matches!(answer, Answer::Extended(_)) {
+        if !matches!(answer, Answer::Extended(_)) {
             self.outcome = Outcome::Answered(answer);
         }
     }
@@ -289,7 +383,7 @@ impl Originator {
             // (Appendix VI.1). If the `EC` that should have followed was lost
             // to the line, what was heard before it is not nothing.
             self.outcome = match self.adps.last() {
-                Some(&a) if self.adps.len() >= 2 && a.error_controlled() => Outcome::Answered(a),
+                Some(&a) if a.error_controlled() => Outcome::Answered(a),
                 _ => Outcome::TimedOut,
             };
         }
@@ -324,6 +418,10 @@ pub struct Answerer {
     flag_run: u32,
     /// Whether the originator has begun the protocol phase (7.2.1.3).
     flags: bool,
+    /// Characters of plain text in a row, and everything heard while
+    /// detecting.
+    text: u32,
+    heard: Vec<bool>,
 }
 
 impl Default for Answerer {
@@ -348,7 +446,15 @@ impl Answerer {
             since_flag: u32::MAX,
             flag_run: 0,
             flags: false,
+            text: 0,
+            heard: Vec::new(),
         }
+    }
+
+    /// Everything the line brought while the detection phase ran: the far
+    /// end's terminal's, if it turned out not to be doing V.42.
+    pub fn take_heard(&mut self) -> Vec<bool> {
+        std::mem::take(&mut self.heard)
     }
 
     /// The next bit to transmit.
@@ -415,8 +521,24 @@ impl Answerer {
         if self.outcome != Outcome::Pending {
             return self.outcome;
         }
-        let Some(c) = self.scanner.feed(bit) else {
-            return self.outcome;
+        if self.heard.len() < HEARD_LIMIT {
+            self.heard.push(bit);
+        }
+        let c = match self.scanner.scan(bit) {
+            Some(Scanned::Character { value, gap }) => {
+                // A caller without V.42 whose terminal is already typing.
+                self.text = if texty(value) && gap < *FILL.start() { self.text + 1 } else { 0 };
+                if self.text >= TEXT_RUN {
+                    self.outcome = Outcome::Text;
+                    return self.outcome;
+                }
+                value
+            }
+            Some(Scanned::FramingError) => {
+                self.text = 0;
+                return self.outcome;
+            }
+            None => return self.outcome,
         };
         // V.42 7.2.1.3: at least four DC1s of alternating parity.
         if c == ODP_EVEN || c == ODP_ODD {
@@ -795,6 +917,85 @@ mod tests {
         for _ in 0..100 {
             assert!(a.transmit(), "answerer should idle at mark");
         }
+    }
+
+    /// Characters as a terminal sends them through a modem without V.42:
+    /// back to back, a stop bit and straight into the next start bit.
+    fn typed(text: &[u8]) -> Vec<bool> {
+        let mut bits = Vec::new();
+        for &c in text {
+            bits.push(false);
+            bits.extend((0..8).map(|i| c >> i & 1 == 1));
+            bits.push(true);
+        }
+        bits
+    }
+
+    #[test]
+    fn a_login_banner_is_text_and_not_two_answers() {
+        // The first live V.34 call to reach data mode: an Armbian box's getty,
+        // whose EMSI request says EM and then EQ.
+        let banner = b"\rArmbian 23.5.1 Bookworm l \n\r\n\r**EMSI_REQA77E\r";
+        let mut o = Originator::default();
+        let mut bits = vec![true; 300];
+        bits.extend(typed(banner));
+        for &b in &bits {
+            o.receive(b);
+        }
+        assert_eq!(o.outcome(), Outcome::Text);
+        assert!(o.patterns().is_empty(), "{:?}", o.patterns());
+        // And what was heard is all there, for the terminal.
+        let heard = o.take_heard();
+        let mut scanner = CharacterScanner::default();
+        let text: Vec<u8> = heard.iter().filter_map(|b| scanner.feed(*b)).collect();
+        assert!(banner.starts_with(&text) && text.len() >= TEXT_RUN as usize, "{:?}", String::from_utf8_lossy(&text));
+    }
+
+    #[test]
+    fn e_twice_in_text_is_not_an_answer() {
+        // Short enough not to be a run of text, and E and Q twice over with
+        // no fill between: Table 3's fill is what makes it a pattern.
+        let mut o = Originator::default();
+        for b in typed(b"EQEQ") {
+            o.receive(b);
+        }
+        assert_eq!(o.outcome(), Outcome::Pending);
+        assert!(o.patterns().is_empty());
+    }
+
+    #[test]
+    fn adjacent_answers_have_to_agree() {
+        // EM then EQ is not two adjacent ADPs saying anything.
+        let mut o = Originator::default();
+        say(&mut o, ADP_M, 1);
+        say(&mut o, b'Q', 1);
+        assert_eq!(o.outcome(), Outcome::Pending);
+    }
+
+    #[test]
+    fn random_noise_is_neither_text_nor_an_answer() {
+        let mut o = Originator::default();
+        let mut a = Answerer::default();
+        let mut seed = 0x2545_f491_u32;
+        for _ in 0..2_000_000 {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let bit = seed & 1 == 1;
+            o.receive(bit);
+            a.receive(bit);
+        }
+        assert_eq!(o.outcome(), Outcome::Pending);
+        assert_eq!(a.outcome(), Outcome::Pending);
+    }
+
+    #[test]
+    fn an_answerer_hears_a_caller_typing() {
+        let mut a = Answerer::default();
+        for b in typed(b"hello there, is this the BBS?\r") {
+            a.receive(b);
+        }
+        assert_eq!(a.outcome(), Outcome::Text);
     }
 
     #[test]
