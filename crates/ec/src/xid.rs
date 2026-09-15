@@ -8,7 +8,7 @@
 //! V.42bis parameters are actually agreed. Without it both ends simply run on
 //! defaults, which works but leaves compression switched off.
 
-use crate::v42bis;
+use crate::{v42bis, v44};
 
 /// The ISO "general purpose" format identifier (V.42 12.2.2).
 pub const FI_GENERAL_PURPOSE: u8 = 0b1000_0010;
@@ -17,6 +17,14 @@ pub const FI_GENERAL_PURPOSE: u8 = 0b1000_0010;
 pub const GI_PARAMETER: u8 = 0b1000_0000;
 /// Group identifier of the private parameter negotiation subfield.
 pub const GI_PRIVATE: u8 = 0b1111_0000;
+/// Group identifier of the user data subfield, where V.44 lives.
+///
+/// V.44 7.3: "Parameters within the user data subfield, in addition to those
+/// defined in ITU-T V.42, shall be used for this purpose. The user data
+/// subfield shall appear in the XID frame immediately before the FCS." A
+/// different subfield from V.42bis's, which is what lets one XID offer both
+/// and let the far end pick.
+pub const GI_USER_DATA: u8 = 0b1111_1111;
 
 /// Parameter identifiers within the parameter negotiation subfield (Table 11a).
 mod pi {
@@ -34,6 +42,36 @@ mod private_pi {
     pub const CODEWORDS: u8 = 2;
     pub const MAX_STRING: u8 = 3;
 }
+
+/// Parameter identifiers within the user data subfield (V.44 Table A.1).
+mod user_pi {
+    pub const PARAMETER_SET: u8 = 0x40;
+    /// C0, the capability byte.
+    pub const CAPABILITY: u8 = 0x41;
+    /// P0, which directions are wanted.
+    pub const REQUEST: u8 = 0x42;
+    /// P1T and P1R, the number of codewords each way.
+    pub const CODEWORDS_TRANSMIT: u8 = 0x43;
+    pub const CODEWORDS_RECEIVE: u8 = 0x44;
+    /// P2T and P2R, the maximum string length each way.
+    pub const MAX_STRING_TRANSMIT: u8 = 0x45;
+    pub const MAX_STRING_RECEIVE: u8 = 0x46;
+    /// P3T and P3R, the length of history each way.
+    pub const HISTORY_TRANSMIT: u8 = 0x47;
+    pub const HISTORY_RECEIVE: u8 = 0x48;
+}
+
+/// Identifier marking the user data subfield as V.44, ASCII "V44".
+pub const PARAMETER_SET_V44: [u8; 3] = *b"V44";
+
+/// C0 with every optional bit clear: no packet methods, and parameters
+/// negotiated here in the XID rather than after the link is up.
+///
+/// Table A.1: "00 Neither packet method nor multi-packet method supported: for
+/// modem connections only", and "0 Parameter negotiation using XID exchange
+/// and parameters below". Both are what a modem wants, and the second is the
+/// default 7.4 names.
+const CAPABILITY_MODEM: u8 = 0b0000_0000;
 
 /// Identifier marking the private subfield as V.42bis, ASCII "V42".
 ///
@@ -99,6 +137,22 @@ impl Compression {
         }
     }
 
+    /// The same directions seen from the other end of the line.
+    ///
+    /// V.42bis names its directions absolutely -- initiator to responder --
+    /// and needs no such thing. V.44's P0 is relative to whoever sent it
+    /// (Table 10: "01 only in transmit direction"), and 7.4 spells out what
+    /// that means for an answer: "the complementary response to one entity's
+    /// P0 value of 01 ... is a P0 value of 10". So a V.44 proposal has to be
+    /// turned round before it can be compared with this end's.
+    pub fn flipped(self) -> Self {
+        match self {
+            Self::InitiatorToResponder => Self::ResponderToInitiator,
+            Self::ResponderToInitiator => Self::InitiatorToResponder,
+            other => other,
+        }
+    }
+
     /// The directions both ends agree on.
     pub fn intersect(self, other: Self) -> Self {
         let bits = self.to_bits() & other.to_bits();
@@ -131,6 +185,54 @@ pub struct Xid {
     pub codewords: Option<u16>,
     /// P2, maximum string length.
     pub max_string: Option<u8>,
+    /// V.44, present only when the user data subfield names it.
+    pub v44: Option<V44Offer>,
+}
+
+/// What one end proposes for V.44 (Table A.1).
+///
+/// The two directions are proposed separately and settled against each other
+/// crosswise: 7.4 has "the proposed P2T from one entity ... compared with the
+/// proposed P2R from the other entity", because one end's transmitting is the
+/// other end's receiving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct V44Offer {
+    /// P0: which directions this end wants compressed.
+    pub compression: Compression,
+    /// P1T, P2T, P3T.
+    pub transmit: v44::Params,
+    /// P1R, P2R, P3R.
+    pub receive: v44::Params,
+}
+
+impl V44Offer {
+    /// Everything this implementation will do.
+    pub fn proposal(compression: Compression) -> Self {
+        let params = v44::Params::of(v44::OFFERED_N2, v44::OFFERED_N7);
+        Self { compression, transmit: params, receive: params }
+    }
+
+    /// Settle this end's proposal against the far end's.
+    ///
+    /// 7.4: "if both values are valid, the lesser value shall be used ... The
+    /// final agreed value is set into N7T by the entity proposing P2T and into
+    /// N7R by the entity proposing P2R." So this end's transmit settings are
+    /// its own proposal against what the far end said it could receive.
+    pub fn resolve(self, other: Self) -> Option<Self> {
+        let compression = self.compression.intersect(other.compression.flipped());
+        if compression == Compression::Neither {
+            return None;
+        }
+        let transmit = self.transmit.resolve(other.receive);
+        let receive = self.receive.resolve(other.transmit);
+        // 7.4: "any attempt to specify a value less than the minimum is a
+        // procedural error". Refusing V.44 is kinder than disconnecting, and
+        // leaves V.42bis or nothing.
+        if !transmit.valid() || !receive.valid() {
+            return None;
+        }
+        Some(Self { compression, transmit, receive })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -168,6 +270,12 @@ impl Xid {
             compression: Some(compression),
             codewords: Some(v42bis::OFFERED_N2),
             max_string: Some(v42bis::OFFERED_N7),
+            // Both are offered in the one XID. 7.3: "the responder shall
+            // include parameters for at most one compression algorithm
+            // (V.42 bis or V.44) in the response XID", so the far end picks
+            // and a far end that has never heard of V.44 skips the subfield it
+            // does not know and answers about V.42bis.
+            v44: Some(V44Offer::proposal(compression)),
         }
     }
 
@@ -206,6 +314,22 @@ impl Xid {
                 push_param(&mut private, private_pi::MAX_STRING, &[n7]);
             }
             push_subfield(&mut out, GI_PRIVATE, &private);
+        }
+
+        // User data subfield, carrying V.44. 7.3 puts it "immediately before
+        // the FCS", which is to say last.
+        if let Some(v44) = self.v44 {
+            let mut user = Vec::new();
+            push_param(&mut user, user_pi::PARAMETER_SET, &PARAMETER_SET_V44);
+            push_param(&mut user, user_pi::CAPABILITY, &[CAPABILITY_MODEM]);
+            push_param(&mut user, user_pi::REQUEST, &[v44.compression.to_bits()]);
+            push_param(&mut user, user_pi::CODEWORDS_TRANSMIT, &v44.transmit.n2.to_be_bytes());
+            push_param(&mut user, user_pi::CODEWORDS_RECEIVE, &v44.receive.n2.to_be_bytes());
+            push_param(&mut user, user_pi::MAX_STRING_TRANSMIT, &[v44.transmit.n7]);
+            push_param(&mut user, user_pi::MAX_STRING_RECEIVE, &[v44.receive.n7]);
+            push_param(&mut user, user_pi::HISTORY_TRANSMIT, &v44.transmit.n8.to_be_bytes());
+            push_param(&mut user, user_pi::HISTORY_RECEIVE, &v44.receive.n8.to_be_bytes());
+            push_subfield(&mut out, GI_USER_DATA, &user);
         }
         out
     }
@@ -261,6 +385,7 @@ impl Xid {
             match gi {
                 GI_PARAMETER => xid.read_parameters(&body[start..end])?,
                 GI_PRIVATE => xid.read_private(&body[start..end])?,
+                GI_USER_DATA => xid.read_user_data(&body[start..end])?,
                 _ => {} // an unrecognized group is skipped whole
             }
             pos = end;
@@ -316,6 +441,57 @@ impl Xid {
         Ok(())
     }
 
+    /// The V.44 half of the user data subfield (Table A.1).
+    fn read_user_data(&mut self, mut field: &[u8]) -> Result<(), XidError> {
+        let mut is_v44 = false;
+        let mut offer = V44Offer::proposal(Compression::Neither);
+        let mut said_anything = false;
+        while let Some((pi, value, rest)) = take_param(field)? {
+            field = rest;
+            if pi == user_pi::PARAMETER_SET {
+                is_v44 = value == PARAMETER_SET_V44;
+                continue;
+            }
+            if !is_v44 {
+                // Everything after the identifier belongs to whatever set it
+                // named, and this one is not V.44.
+                continue;
+            }
+            match pi {
+                user_pi::REQUEST => {
+                    let v = *value.first().ok_or(XidError::Truncated)?;
+                    offer.compression = Compression::from_bits(v);
+                    said_anything = true;
+                }
+                user_pi::CODEWORDS_TRANSMIT => offer.transmit.n2 = be_u16(pi, value)?,
+                user_pi::CODEWORDS_RECEIVE => offer.receive.n2 = be_u16(pi, value)?,
+                user_pi::MAX_STRING_TRANSMIT => {
+                    offer.transmit.n7 = *value.first().ok_or(XidError::Truncated)?;
+                }
+                user_pi::MAX_STRING_RECEIVE => {
+                    offer.receive.n7 = *value.first().ok_or(XidError::Truncated)?;
+                }
+                user_pi::HISTORY_TRANSMIT => offer.transmit.n8 = be_u16(pi, value)?,
+                user_pi::HISTORY_RECEIVE => offer.receive.n8 = be_u16(pi, value)?,
+                // C0's packet-method bits are "ignored for modem connections".
+                _ => {}
+            }
+        }
+        if is_v44 && said_anything {
+            self.v44 = Some(offer);
+        }
+        Ok(())
+    }
+
+    /// What the two ends settled on for V.44, if anything.
+    ///
+    /// None means it is not running, and the connection falls back to whatever
+    /// V.42bis agreed -- which 7.3 allows for by having the responder name at
+    /// most one of the two.
+    pub fn v44_params(&self, other: &Self) -> Option<V44Offer> {
+        self.v44?.resolve(other.v44?)
+    }
+
     /// Settle a proposal against a reply.
     ///
     /// V.42 9.2.3, 9.2.4 and V.42bis 5.1 all say the same thing for their own
@@ -337,6 +513,9 @@ impl Xid {
             },
             codewords: lower(self.codewords, other.codewords, v42bis::DEFAULT_N2),
             max_string: lower(self.max_string, other.max_string, v42bis::DEFAULT_N7),
+            // V.44's two directions are settled crosswise rather than by
+            // taking the lower of matching fields, so it has its own.
+            v44: self.v44_params(other),
         }
     }
 
@@ -687,5 +866,154 @@ mod tests {
         assert_eq!(back.window_receive, Some(7));
         assert_eq!(back.window_transmit, None);
         assert_eq!(back.n401_transmit, None);
+    }
+}
+
+#[cfg(test)]
+mod v44_negotiation {
+    use super::*;
+
+    /// Table A.1: the user data subfield opens with the parameter set
+    /// identifier, and it spells "V44".
+    #[test]
+    fn the_user_data_subfield_names_the_recommendation_first() {
+        assert_eq!(PARAMETER_SET_V44, [0x56, 0x34, 0x34]);
+        let bytes = Xid::proposal(Compression::Both).encode();
+        // Walked rather than searched for: 0xff is a perfectly ordinary
+        // parameter value and looking for the octet finds one of those.
+        let mut at = 1usize;
+        let mut groups = Vec::new();
+        while at < bytes.len() {
+            let len = u16::from_be_bytes([bytes[at + 1], bytes[at + 2]]) as usize;
+            groups.push((bytes[at], at));
+            at += 3 + len;
+        }
+        assert_eq!(at, bytes.len(), "the subfields do not tile the field");
+        // 7.3 puts it "immediately before the FCS", which is to say last.
+        let (gi, gi_at) = *groups.last().expect("no subfields at all");
+        assert_eq!(gi, GI_USER_DATA);
+        assert!(groups.iter().any(|&(g, _)| g == GI_PARAMETER));
+        assert!(groups.iter().any(|&(g, _)| g == GI_PRIVATE));
+        // Group identifier, two octets of length, then the first parameter.
+        assert_eq!(bytes[gi_at + 3], user_pi::PARAMETER_SET);
+        assert_eq!(bytes[gi_at + 4], 3, "the identifier is three octets");
+        assert_eq!(&bytes[gi_at + 5..gi_at + 8], &PARAMETER_SET_V44);
+    }
+
+    /// An XID offers both algorithms, because 7.3 has the responder pick one.
+    #[test]
+    fn one_proposal_offers_both_algorithms() {
+        let xid = Xid::proposal(Compression::Both);
+        assert!(xid.compression.is_some(), "V.42bis was not offered");
+        assert!(xid.v44.is_some(), "V.44 was not offered");
+        let back = Xid::decode(&xid.encode()).expect("did not decode");
+        assert_eq!(back.v44, xid.v44);
+        assert_eq!(back.compression, xid.compression);
+        assert_eq!(back.codewords, xid.codewords);
+    }
+
+    /// Everything in Table A.1 survives the round trip, including values that
+    /// are not the defaults.
+    #[test]
+    fn the_parameters_come_back_as_they_went() {
+        let mut xid = Xid::proposal(Compression::Both);
+        xid.v44 = Some(V44Offer {
+            compression: Compression::InitiatorToResponder,
+            transmit: v44::Params { n2: 4096, n7: 200, n8: 9000 },
+            receive: v44::Params { n2: 1024, n7: 64, n8: 3072 },
+        });
+        let back = Xid::decode(&xid.encode()).expect("did not decode");
+        assert_eq!(back.v44, xid.v44);
+    }
+
+    /// 7.4: the directions are relative to whoever sent them, so a proposal
+    /// and its complementary answer agree rather than cancelling out.
+    #[test]
+    fn the_directions_are_read_from_each_ends_own_point_of_view() {
+        let one = V44Offer::proposal(Compression::InitiatorToResponder);
+        // "The complementary response to one entity's P0 value of 01 ... is a
+        // P0 value of 10."
+        let other = V44Offer::proposal(Compression::ResponderToInitiator);
+        let agreed = one.resolve(other).expect("they did not agree");
+        assert_eq!(agreed.compression, Compression::InitiatorToResponder);
+
+        // And an answer that proposes the same direction as the question is
+        // proposing the opposite one, which leaves nothing agreed.
+        assert_eq!(one.resolve(one), None);
+    }
+
+    /// 7.4: "the proposed P2T from one entity is compared with the proposed
+    /// P2R from the other entity" -- crosswise, because one end transmitting
+    /// is the other end receiving.
+    #[test]
+    fn each_direction_is_settled_against_the_other_ends_opposite() {
+        let mine = V44Offer {
+            compression: Compression::Both,
+            transmit: v44::Params { n2: 4096, n7: 255, n8: 12288 },
+            receive: v44::Params { n2: 4096, n7: 255, n8: 12288 },
+        };
+        let theirs = V44Offer {
+            compression: Compression::Both,
+            // What they will send, and so what this end must read.
+            transmit: v44::Params { n2: 512, n7: 64, n8: 1536 },
+            // What they can read, and so what this end may send.
+            receive: v44::Params { n2: 1024, n7: 100, n8: 3072 },
+        };
+        let agreed = mine.resolve(theirs).expect("they did not agree");
+        assert_eq!(agreed.transmit, v44::Params { n2: 1024, n7: 100, n8: 3072 });
+        assert_eq!(agreed.receive, v44::Params { n2: 512, n7: 64, n8: 1536 });
+    }
+
+    /// A far end that has never heard of V.44 leaves the subfield out, and
+    /// what is left is an ordinary V.42bis negotiation.
+    #[test]
+    fn a_far_end_that_does_not_know_it_is_not_pressed() {
+        let mine = Xid::proposal(Compression::Both);
+        let mut theirs = Xid::proposal(Compression::Both);
+        theirs.v44 = None;
+        let agreed = mine.resolve(&theirs);
+        assert_eq!(agreed.v44, None, "V.44 was agreed with an end that never offered it");
+        assert!(agreed.v42bis_params().is_some(), "V.42bis was lost as well");
+    }
+
+    /// A user data subfield belonging to something else is skipped whole,
+    /// rather than read as V.44 parameters.
+    #[test]
+    fn a_user_data_subfield_for_something_else_is_ignored() {
+        let mut user = Vec::new();
+        push_param(&mut user, user_pi::PARAMETER_SET, b"XYZ");
+        push_param(&mut user, user_pi::REQUEST, &[0b11]);
+        push_param(&mut user, user_pi::MAX_STRING_TRANSMIT, &[99]);
+        let mut bytes = vec![FI_GENERAL_PURPOSE];
+        push_subfield(&mut bytes, GI_USER_DATA, &user);
+        let xid = Xid::decode(&bytes).expect("did not decode");
+        assert_eq!(xid.v44, None);
+    }
+
+    /// 7.4 makes a proposal below Table 10's minimum "a procedural error".
+    /// Declining V.44 leaves V.42bis, which beats dropping the call.
+    #[test]
+    fn a_proposal_below_the_minimum_is_declined_rather_than_taken() {
+        let mine = V44Offer::proposal(Compression::Both);
+        let theirs = V44Offer {
+            compression: Compression::Both,
+            transmit: v44::Params { n2: 64, n7: 8, n8: 16 },
+            receive: v44::Params { n2: 64, n7: 8, n8: 16 },
+        };
+        assert_eq!(mine.resolve(theirs), None);
+    }
+
+    /// The capability byte a modem sends: Table A.1's "neither packet method
+    /// nor multi-packet method supported: for modem connections only", and
+    /// parameters negotiated here rather than after the link is up.
+    #[test]
+    fn the_capability_byte_says_modem_and_xid() {
+        assert_eq!(CAPABILITY_MODEM, 0);
+        let bytes = Xid::proposal(Compression::Both).encode();
+        let at = bytes
+            .windows(3)
+            .position(|w| w == [user_pi::CAPABILITY, 1, CAPABILITY_MODEM])
+            .expect("no capability parameter");
+        let _ = at;
     }
 }
