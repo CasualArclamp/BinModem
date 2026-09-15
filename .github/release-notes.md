@@ -18,59 +18,41 @@ audio at all, which is the quickest way to see whether it runs.
 
 Bell 103, V.22, V.22bis, V.32, V.32bis and V.34; V.8 negotiation, V.42 error
 control and V.42bis compression; group 3 fax over V.29 and V.27 ter, with error
-correction mode and MMR; a V.250 AT interface, an ANSI/CP437 terminal and
-ZMODEM.
+correction mode and MMR; PPP with PAP and CHAP; a V.250 AT interface, an
+ANSI/CP437 terminal and ZMODEM.
 
-New since v0.5.0: **33 600.** V.34 was built against a public dial-up service
-over a VoIP trunk, one live call at a time, and the call that worked came up at
-31 200 towards this end and 33 600 from it, brought V.42 up over the top, and
-logged in and carried a session onward for a minute.
+New since v0.6.0: **something other than another BinModem can dial in**, and a
+fax to a real machine falls back when the line will not carry the fastest rate.
 
-- **V.34, all of it**, behind `AT+MS=V34` or 33600 in the rate row. Phase 2
-  swaps capabilities, measures the round trip and probes the line in both
-  directions; phases 3 and 4 train both receivers and settle the rates in MP
-  sequences; data mode is superframes, shell mapping, the 16, 32 and 64-state
-  four-dimensional trellis codes, precoding and non-linear encoding. The
-  start-up was checked against a Conexant recording and the live calls, and
-  data mode against the far modem's own B1, read as the ones it is. The
-  constellations and trellis encoders were read off the figures in the PDF, and
-  the framing checked against its tables as printed, rather than trusting the
-  extracted text.
-- **Through a VoIP jitter buffer.** A softphone makes up or drops twenty
-  milliseconds of audio every few seconds. The start-up follows the jumps, and
-  data mode now lives through them too: the receiver re-times itself, and finds
-  its place in the frames again from the bit inversions every superframe
-  carries, in about a third of a second, while V.42 sends again what was lost.
-  One call had a slip swallow the far modem's E, the signal data mode starts
-  on; that call is rescued the same way instead of waiting for the E until it
-  gives up.
-- **Rate renegotiation and cleardown** from either end. The far modem asked,
-  six seconds into its first data call, to be sent 28 800 rather than 33 600;
-  this end now answers at once, the call stays up through it, and the panel
-  says what the new rates came to.
-- **A far end that talks first.** Its login banner goes to the terminal, and a
-  FidoNet mailer's `**EMSI_REQ` is no longer read as two V.42 answer patterns
-  that turn error control off.
-- **Data mode at the power of training**, as 10.1.3 asks. Low mapping frames
-  use the cheaper half of the shell mapper's combinations, and counting them as
-  high had left 33 600 going out 7.5% short.
-- **The scope draws data mode**: its hundreds of points, scaled to reach, with
-  enough symbols kept to land on all of them. Click the scope to open it large.
-  `tools/plot_constellation.py` draws any stretch of a recorded call the same
-  way, side by side.
-- **Fax error correction mode.** T.30 Annex A between two of these: numbered
-  frames and a request for any the far end could not read, so noise on a page
-  costs a few frames sent again instead of streaks. Under it the page can go
-  in MMR, T.6's coding, at under half the size of Modified Huffman, and
-  Modified READ is there too. A page arriving is drawn a row at a time.
-- **The ZMODEM window** has folder buttons for the file to send and the folder
-  to receive into, and a speed worth reading: the last few seconds' and the
-  whole file's, the time left and the share of the line the file is getting,
-  counted from when the file starts moving rather than from the handshake. What
-  a transfer came to stays on the window when it is over.
-- **The line is driven at -20 dB by default**, the level the calls through a
-  softphone were placed at, which leaves the shaped constellations' peaks well
-  under full scale.
+- **A login in front of PPP, both ways round.** A call this end answers can
+  meet what a dial-up provider showed: a banner, `login:`, `Password:`, and a
+  prompt where `ppp` starts PPP, `help` lists the commands and `logout` hangs
+  up. A dialler that skips the text and sends frames from the first octet — as
+  Windows' Dial-Up Networking does — is answered as PPP and asked for the same
+  account another way. The **Network** window has the one account, and **Log
+  in, then PPP** on the calling end answers the far end's prompts by itself.
+- **PAP and CHAP** (RFC 1334, RFC 1994, over RFC 1321's MD5, checked against
+  its own test suite), in either direction. An end given an account asks callers
+  for CHAP first and PAP after, never drops the demand when a far end refuses
+  it, and ends the link with the reason on both ends when a password is wrong.
+  A far end that got LCP and then nothing, because nothing here could answer its
+  question, now gets an answer.
+- **A fax that cannot train at the top rate steps down.** A real wired fax
+  machine over a VoIP trunk offered 9600, could not train there, and answered
+  the training check by re-sending its DIS rather than the failure-to-train the
+  book asks for. This end had read every DIS as "start over" and commanded 9600
+  again, five times, until the far end gave up. A repeated DIS after the command
+  has gone is now read as the failure to train it is: 9600, 7200, 4800, 2400,
+  and then a polite goodbye.
+
+The PPP automaton was found to have four faults on the way to authenticating,
+each now fixed and tested: its configure, terminate and code-reject packets went
+out under the options the link had agreed rather than the defaults RFC 1661
+requires, so a far end back at its own defaults could not read a hang-up or a
+fresh request; a far end's Terminate-Request left this end stuck; a hang-up took
+thirty seconds rather than six; a far end wanting a method this end lacks was
+answered for ever; and a protocol this end does not run got silence rather than
+the Protocol-Reject that stops a peer asking for half a minute.
 
 V.34 does not yet follow a full retrain, which a far end falls back to when a
 renegotiation goes unanswered or the line changes too much for one; the call
