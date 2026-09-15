@@ -23,6 +23,7 @@
 //! six data frame intervals can carry. That second one costs exactly one bit
 //! per data frame, which is exactly one step of the rate ladder -- see [`RATE_STEP`].
 
+pub mod encoder;
 pub mod modulus;
 pub mod sign;
 pub mod ucode;
@@ -46,6 +47,30 @@ pub const RATE_STEP: (u32, u32) = (8000, 6);
 /// The lowest and highest downstream rates (5.1).
 pub const SLOWEST: u32 = 28_000;
 pub const FASTEST: u32 = 56_000;
+
+/// Table 2's bounds on K, the modulus encoder's input bits.
+pub const K_RANGE: (u32, u32) = (15, 39);
+/// And on S, the sign bits carrying user data.
+pub const S_RANGE: (u32, u32) = (3, 6);
+/// And on D = S + K, which is what settles the rate.
+pub const D_RANGE: (u32, u32) = (21, 42);
+
+/// Whether Table 2 has a row for this K and S.
+///
+/// The table prints twenty-five rows with a range of S against each, and all
+/// of it is these three bounds. K = 15 has only S = 6 because anything less
+/// would fall below 28 000; K = 39 has only S = 3 because anything more would
+/// pass 56 000. Everything between is whatever keeps D on the ladder.
+pub fn table_2_has(k: u32, s: u32) -> bool {
+    (K_RANGE.0..=K_RANGE.1).contains(&k)
+        && (S_RANGE.0..=S_RANGE.1).contains(&s)
+        && (D_RANGE.0..=D_RANGE.1).contains(&(k + s))
+}
+
+/// The largest K Table 2 allows alongside this many sign bits.
+pub fn largest_k(s: u32) -> u32 {
+    K_RANGE.1.min(D_RANGE.1.saturating_sub(s))
+}
 
 /// The rate a data frame of `bits` carries, rounded down to whole bit/s.
 ///
@@ -92,6 +117,58 @@ mod tests {
         assert_eq!(bits_for(56_000), 42);
         assert_eq!(bits_for(28_000), 21);
         assert_eq!(bits_for(44_000), 33);
+    }
+
+    /// Table 2, all twenty-five rows of it, against the two inequalities.
+    ///
+    /// The table gives a range of S for each K and the endpoints of the rate
+    /// it produces. Every row is reproduced here from the bounds alone, which
+    /// is what says the bounds are the table rather than an approximation of
+    /// it.
+    #[test]
+    fn table_two_is_two_inequalities() {
+        // K, the lowest S, the highest S, and the rates at each end, in
+        // thousands with the fractions the table prints as sixths.
+        let rows: [(u32, u32, u32); 25] = [
+            (15, 6, 6),
+            (16, 5, 6),
+            (17, 4, 6),
+            (18, 3, 6),
+            (19, 3, 6),
+            (20, 3, 6),
+            (21, 3, 6),
+            (22, 3, 6),
+            (23, 3, 6),
+            (24, 3, 6),
+            (25, 3, 6),
+            (26, 3, 6),
+            (27, 3, 6),
+            (28, 3, 6),
+            (29, 3, 6),
+            (30, 3, 6),
+            (31, 3, 6),
+            (32, 3, 6),
+            (33, 3, 6),
+            (34, 3, 6),
+            (35, 3, 6),
+            (36, 3, 6),
+            (37, 3, 5),
+            (38, 3, 4),
+            (39, 3, 3),
+        ];
+        for (k, lowest, highest) in rows {
+            for s in 0..=8u32 {
+                let allowed = (lowest..=highest).contains(&s);
+                assert_eq!(table_2_has(k, s), allowed, "K {k}, S {s}");
+            }
+            assert_eq!(largest_k(highest), k.max(largest_k(highest)));
+        }
+        // The first row's rate and the last row's, which are the ends of 5.1.
+        assert_eq!(rate_for(15 + 6), SLOWEST);
+        assert_eq!(rate_for(39 + 3), FASTEST);
+        // And nothing outside K's own range has a row at all.
+        assert!(!table_2_has(14, 6));
+        assert!(!table_2_has(40, 3));
     }
 
     /// One bit a data frame is one step, which is the arithmetic that makes a
