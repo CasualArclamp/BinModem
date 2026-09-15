@@ -31,6 +31,18 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 /// a limit the buffer between them is however large the page is.
 const MOST_BUFFERED: usize = 64 * 1024;
 
+/// Whether what a client opened with is an HTTP request.
+///
+/// A SOCKS greeting opens with 0x05. An HTTP one opens with a method and a
+/// space, which is what a browser sends when its HTTP proxy is pointed here
+/// rather than its SOCKS host.
+fn looks_like_http(bytes: &[u8]) -> bool {
+    const METHODS: [&[u8]; 8] = [
+        b"GET ", b"POST ", b"HEAD ", b"PUT ", b"CONNECT ", b"OPTIONS ", b"DELETE ", b"PATCH ",
+    ];
+    METHODS.iter().any(|m| bytes.starts_with(m))
+}
+
 /// One connection over the link, and the socket it turned into.
 #[derive(Debug)]
 struct Relayed {
@@ -54,6 +66,9 @@ struct Relayed {
     heard: bool,
     /// Whether the SOCKS conversation has already been complained about.
     complained: bool,
+    /// Whether what arrived was an HTTP request rather than a SOCKS greeting,
+    /// which says what to change rather than only that it is wrong.
+    spoke_http: bool,
     /// Whether the socket has said it has no more to give.
     socket_finished: bool,
     /// And whether the far side of the internet has been told that the
@@ -136,6 +151,7 @@ impl Server {
                     going_to: String::new(),
                     heard: false,
                     complained: false,
+                    spoke_http: false,
                     socket_finished: false,
                     told_socket: false,
                 },
@@ -183,6 +199,7 @@ impl Server {
             // silence -- the session gave up and nothing said so.
             if !relay.heard {
                 relay.heard = true;
+                relay.spoke_http = looks_like_http(&from_link);
                 let opening: Vec<String> =
                     from_link.iter().take(4).map(|b| format!("{b:02x}")).collect();
                 self.log.push(format!(
@@ -201,6 +218,18 @@ impl Server {
         {
             relay.complained = true;
             self.log.push(format!("proxy: the connection made no sense: {why}"));
+            // The commonest way to get here, and not a fault in anything: a
+            // browser whose HTTP proxy is pointed at this rather than its
+            // SOCKS host. It then asks in HTTP, which is a different protocol
+            // on the same port, and nothing here speaks it.
+            if relay.spoke_http {
+                self.log.push(
+                    "proxy: that is an HTTP proxy request, not SOCKS. Clear the \
+                     browser's HTTP Proxy box and put this address in its SOCKS \
+                     Host box instead, as SOCKS v5"
+                        .to_owned(),
+                );
+            }
         }
 
         // A request nobody has answered yet: open it.
@@ -395,5 +424,25 @@ mod tests {
         assert_eq!(server.port(), 1080);
         assert_eq!(server.address(), [10, 0, 0, 1]);
         assert_eq!(server.open(), 0);
+    }
+}
+
+#[cfg(test)]
+mod opening {
+    use super::looks_like_http;
+
+    /// The commonest misconfiguration there is: the browser's HTTP proxy
+    /// pointed at the SOCKS port. It asks in HTTP and nothing here speaks it,
+    /// so it is worth recognising and saying what to change.
+    #[test]
+    fn an_http_request_is_told_apart_from_a_socks_greeting() {
+        assert!(looks_like_http(b"GET http://example.com/ HTTP/1.1\r\n"));
+        assert!(looks_like_http(b"CONNECT example.com:443 HTTP/1.1\r\n"));
+        assert!(looks_like_http(b"POST / HTTP/1.1"));
+        // A SOCKS 5 greeting, and a request for an address that starts with
+        // the same octets as no method does.
+        assert!(!looks_like_http(&[5, 1, 0]));
+        assert!(!looks_like_http(&[5, 1, 0, 3, 11]));
+        assert!(!looks_like_http(b""));
     }
 }

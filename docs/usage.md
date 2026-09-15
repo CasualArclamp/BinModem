@@ -270,9 +270,17 @@ anyone has called.
 The end that answered the call has the internet and offers it, and says
 *offering the internet at 10.0.0.1:1080*; the end that dialled listens on
 `127.0.0.1:1080` and says so. Point a browser's SOCKS 5 proxy setting there —
-in Firefox, Settings → Network Settings → Manual, SOCKS Host `127.0.0.1` port
-`1080`, SOCKS v5, and tick *Proxy DNS when using SOCKS v5* so names are
+in Firefox, Settings → Network Settings → Manual, **SOCKS Host** `127.0.0.1`
+port `1080`, SOCKS v5, and tick *Proxy DNS when using SOCKS v5* so names are
 resolved at the far end where there is something to resolve them with.
+
+The **SOCKS Host** box, not the **HTTP Proxy** box above it. They are both
+proxies on the same page and this one speaks only SOCKS; a browser whose HTTP
+proxy is pointed here asks in HTTP instead, which is a different protocol on
+the same port. The panel says so — *the browser opened with 47 45 54 20*, which
+is `GET `, and *that is an HTTP proxy request, not SOCKS* — and the page comes
+back empty until the box is moved. Leave the HTTP Proxy box empty, and with it
+*Also use this proxy for HTTPS*.
 
 If the far end is not carrying web traffic there is nothing at its port to
 refuse the connections, so they are not refused: they go unanswered, and a
