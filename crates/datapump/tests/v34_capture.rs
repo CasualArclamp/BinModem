@@ -150,6 +150,12 @@ fn a_captured_end_of_phases_3_and_4() {
                 }
                 Heard::Symbol(symbol) => {
                     symbols += 1;
+                    // Data mode from a given time rather than from an E, for a
+                    // far end whose E did not arrive.
+                    if !e_seen && now >= number("V34_DATA_AT", 1e9) {
+                        println!("{now:8.3} data mode from here, E or no E");
+                        e_seen = true;
+                    }
                     if e_seen && data.is_none() {
                         let params = Params {
                             framing: Framing::new(rate, data_rate, false, expanded).expect("a rate Table 8 has"),
@@ -256,6 +262,12 @@ fn a_captured_end_of_phases_3_and_4() {
                         println!("{now:8.3} TRN over after {trn_symbols} symbols of ones");
                         reader = before;
                         trn = false;
+                    }
+                    let (trace_from, trace_to) = (number("V34_TRACE_FROM", 0.0), number("V34_TRACE_TO", 0.0));
+                    if (trace_from..trace_to).contains(&now) {
+                        let mut probe = reader.clone();
+                        let bits: String = probe.differential(symbol.decided, size).iter().map(|b| if *b { '1' } else { '0' }).collect();
+                        println!("{now:9.4} {:+.3}{:+.3}j decided {:?} error {:.4} bits {bits}", symbol.point.re, symbol.point.im, symbol.decided, symbol.error);
                     }
                     for bit in reader.differential(symbol.decided, size) {
                         if let Some(tail) = after_e.as_mut()
@@ -383,6 +395,7 @@ fn a_captured_call_through_the_start_up() {
     let (mut phase, mut status) = ("", Status::Running);
     let mut bits: Vec<bool> = Vec::new();
     let mut last_report = 0.0;
+    let mut slips = 0;
     for (i, &x) in samples[(skip * fs) as usize..].iter().enumerate() {
         let now = skip + i as f64 / fs;
         modem.step(f64::from(x));
@@ -392,6 +405,12 @@ fn a_captured_call_through_the_start_up() {
         }
         let got = modem.take_bits();
         bits.extend(&got);
+        if let Some(training) = modem.training()
+            && training.slips() != slips
+        {
+            slips = training.slips();
+            println!("{now:8.3} a slip followed ({slips} so far), {:.1} dB", training.snr());
+        }
         if let Some(training) = modem.training()
             && matches!(status, Status::Connected { .. } | Status::Retraining)
             && now - last_report > 0.1
