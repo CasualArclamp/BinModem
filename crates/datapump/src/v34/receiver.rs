@@ -105,6 +105,24 @@ const RESYNC_EVERY: usize = 32;
 /// Fractions of a half symbol tried either side, when looking.
 const RESYNC_STEPS: usize = 8;
 
+/// Symbols between the copies of the loops kept for putting back, and how
+/// many are kept: enough to reach back past a far end's symbols that were
+/// read as the wrong constellation for a hundred and fifty symbols before
+/// anything could tell.
+const EARLIER_EVERY: u64 = 16;
+const EARLIER_KEPT: usize = 24;
+
+/// Symbols a resync on a dense grid is judged over, all of them after the
+/// jump that made it necessary.
+const DENSE_WINDOW: usize = 64;
+
+/// Steps a half symbol is tried in, either side, by a resync on a dense grid;
+/// the phase steps, in degrees, it turns through a quarter in; and the finer
+/// steps of a half symbol it then tries either side of the best.
+const DENSE_STEPS: usize = 16;
+const DENSE_DEGREES: f64 = 1.5;
+const DENSE_FINE: usize = 64;
+
 /// Normalised least-mean-squares step.
 const STEP: f64 = 0.02;
 
@@ -163,6 +181,17 @@ impl Slicer {
         match self {
             Self::Points(_) => 0.25 * self.min_distance_squared(),
             Self::Grid { .. } => self.min_distance_squared() / 12.0,
+        }
+    }
+
+    /// The recent error past which the signal is lost, given what it settles
+    /// to: well past it for four or sixteen points, whose garbage is far off,
+    /// and only twice it on a grid, whose garbage on a 33 dB line reads a mere
+    /// three times the noise.
+    fn lost_threshold(self, settled: f64) -> f64 {
+        match self {
+            Self::Points(_) => (8.0 * settled).max(self.lost_level()),
+            Self::Grid { .. } => (2.0 * settled).max(self.lost_level()),
         }
     }
 
@@ -389,6 +418,24 @@ pub struct Receiver {
     /// The half-symbol samples' mean power, slowly: whether anything is
     /// arriving at all.
     power: f64,
+    /// Everything the timing loop has moved the clock by, in samples, and
+    /// copies of the loops as they were while the signal was being followed.
+    timed: f64,
+    earlier: VecDeque<Loops>,
+}
+
+/// The loops at one symbol, for putting back.
+#[derive(Debug, Clone)]
+struct Loops {
+    symbol: u64,
+    taps: Vec<Complex>,
+    rotation: f64,
+    turn: f64,
+    drift: f64,
+    slope: f64,
+    timed: f64,
+    settled: f64,
+    error: f64,
 }
 
 impl Receiver {
@@ -446,6 +493,8 @@ impl Receiver {
             lost: None,
             slips: 0,
             power: 0.0,
+            timed: 0.0,
+            earlier: VecDeque::new(),
         }
     }
 
@@ -849,9 +898,12 @@ impl Receiver {
         }
         let recent = self.recent.iter().sum::<f64>() / self.recent.len() as f64;
         match self.lost {
-            None if self.recent.len() == judged && recent > (8.0 * self.settled).max(self.slicer.lost_level()) => {
-                // The signal has jumped, or gone. Hold everything.
+            None if self.recent.len() == judged && recent > self.slicer.lost_threshold(self.settled) => {
+                // The signal has jumped, or gone. Hold everything -- as it was
+                // before the symbols that showed it, which every loop has
+                // been learning from as though they were right.
                 self.lost = Some(0);
+                self.rewind(judged as u64 + EARLIER_EVERY);
             }
             Some(n) => self.lost = Some(n + 1),
             None => {}
@@ -876,13 +928,176 @@ impl Receiver {
             self.slope += 0.01 * (rate.norm_sqr() - self.slope);
             let late = ((e * rate.conj()).re / self.slope.max(1e-9)).clamp(-0.5, 0.5);
             self.due -= TIMING_GAIN * late * self.half;
+            self.timed -= TIMING_GAIN * late * self.half;
             self.drift = (self.drift - DRIFT_GAIN * late).clamp(-0.001, 0.001);
             self.settled += 0.01 * (squared - self.settled);
+        }
+        let symbol = self.next_symbol / 2;
+        if self.lost.is_none() && symbol.is_multiple_of(EARLIER_EVERY) {
+            if self.earlier.len() == EARLIER_KEPT {
+                self.earlier.pop_front();
+            }
+            self.earlier.push_back(Loops {
+                symbol,
+                taps: self.taps.clone(),
+                rotation: self.rotation,
+                turn: self.turn,
+                drift: self.drift,
+                slope: self.slope,
+                timed: self.timed,
+                settled: self.settled,
+                error: self.error,
+            });
         }
         self.rotation = self.rotation.rem_euclid(std::f64::consts::TAU);
         self.error += 0.01 * (squared - self.error);
         self.last = z;
         Symbol { point: z, decided, error: squared }
+    }
+
+    /// Put the loops back as they were at least `back` symbols ago, carrying
+    /// the carrier's phase on by the turn as it was then: for when the far
+    /// end's symbols have been decided against the wrong constellation, and
+    /// every loop has learnt from the decisions.
+    pub fn rewind(&mut self, back: u64) {
+        let now = self.next_symbol / 2;
+        let Some(kept) = self.earlier.iter().rposition(|l| now.saturating_sub(l.symbol) >= back) else { return };
+        // The copies after it were made from the loops being put right.
+        self.earlier.truncate(kept + 1);
+        let loops = self.earlier[kept].clone();
+        let elapsed = (now - loops.symbol) as f64;
+        self.taps.clone_from(&loops.taps);
+        self.turn = loops.turn;
+        self.drift = loops.drift;
+        self.slope = loops.slope;
+        self.rotation = (loops.rotation + loops.turn * elapsed).rem_euclid(std::f64::consts::TAU);
+        self.due += loops.timed - self.timed;
+        self.timed = loops.timed;
+        self.settled = loops.settled;
+        self.error = loops.error;
+    }
+
+    /// After a jump, on a dense grid: read the newest symbols again at every
+    /// sixteenth of a half symbol either side, turn each reading through a
+    /// quarter in steps of a degree and a half, fit its gain and phase to the
+    /// decisions by least squares, and take up at the best -- once it has been
+    /// tried a little either side, and if it stands clear of the rest.
+    ///
+    /// All of that because a dense constellation gives nothing less a hold.
+    /// 832 points read as noise a sixty-fourth of a symbol out, or a degree
+    /// or two turned, or with the equaliser's gain a percent off -- and the
+    /// fourth power a resync on sixteen points turns by is near nought for a
+    /// constellation shaped round. The live call this was written from had
+    /// the equaliser trained on sixteen points 0.9% high for its data.
+    fn resync_dense(&mut self) {
+        let half = self.half * (1.0 + self.drift);
+        let reach = REACH as u64 + 1;
+        // Four symbols short of the newest, so that reading them later still
+        // has samples to read.
+        let Some(last) = self.next_symbol.checked_sub(10) else { return };
+        let Some(first_centre) = last.checked_sub(2 * (DENSE_WINDOW as u64 - 1)) else { return };
+        let Some(from) = first_centre.checked_sub(reach) else { return };
+        if from < self.first || last + reach >= self.made {
+            return;
+        }
+        let start_time = self.times[(from - self.first) as usize];
+        let count = (last + reach - from + 1) as usize;
+        let outputs_at = |receiver: &Self, moved: f64| -> Option<Vec<Complex>> {
+            let read: Vec<Complex> =
+                (0..count).map(|m| receiver.interpolate(start_time + m as f64 * half + moved)).collect::<Option<_>>()?;
+            Some((0..DENSE_WINDOW).map(|j| apply(&receiver.taps, &read[2 * j + 1..2 * j + 2 + 2 * REACH])).collect())
+        };
+        let mse = |outputs: &[Complex], c: Complex| {
+            outputs.iter().map(|y| (*y * c - self.slicer.decide(*y * c).1).norm_sqr()).sum::<f64>() / outputs.len() as f64
+        };
+        // Gain and phase, least squares against the decisions, a few rounds.
+        let fit = |outputs: &[Complex], mut c: Complex| {
+            for _ in 0..4 {
+                let (num, den) = outputs.iter().fold((Complex::ZERO, 0.0), |(num, den), y| {
+                    (num + self.slicer.decide(*y * c).1 * y.conj(), den + y.norm_sqr())
+                });
+                if den > 0.0 {
+                    c = num.scale(1.0 / den);
+                }
+            }
+            (mse(outputs, c), c)
+        };
+        let settle = |outputs: &[Complex]| {
+            let turns = (90.0 / DENSE_DEGREES) as usize;
+            let coarse = (0..turns)
+                .map(|q| Complex::from_polar(1.0, -(self.rotation + (q as f64 * DENSE_DEGREES).to_radians())))
+                .map(|c| (mse(outputs, c), c))
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map_or(Complex::ONE, |(_, c)| c);
+            fit(outputs, coarse)
+        };
+        let mut readings = Vec::new();
+        let mut best: Option<(f64, f64, Complex)> = None;
+        for step in 0..2 * DENSE_STEPS {
+            let moved = (step as f64 / DENSE_STEPS as f64 - 1.0) * half;
+            let Some(outputs) = outputs_at(self, moved) else { continue };
+            let (found, c) = settle(&outputs);
+            readings.push(found);
+            if best.is_none_or(|b| found < b.0) {
+                best = Some((found, moved, c));
+            }
+        }
+        let Some((mut found, mut moved, mut c)) = best else { return };
+        let coarse = moved;
+        for fine in 1..DENSE_FINE / DENSE_STEPS {
+            for sign in [-1.0, 1.0] {
+                let tried = coarse + sign * fine as f64 * half / DENSE_FINE as f64;
+                let Some(outputs) = outputs_at(self, tried) else { continue };
+                let (e, g) = fit(&outputs, c);
+                if e < found {
+                    (found, moved, c) = (e, tried, g);
+                }
+            }
+        }
+        readings.sort_by(f64::total_cmp);
+        let wrong = readings[readings.len() / 2];
+        if found > self.slicer.found_level(self.settled) || found > 0.6 * wrong {
+            return;
+        }
+        // The gain into the equaliser, and the phase into the carrier's.
+        let gain = c.abs();
+        for tap in &mut self.taps {
+            *tap = tap.scale(gain);
+        }
+        self.take_up(from, moved, -c.arg(), DENSE_WINDOW);
+    }
+
+    /// Carry on from a resync: every half symbol from `from` read again
+    /// `moved` samples later, and the carrier's phase `turned` at the middle
+    /// of the `window` symbols it was judged over.
+    fn take_up(&mut self, from: u64, moved: f64, turned: f64, window: usize) {
+        let redo = (from - self.first) as usize;
+        let mut keep = self.halves.len();
+        for m in redo..self.halves.len() {
+            let time = self.times[m] + moved;
+            match self.interpolate(time) {
+                Some(value) => {
+                    self.halves[m] = value;
+                    self.times[m] = time;
+                }
+                None => {
+                    keep = m;
+                    break;
+                }
+            }
+        }
+        if keep < self.halves.len() {
+            self.due = self.times[keep] + moved;
+            self.halves.truncate(keep);
+            self.times.truncate(keep);
+            self.made = self.first + keep as u64;
+        } else {
+            self.due += moved;
+        }
+        self.rotation = (turned + self.turn * (window as f64 / 2.0)).rem_euclid(std::f64::consts::TAU);
+        self.lost = None;
+        self.recent.clear();
+        self.slips += 1;
     }
 
     /// After a jump: read the last few dozen symbols again from the raw
@@ -896,6 +1111,10 @@ impl Receiver {
     /// carrier's turn is found again from the symbols' fourth power, to within
     /// a quarter -- which the same differential coding does not mind either.
     fn resync(&mut self) {
+        if matches!(self.slicer, Slicer::Grid { .. }) {
+            self.resync_dense();
+            return;
+        }
         let half = self.half * (1.0 + self.drift);
         let (window, _) = self.slicer.window();
         // The newest window of symbols that every shift can be read for.
@@ -908,6 +1127,7 @@ impl Receiver {
         }
         let start_time = self.times[(from - self.first) as usize];
         let count = (last + reach - from + 1) as usize;
+        let mut readings = Vec::new();
         let mut best: Option<(f64, f64, f64)> = None;
         for step in 0..2 * RESYNC_STEPS {
             let shift = (step as f64 - RESYNC_STEPS as f64) / RESYNC_STEPS as f64;
@@ -936,45 +1156,23 @@ impl Receiver {
             let spin = Complex::from_polar(1.0, -turned);
             let mse = outputs.iter().map(|y| (*y * spin - self.slicer.decide(*y * spin).1).norm_sqr()).sum::<f64>()
                 / window as f64;
+            readings.push(mse);
             if best.is_none_or(|b| mse < b.0) {
                 best = Some((mse, shift, turned));
             }
         }
         let Some((mse, shift, turned)) = best else { return };
-        if mse > self.slicer.found_level(self.settled) {
+        // The shifts that are wrong read as what the signal reads out of step;
+        // a real jump found stands clear of them.
+        readings.sort_by(f64::total_cmp);
+        let wrong = readings.get(readings.len() / 2).copied().unwrap_or(f64::MAX);
+        if mse > self.slicer.found_level(self.settled) || mse > 0.6 * wrong {
             return;
         }
         // Found. Everything from the window on is read again on the moved
         // grid, and anything the moved grid needs samples for that have not
         // come yet is made again when they have.
-        let moved = shift * half;
-        let redo = (from - self.first) as usize;
-        let mut keep = self.halves.len();
-        for m in redo..self.halves.len() {
-            let time = self.times[m] + moved;
-            match self.interpolate(time) {
-                Some(value) => {
-                    self.halves[m] = value;
-                    self.times[m] = time;
-                }
-                None => {
-                    keep = m;
-                    break;
-                }
-            }
-        }
-        if keep < self.halves.len() {
-            self.due = self.times[keep] + moved;
-            self.halves.truncate(keep);
-            self.times.truncate(keep);
-            self.made = self.first + keep as u64;
-        } else {
-            self.due += moved;
-        }
-        self.rotation = (turned + self.turn * (window as f64 / 2.0)).rem_euclid(std::f64::consts::TAU);
-        self.lost = None;
-        self.recent.clear();
-        self.slips += 1;
+        self.take_up(from, shift * half, turned, window);
     }
 }
 

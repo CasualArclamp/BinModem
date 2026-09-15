@@ -38,7 +38,7 @@ use std::collections::VecDeque;
 use dsp::Complex;
 
 use super::constellation::Point;
-use super::data::{Decoder, Encoder, Params};
+use super::data::{Acquired, Acquirer, Decoder, Encoder, Params};
 use super::frame::Framing;
 use super::info::{Info0, Info1a, Info1c};
 use super::mp::{Finder, Found, Mp, Trellis};
@@ -171,6 +171,23 @@ const S_HEARD: usize = 24;
 /// modem the first live renegotiation came from sent about a hundred and
 /// forty symbols of it.
 const RENEGOTIATION_TRN: usize = 256;
+
+/// What reading the far end's data costs the trellis a 4D symbol, averaged, in
+/// grid units squared, past which the decoder has lost its place: data mode
+/// reads a few tenths on the lines V.34 has run over, and a decoder reading
+/// from the wrong place well over one.
+const STRAYED_COST: f64 = 1.0;
+
+/// 2D symbols of that before looking for the place again: a third of a
+/// second or so.
+const STRAYED_SYMBOLS: usize = 1000;
+
+/// The far end's 2D symbols, while this end listens for its E, whose average
+/// distance from sixteen points is past this -- or which the receiver cannot
+/// lock on to as sixteen points at all -- for longer than a slip takes to find
+/// again, with a signal there, for a data signal rather than MP.
+const UNLIKE_ERROR: f64 = 0.02;
+const UNLIKE_SYMBOLS: usize = 150;
 
 /// What this end sends, and how it moves from one signal to the next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -412,6 +429,9 @@ struct Listening {
     j: Option<Size>,
     mp_found: bool,
     j_prime: bool,
+    /// For a test: an E that never arrives, as a slip can make it.
+    #[cfg(test)]
+    deaf_to_e: bool,
 }
 
 impl Listening {
@@ -427,6 +447,8 @@ impl Listening {
             j: None,
             mp_found: false,
             j_prime: false,
+            #[cfg(test)]
+            deaf_to_e: false,
         }
     }
 
@@ -467,6 +489,8 @@ impl Listening {
                     events.push(Event::Mp(mp));
                 }
                 // Twenty ones could be anything before an MP has been read.
+                #[cfg(test)]
+                Some(Found::E) if self.deaf_to_e => {}
                 Some(Found::E) if self.mp_found => events.push(Event::E),
                 _ => {}
             }
@@ -646,6 +670,22 @@ pub struct Modem {
     /// The precoding coefficients this end's transmitter uses: zero until a
     /// Type 1 MP says otherwise, and kept through a Type 0 one.
     precoding: [super::mp::Coefficient; 3],
+
+    /// Looking for where the far end's data frames are, and the receiver's
+    /// slips as last seen, since one is a reason to look.
+    acquirer: Option<Acquirer>,
+    slips_seen: u32,
+    /// 2D symbols the decoder has cost what a lost place does, in a row.
+    strayed: usize,
+    /// While listening for E: how far from sixteen points the far end's
+    /// symbols are, averaged, for how many symbols in a row too far, and for
+    /// how many they have been any way off at all -- which is how far back
+    /// the loops were last taught by symbols that were what they seemed.
+    unlike: f64,
+    unlike_run: usize,
+    off_run: usize,
+    /// Times the frames were found again.
+    found_again: u32,
 }
 
 impl Modem {
@@ -697,6 +737,13 @@ impl Modem {
             renegotiations: 0,
             receive_cap: None,
             precoding: [(0, 0); 3],
+            acquirer: None,
+            slips_seen: 0,
+            strayed: 0,
+            unlike: 0.0,
+            unlike_run: 0,
+            off_run: 0,
+            found_again: 0,
         };
         match settings.role {
             Role::Call => {
@@ -747,6 +794,12 @@ impl Modem {
         self.renegotiations
     }
 
+    /// Times data mode's frames were found again from the data itself: after
+    /// a slip, a decoder that had lost its place, or an E that never came.
+    pub fn found_again(&self) -> u32 {
+        self.found_again
+    }
+
     /// Start a rate renegotiation from data mode (11.6.1.1), offering to
     /// receive no faster than `receive`, a multiple of 2400. False, and
     /// nothing done, outside data mode.
@@ -788,6 +841,7 @@ impl Modem {
         self.renegotiations += 1;
         self.initiated = initiating;
         self.status = Status::Retraining;
+        self.acquirer = None;
         self.b1_left = 0;
         self.listening = Listening::new(self.far_mode);
         self.far_s_bar = false;
@@ -824,6 +878,61 @@ impl Modem {
     fn clamp(&mut self) {
         self.decoder = None;
         self.rx.set_size(Size::Four);
+    }
+
+    /// Look for where the far end's data frames are, from its data.
+    fn search(&mut self) {
+        let Some(params) = self.receive_params() else { return };
+        if self.decoder.is_none() && self.acquirer.is_none() {
+            // From listening for E: the far end's data has been decided as
+            // sixteen points since the error first rose, and every loop
+            // taught by the decisions.
+            self.rx.rewind(self.off_run as u64 + 32);
+        }
+        let acquirer = Acquirer::new(params);
+        self.rx.set_grid(acquirer.grid_scale(), acquirer.extent());
+        self.decoder = None;
+        self.acquirer = Some(acquirer);
+        self.strayed = 0;
+        self.unlike = 0.0;
+        self.unlike_run = 0;
+        self.off_run = 0;
+    }
+
+    /// The far end's data, decoded, to where it goes: B1's ones counted, and
+    /// everything after them received.
+    fn take_decoded(&mut self) {
+        let Some(decoder) = self.decoder.as_mut() else { return };
+        for bit in decoder.take_bits() {
+            if self.b1_left > 0 {
+                self.b1_left -= 1;
+                self.b1_errors += usize::from(!bit);
+            } else {
+                self.received.push(bit);
+            }
+        }
+    }
+
+    /// While MP' comes and E is waited for: a far end whose symbols have
+    /// stopped being sixteen points, with the receiver locked on to them, has
+    /// gone into data mode, and its E was lost -- the second live call to
+    /// reach MP' had a VoIP slip land on it.
+    fn watch_for_lost_e(&mut self, error: f64) {
+        let waiting = matches!(self.stage, Stage::CallMp | Stage::AnswerMp | Stage::Renegotiation)
+            && self.far_acknowledged
+            && !self.far_e
+            && (self.stage != Stage::Renegotiation || self.far_s_bar);
+        if !waiting {
+            return;
+        }
+        self.unlike += 0.05 * (error - self.unlike);
+        let unlike = self.unlike > UNLIKE_ERROR || self.rx.is_lost();
+        self.unlike_run = if unlike && self.rx.level() > 1e-4 { self.unlike_run + 1 } else { 0 };
+        // A tenth of the way there is off already.
+        self.off_run = if self.unlike > 0.1 * UNLIKE_ERROR || self.rx.is_lost() { self.off_run + 1 } else { 0 };
+        if self.unlike_run > UNLIKE_SYMBOLS {
+            self.search();
+        }
     }
 
     /// The far end's S turned into S-bar: its TRN or MP is next.
@@ -999,16 +1108,52 @@ impl Modem {
                         return;
                     }
                 }
+                // A slip loses or repeats symbols, and with them the place in
+                // the frames.
+                if self.rx.slips() != self.slips_seen {
+                    self.slips_seen = self.rx.slips();
+                    if self.decoder.is_some() || self.acquirer.is_some() {
+                        self.search();
+                    }
+                }
+                if let Some(acquirer) = self.acquirer.as_mut() {
+                    match acquirer.feed(symbol.point) {
+                        Acquired::Searching => {}
+                        Acquired::Found(decoder) => {
+                            self.acquirer = None;
+                            self.found_again += 1;
+                            // An E that never came was sent all the same: its
+                            // data is here. Where its B1 was is not known, and
+                            // B1 is ones, which the far end's idle is too.
+                            self.far_e = true;
+                            self.b1_left = 0;
+                            self.decoder = Some(*decoder);
+                            self.take_decoded();
+                        }
+                        Acquired::Nothing if self.decoder.is_none() && self.stage != Stage::Data => {
+                            // Not data mode after all: listen for E again.
+                            self.acquirer = None;
+                            // Sixteen points in phase 4, as this end's J asked;
+                            // four in a renegotiation.
+                            let size = if self.stage == Stage::Renegotiation { Size::Four } else { self.source.ask };
+                            self.rx.set_size(size);
+                        }
+                        Acquired::Nothing => self.search(),
+                    }
+                    return;
+                }
                 if let Some(decoder) = self.decoder.as_mut() {
                     decoder.feed(symbol.point);
-                    for bit in decoder.take_bits() {
-                        if self.b1_left > 0 {
-                            self.b1_left -= 1;
-                            self.b1_errors += usize::from(!bit);
-                        } else {
-                            self.received.push(bit);
-                        }
+                    let strayed = decoder.path_cost() > STRAYED_COST;
+                    self.take_decoded();
+                    self.strayed = if strayed { self.strayed + 1 } else { 0 };
+                    if self.strayed > STRAYED_SYMBOLS {
+                        self.search();
                     }
+                    return;
+                }
+                self.watch_for_lost_e(symbol.error);
+                if self.acquirer.is_some() {
                     return;
                 }
                 for event in self.listening.symbol(symbol.decided) {
@@ -1528,6 +1673,24 @@ mod tests {
             let up = |m: &Modem| matches!(m.status(), Status::Connected { .. });
             up(&self.caller) && up(&self.answerer)
         }
+
+        /// A VoIP jitter buffer's slip on the way to `towards`: the next
+        /// twenty milliseconds never arrive, or arrive twice.
+        fn slip(&mut self, towards: Role, dropped: bool) {
+            let n = (0.020 * FS) as usize;
+            let queue = match towards {
+                Role::Call => &mut self.to_call,
+                Role::Answer => &mut self.to_answer,
+            };
+            if dropped {
+                queue.drain(..n);
+            } else {
+                let again: Vec<f64> = queue.iter().take(n).copied().collect();
+                for x in again.into_iter().rev() {
+                    queue.push_front(x);
+                }
+            }
+        }
     }
 
     /// The same, and once both ends are in data mode `from_call` and
@@ -1689,6 +1852,47 @@ mod tests {
         assert!(link.run_until(1.0, |l| l.caller.status() == Status::Retraining), "the call end never heard S");
         assert!(link.run_until(10.0, Link::both_connected), "stuck at {} and {}", link.caller.phase(), link.answerer.phase());
         assert_eq!(link.answerer.rates().map(|r| r.1), Some(10));
+    }
+
+    #[test]
+    fn a_slip_in_data_mode_costs_only_the_data_in_flight() {
+        for (towards, dropped) in [(Role::Call, true), (Role::Answer, false), (Role::Answer, true)] {
+            let mut link = Link::new(0.040, 45.0, 60.0);
+            assert!(link.run_until(20.0, Link::both_connected), "never connected");
+            link.run_until(0.5, |_| false);
+            link.slip(towards, dropped);
+            let found = |l: &Link| match towards {
+                Role::Call => l.caller.found_again(),
+                Role::Answer => l.answerer.found_again(),
+            };
+            assert!(link.run_until(2.0, |l| found(l) == 1), "{towards:?} dropped {dropped}: the frames were not found again");
+            assert!(link.both_connected(), "{towards:?} dropped {dropped}: {} and {}", link.caller.phase(), link.answerer.phase());
+            let (from_call, from_answer) = (pattern(4000, 37), pattern(4000, 13));
+            link.at_call.clear();
+            link.at_answer.clear();
+            link.caller.send_bits(&from_call);
+            link.answerer.send_bits(&from_answer);
+            link.run_until(1.0, |_| false);
+            assert!(contains(&link.at_answer, &from_call), "{towards:?} dropped {dropped}: call to answer lost after the slip");
+            assert!(contains(&link.at_call, &from_answer), "{towards:?} dropped {dropped}: answer to call lost after the slip");
+        }
+    }
+
+    #[test]
+    fn an_e_that_never_arrives_is_found_from_the_data_after_it() {
+        let mut link = Link::new(0.030, 45.0, 0.0);
+        link.caller.listening.deaf_to_e = true;
+        assert!(link.run_until(25.0, Link::both_connected), "stuck at {} and {}", link.caller.phase(), link.answerer.phase());
+        assert_eq!(link.caller.found_again(), 1);
+        assert_eq!(link.answerer.found_again(), 0);
+        let (from_call, from_answer) = (pattern(4000, 37), pattern(4000, 13));
+        link.at_call.clear();
+        link.at_answer.clear();
+        link.caller.send_bits(&from_call);
+        link.answerer.send_bits(&from_answer);
+        link.run_until(1.0, |_| false);
+        assert!(contains(&link.at_answer, &from_call), "call to answer lost");
+        assert!(contains(&link.at_call, &from_answer), "answer to call lost");
     }
 
     #[test]

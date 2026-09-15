@@ -416,6 +416,51 @@ fn nearest_by_label(r: Complex) -> [(Point, f64); 8] {
     best
 }
 
+/// The label pairs of each 4D subset, by Y0 and the code's input bits: the
+/// index is 16 Y0 + Y.
+fn subsets(code: Code) -> Vec<Vec<(u8, u8)>> {
+    let values = 1usize << 4;
+    let mut subsets = vec![Vec::new(); 2 * values];
+    for first in 0..8u8 {
+        for second in 0..8u8 {
+            let y = trellis::convert(first, second) & code.inputs();
+            let y0 = usize::from((first ^ second) & 1);
+            subsets[y0 * values + y as usize].push((first, second));
+        }
+    }
+    subsets
+}
+
+/// A received 2D symbol at unit power, in grid units, with 9.7's stretch taken
+/// back out: by fixed-point iteration, since a point bent out by phi of its
+/// own energy is brought back by phi of the unbent one's.
+fn to_grid(params: &Params, energy: f64, scale: f64, symbol: Complex) -> Complex {
+    let point = symbol.scale(scale);
+    if !params.nonlinear {
+        return point;
+    }
+    let theta = params.theta();
+    let mut x = point;
+    for _ in 0..3 {
+        x = point.scale(1.0 / projection(theta * x.norm_sqr() / energy));
+    }
+    x
+}
+
+/// For two received 2D symbols, the nearest pair of points in each 4D subset
+/// and how far away, by 16 Y0 + Y.
+fn branches(subsets: &[Vec<(u8, u8)>], near: &[[(Point, f64); 8]; 2]) -> Vec<(f64, (u8, u8))> {
+    subsets
+        .iter()
+        .map(|pairs| {
+            pairs.iter().fold((f64::MAX, (0, 0)), |best, &(a, b)| {
+                let d = near[0][a as usize].1 + near[1][b as usize].1;
+                if d < best.0 { (d, (a, b)) } else { best }
+            })
+        })
+        .collect()
+}
+
 /// One 4D symbol's worth of the decoder's memory.
 #[derive(Debug, Clone)]
 struct Stage {
@@ -455,6 +500,9 @@ pub struct Decoder {
     outside: u64,
     /// The best path's cost per 4D symbol, averaged, in grid units squared.
     cost: f64,
+    /// The first 4D symbol of the first whole mapping frame read, where a
+    /// decoder picked up part way through a frame starts giving bits.
+    whole_from: u64,
 }
 
 impl Decoder {
@@ -463,21 +511,12 @@ impl Decoder {
         let shell = Shell::new(params.framing.m);
         let (energy, bent) = energies(&params, &shell);
         let code = params.code;
-        let values = 1usize << 4;
-        let mut subsets = vec![Vec::new(); 2 * values];
-        for first in 0..8u8 {
-            for second in 0..8u8 {
-                let y = trellis::convert(first, second) & code.inputs();
-                let y0 = usize::from((first ^ second) & 1);
-                subsets[y0 * values + y as usize].push((first, second));
-            }
-        }
         let mut metrics = vec![f64::MAX; code.states()];
         metrics[0] = 0.0;
         Self {
             shell,
             descrambler: Scrambler::new(params.mode),
-            subsets,
+            subsets: subsets(code),
             metrics,
             stages: VecDeque::new(),
             received: 0,
@@ -493,8 +532,23 @@ impl Decoder {
             bits: Vec::new(),
             outside: 0,
             cost: 0.0,
+            whole_from: 0,
             params,
         }
+    }
+
+    /// A decoder picked up part way through data mode, whose next 2D symbol
+    /// begins 4D symbol `m` as B1 counts them -- from the start of B1, modulo
+    /// a superframe. The trellis state is not known, so every one is as
+    /// likely; the bits of the mapping frame `m` falls in, if it does not
+    /// start one, are not given.
+    pub fn resume(params: Params, m: u64) -> Self {
+        let mut decoder = Self::new(params);
+        decoder.metrics = vec![0.0; params.code.states()];
+        decoder.received = m;
+        decoder.decided = m;
+        decoder.whole_from = m.next_multiple_of(4);
+        decoder
     }
 
     pub fn params(&self) -> &Params {
@@ -535,17 +589,7 @@ impl Decoder {
 
     /// One received 2D symbol at unit mean power.
     pub fn feed(&mut self, symbol: Complex) {
-        let mut point = symbol.scale(self.scale);
-        if self.params.nonlinear {
-            // Undo 9.7 by fixed-point iteration: a point bent out by phi of
-            // its own energy is brought back by phi of the unbent one's.
-            let theta = self.params.theta();
-            let mut x = point;
-            for _ in 0..3 {
-                x = point.scale(1.0 / projection(theta * x.norm_sqr() / self.energy));
-            }
-            point = x;
-        }
+        let point = to_grid(&self.params, self.energy, self.scale, symbol);
         match self.half.take() {
             None => self.half = Some(point),
             Some(first) => self.viterbi(first, point),
@@ -558,15 +602,7 @@ impl Decoder {
         let inversion = inversion_at(&self.params.framing, self.received);
         // The best pair in each subset.
         let values = 16usize;
-        let mut best = vec![(f64::MAX, (0u8, 0u8)); 2 * values];
-        for (index, pairs) in self.subsets.iter().enumerate() {
-            for &(a, b) in pairs {
-                let d = near[0][a as usize].1 + near[1][b as usize].1;
-                if d < best[index].0 {
-                    best[index] = (d, (a, b));
-                }
-            }
-        }
+        let best = branches(&self.subsets, &near);
         let n = code.states();
         let mut next = vec![f64::MAX; n];
         let mut back = vec![(0u8, 0u8, 0u8); n];
@@ -660,7 +696,7 @@ impl Decoder {
         self.labels[2 * j] = l0 >> framing.q;
         self.labels[2 * j + 1] = l1 >> framing.q;
         self.decided += 1;
-        if j == 3 {
+        if j == 3 && m - 3 >= self.whole_from {
             let frame = m / 4;
             let within = (frame % framing.p as u64) as usize;
             let high = framing.high(within);
@@ -678,6 +714,253 @@ impl Decoder {
             }
         }
     }
+}
+
+/// Most a right place to read from costs the trellis a 4D symbol, on average,
+/// in grid units squared: a quarter of the least distance between two 4D
+/// subsets. Data mode reads a few tenths on the lines V.34 has run over, and
+/// a wrong place well over one.
+const SEARCH_COST: f64 = 1.0;
+
+/// Least the best place to read from has to cost less than the next best, in
+/// grid units squared: one and a half inversions' worth.
+const SEARCH_MARGIN: f64 = 6.0;
+
+/// Searches that find nothing before the signal is taken not to be data mode
+/// as expected.
+const SEARCHES: usize = 4;
+
+/// What a search for data mode's frames has come to.
+#[derive(Debug)]
+pub enum Acquired {
+    Searching,
+    /// A decoder at the place found, with every symbol the search read in it
+    /// already.
+    Found(Box<Decoder>),
+    /// Long enough to say it is not data mode as these parameters make it.
+    Nothing,
+}
+
+/// One place data mode's frames could start, and what reading from there has
+/// cost.
+#[derive(Debug, Clone)]
+struct Trial {
+    /// Which 2D symbol read begins a 4D symbol, 0 or 1.
+    pairing: usize,
+    /// Which 4D symbol read, counted modulo a half data frame, begins one.
+    phase: usize,
+    metrics: Vec<f64>,
+    cost: f64,
+}
+
+/// Finds where data mode's frames are, in symbols picked up part way through:
+/// after a slip has lost or repeated some, or when the far end's E never
+/// arrived.
+///
+/// Nothing in the signal marks a frame except the superframe's bit inversions
+/// (9.6.3, Table 12): at the start of each half data frame, the trellis
+/// encoder's Y0 goes out inverted or not, in a pattern of 2J that repeats
+/// once a superframe. A decoder reading from the wrong place pays for every
+/// inversion it does not expect -- and for every 4D symbol, if it pairs the 2D
+/// symbols wrongly. So a trial decoder for each pairing and each 4D symbol a
+/// half frame could start at, each free to take either Y0 at the start of
+/// every half frame, tells the right pairing and the half frame boundaries by
+/// what its best path costs over a superframe. Which Y0 the best of them took
+/// at each of those places then spells out the pattern, and where in it the
+/// search began: the pattern's zeros are 4, 9, 2 and 1 apart, so no turn of it
+/// but one fits.
+#[derive(Debug, Clone)]
+pub struct Acquirer {
+    params: Params,
+    subsets: Vec<Vec<(u8, u8)>>,
+    energy: f64,
+    scale: f64,
+    /// The symbols read since this search began, as fed, and in grid units.
+    symbols: Vec<Complex>,
+    points: Vec<Complex>,
+    trials: Vec<Trial>,
+    /// 4D symbols each pairing's trials have read.
+    read: [usize; 2],
+    failed: usize,
+}
+
+impl Acquirer {
+    pub fn new(params: Params) -> Self {
+        let shell = Shell::new(params.framing.m);
+        let (energy, bent) = energies(&params, &shell);
+        let mut acquirer = Self {
+            params,
+            subsets: subsets(params.code),
+            energy,
+            scale: bent.sqrt(),
+            symbols: Vec::new(),
+            points: Vec::new(),
+            trials: Vec::new(),
+            read: [0, 0],
+            failed: 0,
+        };
+        acquirer.restart();
+        acquirer
+    }
+
+    /// What a unit-power symbol is multiplied by to be in grid units.
+    pub fn grid_scale(&self) -> f64 {
+        self.scale
+    }
+
+    /// How far out the constellation's points reach, in grid units.
+    pub fn extent(&self) -> i32 {
+        extent(&self.params.framing)
+    }
+
+    /// 4D symbols a search reads: a superframe, over which the pattern of
+    /// inversions goes round once.
+    fn length(&self) -> usize {
+        4 * self.params.framing.p * self.params.framing.j
+    }
+
+    fn half_frame(&self) -> usize {
+        2 * self.params.framing.p
+    }
+
+    /// Start again from the next symbol.
+    fn restart(&mut self) {
+        let states = self.params.code.states();
+        self.symbols.clear();
+        self.points.clear();
+        self.read = [0, 0];
+        self.trials = (0..2)
+            .flat_map(|pairing| (0..self.half_frame()).map(move |phase| (pairing, phase)))
+            .map(|(pairing, phase)| Trial { pairing, phase, metrics: vec![0.0; states], cost: 0.0 })
+            .collect();
+    }
+
+    /// One received 2D symbol at unit mean power.
+    pub fn feed(&mut self, symbol: Complex) -> Acquired {
+        self.symbols.push(symbol);
+        self.points.push(to_grid(&self.params, self.energy, self.scale, symbol));
+        let (length, half_frame, code) = (self.length(), self.half_frame(), self.params.code);
+        for pairing in 0..2 {
+            let n = self.read[pairing];
+            let at = pairing + 2 * n;
+            if n == length || at + 1 >= self.points.len() {
+                continue;
+            }
+            let near = [nearest_by_label(self.points[at]), nearest_by_label(self.points[at + 1])];
+            let table: Vec<f64> = branches(&self.subsets, &near).iter().map(|b| b.0).collect();
+            for trial in self.trials.iter_mut().filter(|t| t.pairing == pairing) {
+                let free = n % half_frame == trial.phase;
+                trial.cost += step(&mut trial.metrics, &table, code, free, None);
+            }
+            self.read[pairing] += 1;
+        }
+        if self.read != [length, length] {
+            return Acquired::Searching;
+        }
+        if let Some(decoder) = self.decide() {
+            return Acquired::Found(Box::new(decoder));
+        }
+        self.failed += 1;
+        if self.failed == SEARCHES {
+            return Acquired::Nothing;
+        }
+        self.restart();
+        Acquired::Searching
+    }
+
+    /// The decoder the search came to, if it came to one.
+    fn decide(&self) -> Option<Decoder> {
+        let length = self.length();
+        let mut order: Vec<&Trial> = self.trials.iter().collect();
+        order.sort_by(|a, b| a.cost.total_cmp(&b.cost));
+        let (best, runner) = (order[0], order[1]);
+        if best.cost / length as f64 > SEARCH_COST || runner.cost - best.cost < SEARCH_MARGIN {
+            return None;
+        }
+        let framing = self.params.framing;
+        let halves = 2 * framing.j;
+        let offset = self.pattern_at(best)?;
+        // 4D symbol `phase` begins the half frame the pattern calls `offset`,
+        // which B1 counting would reach at (offset + 2) half frames: B1 is the
+        // last data frame of a superframe, halves 2J - 2 and 2J - 1.
+        let there = ((offset + 2) % halves * self.half_frame()) as u64;
+        let superframe = length as u64;
+        let m = (there + superframe - best.phase as u64) % superframe;
+        let mut decoder = Decoder::resume(self.params, m);
+        for &symbol in &self.symbols[best.pairing..] {
+            decoder.feed(symbol);
+        }
+        Some(decoder)
+    }
+
+    /// Where in the pattern of inversions a trial's first free place is: read
+    /// off its best path, and fitted to the pattern with no more than one of
+    /// the places misread.
+    fn pattern_at(&self, trial: &Trial) -> Option<usize> {
+        let (length, half_frame, code) = (self.length(), self.half_frame(), self.params.code);
+        let mut metrics = vec![0.0; code.states()];
+        let mut back = Vec::with_capacity(length);
+        for n in 0..length {
+            let at = trial.pairing + 2 * n;
+            let near = [nearest_by_label(self.points[at]), nearest_by_label(self.points[at + 1])];
+            let table: Vec<f64> = branches(&self.subsets, &near).iter().map(|b| b.0).collect();
+            let mut stage = vec![(0u8, false); code.states()];
+            step(&mut metrics, &table, code, n % half_frame == trial.phase, Some(&mut stage));
+            back.push(stage);
+        }
+        let mut state = metrics.iter().enumerate().min_by(|a, b| a.1.total_cmp(b.1)).map_or(0, |(s, _)| s);
+        let mut inverted = vec![false; length];
+        for n in (0..length).rev() {
+            let (from, flipped) = back[n][state];
+            inverted[n] = flipped;
+            state = usize::from(from);
+        }
+        let seen: Vec<bool> = (trial.phase..length).step_by(half_frame).map(|n| inverted[n]).collect();
+        let halves = 2 * self.params.framing.j;
+        let misread = |offset: usize| {
+            seen.iter().enumerate().filter(|&(i, &v)| trellis::inversion(self.params.framing.j, (offset + i) % halves) != v).count()
+        };
+        let mut fits: Vec<(usize, usize)> = (0..halves).map(|offset| (misread(offset), offset)).collect();
+        fits.sort_unstable();
+        (fits[0].0 <= 1 && fits[1].0 >= fits[0].0 + 2).then_some(fits[0].1)
+    }
+}
+
+/// One trellis step over every state for a trial: `free` lets Y0 go either way,
+/// as it may where a half frame starts. The cheapest path's cost is taken out
+/// of every metric and returned; `back`, if given, keeps where each state came
+/// from and whether Y0 went out inverted to get there.
+fn step(metrics: &mut Vec<f64>, table: &[f64], code: Code, free: bool, mut back: Option<&mut Vec<(u8, bool)>>) -> f64 {
+    let mut next = vec![f64::MAX; code.states()];
+    for (state, &from) in metrics.iter().enumerate() {
+        if from == f64::MAX {
+            continue;
+        }
+        let out = usize::from(code.output(state as u8));
+        for y in (0..16u8).filter(|y| y & !code.inputs() == 0) {
+            let plain = table[out * 16 + y as usize];
+            let turned = table[(1 - out) * 16 + y as usize];
+            let (d, flipped) = if free && turned < plain { (turned, true) } else { (plain, false) };
+            if d == f64::MAX {
+                continue;
+            }
+            let to = code.next(state as u8, y) as usize;
+            if from + d < next[to] {
+                next[to] = from + d;
+                if let Some(back) = back.as_deref_mut() {
+                    back[to] = (state as u8, flipped);
+                }
+            }
+        }
+    }
+    let floor = next.iter().copied().fold(f64::MAX, f64::min);
+    for m in &mut next {
+        if *m != f64::MAX {
+            *m -= floor;
+        }
+    }
+    *metrics = next;
+    floor
 }
 
 #[cfg(test)]
@@ -775,6 +1058,101 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Symbols from an encoder of random bits, with noise at `snr_db`, and
+    /// the bits.
+    fn signal(p: Params, symbols: usize, snr_db: f64) -> (Vec<Complex>, Vec<bool>) {
+        let mut encoder = Encoder::new(p);
+        let mut seed = 0x1234_5679_u32;
+        let mut noise = 0x2545_f491_u32;
+        let sigma = 10f64.powf(-snr_db / 20.0) / 2f64.sqrt();
+        let mut uniform = move || {
+            noise ^= noise << 13;
+            noise ^= noise >> 17;
+            noise ^= noise << 5;
+            f64::from(noise) / f64::from(u32::MAX)
+        };
+        let mut gauss = move || {
+            let (a, b) = (uniform().max(1e-12), uniform());
+            (-2.0 * a.ln()).sqrt() * (std::f64::consts::TAU * b).cos()
+        };
+        let mut sent = Vec::new();
+        let out = (0..symbols)
+            .map(|_| {
+                let symbol = encoder.next_symbol(&mut || {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    let bit = seed & 1 == 1;
+                    sent.push(bit);
+                    bit
+                });
+                symbol + Complex::new(gauss() * sigma, gauss() * sigma)
+            })
+            .collect();
+        (out, sent)
+    }
+
+    #[test]
+    fn data_mode_picked_up_anywhere_finds_its_frames() {
+        // Every trellis code, the rates with J of 7 and 8, minimum and
+        // expanded shaping, and places to start that are none of them the
+        // start of anything.
+        for (rate, primary, code, expanded) in [
+            (SymbolRate::S3429, 33_600, Code::States16, false),
+            (SymbolRate::S3429, 31_200, Code::States64, true),
+            (SymbolRate::S3200, 28_800, Code::States32, false),
+            (SymbolRate::S3429, 4800, Code::States16, false),
+            (SymbolRate::S2400, 9600, Code::States16, true),
+        ] {
+            let p = params(rate, primary, code, expanded, false);
+            let superframe = 8 * p.framing.p * p.framing.j;
+            let (symbols, sent) = signal(p, 6 * superframe, 38.0);
+            for start in [1, 2 * superframe + 7, 3 * superframe - 333] {
+                let mut acquirer = Acquirer::new(p);
+                let mut decoder = None;
+                let mut fed = start;
+                while decoder.is_none() && fed < symbols.len() {
+                    match acquirer.feed(symbols[fed]) {
+                        Acquired::Searching => {}
+                        Acquired::Found(found) => decoder = Some(found),
+                        Acquired::Nothing => panic!("{rate:?} {primary} {code:?}: nothing from {start}"),
+                    }
+                    fed += 1;
+                }
+                let mut decoder = decoder.unwrap_or_else(|| panic!("{rate:?} {primary} {code:?}: never found from {start}"));
+                assert!(fed - start <= 2 * superframe + 2, "{rate:?} {primary}: {} symbols to find", fed - start);
+                for &symbol in &symbols[fed..] {
+                    decoder.feed(symbol);
+                }
+                // A good long run of what went in, back out of it.
+                let got = decoder.take_bits();
+                let middle = &sent[sent.len() * 2 / 3..sent.len() * 2 / 3 + 2000];
+                assert!(got.windows(middle.len()).any(|w| w == middle), "{rate:?} {primary} {code:?} from {start}: {} bits and not those", got.len());
+            }
+        }
+    }
+
+    #[test]
+    fn noise_that_is_not_data_mode_is_not_found_as_it() {
+        let p = params(SymbolRate::S3429, 31_200, Code::States16, false, false);
+        let mut acquirer = Acquirer::new(p);
+        let mut seed = 7u32;
+        let mut uniform = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            f64::from(seed) / f64::from(u32::MAX) - 0.5
+        };
+        let mut outcome = Acquired::Searching;
+        for _ in 0..(8 * p.framing.p * p.framing.j) * SEARCHES + 8 {
+            outcome = acquirer.feed(Complex::new(uniform() * 3.0, uniform() * 3.0));
+            if !matches!(outcome, Acquired::Searching) {
+                break;
+            }
+        }
+        assert!(matches!(outcome, Acquired::Nothing), "{outcome:?}");
     }
 
     #[test]

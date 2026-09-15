@@ -384,6 +384,9 @@ pub struct V34Training {
     /// whether the last was a cleardown that ended the call.
     pub renegotiations: u32,
     pub cleared_down: bool,
+    /// Times data mode's frames were found again from the data: after a slip,
+    /// or an E the line lost.
+    pub found_again: u32,
 }
 
 impl V34Report {
@@ -429,6 +432,7 @@ impl V34Report {
                 rates: t.rates(),
                 renegotiations: t.renegotiations(),
                 cleared_down: t.status() == v34::training::Status::ClearedDown,
+                found_again: t.found_again(),
             }),
         }
     }
@@ -555,6 +559,16 @@ impl V34Report {
                 rows.push((
                     "V.34 renegotiated",
                     format!("{} time{}", t.renegotiations, if t.renegotiations == 1 { "" } else { "s" }),
+                ));
+            }
+            if t.found_again > 0 {
+                rows.push((
+                    "V.34 frames found",
+                    format!(
+                        "again {} time{}, after slips or a lost E",
+                        t.found_again,
+                        if t.found_again == 1 { "" } else { "s" }
+                    ),
                 ));
             }
             rows.push((

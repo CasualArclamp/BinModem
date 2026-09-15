@@ -9,7 +9,7 @@ one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
 source for every normative constant, and against the RFCs for everything
-carried over the top of them. 1226 tests.
+carried over the top of them. 1230 tests.
 
 ## What works
 
@@ -169,14 +169,16 @@ OS-specific code — but only built and run on Windows so far.
 ## Next
 
 V.34 on a real call. A live call has reached data mode with a real modem at
-31 200 towards this end: its login banner came through without an error, and
-the far end heard this end's 33 600 well enough to ask, six seconds in, for a
-rate renegotiation down to 28 800. That renegotiation is now answered -- two of
+31 200 towards this end: its login banner came through without an error, and the
+far end heard this end's 33 600 well enough to ask, six seconds in, for a rate
+renegotiation down to 28 800. That renegotiation is now answered -- two of
 these renegotiate from either end and carry V.42 on through it, and the capture
 replays through the modem to the banner on the terminal and the far end's new
-MP read. What is left is what the far end did when nobody answered, a full
-retrain from phase 2, and how data mode lives through a VoIP jitter buffer's
-slips, which lose symbols and so the frame alignment with them.
+MP read. A second call lost the far end's E to a VoIP slip; that capture now
+connects in replay, the receiver re-timing itself to the slip and finding the
+frames again from the superframe's bit inversions, and doing the same for
+another slip once connected. What is left is a full retrain from phase 2, which
+a far end falls back to when a renegotiation goes unanswered.
 
 After it, V.17 for fax at 14 400, and V.33 beside it -- the same trellis code
 as V.32bis again, on a fax call and a leased line respectively -- and more than

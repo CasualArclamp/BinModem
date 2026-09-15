@@ -115,10 +115,14 @@ login banner, a prompt. That is recognised as text rather than read as an
 answer pattern, and goes to the terminal.
 
 A VoIP call's jitter buffer now and then plays twenty milliseconds of audio it
-made up, and the receiver notices the jump and finds the signal again. In the
-start-up that costs nothing; in data mode it costs the data in flight, which
-V.42 sends again. Press **Record** first on any V.34 call that goes wrong: the
-capture is what gets it fixed.
+made up, or drops some, and the receiver notices the jump and finds the signal
+again. In the start-up that costs nothing. In data mode it costs a third of a
+second or so: the receiver finds where the frames are again from the data
+itself, by the bit inversions every superframe carries, and V.42 sends again
+whatever was lost. The same search rescues a call whose far end's E was lost to
+a slip, which would otherwise wait for it until it gave up. The panel counts the
+times the frames were found again. Press **Record** first on any V.34 call that
+goes wrong: the capture is what gets it fixed.
 
 A capture can be drawn afterwards, too. The data pump's capture test dumps
 every equalised symbol of one direction, and `tools/plot_constellation.py`
