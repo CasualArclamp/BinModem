@@ -545,7 +545,7 @@ impl ScopeApp {
         ("V32B", "V.32bis - 4800 to 14400"),
         (
             "V34",
-            "V.34 - start-up only: probes, trains, swaps MP, reports, and hangs up.     A far end without V.34 gets V.32bis",
+            "V.34 - up to 33600, the rate settled from what the line measures.         A far end without V.34 gets V.32bis",
         ),
     ];
 

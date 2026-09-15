@@ -18,6 +18,9 @@
 use std::collections::VecDeque;
 
 use datapump::v32::Mode;
+use datapump::v34::data::{Decoder, Params};
+use datapump::v34::frame::Framing;
+use datapump::v34::trellis::Code;
 use datapump::v34::info::SymbolRate;
 use datapump::v34::mp::{Finder, Found};
 use datapump::v34::qam::Band;
@@ -83,6 +86,12 @@ fn a_captured_end_of_phases_3_and_4() {
     let mut last_report = 0.0;
     let mut mp_count = 0usize;
     let (mut slips, mut lost) = (0, false);
+    // Data mode after E, as this end's MP asked the far end to send it: the
+    // rate the two MPs came to, 16 states, minimum shaping, no precoding.
+    let data_rate = number("V34_DATA_RATE", 31_200.0) as u32;
+    let mut data: Option<Decoder> = None;
+    let mut data_bits: Vec<bool> = Vec::new();
+    let mut e_seen = false;
     // Equalised points between two times, for looking at.
     let (dump_from, dump_to) = (number("V34_DUMP_FROM", 0.0), number("V34_DUMP_TO", 0.0));
     let mut dump = std::env::var("V34_DUMP").ok().map(|path| std::fs::File::create(path).expect("could not make the dump"));
@@ -112,6 +121,36 @@ fn a_captured_end_of_phases_3_and_4() {
                 }
                 Heard::Symbol(symbol) => {
                     symbols += 1;
+                    if e_seen && data.is_none() {
+                        let params = Params {
+                            framing: Framing::new(rate, data_rate, false, false).expect("a rate Table 8 has"),
+                            code: Code::States16,
+                            nonlinear: false,
+                            precoding: [(0, 0); 3],
+                            mode: sender,
+                        };
+                        let decoder = Decoder::new(params);
+                        rx.set_grid(decoder.grid_scale(), decoder.extent());
+                        println!("{now:8.3} B1 and data at {data_rate} from here, grid scale {:.2}", decoder.grid_scale());
+                        data = Some(decoder);
+                    }
+                    if let Some(decoder) = data.as_mut() {
+                        decoder.feed(symbol.point);
+                        data_bits.extend(decoder.take_bits());
+                        if now - last_report > 0.02 && now < 30.3 || now - last_report > 0.25 {
+                            last_report = now;
+                            let recent = &data_bits[data_bits.len().saturating_sub(500)..];
+                            println!(
+                                "{now:8.3}   data: {:.1} dB on the grid, path cost {:.2}, {} bits, last 500 {:.2} ones, drift {:+.0} ppm",
+                                rx.snr_db(),
+                                decoder.path_cost(),
+                                data_bits.len(),
+                                recent.iter().filter(|b| **b).count() as f64 / recent.len().max(1) as f64,
+                                rx.drift_ppm()
+                            );
+                        }
+                        continue;
+                    }
                     if rx.slips() != slips {
                         slips = rx.slips();
                         println!("{now:8.3} found the signal again after a slip ({slips} so far)");
@@ -188,6 +227,7 @@ fn a_captured_end_of_phases_3_and_4() {
                             Some(Found::E) if mp_count > 0 && after_e.is_none() => {
                                 println!("{now:8.3} E");
                                 after_e = Some(Vec::new());
+                                e_seen = true;
                             }
                             _ => {}
                         }
@@ -218,4 +258,41 @@ fn a_captured_end_of_phases_3_and_4() {
         }
     }
     println!("{mp_count} MP sequences in all");
+    if !data_bits.is_empty() {
+        let text: String = data_bits.iter().take(2400).map(|b| if *b { '1' } else { '0' }).collect();
+        println!("the first data bits:");
+        for chunk in text.as_bytes().chunks(100) {
+            println!("  {}", std::str::from_utf8(chunk).unwrap());
+        }
+        let ones = data_bits.iter().filter(|b| **b).count();
+        let flags = data_bits.windows(8).filter(|w| *w == [false, true, true, true, true, true, true, false]).count();
+        println!("{} data bits, {} ones, {} HDLC flags", data_bits.len(), ones, flags);
+        // What V.42 made of it: frames whose FCS checks, and the ones that
+        // did not.
+        let mut hdlc = ec::hdlc::Decoder::new(ec::hdlc::Fcs::Bits16);
+        hdlc.accept_either();
+        let (mut good, mut bad) = (0, 0);
+        for &bit in &data_bits {
+            match hdlc.feed(bit) {
+                Some(Ok(frame)) => {
+                    good += 1;
+                    if good <= 6 {
+                        println!("  frame of {} octets: {:02x?}", frame.len(), &frame[..frame.len().min(24)]);
+                    }
+                }
+                Some(Err(e)) => {
+                    bad += 1;
+                    if bad <= 3 {
+                        println!("  bad frame: {e:?}");
+                    }
+                }
+                None => {}
+            }
+        }
+        println!("{good} frames checked, {bad} did not");
+        if let Ok(path) = std::env::var("V34_BITS") {
+            let text: String = data_bits.iter().map(|b| if *b { '1' } else { '0' }).collect();
+            std::fs::write(path, text).unwrap();
+        }
+    }
 }

@@ -371,31 +371,44 @@ fn the_two_v32_carriers_are_two_ceilings() {
 
 /// Two modems asked for V.34 agree on it in V.8 and go through its start-up:
 /// capabilities, ranging, probing and the settlement in phase 2, training and
-/// the MP exchange in phases 3 and 4. There is no data mode yet, so both ends
-/// then hang up -- and what they found is kept.
+/// the MP exchange in phases 3 and 4 -- and then connect at 33 600 both ways,
+/// with V.42 over it carrying a login both ways.
 #[test]
-fn two_modems_asked_for_v34_train_exchange_mp_and_hang_up() {
+fn two_modems_asked_for_v34_connect_at_33600_and_carry_data() {
     let mut p = Pair::new();
     Pair::type_at(&mut p.host, "AT+MS=V34");
     Pair::type_at(&mut p.caller, "AT+MS=V34");
     Pair::type_at(&mut p.host, "ATA");
     Pair::type_at(&mut p.caller, "ATD5551234");
     let mut phases = Vec::new();
-    for _ in 0..1500 {
+    for _ in 0..2000 {
         p.run(0.01);
         let phase = p.caller.line_phase();
         if phases.last() != Some(&phase) {
             phases.push(phase);
         }
-        if p.caller.state() == State::Command && p.host.state() == State::Command && phases.len() > 2 {
+        if p.caller.state() == State::Data && p.host.state() == State::Data {
             break;
         }
     }
     assert!(phases.contains(&"V.34 ranging"), "never ranged: {phases:?}");
     assert!(phases.contains(&"V.34 phase 4: MP"), "never reached MP: {phases:?}");
-    assert_eq!(p.caller.state(), State::Command, "still in {phases:?}");
-    assert_eq!(p.host.state(), State::Command);
-    assert!(p.caller_saw().contains("NO CARRIER"), "{}", p.caller_saw());
+    assert_eq!(p.caller.state(), State::Data, "still in {phases:?}: {}", p.caller_saw());
+    assert_eq!(p.host.state(), State::Data, "{}", p.host_saw());
+    assert!(p.caller_saw().contains("CONNECT 33600"), "{}", p.caller_saw());
+    assert_eq!(p.caller.rate(), Some(33_600));
+
+    p.at_caller.clear();
+    p.at_host.clear();
+    for b in b"cactus\r" {
+        p.caller.feed_dte(*b);
+    }
+    for b in b"Password:" {
+        p.host.feed_dte(*b);
+    }
+    p.run(4.0);
+    assert!(p.host_saw().contains("cactus"), "the host saw {:?}", p.host_saw());
+    assert!(p.caller_saw().contains("Password:"), "the caller saw {:?}", p.caller_saw());
 
     for (who, modem) in [("caller", &p.caller), ("host", &p.host)] {
         let report = modem.v34_report().unwrap_or_else(|| panic!("{who}: no report"));
@@ -408,6 +421,7 @@ fn two_modems_asked_for_v34_train_exchange_mp_and_hang_up() {
         assert!(rtd < 0.003, "{who}: {rtd} s round trip on a direct connection");
         let training = report.training.as_ref().expect("phases 3 and 4 never started");
         assert!(training.done, "{who}: {:?}", training.stopped);
+        assert_eq!(training.connected, Some((33_600, 33_600)), "{who}");
         assert_eq!(training.far_asked, Some(datapump::v34::signals::Size::Sixteen), "{who}");
         assert!(training.phase3_snr.unwrap() > 30.0, "{who}: {:?}", training.phase3_snr);
         assert_eq!(training.rates, Some((14, 14)), "{who}");

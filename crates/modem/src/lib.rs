@@ -95,9 +95,8 @@ enum Pump {
     V32(Box<v32::startup::Modem>),
     /// Bell 103: 300 bit/s, two tones a direction, and nothing else at all.
     Bell103(Box<bell103::Modem>),
-    /// V.34's start-up: the line probed and ranged in phase 2, both receivers
-    /// trained and data mode's parameters exchanged in phases 3 and 4 -- and
-    /// the call ended there, because the data mode is not written yet.
+    /// V.34: the line probed and ranged in phase 2, both receivers trained
+    /// and data mode's parameters exchanged in phases 3 and 4, and data after.
     V34(Box<v34::startup::Modem>),
 }
 
@@ -132,10 +131,11 @@ impl Pump {
                 bell103::Status::Connected(rate) => Progress::Connected(rate),
                 bell103::Status::Failed => Progress::Failed,
             },
-            // Done is not connected: there is nothing after phase 4 to connect
-            // with yet, so either way the call is over.
+            // Rates can differ each way; the one reported is what arrives,
+            // which is what the terminal on this end gets to see.
             Self::V34(m) => match m.status() {
                 v34::startup::Status::Running => Progress::Negotiating,
+                v34::startup::Status::Connected { receive, .. } => Progress::Connected(receive),
                 v34::startup::Status::Done | v34::startup::Status::Failed(_) => Progress::Failed,
             },
         }
@@ -152,7 +152,7 @@ impl Pump {
             // waiting for a carrier that had gone before it started waiting.
             Self::V32(m) => m.carrier(),
             Self::Bell103(m) => m.carrier(),
-            Self::V34(_) => false,
+            Self::V34(m) => m.carrier(),
         }
     }
 
@@ -161,7 +161,7 @@ impl Pump {
             Self::V22bis(m) => m.take_bits(),
             Self::V32(m) => m.take_bits(),
             Self::Bell103(m) => m.take_bits(),
-            Self::V34(_) => Vec::new(),
+            Self::V34(m) => m.take_bits(),
         }
     }
 
@@ -170,7 +170,7 @@ impl Pump {
             Self::V22bis(m) => m.send_bits(bits),
             Self::V32(m) => m.send_bits(bits),
             Self::Bell103(m) => m.send_bits(bits),
-            Self::V34(_) => {}
+            Self::V34(m) => m.send_bits(bits),
         }
     }
 
@@ -179,7 +179,7 @@ impl Pump {
             Self::V22bis(m) => m.pending_bits(),
             Self::V32(m) => m.pending_bits(),
             Self::Bell103(m) => m.pending_bits(),
-            Self::V34(_) => 0,
+            Self::V34(m) => m.pending_bits(),
         }
     }
 
@@ -356,6 +356,9 @@ pub struct V34Report {
 pub struct V34Training {
     /// Whether they got to the end, and if not where they stopped and why.
     pub done: bool,
+    /// Data mode's rates in bit/s, this end's transmitter's and receiver's,
+    /// once B1 has arrived.
+    pub connected: Option<(u32, u32)>,
     pub stopped: Option<(&'static str, &'static str)>,
     /// The constellation each end's J asked the other to use in phase 4.
     pub far_asked: Option<v34::signals::Size>,
@@ -389,7 +392,11 @@ impl V34Report {
             info1c: m.info1c(),
             info1a: m.info1a(),
             training: startup.training().map(|t| V34Training {
-                done: t.status() == v34::training::Status::Done,
+                done: matches!(t.status(), v34::training::Status::Done | v34::training::Status::Connected { .. }),
+                connected: match t.status() {
+                    v34::training::Status::Connected { transmit, receive } => Some((transmit, receive)),
+                    _ => None,
+                },
                 stopped: match t.status() {
                     v34::training::Status::Failed(why) => Some((t.phase(), why)),
                     _ => None,
@@ -514,7 +521,8 @@ impl V34Report {
             rows.push((
                 "V.34 phases 3 and 4",
                 match (t.done, t.stopped) {
-                    (true, _) => "done; the data mode is not written yet, so the call ends here".to_owned(),
+                    (true, _) if t.connected.is_some() => "done, and in data mode".to_owned(),
+                    (true, _) => "done, but the two MPs left no rate to run data at".to_owned(),
                     (_, Some((stage, why))) => format!("stopped at {stage}: {why}"),
                     _ => "still going".to_owned(),
                 },
@@ -1306,6 +1314,9 @@ impl Modem {
             Progress::Negotiating | Progress::Retraining => {}
             Progress::Connected(rate) => {
                 self.rate = rate;
+                if let Some(Pump::V34(m)) = self.pump.as_ref() {
+                    self.v34_report = Some(V34Report::of(m));
+                }
                 // Everything the receiver made of the handshake is thrown
                 // away. A demodulator that has not finished training still
                 // hands up bits, and by the time it has there are thousands

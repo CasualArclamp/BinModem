@@ -27,6 +27,8 @@ use std::collections::VecDeque;
 use dsp::Complex;
 
 use super::constellation::Point;
+use super::data::{Decoder, Encoder, Params};
+use super::frame::Framing;
 use super::info::{Info0, Info1a, Info1c};
 use super::mp::{Finder, Found, Mp, Trellis};
 use super::phase2::Role;
@@ -34,14 +36,18 @@ use super::probe;
 use super::qam::{Band, Transmitter};
 use super::receiver::{self, Heard, Receiver, Reference};
 use super::signals::{self, J_FOUR, J_PRIME, J_SIXTEEN, Reader, Sender, Size};
+use super::trellis::Code;
 use crate::v32::Mode;
 
 /// How phases 3 and 4 are going.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Running,
-    /// Both ends have sent E: data mode is next.
+    /// Both ends have sent E, but no data mode could be set up between the
+    /// two MPs -- no rate both ends enable.
     Done,
+    /// In data mode: B1 has arrived, at these rates in bit/s.
+    Connected { transmit: u32, receive: u32 },
     Failed(&'static str),
 }
 
@@ -152,6 +158,8 @@ enum Segment {
     JPrime,
     Mp,
     E,
+    /// B1, and data after it.
+    Data,
 }
 
 /// Symbols for the transmitter, one at a time.
@@ -181,6 +189,11 @@ struct Source {
     /// have to be before a change out of it is taken.
     silent: usize,
     hold: usize,
+    /// Data mode's encoder, made ready before E goes so that B1 follows it
+    /// with nothing between.
+    encoder: Option<Encoder>,
+    /// Data waiting to go.
+    data: VecDeque<bool>,
 }
 
 fn grid(point: Point, size: Size) -> Complex {
@@ -203,6 +216,8 @@ impl Source {
             acknowledged: 0,
             silent: 0,
             hold: 0,
+            encoder: None,
+            data: VecDeque::new(),
         }
     }
 
@@ -312,11 +327,27 @@ impl Source {
                 }
                 Segment::E => {
                     if self.queue.is_empty() {
-                        self.start(Segment::Silence);
+                        // 11.4.1.1.4 and 11.4.1.2.4: "After sending an E
+                        // sequence, the ... modem shall send B1".
+                        let next = if self.encoder.is_some() { Segment::Data } else { Segment::Silence };
+                        self.start(next);
                         continue;
                     }
                     let size = self.size;
                     return self.differential(size);
+                }
+                Segment::Data => {
+                    let Some(encoder) = self.encoder.as_mut() else {
+                        self.start(Segment::Silence);
+                        continue;
+                    };
+                    // B1 is one data frame of scrambled ones (10.1.3.1): the
+                    // encoder's first data frame takes ones whatever is
+                    // waiting.
+                    let b1 = encoder.mapping_frames() < encoder.params().framing.p as u64;
+                    let data = &mut self.data;
+                    self.count += 1;
+                    return encoder.next_symbol(&mut || if b1 { true } else { data.pop_front().unwrap_or(true) });
                 }
             }
         }
@@ -445,6 +476,8 @@ enum Stage {
     AnswerAwaitJ,
     AnswerPhase4,
     AnswerMp,
+    // Both.
+    Data,
     Finished,
 }
 
@@ -458,6 +491,7 @@ impl Stage {
             Self::CallAwaitS4 => "V.34 phase 4: listening for S",
             Self::CallTraining4 | Self::AnswerPhase4 => "V.34 phase 4: training",
             Self::CallMp | Self::AnswerMp => "V.34 phase 4: MP",
+            Self::Data => "V.34 data",
             Self::Finished => "V.34 phase 4 done",
         }
     }
@@ -494,6 +528,15 @@ pub struct Modem {
     far_acknowledged: bool,
     far_e: bool,
     sent_e: bool,
+
+    /// Data mode's decoder, once the far end's E has come.
+    decoder: Option<Decoder>,
+    /// Bits of the far end's B1 still to come, and how many of them were not
+    /// the ones B1 is.
+    b1_left: usize,
+    b1_errors: usize,
+    /// Data received.
+    received: Vec<bool>,
 }
 
 impl Modem {
@@ -534,6 +577,10 @@ impl Modem {
             far_acknowledged: false,
             far_e: false,
             sent_e: false,
+            decoder: None,
+            b1_left: 0,
+            b1_errors: 0,
+            received: Vec::new(),
         };
         match settings.role {
             Role::Call => {
@@ -660,12 +707,13 @@ impl Modem {
     pub fn step(&mut self, line: f64) -> f64 {
         self.now += 1;
         self.rx.feed(line);
+        let live = |status: Status| matches!(status, Status::Running | Status::Connected { .. });
         while let Some(heard) = self.rx.heard() {
-            if self.status == Status::Running {
+            if live(self.status) {
                 self.heard(heard);
             }
         }
-        if self.status == Status::Running {
+        if live(self.status) {
             if let Some((at, why)) = self.deadline
                 && self.now > at
             {
@@ -702,6 +750,18 @@ impl Modem {
             }
             Heard::Untrained => self.fail("the far end's training sequence did not train this end"),
             Heard::Symbol(symbol) => {
+                if let Some(decoder) = self.decoder.as_mut() {
+                    decoder.feed(symbol.point);
+                    for bit in decoder.take_bits() {
+                        if self.b1_left > 0 {
+                            self.b1_left -= 1;
+                            self.b1_errors += usize::from(!bit);
+                        } else {
+                            self.received.push(bit);
+                        }
+                    }
+                    return;
+                }
                 for event in self.listening.symbol(symbol.decided) {
                     self.event(event);
                 }
@@ -785,9 +845,87 @@ impl Modem {
                     self.far_acknowledged = true;
                 }
             }
-            (_, Event::E) => self.far_e = true,
+            (_, Event::E) => {
+                self.far_e = true;
+                // "After receiving a 20-bit E sequence, the modem shall
+                // condition its receiver to receive B1" (11.4.1.1.5): the next
+                // symbol is B1's first.
+                if let Some(params) = self.receive_params() {
+                    let decoder = Decoder::new(params);
+                    self.rx.set_grid(decoder.grid_scale(), decoder.extent());
+                    self.b1_left = params.framing.n;
+                    self.decoder = Some(decoder);
+                }
+            }
             _ => {}
         }
+    }
+
+    /// Data mode as this end sends it: at the rate the two MPs came to, with
+    /// the trellis code, shaping, non-linear encoding and precoding the far
+    /// end's MP asked for.
+    fn transmit_params(&self) -> Option<Params> {
+        let far = self.far_mp?;
+        let (transmit, _) = self.rates()?;
+        Some(Params {
+            framing: Framing::new(self.settings.transmit.rate, u32::from(transmit) * 2400, false, far.expanded_shaping)?,
+            code: code_of(far.trellis),
+            nonlinear: far.non_linear,
+            // "Prior to receiving the first MP sequence in Phase 4, the
+            // precoding coefficients are initialized to 0. If a Type 0 sequence
+            // is received, the precoding coefficients are unaffected."
+            precoding: far.precoding.unwrap_or([(0, 0); 3]),
+            mode: own_mode(self.settings.role),
+        })
+    }
+
+    /// Data mode as the far end sends it: as this end's own MP asked.
+    fn receive_params(&self) -> Option<Params> {
+        let ours = self.ours?;
+        let (_, receive) = self.rates()?;
+        Some(Params {
+            framing: Framing::new(self.settings.receive.rate, u32::from(receive) * 2400, false, ours.expanded_shaping)?,
+            code: code_of(ours.trellis),
+            nonlinear: ours.non_linear,
+            precoding: ours.precoding.unwrap_or([(0, 0); 3]),
+            mode: self.far_mode,
+        })
+    }
+
+    /// Data received, taken.
+    pub fn take_bits(&mut self) -> Vec<bool> {
+        std::mem::take(&mut self.received)
+    }
+
+    /// Data to send.
+    pub fn send_bits(&mut self, bits: &[bool]) {
+        self.source.data.extend(bits.iter().copied());
+    }
+
+    /// Data waiting to go, less what the next mapping frame will take at
+    /// once. A mapping frame's bits all go into the encoder together -- 79 of
+    /// them at 33 600 -- and whatever is feeding this has to have that many
+    /// ready or the frame is made up with idle ones, which in the middle of an
+    /// HDLC frame is an abort.
+    pub fn pending_bits(&self) -> usize {
+        let frame = self.source.encoder.as_ref().map_or(0, |e| e.params().framing.b);
+        self.source.data.len().saturating_sub(frame)
+    }
+
+    /// Bits of the far end's B1 that were not ones.
+    pub fn b1_errors(&self) -> usize {
+        self.b1_errors
+    }
+
+    /// What the far end's data costs the trellis decoder a 4D symbol, in grid
+    /// units squared: about the noise when all is well.
+    pub fn path_cost(&self) -> Option<f64> {
+        self.decoder.as_ref().map(Decoder::path_cost)
+    }
+
+    /// Whether the far end's signal is there to be demodulated.
+    pub fn carrier(&self) -> bool {
+        matches!(self.status, Status::Connected { .. }) && self.rx.level() > 1e-4
     }
 
     /// The MP this end sends: what it can take and give.
@@ -885,18 +1023,36 @@ impl Modem {
                     self.source.mp = ours.acknowledged();
                 }
                 if !self.sent_e && self.source.acknowledged >= MP_PRIME_REPEATS && (self.far_acknowledged || self.far_e) {
+                    self.source.encoder = self.transmit_params().map(Encoder::new);
                     self.source.change(Segment::E);
                     self.sent_e = true;
                 }
-                // Done once E is not just asked for but on the line: the pulse
-                // carries symbols a way ahead of the sample going out, and a
-                // modem that stopped as soon as E had been asked for would
-                // hang up with the whole of a sixteen-point E still inside it.
-                let flushed = self.source.segment == Segment::Silence && self.source.silent > 2 * Transmitter::lookahead();
-                if self.sent_e && self.far_e && flushed {
-                    self.status = Status::Done;
-                    self.deadline = None;
-                    self.enter(Stage::Finished);
+                if self.sent_e && self.far_e {
+                    if self.decoder.is_some() && self.source.encoder.is_some() {
+                        // 11.4.1.1.5: "After receiving B1, the modem shall
+                        // unclamp Circuit 104, turn on Circuit 109, and begin
+                        // demodulating data."
+                        if self.b1_left == 0 && self.source.segment == Segment::Data {
+                            if let Some((transmit, receive)) = self.rates() {
+                                self.status = Status::Connected {
+                                    transmit: u32::from(transmit) * 2400,
+                                    receive: u32::from(receive) * 2400,
+                                };
+                            }
+                            self.deadline = None;
+                            self.enter(Stage::Data);
+                        }
+                    } else {
+                        // No data mode between these MPs. Done once E is not
+                        // just asked for but on the line: the pulse carries
+                        // symbols a way ahead of the sample going out.
+                        let flushed = self.source.segment == Segment::Silence && self.source.silent > 2 * Transmitter::lookahead();
+                        if flushed {
+                            self.status = Status::Done;
+                            self.deadline = None;
+                            self.enter(Stage::Finished);
+                        }
+                    }
                 }
             }
             Stage::CallAwaitS
@@ -906,8 +1062,26 @@ impl Modem {
             | Stage::AnswerAwaitS
             | Stage::AnswerTraining
             | Stage::AnswerAwaitJ
+            | Stage::Data
             | Stage::Finished => {}
         }
+    }
+}
+
+/// The trellis code an MP asks for.
+fn code_of(trellis: Trellis) -> Code {
+    match trellis {
+        Trellis::States16 => Code::States16,
+        Trellis::States32 => Code::States32,
+        Trellis::States64 => Code::States64,
+    }
+}
+
+/// The scrambler of this end's own transmitter.
+fn own_mode(role: Role) -> Mode {
+    match role {
+        Role::Call => Mode::Call,
+        Role::Answer => Mode::Answer,
     }
 }
 
@@ -959,6 +1133,21 @@ mod tests {
     /// Two ends of phases 3 and 4 on a line with a delay each way, a loss,
     /// noise, and the answer end's clock off the call end's.
     fn call(one_way: f64, noise_db: f64, ppm: f64, seconds: f64) -> (Modem, Modem) {
+        let (caller, answerer, _, _) = call_with_data(one_way, noise_db, ppm, seconds, &[], &[]);
+        (caller, answerer)
+    }
+
+    /// The same, and once both ends are in data mode `from_call` and
+    /// `from_answer` sent for half a second; what each end received after its
+    /// B1 comes back too.
+    fn call_with_data(
+        one_way: f64,
+        noise_db: f64,
+        ppm: f64,
+        seconds: f64,
+        call_data: &[bool],
+        answer_data: &[bool],
+    ) -> (Modem, Modem, Vec<bool>, Vec<bool>) {
         let delay = (one_way * FS) as usize;
         let mut caller = Modem::new(settings(Role::Call, 2.0 * one_way), FS);
         let mut answerer = Modem::new(settings(Role::Answer, 2.0 * one_way), FS);
@@ -979,7 +1168,9 @@ mod tests {
         let mut down = dsp::Resampler::new(FS * (1.0 + ppm * 1e-6), FS);
         let (mut into_answer, mut out_of_answer): (VecDeque<f64>, VecDeque<f64>) = (VecDeque::new(), VecDeque::new());
         let mut buffer = Vec::new();
-        for _ in 0..(seconds * FS) as usize {
+        let (mut at_answer, mut at_call) = (Vec::new(), Vec::new());
+        let mut connected_at = None;
+        for n in 0..(seconds * FS) as usize {
             let heard_by_call = to_call.pop_front().unwrap() * loss + noise * rand();
             let from_call = caller.step(heard_by_call);
             to_answer.push_back(from_call);
@@ -994,14 +1185,28 @@ mod tests {
                 out_of_answer.extend(buffer.iter().copied());
             }
             to_call.push_back(out_of_answer.pop_front().unwrap_or(0.0));
-            if caller.status() != Status::Running && answerer.status() != Status::Running {
+            let both = |m: &Modem| matches!(m.status(), Status::Connected { .. });
+            if both(&caller) && both(&answerer) && connected_at.is_none() {
+                connected_at = Some(n);
+                caller.send_bits(call_data);
+                answerer.send_bits(answer_data);
+            }
+            at_answer.extend(answerer.take_bits());
+            at_call.extend(caller.take_bits());
+            let ended = |m: &Modem| matches!(m.status(), Status::Failed(_) | Status::Done);
+            if ended(&caller) || ended(&answerer) {
+                break;
+            }
+            // Half a second and the round trip after both connected: long
+            // enough for the data to cross.
+            if connected_at.is_some_and(|c| n > c + ((0.5 + 2.0 * one_way) * FS) as usize) {
                 break;
             }
         }
-        (caller, answerer)
+        (caller, answerer, at_call, at_answer)
     }
 
-    fn check_done(caller: &Modem, answerer: &Modem) {
+    fn check_connected(caller: &Modem, answerer: &Modem) {
         for m in [caller, answerer] {
             println!(
                 "{:?}: {} at {:.2} s, phase 3 {:?} dB, phase 4 {:?} dB, now {:.1} dB, drift {:.1} ppm, rates {:?}, far {:?}",
@@ -1016,8 +1221,10 @@ mod tests {
                 m.far_mp()
             );
         }
-        assert_eq!(caller.status(), Status::Done, "call modem stuck at {}", caller.phase());
-        assert_eq!(answerer.status(), Status::Done, "answer modem stuck at {}", answerer.phase());
+        assert!(matches!(caller.status(), Status::Connected { .. }), "call modem stuck at {}", caller.phase());
+        assert!(matches!(answerer.status(), Status::Connected { .. }), "answer modem stuck at {}", answerer.phase());
+        // Each end's B1 arrived as the ones it is.
+        assert_eq!((caller.b1_errors(), answerer.b1_errors()), (0, 0));
         // Each end asked for sixteen points and was given them.
         assert_eq!(caller.far_asked(), Some(Size::Sixteen));
         assert_eq!(answerer.far_asked(), Some(Size::Sixteen));
@@ -1037,7 +1244,7 @@ mod tests {
     #[test]
     fn two_ends_train_and_exchange_mp_on_a_short_line() {
         let (caller, answerer) = call(0.010, 45.0, 0.0, 12.0);
-        check_done(&caller, &answerer);
+        check_connected(&caller, &answerer);
         // A clean line: 33 600 from call to answer is the call modem's own
         // ceiling at 3200 symbols a second, 31 200.
         let (call_tx, call_rx) = caller.rates().unwrap();
@@ -1048,7 +1255,19 @@ mod tests {
     #[test]
     fn a_voip_round_trip_and_a_clock_114_ppm_out_are_survived() {
         let (caller, answerer) = call(0.580, 45.0, 114.0, 25.0);
-        check_done(&caller, &answerer);
+        check_connected(&caller, &answerer);
+    }
+
+    #[test]
+    fn data_crosses_both_ways_once_connected() {
+        // A pattern each way that no idle line of ones could be mistaken for.
+        let from_call: Vec<bool> = (0..6000).map(|i| (i * 37 + 11) % 7 < 3).collect();
+        let from_answer: Vec<bool> = (0..6000).map(|i| (i * 13 + 5) % 5 < 2).collect();
+        let (caller, answerer, at_call, at_answer) = call_with_data(0.030, 45.0, 60.0, 14.0, &from_call, &from_answer);
+        check_connected(&caller, &answerer);
+        let contains = |haystack: &[bool], needle: &[bool]| haystack.windows(needle.len()).any(|w| w == needle);
+        assert!(contains(&at_answer, &from_call), "the answer end did not receive the call end's data ({} bits)", at_answer.len());
+        assert!(contains(&at_call, &from_answer), "the call end did not receive the answer end's data ({} bits)", at_call.len());
     }
 
     #[test]

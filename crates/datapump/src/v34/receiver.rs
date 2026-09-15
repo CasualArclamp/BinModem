@@ -120,6 +120,72 @@ const FREQUENCY_GAIN: f64 = 4e-4;
 const TIMING_GAIN: f64 = 0.01;
 const DRIFT_GAIN: f64 = 1.25e-5;
 
+/// What the decisions that keep the loops going are made against.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Slicer {
+    /// Four or sixteen points: phases 3 and 4.
+    Points(Size),
+    /// Every odd grid point out to `limit`, a unit-power symbol being `scale`
+    /// grid units: data mode, whose trellis decoder makes the real decisions
+    /// some symbols later than the loops can wait.
+    Grid { scale: f64, limit: i32 },
+}
+
+impl Slicer {
+    /// The nearest point to `z`, on the grid and at unit power.
+    fn decide(self, z: Complex) -> (Point, Complex) {
+        match self {
+            Self::Points(size) => decide(z, size),
+            Self::Grid { scale, limit } => {
+                let odd = |v: f64| (2 * ((v * scale - 1.0) / 2.0).round() as i32 + 1).clamp(-limit, limit);
+                let point = (odd(z.re), odd(z.im));
+                (point, Complex::new(f64::from(point.0), f64::from(point.1)).scale(1.0 / scale))
+            }
+        }
+    }
+
+    /// The least squared distance between two of its points at unit power.
+    fn min_distance_squared(self) -> f64 {
+        match self {
+            Self::Points(size) => min_distance_squared(size),
+            Self::Grid { scale, .. } => (2.0 / scale).powi(2),
+        }
+    }
+
+    /// Mean squared error past which the signal is taken to be lost.
+    ///
+    /// Four or sixteen points are far apart, and a lost signal's error is most
+    /// of the way to the next point. A dense grid is another matter: every
+    /// sample lands within half a step of some point whatever it is, so the
+    /// error of pure garbage is only a sixth of a step squared -- a slicer on
+    /// data mode's 832 points reads noise at 28 dB. Half that is the line.
+    fn lost_level(self) -> f64 {
+        match self {
+            Self::Points(_) => 0.25 * self.min_distance_squared(),
+            Self::Grid { .. } => self.min_distance_squared() / 12.0,
+        }
+    }
+
+    /// The error a resync's best reading has to come under to be believed.
+    fn found_level(self, settled: f64) -> f64 {
+        match self {
+            Self::Points(_) => (4.0 * settled).max(0.0625 * self.min_distance_squared()),
+            // Garbage is a sixth of a step squared here, and not far above a
+            // locked signal at the rates this is used for, so the bar is close.
+            Self::Grid { .. } => (2.0 * settled).max(0.4 * self.min_distance_squared() / 6.0),
+        }
+    }
+
+    /// Symbols a resync reads, and over which lost is judged: a dense grid's
+    /// errors are small enough either way that it takes more of them.
+    fn window(self) -> (usize, usize) {
+        match self {
+            Self::Points(_) => (RESYNC_WINDOW, 8),
+            Self::Grid { .. } => (4 * RESYNC_WINDOW, 32),
+        }
+    }
+}
+
 /// A training sequence, known from its first symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reference {
@@ -297,6 +363,7 @@ pub struct Receiver {
     /// The half-symbol sample the next symbol is centred on.
     next_symbol: u64,
     size: Size,
+    slicer: Slicer,
     /// Carrier phase to take out of the next symbol, and its turn a symbol,
     /// in radians.
     rotation: f64,
@@ -319,6 +386,9 @@ pub struct Receiver {
     lost: Option<usize>,
     /// Slips found and followed.
     slips: u32,
+    /// The half-symbol samples' mean power, slowly: whether anything is
+    /// arriving at all.
+    power: f64,
 }
 
 impl Receiver {
@@ -363,6 +433,7 @@ impl Receiver {
             taps,
             next_symbol: 0,
             size: Size::Four,
+            slicer: Slicer::Points(Size::Four),
             rotation: 0.0,
             turn: 0.0,
             slope: 1.0,
@@ -374,6 +445,7 @@ impl Receiver {
             settled: 1.0,
             lost: None,
             slips: 0,
+            power: 0.0,
         }
     }
 
@@ -396,6 +468,7 @@ impl Receiver {
             Reference::PpThenTrn => Size::Four,
             Reference::Trn(size) => size,
         };
+        self.slicer = Slicer::Points(self.size);
     }
 
     /// Stop listening.
@@ -410,10 +483,17 @@ impl Receiver {
     /// The constellation decisions are made against from here on.
     pub fn set_size(&mut self, size: Size) {
         self.size = size;
+        self.slicer = Slicer::Points(size);
     }
 
     pub fn size(&self) -> Size {
         self.size
+    }
+
+    /// Decide against data mode's grid from here on: `scale` grid units to a
+    /// unit-power symbol, out to `limit`.
+    pub fn set_grid(&mut self, scale: f64, limit: i32) {
+        self.slicer = Slicer::Grid { scale, limit };
     }
 
     /// Signal to noise of the decisions, in decibels.
@@ -424,6 +504,11 @@ impl Receiver {
     /// The last symbol, equalised, while trained.
     pub fn last_point(&self) -> Option<Complex> {
         self.is_trained().then_some(self.last)
+    }
+
+    /// The signal's power, as the mixed-down half-symbol samples have it.
+    pub fn level(&self) -> f64 {
+        self.power
     }
 
     /// Slips found and followed since the start.
@@ -496,6 +581,7 @@ impl Receiver {
     }
 
     fn on_half(&mut self, half: Complex, at: f64) {
+        self.power += 0.002 * (half.norm_sqr() - self.power);
         let index = self.made;
         self.made += 1;
         self.halves.push_back(half);
@@ -531,7 +617,7 @@ impl Receiver {
                     let symbol = self.symbol();
                     self.heard.push_back(Heard::Symbol(symbol));
                     if let Some(lost) = self.lost
-                        && lost >= RESYNC_WINDOW / 2
+                        && lost >= self.slicer.window().0 / 2
                         && lost % RESYNC_EVERY == 0
                     {
                         self.resync();
@@ -735,19 +821,20 @@ impl Receiver {
             .fold(Complex::ZERO, |sum, (i, w)| sum + *w * (wide[i + 2] - wide[i]).scale(0.5));
         let spin = Complex::from_polar(1.0, -self.rotation);
         let z = y * spin;
-        let (decided, target) = decide(z, self.size);
+        let (decided, target) = self.slicer.decide(z);
         let e = z - target;
         let squared = e.norm_sqr();
         // Half the way to the nearest other point, squared: an error past it
         // is more likely a wrong decision than a right one.
-        let doubtful = 0.25 * min_distance_squared(self.size);
+        let doubtful = 0.25 * self.slicer.min_distance_squared();
+        let (_, judged) = self.slicer.window();
         self.recent.push_back(squared);
-        if self.recent.len() > 8 {
+        if self.recent.len() > judged {
             self.recent.pop_front();
         }
         let recent = self.recent.iter().sum::<f64>() / self.recent.len() as f64;
         match self.lost {
-            None if self.recent.len() == 8 && recent > (8.0 * self.settled).max(doubtful) => {
+            None if self.recent.len() == judged && recent > (8.0 * self.settled).max(self.slicer.lost_level()) => {
                 // The signal has jumped, or gone. Hold everything.
                 self.lost = Some(0);
             }
@@ -795,41 +882,51 @@ impl Receiver {
     /// a quarter -- which the same differential coding does not mind either.
     fn resync(&mut self) {
         let half = self.half * (1.0 + self.drift);
+        let (window, _) = self.slicer.window();
         // The newest window of symbols that every shift can be read for.
         let reach = REACH as u64 + 1;
         let Some(last) = self.next_symbol.checked_sub(2) else { return };
-        let Some(first_centre) = last.checked_sub(2 * (RESYNC_WINDOW as u64 - 1)) else { return };
+        let Some(first_centre) = last.checked_sub(2 * (window as u64 - 1)) else { return };
         let Some(from) = first_centre.checked_sub(reach) else { return };
         if from < self.first || last + reach >= self.made {
             return;
         }
         let start_time = self.times[(from - self.first) as usize];
         let count = (last + reach - from + 1) as usize;
-        let doubtful = 0.25 * min_distance_squared(self.size);
         let mut best: Option<(f64, f64, f64)> = None;
         for step in 0..2 * RESYNC_STEPS {
             let shift = (step as f64 - RESYNC_STEPS as f64) / RESYNC_STEPS as f64;
             let read: Option<Vec<Complex>> = (0..count).map(|m| self.interpolate(start_time + (m as f64 + shift) * half)).collect();
             let Some(read) = read else { continue };
-            let outputs: Vec<Complex> = (0..RESYNC_WINDOW)
+            let outputs: Vec<Complex> = (0..window)
                 .map(|j| apply(&self.taps, &read[2 * j + 1..2 * j + 2 + 2 * REACH]))
                 .collect();
             let fourth = outputs.iter().fold(Complex::ZERO, |sum, y| sum + *y * *y * *y * *y);
             let base = (fourth.arg() - std::f64::consts::PI) / 4.0;
             // Of the four turns that fit, the one nearest the turn before.
-            let turned = (0..4)
+            let mut turned = (0..4)
                 .map(|q| base + std::f64::consts::FRAC_PI_2 * f64::from(q))
                 .min_by(|a, b| angle_between(*a, self.rotation).total_cmp(&angle_between(*b, self.rotation)))
                 .unwrap_or(base);
+            // The fourth power only gets close on a dense constellation; the
+            // decisions it then allows take the rest of the way.
+            for _ in 0..3 {
+                let spin = Complex::from_polar(1.0, -turned);
+                let lean = outputs.iter().fold(Complex::ZERO, |sum, y| {
+                    let z = *y * spin;
+                    sum + z * self.slicer.decide(z).1.conj()
+                });
+                turned += lean.arg();
+            }
             let spin = Complex::from_polar(1.0, -turned);
-            let mse = outputs.iter().map(|y| (*y * spin - decide(*y * spin, self.size).1).norm_sqr()).sum::<f64>()
-                / RESYNC_WINDOW as f64;
+            let mse = outputs.iter().map(|y| (*y * spin - self.slicer.decide(*y * spin).1).norm_sqr()).sum::<f64>()
+                / window as f64;
             if best.is_none_or(|b| mse < b.0) {
                 best = Some((mse, shift, turned));
             }
         }
         let Some((mse, shift, turned)) = best else { return };
-        if mse > (4.0 * self.settled).max(0.25 * doubtful) {
+        if mse > self.slicer.found_level(self.settled) {
             return;
         }
         // Found. Everything from the window on is read again on the moved
@@ -859,7 +956,7 @@ impl Receiver {
         } else {
             self.due += moved;
         }
-        self.rotation = (turned + self.turn * (RESYNC_WINDOW as f64 / 2.0)).rem_euclid(std::f64::consts::TAU);
+        self.rotation = (turned + self.turn * (window as f64 / 2.0)).rem_euclid(std::f64::consts::TAU);
         self.lost = None;
         self.recent.clear();
         self.slips += 1;

@@ -20,13 +20,17 @@
 //! recording has it. The data mode is next.
 
 pub mod constellation;
+pub mod data;
 pub mod dpsk;
+pub mod frame;
 pub mod info;
 pub mod mp;
 pub mod phase2;
 pub mod probe;
 pub mod qam;
 pub mod receiver;
+pub mod shell;
 pub mod signals;
 pub mod startup;
 pub mod training;
+pub mod trellis;
