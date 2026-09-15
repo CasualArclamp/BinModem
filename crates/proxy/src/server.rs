@@ -117,6 +117,9 @@ impl Server {
         self.stack.tick(ms);
 
         for handle in self.stack.take_arrived() {
+            // Said out loud because everything between a browser asking and a
+            // socket opening happens over the link, where nobody can see it.
+            self.log.push("proxy: a connection arrived over the link".to_owned());
             self.relays.insert(
                 handle,
                 Relayed {

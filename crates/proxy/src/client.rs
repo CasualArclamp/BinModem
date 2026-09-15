@@ -137,8 +137,23 @@ impl Client {
         for event in self.stack.take_events() {
             match event.report {
                 Report::Reset | Report::Refused | Report::Closed => {
-                    if self.relays.remove(&event.handle).is_some() {
-                        self.log.push("proxy: a connection ended".to_owned());
+                    // Which of the three it was matters: refused is a far end
+                    // that is there and said no, reset is one that lost the
+                    // connection, and closed is the ordinary end of one.
+                    let why = match event.report {
+                        Report::Refused => "refused",
+                        Report::Reset => "reset",
+                        _ => "closed",
+                    };
+                    if let Some(relay) = self.relays.remove(&event.handle) {
+                        let owed = relay.to_socket.len();
+                        self.log.push(if owed > 0 {
+                            format!("proxy: a connection was {why} with {owed} octets still owed the browser")
+                        } else if relay.established {
+                            format!("proxy: a connection was {why}")
+                        } else {
+                            format!("proxy: a connection was {why} before the far end answered")
+                        });
                     }
                 }
                 Report::Established => {
@@ -146,6 +161,7 @@ impl Client {
                     if let Some(relay) = self.relays.get_mut(&event.handle) {
                         relay.established = true;
                     }
+                    self.log.push("proxy: the far end answered".to_owned());
                 }
                 Report::Data | Report::Closing => {}
             }
