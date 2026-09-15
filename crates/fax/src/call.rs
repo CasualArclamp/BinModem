@@ -866,12 +866,30 @@ impl Call {
                 self.scan_line_field = t30::field_of(&message.fif, 21, 23);
                 self.capabilities = Some(caps);
                 self.capability_field = Some(message.fif.clone());
-                // Only if there is a rate to command. A far end offering
-                // nothing this end can raise has already been told so, and
-                // sending it a DCS naming a modulation neither of us agreed
-                // on would be worse than saying nothing.
-                if self.role == Role::Caller && self.choose_rate() {
-                    self.pause_then(Phase::Commanding);
+                if self.role == Role::Caller {
+                    match self.phase {
+                        // The first DIS: choose the fastest rate both ends
+                        // have and command it. Only if there is one -- a far
+                        // end offering nothing this end can raise has already
+                        // been told so, and a DCS naming a modulation neither
+                        // agreed on is worse than saying nothing.
+                        Phase::Calling | Phase::Listening => {
+                            if self.choose_rate() {
+                                self.pause_then(Phase::Commanding);
+                            }
+                        }
+                        // A DIS again, once the command and training check
+                        // have already gone, is a far end that could not
+                        // train: 6.2.6 would have it answer with FTT, but
+                        // plenty of machines re-send DIS instead. Either way
+                        // the line will not carry this rate, so drop one, the
+                        // same as an FTT does. Choosing afresh here -- which
+                        // is what this used to do -- rebuilds the ladder at
+                        // the top every time, so the call never descends and
+                        // dies at the fastest rate the far end cannot read.
+                        Phase::Training | Phase::AwaitingConfirm => self.step_down(),
+                        _ => {}
+                    }
                 }
             }
             Frame::Dcs => {
@@ -2214,6 +2232,51 @@ mod tests {
         );
         call.step_down();
         assert!(call.trouble.is_some(), "ran off the bottom without saying so");
+    }
+
+    /// live-1789455660: a real wired fax machine that offers up to 9600,
+    /// cannot train there over a VoIP line, and answers the training check by
+    /// re-sending its DIS rather than an FTT (6.2.6 would have it send FTT,
+    /// but plenty do not). Read as "say the command again at this rate" the
+    /// call loops at 9600 until the far end gives up with a DCN; read as the
+    /// failure to train it is, the caller walks down the ladder.
+    #[test]
+    fn a_far_end_that_only_re_sends_dis_makes_the_caller_step_down() {
+        let dis = Message::new(Frame::Dis, false).with_fif(&DIS);
+        let mut call = Call::originate(FS, "61400000000", None);
+        let mut tx = frames::Sender::new();
+        tx.send(std::slice::from_ref(&dis));
+
+        let mut commanded = Vec::new();
+        let mut last = Phase::Calling;
+        for _ in 0..(120.0 * FS) as usize {
+            let listening = matches!(call.line(), Line::Listen | Line::CallingTone);
+            if listening
+                && (call.seconds() * 300.0).fract() < 300.0 / FS
+                && let Some(bit) = tx.next_bit()
+            {
+                call.control_bit(bit);
+            }
+            call.tick(true);
+            while call.next_control_bit().is_some() {}
+            while call.next_fast_bit().is_some() {}
+
+            // Each time the command and training check have gone out and the
+            // caller is waiting to be let go, note the rate it committed to
+            // and have the far end re-send its DIS -- what the real machine
+            // does when it cannot train.
+            if call.phase() == Phase::AwaitingConfirm && last != Phase::AwaitingConfirm {
+                commanded.push(call.rate());
+                tx.send(std::slice::from_ref(&dis));
+            }
+            last = call.phase();
+            if call.phase().is_over() {
+                break;
+            }
+        }
+        assert_eq!(commanded, vec![9600, 7200, 4800, 2400], "{commanded:?}");
+        assert!(call.phase().is_over(), "it never gave up below the slowest rate");
+        assert!(call.trouble.is_some(), "it failed without saying why");
     }
 
     #[test]
