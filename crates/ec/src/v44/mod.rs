@@ -22,7 +22,12 @@
 //! no dictionary reset short of starting again. When the node-tree or the
 //! history fills, the whole dictionary is reinitialised (7.11.3, 7.11.4).
 
+pub mod decoder;
+pub mod encoder;
 pub mod length;
+
+pub use decoder::Decoder;
+pub use encoder::Encoder;
 
 /// N5 (Table 11): "Number of control codes & first available codeword".
 ///
@@ -143,7 +148,10 @@ pub enum Mode {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests;
+
+#[cfg(test)]
+mod table_tests {
     use super::*;
 
     /// Table 11: N1 is "derived from N2T, N2R", and it has to be wide enough
@@ -193,7 +201,9 @@ mod tests {
     #[test]
     fn the_control_codes_sit_below_the_first_codeword() {
         assert_eq!(N5, 4);
-        assert!(control::REINIT < N5);
+        // Table 8 fills 0 to 3, so the first codeword is 4 and a code of 1
+        // followed by a value below N5 is a control code rather than one.
+        assert_eq!(N5 as usize, 4);
         assert_eq!(control::ETM, 0);
         assert_eq!(control::FLUSH, 1);
         assert_eq!(control::STEPUP, 2);
