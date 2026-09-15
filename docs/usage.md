@@ -67,12 +67,17 @@ that cannot give the first, `AT+MS=V22B,1,1200,1200` is not the slower
 connection — it is the one that works.
 
 To have something to dial, run the same program again with `--answer` on the
-same cable. It puts a second modem on the line, answers, and echoes what is
-typed like the simplest possible board:
+same cable. It puts a second modem on the line and answers the way a dial-up
+provider did: a banner, `login:` and `Password:`, and a prompt where `ppp`
+starts PPP. Log in as `guest` with no password, or give it an account of its
+own:
 
 ```powershell
-binmodem --answer --in "<input device>" --out "<output device>" --carrier V22B
+binmodem --answer --in "<input device>" --out "<output device>" --carrier V22B --user rory --password <password>
 ```
+
+Everything the caller is shown is printed there too, along with who logged in,
+the addresses PPP handed out and every ping that arrived.
 
 ## Trying V.34
 
@@ -214,14 +219,51 @@ alongside every other layer's.
 While the link is up it owns the byte stream: nothing typed reaches the far
 end and nothing from the far end reaches the screen, because a PPP frame is
 not something anybody wants on a terminal and a keystroke in the middle of one
-is a frame that fails its check. A file transfer wants the stream for the same
-reason, so the two refuse to run together. **Put it down** gives the terminal
-back, and hanging up takes the link with it.
+is a frame that fails its check. What is typed is dropped, with a line in the
+transcript saying so; put the link down first to type again. A file transfer
+wants the stream for the same reason, so the two refuse to run together. **Put it down** gives the terminal back, and hanging up
+takes the link with it.
+
+### Logging in
+
+The Network window has one account, a name and a password. It is what this
+end logs in with when it calls, and what a caller has to give when this end
+answers.
+
+Tick **answer calls with a login prompt** on the machine that will answer. A
+caller then meets what a dial-up provider showed: a banner, `login:`,
+`Password:`, and a prompt. `ppp` there starts PPP, `help` lists the commands
+and `logout` hangs up. The answering screen shows the session as the caller
+sees it, without the password. Three wrong passwords or a minute without a
+login put the call down, and so does the end of the PPP link.
+
+A dialler that skips the text and sends PPP frames from the start is answered
+as PPP, which is what Windows' Dial-Up Networking does unless it is told to
+show a terminal. That caller has not logged in, so PPP asks for the same
+account: CHAP first (RFC 1994), and PAP (RFC 1334) when the account has no
+password, since CHAP needs a secret at least one octet long.
+
+On the calling machine, **Log in, then PPP** does the login. It answers the far
+end's `login:` and `Password:` prompts with the account, types the **then
+type** command at the prompt after them -- `ppp` unless changed -- and starts
+PPP when the far end's first frame arrives. The far end's text is on the screen
+while it happens. A far end that refuses the password or asks for the login
+again stops it, and the terminal comes back with the reason in the transcript.
+**Bring PPP up** skips the text, and still gives the account to a far end that
+asks for it over PAP or CHAP.
+
+The password is kept between runs in BinModem's settings file, in plain text,
+so make one up for this rather than reusing one.
+
+The transcript says who logged in and how, and a link that ends says why: the
+password was wrong, the far end wanted MS-CHAP, which this does not do, or the
+far end put the link down.
 
 ### Web traffic over it
 
-Tick **carry web traffic** once the link is up and the two ends become a
-proxy. The end that answered the call has the internet and offers it; the end
+Tick **carry web traffic** and the two ends become a proxy once the link is
+up. The setting is kept for the next link, so a machine answering with a login
+prompt can offer it before anyone has called. The end that answered the call has the internet and offers it; the end
 that dialled listens on `127.0.0.1:1080` and the panel says so. Point a
 browser's SOCKS 5 proxy setting there — in Firefox, Settings → Network
 Settings → Manual, SOCKS Host `127.0.0.1` port `1080`, SOCKS v5, and tick
@@ -238,13 +280,11 @@ socket the answering end opens to the site. Expect a page in tens of seconds
 at 2400 and rather better at 9600; a modern page with a hundred requests on it
 will not be pleasant, and a page from 1996 will be exactly as it was.
 
-There is no authentication yet. Two of these go straight from LCP to
-addresses; a far end that insists on PAP or CHAP will agree to LCP and stop
-there, which is at least a failure with a name on it.
-
 The clause numbers in `crates/ppp` are RFC numbers: 1662 for the framing, 1661
-for the negotiation, 1332 for the addresses, and 791, 792 and 1071 for the
-datagram, the echo and the checksum over both. `crates/tcp` is RFC 9293, with
+for the negotiation, 1334 and 1994 for PAP and CHAP with 1321's MD5 under it,
+1332 for the addresses, and 791, 792 and 1071 for the datagram, the echo and
+the checksum over both. `crates/login` has no RFC behind it, because the text
+before PPP never had one. `crates/tcp` is RFC 9293, with
 6298 for the retransmission timer and 5681 for what to do about a loss;
 `crates/socks` is RFC 1928.
 

@@ -23,6 +23,7 @@ use modem::{Modem, Role, State};
 use telemetry::{CallState, Direction, Leds, Publisher};
 
 use crate::engine::{Control, FFT_SIZE, Ring, SCOPE_LEN, SPECTRUM_BINS, SYMBOL_HISTORY, scope_depth};
+use crate::dialin::{Login, Next as LoginNext, Settings as DialIn};
 use crate::network::{Networking, Request as NetRequest, View as NetView};
 
 /// The rate the modem runs at, whatever the sound card is doing.
@@ -210,6 +211,14 @@ pub struct Session {
     network_request: Mutex<Option<NetRequest>>,
     /// And what it is doing, once there is one.
     network: Mutex<Option<NetView>>,
+    /// The account, and whether calls are answered with a login prompt.
+    dialin: Mutex<DialIn>,
+    /// Where a login on the call has got to, while one is running.
+    login: Mutex<Option<String>>,
+    /// Whether web traffic should be carried, kept here rather than only
+    /// sent to a link, because a dial-in caller's link starts without anyone
+    /// at this end pressing anything.
+    carry_web: AtomicBool,
     /// What this end calls itself in a fax call, sent as a TSI.
     ///
     /// A setting of the machine rather than of the call, which is why it
@@ -258,6 +267,9 @@ impl Default for Session {
             transfer: Mutex::default(),
             network_request: Mutex::default(),
             network: Mutex::default(),
+            dialin: Mutex::default(),
+            login: Mutex::default(),
+            carry_web: AtomicBool::new(false),
             fax_identification: Mutex::default(),
             fax_offer: Mutex::new(fax::call::OUR_MODULATIONS.to_vec()),
             fax_error_correction: AtomicBool::new(true),
@@ -452,7 +464,37 @@ impl Session {
 
     /// Carry web traffic over the link, or stop.
     pub fn carry_web(&self, on: bool) {
+        self.carry_web.store(on, Ordering::Relaxed);
         self.ask_network(NetRequest::Proxy(on));
+    }
+
+    /// Log in to the far end at its prompts, then bring PPP up.
+    pub fn log_in(&self) {
+        self.ask_network(NetRequest::LogIn);
+    }
+
+    /// What to log in with, and whether to answer with a login prompt.
+    pub fn set_dialin(&self, settings: DialIn) {
+        if let Ok(mut slot) = self.dialin.lock() {
+            *slot = settings;
+        }
+    }
+
+    fn dialin(&self) -> DialIn {
+        self.dialin.lock().map(|s| s.clone()).unwrap_or_default()
+    }
+
+    /// Where a login on the call has got to, if one is running.
+    pub fn login(&self) -> Option<String> {
+        self.login.lock().ok().and_then(|s| s.clone())
+    }
+
+    fn set_login(&self, stage: Option<String>) {
+        if let Ok(mut slot) = self.login.lock()
+            && *slot != stage
+        {
+            *slot = stage;
+        }
     }
 
     /// What the link is doing, if there is one.
@@ -616,6 +658,14 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // The PPP link, while one is up. Like a transfer it owns the byte stream
     // while it runs, and for the same reason.
     let mut networking: Option<Networking> = None;
+    // A login in front of it: the terminal server for a caller, or the script
+    // logging in to a far end. It owns the stream too.
+    let mut login: Option<Login> = None;
+    // Whether there was a call last time round, for noticing a new one.
+    let mut was_online = false;
+    // When typing was last turned away, so saying so does not fill the
+    // transcript.
+    let mut refused_typing: Option<Instant> = None;
     // Line time the link has not been told about yet, in milliseconds.
     //
     // The loop turns over on audio arriving, so a round is a block and not a
@@ -674,23 +724,27 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         // What the window has asked the PPP link to do.
         if let Some(request) = session.take_network_request() {
             match request {
-                NetRequest::Start if networking.is_some() => {}
-                NetRequest::Start if !modem.is_online() => {
+                NetRequest::Start | NetRequest::LogIn if networking.is_some() => {}
+                NetRequest::Start | NetRequest::LogIn if !modem.is_online() => {
                     tx.log(Direction::Note, "ppp: there is no call to run it over");
                 }
-                NetRequest::Start if job.is_some() => {
+                NetRequest::Start | NetRequest::LogIn if job.is_some() => {
                     // Both want the whole byte stream, and neither would
                     // survive the other having half of it.
                     tx.log(Direction::Note, "ppp: not while a transfer is running");
                 }
                 NetRequest::Start => {
-                    let mut link = Networking::start(modem.role(), &tx);
-                    for b in link.step(0, &tx) {
-                        modem.feed_dte(b);
-                    }
+                    login = None;
+                    let link = start_link(&modem, &session, Vec::new(), None, &tx);
                     networking = Some(link);
                 }
+                NetRequest::LogIn => {
+                    login = Some(Login::call(&session.dialin(), &tx));
+                }
                 NetRequest::Stop => {
+                    if login.take().is_some() {
+                        tx.log(Direction::Note, "login: stopped; the terminal is yours again");
+                    }
                     if let Some(mut link) = networking.take() {
                         for b in link.stop(&tx) {
                             modem.feed_dte(b);
@@ -722,16 +776,74 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             session.set_network(None);
             tx.log(Direction::Note, "ppp: the call ended");
         }
+        if !modem.is_online() {
+            login = None;
+        }
+
+        // A call has just come up. If this end answered it and the window
+        // says to, the caller meets a login prompt rather than a terminal.
+        let online = modem.is_online();
+        if online && !was_online {
+            let settings = session.dialin();
+            if settings.serve && modem.role() == Role::Answering && networking.is_none() && job.is_none() {
+                login = Some(Login::serve(&settings, &tx));
+            }
+        }
+        was_online = online;
+
+        // The line's own time since last round, handed to whatever is running
+        // above the modem. Taken every round whether or not anything is, so
+        // that a link started a minute into a call is not handed that minute
+        // all at once -- which fired its restart timer the moment it opened,
+        // and sent a second Configure-Request before the first was answered.
+        let ms = owed_ms as u32;
+        owed_ms -= f64::from(ms);
+
+        if let Some(running) = login.as_mut() {
+            let (out, next) = running.step(ms, &tx);
+            for b in out {
+                modem.feed_dte(b);
+            }
+            session.set_login(Some(running.stage()));
+            match next {
+                None => {}
+                Some(LoginNext::Ppp { user, early }) => {
+                    let serving = running.serving();
+                    login = None;
+                    let mut link = start_link(&modem, &session, early, serving.then_some(user), &tx);
+                    link.hang_up_after = serving;
+                    networking = Some(link);
+                }
+                Some(LoginNext::HangUp(why)) => {
+                    login = None;
+                    tx.log(Direction::Note, format!("dial-in: hanging up: {why}"));
+                    modem.hang_up();
+                }
+                Some(LoginNext::GiveBack(why)) => {
+                    login = None;
+                    tx.log(Direction::Note, format!("login: {why}; the terminal is yours again"));
+                }
+            }
+        }
+        if login.is_none() {
+            session.set_login(None);
+        }
 
         // Drive the link. Its frames go down the line the same way a keystroke
         // does, because to the modem that is what they are.
         if let Some(link) = networking.as_mut() {
-            let ms = owed_ms as u32;
-            owed_ms -= f64::from(ms);
             for b in link.step(ms, &tx) {
                 modem.feed_dte(b);
             }
             session.set_network(Some(link.view()));
+            // A dial-in caller's link that has ended is the end of the call,
+            // the way a provider's modem hung up when PPP did.
+            if link.hang_up_after && link.ended() {
+                tx.log(Direction::Note, "dial-in: the link is down, hanging up");
+                modem.hang_up();
+                networking = None;
+                session.set_network(None);
+            }
         }
 
         // A transfer the window has asked for.
@@ -844,10 +956,25 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
 
         let typed = session.take_typed();
         if !typed.is_empty() {
-            typed_recently = Instant::now();
-            tx_bytes += typed.len() as u64;
-            for b in &typed {
-                modem.feed_dte(*b);
+            // A keystroke in the middle of a frame is a frame that fails its
+            // check, and one typed at a caller's login prompt is typed into
+            // somebody else's session. So while anything above the modem has
+            // the stream, typing goes nowhere -- except the escape, which is
+            // how the call is put down by hand.
+            let taken = modem.state() == State::Data
+                && (networking.is_some() || login.is_some() || job.is_some());
+            if taken && typed != b"+++" {
+                // Once every few seconds, not once a keystroke.
+                if refused_typing.is_none_or(|at| at.elapsed() > Duration::from_secs(5)) {
+                    refused_typing = Some(Instant::now());
+                    tx.log(Direction::Note, "not typed: the call is carrying PPP or a login, not the terminal");
+                }
+            } else {
+                typed_recently = Instant::now();
+                tx_bytes += typed.len() as u64;
+                for b in &typed {
+                    modem.feed_dte(*b);
+                }
             }
         }
 
@@ -859,6 +986,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             &mut heard_recently,
             job.as_mut(),
             networking.as_mut(),
+            login.as_mut(),
         );
             thread::sleep(Duration::from_millis(8));
             continue;
@@ -877,6 +1005,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             &mut heard_recently,
             job.as_mut(),
             networking.as_mut(),
+            login.as_mut(),
         );
             thread::sleep(Duration::from_millis(2));
             continue;
@@ -973,6 +1102,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             &mut heard_recently,
             job.as_mut(),
             networking.as_mut(),
+            login.as_mut(),
         );
 
         // A retrain is not a new call and the terminal is told nothing about
@@ -1438,6 +1568,7 @@ fn drain_dte(
     heard: &mut Instant,
     job: Option<&mut Job>,
     network: Option<&mut Networking>,
+    login: Option<&mut Login>,
 ) {
     let out = modem.take_dte();
     if out.is_empty() {
@@ -1445,13 +1576,52 @@ fn drain_dte(
     }
     *rx_bytes += out.len() as u64;
     *heard = Instant::now();
-    match (job, network) {
-        (Some(Job::Sending(s)), _) => s.feed(&out),
-        (Some(Job::Receiving(r, _)), _) => r.feed(&out),
-        (None, Some(link)) => link.feed(&out),
-        (None, None) => tx.line_data(&out),
+    match (job, network, login) {
+        (Some(Job::Sending(s)), _, _) => s.feed(&out),
+        (Some(Job::Receiving(r, _)), _, _) => r.feed(&out),
+        (None, Some(link), _) => link.feed(&out),
+        (None, None, Some(running)) => running.feed(&out, tx),
+        (None, None, None) => tx.line_data(&out),
     }
 }
+
+/// Bring PPP up over the call, with whatever authentication the window's
+/// settings and the way the call started call for.
+///
+/// `served` is Some for a caller who came in through the login prompt: with a
+/// name in it if they logged in there, which is enough, and None inside if
+/// they went straight to PPP, which then has to ask. Otherwise an answering
+/// end asks only if the window says calls are answered with a login, and a
+/// calling end offers the account to a far end that asks.
+fn start_link(
+    modem: &Modem,
+    session: &Session,
+    early: Vec<u8>,
+    served: Option<Option<String>>,
+    tx: &Publisher,
+) -> Networking {
+    let settings = session.dialin();
+    let role = modem.role();
+    let asks = match &served {
+        Some(user) => user.is_none(),
+        None => role == Role::Answering && settings.serve,
+    };
+    let authentication = ppp::link::Authentication {
+        account: (!settings.account.name.is_empty()).then(|| settings.account.clone()),
+        callers: asks.then(|| settings.callers()),
+        name: "binmodem".to_owned(),
+        seed: crate::dialin::challenge_seed(),
+    };
+    let mut link = Networking::start(role, authentication, tx);
+    if session.carry_web.load(Ordering::Relaxed) {
+        link.carry_web(true, tx);
+    }
+    if !early.is_empty() {
+        link.feed(&early);
+    }
+    link
+}
+
 
 #[cfg(test)]
 mod level_tests {

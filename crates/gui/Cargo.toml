@@ -14,6 +14,7 @@ fax       = { path = "../fax" }
 datapump  = { path = "../datapump" }
 ec        = { path = "../ec" }
 line      = { path = "../line" }
+login     = { path = "../login" }
 modem     = { path = "../modem" }
 telemetry = { path = "../telemetry" }
 at        = { path = "../at" }

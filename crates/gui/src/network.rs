@@ -15,7 +15,7 @@
 //! terminal.
 
 use modem::Role;
-use ppp::link::{Link, Phase};
+use ppp::link::{Authentication, Link, Phase};
 use ppp::ping::{Event, Pinger, Stats};
 use telemetry::{Direction, Publisher};
 
@@ -40,6 +40,8 @@ pub const CLIENT_ADDRESS: [u8; 4] = [10, 0, 0, 2];
 pub enum Request {
     /// Bring PPP up on the call that is already there.
     Start,
+    /// Log in to the far end at its prompts first, and bring PPP up after.
+    LogIn,
     /// Put it down again and give the terminal back.
     Stop,
     /// One echo, now.
@@ -73,6 +75,12 @@ pub struct View {
     pub tx_bytes: u64,
     /// The proxy, if one is running.
     pub proxy: Option<ProxyView>,
+    /// Whether this end is asking the far end who it is.
+    pub asking: bool,
+    /// Who the far end proved it was, and how.
+    pub who: Option<String>,
+    /// Why the link is down, once there is a reason.
+    pub trouble: Option<String>,
 }
 
 /// What the proxy is doing, for the window to show.
@@ -110,6 +118,7 @@ fn phase_name(phase: Phase) -> &'static str {
         // this next to the document should not have to translate.
         Phase::Dead => "dead",
         Phase::Establish => "establishing",
+        Phase::Authenticate => "authenticating",
         Phase::Network => "network",
         Phase::Terminate => "terminating",
     }
@@ -130,6 +139,13 @@ pub struct Networking {
     /// Whether the window has asked for web traffic to be carried.
     want_proxy: bool,
     proxy: Option<Proxy>,
+    /// Whether this end asked the far end who it is.
+    asking: bool,
+    /// Whether the call goes down with the link: a dial-in server's does,
+    /// the way a provider's modem hung up when PPP ended.
+    pub hang_up_after: bool,
+    /// Set once the end of the link has been reported.
+    ended_reported: bool,
 }
 
 impl Networking {
@@ -141,8 +157,9 @@ impl Networking {
     /// Nothing in RFC 1332 says it has to be that way round -- 3.3 makes it
     /// whichever end has an address to give -- but a modem call already has an
     /// end that answered, so there is no need to ask anybody which is which.
-    pub fn start(role: Role, tx: &Publisher) -> Self {
+    pub fn start(role: Role, authentication: Authentication, tx: &Publisher) -> Self {
         let serving = role == Role::Answering;
+        let asking = authentication.callers.is_some();
         let (local, remote) = if serving {
             (SERVER_ADDRESS, CLIENT_ADDRESS)
         } else {
@@ -162,7 +179,10 @@ impl Networking {
                 "ppp: asking the far end what to call ourselves".to_owned()
             },
         );
-        let mut link = Link::new(local, remote);
+        if asking {
+            tx.log(Direction::Note, "ppp: asking the far end who it is, with CHAP or PAP");
+        }
+        let mut link = Link::with_authentication(local, remote, authentication);
         link.open();
         Self {
             link,
@@ -175,7 +195,16 @@ impl Networking {
             tx_bytes: 0,
             want_proxy: false,
             proxy: None,
+            asking,
+            hang_up_after: false,
+            ended_reported: false,
         }
+    }
+
+    /// Whether the link has come to an end: given up on, refused, or put down
+    /// by the far end.
+    pub fn ended(&self) -> bool {
+        self.link.ended()
     }
 
     /// Start or stop carrying web traffic.
@@ -341,6 +370,12 @@ impl Networking {
                 }),
                 None => self.want_proxy.then(ProxyView::default),
             },
+            asking: self.asking,
+            who: self.link.who().map(|who| match self.link.checked_with() {
+                Some(method) => format!("{who}, over {}", method.name()),
+                None => who.to_owned(),
+            }),
+            trouble: self.link.trouble().map(str::to_owned),
         }
     }
 
@@ -349,10 +384,20 @@ impl Networking {
         if self.link.up() && !self.announced {
             self.announced = true;
             let (local, remote) = self.link.addresses();
+            let who = match (self.link.who(), self.link.checked_with(), self.link.proved_with()) {
+                (Some(who), Some(method), _) => format!(", the caller is {who} over {}", method.name()),
+                (_, _, Some(method)) => format!(", logged in over {}", method.name()),
+                _ => String::new(),
+            };
             tx.log(
                 Direction::Note,
-                format!("ppp: up, {} talking to {}", dotted(local), dotted(remote)),
+                format!("ppp: up, {} talking to {}{who}", dotted(local), dotted(remote)),
             );
+        }
+        if self.link.ended() && !self.ended_reported {
+            self.ended_reported = true;
+            let why = self.link.trouble().unwrap_or("it was put down");
+            tx.log(Direction::Note, format!("ppp: down, {why}"));
         }
         for event in self.pinger.take_events() {
             match event {
@@ -393,11 +438,11 @@ mod tests {
     #[test]
     fn the_answering_end_is_the_one_with_addresses_to_give() {
         let (tx, _rx) = telemetry::channel(64, 32, 8_000.0);
-        let answering = Networking::start(Role::Answering, &tx);
+        let answering = Networking::start(Role::Answering, Authentication::default(), &tx);
         assert!(answering.serving);
         assert_eq!(answering.view().local, "10.0.0.1");
 
-        let calling = Networking::start(Role::Calling, &tx);
+        let calling = Networking::start(Role::Calling, Authentication::default(), &tx);
         assert!(!calling.serving);
         assert_eq!(calling.view().local, "0.0.0.0", "it made an address up");
     }
@@ -407,8 +452,8 @@ mod tests {
     #[test]
     fn two_ends_of_a_call_come_up_and_ping() {
         let (tx, _rx) = telemetry::channel(64, 32, 8_000.0);
-        let mut answering = Networking::start(Role::Answering, &tx);
-        let mut calling = Networking::start(Role::Calling, &tx);
+        let mut answering = Networking::start(Role::Answering, Authentication::default(), &tx);
+        let mut calling = Networking::start(Role::Calling, Authentication::default(), &tx);
 
         let mut came_up = None;
         for ms in 0..30_000u32 {

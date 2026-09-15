@@ -773,6 +773,19 @@ impl Modem {
         matches!(self.state, State::Data | State::OnlineCommand)
     }
 
+    /// Put the call down, as `ATH` does, for a program driving the modem
+    /// rather than a person typing at it.
+    ///
+    /// A person in data state has to escape to command state first, and the
+    /// escape wants a second of silence either side of it. A dial-in server
+    /// ending a session it has already said goodbye to has no reason to wait
+    /// for that, and nothing it sends after the goodbye would be data.
+    pub fn hang_up(&mut self) {
+        if self.pump.is_some() || self.negotiation.is_some() {
+            self.end_call(Ended::LocalRequest);
+        }
+    }
+
     /// The rate agreed, once there is a connection.
     pub fn rate(&self) -> Option<u32> {
         (self.rate > 0).then_some(self.rate)

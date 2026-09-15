@@ -9,7 +9,7 @@ one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
 source for every normative constant, and against the RFCs for everything
-carried over the top of them. 1235 tests.
+carried over the top of them. 1285 tests.
 
 ## What works
 
@@ -46,7 +46,7 @@ been checked three other ways: two documents, two methods, one table.
 | **Settings** | remembered between runs, so the modem comes back where it was left |
 | **Files** | ZMODEM send and receive |
 | **Fax** | T.30 group 3, sending and receiving; V.29 (7200/9600) and V.27 ter (2400/4800); T.4 Modified Huffman and Modified READ, T.6 MMR; T.30 Annex A error correction mode; pages drawn as they arrive |
-| **Network** | PPP (RFC 1661/1662) with LCP and IPCP, and a ping over it |
+| **Network** | PPP (RFC 1661/1662) with LCP, PAP and CHAP, and IPCP, and a ping over it; a dial-in login prompt, and a login script for dialling out |
 | **Internet** | our own TCP (RFC 9293) and a SOCKS 5 proxy: a browser on one machine, the internet on the other |
 | **Line** | full-duplex sound card, or a WAV to replay |
 
@@ -75,6 +75,13 @@ and is told, and an ICMP echo crosses and comes back with a round trip on it.
 Tick *carry web traffic* and the end that answered offers its connection —
 point a browser on the dialling machine at `socks5://127.0.0.1:1080` and it
 goes out through the modem.
+
+The answering end can be a dial-in server, the way a provider's modem pool
+was. A caller gets a banner, `login:` and `Password:`, and a prompt where `ppp`
+starts PPP; the calling end's **Log in, then PPP** answers those prompts by
+itself. A dialler that skips the text and starts PPP straight away is asked for
+the same account over CHAP or PAP (RFC 1994, RFC 1334), so something other than
+another BinModem can dial in.
 
 TCP is ours, written against RFC 9293: the eleven states, retransmission with
 RFC 6298's estimator, Nagle, delayed acknowledgements, zero-window probing,
@@ -184,8 +191,7 @@ After it, V.17 for fax at 14 400, and V.33 beside it -- the same trellis code
 as V.32bis again, on a fax call and a leased line respectively -- and more than
 one page to a fax call.
 
-Alongside them: PAP and CHAP, so something other than another BinModem can
-dial in; and MNP as an alternative to LAPM, since it is what a modem without
+Alongside them: MNP as an alternative to LAPM, since it is what a modem without
 V.42 will offer.
 
 ## Running it

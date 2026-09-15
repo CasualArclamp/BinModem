@@ -1,4 +1,4 @@
-//! A modem sitting on the line waiting to be dialled: a board to call.
+//! A modem sitting on the line waiting to be dialled: a dial-in server.
 //!
 //! The companion to `--live`, and in the same program as it. That window has
 //! a modem in it and a terminal wired to it, and nothing to ring. This is the
@@ -10,15 +10,22 @@
 //! modems across it. Each hears the other and its own reflection, which is the
 //! situation every one of these modulations was designed for.
 //!
-//! Once connected it behaves like the simplest possible board: a banner, and
-//! then an echo of whatever is typed, so that what comes back on the screen is
-//! proof it went down the line and returned rather than proof the terminal can
-//! draw its own keystrokes.
+//! Once connected it is what a caller to a provider met: a banner, `login:`,
+//! `Password:`, and a prompt where `ppp` starts PPP -- or PPP straight away,
+//! for a dialler that sends frames from the start, with the same account
+//! asked for over CHAP or PAP. Echoes that arrive over the link are answered.
+//! Everything the caller is shown is printed here too, so what came back on
+//! the calling screen can be checked against what was sent.
 
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use login::server::{self, Server};
+use login::Account;
 use modem::{Modem, State};
+use ppp::link::{Authentication, Link};
+
+use crate::network::{CLIENT_ADDRESS, SERVER_ADDRESS};
 
 const FS: f64 = 16_000.0;
 
@@ -29,14 +36,20 @@ const FS: f64 = 16_000.0;
 /// well above its own average, and a clipped handshake is a failed one.
 const LEVEL: f32 = 0.45;
 
+/// What is running above the modem on the call.
+enum Above {
+    Nothing,
+    Login(Box<Server>),
+    Ppp { link: Box<Link>, announced: bool },
+}
+
 /// Run the answering modem. `args` is what followed `--answer`.
 pub fn run(args: Vec<String>) -> ExitCode {
     let mut input: Option<String> = None;
     let mut output: Option<String> = None;
     let mut carrier = "V22B".to_owned();
-    let mut banner =
-        "\r\n\r\n*** THE DEAD ZONE BBS ***\r\n  1200 baud - 24 hours - SysOp: nobody\r\n\r\nlogin: "
-            .to_owned();
+    let mut banner = "*** THE DEAD ZONE BBS ***\n  24 hours - SysOp: nobody".to_owned();
+    let mut account = Account::new("guest", "");
 
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -46,14 +59,19 @@ pub fn run(args: Vec<String>) -> ExitCode {
             "--out" => output = Some(value()),
             "--carrier" => carrier = value().to_ascii_uppercase(),
             "--banner" => banner = value(),
+            "--user" => account.name = value(),
+            "--password" => account.password = value(),
             "--help" | "-h" => {
                 println!(
                     "binmodem --answer --in <device> --out <device> \
-                     [--carrier B103|V22B|V32] [--banner <text>]\n\
+                     [--carrier B103|V22B|V32|V34] [--banner <text>]\n\
+                     \x20                [--user <name>] [--password <password>]\n\
                      \n\
-                     Answers calls on a virtual cable and echoes what is typed,\n\
-                     so that `binmodem --live` on the same cable has\n\
-                     something to dial. Both devices must be named."
+                     Answers calls on a virtual cable with a login prompt, so that\n\
+                     `binmodem --live` on the same cable has something to dial.\n\
+                     Log in as the user (guest, with no password, unless told\n\
+                     otherwise) and type ppp, or start PPP straight away and give\n\
+                     the same account over PAP. Both devices must be named."
                 );
                 return ExitCode::SUCCESS;
             }
@@ -77,8 +95,8 @@ pub fn run(args: Vec<String>) -> ExitCode {
         }
     };
     println!(
-        "out: {} at {} Hz\nin:  {} at {} Hz\nanswering as {carrier}; ctrl-c to stop",
-        audio.output_device, audio.output_rate, audio.input_device, audio.input_rate
+        "out: {} at {} Hz\nin:  {} at {} Hz\nanswering as {carrier}, logins as {}; ctrl-c to stop",
+        audio.output_device, audio.output_rate, audio.input_device, audio.input_rate, account.name
     );
 
     let mut host = Modem::new(FS);
@@ -92,13 +110,25 @@ pub fn run(args: Vec<String>) -> ExitCode {
         host.feed_dte(*b);
     }
 
+    let config = server::Config {
+        banner,
+        accounts: vec![account.clone()],
+        ppp_message: format!(
+            "PPP session from {} to {} beginning....",
+            dotted(SERVER_ADDRESS),
+            dotted(CLIENT_ADDRESS)
+        ),
+        ..server::Config::default()
+    };
+
     let mut from_line: Vec<f32> = Vec::with_capacity(4096);
     let mut to_line: Vec<f32> = Vec::with_capacity(4096);
-    let mut greeted = false;
-    let mut connected_at = Instant::now();
+    let mut above = Above::Nothing;
     let mut last_phase = "";
     let mut last_ec = "";
-    let started = Instant::now();
+    let mut owed_ms = 0.0f64;
+    let started = std::time::Instant::now();
+    let stamp = || started.elapsed().as_secs_f64();
 
     loop {
         from_line.clear();
@@ -112,11 +142,14 @@ pub fn run(args: Vec<String>) -> ExitCode {
             to_line.push(host.step(f64::from(s)) as f32 * LEVEL);
         }
         audio.transmit(&to_line);
+        owed_ms += from_line.len() as f64 / FS * 1000.0;
+        let ms = owed_ms as u32;
+        owed_ms -= f64::from(ms);
 
         let phase = host.line_phase();
         if phase != last_phase {
             last_phase = phase;
-            println!("[{:>6.2}s {phase}]", started.elapsed().as_secs_f64());
+            println!("[{:>6.2}s {phase}]", stamp());
         }
 
         // The same trace for the layer above, so that a call which connects
@@ -125,54 +158,116 @@ pub fn run(args: Vec<String>) -> ExitCode {
         if ec != last_ec {
             last_ec = ec;
             if !ec.is_empty() {
-                println!("[{:>6.2}s V.42 {ec}]", started.elapsed().as_secs_f64());
+                println!("[{:>6.2}s V.42 {ec}]", stamp());
             }
         }
 
         let heard = host.take_dte();
-        if host.state() == State::Data {
-            if !greeted {
-                greeted = true;
-                connected_at = Instant::now();
+        match (&mut above, host.state()) {
+            (Above::Nothing, State::Data) => {
                 println!(
                     "[{:>6.2}s connected at {} bit/s, error control {}, compression {}]",
-                    started.elapsed().as_secs_f64(),
+                    stamp(),
                     host.rate().unwrap_or(0),
                     host.error_control_detail(),
                     if host.compressing() { "V.42bis" } else { "off" }
                 );
+                let mut server = Box::new(Server::new(config.clone()));
+                print_notes(&mut server, stamp());
+                above = Above::Login(server);
             }
-            // A moment before speaking. Both ends have a receiver that has
-            // only just stopped training, and a banner sent into that is a
-            // banner half of which is never seen.
-            if greeted && connected_at.elapsed() > Duration::from_millis(500) && !banner.is_empty()
-            {
-                for b in banner.bytes() {
+            (Above::Nothing, _) => {}
+            (_, State::Command) => {
+                println!("\n[{:>6.2}s the call ended]", stamp());
+                above = Above::Nothing;
+                for b in b"ATA\r" {
+                    host.feed_dte(*b);
+                }
+            }
+            (Above::Login(server), _) => {
+                server.feed(&heard);
+                server.tick(ms);
+                let out = server.take_output();
+                print_text(&out);
+                for b in out {
                     host.feed_dte(b);
                 }
-                banner.clear();
-            }
-            if !heard.is_empty() {
-                print!("{}", String::from_utf8_lossy(&heard));
-                use std::io::Write;
-                let _ = std::io::stdout().flush();
-                // Echo it back, which is what a board does and what makes the
-                // characters appear on the caller's screen at all.
-                for b in &heard {
-                    host.feed_dte(*b);
-                    // A bare return from a terminal wants a line feed with it.
-                    if *b == b'\r' {
-                        host.feed_dte(b'\n');
+                print_notes(server, stamp());
+                match server.take_outcome() {
+                    Some(server::Outcome::Ppp { user, early }) => {
+                        let mut link = Box::new(Link::with_authentication(
+                            SERVER_ADDRESS,
+                            CLIENT_ADDRESS,
+                            Authentication {
+                                // Logged in at the prompt is enough. A caller
+                                // that went straight to PPP is asked here.
+                                callers: user.is_none().then(|| vec![account.clone()]),
+                                name: "binmodem".to_owned(),
+                                seed: crate::dialin::challenge_seed(),
+                                ..Authentication::default()
+                            },
+                        ));
+                        link.open();
+                        link.feed(&early);
+                        above = Above::Ppp { link, announced: false };
                     }
+                    Some(server::Outcome::HangUp(why)) => {
+                        println!("\n[{:>6.2}s hanging up: {why}]", stamp());
+                        host.hang_up();
+                    }
+                    None => {}
                 }
             }
-        } else if greeted && host.state() == State::Command {
-            println!("\n[caller hung up]");
-            greeted = false;
-            banner = "\r\nlogin: ".to_owned();
-            for b in b"ATA\r" {
-                host.feed_dte(*b);
+            (Above::Ppp { link, announced }, _) => {
+                link.feed(&heard);
+                link.tick(ms);
+                for b in link.take_line() {
+                    host.feed_dte(b);
+                }
+                for echo in link.take_arrived() {
+                    if !echo.echo.reply {
+                        println!("[{:>6.2}s ping from {}, seq {}]", stamp(), dotted(echo.from), echo.echo.sequence);
+                    }
+                }
+                let _ = link.take_carried();
+                if link.up() && !*announced {
+                    *announced = true;
+                    let who = link.who().map(|w| format!(", {w} over PAP or CHAP")).unwrap_or_default();
+                    println!(
+                        "[{:>6.2}s PPP up: {} is {}{who}]",
+                        stamp(),
+                        dotted(CLIENT_ADDRESS),
+                        dotted(SERVER_ADDRESS)
+                    );
+                }
+                if link.ended() {
+                    println!(
+                        "[{:>6.2}s PPP down: {}; hanging up]",
+                        stamp(),
+                        link.trouble().unwrap_or("it was put down")
+                    );
+                    host.hang_up();
+                }
             }
         }
+    }
+}
+
+fn dotted([a, b, c, d]: [u8; 4]) -> String {
+    format!("{a}.{b}.{c}.{d}")
+}
+
+fn print_text(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    print!("{}", String::from_utf8_lossy(bytes));
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+}
+
+fn print_notes(server: &mut Server, at: f64) {
+    for note in server.take_notes() {
+        println!("\n[{at:>6.2}s {note}]");
     }
 }

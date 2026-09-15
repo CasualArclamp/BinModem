@@ -1,0 +1,13 @@
+[package]
+name    = "login"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# For the account a caller logs in with, which is the same one PPP's PAP and
+# CHAP check: a provider had one list of users, whichever way they arrived.
+ppp = { path = "../ppp" }
+
+[lints]
+workspace = true

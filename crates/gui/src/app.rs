@@ -300,6 +300,11 @@ pub struct ScopeApp {
     ping_repeatedly: bool,
     /// And whether it has asked for web traffic to be carried.
     carry_web: bool,
+    /// The account, the command typed after logging in, and whether calls
+    /// are answered with a login prompt; and what the line thread was last
+    /// told of them.
+    dialin: crate::dialin::Settings,
+    dialin_sent: Option<crate::dialin::Settings>,
     /// The fax window: a picture, the page it becomes, and the machine at
     /// the far end of the call.
     fax: crate::faxwin::Fax,
@@ -385,6 +390,8 @@ impl ScopeApp {
             constellation_open: false,
             ping_repeatedly: false,
             carry_web: false,
+            dialin: crate::dialin::Settings::default(),
+            dialin_sent: None,
             fax: crate::faxwin::Fax::new(),
             transfer_open: false,
             line_was_open: false,
@@ -971,8 +978,8 @@ impl ScopeApp {
             if ui
                 .selectable_label(self.network_open, "Network")
                 .on_hover_text(
-                    "PPP over the call: give the two ends addresses and ping \
-                     between them",
+                    "PPP over the call: log in, give the two ends addresses, \
+                     ping between them, and answer calls with a login prompt",
                 )
                 .clicked()
             {
@@ -1112,20 +1119,36 @@ impl ScopeApp {
     /// this end was given rather than configured, and a round trip measured
     /// over a modem. Between them they say the call is carrying IP, which is
     /// not something any amount of staring at a constellation will tell you.
+    ///
+    /// Above them, who is calling: the account this end logs in with, and
+    /// whether a call it answers gets a login prompt first.
     fn network_window(&mut self, ui: &mut egui::Ui, session: &Arc<live::Session>) {
         let dim = Color32::from_rgb(140, 150, 165);
         let bright = Color32::from_rgb(220, 225, 235);
         let good = Color32::from_rgb(90, 220, 130);
+        let bad = Color32::from_rgb(235, 100, 90);
+        // The line thread reads these when a call arrives or a link starts,
+        // which may be long after they were last touched here.
+        if self.dialin_sent.as_ref() != Some(&self.dialin) {
+            session.set_dialin(self.dialin.clone());
+            self.dialin_sent = Some(self.dialin.clone());
+        }
         let mut open = self.network_open;
         let link = session.network();
+        let logging_in = session.login();
         egui::Window::new("PPP - network")
             .open(&mut open)
             .resizable(false)
-            .default_width(420.0)
+            .default_width(440.0)
             .show(ui.ctx(), |ui| {
                 let online = self.frame.state == telemetry::CallState::Connected;
                 ui.horizontal(|ui| {
-                    if link.is_none() {
+                    if let Some(stage) = &logging_in {
+                        if ui.button("Stop").clicked() {
+                            session.stop_network();
+                        }
+                        ui.label(RichText::new(stage).monospace().color(bright));
+                    } else if link.is_none() {
                         if ui
                             .add_enabled(online, egui::Button::new("Bring PPP up"))
                             .on_hover_text(
@@ -1136,9 +1159,19 @@ impl ScopeApp {
                         {
                             session.start_network();
                         }
+                        if ui
+                            .add_enabled(online, egui::Button::new("Log in, then PPP"))
+                            .on_hover_text(
+                                "answer the far end's login: and Password: prompts \
+                                 with the account below, type the command after them, \
+                                 and start PPP when the far end does",
+                            )
+                            .clicked()
+                        {
+                            session.log_in();
+                        }
                     } else if ui.button("Put it down").clicked() {
                         self.ping_repeatedly = false;
-                        self.carry_web = false;
                         session.stop_network();
                     }
                     if let Some(view) = &link {
@@ -1159,7 +1192,7 @@ impl ScopeApp {
                     }
                 });
 
-                if !online && link.is_none() {
+                if !online && link.is_none() && logging_in.is_none() {
                     ui.add_space(4.0);
                     ui.label(
                         RichText::new("There is no call. PPP needs one under it.")
@@ -1168,7 +1201,93 @@ impl ScopeApp {
                     );
                 }
 
+                ui.separator();
+                egui::Grid::new("ppp account")
+                    .num_columns(2)
+                    .spacing([10.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("name").monospace().color(dim));
+                        ui.add(egui::TextEdit::singleline(&mut self.dialin.account.name).desired_width(180.0))
+                            .on_hover_text(
+                                "the account: what this end logs in with when it \
+                                 calls, and what a caller must give when it answers",
+                            );
+                        ui.end_row();
+                        ui.label(RichText::new("password").monospace().color(dim));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.dialin.account.password)
+                                .password(true)
+                                .desired_width(180.0),
+                        )
+                        .on_hover_text(
+                            "kept between runs in BinModem's settings file, in plain \
+                             text: use one made up for this",
+                        );
+                        ui.end_row();
+                        ui.label(RichText::new("then type").monospace().color(dim));
+                        ui.add(egui::TextEdit::singleline(&mut self.dialin.command).desired_width(180.0))
+                            .on_hover_text(
+                                "what Log in, then PPP types at the far end's prompt \
+                                 once it is logged in. Empty starts PPP at the prompt",
+                            );
+                        ui.end_row();
+                    });
+                ui.checkbox(&mut self.dialin.serve, "answer calls with a login prompt")
+                    .on_hover_text(
+                        "a caller gets login: and Password:, then a prompt where ppp \
+                         starts PPP. A dialler that goes straight to PPP is asked \
+                         for the same account with CHAP or PAP instead. The call is \
+                         put down when the caller logs out or the link ends",
+                    );
+                if self.dialin.serve {
+                    let (text, colour) = if self.dialin.account.name.trim().is_empty() {
+                        ("set a name first: without an account nobody can log in".to_owned(), bad)
+                    } else {
+                        (format!("callers log in as {}", self.dialin.account.name.trim()), dim)
+                    };
+                    ui.label(RichText::new(text).small().color(colour));
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .checkbox(&mut self.carry_web, "carry web traffic")
+                        .on_hover_text(
+                            "SOCKS 5 over the link: the end that answered the call \
+                             opens the connections, the end that dialled points a \
+                             browser at a local port. Kept for the next link, so a \
+                             dial-in server can offer it before anyone calls",
+                        )
+                        .changed()
+                    {
+                        session.carry_web(self.carry_web);
+                    }
+                    if let Some(p) = link.as_ref().and_then(|v| v.proxy.as_ref()) {
+                        if let Some(why) = &p.trouble {
+                            ui.label(RichText::new(why).small().color(bad));
+                        } else if !p.at.is_empty() {
+                            ui.label(
+                                RichText::new(if p.serving {
+                                    format!("offering the internet at {}", p.at)
+                                } else {
+                                    format!("socks5://{}", p.at)
+                                })
+                                .monospace()
+                                .small()
+                                .color(bright),
+                            );
+                        }
+                    }
+                });
+
                 let Some(view) = link else { return };
+                if let Some(p) = &view.proxy
+                    && p.open > 0
+                {
+                    ui.label(
+                        RichText::new(format!("{} connections being carried", p.open))
+                            .small()
+                            .color(dim),
+                    );
+                }
                 ui.separator();
                 egui::Grid::new("ppp addresses")
                     .num_columns(2)
@@ -1180,6 +1299,15 @@ impl ScopeApp {
                         ui.label(RichText::new("far end").monospace().color(dim));
                         ui.label(RichText::new(&view.remote).monospace().color(bright));
                         ui.end_row();
+                        if view.asking || view.who.is_some() {
+                            ui.label(RichText::new("caller").monospace().color(dim));
+                            ui.label(
+                                RichText::new(view.who.as_deref().unwrap_or("not yet said who"))
+                                    .monospace()
+                                    .color(if view.who.is_some() { bright } else { dim }),
+                            );
+                            ui.end_row();
+                        }
                         ui.label(RichText::new("frames").monospace().color(dim));
                         ui.label(
                             RichText::new(format!(
@@ -1192,6 +1320,9 @@ impl ScopeApp {
                         );
                         ui.end_row();
                     });
+                if let Some(why) = &view.trouble {
+                    ui.label(RichText::new(why).small().color(bad));
+                }
 
                 ui.separator();
                 ui.add_enabled_ui(view.up, |ui| {
@@ -1217,52 +1348,6 @@ impl ScopeApp {
                             );
                         }
                     });
-                });
-
-                ui.separator();
-                ui.add_enabled_ui(view.up, |ui| {
-                    ui.horizontal(|ui| {
-                        if ui
-                            .checkbox(&mut self.carry_web, "carry web traffic")
-                            .on_hover_text(
-                                "SOCKS 5 over the link: the end that answered \
-                                 the call opens the connections, the end that \
-                                 dialled points a browser at a local port",
-                            )
-                            .changed()
-                        {
-                            session.carry_web(self.carry_web);
-                        }
-                        if let Some(p) = &view.proxy {
-                            if let Some(why) = &p.trouble {
-                                ui.label(
-                                    RichText::new(why)
-                                        .small()
-                                        .color(Color32::from_rgb(235, 100, 90)),
-                                );
-                            } else if !p.at.is_empty() {
-                                ui.label(
-                                    RichText::new(if p.serving {
-                                        format!("offering the internet at {}", p.at)
-                                    } else {
-                                        format!("socks5://{}", p.at)
-                                    })
-                                    .monospace()
-                                    .small()
-                                    .color(bright),
-                                );
-                            }
-                        }
-                    });
-                    if let Some(p) = &view.proxy
-                        && p.open > 0
-                    {
-                        ui.label(
-                            RichText::new(format!("{} connections being carried", p.open))
-                                .small()
-                                .color(dim),
-                        );
-                    }
                 });
 
                 let s = view.stats;
@@ -1432,13 +1517,13 @@ impl ScopeApp {
     ///
     /// Put back what the last run was set to.
     fn recall(&mut self) {
-        let (carrier, modulation, protection) =
-            from_remembered(&crate::remembered::Remembered::load());
+        let loaded = crate::remembered::Remembered::load();
+        let (carrier, modulation, protection) = from_remembered(&loaded);
         self.carrier = carrier;
         self.modulation = modulation;
         self.protection = protection;
-        self.remembered = self.settings().join("
-");
+        self.dialin = crate::dialin::Settings::recall(&loaded);
+        self.remembered = self.settings().join("\n") + &self.dialin.fingerprint();
     }
 
     /// Write the settings out if they have moved since they were last written.
@@ -1447,11 +1532,12 @@ impl ScopeApp {
     /// is the comparison that matters: two states that assert identically are
     /// the same state as far as the modem is concerned.
     fn remember(&mut self) {
-        let now = self.settings().join("
-");
+        let now = self.settings().join("\n") + &self.dialin.fingerprint();
         if now != self.remembered {
             self.remembered = now;
-            to_remember(self.carrier, self.modulation, self.protection).save();
+            let mut r = to_remember(self.carrier, self.modulation, self.protection);
+            self.dialin.remember(&mut r);
+            r.save();
         }
     }
 
