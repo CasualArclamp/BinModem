@@ -1211,7 +1211,16 @@ impl Modem {
             // XID: what the two of them can agree to do (8.10).
             Phase::Negotiating => "negotiating",
             Phase::Protocol if ec.is_connected() => "connected",
-            Phase::Protocol => "establishing",
+            // Which way it is going matters, and calling both of them
+            // "establishing" hid a fault for a whole call: a link taken down
+            // by a decoder that could not read what arrived looked exactly
+            // like one coming back up, so the transcript read as a retrain
+            // with nothing after it rather than as a release.
+            Phase::Protocol => match ec.state() {
+                ec::lapm::State::AwaitingRelease => "releasing",
+                ec::lapm::State::Disconnected => "ended",
+                _ => "establishing",
+            },
             Phase::Transparent => "none",
         }
     }
@@ -1242,6 +1251,15 @@ impl Modem {
     /// has to be sent before anything new is heard.
     pub fn queued(&self) -> usize {
         self.outbound.len() + self.ec.as_ref().map_or(0, Stack::queued)
+    }
+
+    /// Compressed streams that arrived intact and would not decode.
+    ///
+    /// Zero on a healthy call and not a line measurement at all: it counts the
+    /// times this end and the far end disagreed about what a codeword meant,
+    /// which is a fault in the compression and not in the line.
+    pub fn undecodable_streams(&self) -> u64 {
+        self.ec.as_ref().map_or(0, Stack::undecodable_streams)
     }
 
     /// Frames that arrived and did not survive the line.

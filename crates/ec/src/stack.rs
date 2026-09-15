@@ -141,6 +141,15 @@ pub struct Stack {
     /// Whether the link has ever been up, which is what tells a failure to
     /// establish apart from a connection that later ended.
     established: bool,
+    /// Compressed streams that would not decode, each of which took the link
+    /// down with it.
+    ///
+    /// Counted rather than inferred. It is the one failure here that looks
+    /// like something else from outside: the link goes, error control starts
+    /// again, and every rate and level on the panel is still perfect -- so the
+    /// call reads as a line fault when it is this end and the far end
+    /// disagreeing about what a codeword means.
+    undecodable: u64,
     /// Whether establishment was tried and nothing answered.
     gave_up: bool,
     /// Whether the run of flags that opens the protocol phase has been queued.
@@ -225,6 +234,7 @@ impl Stack {
             heard_xid: None,
             agreed_fcs: Fcs::Bits16,
             established: false,
+            undecodable: 0,
             gave_up: false,
             opened: false,
             waited_ms: 0,
@@ -427,6 +437,15 @@ impl Stack {
     /// Frames that arrived damaged and were dropped.
     pub fn damaged_frames(&self) -> u64 {
         self.damaged
+    }
+
+    /// Compressed streams that would not decode.
+    ///
+    /// Not a line measurement: a damaged frame never reaches the decoder, so
+    /// anything counted here arrived intact and still made no sense, which
+    /// only happens when the two dictionaries have come apart.
+    pub fn undecodable_streams(&self) -> u64 {
+        self.undecodable
     }
 
     /// Take the frames that have crossed since this was last called.
@@ -869,7 +888,7 @@ impl Stack {
                     // end is built from everything that came before, so once
                     // they disagree they stay disagreed. V.42bis 6.4 has the
                     // receiver ask for the link to be reset.
-                    self.damaged += 1;
+                    self.undecodable += 1;
                     self.lapm.disconnect();
                 }
             }
@@ -1142,6 +1161,65 @@ mod tests {
         b.send(&after);
         settle(&mut a, &mut b, 200_000, |_, bit| bit);
         assert_eq!(a.take_received(), after, "and not the other way either");
+    }
+
+    /// A negotiated pair, the way a call makes one: XID settles compression
+    /// and everything else that goes with it, rather than a test reaching in.
+    fn negotiated_pair() -> (Stack, Stack) {
+        let mut a = Stack::new(Role::Originator, Params::default());
+        let mut b = Stack::new(Role::Answerer, Params::default());
+        a.offer_compression(Compression::Both);
+        b.offer_compression(Compression::Both);
+        (a, b)
+    }
+
+    /// Bulk traffic both ways at once on a line that damages frames.
+    ///
+    /// The condition a real call is in for most of its life and no other test
+    /// here puts it in: both ends compressing, both ends with data outstanding,
+    /// and retransmission running underneath. Compression cannot tolerate a
+    /// single octet delivered twice, out of order, or not at all, so this is
+    /// where error control either holds the stream together or quietly stops.
+    #[test]
+    fn bulk_traffic_both_ways_survives_a_line_that_damages_frames() {
+        let (mut a, mut b) = negotiated_pair();
+        a.connect();
+        settle(&mut a, &mut b, 40_000, |_, bit| bit);
+        assert!(a.is_connected() && b.is_connected(), "the link never came up");
+        assert!(a.compressing() && b.compressing(), "compression was not negotiated");
+
+        // Web traffic, near enough: headers that repeat and a body that does
+        // not, so the dictionary is being added to throughout.
+        let stream = |tag: u8, n: usize| -> Vec<u8> {
+            let mut out = Vec::new();
+            let mut x: u32 = 0x2545_f491 ^ u32::from(tag);
+            while out.len() < n {
+                out.extend_from_slice(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n");
+                for _ in 0..64 {
+                    x ^= x << 13;
+                    x ^= x >> 17;
+                    x ^= x << 5;
+                    out.push((x & 0xff) as u8);
+                }
+            }
+            out.truncate(n);
+            out
+        };
+
+        let up = stream(1, 6_000);
+        let down = stream(2, 6_000);
+        a.send(&up);
+        b.send(&down);
+        settle(&mut a, &mut b, 2_000_000, |i, bit| {
+            if i % 8191 == 0 { !bit } else { bit }
+        });
+        assert!(
+            a.damaged_frames() + b.damaged_frames() > 0,
+            "the channel damaged nothing, so nothing was tested"
+        );
+        assert!(a.is_connected() && b.is_connected(), "the link did not survive");
+        assert_eq!(b.take_received(), up, "what reached the answerer was not what was sent");
+        assert_eq!(a.take_received(), down, "and not the other way either");
     }
 
     #[test]

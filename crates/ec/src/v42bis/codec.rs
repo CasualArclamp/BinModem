@@ -488,6 +488,27 @@ impl Decoder {
             return Err(Error::UnknownCodeword(code));
         }
         let string = self.inner.dict.string(code);
+        // 9.2 b): the escape character moves on "in both transparent and
+        // compressed modes", and 2.13 says the same -- "adjusted on each
+        // appearance of the escape character in the data stream from the DTE,
+        // whether in transparent mode or compressed mode". These characters
+        // are that data stream, arriving at this end instead of leaving the
+        // other, so every one of them that is the escape moves it on here too.
+        //
+        // Doing it only in transparent mode is invisible for a long time and
+        // then fatal. Nothing marks a compressed-mode escape character on the
+        // line -- it is inside a string, indistinguishable from any other
+        // octet -- so the two ends simply hold different values and carry on.
+        // The first transparent-mode octet after that is read against the
+        // wrong escape: either an ordinary character is taken for the start of
+        // a command sequence, or a real sequence is taken for data. A link
+        // that had been carrying a page perfectly stops carrying anything, and
+        // the only sign is a command code that does not exist.
+        for &c in &string {
+            if c == self.inner.escape {
+                self.inner.escape = self.inner.escape.wrapping_add(51);
+            }
+        }
         out.extend_from_slice(&string);
 
         // The new entry is the previous string extended by this one's first
@@ -635,6 +656,71 @@ mod tests {
             dec.decode(chunk, &mut out).unwrap();
         }
         assert_eq!(out, input);
+    }
+
+    /// Traffic handed over the way a link hands it over, for long enough that
+    /// the dictionary fills and the mode changes more than once.
+    ///
+    /// Every other test here hands the encoder one payload. A modem hands it
+    /// whatever came down from above, when it came, and flushes each time so
+    /// nothing waits for a better match -- and a page fetched through a proxy
+    /// is a few hundred octets of text, then a few thousand of image, then
+    /// text again. Both of those matter: the chunking is where the accumulated
+    /// string is broken off, and the changing compressibility is where the
+    /// mode switches, which is the other place the two ends can part company.
+    #[test]
+    fn chunked_traffic_that_changes_its_mind_stays_in_step() {
+        let params = Params::default();
+        let mut enc = Encoder::new(params);
+        let mut dec = Decoder::new(params);
+
+        let mut plain: Vec<u8> = Vec::new();
+        let mut x: u32 = 0x1234_5678;
+        let mut next = move || {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            x
+        };
+        // Alternating runs: text a dictionary loves, then bytes it can do
+        // nothing with, which is what drives the compressibility test back and
+        // forth across its threshold.
+        for round in 0..60 {
+            for i in 0..40 {
+                plain.extend_from_slice(
+                    format!("GET /page/{i} HTTP/1.1\r\nHost: example.invalid\r\n\r\n").as_bytes(),
+                );
+            }
+            for _ in 0..600 {
+                plain.push((next() & 0xff) as u8);
+            }
+            let _ = round;
+        }
+
+        let mut out = Vec::new();
+        let mut back = Vec::new();
+        let mut at = 0;
+        while at < plain.len() {
+            // Chunks the size a link actually carries, never the same twice.
+            let take = 1 + (next() as usize % 900);
+            let end = (at + take).min(plain.len());
+            out.clear();
+            enc.encode(&plain[at..end], &mut out);
+            enc.flush(&mut out);
+            dec.decode(&out, &mut back).expect("the far end could not read it");
+            at = end;
+        }
+
+        assert_eq!(back.len(), plain.len(), "a different amount of data came back");
+        if back != plain {
+            let i = back.iter().zip(&plain).position(|(a, b)| a != b).unwrap_or(0);
+            panic!(
+                "the dictionaries came apart at octet {i} of {}: sent {:?}, got {:?}",
+                plain.len(),
+                &plain[i..(i + 24).min(plain.len())],
+                &back[i..(i + 24).min(back.len())]
+            );
+        }
     }
 
     #[test]

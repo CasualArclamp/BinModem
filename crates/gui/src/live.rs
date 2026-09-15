@@ -676,6 +676,12 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // The same, for the error control that runs on top of whatever the line
     // settled on.
     let mut last_ec = "";
+    // Compressed streams that would not decode. The one fault on this call
+    // that says nothing about itself: the link simply goes, and everything
+    // still on the panel -- rate, level, carrier -- looks perfect, so it reads
+    // as a line fault rather than as the two ends disagreeing about what a
+    // codeword means.
+    let mut last_undecodable = 0;
     // Whether the line was retraining last time round, and what it was
     // carrying before it started.
     let mut was_retraining = false;
@@ -1199,6 +1205,16 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 tx.log(Direction::Note, format!("V.42: {ec}{detail}"));
             }
             last_ec = ec;
+        }
+
+        let undecodable = modem.undecodable_streams();
+        if undecodable > last_undecodable {
+            last_undecodable = undecodable;
+            tx.log(
+                Direction::Note,
+                "V.42bis: what arrived would not decode, so the link is being put down"
+                    .to_owned(),
+            );
         }
 
         let state = modem.state();
