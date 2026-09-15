@@ -5,7 +5,6 @@
 //! codewords; the dictionary adapts as it goes and both ends build the same one
 //! from the same data, which is what makes a codeword reversible.
 
-pub mod bits;
 pub mod codec;
 pub mod dictionary;
 

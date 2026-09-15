@@ -1,6 +1,6 @@
 //! The V.42bis encoder and decoder (clauses 7, 8 and 9).
 
-use super::bits::{BitReader, BitWriter};
+use crate::bits::{BitReader, BitWriter};
 use super::dictionary::{Dictionary, ECM, EID, ETM, FLUSH, N4, Params, RESET, STEPUP};
 
 /// Transparent or compressed operation (V.42bis 7.1).

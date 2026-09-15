@@ -3,12 +3,14 @@
 //! What `CONNECT 33600/V42BIS` actually reports, and a prerequisite for
 //! credible interoperation with real modems.
 
+pub mod bits;
 pub mod detect;
 pub mod frame;
 pub mod hdlc;
 pub mod lapm;
 pub mod stack;
 pub mod v42bis;
+pub mod v44;
 pub mod xid;
 
 pub use detect::{Answer, Answerer, Originator, Outcome};

@@ -1,8 +1,12 @@
-//! Bit packing for compressed mode (V.42bis 7.5, Figure 3).
+//! Bit packing for compressed mode, shared by V.42bis and V.44.
 //!
-//! Codewords are packed so that "the least significant bit of a codeword
-//! immediately follows the most significant bit of the preceding codeword", so
-//! both codewords and the octets holding them run low-order bit first.
+//! Both Recommendations specify the same rule in the same words. V.42bis 7.5
+//! (Figure 3) has "the least significant bit of a codeword immediately follows
+//! the most significant bit of the preceding codeword"; V.44 6.6 has "the
+//! least significant bit of the binary code prefix shall immediately follow
+//! the most significant bit of the preceding binary code". So codes and the
+//! octets holding them both run low-order bit first, and one layer serves the
+//! two of them.
 
 /// Packs codewords into octets, low-order bit first.
 #[derive(Debug, Default)]
@@ -47,7 +51,7 @@ impl BitWriter {
 /// Octets queue up rather than shifting straight into the accumulator, so any
 /// number may be pushed before anything is read. Shifting them in directly
 /// would overflow the accumulator as soon as more than a few were buffered.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct BitReader {
     queue: std::collections::VecDeque<u8>,
     acc: u32,
