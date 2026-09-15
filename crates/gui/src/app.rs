@@ -2768,6 +2768,27 @@ impl eframe::App for ScopeApp {
 
                 ui.add_space(10.0);
                 self.status(ui);
+
+                // A retrain by hand, under the rate it would change. V.34's is
+                // the full one (11.5), back through phase 2; the button is
+                // there only on a V.34 call that is up, since that is the only
+                // place a retrain means anything.
+                if let Source::Live(session) = &self.source {
+                    let connected = self.frame.state == telemetry::CallState::Connected;
+                    let v34 = self.frame.modulation == "V.34";
+                    ui.add_space(6.0);
+                    if ui
+                        .add_enabled(connected && v34, egui::Button::new("Retrain"))
+                        .on_hover_text(
+                            "V.34 11.5: send the retrain tone and go back through \
+                             phase 2, measuring the line again and training on \
+                             what it will carry now -- on the same call",
+                        )
+                        .clicked()
+                    {
+                        session.retrain();
+                    }
+                }
             });
 
         self.constellation_window(ui);

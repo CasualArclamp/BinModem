@@ -1614,6 +1614,21 @@ impl Modem {
         }
     }
 
+    /// Retrain the line the whole way (V.34 11.5): back through phase 2 and
+    /// train again, on the same call. For V.34 this is the full retrain, not
+    /// the in-band rate renegotiation [`Self::ask_for_retrain`] does; other
+    /// modulations fall back to whatever retrain they have. Does nothing
+    /// outside data mode.
+    pub fn retrain(&mut self) {
+        match self.pump.as_mut() {
+            Some(Pump::V34(m)) => {
+                m.retrain();
+            }
+            Some(Pump::V32(m)) => m.ask_for_retrain(),
+            _ => {}
+        }
+    }
+
     /// How many times this call has retrained.
     ///
     /// One is a line that changed. A handful is a line that cannot hold what

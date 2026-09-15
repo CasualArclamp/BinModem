@@ -207,6 +207,9 @@ pub struct Session {
     /// the line -- a data call, a fax, a handshake. The line thread hangs up
     /// and clears it.
     hang_up: AtomicBool,
+    /// Set when the window asks for a retrain: V.34 goes back through phase 2
+    /// on the same call. The line thread asks the modem and clears it.
+    retrain: AtomicBool,
     /// A transfer the window has asked for, until the line thread takes it.
     transfer_request: Mutex<Option<TransferRequest>>,
     /// What the transfer is doing, for the window to read.
@@ -282,6 +285,7 @@ impl Default for Session {
             fax_arriving: Mutex::default(),
             recording: AtomicBool::new(false),
             hang_up: AtomicBool::new(false),
+            retrain: AtomicBool::new(false),
         }
     }
 }
@@ -396,6 +400,16 @@ impl Session {
 
     fn take_hang_up(&self) -> bool {
         self.hang_up.swap(false, Ordering::Relaxed)
+    }
+
+    /// Ask the modem to retrain the line: V.34 back through phase 2, on the
+    /// same call.
+    pub fn retrain(&self) {
+        self.retrain.store(true, Ordering::Relaxed);
+    }
+
+    fn take_retrain(&self) -> bool {
+        self.retrain.swap(false, Ordering::Relaxed)
     }
 
     /// Start or stop keeping it. Stopping writes the file.
@@ -973,6 +987,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         if session.take_hang_up() {
             tx.log(Direction::Note, "putting the call down");
             modem.hang_up();
+        }
+        if session.take_retrain() {
+            tx.log(Direction::Note, "retraining the line");
+            modem.retrain();
         }
 
         let typed = session.take_typed();
