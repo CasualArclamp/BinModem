@@ -794,7 +794,7 @@ impl Modem {
     /// ending a session it has already said goodbye to has no reason to wait
     /// for that, and nothing it sends after the goodbye would be data.
     pub fn hang_up(&mut self) {
-        if self.pump.is_some() || self.negotiation.is_some() {
+        if self.pump.is_some() || self.negotiation.is_some() || self.fax.is_some() {
             self.end_call(Ended::LocalRequest);
         }
     }
@@ -1719,7 +1719,7 @@ impl Modem {
                 Action::Dial(_) => self.place_call(Role::Calling),
                 Action::Answer => self.place_call(Role::Answering),
                 Action::HangUp => {
-                    if self.pump.is_some() {
+                    if self.pump.is_some() || self.fax.is_some() {
                         self.end_call(Ended::LocalRequest);
                     } else {
                         self.at.emit(ResultCode::Ok);
@@ -2057,6 +2057,12 @@ impl Modem {
     }
 
     fn end_call(&mut self, why: Ended) {
+        // A fax call is a call too, and putting the line down has to stop it
+        // -- otherwise the only way out of a fax that has gone wrong is to
+        // close the program. What it learned is kept for the window.
+        if self.fax.is_some() {
+            self.fax_result = self.fax.take();
+        }
         self.pump = None;
         self.negotiation = None;
         self.rate = 0;

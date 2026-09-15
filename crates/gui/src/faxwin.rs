@@ -84,6 +84,8 @@ pub enum Start {
     Dial(String),
     /// Go off hook and take whatever arrives.
     Answer,
+    /// Put the call down, in the middle of a fax or before it answers.
+    HangUp,
 }
 
 /// The preview is drawn at a size a window can hold, not at 1728 across.
@@ -726,7 +728,9 @@ impl Fax {
                         }
                     });
                 });
-                self.call_progress(ui, on_hook, dim, bright);
+                if let Some(stop) = self.call_progress(ui, on_hook, dim, bright) {
+                    start = Some(stop);
+                }
 
                 self.receive_row(ui, dim, bright);
 
@@ -802,7 +806,7 @@ impl Fax {
         on_hook: bool,
         dim: Color32,
         bright: Color32,
-    ) {
+    ) -> Option<Start> {
         if on_hook {
             // A modem stays whatever class it was last told, which is also a
             // good way to dial a bulletin board and greet it with a calling
@@ -817,14 +821,25 @@ impl Fax {
                     .color(dim),
                 );
             }
-            return;
+            return None;
         }
         let what = match self.phase {
             Some(p) => p.to_owned(),
             None => "a call, but not a fax".to_owned(),
         };
         let side = if self.sending { "sending" } else { "receiving" };
+        let mut stop = None;
         ui.horizontal(|ui| {
+            if ui
+                .button("Stop")
+                .on_hover_text(
+                    "put the call down now. A fax has no terminal to type ATH \
+                     at, so this is the way out of one that has stalled",
+                )
+                .clicked()
+            {
+                stop = Some(Start::HangUp);
+            }
             ui.label(RichText::new(format!("{side}: {what}")).small().color(bright));
             if self.rate > 0 {
                 ui.label(
@@ -851,6 +866,7 @@ impl Fax {
                     .show_percentage(),
             );
         }
+        stop
     }
 
     /// The page arriving, drawn as it comes, or the page that last arrived.
@@ -973,6 +989,8 @@ impl Fax {
         match start {
             Start::Dial(number) => format!("AT+FCLASS=1\rATD{number}\r"),
             Start::Answer => "AT+FCLASS=1\rATA\r".to_owned(),
+            // Handled by the window, not the modem's command line.
+            Start::HangUp => String::new(),
         }
     }
 }

@@ -210,8 +210,24 @@ impl Halftone {
 }
 
 /// Turn an image into a page.
+///
+/// A fax page is as long as the picture on it, not a fixed sheet: T.4 sends
+/// scan lines until the page ends and puts no length in the header, so a short
+/// image makes a short page rather than a full A4 with a field of white below
+/// it. The picture is laid across the full 215 mm width and the page is however
+/// many lines tall that makes it, capped at the A4 sheet -- a picture taller
+/// than A4 is scaled down to fit it, as before.
 pub fn render(image: &Grey, resolution: Resolution, halftone: Halftone) -> Page {
-    let height = resolution.lines();
+    let max_lines = resolution.lines();
+    let height = if image.width == 0 || image.height == 0 {
+        max_lines
+    } else {
+        // The picture's height in scan lines when it is drawn the full width
+        // of the paper: its aspect ratio times the width, in millimetres, at
+        // this resolution's lines per millimetre.
+        let lines = (image.height as f64 / image.width as f64) * WIDTH_MM * resolution.lines_per_mm();
+        (lines.round() as usize).clamp(1, max_lines)
+    };
     let mut grey = image.fit(WIDTH, height, resolution.lines_per_mm());
     let mut lines = Vec::with_capacity(height);
     match halftone {
@@ -258,11 +274,21 @@ mod tests {
     }
 
     #[test]
-    fn a_page_is_the_size_the_recommendation_gives() {
-        let page = render(&solid(100, 100, 0.0), Resolution::Standard, Halftone::Threshold);
-        assert_eq!(page.width(), 1728);
-        assert_eq!(page.height(), 1143);
-        let fine = render(&solid(100, 100, 0.0), Resolution::Fine, Halftone::Threshold);
+    fn a_page_is_as_long_as_the_picture_not_the_sheet() {
+        // A square drawn the full 215 mm across is 215 mm tall, well short of
+        // A4's 297: the page is that long and no longer, with no field of
+        // white below it.
+        for resolution in [Resolution::Standard, Resolution::Fine] {
+            let square = render(&solid(100, 100, 0.0), resolution, Halftone::Threshold);
+            assert_eq!(square.width(), 1728);
+            let mm = square.height() as f64 / resolution.lines_per_mm();
+            assert!((mm - 215.0).abs() < 3.0, "{resolution:?}: {mm} mm tall");
+        }
+        // A picture taller than the sheet is capped at it and scaled to fit,
+        // as a real machine's page is.
+        let tall = render(&solid(100, 400, 0.0), Resolution::Standard, Halftone::Threshold);
+        assert_eq!(tall.height(), 1143);
+        let fine = render(&solid(100, 400, 0.0), Resolution::Fine, Halftone::Threshold);
         assert_eq!(fine.height(), 2287);
     }
 
@@ -270,11 +296,10 @@ mod tests {
     fn white_paper_stays_white_and_black_paper_stays_black() {
         let white = render(&solid(64, 64, 0.0), Resolution::Standard, Halftone::Threshold);
         assert_eq!(white.coverage(), 0.0);
-        // Black fills the square it is drawn in, which is 1728 wide and the
-        // same tall, on a page taller than that.
+        // Black now fills its page: the page is the square's own shape, so the
+        // ink reaches every edge with no white margin below it.
         let black = render(&solid(64, 64, 1.0), Resolution::Standard, Halftone::Threshold);
-        assert!(black.coverage() > 0.0);
-        assert!(black.coverage() < 1.0, "a square does not fill a page");
+        assert!(black.coverage() > 0.99, "a black square left the page part white: {}", black.coverage());
     }
 
     fn inked_lines(page: &Page) -> Vec<usize> {
@@ -345,7 +370,10 @@ mod tests {
 
     #[test]
     fn a_blank_page_codes_to_almost_nothing() {
-        let page = render(&solid(64, 64, 0.0), Resolution::Standard, Halftone::Threshold);
+        // An A4-shaped blank page, so it is the full sheet: a square one would
+        // be shorter now, which the length test above covers.
+        let page = render(&solid(215, 297, 0.0), Resolution::Standard, Halftone::Threshold);
+        assert_eq!(page.height(), 1143);
         let bits = page.encode();
         // Every line is EOL, 1728 white, 0 white: 29 bits, plus the RTC.
         assert_eq!(bits.len(), 1143 * 29 + 6 * 12);

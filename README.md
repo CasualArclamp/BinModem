@@ -184,11 +184,14 @@ replays through the modem to the banner on the terminal and the far end's new
 MP read. A second call lost the far end's E to a VoIP slip; that capture now
 connects in replay, the receiver re-timing itself to the slip and finding the
 frames again from the superframe's bit inversions, and doing the same for
-another slip once connected. What is left is a full retrain from phase 2, which
-a far end falls back to when a renegotiation goes unanswered.
+another slip once connected. And a full retrain: a far end that gives up on a
+renegotiation, or meets a line that changed too much for one, falls back to
+sending its tone and starting phase 2 again, and two of these now go back
+through it together and come up at whatever the line will carry, without
+exchanging their capabilities a second time.
 
-After it, V.17 for fax at 14 400, and V.33 beside it -- the same trellis code
-as V.32bis again, on a fax call and a leased line respectively -- and more than
+Next, V.17 for fax at 14 400, and V.33 beside it -- the same trellis code as
+V.32bis again, on a fax call and a leased line respectively -- and more than
 one page to a fax call.
 
 Alongside them: MNP as an alternative to LAPM, since it is what a modem without

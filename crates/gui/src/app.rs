@@ -1100,16 +1100,23 @@ impl ScopeApp {
         }
         let on_hook = self.frame.state == telemetry::CallState::Idle;
         if let Some(start) = self.fax.show(ui, on_hook) {
-            self.fax.trouble = None;
-            // Who this end says it is, and what it is sending, before the
-            // call rather than in it: both go out inside the first frames
-            // this modem sends, which is well before the window is asked
-            // anything again.
-            session.set_fax_identification(self.fax.identification.trim());
-            session.set_fax_offer(&self.fax.ours());
-            session.set_fax_error_correction(self.fax.error_correction);
-            session.set_fax_page(self.fax.page().cloned());
-            session.type_bytes(crate::faxwin::Fax::commands(&start).as_bytes());
+            if matches!(start, crate::faxwin::Start::HangUp) {
+                // Not an AT command: a fax call sits in the handshake state
+                // where the interpreter does not read one, so the line thread
+                // puts it down directly.
+                session.hang_up();
+            } else {
+                self.fax.trouble = None;
+                // Who this end says it is, and what it is sending, before the
+                // call rather than in it: both go out inside the first frames
+                // this modem sends, which is well before the window is asked
+                // anything again.
+                session.set_fax_identification(self.fax.identification.trim());
+                session.set_fax_offer(&self.fax.ours());
+                session.set_fax_error_correction(self.fax.error_correction);
+                session.set_fax_page(self.fax.page().cloned());
+                session.type_bytes(crate::faxwin::Fax::commands(&start).as_bytes());
+            }
         }
     }
 

@@ -203,6 +203,10 @@ pub struct Session {
     drive: AtomicU32,
     /// Whether to keep what goes past, for looking at afterwards.
     recording: AtomicBool,
+    /// Set when the window asks for the call to be put down, however it is on
+    /// the line -- a data call, a fax, a handshake. The line thread hangs up
+    /// and clears it.
+    hang_up: AtomicBool,
     /// A transfer the window has asked for, until the line thread takes it.
     transfer_request: Mutex<Option<TransferRequest>>,
     /// What the transfer is doing, for the window to read.
@@ -277,6 +281,7 @@ impl Default for Session {
             fax_received: Mutex::default(),
             fax_arriving: Mutex::default(),
             recording: AtomicBool::new(false),
+            hang_up: AtomicBool::new(false),
         }
     }
 }
@@ -380,6 +385,17 @@ impl Session {
     /// Whether the call is being kept.
     pub fn recording(&self) -> bool {
         self.recording.load(Ordering::Relaxed)
+    }
+
+    /// Put the call down, whatever it is: a data call, a fax, a handshake that
+    /// has not finished. The window's own hang-up, for when there is no
+    /// terminal to type `ATH` at -- a fax call in particular.
+    pub fn hang_up(&self) {
+        self.hang_up.store(true, Ordering::Relaxed);
+    }
+
+    fn take_hang_up(&self) -> bool {
+        self.hang_up.swap(false, Ordering::Relaxed)
     }
 
     /// Start or stop keeping it. Stopping writes the file.
@@ -952,6 +968,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         }
         if let Some(page) = modem.take_received_page() {
             session.set_fax_received(page);
+        }
+
+        if session.take_hang_up() {
+            tx.log(Direction::Note, "putting the call down");
+            modem.hang_up();
         }
 
         let typed = session.take_typed();
