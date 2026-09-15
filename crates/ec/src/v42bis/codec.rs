@@ -750,3 +750,43 @@ mod real_encoder {
         );
     }
 }
+
+#[cfg(test)]
+mod binary_probe {
+    use super::*;
+
+    /// A web page over PPP is binary: compressed images, TLS records, IP and
+    /// TCP headers. Text has always gone across; this is what a browser sends.
+    #[test]
+    fn high_entropy_traffic_survives_the_round_trip() {
+        let params = Params::default();
+        let mut encoder = Encoder::new(params);
+        let mut decoder = Decoder::new(params);
+        let mut seed = 0x1234_5678u32;
+        let mut rand = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed
+        };
+        let mut sent = Vec::new();
+        let mut got = Vec::new();
+        // Bursts, the way frames arrive, mixing text with random octets.
+        for burst in 0..200 {
+            let mut chunk = Vec::new();
+            if burst % 3 == 0 {
+                chunk.extend_from_slice(b"GET /index.html HTTP/1.1\r\nHost: example\r\n\r\n");
+            }
+            let n = (rand() % 400) as usize + 1;
+            for _ in 0..n {
+                chunk.push((rand() >> 11) as u8);
+            }
+            let mut wire = Vec::new();
+            encoder.encode(&chunk, &mut wire);
+            decoder.decode(&wire, &mut got).expect("decode failed");
+            sent.extend_from_slice(&chunk);
+        }
+        assert_eq!(got.len(), sent.len(), "lengths differ");
+        assert!(got == sent, "the data came back changed");
+    }
+}
