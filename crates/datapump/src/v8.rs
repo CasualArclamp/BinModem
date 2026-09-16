@@ -12,7 +12,7 @@
 
 use dsp::filter::OnePole;
 use dsp::Nco;
-use v8::{CallFunction, Decoder, Heard, Menu, Modulation, Modulations, Protocol, Signal};
+use v8::{Access, CallFunction, Decoder, Heard, Menu, Modulation, Modulations, Pcm, PcmRole, Protocol, Signal};
 
 use crate::bell103::{Bell103Rx, Bell103Tx};
 use crate::framing::AsyncBits;
@@ -168,6 +168,8 @@ pub struct Modem {
     outgoing: Vec<u8>,
     /// Zero octets of CJ seen so far (8.2.3 wants all three).
     cj: usize,
+    /// The JM this end answered with, to repeat as it was.
+    sent_jm: Option<Menu>,
 }
 
 impl Modem {
@@ -200,6 +202,7 @@ impl Modem {
             far_menu: None,
             outgoing: Vec::new(),
             cj: 0,
+            sent_jm: None,
         }
     }
 
@@ -216,6 +219,40 @@ impl Modem {
     pub fn offering_lapm(mut self) -> Self {
         self.menu.protocol = Protocol::Lapm;
         self
+    }
+
+    /// Offer to be half of a V.90 pair (Table 5).
+    ///
+    /// 7.3: a call menu carrying the PCM category also carries the PSTN
+    /// access category -- this modem is on an analogue line as far as it
+    /// knows, which is the claim that commits to least -- and V.34, which
+    /// V.90 falls back to.
+    pub fn offering_pcm(self, pcm: Pcm) -> Self {
+        self.offering_pcm_on(pcm, Access::default())
+    }
+
+    /// The same, saying what kind of line this end is on: a V.90 server is
+    /// "on a digital network connection".
+    pub fn offering_pcm_on(mut self, pcm: Pcm, access: Access) -> Self {
+        self.menu.pcm = Some(pcm);
+        self.menu.access = Some(access);
+        self.menu.modulations.insert(Modulation::V34Duplex);
+        self
+    }
+
+    /// Which half of a V.90 pair this end is to be, once the menus are
+    /// settled: none unless both offered a PCM category and the two make a
+    /// pair (9.1.1/V.90).
+    pub fn pcm_role(&self) -> Option<PcmRole> {
+        let ours = self.menu.pcm?;
+        let far = self.far_menu?.pcm?;
+        // From the calling end the far menu is the joint one, which carries
+        // the PCM category back only for a pair; V.34 has to have been agreed
+        // too, since V.90 is V.34 in its other direction.
+        if self.chosen != Some(Modulation::V34Duplex) {
+            return None;
+        }
+        Pcm::pair(ours, far, self.role == Role::Calling)
     }
 
     pub fn status(&self) -> Status {
@@ -416,7 +453,13 @@ impl Modem {
                 // sequences, the DCE shall transmit JM".
                 if let Some(cm) = self.settled() {
                     self.far_menu = Some(cm);
-                    let jm = cm.joint(self.menu.modulations, self.menu.protocol);
+                    let jm = match (self.menu.pcm, self.menu.access) {
+                        (Some(pcm), access) => {
+                            cm.joint_pcm(self.menu.modulations, self.menu.protocol, pcm, access.unwrap_or_default())
+                        }
+                        _ => cm.joint(self.menu.modulations, self.menu.protocol),
+                    };
+                    self.sent_jm = Some(jm);
                     self.chosen = jm.chosen();
                     self.agreed = jm.protocol;
                     self.last = None;
@@ -465,6 +508,9 @@ impl Modem {
 
     /// The JM to repeat, rebuilt from what was agreed.
     fn last_jm(&self) -> Vec<u8> {
+        if let Some(jm) = self.sent_jm {
+            return v8::sequence(Signal::Jm, &jm);
+        }
         let mut modulations = Modulations::NONE;
         if let Some(m) = self.chosen {
             modulations.insert(m);

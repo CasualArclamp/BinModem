@@ -28,12 +28,13 @@ use datapump::bell103;
 use datapump::v22bis;
 use datapump::v32;
 use datapump::v34;
+use datapump::v90;
 mod faxcall;
 
 pub use faxcall::FaxCall;
 
 use datapump::v8 as v8line;
-use v8::{CallFunction, Modulation, Modulations};
+use v8::{CallFunction, Modulation, Modulations, Pcm, PcmRole};
 use ec::stack::Phase;
 use ec::xid::Compression;
 use ec::{Params, Role as EcRole, Stack};
@@ -98,6 +99,10 @@ enum Pump {
     /// V.34: the line probed and ranged in phase 2, both receivers trained
     /// and data mode's parameters exchanged in phases 3 and 4, and data after.
     V34(Box<v34::startup::Modem>),
+    /// V.90's analogue modem: V.34 upstream and codewords downstream, after
+    /// V.90's own phase 2 -- or V.34 in both directions, if the far end turns
+    /// out not to be a V.90 server after all.
+    V90(Box<v90::startup::Analogue>),
 }
 
 impl Pump {
@@ -107,6 +112,7 @@ impl Pump {
             Self::V32(m) => m.step(line),
             Self::Bell103(m) => m.step(line),
             Self::V34(m) => m.step(line),
+            Self::V90(m) => m.step(line),
         }
     }
 
@@ -146,6 +152,12 @@ impl Pump {
                 | v34::startup::Status::ClearedDown
                 | v34::startup::Status::Failed(_) => Progress::Failed,
             },
+            Self::V90(m) => match m.status() {
+                v90::startup::Status::Running => Progress::Negotiating,
+                v90::startup::Status::Connected { receive, transmit } => Progress::Connected { receive, transmit },
+                v90::startup::Status::Retraining => Progress::Retraining,
+                v90::startup::Status::Failed(_) => Progress::Failed,
+            },
         }
     }
 
@@ -158,6 +170,7 @@ impl Pump {
         match self {
             Self::V32(m) => Some((m.round_trip() as f64 * 1000.0 / v32::BAUD).round() as u32),
             Self::V34(m) => m.phase2().round_trip().map(|s| (s * 1000.0).round() as u32),
+            Self::V90(m) => m.round_trip().map(|s| (s * 1000.0).round() as u32),
             Self::V22bis(_) | Self::Bell103(_) => None,
         }
     }
@@ -174,6 +187,7 @@ impl Pump {
             Self::V32(m) => m.carrier(),
             Self::Bell103(m) => m.carrier(),
             Self::V34(m) => m.carrier(),
+            Self::V90(m) => m.carrier(),
         }
     }
 
@@ -183,6 +197,7 @@ impl Pump {
             Self::V32(m) => m.take_bits(),
             Self::Bell103(m) => m.take_bits(),
             Self::V34(m) => m.take_bits(),
+            Self::V90(m) => m.take_bits(),
         }
     }
 
@@ -192,6 +207,7 @@ impl Pump {
             Self::V32(m) => m.send_bits(bits),
             Self::Bell103(m) => m.send_bits(bits),
             Self::V34(m) => m.send_bits(bits),
+            Self::V90(m) => m.send_bits(bits),
         }
     }
 
@@ -204,6 +220,7 @@ impl Pump {
     fn accepts_bits(&self) -> bool {
         match self {
             Self::V34(m) => m.accepts_bits(),
+            Self::V90(m) => m.accepts_bits(),
             Self::V22bis(_) | Self::V32(_) | Self::Bell103(_) => true,
         }
     }
@@ -214,6 +231,7 @@ impl Pump {
             Self::V32(m) => m.pending_bits(),
             Self::Bell103(m) => m.pending_bits(),
             Self::V34(m) => m.pending_bits(),
+            Self::V90(m) => m.pending_bits(),
         }
     }
 
@@ -226,6 +244,10 @@ impl Pump {
             Self::V22bis(m) => Some(m.constellation_point()),
             Self::V32(m) => Some(m.constellation_point()),
             Self::V34(m) => m.constellation_point(),
+            // Downstream has no plane to plot, and until V.90 is settled the
+            // upstream's training is V.34's own.
+            Self::V90(m) if m.is_v90() => None,
+            Self::V90(m) => m.v34().constellation_point(),
             Self::Bell103(_) => None,
         }
     }
@@ -264,7 +286,7 @@ impl Pump {
         match self {
             Self::V22bis(m) => Some(m.residual_error()),
             Self::V32(m) => Some(m.residual_error()),
-            Self::Bell103(_) | Self::V34(_) => None,
+            Self::Bell103(_) | Self::V34(_) | Self::V90(_) => None,
         }
     }
 
@@ -281,7 +303,7 @@ impl Pump {
     fn reception(&self) -> Option<f64> {
         match self {
             Self::V32(m) => Some(m.residual_error() / m.point_spacing()),
-            Self::V22bis(_) | Self::Bell103(_) | Self::V34(_) => None,
+            Self::V22bis(_) | Self::Bell103(_) | Self::V34(_) | Self::V90(_) => None,
         }
     }
 
@@ -305,6 +327,8 @@ impl Pump {
             // Phase 3's TRN and J are four points, phase 4 is sixteen, and
             // data mode is however many hundred its rate and shaping make.
             Self::V34(m) => m.constellation_size().unwrap_or(2),
+            Self::V90(m) if m.is_v90() => 2,
+            Self::V90(m) => m.v34().constellation_size().unwrap_or(2),
         }
     }
 
@@ -334,6 +358,13 @@ impl Pump {
                 Some(_) => "QAM",
                 None => "DPSK",
             },
+            Self::V90(m) if m.is_v90() => "PCM",
+            Self::V90(m) => match m.v34().constellation_size() {
+                Some(4) => "4PSK",
+                Some(16) => "16QAM",
+                Some(_) => "QAM",
+                None => "DPSK",
+            },
         }
     }
 
@@ -350,6 +381,9 @@ impl Pump {
             },
             Self::Bell103(_) => "Bell 103",
             Self::V34(_) => "V.34",
+            // V.90 until phase 2 says the far end is not a server.
+            Self::V90(m) if m.is_v90() || m.v34().training().is_none() => "V.90",
+            Self::V90(_) => "V.34",
         }
     }
 
@@ -361,6 +395,16 @@ impl Pump {
             Self::V32(m) => m.phase(),
             Self::Bell103(m) => m.line_phase(),
             Self::V34(m) => m.phase(),
+            Self::V90(m) => m.phase(),
+        }
+    }
+
+    /// The V.34 start-up this pump is running, or the one inside V.90's.
+    fn v34(&self) -> Option<&v34::startup::Modem> {
+        match self {
+            Self::V34(m) => Some(m),
+            Self::V90(m) => Some(m.v34()),
+            _ => None,
         }
     }
 }
@@ -771,6 +815,8 @@ pub struct Modem {
     recovered: Vec<u8>,
     /// Whether V.8 settled on LAPM before the data carriers went up.
     declared_lapm: bool,
+    /// Whether V.8 settled on this end being V.90's analogue modem.
+    pcm_agreed: bool,
     /// The rate of a connection the terminal has not been told about yet.
     ///
     /// V.250 6.5.5 puts the error control report "before the final result
@@ -811,6 +857,7 @@ impl Modem {
             far_ec: Vec::new(),
             recovered: Vec::new(),
             declared_lapm: false,
+            pcm_agreed: false,
             announce: None,
         }
     }
@@ -1468,7 +1515,7 @@ impl Modem {
                 self.rate = receive;
                 self.transmit_rate = transmit;
                 self.announce = Some(receive);
-                if let Some(Pump::V34(m)) = self.pump.as_ref() {
+                if let Some(m) = self.pump.as_ref().and_then(Pump::v34) {
                     self.v34_report = Some(V34Report::of(m));
                 }
             }
@@ -1485,7 +1532,7 @@ impl Modem {
             Progress::Connected { receive: rate, transmit } => {
                 self.rate = rate;
                 self.transmit_rate = transmit;
-                if let Some(Pump::V34(m)) = self.pump.as_ref() {
+                if let Some(m) = self.pump.as_ref().and_then(Pump::v34) {
                     self.v34_report = Some(V34Report::of(m));
                 }
                 // Everything the receiver made of the handshake is thrown
@@ -1592,7 +1639,7 @@ impl Modem {
                 self.announce_connect();
             }
             Progress::Failed => {
-                if let Some(Pump::V34(m)) = self.pump.as_ref() {
+                if let Some(m) = self.pump.as_ref().and_then(Pump::v34) {
                     // Not a call that never answered: one that answered, got
                     // through as much of V.34 as there is, and stopped. What it
                     // learned is the point of having placed it.
@@ -1686,14 +1733,14 @@ impl Modem {
                 self.rate = receive;
                 self.transmit_rate = transmit;
                 // A V.34 renegotiation settles new MPs and new rates.
-                if let Some(Pump::V34(m)) = self.pump.as_ref() {
+                if let Some(m) = self.pump.as_ref().and_then(Pump::v34) {
                     self.v34_report = Some(V34Report::of(m));
                 }
             }
             // A retrain that never finishes is a call that has ended, whatever
             // the line is still carrying.
             Progress::Failed if self.retraining => {
-                if let Some(Pump::V34(m)) = self.pump.as_ref() {
+                if let Some(m) = self.pump.as_ref().and_then(Pump::v34) {
                     self.v34_report = Some(V34Report::of(m));
                 }
                 self.end_call(Ended::CarrierLost);
@@ -1751,6 +1798,7 @@ impl Modem {
         match self.pump.as_ref() {
             Some(Pump::V32(m)) => m.retrains(),
             Some(Pump::V34(m)) => m.renegotiations() + m.retrains(),
+            Some(Pump::V90(m)) => m.v34().renegotiations() + m.retrains(),
             _ => 0,
         }
     }
@@ -1970,6 +2018,12 @@ impl Modem {
             if self.want_error_control {
                 negotiation = negotiation.offering_lapm();
             }
+            // V.90's analogue half, offered from the end that dials: this
+            // modem is on a telephone line, not wired into the network.
+            if self.at.modulation.carrier == "V90" && self.role == Role::Calling {
+                negotiation = negotiation.offering_pcm(Pcm::ANALOGUE);
+            }
+            self.pcm_agreed = false;
             self.negotiation = Some(negotiation);
             return;
         }
@@ -1997,7 +2051,8 @@ impl Modem {
             "V32" | "V32B" => Some(Modulation::V32bis),
             // Offered first, and V.32bis and V.22bis beside it below: a far end
             // without V.34 picks one of those, and the call goes ahead on it.
-            "V34" => Some(Modulation::V34Duplex),
+            // V.90 rides on V.34's bit, with the PCM category beside it.
+            "V34" | "V90" => Some(Modulation::V34Duplex),
             "B103" => None,
             _ => Some(Modulation::V22bis),
         }) else {
@@ -2078,6 +2133,7 @@ impl Modem {
             v8line::Status::Agreed(modulation) => {
                 self.declared_lapm = negotiation.lapm();
                 self.far_menu = negotiation.far_menu();
+                self.pcm_agreed = negotiation.pcm_role() == Some(PcmRole::Analogue);
                 self.negotiation = None;
                 self.start_pump(Some(modulation));
             }
@@ -2107,6 +2163,9 @@ impl Modem {
     fn start_pump(&mut self, chosen: Option<Modulation>) {
         let role = self.role;
         let carrier = match chosen {
+            // V.8's joint menu named a V.90 server for this end to be the
+            // analogue half of (9.1.1/V.90).
+            Some(Modulation::V34Duplex) if self.pcm_agreed => "V90".to_owned(),
             Some(Modulation::V34Duplex) => "V34".to_owned(),
             // V.8 cannot tell the two apart, so what it agreed does not
             // change which of them was asked for. Anything else -- a far end
@@ -2122,11 +2181,12 @@ impl Modem {
             // whose far end answered with a plain ANS on to V.32bis's own
             // start-up, and so does a V.8 that was turned off.
             _ => match self.at.modulation.carrier.as_str() {
-                "V34" => "V32B".to_owned(),
+                "V34" | "V90" => "V32B".to_owned(),
                 other => other.to_owned(),
             },
         };
         self.pump = Some(match carrier.as_str() {
+            "V90" => Pump::V90(Box::new(v90::startup::Analogue::new(self.fs))),
             "V34" => {
                 let role = match role {
                     Role::Calling => v34::phase2::Role::Call,

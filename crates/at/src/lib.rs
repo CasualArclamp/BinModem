@@ -326,8 +326,10 @@ impl Interpreter {
             // V.32 and V.32bis are separate names because V.250 makes them
             // separate carriers, and the difference is real: V32 tops out at
             // 9600 and V32B at 14 400. A far end that will not hold the faster
-            // rates is asked for the slower carrier and gets exactly it.
-            modulations: ["V34", "V32B", "V32", "V22B", "B103"]
+            // rates is asked for the slower carrier and gets exactly it. V90 is
+            // the analogue half of V.90 only: this modem dials a server, and
+            // is not one.
+            modulations: ["V90", "V34", "V32B", "V32", "V22B", "B103"]
                 .iter()
                 .map(|s| (*s).to_owned())
                 .collect(),

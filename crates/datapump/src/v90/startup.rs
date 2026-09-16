@@ -263,6 +263,13 @@ impl Digital {
         }
     }
 
+    pub fn pending_bits(&self) -> usize {
+        match self.v90.as_ref() {
+            Some(m) => m.pending_bits(),
+            None => self.v34.pending_bits(),
+        }
+    }
+
     /// One network sample in, one out.
     pub fn step(&mut self, input: f64) -> f64 {
         if let Some(m) = self.v90.as_mut() {
