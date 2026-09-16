@@ -23,6 +23,17 @@ pub const INFO0_BITS: usize = 49;
 pub const INFO1C_BITS: usize = 109;
 pub const INFO1A_BITS: usize = 70;
 
+/// V.90's INFO0d (Table 7/V.90), the one sequence of V.90's phase 2 whose
+/// length is not one of V.34's. The other three are V.34's lengths: INFO0a
+/// and both INFO1a are laid out as V.34 lays them, and "the bit definitions
+/// [of INFO1d] are identical to those of INFO1c in Recommendation V.34".
+pub const INFO0D_BITS: usize = 62;
+
+/// Bits 37:39 of an INFO1a that asks for V.90: "Symbol rate of 8000 to be used
+/// by the digital modem: The integer 6" (Table 10/V.90). Six is not one of
+/// V.34's symbol rates, which is what tells the two INFO1a apart.
+pub const PCM_SYMBOL_RATE: u32 = 6;
+
 /// Where the information starts: after the fill and the frame sync.
 const INFORMATION: usize = FILL.len() + SYNC.len();
 
@@ -349,12 +360,157 @@ impl Info1a {
     }
 }
 
-/// Any of the four, as a receiver hands it over.
+/// INFO0d (Table 7/V.90): a V.90 digital modem's capabilities.
+///
+/// Bits 12 to 28 are INFO0a's, word for word -- the digital modem falls back
+/// to V.34 as readily as any modem does, and says what it can do there in the
+/// same place. What follows is what only a modem on a digital network can say:
+/// how loud it will be, where that is measured, and which companding law the
+/// network it sits on uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Info0d {
+    /// Bits 12:28, laid out as INFO0a's. Bits 26:27 are "Reserved for the
+    /// ITU" here, where V.34 has its transmit clock, so they read as zero.
+    pub v34: Info0,
+    /// Bits 29:32: "Digital modem nominal transmit power for Phase 2 ... in
+    /// -1 dBm0 steps where 0 represents -6 dBm0 and 15 represents -21 dBm0".
+    pub nominal_power: u8,
+    /// Bits 33:37: "Maximum digital modem transmit power ... in -0.5 dBm0
+    /// steps where 0 represents -0.5 dBm0 and 31 represents -16 dBm0".
+    pub max_power: u8,
+    /// Bit 38: the power is measured "at the output of the codec" rather than
+    /// at the digital modem's terminals.
+    pub power_at_codec: bool,
+    /// Bit 39: "PCM coding in use by digital modem: 0 = mu-law, 1 = A-law".
+    pub a_law: bool,
+    /// Bit 40: V.90 with an upstream symbol rate of 3429.
+    pub upstream_3429: bool,
+}
+
+impl Info0d {
+    /// Bits 29:32 as a level.
+    pub fn nominal_dbm0(&self) -> f64 {
+        -6.0 - f64::from(self.nominal_power)
+    }
+
+    /// Bits 33:37 as a level. This is the ceiling Table 15/V.90 turns into a
+    /// limit on the constellations the analogue modem may ask for.
+    pub fn max_dbm0(&self) -> f64 {
+        -0.5 * (f64::from(self.max_power) + 1.0)
+    }
+
+    pub fn to_bits(&self) -> Vec<bool> {
+        let info0 = self.v34.to_bits();
+        // The first seventeen information bits are INFO0a's; take them from
+        // its own encoding so the two layouts cannot drift apart.
+        let mut info: Vec<bool> = unframe(&info0, INFO0_BITS).expect("an INFO0 unframes").to_vec();
+        info[14] = false;
+        info[15] = false;
+        put(&mut info, u32::from(self.nominal_power), 4);
+        put(&mut info, u32::from(self.max_power), 5);
+        info.push(self.power_at_codec);
+        info.push(self.a_law);
+        info.push(self.upstream_3429);
+        // Bit 41: "Reserved for the ITU: This bit is set to 0".
+        info.push(false);
+        frame(&info)
+    }
+
+    pub fn from_bits(bits: &[bool]) -> Option<Self> {
+        let info = unframe(bits, INFO0D_BITS)?;
+        let v34 = Info0 {
+            rate_2743: info[0],
+            rate_2800: info[1],
+            rate_3429: info[2],
+            low_carrier_3000: info[3],
+            high_carrier_3000: info[4],
+            low_carrier_3200: info[5],
+            high_carrier_3200: info[6],
+            transmit_3429: info[7],
+            can_reduce_power: info[8],
+            asymmetry: get(info, 9, 3) as u8,
+            cme: info[12],
+            constellation_1664: info[13],
+            // "not interpreted by the analogue modem".
+            clock: 0,
+            acknowledge: info[16],
+        };
+        Some(Self {
+            v34,
+            nominal_power: get(info, 17, 4) as u8,
+            max_power: get(info, 21, 5) as u8,
+            power_at_codec: info[26],
+            a_law: info[27],
+            upstream_3429: info[28],
+        })
+    }
+}
+
+/// INFO1a when V.90 is selected (Table 10/V.90): what the analogue modem asks
+/// the digital modem for before phase 3.
+///
+/// Less than V.34's INFO1a, because there is less to settle. The digital
+/// modem's direction is not a symbol rate chosen from probing -- it is 8000,
+/// fixed by the network -- so what goes downstream in its place is the one
+/// codeword the digital modem is to train with.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Info1aPcm {
+    /// Bits 18:24: the analogue modem's MD in phase 3, in 35 ms steps.
+    pub md_length: u8,
+    /// Bits 25:31: UINFO, "Ucode of the PCM codeword to be used by the digital
+    /// modem for the 2 point train ... UINFO shall be greater than 66".
+    pub uinfo: u8,
+    /// Bits 34:36: the upstream symbol rate, "an integer between 3 and 5".
+    pub upstream: SymbolRate,
+    /// Bits 40:49: the 1050 Hz probing tone's offset as received, or none.
+    pub frequency_offset: Option<f64>,
+}
+
+impl Info1aPcm {
+    pub fn to_bits(&self) -> Vec<bool> {
+        let mut info = Vec::with_capacity(38);
+        // Bits 12:17: "Reserved for the ITU".
+        put(&mut info, 0, 6);
+        put(&mut info, u32::from(self.md_length), 7);
+        put(&mut info, u32::from(self.uinfo), 7);
+        // Bits 32:33: reserved again.
+        put(&mut info, 0, 2);
+        put(&mut info, self.upstream.index(), 3);
+        put(&mut info, PCM_SYMBOL_RATE, 3);
+        put(&mut info, offset_to(self.frequency_offset), 10);
+        frame(&info)
+    }
+
+    pub fn from_bits(bits: &[bool]) -> Option<Self> {
+        let info = unframe(bits, INFO1A_BITS)?;
+        if get(info, 25, 3) != PCM_SYMBOL_RATE {
+            return None;
+        }
+        // 3000, 3200 and 3429 are the only upstream rates V.90 allows (6.2).
+        let upstream = match get(info, 22, 3) {
+            3..=5 => SymbolRate::from_index(get(info, 22, 3))?,
+            _ => return None,
+        };
+        Some(Self {
+            md_length: get(info, 6, 7) as u8,
+            uinfo: get(info, 13, 7) as u8,
+            upstream,
+            frequency_offset: offset_from(get(info, 28, 10)),
+        })
+    }
+}
+
+/// Any of them, as a receiver hands it over.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Info {
     Info0(Info0),
+    /// INFO1c, and V.90's INFO1d, which is the same sequence.
     Info1c(Info1c),
     Info1a(Info1a),
+    /// V.90's digital modem's INFO0.
+    Info0d(Info0d),
+    /// V.90's INFO1a, asking for phase 3 of V.90.
+    Info1aPcm(Info1aPcm),
 }
 
 #[cfg(test)]
@@ -473,5 +629,60 @@ mod tests {
         assert_eq!(offset_from(0x3ff), Some(-0.02));
         assert_eq!(offset_to(None), 0x200);
         assert_eq!(offset_to(Some(-0.02)), 0x3ff);
+    }
+
+    /// Table 7/V.90: sixty-two bits, INFO0a's first seventeen information
+    /// bits in the same places, and the law in bit 39.
+    #[test]
+    fn info0d_is_info0a_with_the_digital_modem_s_levels_after_it() {
+        let info0d = Info0d {
+            v34: Info0 { rate_3429: true, low_carrier_3200: true, asymmetry: 5, acknowledge: true, ..Info0::default() },
+            nominal_power: 3,
+            max_power: 31,
+            power_at_codec: false,
+            a_law: true,
+            upstream_3429: true,
+        };
+        let bits = info0d.to_bits();
+        assert_eq!(bits.len(), INFO0D_BITS);
+        assert_eq!(Info0d::from_bits(&bits), Some(info0d));
+        // Absolute bit numbers, as the table prints them.
+        assert!(bits[14], "bit 14 is 3429 in V.34 mode");
+        assert!(bits[28], "bit 28 is the acknowledgement");
+        assert!(bits[39], "bit 39 is the law");
+        assert!(bits[40], "bit 40 is 3429 upstream");
+        assert!(!bits[41], "bit 41 is reserved");
+        assert_eq!(get(&bits, 33, 5), 31);
+        assert_eq!(&bits[58..62], &FILL);
+        assert_eq!(info0d.nominal_dbm0(), -9.0);
+        assert_eq!(info0d.max_dbm0(), -16.0);
+        // It is not an INFO0, and an INFO0 is not one of these.
+        assert_eq!(Info0::from_bits(&bits), None);
+        assert_eq!(Info0d::from_bits(&Info0::default().to_bits()), None);
+    }
+
+    /// Table 10/V.90: V.34's length, UINFO in bits 25:31, and six in 37:39 --
+    /// which V.34's own INFO1a refuses, so the two cannot be mistaken.
+    #[test]
+    fn a_v90_info1a_carries_uinfo_and_names_8000() {
+        let asked = Info1aPcm { md_length: 0, uinfo: 73, upstream: SymbolRate::S3200, frequency_offset: Some(-0.5) };
+        let bits = asked.to_bits();
+        assert_eq!(bits.len(), INFO1A_BITS);
+        assert_eq!(Info1aPcm::from_bits(&bits), Some(asked));
+        assert_eq!(get(&bits, 25, 7), 73);
+        assert_eq!(get(&bits, 34, 3), 4);
+        assert_eq!(get(&bits, 37, 3), 6);
+        assert_eq!(Info1a::from_bits(&bits), None, "V.34 took a V.90 INFO1a for its own");
+        // And the other way round.
+        let v34 = Info1a {
+            min_power_reduction: 0,
+            additional_power_reduction: 0,
+            md_length: 0,
+            probed: Probed::default(),
+            answer_to_call: SymbolRate::S3429,
+            call_to_answer: SymbolRate::S3200,
+            frequency_offset: None,
+        };
+        assert_eq!(Info1aPcm::from_bits(&v34.to_bits()), None);
     }
 }

@@ -17,7 +17,7 @@ use std::collections::VecDeque;
 
 use dsp::{ComplexFir, Nco, fir_lowpass, rrc_at, rrc_taps};
 
-use super::info::{self, Info, Info0, Info1a, Info1c};
+use super::info::{self, Info, Info0, Info0d, Info1a, Info1aPcm, Info1c};
 
 /// "600 bit/s ± 0.01%", one bit a symbol.
 pub const BAUD: f64 = 600.0;
@@ -79,10 +79,15 @@ impl Side {
 
     /// The lengths of the sequences this side sends: INFO0 from either, and
     /// then INFO1c from the call modem or INFO1a from the answer modem.
-    fn lengths(self) -> [usize; 2] {
+    ///
+    /// V.90 adds one. Its digital modem takes the call modem's side of phase 2
+    /// -- 1200 Hz and tone B, whichever end dialled -- and sends INFO0d, which
+    /// is longer than V.34's INFO0. Its analogue modem's INFO0a and INFO1a are
+    /// V.34's lengths, and INFO1d is INFO1c.
+    fn lengths(self) -> &'static [usize] {
         match self {
-            Self::Call => [info::INFO0_BITS, info::INFO1C_BITS],
-            Self::Answer => [info::INFO0_BITS, info::INFO1A_BITS],
+            Self::Call => &[info::INFO0_BITS, info::INFO0D_BITS, info::INFO1C_BITS],
+            Self::Answer => &[info::INFO0_BITS, info::INFO1A_BITS],
         }
     }
 }
@@ -357,7 +362,7 @@ fn decide(branch: &mut Branch, symbol: (f64, f64), side: Side) -> Option<Info> {
     branch.bits.push_back(turned < 0.0);
 
     let bits = branch.bits.make_contiguous();
-    for length in side.lengths() {
+    for &length in side.lengths() {
         // Checked the moment the CRC is in: the trailing fill says nothing,
         // and whatever follows a sequence may not be ones at all.
         let without_fill = length - info::FILL.len();
@@ -367,8 +372,12 @@ fn decide(branch: &mut Branch, symbol: (f64, f64), side: Side) -> Option<Info> {
         let candidate = &bits[bits.len() - without_fill..];
         let found = match (side, length) {
             (_, info::INFO0_BITS) => Info0::from_bits(candidate).map(Info::Info0),
+            (Side::Call, info::INFO0D_BITS) => Info0d::from_bits(candidate).map(Info::Info0d),
             (Side::Call, _) => Info1c::from_bits(candidate).map(Info::Info1c),
-            (Side::Answer, _) => Info1a::from_bits(candidate).map(Info::Info1a),
+            // The same length either way; bits 37:39 say which.
+            (Side::Answer, _) => Info1a::from_bits(candidate)
+                .map(Info::Info1a)
+                .or_else(|| Info1aPcm::from_bits(candidate).map(Info::Info1aPcm)),
         };
         if found.is_some() {
             return found;

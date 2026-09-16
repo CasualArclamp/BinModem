@@ -57,6 +57,8 @@ fn the_info_sequences_of_a_real_call_check() {
                 Info::Info0(_) => "INFO0",
                 Info::Info1c(_) => "INFO1c",
                 Info::Info1a(_) => "INFO1a",
+                Info::Info0d(_) => "INFO0d",
+                Info::Info1aPcm(_) => "INFO1a (V.90)",
             };
             (*side, kind)
         })

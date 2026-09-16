@@ -265,6 +265,77 @@ pub struct Menu {
     /// be analogue, it is not answering the question -- so this is `None`
     /// rather than a default, and anything reading it has to say which.
     pub access: Option<Access>,
+    /// Which PCM modems the sender can be (Table 5), if it says.
+    ///
+    /// Present only where it matters: 7.3 has a call menu carry it when the
+    /// calling modem wants to offer V.90, and 7.4 has the joint menu carry it
+    /// back only when the answering modem wants to take it up.
+    pub pcm: Option<Pcm>,
+}
+
+/// The PCM modem availability category (Table 5/V.8).
+///
+/// Which half of a V.90 pair the sender can be. V.90 is two different modems
+/// -- one on an analogue line, one wired into the digital network -- so a
+/// modem does not say "I do V.90", it says which of the two it can be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Pcm {
+    /// b5: "V.90 or V.92 analogue modem availability".
+    pub analogue: bool,
+    /// b6: "V.90 or V.92 digital modem availability".
+    pub digital: bool,
+    /// b7: "V.91 availability".
+    pub v91: bool,
+}
+
+/// Which half of a V.90 pair this end is to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PcmRole {
+    Analogue,
+    Digital,
+}
+
+impl Pcm {
+    /// An analogue modem and nothing else, which is what a modem on a
+    /// telephone line can be.
+    pub const ANALOGUE: Self = Self { analogue: true, digital: false, v91: false };
+
+    /// Whether this end, with `ours`, and a far end with `far` make a pair,
+    /// and if so which half this end is (9.1.1/V.90).
+    ///
+    /// "The operation defined in this Recommendation is only possible when two
+    /// V.90 capable modems are connected and one or both of the modems is
+    /// accessing the PSTN digitally ... if the information in the V.90
+    /// availability category does not indicate the presence of an analogue
+    /// and digital modem pair, the modems shall proceed in accordance with
+    /// Recommendation V.8 as if V.90 capability had not been indicated. In the
+    /// case where both modems are digitally connected to the PSTN and both
+    /// modems indicate the ability to be an analogue and a digital modem, the
+    /// call modem shall become the analogue modem and the answer modem shall
+    /// become the digital modem."
+    ///
+    /// That last case generalises: when either assignment would do, the
+    /// calling modem is the analogue one.
+    pub fn pair(ours: Self, far: Self, calling: bool) -> Option<PcmRole> {
+        let we_analogue = ours.analogue && far.digital;
+        let we_digital = ours.digital && far.analogue;
+        match (we_analogue, we_digital) {
+            (true, true) => Some(if calling { PcmRole::Analogue } else { PcmRole::Digital }),
+            (true, false) => Some(PcmRole::Analogue),
+            (false, true) => Some(PcmRole::Digital),
+            (false, false) => None,
+        }
+    }
+
+    fn octet(self) -> u8 {
+        octet([
+            true, true, true, false, // b0..b3: the PCM availability tag, 1110
+            false, // b4: a category octet
+            self.analogue,
+            self.digital,
+            self.v91,
+        ])
+    }
 }
 
 /// The PSTN access category (Table 7/V.8).
@@ -273,7 +344,7 @@ pub struct Menu {
 /// which is why they are worth having: whether the far end is on a digital
 /// network decides what a call can be expected to reach, and cellular decides
 /// whether it will hold still long enough to be worth trying.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Access {
     /// b5: the calling modem is on a cellular connection.
     pub call_cellular: bool,
@@ -301,6 +372,8 @@ mod tag {
     pub const PROTOCOL: u8 = 0b1010;
     /// `b0 b1 b2 b3` = `1 0 1 1`, Table 7.
     pub const PSTN_ACCESS: u8 = 0b1101;
+    /// `b0 b1 b2 b3` = `1 1 1 0`, Table 5.
+    pub const PCM: u8 = 0b0111;
 }
 
 /// Build an octet from its bits, `b0` least significant.
@@ -340,7 +413,10 @@ impl Menu {
         out.push(octet([
             true, false, true, false, // b0..b3: the modulation tag, 1010
             false, // b4: a category octet
-            false, // b5: no PCM modem category follows
+            // b5: 7.3, "if the PCM modem availability category is present
+            // ... the modulation category, if present, shall have bit b5 in
+            // its first octet set to ONE".
+            self.pcm.is_some(),
             has(Modulation::V34Duplex),
             has(Modulation::V34HalfDuplex),
         ]));
@@ -375,6 +451,27 @@ impl Menu {
                 true, false, false, // b5..b7: 100, LAPM per ITU-T V.42
             ]));
         }
+
+        // The PSTN access category, and the PCM category after it. 7.3: "if
+        // the PCM modem availability category is present, the PSTN access
+        // category shall also be present" -- so a menu offering PCM says what
+        // kind of line it is on whether or not anything set that, and an
+        // unstated line goes as an analogue one, which is the claim that
+        // commits to least. The order is the one a Conexant V.92 modem's call
+        // menu uses; neither clause gives one, and a reader takes any.
+        let access = self.access.or(self.pcm.map(|_| Access::default()));
+        if let Some(a) = access {
+            out.push(octet([
+                true, false, true, true, // b0..b3: the PSTN access tag, 1011
+                false, // b4: a category octet
+                a.call_cellular,
+                a.answer_cellular,
+                a.digital,
+            ]));
+        }
+        if let Some(pcm) = self.pcm {
+            out.push(pcm.octet());
+        }
         out
     }
 
@@ -390,6 +487,7 @@ impl Menu {
         let mut modulations = Modulations::NONE;
         let mut protocol = Protocol::Unstated;
         let mut access = None;
+        let mut pcm = None;
         let mut rest = octets.iter().copied().peekable();
         while let Some(o) = rest.next() {
             // Only category octets carry a tag; an extension octet is
@@ -441,10 +539,13 @@ impl Menu {
                         digital: bit(o, 7),
                     });
                 }
+                tag::PCM if !bit(o, 4) => {
+                    pcm = Some(Pcm { analogue: bit(o, 5), digital: bit(o, 6), v91: bit(o, 7) });
+                }
                 _ => {}
             }
         }
-        Some(Self { function: function?, modulations, protocol, access })
+        Some(Self { function: function?, modulations, protocol, access, pcm })
     }
 
     /// The joint menu: what this end has that the far end also offered.
@@ -472,7 +573,26 @@ impl Menu {
             // included by a DCE that "wishes to indicate network access type",
             // which is a thing to say about oneself.
             access: None,
+            pcm: None,
         }
+    }
+
+    /// The joint menu of an answering modem that can be half of a V.90 pair.
+    ///
+    /// [`Self::joint`], with the two categories 7.4 adds for PCM. The PCM
+    /// category goes back "only if it is present in the received CM ... and if
+    /// it is desired to convey PCM modem capability", which is when the two
+    /// ends make a pair; and with it the PSTN access category, whose b5 "is
+    /// set to ONE if and only if the corresponding bit (b5) is set to ONE in
+    /// the received CM".
+    pub fn joint_pcm(&self, ours: Modulations, protocol: Protocol, pcm: Pcm, access: Access) -> Self {
+        let mut jm = self.joint(ours, protocol);
+        let paired = self.pcm.and_then(|far| Pcm::pair(pcm, far, false)).is_some();
+        if paired {
+            jm.pcm = Some(pcm);
+            jm.access = Some(Access { call_cellular: self.access.is_some_and(|a| a.call_cellular), ..access });
+        }
+        jm
     }
 
     /// Whether both ends have now said LAPM.
@@ -661,6 +781,7 @@ mod tests {
             modulations: Modulations::of(list),
             protocol: Protocol::Unstated,
             access: None,
+            pcm: None,
         }
     }
 
@@ -703,6 +824,7 @@ mod tests {
                     modulations: Modulations::NONE,
                     protocol: Protocol::Unstated,
                     access: None,
+                    pcm: None,
                 };
             assert_eq!(Menu::parse(&menu.octets()).unwrap().function, f);
         }
@@ -805,6 +927,7 @@ mod tests {
             modulations: Modulations::of(&[Modulation::V22bis]),
             protocol: Protocol::Lapm,
             access: None,
+            pcm: None,
         };
         let prot0 = *menu.octets().last().unwrap();
         assert_eq!(tag_of(prot0), tag::PROTOCOL);
@@ -826,6 +949,7 @@ mod tests {
             modulations: Modulations::of(&[Modulation::V21]),
             protocol: Protocol::Lapm,
             access: None,
+            pcm: None,
         };
         let octets = menu.octets();
         let prot0 = *octets.last().unwrap();
@@ -866,6 +990,7 @@ mod tests {
             modulations: Modulations::of(&[Modulation::V32bis]),
             protocol: Protocol::Lapm,
             access: None,
+            pcm: None,
         };
         let ours = Modulations::of(&[Modulation::V32bis]);
         assert!(asked.joint(ours, Protocol::Lapm).lapm(), "both said it");
@@ -988,15 +1113,16 @@ mod tests {
         // this one used to stop at four -- so a fifth category was not ignored
         // but lost, along with anything a real modem might put after it. V.8
         // describes several: PSTN access, PCM modem availability, non-standard
-        // facilities. The trailing octet here is PCM modem availability, which
-        // this modem does not read and must still read past. It used to be the
-        // PSTN access category, until that one started being read -- and a
-        // test of stepping over the unknown wants a category that is still
-        // unknown, or it stops testing anything.
+        // facilities. The trailing octet here is the category Table 2 leaves to
+        // T.66, which this modem does not read and must still read past. It
+        // used to be the PSTN access category, and then PCM modem
+        // availability, until each started being read -- and a test of
+        // stepping over the unknown wants a category that is still unknown,
+        // or it stops testing anything.
         let mut menu = data_menu(&[Modulation::V32bis, Modulation::V22bis]);
         menu.protocol = Protocol::Lapm;
-        let access0 = octet([true, true, true, false, false, false, false, false]);
-        assert_eq!(tag_of(access0), 0b0111, "the PCM availability tag of Table 2");
+        let access0 = octet([false, false, true, true, false, false, false, false]);
+        assert_eq!(tag_of(access0), 0b1100, "the T.66 tag of Table 2");
 
         let mut decoder = Decoder::new();
         let mut heard = None;
@@ -1085,5 +1211,103 @@ mod access_tests {
         assert!(theirs.access.is_some(), "the call menu should have one");
         let ours = theirs.joint(Modulations::NONE, Protocol::Unstated);
         assert_eq!(ours.access, None);
+    }
+}
+
+#[cfg(test)]
+mod pcm_tests {
+    use super::*;
+
+    /// A real V.90 call's CM, off `tests/vectors/v90-56k.wav`: a Conexant
+    /// V.92 modem dialling a 56k server.
+    const CONEXANT_CM: [u8; 7] = [0xc1, 0x65, 0x13, 0x94, 0x2a, 0x0d, 0x27];
+    /// And the server's JM, whose categories come in a different order.
+    const SERVER_JM: [u8; 7] = [0xc1, 0x65, 0x13, 0x94, 0x47, 0x8d, 0x2a];
+
+    /// Table 5/V.8, read off a real call.
+    #[test]
+    fn a_real_call_menu_offers_an_analogue_v90_modem() {
+        let cm = Menu::parse(&CONEXANT_CM).expect("it parses");
+        assert_eq!(cm.function, CallFunction::Data);
+        assert_eq!(cm.pcm, Some(Pcm::ANALOGUE));
+        assert!(cm.modulations.contains(Modulation::V34Duplex), "6.3 wants V.34 beside PCM");
+        assert_eq!(cm.access, Some(Access::default()), "an analogue line, not cellular");
+        assert_eq!(cm.protocol, Protocol::Lapm);
+        // 7.3's b5 in modn0 says a PCM category follows.
+        assert!(bit(CONEXANT_CM[1], 5));
+    }
+
+    #[test]
+    fn a_real_joint_menu_answers_with_a_digital_modem_on_a_digital_line() {
+        let jm = Menu::parse(&SERVER_JM).expect("it parses");
+        assert_eq!(jm.pcm, Some(Pcm { analogue: false, digital: true, v91: false }));
+        assert_eq!(jm.access, Some(Access { call_cellular: false, answer_cellular: false, digital: true }));
+        assert_eq!(Pcm::pair(Pcm::ANALOGUE, jm.pcm.unwrap(), true), Some(PcmRole::Analogue));
+    }
+
+    /// Building the same call menu gives the same octets, in the same order.
+    #[test]
+    fn our_call_menu_is_the_one_a_real_modem_sends() {
+        let menu = Menu {
+            function: CallFunction::Data,
+            modulations: Modulations::of(&[
+                Modulation::V34Duplex,
+                Modulation::V32bis,
+                Modulation::V22bis,
+                Modulation::V23Duplex,
+                Modulation::V21,
+            ]),
+            protocol: Protocol::Lapm,
+            access: None,
+            pcm: Some(Pcm::ANALOGUE),
+        };
+        assert_eq!(menu.octets(), CONEXANT_CM.to_vec());
+    }
+
+    /// 7.4: the PCM category goes back only when the two ends make a pair.
+    #[test]
+    fn a_joint_menu_carries_pcm_only_for_a_pair() {
+        let cm = Menu::parse(&CONEXANT_CM).unwrap();
+        let ours = Modulations::of(&[Modulation::V34Duplex, Modulation::V32bis]);
+        let digital = Pcm { digital: true, ..Pcm::default() };
+        let on_isdn = Access { digital: true, ..Access::default() };
+        let jm = cm.joint_pcm(ours, Protocol::Lapm, digital, on_isdn);
+        assert_eq!(jm.pcm, Some(digital));
+        assert_eq!(jm.access, Some(on_isdn));
+        assert!(bit(jm.octets()[1], 5), "modn0 does not say a PCM category follows");
+        // An answering modem that is only analogue is no pair for an
+        // analogue caller, and says nothing about PCM at all.
+        let jm = cm.joint_pcm(ours, Protocol::Lapm, Pcm::ANALOGUE, Access::default());
+        assert_eq!(jm.pcm, None);
+        assert!(!bit(jm.octets()[1], 5));
+        // And a call menu with no PCM in it gets none back.
+        let plain = Menu { pcm: None, ..cm };
+        assert_eq!(plain.joint_pcm(ours, Protocol::Lapm, digital, on_isdn).pcm, None);
+    }
+
+    /// 9.1.1/V.90's pairing, including both ends able to be either.
+    #[test]
+    fn the_calling_modem_is_the_analogue_one_when_either_would_do() {
+        let both = Pcm { analogue: true, digital: true, v91: false };
+        assert_eq!(Pcm::pair(both, both, true), Some(PcmRole::Analogue));
+        assert_eq!(Pcm::pair(both, both, false), Some(PcmRole::Digital));
+        assert_eq!(Pcm::pair(Pcm::ANALOGUE, Pcm::ANALOGUE, true), None);
+        let digital = Pcm { digital: true, ..Pcm::default() };
+        assert_eq!(Pcm::pair(digital, both, true), Some(PcmRole::Digital), "a digital caller");
+    }
+
+    /// A menu offering PCM always says what line it is on (7.3).
+    #[test]
+    fn offering_pcm_brings_the_access_category_with_it() {
+        let menu = Menu {
+            function: CallFunction::Data,
+            modulations: Modulations::of(&[Modulation::V34Duplex]),
+            protocol: Protocol::Unstated,
+            access: None,
+            pcm: Some(Pcm::ANALOGUE),
+        };
+        let back = Menu::parse(&menu.octets()).unwrap();
+        assert_eq!(back.access, Some(Access::default()));
+        assert_eq!(back.pcm, Some(Pcm::ANALOGUE));
     }
 }
