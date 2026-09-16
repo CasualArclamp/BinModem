@@ -53,6 +53,12 @@ pub fn linear(law: Law, ucode: u8) -> i32 {
     }
 }
 
+/// A Ucode's amplitude as a fraction of the sixteen-bit scale Table 1 is
+/// printed in: what a sample of the codec's output is, full scale being one.
+pub fn level(law: Law, ucode: u8) -> f64 {
+    f64::from(linear(law, ucode)) / 32768.0
+}
+
 /// The octet the digital modem hands to the network interface.
 ///
 /// 3.6: "the mu-law and A-law codewords are the octets to be passed to the

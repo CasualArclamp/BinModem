@@ -25,6 +25,8 @@
 
 pub mod encoder;
 pub mod modulus;
+pub mod pcm;
+pub mod sequences;
 pub mod sign;
 pub mod ucode;
 

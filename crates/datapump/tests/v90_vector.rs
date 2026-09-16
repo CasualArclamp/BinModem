@@ -132,3 +132,185 @@ fn the_analogue_modem_asks_for_v90_and_names_its_training_codeword() {
     assert_eq!(rates, vec![5, 6, 6, 7, 8, 9]);
     assert!(!info1d.probed[4].high_carrier, "3200 goes up on the low carrier");
 }
+
+/// The analogue modem's DIL descriptor, as it went up in Ja: the upstream
+/// read with V.34's receiver, since Ja is V.34's modulation (8.3.1).
+fn ja() -> Option<datapump::v90::sequences::Descriptor> {
+    use datapump::v32::Mode;
+    use datapump::v34::qam::Band;
+    use datapump::v34::receiver::{Heard, Receiver, Reference};
+    use datapump::v34::signals::{Reader, Size};
+    use datapump::v90::sequences::Descriptor;
+
+    let (fs, samples) = samples();
+    // INFO1d put the upstream on the low carrier at 3200.
+    let mut rx = Receiver::new(datapump::v34::qam::Band::new(SymbolRate::S3200, false), fs);
+    let _: Band = rx.band();
+    rx.hunt();
+    let mut reader = Reader::new(Mode::Answer);
+    let mut bits: Vec<bool> = Vec::new();
+    let (mut in_trn, mut ones) = (true, 0);
+    let first = (10.0 * fs) as usize;
+    for &x in &samples[first..(12.6 * fs) as usize] {
+        rx.feed(f64::from(x));
+        while let Some(heard) = rx.heard() {
+            match heard {
+                // The second S-bar, after MD: the first is at 9.4 s.
+                Heard::Reversal { at } => rx.train(Reference::PpThenTrn, Mode::Answer, at),
+                Heard::Symbol(symbol) => {
+                    if in_trn {
+                        let got = reader.trn(symbol.decided, Size::Four);
+                        if got.iter().all(|b| *b) || ones < 46 {
+                            ones += 2;
+                            continue;
+                        }
+                        in_trn = false;
+                    }
+                    bits.extend(reader.differential(symbol.decided, Size::Four));
+                }
+                _ => {}
+            }
+        }
+    }
+    (0..bits.len().saturating_sub(18)).find_map(|s| {
+        let fresh = s == 0 || !bits[s - 1];
+        (fresh && bits[s..s + 17].iter().all(|b| *b) && !bits[s + 17]).then(|| Descriptor::from_bits(&bits[s..])).flatten()
+    })
+}
+
+#[test]
+fn the_analogue_modem_s_ja_asks_for_a_dil_of_147_segments() {
+    let d = ja().expect("no DIL descriptor checked");
+    assert_eq!(d.ucodes.len(), 147);
+    assert_eq!(d.signs.len(), 126);
+    assert_eq!(d.training.len(), 126);
+    assert_eq!(d.h, [20, 20, 20, 20, 20, 20, 11, 11]);
+    assert_eq!(d.refs, [78; 8], "every reference is UINFO");
+    // Ucodes 0 to 117 in order, with UINFO after every fourth.
+    let training: Vec<u8> = d.ucodes.iter().copied().enumerate().filter(|(i, _)| i % 5 != 4).map(|(_, u)| u).collect();
+    assert_eq!(training, (0..118).collect::<Vec<u8>>());
+    assert!(d.ucodes.iter().skip(4).step_by(5).all(|&u| u == 78));
+    assert_eq!(d.len(), 17_334);
+}
+
+/// The server's phase 3, heard the way the analogue modem hears it.
+struct Downstream {
+    trained_db: f64,
+    inverted: bool,
+    /// The last Jd, and the symbol after it.
+    jd: Option<(u64, datapump::v90::sequences::Jd)>,
+    /// Where the DIL began, once J'd has been read.
+    dil_from: Option<u64>,
+    /// Symbols from TRN1d on.
+    symbols: Vec<datapump::v90::pcm::Symbol>,
+}
+
+fn downstream() -> Downstream {
+    use datapump::v32::{Mode, Scrambler};
+    use datapump::v90::pcm::{Heard, Receiver};
+    use datapump::v90::sequences::{JD_BITS, JD_PRIME_BITS, Jd};
+    use datapump::v90::ucode::{self, Law};
+
+    let (fs, samples) = samples();
+    let dil: Vec<f64> = ja()
+        .expect("no DIL descriptor")
+        .symbols()
+        .map(|(u, positive)| ucode::level(Law::Mu, u) * if positive { 1.0 } else { -1.0 })
+        .collect();
+    let mut rx = Receiver::new(Law::Mu, fs);
+    rx.hunt(78);
+    let mut out = Downstream { trained_db: 0.0, inverted: false, jd: None, dil_from: None, symbols: Vec::new() };
+    let mut descrambler = Scrambler::new(Mode::Call);
+    let (mut differential, mut previous) = (false, false);
+    let mut bits: Vec<bool> = Vec::new();
+    let first = (12.0 * fs) as usize;
+    for &x in &samples[first..(19.0 * fs) as usize] {
+        rx.feed(f64::from(x));
+        while let Some(heard) = rx.heard() {
+            match heard {
+                Heard::Trained { snr_db, inverted } => {
+                    out.trained_db = snr_db;
+                    out.inverted = inverted;
+                }
+                Heard::Symbol(s) => {
+                    out.symbols.push(s);
+                    if out.dil_from.is_some() {
+                        continue;
+                    }
+                    let sign = s.positive();
+                    let before = descrambler.clone();
+                    let mut bit = descrambler.descramble(if differential { sign ^ previous } else { sign });
+                    if !differential && !bit {
+                        // TRN1d is over: Jd is differential, from this
+                        // symbol on.
+                        differential = true;
+                        descrambler = before;
+                        bit = descrambler.descramble(sign ^ previous);
+                    }
+                    previous = sign;
+                    bits.push(bit);
+                    if bits.len() >= JD_BITS
+                        && let Some(jd) = Jd::from_bits(&bits[bits.len() - JD_BITS..])
+                    {
+                        out.jd = Some((s.index + 1, jd));
+                    }
+                    // J'd: twelve zeros where the next Jd's sync would be,
+                    // and the DIL straight after (9.3.1.6).
+                    if let Some((end, _)) = out.jd
+                        && s.index + 1 == end + JD_PRIME_BITS as u64
+                        && bits[bits.len() - JD_PRIME_BITS..].iter().all(|b| !*b)
+                    {
+                        out.dil_from = Some(s.index + 1);
+                        rx.expect(dil.iter().copied());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn the_server_s_trn1d_trains_the_downstream_receiver_and_jd_checks() {
+    let heard = downstream();
+    // The line is noisy: 19 dB is what a least-squares fit over the whole of
+    // TRN1d gets.
+    assert!(heard.trained_db > 14.0, "trained to {:.1} dB", heard.trained_db);
+    assert!(heard.inverted, "this line turns the signal over");
+    let (end, jd) = heard.jd.expect("no Jd checked");
+    assert_eq!(jd.rates, datapump::v90::sequences::Jd::ALL_RATES);
+    assert!(!jd.sixteen_in_training);
+    assert_eq!(jd.lookahead, 1);
+    // Jd ends on a frame boundary, after four seconds of TRN1d -- 9.3.1.4's
+    // "within 4000 ms" of starting it, give or take the line -- and nineteen
+    // repetitions of itself.
+    assert_eq!(end % 6, 0);
+    assert_eq!(end, 33_816);
+    assert_eq!(heard.dil_from, Some(end + 12), "no J'd after the last Jd");
+}
+
+#[test]
+fn the_dil_that_arrives_is_the_dil_the_analogue_modem_asked_for() {
+    use datapump::v90::ucode::{self, Law};
+    let heard = downstream();
+    let descriptor = ja().expect("no DIL descriptor");
+    let start = heard.dil_from.expect("no J'd");
+    let wanted: Vec<f64> = descriptor
+        .symbols()
+        .map(|(u, positive)| ucode::level(Law::Mu, u) * if positive { 1.0 } else { -1.0 })
+        .collect();
+    let got: Vec<f64> = heard.symbols.iter().filter(|s| s.index >= start).map(|s| s.value).take(wanted.len()).collect();
+    assert_eq!(got.len(), wanted.len(), "the recording ends inside the DIL");
+    let signal: f64 = wanted.iter().map(|w| w * w).sum();
+    let error: f64 = got.iter().zip(&wanted).map(|(g, w)| (g - w).powi(2)).sum();
+    let snr = 10.0 * (signal / error).log10();
+    // As well as TRN1d fits, which it would not if a pattern, a length or a
+    // reference were read wrong.
+    assert!(snr > 14.0, "the DIL fits to {snr:.1} dB");
+    // And shifted by a symbol either way it does not fit at all.
+    for shift in [1usize, 6] {
+        let error: f64 = got[shift..].iter().zip(&wanted).map(|(g, w)| (g - w).powi(2)).sum();
+        assert!(10.0 * (signal / error).log10() < 3.0, "the DIL fits {shift} symbols off too");
+    }
+}
