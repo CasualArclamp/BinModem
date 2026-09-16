@@ -307,6 +307,9 @@ pub struct Constellation<'a> {
     pub tones: usize,
     /// How far the points reach. One fits the box exactly.
     pub peak: f32,
+    /// The points are PCM samples, each against the next, rather than I and
+    /// Q -- which a reader will take them for unless told.
+    pub pairs: bool,
 }
 
 pub fn symbol_scope(
@@ -317,7 +320,7 @@ pub fn symbol_scope(
     quality: Option<u32>,
     height: f32,
 ) -> eframe::egui::Response {
-    let Constellation { points: constellation, tones, peak } = dots;
+    let Constellation { points: constellation, tones, peak, pairs } = dots;
     let size = vec2(ui.available_width(), height);
     let (response, painter) = ui.allocate_painter(size, Sense::click());
     let rect = response.rect;
@@ -380,7 +383,7 @@ pub fn symbol_scope(
             centre.y - (im * fit).clamp(-1.4, 1.4) * radius,
         )
     };
-    if tones > 128 {
+    if tones > 128 || pairs {
         // Hundreds of points and thousands of symbols: colouring each by its
         // distance from the centre would paint the outer rings green and the
         // inner ones red, which says nothing. One colour instead, faint
@@ -403,7 +406,17 @@ pub fn symbol_scope(
 
     // Always say something. A silent, empty scope gives no way to tell a modem
     // that is not decoding from a display that is not being fed.
+    if pairs {
+        // Said on the axes themselves, always: this is not I against Q.
+        let faint = Color32::from_rgb(110, 125, 145);
+        painter.text(pos2(centre.x + radius - 2.0, centre.y + 4.0), Align2::RIGHT_TOP, "sample n", FontId::monospace(10.0), faint);
+        painter.text(pos2(centre.x + 4.0, centre.y - radius + 2.0), Align2::LEFT_TOP, "sample n+1", FontId::monospace(10.0), faint);
+    }
     let (text, colour) = match quality {
+        _ if pairs && !constellation.is_empty() => (
+            format!("{label} {tones} points, last {} samples", constellation.len()),
+            Color32::from_rgb(150, 160, 175),
+        ),
         Some(q) => (format!("{label} Quality: {q}"), margin_colour(q as f32 / 100.0)),
         None if tones > 128 && !constellation.is_empty() => (
             format!("{label}  {tones} points, last {} symbols", constellation.len()),

@@ -490,6 +490,9 @@ pub struct Modem {
     received: Vec<bool>,
     upstream_rate: u32,
     downstream_rate: u32,
+    /// The last two symbols as the equaliser gave them, for the scope.
+    last: [f64; 2],
+    heard_any: bool,
 }
 
 impl Modem {
@@ -529,6 +532,8 @@ impl Modem {
             received: Vec::new(),
             upstream_rate: 0,
             downstream_rate: 0,
+            last: [0.0; 2],
+            heard_any: false,
         };
         // 9.4.2: B1d "within 15 s plus 5 round-trip delays after sending
         // INFO1a".
@@ -562,6 +567,35 @@ impl Modem {
     /// The downstream receiver, for looking at.
     pub fn receiver(&self) -> &pcm::Receiver {
         &self.rx
+    }
+
+    /// The last two downstream symbols, each against the one after it, for a
+    /// scope: there is no plane to plot PCM in, but a sample set against the
+    /// next one lays the levels out on a grid of its own. Scaled so the
+    /// loudest level in use is one.
+    pub fn pair(&self) -> Option<(f64, f64)> {
+        self.heard_any.then(|| (self.last[0] / self.scale(), self.last[1] / self.scale()))
+    }
+
+    /// What the scope's one is.
+    fn scale(&self) -> f64 {
+        let law = self.settings.law;
+        let loudest = |cp: &Cp| (0..INTERVALS).flat_map(|i| cp.points(i)).map(|u| ucode::level(law, u)).fold(0.0, f64::max);
+        match (self.frames.as_ref(), self.choice.as_ref()) {
+            (Some(f), Some(c)) if f.ed => loudest(&c.data),
+            (Some(_), Some(c)) => loudest(&c.training),
+            _ => 1.5 * ucode::level(law, self.settings.uinfo),
+        }
+        .max(1e-6)
+    }
+
+    /// Signed levels in the constellation being read, for a scope's legend.
+    pub fn points(&self) -> usize {
+        match (self.frames.as_ref(), self.choice.as_ref()) {
+            (Some(f), Some(c)) if f.ed => 2 * c.data.points(0).len(),
+            (Some(_), Some(c)) => 2 * c.training.points(0).len(),
+            _ => 2,
+        }
     }
 
     /// The DIL this end asked for.
@@ -677,6 +711,8 @@ impl Modem {
     }
 
     fn symbol(&mut self, symbol: pcm::Symbol) {
+        self.last = [self.last[1], symbol.value];
+        self.heard_any = true;
         match self.stage {
             Stage::AwaitJd | Stage::AwaitJdPrime => {
                 let jd_prime = self.jd.feed(symbol.index, symbol.positive());

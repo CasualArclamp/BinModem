@@ -37,6 +37,9 @@ pub const SPECTRUM_BINS: usize = FFT_SIZE / 2;
 /// line is doing now.
 pub const SYMBOL_HISTORY: usize = 512;
 
+/// Samples of PCM the pair scope keeps: two seconds at 8000 a second.
+pub const PCM_DEPTH: usize = 16_384;
+
 /// Points the scope keeps for a constellation of `states` points.
 ///
 /// Sixteen a cluster is right for anything up to V.32bis's hundred and

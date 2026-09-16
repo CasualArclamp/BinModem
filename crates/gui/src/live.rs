@@ -22,7 +22,7 @@ use line::AudioSink;
 use modem::{Modem, Role, State};
 use telemetry::{CallState, Direction, Leds, Publisher};
 
-use crate::engine::{Control, FFT_SIZE, Ring, SCOPE_LEN, SPECTRUM_BINS, SYMBOL_HISTORY, scope_depth};
+use crate::engine::{Control, FFT_SIZE, PCM_DEPTH, Ring, SCOPE_LEN, SPECTRUM_BINS, SYMBOL_HISTORY, scope_depth};
 use crate::dialin::{Login, Next as LoginNext, Settings as DialIn};
 use crate::network::{Networking, Request as NetRequest, View as NetView};
 
@@ -1100,7 +1100,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
 
         to_line.clear();
         let drive = session.drive();
-        let depth = scope_depth(modem.states());
+        // The PCM scope is every sample against the next, and a dense grid
+        // of levels wants the full depth whatever the count of them.
+        let depth = if modem.shape() == "PCM" { PCM_DEPTH } else { scope_depth(modem.states()) };
         for &s in &from_line {
             let heard = f64::from(s);
             to_line.push(modem.step(heard) as f32 * drive);

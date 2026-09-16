@@ -555,7 +555,7 @@ impl ScopeApp {
     }
 
     /// Modulations the modem will accept, in the order the box shows them.
-    const CARRIERS: [(&'static str, &'static str); 5] = [
+    const CARRIERS: [(&'static str, &'static str); 6] = [
         ("B103", "Bell 103 - 300 bit/s"),
         ("V22B", "V.22bis - 1200 or 2400"),
         ("V32", "V.32 - 4800 or 9600"),
@@ -563,6 +563,10 @@ impl ScopeApp {
         (
             "V34",
             "V.34 - up to 33600, the rate settled from what the line measures.         A far end without V.34 gets V.32bis",
+        ),
+        (
+            "V90",
+            "V.90 - up to 56000 from an ISP's server and 33600 back.         A far end that is no V.90 server gets V.34",
         ),
     ];
 
@@ -2790,6 +2794,7 @@ impl ScopeApp {
                         points: &self.frame.constellation,
                         tones: self.frame.tones,
                         peak: self.frame.constellation_peak,
+                        pairs: self.frame.symbol_label == "PCM",
                     },
                     &label,
                     self.frame.symbol_quality(),
@@ -2929,6 +2934,7 @@ impl eframe::App for ScopeApp {
                         points: &self.frame.constellation,
                         tones: self.frame.tones,
                         peak: self.frame.constellation_peak,
+                        pairs: self.frame.symbol_label == "PCM",
                     },
                     &label,
                     self.frame.symbol_quality(),
@@ -3050,7 +3056,11 @@ mod modulation_tests {
         assert_eq!(ScopeApp::CARRIERS[4].0, "V34");
         assert_eq!(Modulation::rates(4).len(), 14);
         assert_eq!(Modulation::rates(4).last(), Some(&33_600));
-        assert_eq!(ScopeApp::CARRIERS.len(), 5);
+        // V.90's rates here are the upstream's, which are V.34's: the
+        // downstream is whatever the route allows, and +MS does not name it.
+        assert_eq!(ScopeApp::CARRIERS[5].0, "V90");
+        assert_eq!(Modulation::rates(5), Modulation::rates(4));
+        assert_eq!(ScopeApp::CARRIERS.len(), 6);
     }
 
     /// The two V.32 carriers are two ceilings on one modulation, and the

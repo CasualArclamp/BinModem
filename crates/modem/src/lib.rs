@@ -246,7 +246,8 @@ impl Pump {
             Self::V34(m) => m.constellation_point(),
             // Downstream has no plane to plot, and until V.90 is settled the
             // upstream's training is V.34's own.
-            Self::V90(m) if m.is_v90() => None,
+            // Downstream is PCM: each sample against the next.
+            Self::V90(m) if m.is_v90() => m.v90().and_then(|v| v.pair()),
             Self::V90(m) => m.v34().constellation_point(),
             Self::Bell103(_) => None,
         }
@@ -327,7 +328,7 @@ impl Pump {
             // Phase 3's TRN and J are four points, phase 4 is sixteen, and
             // data mode is however many hundred its rate and shaping make.
             Self::V34(m) => m.constellation_size().unwrap_or(2),
-            Self::V90(m) if m.is_v90() => 2,
+            Self::V90(m) if m.is_v90() => m.v90().map_or(2, |v| v.points()),
             Self::V90(m) => m.v34().constellation_size().unwrap_or(2),
         }
     }
