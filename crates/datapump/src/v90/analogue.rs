@@ -6,6 +6,10 @@
 //! digital                 Sd S'd TRN1d Jd ... Jd J'd DIL ... ... DIL Ri ... R'i TRN2d MP MP' Ed B1d data
 //! ```
 //!
+//! A rate renegotiation (9.6) goes back to phase 4 from data mode, the
+//! frames kept in step throughout: Rd and its turn to R-bar-d from the
+//! digital modem, S, S-bar and CP from this end, and phase 4 from there.
+//!
 //! Everything upstream is V.34's, at the symbol rate, carrier and
 //! pre-emphasis phase 2 settled: S, S-bar and PP as phase 3 sends them, TRN
 //! at four points, Ja in J's modulation (8.3.1), CP, SCR and E as MP goes
@@ -51,6 +55,24 @@ const R_HEARD: usize = 8;
 /// B1d: "48 data frames" (8.6.1).
 const B1D_FRAMES: usize = 48;
 
+/// A renegotiation's Ed: "within 5000 ms plus 2 round-trip delays after
+/// sending the S-bar-to-S transition" (9.6.2).
+const RENEGOTIATION_ED: f64 = 5.0;
+
+/// Whole CPs asking for nothing sent before a cleardown is over.
+const CLEARDOWN_CPS: usize = 4;
+
+/// Data mode's levels closer than this many of the receiver's RMS errors
+/// make errors often enough to be worth a slower rate: a frame in some
+/// hundreds at six, none in a quarter of a million bits at eight.
+const MARGIN: f64 = 7.0;
+
+/// How often the margin is looked at, how many looks in a row it must be
+/// short for, and how long data mode runs before the first.
+const MARGIN_EVERY: f64 = 0.25;
+const MARGIN_SHORT: u32 = 4;
+const MARGIN_SETTLE: f64 = 2.0;
+
 /// Frames over which a read of impossible numbers is counted, how many make
 /// it a lost place, and symbols kept for finding the place again.
 const PLACE_WINDOW: usize = 24;
@@ -63,6 +85,8 @@ pub enum Status {
     Running,
     /// In data mode: downstream and upstream rates in bit/s.
     Connected { downstream: u32, upstream: u32 },
+    /// One end or the other asked for a rate of nothing (9.7).
+    ClearedDown,
     Failed(&'static str),
 }
 
@@ -296,6 +320,10 @@ impl Source {
                     return self.differential(size);
                 }
                 Up::Data => {
+                    if let Some(next) = self.pending.take() {
+                        self.start(next);
+                        continue;
+                    }
                     let Some(encoder) = self.encoder.as_mut() else {
                         self.start(Up::Silence);
                         continue;
@@ -368,18 +396,20 @@ struct RWatch {
     run: usize,
     turned: bool,
     heard: bool,
+    /// Whether the last whole frame looked like R or R-bar.
+    looked: bool,
 }
 
 impl RWatch {
-    /// One symbol. The index of the frame after R-bar ends -- TRN2d's first
-    /// -- once the turn is seen.
-    fn feed(&mut self, symbol: &pcm::Symbol, level: f64) -> Option<u64> {
+    /// One symbol, and the level R has in each interval. The index of the
+    /// frame after R-bar ends -- TRN2d's first -- once the turn is seen.
+    fn feed(&mut self, symbol: &pcm::Symbol, levels: &[f64; INTERVALS]) -> Option<u64> {
         let i = symbol.interval();
         self.frame[i] = symbol.value;
         if i != INTERVALS - 1 {
             return None;
         }
-        let near = self.frame.iter().all(|v| (0.5 * level..1.5 * level).contains(&v.abs()));
+        let near = self.frame.iter().zip(levels).all(|(v, level)| (0.5 * level..1.5 * level).contains(&v.abs()));
         let signs: Vec<bool> = self.frame.iter().map(|v| *v >= 0.0).collect();
         let r = [true, true, true, false, false, false];
         let r_bar = [false, false, false, true, true, true];
@@ -393,6 +423,7 @@ impl RWatch {
         } else {
             None
         };
+        self.looked = near && pattern.is_some();
         match (near, pattern) {
             (true, Some(way)) if !self.heard || way == self.turned => {
                 if self.run > 0 && way != self.turned {
@@ -435,6 +466,19 @@ fn levels_for(cp: &Cp, route: &Route) -> Levels {
             })
             .collect()
     })
+}
+
+/// The least distance between two of a CP's levels, either sign, as the
+/// route delivers them.
+fn least_gap(cp: &Cp, route: &Route) -> f64 {
+    (0..INTERVALS)
+        .map(|i| {
+            let mut levels: Vec<f64> =
+                cp.points(i).iter().flat_map(|&u| [route.levels[i][usize::from(u)], -route.levels[i][usize::from(u)]]).collect();
+            levels.sort_by(f64::total_cmp);
+            levels.windows(2).map(|w| w[1] - w[0]).fold(f64::INFINITY, f64::min)
+        })
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// The nearest of an interval's levels to `value`, as (Ucode, positive).
@@ -500,6 +544,34 @@ struct Frames {
     impossible: VecDeque<bool>,
     /// Times the frames were found somewhere else.
     moved: u32,
+    /// Data from frames that looked like Rd, kept back until the next frame
+    /// shows whether Rd is what they were.
+    held: VecDeque<Vec<bool>>,
+}
+
+impl Frames {
+    /// Frames from symbol `from` on, read with `mapping` against `levels`,
+    /// with the scrambler, differential decoder and shaper started afresh.
+    fn new(from: u64, mapping: Mapping, levels: Levels, moved: u32) -> Self {
+        Self {
+            from,
+            decoder: Decoder::new(mapping),
+            levels,
+            frame: [(0, false); INTERVALS],
+            descrambler: Scrambler::new(Mode::Call),
+            finder: Finder::new(),
+            mp: None,
+            far_acknowledged: false,
+            zero_frames: 0,
+            ed: false,
+            b1d_left: 0,
+            data: false,
+            history: VecDeque::with_capacity(PLACE_KEPT),
+            impossible: VecDeque::with_capacity(PLACE_WINDOW),
+            moved,
+            held: VecDeque::new(),
+        }
+    }
 }
 
 /// Where the analogue modem has got to.
@@ -551,6 +623,26 @@ pub struct Modem {
     wants_retrain: bool,
     /// Since the receiver last held a place, in samples.
     lost_since: Option<u64>,
+    /// The CP data mode is running on, which Rd and a renegotiation's
+    /// shaping are taken from.
+    in_use: Option<Cp>,
+    /// Rd and its turn, in data mode and a renegotiation (9.6.2).
+    rd_watch: RWatch,
+    renegotiating: bool,
+    /// Whether this end began the renegotiation, and whether R-bar-d is
+    /// still to come in it.
+    initiated: bool,
+    awaiting_turn: bool,
+    clearing: bool,
+    renegotiations: u32,
+    /// The least distance between data mode's levels as the route delivers
+    /// them, when the margin is next looked at, and looks in a row it was
+    /// short.
+    least_gap: f64,
+    margin_at: u64,
+    short: u32,
+    /// How much worse than the DIL showed data mode has found the line.
+    worse: f64,
 }
 
 impl Modem {
@@ -596,6 +688,17 @@ impl Modem {
             retrain_watch: RetrainWatch::new(Role::Call, fs),
             wants_retrain: false,
             lost_since: None,
+            in_use: None,
+            rd_watch: RWatch::default(),
+            renegotiating: false,
+            initiated: false,
+            awaiting_turn: false,
+            clearing: false,
+            renegotiations: 0,
+            least_gap: f64::INFINITY,
+            margin_at: 0,
+            short: 0,
+            worse: 1.0,
         };
         // 9.4.2: B1d "within 15 s plus 5 round-trip delays after sending
         // INFO1a".
@@ -621,6 +724,7 @@ impl Modem {
             Stage::AwaitJd | Stage::AwaitJdPrime => "V.90 phase 3: Jd",
             Stage::Dil => "V.90 phase 3: DIL",
             Stage::Phase4 => "V.90 phase 4",
+            Stage::Data if self.renegotiating => "V.90 rate renegotiation",
             Stage::Data => "V.90 data",
             Stage::Finished => "V.90 finished",
         }
@@ -699,6 +803,138 @@ impl Modem {
         self.wants_retrain = true;
     }
 
+    /// Rate renegotiations and cleardowns since the call began, from either
+    /// end.
+    pub fn renegotiations(&self) -> u32 {
+        self.renegotiations
+    }
+
+    /// Start a rate renegotiation from data mode (9.6.2.1), asking for the
+    /// fastest downstream the route carries at no more than `most` bit/s.
+    /// False, and nothing done, outside data mode or if the route carries no
+    /// rate that slow.
+    pub fn renegotiate(&mut self, most: u32) -> bool {
+        if !self.in_data_mode() {
+            return false;
+        }
+        let (Some(route), Some(choice)) = (self.route.as_ref(), self.choice.as_ref()) else { return false };
+        let law = self.settings.law;
+        let limit = super::power_limit(&self.settings.server);
+        let jd = self.far_jd.unwrap_or_default();
+        let slow_enough = |drn: u8| jd.enables(drn) && sequences::data_rate(drn).is_some_and(|rate| rate <= most);
+        let mut route = route.clone();
+        for spread in route.spread.iter_mut() {
+            *spread *= self.worse;
+        }
+        let Some(new) = dil::choose(&route, law, limit, slow_enough) else { return false };
+        let mut data = new.data;
+        self.finish_cp(&mut data);
+        let training = choice.training.clone();
+        self.choice = Some(Choice { data, training });
+        self.begin_renegotiation(true);
+        true
+    }
+
+    /// End the call from data mode (9.7): a renegotiation whose CP asks for
+    /// nothing. False, and nothing done, outside data mode.
+    pub fn clear_down(&mut self) -> bool {
+        if !self.in_data_mode() {
+            return false;
+        }
+        let Some(choice) = self.choice.as_mut() else { return false };
+        choice.data.drn = 0;
+        self.clearing = true;
+        self.begin_renegotiation(true);
+        true
+    }
+
+    fn in_data_mode(&self) -> bool {
+        matches!(self.status, Status::Connected { .. }) && !self.renegotiating
+    }
+
+    /// Back from data mode to phase 4 (9.6.2.1.1, 9.6.2.2.1).
+    fn begin_renegotiation(&mut self, initiating: bool) {
+        self.renegotiations += 1;
+        self.renegotiating = true;
+        self.initiated = initiating;
+        self.awaiting_turn = true;
+        self.status = Status::Running;
+        if initiating {
+            // The digital modem's data is data until its Rd.
+            self.rd_watch = RWatch::default();
+            self.send_s_then_cp();
+        } else {
+            self.clamp();
+        }
+        let wait = RENEGOTIATION_ED + 2.0 * self.settings.round_trip + 0.1;
+        self.deadline = Some((self.samples(wait), "no Ed in the rate renegotiation"));
+    }
+
+    /// Rd: circuit 104 clamped, and what was held back for it dropped.
+    fn clamp(&mut self) {
+        if let Some(frames) = self.frames.as_mut() {
+            frames.data = false;
+            frames.held.clear();
+        }
+    }
+
+    /// S for 128T, S-bar for 16T, and CP (9.6.2.1.1 to 9.6.2.1.3).
+    fn send_s_then_cp(&mut self) {
+        let Some(choice) = self.choice.as_ref() else { return };
+        let sixteen = self.far_jd.is_some_and(|jd| jd.sixteen_in_renegotiation);
+        let source = &mut self.source;
+        source.s_length = Some(signals::S_SYMBOLS);
+        source.after_s_bar = Up::Cp;
+        source.cp = choice.data.to_bits();
+        source.cp_is_ack = false;
+        source.next_cp = None;
+        source.cps = 0;
+        source.acknowledged = 0;
+        source.restarted = false;
+        source.size = if sixteen { Size::Sixteen } else { Size::Four };
+        source.encoder = None;
+        source.change(Up::S);
+    }
+
+    /// R-bar-d has begun: TRN2d, MP and Ed start at `from`, on CPt's
+    /// constellations with data mode's shaping (8.6).
+    fn turned(&mut self, from: u64) {
+        self.awaiting_turn = false;
+        let (Some(route), Some(choice), Some(in_use)) = (self.route.as_ref(), self.choice.as_ref(), self.in_use.as_ref()) else {
+            return;
+        };
+        let Some(mapping) = Mapping::for_renegotiation(&choice.training, in_use) else {
+            self.fail("the renegotiation has no mapping to train on");
+            return;
+        };
+        let levels = levels_for(&choice.training, route);
+        let moved = self.frames.as_ref().map_or(0, |f| f.moved);
+        self.frames = Some(Frames::new(from, mapping, levels, moved));
+        if !self.initiated {
+            // 9.6.2.2.2: "transmit S for 128T".
+            self.send_s_then_cp();
+        }
+    }
+
+    /// Rd's level in each interval: "the highest power PCM codeword from the
+    /// data mode constellation" (8.6.4), as the route delivers it.
+    fn rd_levels(&self) -> [f64; INTERVALS] {
+        let (Some(cp), Some(route)) = (self.in_use.as_ref(), self.route.as_ref()) else {
+            return [f64::INFINITY; INTERVALS];
+        };
+        std::array::from_fn(|i| cp.points(i).last().map_or(f64::INFINITY, |&u| route.levels[i][usize::from(u)]))
+    }
+
+    /// One end has asked for nothing: the call is over (9.7).
+    fn cleared_down(&mut self) {
+        self.status = Status::ClearedDown;
+        self.stage = Stage::Finished;
+        self.renegotiating = false;
+        self.source.pending = None;
+        self.source.start(Up::Silence);
+        self.rx.idle();
+    }
+
     pub fn send_bits(&mut self, bits: &[bool]) {
         self.source.data.extend(bits.iter().copied());
     }
@@ -732,7 +968,9 @@ impl Modem {
         match (self.rx.is_lost(), self.lost_since) {
             (true, None) => self.lost_since = Some(self.now),
             (false, Some(_)) => self.lost_since = None,
-            (true, Some(since)) if self.now - since > (3.0 * self.fs) as u64 && self.stage == Stage::Data => {
+            (true, Some(since))
+                if self.now - since > (3.0 * self.fs) as u64 && self.stage == Stage::Data && !self.renegotiating =>
+            {
                 self.wants_retrain = true;
                 self.lost_since = None;
             }
@@ -747,7 +985,13 @@ impl Modem {
             && self.now > at
             && self.status == Status::Running
         {
-            self.fail(why);
+            if self.renegotiating {
+                // 9.6.2: a renegotiation that goes nowhere is a retrain.
+                self.deadline = None;
+                self.wants_retrain = true;
+            } else {
+                self.fail(why);
+            }
         }
         self.stage_step();
         let source = &mut self.source;
@@ -761,18 +1005,29 @@ impl Modem {
                 // 9.3.2.4: S-bar-d within 1500 ms of the start of Ja.
                 self.deadline = Some((self.samples(1.5 + self.settings.round_trip), "no Sd from the digital modem"));
             }
+            Stage::Data if self.clearing => {
+                if self.source.up == Up::Cp && self.source.cps >= CLEARDOWN_CPS {
+                    self.cleared_down();
+                }
+            }
             Stage::Phase4 | Stage::Data => {
                 // 9.4.2.4: a CP' sent, and MP' or Ed heard: E once the
                 // current CP' is whole.
-                let heard_back = self.frames.as_ref().is_some_and(|f| f.far_acknowledged || f.ed);
+                let heard_back = !self.awaiting_turn && self.frames.as_ref().is_some_and(|f| f.far_acknowledged || f.ed);
                 if self.source.up == Up::Cp && self.source.acknowledged >= 1 && heard_back && self.source.pending.is_none() {
                     self.prepare_upstream();
                     self.source.change(Up::E);
                 }
                 let receiving = self.frames.as_ref().is_some_and(|f| f.data);
-                if self.status == Status::Running && receiving && self.source.up == Up::Data {
+                if self.status == Status::Running && !self.renegotiating && receiving && self.source.up == Up::Data {
                     self.status = Status::Connected { downstream: self.downstream_rate, upstream: self.upstream_rate };
                     self.deadline = None;
+                    self.margin_at = self.samples(MARGIN_SETTLE);
+                    self.short = 0;
+                }
+                if self.in_data_mode() && self.now >= self.margin_at {
+                    self.margin_at = self.samples(MARGIN_EVERY);
+                    self.watch_margin();
                 }
             }
             _ => {}
@@ -859,12 +1114,8 @@ impl Modem {
             self.fail("the route cannot carry V.90's slowest rate");
             return;
         };
-        let upstream_rates = if self.settings.wide { 0x1fff } else { 0x07ff };
-        for cp in [&mut choice.data, &mut choice.training] {
-            cp.a_law = law == Law::A;
-            cp.upstream_rates = upstream_rates;
-            cp.lookahead = 0;
-        }
+        self.finish_cp(&mut choice.data);
+        self.finish_cp(&mut choice.training);
         self.downstream_rate = sequences::data_rate(choice.data.drn).unwrap_or(0);
         // "S for 128T followed by S-bar for 16T", and phase 4: CPt.
         self.source.s_length = Some(signals::S_SYMBOLS);
@@ -885,7 +1136,7 @@ impl Modem {
         if self.trn2d_from.is_none() {
             let level = ucode::level(self.settings.law, self.settings.uinfo);
             let was_heard = self.r_watch.heard;
-            if let Some(from) = self.r_watch.feed(&symbol, level) {
+            if let Some(from) = self.r_watch.feed(&symbol, &[level; INTERVALS]) {
                 // 9.4.2.2: the current CPt whole, then CP.
                 self.trn2d_from = Some(from);
                 self.source.next_cp = Some((choice.data.to_bits(), false));
@@ -894,28 +1145,36 @@ impl Modem {
                     return;
                 };
                 let levels = levels_for(&choice.training, route);
-                self.frames = Some(Frames {
-                    from,
-                    decoder: Decoder::new(training),
-                    levels,
-                    frame: [(0, false); INTERVALS],
-                    descrambler: Scrambler::new(Mode::Call),
-                    finder: Finder::new(),
-                    mp: None,
-                    far_acknowledged: false,
-                    zero_frames: 0,
-                    ed: false,
-                    b1d_left: 0,
-                    data: false,
-                    history: VecDeque::with_capacity(PLACE_KEPT),
-                    impossible: VecDeque::with_capacity(PLACE_WINDOW),
-                    moved: 0,
-                });
+                self.frames = Some(Frames::new(from, training, levels, 0));
             } else if self.r_watch.heard && !was_heard {
                 self.rx.set_slicer(Slicer::Binary(level));
             }
             return;
         }
+        // Data mode, and a renegotiation until R-bar-d: Rd, from either end's
+        // asking (9.6.2.1.4, 9.6.2.2.1).
+        let receiving = self.frames.as_ref().is_some_and(|f| f.data);
+        let mut looked = false;
+        if self.stage == Stage::Data && (receiving || self.awaiting_turn) {
+            let levels = self.rd_levels();
+            let was_heard = self.rd_watch.heard;
+            if let Some(from) = self.rd_watch.feed(&symbol, &levels) {
+                self.turned(from);
+                return;
+            }
+            if self.rd_watch.heard {
+                if !was_heard {
+                    if self.renegotiating {
+                        self.clamp();
+                    } else {
+                        self.begin_renegotiation(false);
+                    }
+                }
+                return;
+            }
+            looked = self.rd_watch.looked && symbol.interval() == INTERVALS - 1;
+        }
+        let (Some(route), Some(choice)) = (self.route.as_ref(), self.choice.as_ref()) else { return };
         let Some(frames) = self.frames.as_mut() else { return };
         if symbol.index + 1 == frames.from {
             // TRN2d's first symbol is next: decide against CPt's levels.
@@ -941,7 +1200,8 @@ impl Modem {
         if frames.impossible.len() == PLACE_WINDOW {
             frames.impossible.pop_front();
         }
-        frames.impossible.push_back(!frames.decoder.could_have_sent(&frame));
+        // Rd is no frame of data, and says nothing about where the frames are.
+        frames.impossible.push_back(!looked && !frames.decoder.could_have_sent(&frame));
         if frames.impossible.iter().filter(|x| **x).count() >= PLACE_LOST
             && let Some(shift) = find_place(frames)
         {
@@ -956,7 +1216,14 @@ impl Modem {
         }
         let bits: Vec<bool> = frames.decoder.frame(frame).into_iter().map(|b| frames.descrambler.descramble(b)).collect();
         if frames.data {
-            self.received.extend(bits);
+            if looked {
+                frames.held.push_back(bits);
+            } else {
+                for held in frames.held.drain(..) {
+                    self.received.extend(held);
+                }
+                self.received.extend(bits);
+            }
             return;
         }
         if frames.ed {
@@ -965,6 +1232,8 @@ impl Modem {
             if frames.b1d_left == 0 {
                 frames.data = true;
                 self.stage = Stage::Data;
+                self.renegotiating = false;
+                self.rd_watch = RWatch::default();
             }
             return;
         }
@@ -975,6 +1244,10 @@ impl Modem {
             // started afresh (8.6.1).
             frames.ed = true;
             frames.b1d_left = B1D_FRAMES;
+            self.deadline = None;
+            self.in_use = Some(choice.data.clone());
+            self.least_gap = least_gap(&choice.data, route);
+            self.downstream_rate = sequences::data_rate(choice.data.drn).unwrap_or(0);
             let Some(data) = Mapping::from_cp(&choice.data) else { return };
             frames.decoder = Decoder::new(data);
             frames.levels = levels_for(&choice.data, route);
@@ -984,6 +1257,11 @@ impl Modem {
         }
         for bit in bits {
             if let Some(Found::Mp(mp)) = frames.finder.feed(bit) {
+                if mp.answer_to_call == 0 {
+                    // 9.7: the digital modem has cleared down.
+                    self.cleared_down();
+                    return;
+                }
                 if mp.acknowledge {
                     frames.far_acknowledged = true;
                 }
@@ -995,6 +1273,44 @@ impl Modem {
                 frames.mp = Some(mp);
             }
         }
+    }
+
+    /// Whether data mode's levels still stand far enough apart for the error
+    /// the receiver is making, and a slower rate if they have not for a while.
+    fn watch_margin(&mut self) {
+        let law = self.settings.law;
+        let rms = ucode::level(law, self.settings.uinfo) / 10f64.powf(self.rx.snr_db() / 20.0);
+        // A slip's burst is not the line.
+        if self.rx.is_lost() {
+            return;
+        }
+        self.short = if self.least_gap < MARGIN * rms { self.short + 1 } else { 0 };
+        if self.short < MARGIN_SHORT {
+            return;
+        }
+        self.short = 0;
+        if self.least_gap < 2.0 * rms {
+            // Nothing is being read at all: that is a receiver to train again.
+            self.wants_retrain = true;
+            return;
+        }
+        // The next rate is chosen for the line as data mode finds it.
+        if let Some(route) = self.route.as_ref() {
+            let limit = f64::from(super::power_limit(&self.settings.server)) / 32768.0;
+            self.worse = self.worse.max(rms / route.noise_at(law, limit));
+        }
+        let most = self.downstream_rate.saturating_sub(1);
+        if !self.renegotiate(most) {
+            // Nothing slower the route carries: train again from phase 2.
+            self.wants_retrain = true;
+        }
+    }
+
+    /// What every CP this end sends says besides its constellations and rate.
+    fn finish_cp(&self, cp: &mut Cp) {
+        cp.a_law = self.settings.law == Law::A;
+        cp.upstream_rates = if self.settings.wide { 0x1fff } else { 0x07ff };
+        cp.lookahead = 0;
     }
 
     /// Times the downstream frames were found somewhere else after a slip.

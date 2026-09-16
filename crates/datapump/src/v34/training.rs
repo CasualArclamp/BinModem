@@ -602,24 +602,24 @@ impl Listening {
 /// where one becomes the other, two symbols in a row are opposite the ones two
 /// before them.
 #[derive(Debug, Clone, Default)]
-struct SWatch {
+pub(crate) struct SWatch {
     last: VecDeque<Complex>,
     run: usize,
-    heard: bool,
+    pub(crate) heard: bool,
     flips: usize,
     /// Symbols since S was heard.
-    since: usize,
+    pub(crate) since: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Watched {
+pub(crate) enum Watched {
     Nothing,
     S,
     SBar,
 }
 
 impl SWatch {
-    fn feed(&mut self, y: Complex) -> Watched {
+    pub(crate) fn feed(&mut self, y: Complex) -> Watched {
         self.last.push_back(y);
         if self.last.len() > 3 {
             self.last.pop_front();

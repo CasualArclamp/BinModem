@@ -131,6 +131,12 @@ impl Network {
         self
     }
 
+    /// The loop's noise from now on: a line that goes bad in the middle of a
+    /// call.
+    pub fn set_noise(&mut self, level: f64) {
+        self.noise = level;
+    }
+
     /// A robbed bit on every sixth downstream octet, starting at `phase`.
     pub fn with_robbed_bit(mut self, phase: usize) -> Self {
         self.robbed = Some(phase % 6);

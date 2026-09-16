@@ -113,6 +113,10 @@ const JUDGED: usize = 32;
 const LOST_AT: f64 = 4.0;
 const FOUND_AT: f64 = 2.0;
 
+/// Symbols of holding still after which the errors are the line's own: half
+/// a second, where a slip's burst is gone in a few tens of milliseconds.
+const HELD_AT_MOST: u32 = 4000;
+
 /// Symbols between looks at where the equaliser's weight has got to, and how
 /// much of its movement goes into the clock's rate.
 const CENTRE_EVERY: u64 = 16;
@@ -328,6 +332,7 @@ pub struct Receiver {
     recent: VecDeque<f64>,
     settled: f64,
     lost: bool,
+    held: u32,
     slips: u32,
 }
 
@@ -386,6 +391,7 @@ impl Receiver {
             recent: VecDeque::with_capacity(JUDGED),
             settled: 0.0,
             lost: false,
+            held: 0,
             slips: 0,
         }
     }
@@ -815,11 +821,20 @@ impl Receiver {
         }
         if !self.lost && recent > LOST_AT * self.settled {
             self.lost = true;
+            self.held = 0;
             self.slips += 1;
             self.heard.push_back(Heard::Lost);
         } else if self.lost && recent < FOUND_AT * self.settled {
             self.lost = false;
             self.heard.push_back(Heard::Found);
+        } else if self.lost {
+            self.held += 1;
+            if self.held > HELD_AT_MOST {
+                // Not a slip: the line has got worse, and this is it now.
+                self.lost = false;
+                self.settled = recent;
+                self.heard.push_back(Heard::Found);
+            }
         }
         if !self.lost {
             self.settled += 0.005 * (recent - self.settled);

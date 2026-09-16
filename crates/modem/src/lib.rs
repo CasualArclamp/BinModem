@@ -156,7 +156,7 @@ impl Pump {
                 v90::startup::Status::Running => Progress::Negotiating,
                 v90::startup::Status::Connected { receive, transmit } => Progress::Connected { receive, transmit },
                 v90::startup::Status::Retraining => Progress::Retraining,
-                v90::startup::Status::Failed(_) => Progress::Failed,
+                v90::startup::Status::ClearedDown | v90::startup::Status::Failed(_) => Progress::Failed,
             },
         }
     }
@@ -1772,6 +1772,10 @@ impl Modem {
             Some(Pump::V34(m)) => {
                 m.renegotiate(((arriving / 2400) as u8).saturating_sub(2).max(1));
             }
+            // Downstream, V.90's rates are 1333 bit/s apart.
+            Some(Pump::V90(m)) => {
+                m.renegotiate(arriving.saturating_sub(4000));
+            }
             _ => {}
         }
     }
@@ -1802,7 +1806,7 @@ impl Modem {
         match self.pump.as_ref() {
             Some(Pump::V32(m)) => m.retrains(),
             Some(Pump::V34(m)) => m.renegotiations() + m.retrains(),
-            Some(Pump::V90(m)) => m.v34().renegotiations() + m.retrains(),
+            Some(Pump::V90(m)) => m.renegotiations() + m.retrains(),
             _ => 0,
         }
     }

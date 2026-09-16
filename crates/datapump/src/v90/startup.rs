@@ -25,8 +25,11 @@ pub enum Status {
     Running,
     /// In data mode, at these rates in bit/s.
     Connected { transmit: u32, receive: u32 },
-    /// Going through the start-up again, with a call that was up.
+    /// Going through the start-up again, or renegotiating the rates, with a
+    /// call that was up.
     Retraining,
+    /// The call ended the way 9.7 (or V.34's 11.7) ends one.
+    ClearedDown,
     Failed(&'static str),
 }
 
@@ -40,6 +43,8 @@ pub struct Analogue {
     failed_starts: u32,
     connected_once: bool,
     last_failure: Option<&'static str>,
+    /// Renegotiations in V.90 data modes a retrain has since replaced.
+    renegotiations: u32,
 }
 
 impl Analogue {
@@ -52,6 +57,7 @@ impl Analogue {
             failed_starts: 0,
             connected_once: false,
             last_failure: None,
+            renegotiations: 0,
         }
     }
 
@@ -87,12 +93,45 @@ impl Analogue {
         self.last_failure
     }
 
+    /// Rate renegotiations and cleardowns since the call began, V.90's and
+    /// V.34's.
+    pub fn renegotiations(&self) -> u32 {
+        self.renegotiations + self.v90.as_ref().map_or(0, analogue::Modem::renegotiations) + self.v34.renegotiations()
+    }
+
+    /// Renegotiate from data mode, asking to receive no faster than
+    /// `receive` bit/s (V.90 9.6.2.1, or V.34 11.6.1.1). False outside data
+    /// mode.
+    pub fn renegotiate(&mut self, receive: u32) -> bool {
+        match self.v90.as_mut() {
+            Some(m) => m.renegotiate(receive),
+            None => self.v34.renegotiate((receive / 2400).clamp(1, 14) as u8),
+        }
+    }
+
+    /// End the call from data mode (V.90 9.7, or V.34 11.7).
+    pub fn clear_down(&mut self) -> bool {
+        match self.v90.as_mut() {
+            Some(m) => m.clear_down(),
+            None => self.v34.clear_down(),
+        }
+    }
+
+    /// Back through V.90's phase 2.
+    fn back_to_phase2(&mut self) {
+        if let Some(m) = self.v90.take() {
+            self.renegotiations += m.renegotiations();
+        }
+        self.v34.restart_phase2();
+    }
+
     pub fn status(&self) -> Status {
         match self.v90.as_ref().map(analogue::Modem::status) {
             Some(analogue::Status::Connected { downstream, upstream }) => {
                 Status::Connected { transmit: upstream, receive: downstream }
             }
             Some(analogue::Status::Failed(why)) => Status::Failed(why),
+            Some(analogue::Status::ClearedDown) => Status::ClearedDown,
             Some(analogue::Status::Running) if self.connected_once => Status::Retraining,
             Some(analogue::Status::Running) => Status::Running,
             None => match self.v34.status() {
@@ -100,7 +139,7 @@ impl Analogue {
                 v34::Status::Running | v34::Status::Done => Status::Running,
                 v34::Status::Connected { transmit, receive } => Status::Connected { transmit, receive },
                 v34::Status::Retraining => Status::Retraining,
-                v34::Status::ClearedDown => Status::Failed("cleared down"),
+                v34::Status::ClearedDown => Status::ClearedDown,
                 v34::Status::Failed(why) => Status::Failed(why),
             },
         }
@@ -177,8 +216,7 @@ impl Analogue {
             if m.take_retrain() {
                 // 9.5.2: tone A and phase 2, whichever end began it; the
                 // capabilities are not exchanged again.
-                self.v90 = None;
-                self.v34.restart_phase2();
+                self.back_to_phase2();
                 return out;
             }
             match m.status() {
@@ -190,8 +228,7 @@ impl Analogue {
                     // 9.5.2.1: back to V.90's phase 2.
                     self.last_failure = Some(why);
                     self.failed_starts += 1;
-                    self.v90 = None;
-                    self.v34.restart_phase2();
+                    self.back_to_phase2();
                 }
                 _ => {}
             }
@@ -253,11 +290,13 @@ impl Digital {
                 Status::Connected { transmit: downstream, receive: upstream }
             }
             Some(digital::Status::Failed(why)) => Status::Failed(why),
+            Some(digital::Status::ClearedDown) => Status::ClearedDown,
             Some(digital::Status::Running) => Status::Running,
             None => match self.v34.status() {
                 v34::Status::Connected { transmit, receive } => Status::Connected { transmit, receive },
                 v34::Status::Failed(why) => Status::Failed(why),
                 v34::Status::Retraining => Status::Retraining,
+                v34::Status::ClearedDown => Status::ClearedDown,
                 _ => Status::Running,
             },
         }
@@ -300,6 +339,23 @@ impl Digital {
                 true
             }
             None => self.v34.retrain(),
+        }
+    }
+
+    /// Renegotiate from data mode (9.6.1.1), asking the analogue modem to
+    /// send no faster than `upstream`, a multiple of 2400.
+    pub fn renegotiate(&mut self, upstream: u8) -> bool {
+        match self.v90.as_mut() {
+            Some(m) => m.renegotiate(upstream),
+            None => self.v34.renegotiate(upstream),
+        }
+    }
+
+    /// End the call from data mode (9.7).
+    pub fn clear_down(&mut self) -> bool {
+        match self.v90.as_mut() {
+            Some(m) => m.clear_down(),
+            None => self.v34.clear_down(),
         }
     }
 

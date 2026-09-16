@@ -341,6 +341,113 @@ fn a_retrain_from_either_end_comes_back_up() {
     }
 }
 
+impl FullCall {
+    /// Run until both ends are in data mode again, having left it; false if
+    /// that takes more than `seconds`.
+    fn comes_back_up(&mut self, seconds: f64) -> bool {
+        use datapump::v90::startup::Status;
+        let up = |s: Status| matches!(s, Status::Connected { .. });
+        let end = self.ticks + (seconds * 8000.0) as u64;
+        let mut went_down = false;
+        while self.ticks < end {
+            self.run_until_seconds((self.ticks + 80) as f64 / 8000.0);
+            if !up(self.analogue.status()) || !up(self.digital.status()) {
+                went_down = true;
+            } else if went_down {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn rates(&self) -> (u32, u32) {
+        use datapump::v90::startup::Status;
+        match self.analogue.status() {
+            Status::Connected { transmit, receive } => (receive, transmit),
+            other => panic!("not connected: {other:?}"),
+        }
+    }
+}
+
+/// A rate renegotiation from data mode (9.6), from either end: back through
+/// phase 4 at the rates asked for, with no retrain, and data after it.
+#[test]
+fn a_rate_renegotiation_from_either_end_settles_the_rates_asked_for() {
+    // Over a short line, and over a VoIP call's 600 ms each way.
+    for (from_server, delay) in [(true, 0.020), (false, 0.020), (true, 0.6), (false, 0.6)] {
+        let mut call = connects(Network::new(Law::Mu, FS).with_delay(delay, FS).with_noise(1e-5), server(), 40.0);
+        let (down, up) = call.rates();
+        let began = call.ticks;
+        if from_server {
+            assert!(call.digital.renegotiate(8));
+        } else {
+            assert!(call.analogue.renegotiate(40_000));
+        }
+        assert!(call.comes_back_up(10.0), "from the server {from_server}: {} / {}", call.analogue.phase(), call.digital.phase());
+        let (new_down, new_up) = call.rates();
+        println!("from the server {from_server}, {delay} s each way: {down}/{up} became {new_down}/{new_up} in {:.2} s", (call.ticks - began) as f64 / 8000.0);
+        if from_server {
+            assert_eq!(new_up, 19_200);
+            assert_eq!(new_down, down);
+        } else {
+            assert!((36_000..=40_000).contains(&new_down), "downstream {new_down}");
+            assert_eq!(new_up, up);
+        }
+        assert!(call.analogue.is_v90());
+        assert_eq!(call.analogue.retrains(), 0, "a retrain happened");
+        assert_eq!(call.analogue.renegotiations(), 1);
+        assert_eq!(call.digital.v90().map(|m| m.renegotiations()), Some(1));
+        assert_eq!(call.carries_data(3.0), (true, true), "from the server {from_server}");
+        // And again, the other way round.
+        if from_server {
+            assert!(call.analogue.renegotiate(60_000));
+        } else {
+            assert!(call.digital.renegotiate(14));
+        }
+        assert!(call.comes_back_up(10.0), "second, from the server {}", !from_server);
+        assert_eq!(call.carries_data(3.0), (true, true), "second, from the server {}", !from_server);
+    }
+}
+
+/// A line that gets noisier in data mode: the analogue modem sees its
+/// levels are too close for the errors it is making, and renegotiates to a
+/// slower rate that carries data cleanly (9.6.2.1), with no retrain.
+#[test]
+fn a_line_gone_noisy_is_renegotiated_down() {
+    let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5), server(), 30.0);
+    let (down, _) = call.rates();
+    call.net.set_noise(1e-3);
+    assert!(call.comes_back_up(10.0), "{} / {}", call.analogue.phase(), call.digital.phase());
+    let (slower, _) = call.rates();
+    println!("{down} became {slower} after {} renegotiations", call.analogue.renegotiations());
+    assert!(slower < down);
+    // Settled: the rate holds, and data crosses.
+    call.run_until_seconds(call.ticks as f64 / 8000.0 + 4.0);
+    assert_eq!(call.rates().0, slower, "{} renegotiations", call.analogue.renegotiations());
+    assert_eq!(call.carries_data(3.0), (true, true));
+    assert_eq!(call.analogue.retrains(), 0);
+}
+
+/// 9.7: a cleardown from either end ends the call at both.
+#[test]
+fn a_cleardown_from_either_end_ends_the_call_at_both() {
+    use datapump::v90::startup::Status;
+    for from_server in [true, false] {
+        let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.020, FS), server(), 30.0);
+        assert!(if from_server { call.digital.clear_down() } else { call.analogue.clear_down() });
+        let start = call.ticks;
+        while call.ticks < start + 3 * 8000 {
+            call.run_until_seconds((call.ticks + 80) as f64 / 8000.0);
+            if call.analogue.status() == Status::ClearedDown && call.digital.status() == Status::ClearedDown {
+                break;
+            }
+        }
+        println!("from the server {from_server}: {:?} {:?} after {:.2} s", call.analogue.status(), call.digital.status(), (call.ticks - start) as f64 / 8000.0);
+        assert_eq!(call.analogue.status(), Status::ClearedDown, "from the server {from_server}");
+        assert_eq!(call.digital.status(), Status::ClearedDown, "from the server {from_server}");
+    }
+}
+
 #[test]
 fn a_sound_card_clock_120_ppm_off_is_followed_through_ten_seconds_of_data() {
     let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5).with_clock(120.0), server(), 30.0);

@@ -131,6 +131,35 @@ impl Route {
         s[s.len() / 2]
     }
 
+    /// The spread data mode can expect in a signal whose RMS level, as sent,
+    /// is `rms`.
+    ///
+    /// Not the median across codewords. The spread grows with level -- a DIL
+    /// segment of the loudest codewords reads several times as untidy as one
+    /// of the quietest, from everything in the receiver whose error is a share
+    /// of the signal -- and data mode's symbols sit in a signal at the power
+    /// Table 15 allows, loud or quiet as each one is. A constellation spaced
+    /// by the median made an error every second or so. So the spread's square
+    /// is fitted as a floor plus a share of each segment's power, across every
+    /// codeword read, and taken at data mode's power.
+    pub fn noise_at(&self, law: Law, rms: f64) -> f64 {
+        let points: Vec<(f64, f64)> = (0..UCODES)
+            .filter(|&u| self.spread[u].is_finite())
+            .map(|u| (ucode::level(law, u as u8).powi(2), self.spread[u].powi(2)))
+            .collect();
+        if points.len() < 2 {
+            return self.noise();
+        }
+        let n = points.len() as f64;
+        let (mx, my) = (points.iter().map(|p| p.0).sum::<f64>() / n, points.iter().map(|p| p.1).sum::<f64>() / n);
+        let sxx: f64 = points.iter().map(|p| (p.0 - mx).powi(2)).sum();
+        let sxy: f64 = points.iter().map(|p| (p.0 - mx) * (p.1 - my)).sum();
+        let slope = if sxx > 0.0 { (sxy / sxx).max(0.0) } else { 0.0 };
+        let floor = (my - slope * mx).max(0.0);
+        // Never tidier than the quiet codewords read.
+        (floor + slope * rms * rms).sqrt().max(self.noise())
+    }
+
     /// Interval `i`'s constellation: codewords whose levels stand `spacing`
     /// spreads apart from their neighbours and from their own opposites.
     ///
@@ -303,7 +332,7 @@ fn quietest(route: &Route, law: Law, k: u32, spacing: f64, limit: f64) -> Option
 /// The sets carrying `k` bits with the most room between levels the power
 /// allows, if that room is at least `least` of the noise.
 fn widest(route: &Route, law: Law, k: u32, least: f64, limit: f64) -> Option<[Vec<u8>; INTERVALS]> {
-    let noise = route.noise();
+    let noise = route.noise_at(law, limit.sqrt() / 32768.0);
     let build = |factor: f64| quietest(route, law, k, factor * noise, limit);
     let mut best = build(least)?;
     let (mut low, mut high) = (least, 64.0 * least);
@@ -353,7 +382,7 @@ pub fn choose(route: &Route, law: Law, limit: u32, enabled: impl Fn(u8) -> bool)
 /// What choosing made of a route, a line to a rate, for when it chose
 /// nothing or not much.
 pub fn explain(route: &Route, law: Law, limit: u32) -> Vec<String> {
-    let noise = route.noise();
+    let noise = route.noise_at(law, f64::from(limit) / 32768.0);
     let limit = f64::from(limit).powi(2);
     let mut out = vec![format!("noise {noise:.2e}, ceiling {:.0}", limit.sqrt())];
     for i in 0..INTERVALS {

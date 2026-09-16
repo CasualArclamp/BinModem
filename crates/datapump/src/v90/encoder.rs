@@ -83,6 +83,19 @@ impl Mapping {
         modulus::fits(mapping.moduli(), k).then_some(mapping)
     }
 
+    /// What TRN2d, MP and Ed go out on in a rate renegotiation (8.6): "the
+    /// spectral shaping parameters as used in the preceding data mode along
+    /// with the K previously derived from CPt", and CPt's constellations.
+    pub fn for_renegotiation(cpt: &Cp, data_mode: &Cp) -> Option<Self> {
+        let training = Self::from_cp(cpt)?;
+        Some(Self {
+            redundancy: data_mode.redundancy,
+            lookahead: usize::from(data_mode.lookahead),
+            shaping: data_mode.shaping,
+            ..training
+        })
+    }
+
     /// The moduli these constellations give (5.4.3: "Mi is equal to the number
     /// of members in the PCM code sets").
     pub fn moduli(&self) -> Moduli {
