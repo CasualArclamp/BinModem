@@ -166,11 +166,31 @@ const E_PATIENCE: f64 = 1.0;
 /// sending data for a rate renegotiation or a cleardown.
 const S_HEARD: usize = 24;
 
-/// TRN this end sends in a rate renegotiation before its MP. Its receiver is
-/// trained already and so is the far end's, so this is only a little: the
-/// modem the first live renegotiation came from sent about a hundred and
-/// forty symbols of it.
-const RENEGOTIATION_TRN: usize = 256;
+/// Seconds of TRN this end sends in a rate renegotiation before its MP.
+///
+/// Not for this end's receiver, which is trained already: for the far end's.
+/// 11.6 has the procedure "also used to resynchronize the receiver", and a far
+/// end that began one for that reason has lost its place in this end's
+/// signal and needs a reference to find it again. dialup.world's modem sends
+/// only about 140 symbols of TRN of its own. A provider's modem pool
+/// (live-1789546478) sends 1.85 s of it every time, and was left unable to
+/// read this end at all when this was 256 symbols. It never acknowledged
+/// an MP, and a full retrain followed each time.
+///
+/// Cut short when the far end's MP arrives. 11.6 has TRN sent "until the
+/// receiver is prepared to enter data mode. Then the Modulation Parameters
+/// (MPs) sequence is sent", so an MP means the far receiver is ready.
+///
+/// A second still leaves room. An initiator gives up on E 2500 ms and two
+/// round trips after its S-bar (11.6.2), and this end's E arrives a little
+/// over two round trips plus this long after it, whatever the round trip is.
+/// That leaves a margin of about 1.3 s.
+const RENEGOTIATION_TRN: f64 = 1.0;
+
+/// How often data mode's signal to noise is sampled, and how many samples
+/// are kept, for an MP sent in a renegotiation.
+const SNR_EVERY: f64 = 0.1;
+const SNR_KEPT: usize = 20;
 
 /// What reading the far end's data costs the trellis a 4D symbol, averaged, in
 /// grid units squared, past which the decoder has lost its place: data mode
@@ -726,6 +746,10 @@ pub struct Modem {
     renegotiations: u32,
     /// The most this end's MP offers to receive, if less than it could.
     receive_cap: Option<u8>,
+    /// Data mode's signal to noise, sampled every [`SNR_EVERY`], newest last,
+    /// and when it was last sampled.
+    data_snr: VecDeque<f64>,
+    data_snr_at: u64,
     /// The precoding coefficients this end's transmitter uses: zero until a
     /// Type 1 MP says otherwise, and kept through a Type 0 one.
     precoding: [super::mp::Coefficient; 3],
@@ -802,6 +826,8 @@ impl Modem {
             clearing: false,
             renegotiations: 0,
             receive_cap: None,
+            data_snr: VecDeque::with_capacity(SNR_KEPT),
+            data_snr_at: 0,
             precoding: [(0, 0); 3],
             acquirer: None,
             slips_seen: 0,
@@ -1131,6 +1157,13 @@ impl Modem {
                 self.heard(heard);
             }
         }
+        if self.stage == Stage::Data && self.now >= self.data_snr_at {
+            self.data_snr_at = self.samples(SNR_EVERY);
+            if self.data_snr.len() == SNR_KEPT {
+                self.data_snr.pop_front();
+            }
+            self.data_snr.push_back(self.rx.snr_db());
+        }
         if live(self.status) {
             if let Some((at, why)) = self.deadline
                 && self.now > at
@@ -1438,7 +1471,7 @@ impl Modem {
         let wide_cap = |rate: u8| if s.wide { rate } else { rate.min(12) };
         // What this end's receiver could take, by the signal to noise it
         // trained to, with the same allowance phase 2's projections make.
-        let snr = 10f64.powf(self.rx.snr_db().min(60.0) / 10.0);
+        let snr = 10f64.powf(self.mp_snr_db().min(60.0) / 10.0);
         let bits = (1.0 + snr / 10f64.powf(0.6)).log2();
         let receive = ((bits * s.receive.baud() / 2400.0).floor() as u8).clamp(1, probe::ceiling(s.receive.rate));
         let receive = self.receive_cap.map_or(receive, |cap| receive.min(cap.max(1)));
@@ -1460,6 +1493,25 @@ impl Modem {
             asymmetric: true,
             precoding: None,
         }
+    }
+
+    /// The signal to noise an MP's receive rate is chosen by.
+    ///
+    /// In phase 4, what the receiver reads now: it has just trained. In a
+    /// renegotiation, the median of what data mode read over its last couple
+    /// of seconds. The reading at the moment the MP is made is the wrong
+    /// figure there, because the far end's S and S-bar have just arrived.
+    /// A receiver in data mode takes each phase reversal as a jump and reads
+    /// badly for a few tenths of a second after one. In live-1789546478, that
+    /// reading was 7 dB on a 38 dB line, so the MP asked for 4800 bit/s and
+    /// the far end sent at 4800 from then on.
+    fn mp_snr_db(&self) -> f64 {
+        if self.stage != Stage::Renegotiation || self.data_snr.is_empty() {
+            return self.rx.snr_db();
+        }
+        let mut readings: Vec<f64> = self.data_snr.iter().copied().collect();
+        readings.sort_by(f64::total_cmp);
+        readings[readings.len() / 2]
     }
 
     fn stage_step(&mut self) {
@@ -1521,7 +1573,11 @@ impl Modem {
             }
             Stage::CallMp | Stage::AnswerMp => self.exchange_mp(),
             Stage::Renegotiation => {
-                if self.ours.is_none() && self.source.segment == Segment::Trn && self.source.count >= RENEGOTIATION_TRN {
+                // TRN until the far end's MP says its receiver is ready, and
+                // no longer than RENEGOTIATION_TRN either way. A cleardown's
+                // MP is the far end asking for none at all (11.7.2.2).
+                let enough = self.far_mp.is_some() || self.source.count as f64 >= RENEGOTIATION_TRN * baud;
+                if self.ours.is_none() && self.source.segment == Segment::Trn && enough {
                     let ours = self.make_mp();
                     self.ours = Some(ours);
                     self.source.mp = ours;
@@ -1945,6 +2001,34 @@ mod tests {
             }
             let received = |m: &Modem| m.rates().map(|r| r.1);
             assert_eq!(received(link.end(other)), Some(6), "{other:?}");
+        }
+    }
+
+    /// A renegotiation the far end begins to resynchronise its receiver, as a
+    /// provider's modem did in live-1789546478: nothing about the line has
+    /// changed, so neither rate should. This end's receiver reads badly for a
+    /// few tenths of a second after the far end's S and S-bar arrive, and
+    /// worse if a slip lands in them. An MP made from that reading asked for
+    /// 4800 bit/s on a 38 dB line.
+    #[test]
+    fn a_renegotiation_the_far_end_begins_keeps_what_data_mode_could_carry() {
+        for slipped in [false, true] {
+            let mut link = Link::new(0.030, 45.0, 60.0);
+            assert!(link.run_until(20.0, Link::both_connected), "never connected");
+            // Long enough in data mode for its readings to fill.
+            link.run_until(2.5, |_| false);
+            let before = link.answerer.rates().unwrap();
+            // The call end asks for nothing lower: a resynchronisation.
+            assert!(link.caller.renegotiate(14));
+            let heard = link.run_until(1.0, |l| l.answerer.status() == Status::Retraining);
+            assert!(heard, "the answer end never heard S");
+            if slipped {
+                link.slip(Role::Answer, true);
+            }
+            assert!(link.run_until(8.0, Link::both_connected), "slipped {slipped}: stuck at {}", link.answerer.phase());
+            let ours = link.answerer.ours.expect("no MP");
+            assert_eq!(ours.call_to_answer, before.1, "slipped {slipped}: the answer end's MP asked for less than data mode carried");
+            assert_eq!(link.answerer.rates(), Some(before), "slipped {slipped}");
         }
     }
 

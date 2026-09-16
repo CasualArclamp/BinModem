@@ -243,6 +243,8 @@ pub struct Modem {
     info1a: Option<Info1a>,
     /// Times a timeout of 11.2.2 was taken instead of the signal it waited for.
     recoveries: u32,
+    /// Set when the failure is one to retrain from.
+    retrain_instead: bool,
 }
 
 impl Modem {
@@ -281,6 +283,7 @@ impl Modem {
             info1c: None,
             info1a: None,
             recoveries: 0,
+            retrain_instead: false,
         }
     }
 
@@ -412,6 +415,20 @@ impl Modem {
         self.stage = Stage::Finished;
         self.tx.stop();
         self.speaking = Speaking::Silent;
+    }
+
+    /// Stop here, the way [`Self::fail`] does, for a lapse that 11.2.2 has
+    /// answered with a retrain rather than the end of the call.
+    fn fail_for_a_retrain(&mut self, why: &'static str) {
+        self.fail(why);
+        self.retrain_instead = true;
+    }
+
+    /// Whether the failure is one the recommendation recovers from by
+    /// retraining (11.5.1.1, 11.5.2.1). What that retrain is belongs to
+    /// whatever owns this: phase 2 knows only that it has lost its place.
+    pub fn asks_for_retrain(&self) -> bool {
+        self.retrain_instead
     }
 
     /// Carry phase 2 one sample further: hear `line`, and say what goes on it.
@@ -653,7 +670,8 @@ impl Modem {
                     self.tx.silence();
                     self.enter(Stage::CallInfo1);
                 } else if self.deadline.is_some_and(|d| now > d) {
-                    self.fail("no tone A after this end's probing");
+                    // 11.2.2.1.5: "the call modem shall initiate a retrain".
+                    self.fail_for_a_retrain("no tone A after this end's probing");
                 }
             }
             Stage::CallInfo1 => {
@@ -662,7 +680,13 @@ impl Modem {
                     self.deadline = Some(now + self.ms(0.700) + self.rtd() + self.ms(0.3));
                 }
                 if self.deadline.is_some_and(|d| now > d) {
-                    self.fail("no INFO1a");
+                    // 11.2.2.1.6: listen for tone A or INFOMARKSa, and on
+                    // INFOMARKSa "either initiate a retrain according to
+                    // 11.5.1.1 or send INFO1c". The far end has gone on to
+                    // phase 3 by now; after its own wait for S it sends
+                    // INFOMARKSa and listens for tone B (11.3.2.2.1). So the
+                    // retrain is what both recovery paths lead to.
+                    self.fail_for_a_retrain("no INFO1a");
                 }
             }
 
@@ -734,8 +758,9 @@ impl Modem {
                         self.enter(Stage::Finished);
                     }
                 } else if self.deadline.is_some_and(|d| now > d) {
-                    // 11.2.2.2.4.
-                    self.fail("no INFO1c");
+                    // 11.2.2.2.4: "initiate a retrain according to 11.5.2.1
+                    // or send INFOMARKSa".
+                    self.fail_for_a_retrain("no INFO1c");
                 }
             }
             Stage::Finished => {}

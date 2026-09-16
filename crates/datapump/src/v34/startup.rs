@@ -4,6 +4,14 @@
 use super::phase2::{self, Role};
 use super::training::{self, Settings};
 
+/// Retrains in a row that phase 2 may ask for before its failure is taken as
+/// the end of the call.
+///
+/// Each one runs phase 2 again from its tones, and phase 2 gives up on its
+/// own after twenty seconds, so this bounds how long a far end that has gone
+/// can keep this end busy.
+const PHASE2_RETRAINS: u32 = 2;
+
 /// How the start-up is going.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -32,11 +40,20 @@ pub struct Modem {
     /// Full retrains since the call began (11.5), as against the in-band rate
     /// renegotiations [`training::Modem`] counts.
     retrains: u32,
+    /// Retrains phase 2 has asked for since phases 3 and 4 last connected.
+    phase2_retrains: u32,
 }
 
 impl Modem {
     pub fn new(role: Role, fs: f64) -> Self {
-        Self { fs, phase2: phase2::Modem::new(role, fs), training: None, retraining: false, retrains: 0 }
+        Self {
+            fs,
+            phase2: phase2::Modem::new(role, fs),
+            training: None,
+            retraining: false,
+            retrains: 0,
+            phase2_retrains: 0,
+        }
     }
 
     /// Full retrains since the call began.
@@ -169,10 +186,25 @@ impl Modem {
             // The recovery is over the moment the new training connects.
             if matches!(training.status(), training::Status::Connected { .. }) {
                 self.retraining = false;
+                self.phase2_retrains = 0;
             }
             return out;
         }
         let out = self.phase2.step(line);
+        // 11.2.2: a phase 2 that lost its place is retrained, not given up
+        // on. live-1789546478 lost a whole call to one INFO1a a VoIP slip
+        // had damaged, with the far end still there and waiting.
+        if self.phase2.asks_for_retrain()
+            && self.phase2_retrains < PHASE2_RETRAINS
+            && let Some(far) = self.phase2.far_capabilities()
+        {
+            self.phase2 = phase2::Modem::retrain(self.phase2.role(), self.fs, far);
+            self.phase2_retrains += 1;
+            if self.retraining {
+                self.retrains += 1;
+            }
+            return out;
+        }
         if self.phase2.status() == phase2::Status::Done {
             self.training = self.settings().map(|settings| training::Modem::new(settings, self.fs));
         }
@@ -335,6 +367,53 @@ mod tests {
         assert_eq!(call.rates(), Some((14, 14)));
         assert_eq!(answer.rates(), Some((14, 14)));
         println!("  back up at {at:.1}s");
+    }
+
+    /// INFO1a is sent once and nothing repeats it. A VoIP jitter buffer's
+    /// slip through the middle of it cost a live call (live-1789546478) that
+    /// was in a retrain: the call modem gave up on it and hung up, with the
+    /// far end still there. 11.2.2.1.6 retrains instead, and the answer modem
+    /// hears the call modem's tone B from phase 3 and comes back too.
+    #[test]
+    fn an_info1a_lost_on_the_way_is_retrained_from() {
+        let delay = (0.030 * FS) as usize;
+        let mut caller = Modem::new(Role::Call, FS);
+        let mut answerer = Modem::new(Role::Answer, FS);
+        let mut to_answer: std::collections::VecDeque<f64> = std::iter::repeat_n(0.0, delay).collect();
+        let mut to_call: std::collections::VecDeque<f64> = std::iter::repeat_n(0.0, delay).collect();
+        let up = |m: &Modem| matches!(m.status(), Status::Connected { .. });
+        // When the answer modem began INFO1a, by its own clock.
+        let mut info1a_at = None;
+        let mut failed = None;
+        for i in 0..(60.0 * FS) as usize {
+            let out_call = caller.step(to_call.pop_front().unwrap() * 0.3);
+            let mut out_answer = answerer.step(to_answer.pop_front().unwrap() * 0.3);
+            if info1a_at.is_none() && answerer.phase2().info1a().is_some() {
+                info1a_at = Some(i);
+            }
+            // Forty milliseconds in, the next thirty never arrive: the sync
+            // and the CRC can no longer agree.
+            if let Some(at) = info1a_at
+                && (at + (0.040 * FS) as usize..at + (0.070 * FS) as usize).contains(&i)
+            {
+                out_answer = 0.0;
+            }
+            to_answer.push_back(out_call);
+            to_call.push_back(out_answer);
+            if let Status::Failed(why) = caller.status() {
+                failed = Some(why);
+                break;
+            }
+            if up(&caller) && up(&answerer) {
+                break;
+            }
+        }
+        assert!(info1a_at.is_some(), "the answer modem never sent INFO1a");
+        assert_eq!(failed, None, "the call modem gave up");
+        assert!(up(&caller) && up(&answerer), "never came up: {} and {}", caller.phase(), answerer.phase());
+        // Phase 2 was run again by both; phase 3 and 4 settled as normal.
+        assert!(caller.phase2().info1a().is_some());
+        assert_eq!(caller.training().unwrap().rates(), Some((14, 14)));
     }
 
     #[test]

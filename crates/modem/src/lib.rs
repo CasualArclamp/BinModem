@@ -1458,6 +1458,20 @@ impl Modem {
         // means: 5.6.1's instruction to give up on the call, because from the
         // terminal's side there is not yet a call.
         if self.announce.is_some() {
+            // The line can change its rates in that gap. A V.34 far end
+            // renegotiated a second after data mode began in
+            // live-1789546478, while the detection phase was still running,
+            // and this end went on reporting the rate it had before.
+            if let Some(Progress::Connected { receive, transmit }) = self.pump.as_ref().map(Pump::status)
+                && (receive, transmit) != (self.rate, self.transmit_rate)
+            {
+                self.rate = receive;
+                self.transmit_rate = transmit;
+                self.announce = Some(receive);
+                if let Some(Pump::V34(m)) = self.pump.as_ref() {
+                    self.v34_report = Some(V34Report::of(m));
+                }
+            }
             self.carry_data();
             return;
         }

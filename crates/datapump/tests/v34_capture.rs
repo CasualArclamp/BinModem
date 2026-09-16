@@ -390,7 +390,10 @@ fn a_captured_call_through_the_start_up() {
     };
     let wav = line::wav::read(&path).expect("could not read the capture");
     let fs = f64::from(wav.sample_rate);
-    let samples = wav.channel(0);
+    // Channel 0 unless told: channel 1, with `V34_ROLE` the other way round,
+    // is this end's own signal heard as the far end heard it.
+    let channel = std::env::var("V34_CHANNEL").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(0);
+    let samples = wav.channel(channel);
     let mut modem = Modem::new(role, fs);
     let (mut phase, mut status) = ("", Status::Running);
     let mut bits: Vec<bool> = Vec::new();
@@ -432,5 +435,38 @@ fn a_captured_call_through_the_start_up() {
     if let Ok(path) = std::env::var("V34_BITS") {
         let text: String = bits.iter().map(|b| if *b { '1' } else { '0' }).collect();
         std::fs::write(path, text).unwrap();
+    }
+}
+
+/// Every INFO sequence in a stretch of a capture, read with a fresh receiver.
+///
+/// `V34_CHANNEL` and `V34_FROM`/`V34_TO` as above; `V34_SENDER` says whose
+/// INFO sequences to listen for (`call` or `answer`). What the start-up's own
+/// receiver missed can be told apart here from what was never there.
+#[test]
+#[ignore = "needs a capture; see the module comment"]
+fn every_info_sequence_in_a_capture() {
+    use datapump::v34::dpsk::{Receiver as InfoReceiver, Side};
+
+    let Ok(path) = std::env::var("V34_CAPTURE") else {
+        println!("set V34_CAPTURE to a recording to run this");
+        return;
+    };
+    let number = |name: &str, default: f64| std::env::var(name).ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(default);
+    let channel = number("V34_CHANNEL", 0.0) as usize;
+    let side = match std::env::var("V34_SENDER").as_deref() {
+        Ok("call") => Side::Call,
+        _ => Side::Answer,
+    };
+    let wav = line::wav::read(&path).expect("could not read the capture");
+    let fs = f64::from(wav.sample_rate);
+    let samples = wav.channel(channel);
+    let first = (number("V34_FROM", 0.0) * fs) as usize;
+    let last = ((number("V34_TO", 1e9) * fs) as usize).min(samples.len());
+    let mut rx = InfoReceiver::new(side, fs);
+    for (i, &x) in samples[first..last].iter().enumerate() {
+        if let Some(info) = rx.feed(f64::from(x)) {
+            println!("{:8.3} {info:?}", (first + i) as f64 / fs);
+        }
     }
 }
