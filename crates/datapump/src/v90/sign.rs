@@ -255,6 +255,272 @@ pub fn to_signs(frames: &[Vec<bool>]) -> Signs {
     out
 }
 
+/// The four sign inversion rules of 5.4.5.5.
+///
+/// Figure 2's trellis says which may follow which: from state 0 only A, which
+/// stays there, and B, which goes to state 1; from state 1 only C, back to 0,
+/// and D, which stays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rule {
+    /// "Do nothing."
+    A,
+    /// "Invert all sign bits in spectral shaping frame j."
+    B,
+    /// "Invert even-numbered [tj(0), tj(2), etc.] sign bits."
+    C,
+    /// "Invert odd-numbered [tj(1), tj(3), etc.] sign bits."
+    D,
+}
+
+impl Rule {
+    /// The two rules allowed from a state (Figure 2).
+    pub fn allowed(state: bool) -> [Self; 2] {
+        if state { [Self::C, Self::D] } else { [Self::A, Self::B] }
+    }
+
+    /// The state after this rule: B and D arrive at state 1, A and C at 0.
+    pub fn next(self) -> bool {
+        matches!(self, Self::B | Self::D)
+    }
+
+    /// Whether this rule inverts bit `k` of its frame.
+    pub fn inverts(self, k: usize) -> bool {
+        match self {
+            Self::A => false,
+            Self::B => true,
+            Self::C => k % 2 == 0,
+            Self::D => k % 2 == 1,
+        }
+    }
+}
+
+/// The spectral shaping metric's filter (5.4.5.6).
+///
+/// F(z) = (1 - b1 z^-1)(1 - b2 z^-1) / ((1 - a1 z^-1)(1 - a2 z^-1)), which is
+/// the inverse of the shape the analogue modem wants. The shaper keeps the
+/// power of the signal through it low, so the signal itself ends up weakest
+/// where F is strongest.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ShapeFilter {
+    a1: f64,
+    a2: f64,
+    b1: f64,
+    b2: f64,
+    x1: f64,
+    y1: f64,
+    v1: f64,
+}
+
+impl ShapeFilter {
+    /// From CP's a1, a2, b1 and b2, "in the 8-bit two's-complement format
+    /// with 6 bits after the binary point".
+    pub fn new(coefficients: [i8; 4]) -> Self {
+        let q = |c: i8| f64::from(c) / 64.0;
+        Self {
+            a1: q(coefficients[0]),
+            a2: q(coefficients[1]),
+            b1: q(coefficients[2]),
+            b2: q(coefficients[3]),
+            ..Self::default()
+        }
+    }
+
+    /// One sample in, and v[n] squared -- the step w[n] takes -- out:
+    ///
+    /// 1) y[n] = x[n] - b1 x[n-1] + a1 y[n-1]
+    /// 2) v[n] = y[n] - b2 y[n-1] + a2 v[n-1]
+    /// 3) w[n] = v^2[n] + w[n-1]
+    pub fn step(&mut self, x: f64) -> f64 {
+        let y = x - self.b1 * self.x1 + self.a1 * self.y1;
+        let v = y - self.b2 * self.y1 + self.a2 * self.v1;
+        self.x1 = x;
+        self.y1 = y;
+        self.v1 = v;
+        v * v
+    }
+}
+
+/// One shaping frame as the shaper sees it: the levels its symbols will have
+/// and its initial sign assignment t.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShapingFrame {
+    pub magnitudes: Vec<f64>,
+    pub t: Vec<bool>,
+}
+
+/// The digital modem's sign coding when shaping is on (5.4.5.2 to 5.4.5.5):
+/// parsing into shaping frames, both differential codings, and the choice of
+/// inversions that keeps the spectral metric low.
+#[derive(Debug, Clone)]
+pub struct Shaper {
+    redundancy: Redundancy,
+    /// ld, in shaping frames.
+    lookahead: usize,
+    state: bool,
+    filter: ShapeFilter,
+    odd: OddChain,
+    chain: FrameChain,
+}
+
+impl Shaper {
+    pub fn new(redundancy: Redundancy, lookahead: usize, coefficients: [i8; 4]) -> Self {
+        Self {
+            redundancy,
+            lookahead: lookahead.min(3),
+            // "The initial state of the spectral shaper does not affect the
+            // performance of the analogue modem and is therefore left to the
+            // implementor."
+            state: false,
+            filter: ShapeFilter::new(coefficients),
+            odd: OddChain::new(),
+            chain: FrameChain::new(),
+        }
+    }
+
+    pub fn redundancy(&self) -> Redundancy {
+        self.redundancy
+    }
+
+    pub fn lookahead(&self) -> usize {
+        self.lookahead
+    }
+
+    /// Shaping frames per data frame.
+    pub fn frames_per_data_frame(&self) -> usize {
+        self.redundancy.frames().0
+    }
+
+    /// A data frame's S sign bits and the six levels its magnitudes map to,
+    /// as the shaping frames the shaper will choose over. The chains move on:
+    /// this is to be called once for each data frame, in order.
+    pub fn prepare(&mut self, s: &[bool], levels: [f64; INTERVALS]) -> Vec<ShapingFrame> {
+        let parsed = parse_to_frames(self.redundancy, s);
+        let coded = self.odd.encode(&parsed);
+        let t = self.chain.encode(&coded);
+        let width = self.redundancy.frames().1;
+        t.into_iter()
+            .enumerate()
+            .map(|(j, t)| ShapingFrame { magnitudes: levels[j * width..(j + 1) * width].to_vec(), t })
+            .collect()
+    }
+
+    /// Choose the rule for `frames[0]`, looking at up to ld frames after it,
+    /// and give the signs it goes out with (5.4.5.5).
+    pub fn choose(&mut self, frames: &[ShapingFrame]) -> Vec<bool> {
+        let depth = frames.len().min(self.lookahead + 1).max(1);
+        let mut best: Option<(f64, Rule)> = None;
+        // Every path through the trellis from the current state, `depth`
+        // frames long: two ways out of every state.
+        for path in 0..1usize << depth {
+            let mut filter = self.filter;
+            let mut state = self.state;
+            let mut cost = 0.0;
+            let mut first = Rule::A;
+            for (depth_index, frame) in frames.iter().take(depth).enumerate() {
+                let rule = Rule::allowed(state)[path >> depth_index & 1];
+                if depth_index == 0 {
+                    first = rule;
+                }
+                state = rule.next();
+                for (k, (&m, &t)) in frame.magnitudes.iter().zip(&frame.t).enumerate() {
+                    let positive = t ^ rule.inverts(k);
+                    cost += filter.step(if positive { m } else { -m });
+                }
+            }
+            if best.is_none_or(|(c, _)| cost < c) {
+                best = Some((cost, first));
+            }
+        }
+        let rule = best.map_or(Rule::A, |(_, r)| r);
+        self.apply(&frames[0], rule)
+    }
+
+    /// Send `frame` with `rule`, whatever the metric says: for a test.
+    pub fn apply(&mut self, frame: &ShapingFrame, rule: Rule) -> Vec<bool> {
+        debug_assert!(Rule::allowed(self.state).contains(&rule), "{rule:?} from state {}", self.state);
+        self.state = rule.next();
+        frame
+            .magnitudes
+            .iter()
+            .zip(&frame.t)
+            .enumerate()
+            .map(|(k, (&m, &t))| {
+                let positive = t ^ rule.inverts(k);
+                self.filter.step(if positive { m } else { -m });
+                positive
+            })
+            .collect()
+    }
+
+    pub fn state(&self) -> bool {
+        self.state
+    }
+}
+
+/// The analogue modem's side of every sign coding, shaped or not.
+///
+/// It never needs to know which inversions the shaper chose. Undoing the
+/// second differential coding leaves each shaping frame off by the
+/// difference of two consecutive inversions, and the trellis keeps that
+/// difference to one of four patterns: nothing, everything, the even bits or
+/// the odd bits -- the same bit throughout the even positions, and the same
+/// throughout the odd. Bit 0 is always even and was always zero, so it says
+/// what the even bits are off by. And the odd bits are off by the same, once
+/// the odd chain is undone across the frame boundary: within a frame their
+/// errors cancel, and across one they come to the state before the last
+/// frame against the state after this one -- which is also what the even bits
+/// are off by, because an inversion of the even bits is a change of state.
+#[derive(Debug, Clone, Default)]
+pub struct SignDecoder {
+    redundancy: Redundancy,
+    plain: Differential,
+    /// The previous shaping frame's received signs, and the last odd bit
+    /// after the second differential coding was undone.
+    last_t: Vec<bool>,
+    last_odd: bool,
+}
+
+impl SignDecoder {
+    pub fn new(redundancy: Redundancy) -> Self {
+        Self { redundancy, ..Self::default() }
+    }
+
+    /// The S sign bits a data frame's six received signs carry.
+    pub fn decode(&mut self, dollars: Signs) -> Vec<bool> {
+        if self.redundancy == Redundancy::None {
+            return self.plain.decode(dollars).to_vec();
+        }
+        let (count, width) = self.redundancy.frames();
+        let mut out = Vec::with_capacity(self.redundancy.data_bits());
+        for j in 0..count {
+            let t = &dollars[j * width..(j + 1) * width];
+            // p' = t xor the previous frame's t, position by position.
+            let p: Vec<bool> = t
+                .iter()
+                .enumerate()
+                .map(|(k, &bit)| bit ^ self.last_t.get(k).copied().unwrap_or(false))
+                .collect();
+            self.last_t = t.to_vec();
+            // p'(0) was zero when it went: what it is now is how far off the
+            // even bits are, and the first odd bit too.
+            let off = p[0];
+            for k in 1..width {
+                if k % 2 == 1 {
+                    let previous = if k == 1 { self.last_odd } else { p[k - 2] };
+                    let bit = p[k] ^ previous ^ if k == 1 { off } else { false };
+                    out.push(bit);
+                } else {
+                    out.push(p[k] ^ off);
+                }
+            }
+            // The last odd bit of this frame is what the next frame's first
+            // odd bit was chained to.
+            self.last_odd = p[(width - 1) - (width - 1 + 1) % 2];
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -385,5 +651,122 @@ mod tests {
         // Sr = 3: two bits each.
         let signs = to_signs(&[vec![true, false], vec![false, true], vec![true, true]]);
         assert_eq!(signs, [true, false, false, true, true, true]);
+    }
+
+    fn random_bits(seed: &mut u64, n: usize) -> Vec<bool> {
+        (0..n)
+            .map(|_| {
+                *seed ^= *seed << 13;
+                *seed ^= *seed >> 7;
+                *seed ^= *seed << 17;
+                *seed & 1 == 1
+            })
+            .collect()
+    }
+
+    /// Whatever inversions the trellis allows, the analogue modem gets the
+    /// sign bits back without knowing which were chosen.
+    #[test]
+    fn any_path_through_the_trellis_decodes_without_being_told_it() {
+        for sr in [Redundancy::One, Redundancy::Two, Redundancy::Three] {
+            let mut seed = 0x9e37_79b9_7f4a_7c15u64 ^ sr.spent() as u64;
+            let mut shaper = Shaper::new(sr, 0, [0; 4]);
+            let mut decoder = SignDecoder::new(sr);
+            for frame in 0..400 {
+                let s = random_bits(&mut seed, sr.data_bits());
+                let frames = shaper.prepare(&s, [1.0; INTERVALS]);
+                let mut dollars = Vec::new();
+                for f in &frames {
+                    // Any allowed rule, at random.
+                    let pick = random_bits(&mut seed, 1)[0];
+                    let rule = Rule::allowed(shaper.state())[usize::from(pick)];
+                    dollars.extend(shaper.apply(f, rule));
+                }
+                let signs: Signs = std::array::from_fn(|i| dollars[i]);
+                assert_eq!(decoder.decode(signs), s, "{sr:?} frame {frame}");
+            }
+        }
+    }
+
+    /// Unshaped, the decoder is 5.4.5.1's running difference.
+    #[test]
+    fn with_shaping_off_the_decoder_is_the_running_difference() {
+        let mut seed = 7u64;
+        let mut tx = Differential::new();
+        let mut rx = SignDecoder::new(Redundancy::None);
+        for _ in 0..100 {
+            let bits = random_bits(&mut seed, 6);
+            let s: Signs = std::array::from_fn(|i| bits[i]);
+            assert_eq!(rx.decode(tx.encode(s)), bits);
+        }
+    }
+
+    /// Figure 2: A and B from state 0, C and D from state 1.
+    #[test]
+    fn the_trellis_is_figure_two() {
+        assert_eq!(Rule::allowed(false), [Rule::A, Rule::B]);
+        assert_eq!(Rule::allowed(true), [Rule::C, Rule::D]);
+        assert!(!Rule::A.next() && Rule::B.next() && !Rule::C.next() && Rule::D.next());
+        let inverted = |r: Rule| (0..6).filter(|&k| r.inverts(k)).collect::<Vec<_>>();
+        assert_eq!(inverted(Rule::A), Vec::<usize>::new());
+        assert_eq!(inverted(Rule::B), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(inverted(Rule::C), vec![0, 2, 4]);
+        assert_eq!(inverted(Rule::D), vec![1, 3, 5]);
+    }
+
+    /// The metric does what it is for: a filter strongest at DC pushes the
+    /// signal's power away from DC, and more look-ahead pushes harder.
+    #[test]
+    fn shaping_takes_power_away_from_where_the_filter_is_strong() {
+        let dc_share = |sr: Redundancy, lookahead: usize, shape: bool| {
+            // b1 = b2 = -1: F(z) = (1 + z^-1)^2, strong at DC and nothing at
+            // 4 kHz.
+            let coefficients = if shape { [0, 0, -64, -64] } else { [0; 4] };
+            let mut shaper = Shaper::new(sr, lookahead, coefficients);
+            let mut decoder = SignDecoder::new(sr);
+            let mut seed = 0x1234_5678u64;
+            let mut out = Vec::new();
+            let mut queue: std::collections::VecDeque<ShapingFrame> = std::collections::VecDeque::new();
+            let mut sent: Vec<Vec<bool>> = Vec::new();
+            let mut decoded: Vec<Vec<bool>> = Vec::new();
+            for _ in 0..3000 {
+                let s = random_bits(&mut seed, sr.data_bits());
+                let magnitudes: [f64; INTERVALS] = std::array::from_fn(|i| 0.5 + 0.1 * i as f64);
+                sent.push(s.clone());
+                queue.extend(shaper.prepare(&s, magnitudes));
+                let per = shaper.frames_per_data_frame();
+                while queue.len() >= per + lookahead {
+                    let mut signs = Vec::new();
+                    for _ in 0..per {
+                        let frames: Vec<ShapingFrame> = queue.iter().cloned().collect();
+                        signs.extend(shaper.choose(&frames));
+                        let f = queue.pop_front().unwrap();
+                        let _ = f;
+                    }
+                    let dollars: Signs = std::array::from_fn(|i| signs[i]);
+                    decoded.push(decoder.decode(dollars));
+                    for (i, &p) in signs.iter().enumerate() {
+                        out.push(if p { magnitudes[i] } else { -magnitudes[i] });
+                    }
+                }
+            }
+            // Every frame that went out came back.
+            for (d, s) in decoded.iter().zip(&sent) {
+                assert_eq!(d, s);
+            }
+            let mean = out.iter().sum::<f64>() / out.len() as f64;
+            let low: f64 = out.windows(8).map(|w| w.iter().sum::<f64>().powi(2)).sum::<f64>() / out.len() as f64;
+            let power: f64 = out.iter().map(|x| x * x).sum::<f64>() / out.len() as f64;
+            let _ = mean;
+            low / power / 8.0
+        };
+        for sr in [Redundancy::One, Redundancy::Two, Redundancy::Three] {
+            let flat = dc_share(sr, 0, false);
+            let shaped = dc_share(sr, 0, true);
+            let deeper = dc_share(sr, 2, true);
+            println!("{sr:?}: low-band share {flat:.3} unshaped, {shaped:.3} shaped, {deeper:.3} with look-ahead 2");
+            assert!(shaped < 0.85 * flat, "{sr:?} did not shape: {shaped:.3} against {flat:.3}");
+            assert!(deeper <= shaped + 0.01, "{sr:?}: look-ahead made it worse");
+        }
     }
 }

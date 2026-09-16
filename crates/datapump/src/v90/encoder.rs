@@ -11,10 +11,13 @@
 //! takes octets and not samples. The analogue end is the only one of the pair
 //! that ever deals in amplitude.
 
-use super::modulus::{self, Constellation, Moduli};
-use super::sign::{self, Differential, Redundancy, Signs};
-use super::ucode::{self, Law};
+use std::collections::VecDeque;
+
 use super::INTERVALS;
+use super::modulus::{self, Constellation, Moduli};
+use super::sequences::Cp;
+use super::sign::{Differential, Redundancy, ShapingFrame, Shaper, SignDecoder, Signs};
+use super::ucode::{self, Law};
 
 /// One data frame's worth of output: six codewords with their signs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,7 +42,7 @@ impl Frame {
 
 /// What training settled on: the six constellations and how the signs are
 /// spent (5.4.1).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Mapping {
     /// C0 to C5, "specified by the analogue modem during training procedures".
     pub sets: [Constellation; INTERVALS],
@@ -47,6 +50,10 @@ pub struct Mapping {
     pub k: u32,
     /// Sr, and with it S.
     pub redundancy: Redundancy,
+    /// ld, the shaper's look-ahead in shaping frames.
+    pub lookahead: usize,
+    /// a1, a2, b1 and b2 of the shaping filter, in CP's Q1.6.
+    pub shaping: [i8; 4],
 }
 
 impl Mapping {
@@ -62,7 +69,18 @@ impl Mapping {
         let moduli: Moduli = std::array::from_fn(|i| sets[i].modulus());
         let s = redundancy.data_bits() as u32;
         let k = modulus::capacity(moduli).min(super::largest_k(s));
-        Self { sets, k, redundancy }
+        Self { sets, k, redundancy, lookahead: 0, shaping: [0; 4] }
+    }
+
+    /// What a CP or a CPt asks for (8.5.2): its constellations, its rate, and
+    /// its shaping. None if the rate is more than the constellations can
+    /// carry, which 5.4.3's inequality forbids.
+    pub fn from_cp(cp: &Cp) -> Option<Self> {
+        let sets: [Constellation; INTERVALS] = std::array::from_fn(|i| Constellation::new(cp.points(i)));
+        let s = cp.redundancy.data_bits();
+        let k = cp.frame_bits().checked_sub(s)? as u32;
+        let mapping = Self { sets, k, redundancy: cp.redundancy, lookahead: usize::from(cp.lookahead), shaping: cp.shaping };
+        modulus::fits(mapping.moduli(), k).then_some(mapping)
     }
 
     /// The moduli these constellations give (5.4.3: "Mi is equal to the number
@@ -95,37 +113,57 @@ impl Mapping {
 }
 
 /// The digital modem's transmitting half.
-#[derive(Debug)]
+///
+/// Built afresh wherever the Recommendation starts the coding again -- TRN2d
+/// and B1d both begin with "the scrambler, differential encoder and spectral
+/// shape filter memory ... initialized to zero" -- so there is no reset.
+#[derive(Debug, Clone)]
 pub struct Encoder {
     mapping: Mapping,
+    law: Law,
     signs: Differential,
+    shaper: Shaper,
+    /// Mapped frames whose signs are not all chosen yet: their magnitudes, and
+    /// their shaping frames still to go.
+    magnitudes: VecDeque<[u8; INTERVALS]>,
+    shaping: VecDeque<ShapingFrame>,
 }
 
 impl Encoder {
-    pub fn new(mapping: Mapping) -> Self {
-        Self { mapping, signs: Differential::new() }
+    pub fn new(mapping: Mapping, law: Law) -> Self {
+        let shaper = Shaper::new(mapping.redundancy, mapping.lookahead, mapping.shaping);
+        Self {
+            mapping,
+            law,
+            signs: Differential::new(),
+            shaper,
+            magnitudes: VecDeque::new(),
+            shaping: VecDeque::new(),
+        }
     }
 
     pub fn mapping(&self) -> &Mapping {
         &self.mapping
     }
 
-    /// One data frame: D bits in, six codewords out.
+    /// D, the bits a data frame takes.
+    pub fn frame_bits(&self) -> usize {
+        self.mapping.frame_bits()
+    }
+
+    /// Map one data frame's D bits, as far as the magnitudes and the initial
+    /// signs.
     ///
     /// 5.4.2 does the parsing and the order matters: "d0 to d(S-1) form s0 to
     /// s(S-1) and dS to d(D-1) form b0 to b(K-1)". The sign bits come first in
     /// time and the modulus encoder's bits follow, which is the opposite of
     /// the order Figure 1 draws them in.
-    pub fn frame(&mut self, bits: &[bool]) -> Frame {
+    fn map(&mut self, bits: &[bool]) -> ([u8; INTERVALS], Vec<bool>) {
         let s_count = self.mapping.redundancy.data_bits();
-        let mut s: Signs = [false; INTERVALS];
-        for (i, slot) in s.iter_mut().enumerate().take(s_count) {
-            *slot = bits.get(i).copied().unwrap_or(false);
-        }
+        let s: Vec<bool> = (0..s_count).map(|i| bits.get(i).copied().unwrap_or(false)).collect();
         let b: Vec<bool> = bits.iter().skip(s_count).copied().collect();
-
         let labels = modulus::encode(&b, self.mapping.moduli());
-        let ucodes: [u8; INTERVALS] = std::array::from_fn(|i| {
+        let ucodes = std::array::from_fn(|i| {
             // 5.4.4: the mapper "forms Ui by choosing the constellation point
             // in Ci labelled by Ki". A label outside the set cannot happen
             // while 5.4.3's inequality holds, and the quietest point is the
@@ -135,45 +173,73 @@ impl Encoder {
                 .or_else(|| self.mapping.sets[i].points().last().copied())
                 .unwrap_or(0)
         });
+        (ucodes, s)
+    }
 
-        let positive = match self.mapping.redundancy {
-            // 5.4.5.1 is the whole of shaping-disabled mode.
-            Redundancy::None => self.signs.encode(s),
-            // The shaper's own coding, up to but not including the rule
-            // selection of 5.4.5.5 -- see the note on [`super::sign`].
-            sr => {
-                let parsed = sign::parse_to_frames(sr, &s[..s_count]);
-                sign::to_signs(&parsed)
-            }
-        };
-        Frame { ucodes, positive }
+    /// The next data frame, pulling D bits from `bit` for each frame that has
+    /// to be mapped to get it out: the frame itself, and with look-ahead the
+    /// frames after it, whose magnitudes the shaper needs to see.
+    pub fn next_frame(&mut self, mut bit: impl FnMut() -> bool) -> Frame {
+        let d = self.frame_bits();
+        if self.mapping.redundancy == Redundancy::None {
+            let bits: Vec<bool> = (0..d).map(|_| bit()).collect();
+            let (ucodes, s) = self.map(&bits);
+            let s: Signs = std::array::from_fn(|i| s[i]);
+            return Frame { ucodes, positive: self.signs.encode(s) };
+        }
+        let per = self.shaper.frames_per_data_frame();
+        while self.shaping.len() < per + self.shaper.lookahead() {
+            let bits: Vec<bool> = (0..d).map(|_| bit()).collect();
+            let (ucodes, s) = self.map(&bits);
+            let levels = std::array::from_fn(|i| ucode::level(self.law, ucodes[i]));
+            let frames = self.shaper.prepare(&s, levels);
+            self.magnitudes.push_back(ucodes);
+            self.shaping.extend(frames);
+        }
+        let mut positive = Vec::with_capacity(INTERVALS);
+        for _ in 0..per {
+            let frames = self.shaping.make_contiguous();
+            positive.extend(self.shaper.choose(frames));
+            self.shaping.pop_front();
+        }
+        let ucodes = self.magnitudes.pop_front().expect("a frame was mapped for every one taken");
+        Frame { ucodes, positive: std::array::from_fn(|i| positive[i]) }
+    }
+
+    /// One data frame of `bits`, for an encoder that needs nothing ahead of
+    /// the frame it is sending: no shaping, or shaping with no look-ahead.
+    pub fn frame(&mut self, bits: &[bool]) -> Frame {
+        debug_assert!(
+            self.mapping.redundancy == Redundancy::None || self.mapping.lookahead == 0,
+            "an encoder with look-ahead takes its bits through next_frame"
+        );
+        let mut given = bits.iter().copied();
+        self.next_frame(|| given.next().unwrap_or(false))
     }
 }
 
 /// The analogue modem's receiving half of the same arithmetic.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Decoder {
     mapping: Mapping,
-    signs: Differential,
+    signs: SignDecoder,
 }
 
 impl Decoder {
     pub fn new(mapping: Mapping) -> Self {
-        Self { mapping, signs: Differential::new() }
+        let signs = SignDecoder::new(mapping.redundancy);
+        Self { mapping, signs }
+    }
+
+    pub fn mapping(&self) -> &Mapping {
+        &self.mapping
     }
 
     /// Six codewords back to the D bits they carried.
     pub fn frame(&mut self, frame: Frame) -> Vec<bool> {
-        let labels: [u16; INTERVALS] = std::array::from_fn(|i| {
-            self.mapping.sets[i].label(frame.ucodes[i]).unwrap_or(0)
-        });
+        let labels: [u16; INTERVALS] = std::array::from_fn(|i| self.mapping.sets[i].label(frame.ucodes[i]).unwrap_or(0));
         let b = modulus::decode(labels, self.mapping.moduli(), self.mapping.k);
-        let s_count = self.mapping.redundancy.data_bits();
-        let s = match self.mapping.redundancy {
-            Redundancy::None => self.signs.decode(frame.positive),
-            _ => frame.positive,
-        };
-        let mut out: Vec<bool> = s[..s_count].to_vec();
+        let mut out = self.signs.decode(frame.positive);
         out.extend(b);
         out
     }
@@ -221,7 +287,7 @@ mod tests {
         let mapping = route();
         assert!(mapping.valid(), "5.4.3's inequality does not hold");
         let d = mapping.frame_bits();
-        let mut tx = Encoder::new(mapping.clone());
+        let mut tx = Encoder::new(mapping.clone(), Law::Mu);
         let mut rx = Decoder::new(mapping);
 
         let mut x: u64 = 0x1234_5678_9abc_def0;
@@ -235,13 +301,65 @@ mod tests {
         }
     }
 
+    /// Shaping on, with every look-ahead there is: the frames come out in
+    /// order, and every bit comes back.
+    #[test]
+    fn a_shaped_stream_comes_back_whatever_the_look_ahead() {
+        for sr in [Redundancy::One, Redundancy::Two, Redundancy::Three] {
+            for lookahead in 0..=3 {
+                let mut mapping = route();
+                mapping.redundancy = sr;
+                mapping.lookahead = lookahead;
+                mapping.shaping = [-40, 20, 60, -64];
+                mapping.k = mapping.k.min(super::super::largest_k(sr.data_bits() as u32));
+                assert!(mapping.valid());
+                let d = mapping.frame_bits();
+                let mut tx = Encoder::new(mapping.clone(), Law::Mu);
+                let mut rx = Decoder::new(mapping);
+                let mut x: u64 = 0xdead_beef ^ lookahead as u64;
+                let mut sent: std::collections::VecDeque<bool> = std::collections::VecDeque::new();
+                let mut next = || {
+                    x ^= x << 13;
+                    x ^= x >> 7;
+                    x ^= x << 17;
+                    x & 1 == 1
+                };
+                for n in 0..300 {
+                    let frame = tx.next_frame(|| {
+                        let b = next();
+                        sent.push_back(b);
+                        b
+                    });
+                    let wanted: Vec<bool> = sent.drain(..d).collect();
+                    assert_eq!(rx.frame(frame), wanted, "Sr {sr:?}, ld {lookahead}, frame {n}");
+                }
+            }
+        }
+    }
+
+    /// A CP's constellations and rate are a mapping, and one asking for more
+    /// than its constellations hold is not.
+    #[test]
+    fn a_cp_is_a_mapping() {
+        use super::super::sequences::Cp;
+        let mask: super::super::sequences::Mask = (24..112).fold(0, |m, u| m | 1 << u);
+        let cp = Cp { data_mode: true, drn: 22, constellations: vec![mask], ..Cp::default() };
+        let mapping = Mapping::from_cp(&cp).expect("56 000 fits 88 codes a frame");
+        assert_eq!(mapping.frame_bits(), 42);
+        assert_eq!(mapping.k, 36);
+        assert_eq!(mapping.rate(), 56_000);
+        let small: super::super::sequences::Mask = (100..108).fold(0, |m, u| m | 1 << u);
+        let too_much = Cp { constellations: vec![small], ..cp };
+        assert_eq!(Mapping::from_cp(&too_much), None, "eight codes cannot carry 36 bits");
+    }
+
     /// And through the amplitudes, which is what the analogue end actually
     /// receives -- on a clean line, where every sample lands on its codepoint.
     #[test]
     fn the_same_frame_survives_being_read_off_the_line() {
         let mapping = route();
         let d = mapping.frame_bits();
-        let mut tx = Encoder::new(mapping.clone());
+        let mut tx = Encoder::new(mapping.clone(), Law::Mu);
         let mut rx = Decoder::new(mapping);
 
         for value in 0..200u64 {
@@ -260,7 +378,7 @@ mod tests {
         mapping.k = 12;
         let d = mapping.frame_bits();
         assert_eq!(d, 12 + 6, "S is six when shaping is off");
-        let mut tx = Encoder::new(mapping.clone());
+        let mut tx = Encoder::new(mapping.clone(), Law::Mu);
 
         // Everything zero but the very first bit, which is s0. With the
         // differential chain starting from nothing, s0 set makes every sign
