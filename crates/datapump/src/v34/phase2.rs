@@ -276,6 +276,9 @@ pub struct Modem {
     retrain_instead: bool,
     /// V.90's part, if this is V.90's phase 2.
     pcm: Option<Pcm>,
+    /// Whether an analogue modem that meets a digital one asks for V.34
+    /// anyway, having found the line will not carry PCM.
+    pcm_declined: bool,
     /// The far end's INFO0d, if it sent one.
     far_info0d: Option<Info0d>,
     /// An INFO1a asking for V.90, sent or received.
@@ -320,6 +323,7 @@ impl Modem {
             recoveries: 0,
             retrain_instead: false,
             pcm: None,
+            pcm_declined: false,
             far_info0d: None,
             info1a_pcm: None,
         }
@@ -369,10 +373,18 @@ impl Modem {
     /// V.90's part kept if there is one.
     pub fn again(&self) -> Self {
         let far = self.far.unwrap_or_default();
-        match self.pcm {
+        let mut modem = match self.pcm {
             Some(pcm) => Self::v90_retrain(pcm, self.fs, far, self.far_info0d),
             None => Self::retrain(self.role, self.fs, far),
-        }
+        };
+        modem.pcm_declined = self.pcm_declined;
+        modem
+    }
+
+    /// Ask for V.34 in INFO1a from now on, even of a V.90 digital modem
+    /// (9.2.2.1.9 leaves the choice to the analogue modem).
+    pub fn decline_pcm(&mut self) {
+        self.pcm_declined = true;
     }
 
     /// This end's INFO0 as it goes out: INFO0d from a digital modem.
@@ -626,7 +638,7 @@ impl Modem {
                 // An analogue modem that heard an INFO0d asks for V.90
                 // (9.2.2.1.9); anything else is V.34's INFO1a.
                 let bits = match (self.pcm, self.far_info0d) {
-                    (Some(Pcm::Analogue), Some(far)) => {
+                    (Some(Pcm::Analogue), Some(far)) if !self.pcm_declined => {
                         let bits = self.settle_pcm(&info1c, &far).to_bits();
                         self.info1a_pcm = Info1aPcm::from_bits(&bits);
                         bits

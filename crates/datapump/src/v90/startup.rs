@@ -7,7 +7,9 @@
 //! and V.34's start-up carries on as it would have; a far end that is leaves
 //! it with V.90's, and V.90 takes over from there. A V.90 start-up that
 //! loses its place retrains, back through V.90's phase 2 (9.5): "Any
-//! subsequent retrains shall use Phase 2 of V.90".
+//! subsequent retrains shall use Phase 2 of V.90". A line that will not
+//! carry PCM at all -- the DIL says so, or V.90 has failed too often -- gets
+//! V.34's INFO1a in that phase 2 instead, and the call goes on as V.34.
 
 use crate::v34::info::Info0d;
 use crate::v34::phase2::{self, Pcm};
@@ -16,7 +18,8 @@ use crate::v34::startup as v34;
 use super::ucode::Law;
 use super::{analogue, digital};
 
-/// Retrains in a row a failed V.90 start-up gets before it is the end.
+/// Retrains in a row a failed V.90 start-up gets before the analogue modem
+/// asks for V.34 instead.
 const V90_RETRAINS: u32 = 2;
 
 /// How the start-up is going.
@@ -224,11 +227,16 @@ impl Analogue {
                     self.connected_once = true;
                     self.failed_starts = 0;
                 }
-                analogue::Status::Failed(why) if self.failed_starts < V90_RETRAINS => {
+                analogue::Status::Failed(why) => {
                     // 9.5.2.1: back to V.90's phase 2.
+                    let hopeless = m.route().is_some() && m.choice().is_none();
                     self.last_failure = Some(why);
                     self.failed_starts += 1;
                     self.back_to_phase2();
+                    if hopeless || self.failed_starts > V90_RETRAINS {
+                        // 9.2.2.1.9: this time, V.34's INFO1a.
+                        self.v34.decline_pcm();
+                    }
                 }
                 _ => {}
             }

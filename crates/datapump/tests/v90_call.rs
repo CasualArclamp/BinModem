@@ -484,3 +484,17 @@ fn slips_during_the_start_up_are_followed() {
     assert!(dil_moved > 0, "no slip landed in a DIL");
     assert!(frames_moved > 0, "no slip moved the frames in phase 4");
 }
+
+/// A line too noisy for PCM: the DIL says so, and the analogue modem asks for
+/// V.34 in the retrain's INFO1a (9.2.2.1.9), and gets it.
+#[test]
+fn a_line_that_will_not_carry_pcm_comes_up_as_v34() {
+    let mut call = FullCall::new(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(2e-2), server());
+    let ok = call.run(60.0);
+    println!("{:?} {:?}, {} retrains, last failure {:?}", call.analogue.status(), call.digital.status(), call.analogue.retrains(), call.analogue.last_failure());
+    assert!(ok, "no connection: {} / {}", call.analogue.phase(), call.digital.phase());
+    assert!(!call.analogue.is_v90());
+    assert_eq!(call.analogue.last_failure(), Some("the route cannot carry V.90's slowest rate"));
+    assert_eq!(call.analogue.retrains(), 1);
+    assert_eq!(call.carries_data(3.0), (true, true));
+}

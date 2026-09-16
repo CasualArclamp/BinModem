@@ -175,6 +175,11 @@ impl Modem {
     }
 
     /// Start phase 2 again as a retrain, from wherever this start-up is.
+    /// Ask for V.34 in phase 2's INFO1a from now on, even of a V.90 server.
+    pub fn decline_pcm(&mut self) {
+        self.phase2.decline_pcm();
+    }
+
     pub fn restart_phase2(&mut self) {
         self.phase2 = self.phase2.again();
         self.training = None;

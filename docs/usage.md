@@ -171,6 +171,11 @@ Once connected, the call keeps itself up:
   is a line this end cannot read at all.
 - **Cleardown.** A server that ends the call politely ends it here as well.
 
+A line that will not carry PCM at all -- the DIL shows nothing V.90 could use,
+or V.90 has failed three times -- is retrained once more asking for V.34, and
+the call comes up as V.34 instead of hanging up. The panel shows why V.90 was
+given up.
+
 PCM needs the digital path to arrive untouched, which a VoIP call does if the
 softphone uses G.711 (PCMU or PCMA) and nothing on the way processes the audio.
 In the softphone, allow only PCMU and PCMA, and turn off echo cancellation,
