@@ -52,6 +52,23 @@ const FILL: std::ops::RangeInclusive<u32> = 8..=16;
 /// trillion.
 const TEXT_RUN: u32 = 16;
 
+/// Identical answer patterns in a row, sent without Table 3's fill, before
+/// they are taken as an answer anyway.
+///
+/// Table 3 puts "8 to 16 ones" between an ADP's characters, and a modem on a
+/// real call puts none. The board this modem calls most answers `ECECEC...`
+/// back to back, stop bit straight into start bit, from its first character
+/// -- so it read as text, and after sixteen characters as a far end with no
+/// V.42 at all, and error control was dropped between two modems that both do
+/// it. That only went unseen while T400 ran out before any ADP could cross the
+/// line.
+///
+/// Repetition is what tells it from text: a terminal does not send the same
+/// two characters four times over. And only the answers Table 3 and Appendix
+/// VI.1 give a meaning to are read this way, so an unfilled `EQEQ` in a
+/// banner stays text however often it comes.
+const UNFILLED_PAIRS: usize = 4;
+
 /// Bits of the line kept while the detection phase runs, for the terminal if
 /// it fails (Appendix I.3): a second or so at the fastest rates.
 const HEARD_LIMIT: usize = 1 << 16;
@@ -221,6 +238,37 @@ impl CharacterScanner {
     }
 }
 
+/// Two adjacent patterns as Table 3 draws them, at the end of what was seen:
+/// `E`, the type character, `E` and the type character again, each after
+/// "8 to 16 ones".
+///
+/// The fill is what makes a pattern a pattern. Without it, text that happens
+/// to have an `E` in it twice is an answer: `**EMSI_REQ`, which a login banner
+/// over a real call sent, is `EM` and then `EQ`.
+fn filled_answer(seen: &[(u8, u32)]) -> Option<Answer> {
+    let &[(first, _), (second, gap2), (third, gap3), (fourth, gap4)] =
+        seen.get(seen.len().checked_sub(4)?..)?
+    else {
+        return None;
+    };
+    let filled = [gap2, gap3, gap4].iter().all(|gap| FILL.contains(gap));
+    (filled && first == ADP_E && third == ADP_E && second == fourth)
+        .then(|| Answer::from_char(second))
+}
+
+/// The same pattern sent back to back, at the end of what was seen.
+///
+/// Out of Table 3 and on a real line all the same; see [`UNFILLED_PAIRS`] for
+/// why it is still an answer, and why only these four of them.
+fn unfilled_answer(seen: &[(u8, u32)]) -> Option<Answer> {
+    let run = seen.get(seen.len().checked_sub(2 * UNFILLED_PAIRS)?..)?;
+    let kind = run[1].0;
+    let meant = matches!(kind, ADP_C | ADP_NULL | ADP_M | ADP_P);
+    let repeated = run.chunks(2).all(|pair| pair[0].0 == ADP_E && pair[1].0 == kind);
+    let back_to_back = run[1..].iter().all(|&(_, gap)| gap < *FILL.start());
+    (meant && repeated && back_to_back).then(|| Answer::from_char(kind))
+}
+
 /// Whether a character is what a terminal would print, or a line ending.
 fn texty(c: u8) -> bool {
     matches!(c, 0x20..=0x7e | b'\r' | b'\n' | b'\t')
@@ -244,7 +292,7 @@ fn push_character(bits: &mut VecDeque<bool>, value: u8) {
 pub struct Originator {
     out: VecDeque<bool>,
     scanner: CharacterScanner,
-    /// The last four characters from the answerer, and the ones before each.
+    /// The last few characters from the answerer, and the ones before each.
     seen: VecDeque<(u8, u32)>,
     /// Pairs of adjacent ADPs observed, by what they said.
     adps: Vec<Answer>,
@@ -314,7 +362,7 @@ impl Originator {
                     return self.outcome;
                 }
                 self.seen.push_back((value, gap));
-                if self.seen.len() > 4 {
+                if self.seen.len() > 2 * UNFILLED_PAIRS {
                     self.seen.pop_front();
                 }
                 self.classify();
@@ -331,13 +379,8 @@ impl Originator {
         std::mem::take(&mut self.heard)
     }
 
-    /// Look for two adjacent ADPs saying the same thing: `E`, the type
-    /// character, `E` and the type character again, each after the "8 to 16
-    /// ones" of Table 3.
-    ///
-    /// The fill is what makes a pattern a pattern. Without it, text that
-    /// happens to have an `E` in it twice is an answer: `**EMSI_REQ`, which a
-    /// login banner over a real call sent, is `EM` and then `EQ`.
+    /// Look for adjacent ADPs saying the same thing, as Table 3 has them
+    /// ([`filled_answer`]) or as a real modem sends them ([`unfilled_answer`]).
     ///
     /// An extended pattern is recorded and listened past rather than acted on.
     /// Appendix VI.1 describes real modems that send `EM` five times or `EP`
@@ -347,16 +390,15 @@ impl Originator {
     /// is treated this way: 7.2.1.2 says to act on the ADP received, and an
     /// unknown reserved code point is not documented as a prefix to anything.
     fn classify(&mut self) {
-        let [(first, _), (second, gap2), (third, gap3), (fourth, gap4)] = match self.seen.make_contiguous() {
-            [a, b, c, d] => [*a, *b, *c, *d],
-            _ => return,
-        };
-        let filled = [gap2, gap3, gap4].iter().all(|gap| FILL.contains(gap));
-        if !(filled && first == ADP_E && third == ADP_E && second == fourth) {
+        let seen = self.seen.make_contiguous();
+        let Some(answer) = filled_answer(seen).or_else(|| unfilled_answer(seen)) else {
             return;
-        }
-        let answer = Answer::from_char(second);
+        };
         self.adps.push(answer);
+        // A pattern is not text, however printable its letters. Without this
+        // an unfilled `EP`, which Appendix VI.1 has sent sixteen times before
+        // the `EC`, would run past TEXT_RUN on the way.
+        self.text = 0;
         // V.42 7.2.1.2: characters from at least two adjacent ADPs are needed
         // before the pattern counts as observed.
         if !matches!(answer, Answer::Extended(_)) {
@@ -961,6 +1003,48 @@ mod tests {
         }
         assert_eq!(o.outcome(), Outcome::Pending);
         assert!(o.patterns().is_empty());
+    }
+
+    #[test]
+    fn an_answer_sent_back_to_back_is_still_an_answer() {
+        // What the board behind a SIP trunk sends, measured off a replay of a
+        // live call: E and C with no ones between them at all, from the first
+        // character on, for as long as it goes on sending. Read as text it
+        // cost the call its error control.
+        let mut o = Originator::new(DEFAULT_T400_MS);
+        let mut bits = vec![true; 300];
+        bits.extend(typed(&b"EC".repeat(12)));
+        for &b in &bits {
+            o.receive(b);
+        }
+        assert_eq!(o.outcome(), Outcome::Answered(Answer::ErrorControl));
+    }
+
+    #[test]
+    fn an_extended_pattern_sent_back_to_back_is_listened_past_too() {
+        // Appendix VI.1's EP sixteen times and then EC, the whole of it
+        // unfilled: thirty-odd printable characters in a row, none of them
+        // text.
+        let mut o = Originator::default();
+        let mut bits = vec![true; 300];
+        bits.extend(typed(&[b"EP".repeat(16), b"EC".repeat(10)].concat()));
+        for &b in &bits {
+            o.receive(b);
+        }
+        assert_eq!(o.outcome(), Outcome::Answered(Answer::ErrorControl));
+        assert!(o.patterns().contains(&Answer::Extended(ADP_P)), "{:?}", o.patterns());
+    }
+
+    #[test]
+    fn a_repeated_pair_with_no_meaning_is_still_text() {
+        // Only the answers the recommendation gives a meaning to are read
+        // without their fill. Anything else repeated is a terminal.
+        let mut o = Originator::default();
+        for b in typed(&b"EQ".repeat(10)) {
+            o.receive(b);
+        }
+        assert_eq!(o.outcome(), Outcome::Text);
+        assert!(o.patterns().is_empty(), "{:?}", o.patterns());
     }
 
     #[test]
