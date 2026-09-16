@@ -529,6 +529,87 @@ fn a_v34_caller_meets_a_v32bis_modem_on_v32bis() {
     assert!(p.caller.v34_report().is_none());
 }
 
+/// Error control is asked for once, however long the line is.
+///
+/// From a live call to a board over a SIP trunk: V.34 measured the round trip
+/// at 1125 ms in phase 2, and then the SABME was sent, not answered for 1.19 s,
+/// and sent again at 1.02 s -- because T401 at 28 800 bit/s came to 1.03 s,
+/// which is a second's allowance for a line and a few milliseconds of frame.
+/// The far end honoured the second one as V.42 8.2.4.3 says it should: a
+/// second UA, its sequence numbers back to zero, and its banner sent again
+/// under a link this end thought was already carrying it.
+///
+/// Every call over that line does it, and the line had already said how long
+/// it was. So the two modems here are joined by the same delay, and the end
+/// asking must ask once.
+#[test]
+fn error_control_is_asked_for_once_over_a_line_with_a_long_round_trip() {
+    // 562 ms each way: the 1125 ms that call measured.
+    const ONE_WAY: usize = (0.5625 * FS) as usize;
+    let mut caller = Modem::new(FS);
+    let mut host = Modem::new(FS);
+    Pair::type_at(&mut host, "AT+MS=V34");
+    Pair::type_at(&mut caller, "AT+MS=V34");
+    Pair::type_at(&mut host, "ATA");
+    Pair::type_at(&mut caller, "ATD5551234");
+
+    let mut to_host = std::collections::VecDeque::from(vec![0.0; ONE_WAY]);
+    let mut to_caller = std::collections::VecDeque::from(vec![0.0; ONE_WAY]);
+    let (mut from_caller, mut from_host) = (0.0, 0.0);
+    let (mut asked, mut answered) = (0, 0);
+    let mut saw = Vec::new();
+    let mut host_saw = Vec::new();
+    // A SABME is control field 0x6f, 0x7f with the P bit (V.42 Table 7),
+    // whichever address it went out on; a UA is 0x63, 0x73 with the F bit.
+    let sabme = |body: &[u8]| body.get(1).is_some_and(|c| c & 0xef == 0x6f);
+    let ua = |body: &[u8]| body.get(1).is_some_and(|c| c & 0xef == 0x63);
+    // Past the connection by a few round trips, so that a second SABME has
+    // had every chance to go out and to be answered.
+    let mut settled_at = None;
+    for i in 0..(60.0 * FS) as usize {
+        to_host.push_front(from_caller);
+        to_caller.push_front(from_host);
+        from_caller = caller.step(to_caller.pop_back().unwrap_or(0.0));
+        from_host = host.step(to_host.pop_back().unwrap_or(0.0));
+        saw.extend(caller.take_dte());
+        host_saw.extend(host.take_dte());
+        asked += caller.take_frame_log().iter().filter(|f| f.outbound && sabme(&f.body)).count();
+        answered += host.take_frame_log().iter().filter(|f| f.outbound && ua(&f.body)).count();
+        if settled_at.is_none() && caller.state() == State::Data && host.state() == State::Data {
+            settled_at = Some(i);
+        }
+        if settled_at.is_some_and(|at| i > at + (5.0 * FS) as usize) {
+            break;
+        }
+    }
+    assert!(
+        settled_at.is_some(),
+        "never connected over the long line: the caller was told {:?}, the host {:?}",
+        String::from_utf8_lossy(&saw),
+        String::from_utf8_lossy(&host_saw),
+    );
+    // Connected is not enough on its own: an originator that hears nothing back
+    // goes on without error control, and that is a connection too.
+    for (who, modem) in [("caller", &caller), ("host", &host)] {
+        assert_eq!(
+            modem.error_control_phase(),
+            "connected",
+            "the {who} has no error control: asked {asked}, answered {answered},              {} frames the host could not read",
+            host.damaged_frames()
+        );
+    }
+    let round_trip = caller
+        .v34_report()
+        .and_then(|r| r.round_trip)
+        .expect("V.34 never measured the line");
+    assert!(
+        (1.0..1.3).contains(&round_trip),
+        "the line was meant to measure about 1.125 s and measured {round_trip:.3}"
+    );
+    assert_eq!(asked, 1, "error control was asked for {asked} times");
+    assert_eq!(answered, 1, "and answered {answered} times");
+}
+
 #[test]
 fn a_v32_call_carries_data_both_ways() {
     let mut p = Pair::new();

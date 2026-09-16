@@ -1036,6 +1036,31 @@ fn the_acknowledgement_timer_follows_the_line_rate() {
 }
 
 #[test]
+fn the_acknowledgement_timer_allows_for_a_line_it_has_measured() {
+    use ec::lapm::{t401_for, t401_for_line};
+
+    // The call this is from: V.34 put the line at 1125 ms and the far end took
+    // 1.19 s to answer a SABME at 28 800 bit/s. The unmeasured timer sent the
+    // SABME again before the answer could arrive; the measured one must not.
+    assert!(t401_for(28_800) < 1190, "the unmeasured timer was long enough after all");
+    assert!(
+        t401_for_line(28_800, 1125) > 1190,
+        "{} ms still sends the SABME twice",
+        t401_for_line(28_800, 1125)
+    );
+
+    // A short line gets no less than it had before: the far end's processing
+    // is not in the measurement, and on a direct connection it is all there is.
+    for rate in [2400u32, 14_400, 33_600] {
+        assert_eq!(t401_for_line(rate, 0), t401_for(rate), "at {rate}");
+        assert_eq!(t401_for_line(rate, 400), t401_for(rate), "at {rate}");
+    }
+
+    // And a measurement from nowhere cannot make it wait for ever.
+    assert!(t401_for_line(2400, 60_000) <= 6000);
+}
+
+#[test]
 fn compression_survives_being_handed_data_a_byte_at_a_time() {
     // How a modem actually uses this. The terminal hands over whatever it has
     // whenever it has it, so `send` is called with a byte or two at a time and

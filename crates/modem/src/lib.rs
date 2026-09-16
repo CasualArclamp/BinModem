@@ -149,6 +149,19 @@ impl Pump {
         }
     }
 
+    /// How long the line takes there and back, where the start-up measured it.
+    ///
+    /// V.32 does in 5.4's counter/timer and V.34 in phase 2's ranging, both
+    /// before a bit of data has crossed. V.22bis and Bell 103 have nothing to
+    /// measure it with.
+    fn round_trip_ms(&self) -> Option<u32> {
+        match self {
+            Self::V32(m) => Some((m.round_trip() as f64 * 1000.0 / v32::BAUD).round() as u32),
+            Self::V34(m) => m.phase2().round_trip().map(|s| (s * 1000.0).round() as u32),
+            Self::V22bis(_) | Self::Bell103(_) => None,
+        }
+    }
+
     fn carrier(&self) -> bool {
         match self {
             Self::V22bis(m) => m.carrier(),
@@ -1507,9 +1520,31 @@ impl Modem {
                     // The timer that decides how long a silence is worth
                     // waiting through, sized to the rate the silence is on
                     // (V.42 Appendix IV).
-                    let params =
-                        Params { t401_ms: ec::lapm::t401_for(rate), ..Params::default() };
+                    //
+                    // The slower of the two directions where they differ. The
+                    // appendix's sum has a term at each rate -- the frame
+                    // going out and the acknowledgement coming back -- and a
+                    // timer sized to the faster one expires while the slower
+                    // is still legitimately in progress.
+                    //
+                    // And the line's own length, where the start-up measured
+                    // it. That is the rest of the sum, and on a call carried
+                    // over a SIP trunk it is the larger part: V.34 put one at
+                    // 1125 ms, T401 came to 1.04 s without it, and every
+                    // SABME on that line went out twice.
+                    let slower = rate.min(transmit);
+                    let round_trip = self.pump.as_ref().and_then(Pump::round_trip_ms);
+                    let params = Params {
+                        t401_ms: match round_trip {
+                            Some(ms) => ec::lapm::t401_for_line(slower, ms),
+                            None => ec::lapm::t401_for(slower),
+                        },
+                        ..Params::default()
+                    };
                     let mut stack = Stack::new(role, params);
+                    if let Some(ms) = round_trip {
+                        stack = stack.over_a_round_trip(ms);
+                    }
                     if !self.want_error_control {
                         stack = stack.declining();
                     }

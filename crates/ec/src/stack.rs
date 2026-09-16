@@ -42,7 +42,9 @@ const LEADING_FLAGS: usize = 16;
 ///
 /// V.42 8.10 does not name a figure. A second is generous at any rate this
 /// modem reaches and short enough that a modem which does error control but
-/// not parameter negotiation is not left waiting.
+/// not parameter negotiation is not left waiting -- on a line that answers
+/// promptly. A line the data pump has measured adds its round trip to it
+/// ([`Stack::over_a_round_trip`]).
 const XID_WAIT_MS: u32 = 1000;
 
 /// Where a V.42 connection has got to.
@@ -157,6 +159,9 @@ pub struct Stack {
     /// Whether the run of flags that opens the protocol phase has been queued.
     opened: bool,
     waited_ms: u32,
+    /// How long the line takes there and back, where the data pump has said.
+    /// Zero where nothing has measured it.
+    round_trip_ms: u32,
     /// Whether the far end turned out to be talking to this end's terminal
     /// rather than doing V.42.
     heard_text: bool,
@@ -172,6 +177,19 @@ enum Detect {
     Origin(Box<Originator>),
     Answer(Box<Answerer>),
     Done,
+}
+
+impl Detect {
+    /// The detection phase from the beginning, for this end of the call.
+    fn start(role: Role, t400_ms: u32, declining: bool) -> Self {
+        match role {
+            Role::Originator => Self::Origin(Box::new(Originator::new(t400_ms))),
+            Role::Answerer => Self::Answer(Box::new(Answerer::new(
+                t400_ms,
+                if declining { Answer::None } else { Answer::ErrorControl },
+            ))),
+        }
+    }
 }
 
 /// Whichever compression the two ends settled on.
@@ -297,15 +315,7 @@ impl Stack {
             damaged: 0,
             log: Vec::new(),
             phase: Phase::Detecting,
-            detect: match role {
-                Role::Originator => {
-                    Detect::Origin(Box::new(Originator::new(crate::detect::DEFAULT_T400_MS)))
-                }
-                Role::Answerer => Detect::Answer(Box::new(Answerer::new(
-                    crate::detect::DEFAULT_T400_MS,
-                    Answer::ErrorControl,
-                ))),
-            },
+            detect: Detect::start(role, crate::detect::DEFAULT_T400_MS, false),
             offer: Compression::Neither,
             limits: (v42bis::OFFERED_N2, v42bis::OFFERED_N7),
             guessed_wrong: false,
@@ -320,6 +330,7 @@ impl Stack {
             gave_up: false,
             opened: false,
             waited_ms: 0,
+            round_trip_ms: 0,
             heard_text: false,
             unclaimed: Vec::new(),
         }
@@ -370,11 +381,44 @@ impl Stack {
     /// connection without it.
     pub fn declining(mut self) -> Self {
         self.declining = true;
-        self.detect = Detect::Answer(Box::new(Answerer::new(
-            crate::detect::DEFAULT_T400_MS,
-            Answer::None,
-        )));
+        self.detect = Detect::start(self.role, self.t400_ms(), true);
         self
+    }
+
+    /// Allow for a line that takes this long there and back.
+    ///
+    /// Every wait in this stack is a wait for the far end, and every one of
+    /// them was sized for a line that answers promptly. V.42 9.1.1 says as
+    /// much of T400: its 750 ms is "the estimated maximum propagation delay of
+    /// all required transmissions including a single satellite link", and a
+    /// call carried over a SIP trunk is further away than a satellite. The
+    /// data pump has measured the line by the time this is built, so the
+    /// detection phase and the XID exchange each wait that much longer.
+    ///
+    /// Without it, on a line with a 1.1 s round trip, both went wrong. The
+    /// originator's T400 ran out before any ADP could arrive, so only a far
+    /// end that had named LAPM in V.8 got error control at all; and an
+    /// answerer gave up on XID before the originator's could reach it, which
+    /// is survivable only because an XID that arrives late is still acted on.
+    ///
+    /// T401 is not set here: it depends on the line rate as well, and comes in
+    /// with the [`Params`] -- see [`crate::lapm::t401_for_line`].
+    pub fn over_a_round_trip(mut self, round_trip_ms: u32) -> Self {
+        self.round_trip_ms = round_trip_ms;
+        if !matches!(self.detect, Detect::Done) {
+            self.detect = Detect::start(self.role, self.t400_ms(), self.declining);
+        }
+        self
+    }
+
+    /// V.42 9.1.1's default, and the line on top of it.
+    fn t400_ms(&self) -> u32 {
+        crate::detect::DEFAULT_T400_MS.saturating_add(self.round_trip_ms)
+    }
+
+    /// How long to wait for the far end's XID, on the same terms.
+    fn xid_wait_ms(&self) -> u32 {
+        XID_WAIT_MS.saturating_add(self.round_trip_ms)
     }
 
     /// Offer V.42bis in the XID exchange.
@@ -601,7 +645,7 @@ impl Stack {
             }
             Phase::Negotiating => {
                 self.waited_ms = self.waited_ms.saturating_add(dt_ms);
-                if self.waited_ms >= XID_WAIT_MS {
+                if self.waited_ms >= self.xid_wait_ms() {
                     // A modem that does error control but declines to negotiate
                     // is a modem to talk to without compression, not one to
                     // wait for indefinitely.
@@ -767,6 +811,17 @@ impl Stack {
         }
         if agreed.fcs32 {
             self.agreed_fcs = Fcs::Bits32;
+            // Late: this end stopped waiting and went on to the protocol
+            // before the far end's XID arrived. The reply below still tells
+            // it 32 bits were agreed, so its SABME may come at 32, and a
+            // decoder still reading 16 turns every one of them into damage --
+            // which is what an answerer did on a line longer than the XID
+            // wait, and the originator gave up on error control after three.
+            // 8.10.2 settles the width on the SABME, so until one has arrived
+            // either is right.
+            if self.phase == Phase::Protocol && !self.lapm.is_connected() {
+                self.decoder.accept_either();
+            }
         }
         // 8.4.5.1: only after both ends have said so. An end that did not
         // agree treats an SREJ as an unrecognized control field, which under
@@ -1387,6 +1442,62 @@ mod tests {
         settle(&mut a, &mut b, 20_000, |_, bit| bit);
         assert!(!a.is_connected(), "the originator is {:?}", a.state());
         assert!(!b.is_connected(), "the answerer is {:?}", b.state());
+    }
+
+    /// An XID that arrives after this end stopped waiting still decides the
+    /// width of what follows.
+    ///
+    /// On a line longer than the XID wait, an answerer goes on to the protocol
+    /// before the originator's XID can reach it. The XID then arrives and is
+    /// answered -- and the answer agrees 32-bit check sequences, so the SABME
+    /// that follows comes at 32. An answerer still reading 16 found every one
+    /// of them damaged, the originator gave up after three, and the call went
+    /// on without error control between two modems that both do it.
+    #[test]
+    fn an_xid_that_arrives_after_the_wait_still_decides_the_check_sequence() {
+        use crate::frame::Kind;
+
+        let mut answerer = Stack::new(Role::Answerer, Params::default()).without_detection();
+        let wire = |stack: &mut Stack, body: &[u8], fcs: Fcs| {
+            let mut e = Encoder::new(fcs);
+            e.idle(LEADING_FLAGS);
+            e.frame(body);
+            e.idle(2);
+            while let Some(bit) = e.next_bit() {
+                stack.next_bit();
+                stack.feed_bit(bit);
+            }
+            stack.tick(0);
+        };
+        // The wait runs out with nothing heard.
+        for _ in 0..20 {
+            for _ in 0..1_000 {
+                answerer.next_bit();
+                answerer.feed_bit(true);
+            }
+            answerer.tick(100);
+        }
+        assert_eq!(answerer.phase(), Phase::Protocol, "still waiting for an XID");
+
+        // Then the originator's arrives, offering 32 bits as this modem does.
+        let offer = Xid::proposal(Compression::Neither);
+        assert!(offer.fcs32, "nothing here to agree to");
+        let xid = Frame::Xid { pf: true, info: offer.encode() }
+            .encode(DLCI_DATA, Role::Originator, Kind::Command);
+        wire(&mut answerer, &xid, Fcs::Bits16);
+        let answered = answerer
+            .take_log()
+            .iter()
+            .any(|f| f.outbound && Frame::decode(&f.body, Role::Originator)
+                .is_ok_and(|(_, frame)| matches!(frame, Frame::Xid { .. })));
+        assert!(answered, "the late XID was not answered");
+
+        // And the SABME comes at the width the answer agreed to.
+        let sabme = Frame::Sabme { poll: true }.encode(DLCI_DATA, Role::Originator, Kind::Command);
+        wire(&mut answerer, &sabme, Fcs::Bits32);
+        assert_eq!(answerer.damaged_frames(), 0, "the SABME could not be read");
+        assert!(answerer.is_connected(), "the answerer is {:?}", answerer.state());
+        assert_eq!(answerer.fcs(), Fcs::Bits32, "and it did not follow the SABME to 32");
     }
 
     /// A far end that compresses without ever negotiating it.

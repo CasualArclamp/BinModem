@@ -59,20 +59,47 @@ pub const DEFAULT_T401_MS: u32 = 3000;
 /// variables underneath a link that was working.
 ///
 /// A second covers that line with room to spare. A slower one is covered by
-/// [`Lapm::tick`] raising the timer as it learns, because no constant can be
-/// right for every path.
+/// [`Lapm::tick`] raising the timer as it learns, and better still by
+/// [`t401_for_line`] where the line has been measured, because no constant can
+/// be right for every path.
 pub fn t401_for(bits_per_second: u32) -> u32 {
-    /// Ta + Tb + Te + Tf: the propagation each way and the processing at each
-    /// end, which is the part that does not depend on the line rate.
-    const PROPAGATION_MS: u32 = 1000;
-    /// Tc: the longest frame that could already be going out, in bits -- the
-    /// information field plus address, control and check sequence.
-    const FRAME_BITS: u32 = (DEFAULT_N401 as u32 + 6) * 8;
-    /// Td: the supervisory frame that acknowledges it.
-    const ACK_BITS: u32 = 6 * 8;
+    PROPAGATION_MS + transmission_ms(bits_per_second)
+}
 
-    let rate = bits_per_second.max(1);
-    PROPAGATION_MS + (FRAME_BITS + ACK_BITS) * 1000 / rate
+/// The same, on a line whose round trip the data pump has already measured.
+///
+/// Measured is the right word for Ta + Tb, and the start-up measures it before
+/// error control ever begins: V.34 in phase 2, V.32 in its counter/timer. The
+/// allowance in [`t401_for`] is a guess at them and was too small by the time
+/// it met a line that V.34 put at 1125 ms. At 28 800 bit/s the transmission
+/// terms are 38 ms, so T401 came to 1.04 s, and the far end took 1.19 s to
+/// answer a SABME -- which was therefore sent twice, on every call over that
+/// line, and a far end that honoured the second reset its sequence numbers
+/// under a link that was already carrying its banner.
+///
+/// Half as much again as the measurement, which is the margin [`Lapm`] itself
+/// uses when it learns from an answer: Te and Tf, the processing at each end,
+/// are not in it, and neither is the far end's queue. Never less than the
+/// unmeasured allowance, since a short line with a slow far end still needs
+/// that much, and never more than the timer is ever allowed to grow to.
+pub fn t401_for_line(bits_per_second: u32, round_trip_ms: u32) -> u32 {
+    let measured = round_trip_ms.saturating_add(round_trip_ms / 2);
+    let t401 = PROPAGATION_MS.max(measured) + transmission_ms(bits_per_second);
+    t401.min(MAX_T401_MS)
+}
+
+/// Ta + Tb + Te + Tf where nothing has measured them: the propagation each way
+/// and the processing at each end, which is the part that does not depend on
+/// the line rate.
+const PROPAGATION_MS: u32 = 1000;
+
+/// Tc + Td: the longest frame that could already be going out -- information
+/// field plus address, control and check sequence -- and the supervisory frame
+/// that acknowledges it.
+fn transmission_ms(bits_per_second: u32) -> u32 {
+    const FRAME_BITS: u32 = (DEFAULT_N401 as u32 + 6) * 8;
+    const ACK_BITS: u32 = 6 * 8;
+    (FRAME_BITS + ACK_BITS) * 1000 / bits_per_second.max(1)
 }
 
 /// Retransmission limit.
