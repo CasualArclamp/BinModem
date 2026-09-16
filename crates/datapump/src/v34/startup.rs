@@ -46,9 +46,16 @@ pub struct Modem {
 
 impl Modem {
     pub fn new(role: Role, fs: f64) -> Self {
+        Self::with_phase2(phase2::Modem::new(role, fs), fs)
+    }
+
+    /// A start-up whose phase 2 is `phase2` -- V.90's, say, which comes to
+    /// V.34's phases 3 and 4 when the far end turns out not to be a V.90
+    /// digital modem.
+    pub fn with_phase2(phase2: phase2::Modem, fs: f64) -> Self {
         Self {
             fs,
-            phase2: phase2::Modem::new(role, fs),
+            phase2,
             training: None,
             retraining: false,
             retrains: 0,
@@ -167,6 +174,14 @@ impl Modem {
         }
     }
 
+    /// Start phase 2 again as a retrain, from wherever this start-up is.
+    pub fn restart_phase2(&mut self) {
+        self.phase2 = self.phase2.again();
+        self.training = None;
+        self.retraining = true;
+        self.retrains += 1;
+    }
+
     /// Carry the start-up one sample further.
     pub fn step(&mut self, line: f64) -> f64 {
         if let Some(training) = self.training.as_mut() {
@@ -176,8 +191,7 @@ impl Modem {
                 // start-up settled -- a retrain does not exchange INFO0 again.
                 // The very sample is the retrain's first, so its tone follows
                 // the data with no gap the far end has to wait through.
-                let far = self.phase2.far_capabilities().unwrap_or_default();
-                self.phase2 = phase2::Modem::retrain(self.phase2.role(), self.fs, far);
+                self.phase2 = self.phase2.again();
                 self.training = None;
                 self.retraining = true;
                 self.retrains += 1;
@@ -196,9 +210,9 @@ impl Modem {
         // had damaged, with the far end still there and waiting.
         if self.phase2.asks_for_retrain()
             && self.phase2_retrains < PHASE2_RETRAINS
-            && let Some(far) = self.phase2.far_capabilities()
+            && self.phase2.far_capabilities().is_some()
         {
-            self.phase2 = phase2::Modem::retrain(self.phase2.role(), self.fs, far);
+            self.phase2 = self.phase2.again();
             self.phase2_retrains += 1;
             if self.retraining {
                 self.retrains += 1;

@@ -727,6 +727,7 @@ impl Modem {
         let limit = super::power_limit(&self.settings.server);
         let jd = self.far_jd.unwrap_or_default();
         let Some(mut choice) = dil::choose(&route, law, limit, |drn| jd.enables(drn)) else {
+            self.route = Some(route);
             self.fail("the route cannot carry V.90's slowest rate");
             return;
         };

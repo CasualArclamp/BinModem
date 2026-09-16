@@ -220,27 +220,31 @@ pub struct Choice {
 /// Two codewords the route put within `spacing` of each other cannot both be
 /// used; of the two, the one that arrived as itself is kept.
 fn ladder(route: &Route, law: Law, i: usize, spacing: f64) -> Vec<u8> {
+    let level = |u: u8| route.levels[i][usize::from(u)];
     let mut order: Vec<u8> = (0..UCODES as u8).filter(|&u| route.readings[i][usize::from(u)] > 0).collect();
-    order.sort_by(|&a, &b| route.levels[i][usize::from(a)].total_cmp(&route.levels[i][usize::from(b)]));
-    let moved = |u: u8| (route.levels[i][usize::from(u)] - ucode::level(law, u)).abs();
-    let mut chosen: Vec<u8> = Vec::new();
+    order.sort_by(|&a, &b| level(a).total_cmp(&level(b)));
+    let moved = |u: u8| (level(u) - ucode::level(law, u)).abs();
+    // Codewords the route put in the same place -- within a few noises, as a
+    // robbed bit's neighbours are -- are one level: keep whichever of them
+    // arrived as itself.
+    let mut levels: Vec<u8> = Vec::new();
     for u in order {
-        let level = route.levels[i][usize::from(u)];
-        if 2.0 * level < spacing {
-            continue;
-        }
-        match chosen.last().copied() {
-            Some(last) if level - route.levels[i][usize::from(last)] < spacing => {
-                // Keep whichever arrived as itself; the level the ladder has
-                // climbed to stays where it was if the swap would lower it.
-                let before = chosen.get(chosen.len().wrapping_sub(2)).map(|&b| route.levels[i][usize::from(b)]);
-                let fits = before.is_none_or(|b| level - b >= spacing);
-                if moved(u) < moved(last) && fits {
-                    chosen.pop();
-                    chosen.push(u);
+        match levels.last_mut() {
+            Some(same) if level(u) - level(*same) < 0.3 * spacing => {
+                if moved(u) < moved(*same) {
+                    *same = u;
                 }
             }
-            _ => chosen.push(u),
+            _ => levels.push(u),
+        }
+    }
+    let mut chosen: Vec<u8> = Vec::new();
+    for u in levels {
+        if 2.0 * level(u) < spacing {
+            continue;
+        }
+        if chosen.last().is_none_or(|&last| level(u) - level(last) >= spacing) {
+            chosen.push(u);
         }
     }
     chosen
@@ -320,6 +324,25 @@ pub fn choose(route: &Route, law: Law, limit: u32, enabled: impl Fn(u8) -> bool)
         .or_else(|| (6..=24u32).rev().find_map(|k| widest(route, law, k, 2.0 * SPACING, limit).map(|sets| (k, sets))))?;
     let training = cp_for(&training_sets, (k + s - 8) as u8, false);
     Some(Choice { data, training })
+}
+
+/// What choosing made of a route, a line to a rate, for when it chose
+/// nothing or not much.
+pub fn explain(route: &Route, law: Law, limit: u32) -> Vec<String> {
+    let noise = route.noise();
+    let limit = f64::from(limit).powi(2);
+    let mut out = vec![format!("noise {noise:.2e}, ceiling {:.0}", limit.sqrt())];
+    for i in 0..INTERVALS {
+        let l = ladder(route, law, i, SPACING * noise);
+        out.push(format!("interval {i}: {} rungs at {:.0} apart, from {:?}", l.len(), SPACING * noise * 32768.0, &l[..l.len().min(8)]));
+    }
+    for k in [15u32, 20, 25, 30, 36] {
+        match quietest(route, law, k, SPACING * noise, f64::INFINITY) {
+            Some(sets) => out.push(format!("K {k}: power {:.0}, sizes {:?}", average_power(law, &sets, k).sqrt(), sets.iter().map(Vec::len).collect::<Vec<_>>())),
+            None => out.push(format!("K {k}: the ladders cannot carry it")),
+        }
+    }
+    out
 }
 
 /// A CP for these sets: one mask for each different set.
@@ -407,11 +430,11 @@ mod tests {
         for &u in &robbed_set {
             assert_eq!(robbed(u), u, "{u} is not one the robbed bit leaves alone");
         }
-        // And a route like it still gets a choice, with interval 3 short and
-        // the others making up for it.
+        // And a route like it still gets a choice. Interval 3 need not come
+        // out shorter: a constellation spaced wider than two codewords skips
+        // every other one anyway, and the robbed bit then costs nothing but
+        // which of each pair is used.
         let choice = choose(&route, Law::Mu, 15124, |_| true).expect("no choice on a robbed route");
-        let sizes: Vec<usize> = (0..INTERVALS).map(|i| choice.data.points(i).len()).collect();
-        assert!(sizes[3] < sizes[0], "{sizes:?}");
         for &u in &choice.data.points(3) {
             assert_eq!(robbed(u), u);
         }
@@ -506,3 +529,4 @@ mod tests {
         assert_eq!(choose(&Route::clean(Law::Mu, 0.05), Law::Mu, 15124, |_| true), None);
     }
 }
+

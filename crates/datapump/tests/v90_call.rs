@@ -136,3 +136,144 @@ fn data_crosses_both_ways() {
     assert!(contains(&got_down, &down), "the downstream did not arrive whole");
     assert!(contains(&got_up, &up), "the upstream did not arrive whole");
 }
+
+/// The whole start-up, from the end of V.8.
+struct FullCall {
+    net: Network,
+    analogue: datapump::v90::startup::Analogue,
+    digital: datapump::v90::startup::Digital,
+    up: [f64; 2],
+    ticks: u64,
+}
+
+impl FullCall {
+    fn new(net: Network, server: Info0d) -> Self {
+        Self {
+            net,
+            analogue: datapump::v90::startup::Analogue::new(FS),
+            digital: datapump::v90::startup::Digital::new(server),
+            up: [0.0; 2],
+            ticks: 0,
+        }
+    }
+
+    fn run(&mut self, seconds: f64) -> bool {
+        use datapump::v90::startup::Status;
+        let end = self.ticks + (seconds * 8000.0) as u64;
+        let mut last = ("", "");
+        while self.ticks < end {
+            let to_digital = self.net.up(&self.up);
+            let from_digital = self.digital.step(to_digital);
+            for (k, x) in self.net.down(from_digital).into_iter().enumerate() {
+                self.up[k] = self.analogue.step(x);
+            }
+            self.ticks += 1;
+            let now = (self.analogue.phase(), self.digital.phase());
+            if now != last {
+                println!("{:7.3} s  analogue: {:28} digital: {}", self.ticks as f64 / 8000.0, now.0, now.1);
+                last = now;
+            }
+            let up = |s: Status| matches!(s, Status::Connected { .. });
+            if up(self.analogue.status()) && up(self.digital.status()) {
+                return true;
+            }
+            if matches!(self.analogue.status(), Status::Failed(_)) || matches!(self.digital.status(), Status::Failed(_)) {
+                return false;
+            }
+        }
+        false
+    }
+}
+
+#[test]
+fn a_whole_v90_start_up_from_phase_2_connects() {
+    use datapump::v90::startup::Status;
+    let mut call = FullCall::new(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5), server());
+    let ok = call.run(30.0);
+    println!("{:?} {:?}", call.analogue.status(), call.digital.status());
+    assert!(ok, "no connection");
+    assert!(call.analogue.is_v90());
+    let Status::Connected { transmit, receive } = call.analogue.status() else { unreachable!() };
+    assert!(receive >= 48_000 && transmit >= 24_000, "{receive} down, {transmit} up");
+    // And the round trip phase 2 measured is the line's.
+    let rtt = call.analogue.round_trip().unwrap();
+    assert!((0.03..0.08).contains(&rtt), "round trip {rtt}");
+}
+
+fn connects(net: Network, server: Info0d, seconds: f64) -> FullCall {
+    let mut call = FullCall::new(net, server);
+    let ok = call.run(seconds);
+    println!("{:?} {:?} ({})", call.analogue.status(), call.digital.status(), call.analogue.last_failure().unwrap_or(""));
+    assert!(ok, "no connection: {} / {}", call.analogue.phase(), call.digital.phase());
+    call
+}
+
+impl FullCall {
+    /// Send both ways for a while, and say whether every bit arrived.
+    fn carries_data(&mut self, seconds: f64) -> (bool, bool) {
+        let down = pattern(30_000, 3);
+        let up = pattern(15_000, 5);
+        self.analogue.take_bits();
+        self.digital.take_bits();
+        self.digital.send_bits(&down);
+        self.analogue.send_bits(&up);
+        let (mut got_down, mut got_up) = (Vec::new(), Vec::new());
+        let end = self.ticks + (seconds * 8000.0) as u64;
+        while self.ticks < end {
+            let to_digital = self.net.up(&self.up);
+            let from_digital = self.digital.step(to_digital);
+            for (k, x) in self.net.down(from_digital).into_iter().enumerate() {
+                self.up[k] = self.analogue.step(x);
+            }
+            self.ticks += 1;
+            got_down.extend(self.analogue.take_bits());
+            got_up.extend(self.digital.take_bits());
+        }
+        (contains(&got_down, &down), contains(&got_up, &up))
+    }
+}
+
+#[test]
+fn a_robbed_bit_route_connects_and_carries_data() {
+    let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5).with_robbed_bit(2), server(), 30.0);
+    let v90 = call.analogue.v90().expect("not V.90");
+    // What the DIL made of the robbed interval: half its codewords arrive
+    // as a neighbour.
+    let route = v90.route().unwrap();
+    let moved: Vec<usize> = (0..6)
+        .map(|i| {
+            (1..127u8)
+                .filter(|&u| {
+                    let level = |u: u8| datapump::v90::ucode::level(Law::Mu, u);
+                    let step = level(u + 1) - level(u);
+                    (route.levels[i][usize::from(u)] - level(u)).abs() > 0.4 * step
+                })
+                .count()
+        })
+        .collect();
+    println!("codewords moved in each interval {moved:?}");
+    assert_eq!(moved.iter().filter(|&&n| n > 30).count(), 1, "{moved:?}");
+    assert_eq!(call.carries_data(4.0), (true, true));
+}
+
+#[test]
+fn an_a_law_network_connects() {
+    let mut a_law = server();
+    a_law.a_law = true;
+    connects(Network::new(Law::A, FS).with_delay(0.020, FS).with_noise(1e-5), a_law, 30.0);
+}
+
+#[test]
+fn a_voip_length_round_trip_connects() {
+    // 0.6 s each way: the round trip Rory's SIP trunk measures.
+    let call = connects(Network::new(Law::Mu, FS).with_delay(0.600, FS).with_noise(1e-5), server(), 40.0);
+    let rtt = call.analogue.round_trip().unwrap();
+    assert!((1.15..1.3).contains(&rtt), "round trip {rtt}");
+}
+
+#[test]
+fn a_noisy_loop_connects_slower() {
+    let call = connects(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(3e-3), server(), 30.0);
+    let datapump::v90::startup::Status::Connected { receive, .. } = call.analogue.status() else { unreachable!() };
+    assert!(receive < 50_000, "{receive} on a noisy loop");
+}

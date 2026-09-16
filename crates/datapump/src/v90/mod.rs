@@ -32,6 +32,7 @@ pub mod network;
 pub mod pcm;
 pub mod sequences;
 pub mod sign;
+pub mod startup;
 pub mod ucode;
 
 use crate::v34::info::Info0d;

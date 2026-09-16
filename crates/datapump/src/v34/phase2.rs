@@ -365,6 +365,16 @@ impl Modem {
         modem
     }
 
+    /// A retrain of this phase 2 (11.5): the same end, the same far end, and
+    /// V.90's part kept if there is one.
+    pub fn again(&self) -> Self {
+        let far = self.far.unwrap_or_default();
+        match self.pcm {
+            Some(pcm) => Self::v90_retrain(pcm, self.fs, far, self.far_info0d),
+            None => Self::retrain(self.role, self.fs, far),
+        }
+    }
+
     /// This end's INFO0 as it goes out: INFO0d from a digital modem.
     fn info0_bits(&self) -> Vec<bool> {
         match self.pcm {
