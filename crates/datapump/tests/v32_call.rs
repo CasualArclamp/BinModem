@@ -517,6 +517,38 @@ fn a_call_survives_an_echo_as_loud_as_what_was_sent() {
     }
 }
 
+/// The far hybrid is found however loud the near one is.
+///
+/// A cable returns this end's signal whole, and the far hybrid's reflection
+/// sits 16.7 dB below that. The search for it was scored against everything
+/// arriving, near echo and all, so it read 0.12 against a bar of 0.15 and
+/// was never given taps: the answering end cancelled 18.5 dB, which with the
+/// far end another 20 dB down left its own echo as loud as the calling
+/// modem's conditioning signal, and it waited in R1 for one it could not
+/// hear until the calling end gave up and started again. Scored against what
+/// the near taps leave, it reads 0.49 and the call comes up.
+#[test]
+fn a_far_hybrid_is_found_behind_an_echo_at_full_strength() {
+    const CABLE_ECHO: f64 = 1.03;
+    let (calling, answering, at) = custom_call(20.0, DELAY, CABLE_ECHO, FAR);
+    for (name, modem) in [("calling", &calling), ("answering", &answering)] {
+        let found = modem
+            .reflection()
+            .unwrap_or_else(|| panic!("the {name} end found no far hybrid"));
+        let off = found.delay as i64 - 2 * DELAY as i64;
+        assert!(off.abs() <= 8, "the {name} end put it {off} samples out");
+        let loss = modem.echo_return_loss();
+        assert!(loss > 30.0, "the {name} end removed only {loss:.1} dB");
+    }
+    assert!(
+        matches!(calling.status(), Status::Connected(4800)),
+        "the call stopped with the calling end at {} and the answering end at {}",
+        calling.phase(),
+        answering.phase()
+    );
+    assert!(at < 15.0, "took {at:.1} s to connect");
+}
+
 /// A call where the answering modem does not start until `quiet_ms` in.
 ///
 /// Which is every real call: the calling modem goes off hook, the network
@@ -582,9 +614,9 @@ fn a_quiet_far_end_is_heard_through_an_echo_at_full_strength() {
     // end in CA unable to hear the reversal it was waiting for: its detector
     // had spent three seconds on the skirt of its own answering tone coming
     // back off the cable, and still thought 1800 Hz was a tone turning fast.
-    // That end hears it now, the start-up goes on to the rate signals -- and a
-    // start-up that gets no further than that goes back to AA by 5.4.1's own
-    // rule, which the old question could not tell from never having left.
+    // That end hears it now. And a start-up that fails anywhere later goes
+    // back to AA by 5.4.1's own rule, which the old question could not tell
+    // from never having left.
     const CABLE_ECHO: f64 = 1.03;
     for quiet_ms in [0.0, 500.0, 2000.0] {
         let (calling, answering) = late_call(12.0, 320, CABLE_ECHO, 0.1, quiet_ms);

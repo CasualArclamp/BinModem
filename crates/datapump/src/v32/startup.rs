@@ -2149,8 +2149,18 @@ const FAR_SPAN_MS: f64 = 4.0;
 /// Under this it is not clear there is a reflection at all. The search takes
 /// the largest of some hundreds of candidates, and the largest of hundreds of
 /// numbers that should all be zero is not zero; a bar has to sit above what
-/// that alone produces. Above it, the reflection is within about 8 dB of the
-/// far modem, which is close enough to be worth removing.
+/// that alone produces.
+///
+/// Measured against what the near taps leave rather than against the line, so
+/// a near echo however loud is not part of it. With no far reflection at all
+/// the largest candidate reads 0.05; a far hybrid 16.7 dB below a
+/// full-strength near echo reads 0.49, and behind an ordinary one 0.63.
+///
+/// Nothing reads much above that, a reflection that is the whole of the line
+/// included. The near taps adapt fast on a signal that is narrow for the rate
+/// it is sampled at, and in doing so shape everything they leave -- the
+/// reflection with it -- so a lone one scores about two thirds of what it
+/// would against the raw line.
 const FAINTEST: f64 = 0.15;
 
 impl Modem {
@@ -2187,19 +2197,31 @@ impl Modem {
         if self.startup.training_echo() && !self.was_training {
             self.begin_search();
         }
+        let cleaned = self.echo.process(sent, line);
+
         if let Some(finder) = self.finder.as_mut() {
-            // What arrived, rather than what the canceller left of it: the
-            // near echo it removes is nowhere near the delays being searched,
-            // and this way the search does not depend on how the near taps are
-            // getting on.
-            finder.feed(sent, line);
+            // What the near taps left, rather than what arrived. The
+            // reflection being looked for is one they cannot reach, and the
+            // near echo they are removing has no business in the scale it is
+            // judged on.
+            //
+            // It was what arrived, and on a cable that returns this end's
+            // signal at full strength the near echo was nearly all of that: a
+            // far hybrid 16.7 dB below it scored 0.12 against a bar of 0.15
+            // and was never given taps. The canceller stopped at 18.5 dB, and
+            // with the far end another 20 dB down the answering modem could
+            // not hear the conditioning signal it was waiting for.
+            //
+            // Scoring what arrived against a scale of what was left looks like
+            // it keeps both, and does not: the near echo is still in every
+            // score as noise, and with nothing else on the line the largest of
+            // them read 0.57. From what was left, that is 0.05.
+            finder.feed(sent, cleaned);
             self.searched += 1;
             if self.searched >= self.search_for {
                 self.place_far_taps();
             }
         }
-
-        let cleaned = self.echo.process(sent, line);
 
         // Adapt only while this end is transmitting its training segment,
         // which is the one stretch the far end is required to be quiet for.
