@@ -1105,6 +1105,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         let depth = if modem.shape() == "PCM" { PCM_DEPTH } else { scope_depth(modem.states()) };
         for &s in &from_line {
             let heard = f64::from(s);
+            // A V.90 server's samples are codewords, and the far encoder
+            // only turns them back into the same ones at the level they left:
+            // no drive of any other size will do.
+            let drive = if modem.exact_levels() { 1.0 } else { drive };
             to_line.push(modem.step(heard) as f32 * drive);
 
             if modem.shape() != drawing {

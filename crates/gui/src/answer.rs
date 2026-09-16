@@ -139,7 +139,10 @@ pub fn run(args: Vec<String>) -> ExitCode {
         }
         to_line.clear();
         for &s in &from_line {
-            to_line.push(host.step(f64::from(s)) as f32 * LEVEL);
+            // A V.90 server's samples are codewords, and the far encoder
+            // only turns them back into the same ones at the level they left.
+            let level = if host.exact_levels() { 1.0 } else { LEVEL };
+            to_line.push(host.step(f64::from(s)) as f32 * level);
         }
         audio.transmit(&to_line);
         owed_ms += from_line.len() as f64 / FS * 1000.0;

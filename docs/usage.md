@@ -137,7 +137,8 @@ mode, a renegotiation -- with instructions at the top of the script.
 ## Trying V.90
 
 **56000** in the rate row, or `AT+MS=V90`, dials as the analogue half of V.90:
-the end that calls an internet provider's modem pool. V.8 offers PCM alongside
+the end that calls an internet provider's modem pool, or another of these
+answering as the digital half (below). V.8 offers PCM alongside
 V.34 and V.32bis, so a far end that is not a V.90 server picks V.34 or V.32bis
 and the call goes ahead as one of those.
 
@@ -175,6 +176,29 @@ A line that will not carry PCM at all -- the DIL shows nothing V.90 could use,
 or V.90 has failed three times -- is retrained once more asking for V.34, and
 the call comes up as V.34 instead of hanging up. The panel shows why V.90 was
 given up.
+
+### Answering as the server
+
+Answer with `AT+MS=V90` (or **56000**) and this modem is V.90's other half, the
+digital modem an internet provider has: it offers PCM from the answering side
+of V.8, and a caller that asks for it gets codewords downstream and sends V.34
+back. Two of these on two machines, each behind its own softphone, reach each
+other this way.
+
+The digital modem's samples are codewords, and they only become the same
+codewords again if they reach the softphone's G.711 encoder exactly as they
+left: same level, same sampling instants. So while it is the digital modem,
+this end ignores the **drive** slider and sends at unity, and the softphone at
+this end has to be set up the same way as the one at the calling end. The rest
+depends on the softphone. One that converts sample rates on the way to its
+encoder filters the codewords and samples them between where they were. The
+calling end then sees an ordinary line with G.711's noise on it, which is
+V.34's territory, and after one try at V.90 the call comes up as V.34 at
+whatever that line carries -- 33 600 in simulation, after about forty seconds
+over a VoIP-length round trip. A softphone that hands its encoder the samples
+it was given, at 8 kHz, gives PCM rates: 52 000 to 54 666 in simulation.
+
+### The softphone
 
 PCM needs the digital path to arrive untouched, which a VoIP call does if the
 softphone uses G.711 (PCMU or PCMA) and nothing on the way processes the audio.

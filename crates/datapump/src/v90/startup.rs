@@ -271,6 +271,8 @@ pub struct Digital {
     phase2_gain: f64,
     /// V.90 start-ups that have failed in a row.
     failed_starts: u32,
+    /// Renegotiations in V.90 data modes a retrain has since replaced.
+    renegotiations: u32,
 }
 
 impl Digital {
@@ -284,6 +286,7 @@ impl Digital {
             v90: None,
             phase2_gain,
             failed_starts: 0,
+            renegotiations: 0,
         }
     }
 
@@ -293,6 +296,58 @@ impl Digital {
 
     pub fn v90(&self) -> Option<&digital::Modem> {
         self.v90.as_ref()
+    }
+
+    /// Whether V.90 is what the call came to.
+    pub fn is_v90(&self) -> bool {
+        self.v90.is_some()
+    }
+
+    pub fn round_trip(&self) -> Option<f64> {
+        self.v34.phase2().round_trip()
+    }
+
+    /// Whether there is anything to send bits into.
+    pub fn accepts_bits(&self) -> bool {
+        match self.v90.as_ref() {
+            Some(m) => matches!(m.status(), digital::Status::Connected { .. }),
+            None => self.v34.accepts_bits(),
+        }
+    }
+
+    /// Whether the far end's data signal is there.
+    pub fn carrier(&self) -> bool {
+        match self.v90.as_ref() {
+            Some(m) => matches!(m.status(), digital::Status::Connected { .. }),
+            None => self.v34.carrier(),
+        }
+    }
+
+    /// Full retrains since the call began.
+    pub fn retrains(&self) -> u32 {
+        self.v34.retrains()
+    }
+
+    /// Rate renegotiations and cleardowns since the call began, V.90's and
+    /// V.34's.
+    pub fn renegotiations(&self) -> u32 {
+        self.renegotiations + self.v90.as_ref().map_or(0, digital::Modem::renegotiations) + self.v34.renegotiations()
+    }
+
+    /// The analogue modem's last upstream symbol, for a scope.
+    pub fn constellation_point(&self) -> Option<(f64, f64)> {
+        match self.v90.as_ref() {
+            Some(m) => m.last_point(),
+            None => self.v34.constellation_point(),
+        }
+    }
+
+    /// Points the upstream is read against.
+    pub fn constellation_size(&self) -> Option<usize> {
+        match self.v90.as_ref() {
+            Some(m) => Some(m.upstream_points()),
+            None => self.v34.constellation_size(),
+        }
     }
 
     pub fn status(&self) -> Status {
@@ -381,6 +436,7 @@ impl Digital {
             if m.take_retrain() || (failed && self.failed_starts < V90_RETRAINS) {
                 // 9.5.1: tone B and phase 2.
                 self.failed_starts += u32::from(failed);
+                self.renegotiations += m.renegotiations();
                 self.v90 = None;
                 self.v34.restart_phase2();
             }

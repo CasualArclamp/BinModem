@@ -31,6 +31,7 @@ pub mod modulus;
 pub mod network;
 pub mod pcm;
 pub mod sequences;
+pub mod server;
 pub mod sign;
 pub mod startup;
 pub mod ucode;

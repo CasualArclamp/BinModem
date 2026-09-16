@@ -566,6 +566,22 @@ impl Modem {
         self.phase3_snr
     }
 
+    /// The analogue modem's last upstream symbol, once phase 3 has trained
+    /// the receiver.
+    pub fn last_point(&self) -> Option<(f64, f64)> {
+        self.rx.last_point().map(Into::into)
+    }
+
+    /// Points the upstream is being decided against: four or sixteen in
+    /// training, and data mode's L once B1 has begun.
+    pub fn upstream_points(&self) -> usize {
+        match self.decoder.as_ref() {
+            Some(decoder) => decoder.params().framing.l,
+            None if self.rx.size() == Size::Sixteen => 16,
+            None => 4,
+        }
+    }
+
     pub fn take_bits(&mut self) -> Vec<bool> {
         std::mem::take(&mut self.received)
     }

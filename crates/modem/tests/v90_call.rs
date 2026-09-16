@@ -178,3 +178,139 @@ fn dialling_a_v90_server_connects_at_pcm_rates_and_carries_text() {
     let got = String::from_utf8_lossy(&call.server.received).into_owned();
     assert!(got.contains("after the retrain"), "the server got {got:?}");
 }
+
+/// Both ends of a V.90 call are these modems: one dials, the other answers
+/// as the digital modem through a softphone.
+struct Pair {
+    net: Network,
+    caller: Modem,
+    host: Modem,
+    up: Vec<f64>,
+    /// The softphone at the answering end: G.711 decoded and resampled to
+    /// the host's rate; the host's samples resampled to 48 kHz, delayed by a
+    /// few samples, and down to the encoder's 8 kHz -- or not resampled at
+    /// all, but taken one in two.
+    decoded: dsp::Resampler,
+    raised: dsp::Resampler,
+    delay: std::collections::VecDeque<f64>,
+    lowered: dsp::Resampler,
+    to_encoder: std::collections::VecDeque<f64>,
+    /// No sample rate conversion on the way to the encoder at all: every
+    /// other sample of the host's, from the one this says.
+    straight: Option<usize>,
+    count: usize,
+    caller_said: Vec<u8>,
+    host_said: Vec<u8>,
+}
+
+impl Pair {
+    fn new(net: Network, delay: usize) -> Self {
+        Self {
+            net,
+            caller: Modem::new(FS),
+            host: Modem::new(FS),
+            up: Vec::new(),
+            decoded: dsp::Resampler::new(NETWORK_FS, FS),
+            raised: dsp::Resampler::new(FS, 48_000.0),
+            delay: std::collections::VecDeque::from(vec![0.0; delay]),
+            lowered: dsp::Resampler::new(48_000.0, NETWORK_FS),
+            to_encoder: std::collections::VecDeque::new(),
+            straight: None,
+            count: 0,
+            caller_said: Vec::new(),
+            host_said: Vec::new(),
+        }
+    }
+
+    fn type_at(modem: &mut Modem, line: &str) {
+        for b in line.bytes() {
+            modem.feed_dte(b);
+        }
+        modem.feed_dte(b'\r');
+    }
+
+    fn run(&mut self, seconds: f64) {
+        let (mut host_in, mut high, mut low) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..(seconds * NETWORK_FS) as usize {
+            let from_caller = self.net.up(&self.up);
+            self.up.clear();
+            host_in.clear();
+            self.decoded.process(from_caller, &mut host_in);
+            for &x in &host_in {
+                let y = self.host.step(x);
+                self.host_said.extend(self.host.take_dte());
+                self.count += 1;
+                if let Some(phase) = self.straight {
+                    if self.count % 2 == phase {
+                        self.to_encoder.push_back(y);
+                    }
+                    continue;
+                }
+                high.clear();
+                self.raised.process(y, &mut high);
+                for &h in &high {
+                    self.delay.push_back(h);
+                    let Some(late) = self.delay.pop_front() else { continue };
+                    low.clear();
+                    self.lowered.process(late, &mut low);
+                    self.to_encoder.extend(low.iter().copied());
+                }
+            }
+            let level = self.to_encoder.pop_front().unwrap_or(0.0);
+            for x in self.net.down(level) {
+                self.up.push(self.caller.step(x));
+                self.caller_said.extend(self.caller.take_dte());
+            }
+        }
+    }
+}
+
+/// Two of these, one dialling and one answering with `AT+MS=V90`: the
+/// answering one is V.90's digital modem, behind a softphone that hands every
+/// other sample it is given to its G.711 encoder. Which of its samples that is
+/// depends on when the call began. Taking the codewords, the call comes up at
+/// PCM rates; taking the samples between them, the DIL shows nothing V.90
+/// could use and the call comes up as V.34 instead. Text crosses both ways
+/// either way.
+#[test]
+fn two_of_these_connect_at_pcm_rates_when_the_codewords_reach_the_encoder() {
+    let mut rates = Vec::new();
+    for phase in [0, 1] {
+        let mut pair = Pair::new(Network::new(Law::Mu, FS).with_delay(0.015, FS).with_noise(1e-5), 0);
+        pair.straight = Some(phase);
+        Pair::type_at(&mut pair.host, "AT+MS=V90");
+        Pair::type_at(&mut pair.caller, "AT+MS=V90");
+        pair.run(0.05);
+        Pair::type_at(&mut pair.host, "ATA");
+        Pair::type_at(&mut pair.caller, "ATD5551234");
+        for _ in 0..40 {
+            pair.run(1.0);
+            if pair.caller.state() == State::Data && pair.host.state() == State::Data {
+                break;
+            }
+        }
+        let saw = String::from_utf8_lossy(&pair.caller_said).into_owned();
+        println!("phase {phase}: {} at {:?} down, {:?} up: {saw:?}", pair.caller.standard(), pair.caller.rate(), pair.caller.transmit_rate());
+        assert_eq!(pair.caller.state(), State::Data, "phase {phase}: {saw:?}");
+        assert_eq!(pair.host.state(), State::Data, "phase {phase}");
+        assert_eq!(pair.caller.standard(), pair.host.standard());
+        rates.push((pair.caller.standard(), pair.caller.rate().unwrap_or(0)));
+
+        pair.run(2.0);
+        for b in b"from the caller" {
+            pair.caller.feed_dte(*b);
+        }
+        for b in b"from the server" {
+            pair.host.feed_dte(*b);
+        }
+        pair.run(3.0);
+        let host_saw = String::from_utf8_lossy(&pair.host_said).into_owned();
+        assert!(host_saw.contains("from the caller"), "phase {phase}: the server saw {host_saw:?}");
+        let caller_saw = String::from_utf8_lossy(&pair.caller_said).into_owned();
+        assert!(caller_saw.contains("from the server"), "phase {phase}: the caller saw {caller_saw:?}");
+    }
+    rates.sort_by_key(|r| r.1);
+    assert_eq!(rates[0], ("V.34", 33_600), "{rates:?}");
+    assert_eq!(rates[1].0, "V.90", "{rates:?}");
+    assert!(rates[1].1 >= 48_000, "{rates:?}");
+}

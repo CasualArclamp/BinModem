@@ -26,6 +26,8 @@ login    = { path = "../login" }
 # And the tallest of all: a web page, which needs the proxy, the TCP
 # under it and a real socket at the far end.
 proxy    = { path = "../proxy" }
+# A softphone's sample rate conversion, for a V.90 server behind one.
+dsp      = { path = "../dsp" }
 
 [lints]
 workspace = true
