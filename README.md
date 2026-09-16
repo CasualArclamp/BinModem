@@ -9,7 +9,7 @@ one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
 source for every normative constant, and against the RFCs for everything
-carried over the top of them. 1446 tests.
+carried over the top of them. 1515 tests.
 
 ## What works
 
@@ -37,7 +37,7 @@ been checked three other ways: two documents, two methods, one table.
 
 | | |
 |---|---|
-| **Modulations** | Bell 103 (300), V.22 (1200), V.22bis (1200/2400), V.32 (4800/9600, both codings), V.32bis (7200/12000/14400), V.34 (4800 to 33600: shell mapping, 16/32/64-state 4D trellis codes, precoding, non-linear encoding) |
+| **Modulations** | Bell 103 (300), V.22 (1200), V.22bis (1200/2400), V.32 (4800/9600, both codings), V.32bis (7200/12000/14400), V.34 (4800 to 33600: shell mapping, 16/32/64-state 4D trellis codes, precoding, non-linear encoding), V.90 analogue modem (28000 to 56000 PCM down, V.34 up: DIL analysis, modulus encoding, spectral shaping, rate renegotiation) |
 | **Negotiation** | V.8 CM/JM/CI/CJ and ANSam; V.25 answer tone told apart from it |
 | **Error control** | V.42 LAPM — detection, HDLC, XID, REJ/SREJ, mod-128 |
 | **Compression** | V.44 (LZJH) and V.42bis (BTLZ), both offered in one XID and the far end picks; V.42bis also followed in band |
@@ -194,6 +194,15 @@ renegotiation, or meets a line that changed too much for one, falls back to
 sending its tone and starting phase 2 again, and two of these now go back
 through it together and come up at whatever the line will carry, without
 exchanging their capabilities a second time.
+
+V.90 on a real call. The analogue half is written from the Recommendation and
+checked against a recording of a real server: its CM and JM, INFO0d, INFO1d,
+Ja, TRN1d, Jd and the DIL all read back as they should, and the DIL fits what
+the analogue modem asked for. Against a simulated server over a simulated
+G.711 network -- A-law and μ-law, a robbed bit, a pad, noise, a VoIP round
+trip, a sound card 120 ppm out, and a jitter buffer slipping every few seconds
+-- it connects at 52 000 to 56 000, renegotiates and retrains from either end,
+and carries V.42 at `AT+MS=V90`. Nothing has been tried on the line yet.
 
 Next, V.17 for fax at 14 400, and V.33 beside it -- the same trellis code as
 V.32bis again, on a fax call and a leased line respectively -- and more than

@@ -134,6 +134,53 @@ every equalised symbol of one direction, and `tools/plot_constellation.py`
 draws any stretches of it as constellations side by side -- training, data
 mode, a renegotiation -- with instructions at the top of the script.
 
+## Trying V.90
+
+**56000** in the rate row, or `AT+MS=V90`, dials as the analogue half of V.90:
+the end that calls an internet provider's modem pool. V.8 offers PCM alongside
+V.34 and V.32bis, so a far end that is not a V.90 server picks V.34 or V.32bis
+and the call goes ahead as one of those.
+
+A V.90 server answers with its own PCM offer, and the start-up runs V.34's
+phase 2 with V.90's INFO sequences in it: the server says what codec law and
+power it sends at, and this end asks for its upstream symbol rate. In phase 3
+the server trains this end's receiver with TRN1d, lists the downstream rates
+it has in Jd, and plays a DIL -- every one of the 128 codeword magnitudes, six
+frames each -- so that this end can see exactly what each codeword arrives as.
+From that it picks the constellations for phase 4 and for data mode, spaced
+for the noise it measured at the power the server may send, and in phase 4 the
+two ends swap CP and MP and go to data. `CONNECT` gives the downstream rate,
+from 28 000 to 56 000 in steps of 1333; the upstream is V.34 and the panel shows
+it. The log goes `V.90 phase 2`, `V.90 phase 3: training`, `V.90 phase 3: Jd`,
+`V.90 phase 3: DIL`, `V.90 phase 4`, `V.90 data`.
+
+There is no I and Q to plot for PCM, so the constellation scope plots each
+sample the modem reads against the next one. A clean line draws a grid: one row
+and one column for each level in use, the dense middle being the quiet levels
+and the loud ones spreading out towards the edges. Noise shows as the spots
+growing into each other, a line that has lost its place as a cloud.
+
+Once connected, the call keeps itself up:
+
+- **Rate renegotiation.** Either end can ask for new rates without starting
+  again. This end answers the server's at once, and asks for a slower
+  downstream itself when the levels in use sit closer than about seven times the
+  error it is reading them with. `V.90 rate renegotiation` shows in the log
+  while it happens, with no `NO CARRIER` and no second `CONNECT`.
+- **Retrain.** A server that retrains is followed back through phase 2, and so
+  is a line this end cannot read at all.
+- **Cleardown.** A server that ends the call politely ends it here as well.
+
+PCM needs the digital path to arrive untouched, which a VoIP call does if the
+softphone uses G.711 (PCMU or PCMA) and nothing on the way processes the audio.
+In the softphone, allow only PCMU and PCMA, and turn off echo cancellation,
+noise suppression, automatic gain and voice activity detection or silence
+suppression. Set both volumes to 100%, and turn off Windows' audio enhancements
+on the VB-Cable devices. The jitter buffer's slips are followed: during the
+start-up, R and the DIL show where the frames went; in data mode, the frames
+themselves do. Press **Record** before dialling: a capture of a V.90 call that
+went wrong is what gets it fixed.
+
 ## Moving a file
 
 The **Files** button opens ZMODEM: a path to send, a directory to receive

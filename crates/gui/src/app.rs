@@ -562,11 +562,11 @@ impl ScopeApp {
         ("V32B", "V.32bis - 4800 to 14400"),
         (
             "V34",
-            "V.34 - up to 33600, the rate settled from what the line measures.         A far end without V.34 gets V.32bis",
+            "V.34 - up to 33600, the rate settled from what the line measures. A far end without V.34 gets V.32bis",
         ),
         (
             "V90",
-            "V.90 - up to 56000 from an ISP's server and 33600 back.         A far end that is no V.90 server gets V.34",
+            "V.90 - up to 56000 from an ISP's server and 33600 back. A far end that is no V.90 server gets V.34",
         ),
     ];
 
@@ -2383,7 +2383,11 @@ impl ScopeApp {
     /// would only take 7200 away. Choosing V.32 on purpose -- which is worth
     /// doing against a far end that claims V.32bis and cannot hold it -- is in
     /// the Advanced window, where a deliberate choice belongs.
-    const CEILINGS: [(u32, usize, &'static str); 9] = [
+    ///
+    /// 56 000 is V.90 with no rate named at all. `+MS`'s rates are the
+    /// sending direction's (V.250 6.4.1), which for V.90's analogue modem is
+    /// V.34's; the downstream is whatever the route carries.
+    const CEILINGS: [(u32, usize, &'static str); 10] = [
         (300, 0, "300"),
         (1200, 1, "1200"),
         (2400, 1, "2400"),
@@ -2393,6 +2397,7 @@ impl ScopeApp {
         (12_000, 3, "12000"),
         (14_400, 3, "14400"),
         (33_600, 4, "33600"),
+        (0, 5, "56000"),
     ];
 
     /// How fast at most, and the three things that are simply on or off.
@@ -3074,10 +3079,10 @@ mod modulation_tests {
             );
         }
         // And the strip of ceilings only ever names a carrier that has the
-        // rate it is offering.
+        // rate it is offering, or names none.
         for (rate, carrier, _) in ScopeApp::CEILINGS {
             assert!(
-                Modulation::rates(carrier).contains(&rate),
+                rate == 0 || Modulation::rates(carrier).contains(&rate),
                 "the ceiling {rate} names a carrier that has no such rate"
             );
         }
