@@ -63,6 +63,11 @@ pub const FEEDBACK: usize = 24;
 /// Half-symbol samples kept.
 const KEPT: usize = 8192;
 
+/// Line kept, in seconds: enough to sample the whole of training again once
+/// its clock is known.
+const HISTORY_SECONDS: f64 = 1.0;
+
+
 /// Sd's period, in half-symbol samples.
 const PERIOD: usize = 2 * INTERVALS;
 
@@ -99,6 +104,11 @@ const STEP: f64 = 0.004;
 /// Timing loop gains, a symbol at a time.
 const TIMING_GAIN: f64 = 0.004;
 const DRIFT_GAIN: f64 = 2e-6;
+
+/// Symbols between looks at where the equaliser's weight has got to, and how
+/// much of its movement goes into the clock's rate.
+const CENTRE_EVERY: u64 = 16;
+const CENTRE_DRIFT_GAIN: f64 = 0.3;
 
 /// What the decisions that keep the loops going are made against.
 #[derive(Debug, Clone, PartialEq)]
@@ -260,6 +270,7 @@ pub struct Receiver {
     /// Line samples, newest last, and the index of the oldest.
     history: VecDeque<f64>,
     history_first: u64,
+    history_kept: usize,
     taken: u64,
     /// Where the next half-symbol sample falls, in line samples, and how far
     /// apart they are with the timing loop's correction.
@@ -269,6 +280,8 @@ pub struct Receiver {
     table: Vec<f64>,
 
     halves: VecDeque<f64>,
+    /// Where on the line each half-symbol sample was taken.
+    times: VecDeque<f64>,
     first: u64,
     made: u64,
 
@@ -292,6 +305,8 @@ pub struct Receiver {
     inverted: bool,
     /// Everything the timing loop has moved the clock by, in line samples.
     timed: f64,
+    /// Where training left the equaliser's weight, in taps.
+    centre: f64,
 }
 
 impl Receiver {
@@ -318,14 +333,16 @@ impl Receiver {
         taps[REACH] = 1.0;
         Self {
             law,
-            history: VecDeque::with_capacity(4096),
+            history: VecDeque::with_capacity((HISTORY_SECONDS * fs) as usize),
             history_first: 0,
+            history_kept: (HISTORY_SECONDS * fs) as usize,
             taken: 0,
             due: FILTER_TAPS as f64,
             half: fs / BAUD / 2.0,
             drift: 0.0,
             table,
             halves: VecDeque::with_capacity(KEPT),
+            times: VecDeque::with_capacity(KEPT),
             first: 0,
             made: 0,
             stage: Stage::Idle,
@@ -342,6 +359,7 @@ impl Receiver {
             trained_snr: 0.0,
             inverted: false,
             timed: 0.0,
+            centre: 0.0,
         }
     }
 
@@ -411,14 +429,15 @@ impl Receiver {
 
     pub fn feed(&mut self, sample: f64) {
         self.history.push_back(sample);
-        if self.history.len() > 4096 {
+        if self.history.len() > self.history_kept {
             self.history.pop_front();
             self.history_first += 1;
         }
         self.taken += 1;
         while let Some(value) = self.interpolate(self.due) {
+            let at = self.due;
             self.due += self.half * (1.0 + self.drift);
-            self.on_half(value);
+            self.on_half(value, at);
         }
     }
 
@@ -442,12 +461,14 @@ impl Receiver {
         Some(row.iter().enumerate().map(|(i, tap)| self.history[offset + i] * tap).sum())
     }
 
-    fn on_half(&mut self, half: f64) {
+    fn on_half(&mut self, half: f64, at: f64) {
         let index = self.made;
         self.made += 1;
         self.halves.push_back(half);
+        self.times.push_back(at);
         if self.halves.len() > KEPT {
             self.halves.pop_front();
+            self.times.pop_front();
             self.first += 1;
         }
         match &mut self.stage {
@@ -501,7 +522,93 @@ impl Receiver {
             .collect()
     }
 
+    /// How far the far clock is off this one, as a fraction, from where the
+    /// line's pulse sits in four stretches of TRN1d.
+    ///
+    /// TRN1d is as good as white, so the line set against it is the line's
+    /// pulse, and a far clock running slow against this one moves the pulse a
+    /// little later in this end's samples with every symbol. At 40 ppm that is
+    /// a tenth of a half-symbol sample across training -- which a single fit
+    /// over the whole of it smears into an error 25 dB up on a clean line.
+    /// Where each stretch's peak is, to a fraction of a sample, is biased by
+    /// the pulse's shape; the bias is the same in every stretch, and the line
+    /// through them is not.
+    fn drift_across(&self, origin: u64, targets: &[f64]) -> Option<f64> {
+        let length = (TRAIN_TO - TRAIN_FROM) / 4;
+        let pulse = |from: usize, lag: i64| -> Option<f64> {
+            let mut sum = 0.0;
+            for (k, &target) in targets.iter().enumerate().skip(from).take(length) {
+                let at = (origin + 2 * k as u64).checked_add_signed(lag)?.checked_sub(self.first)? as usize;
+                sum += self.halves.get(at)? * target;
+            }
+            Some(sum)
+        };
+        // The pulse's main lag, from the first stretch.
+        let reach = REACH as i64;
+        let peak = (-reach..=reach)
+            .filter_map(|lag| pulse(TRAIN_FROM, lag).map(|v| (lag, v.abs())))
+            .max_by(|a, b| a.1.total_cmp(&b.1))?
+            .0;
+        let mut points = Vec::with_capacity(4);
+        for n in 0..4 {
+            let from = TRAIN_FROM + n * length;
+            let (a, b, c) = (pulse(from, peak - 1)?.abs(), pulse(from, peak)?.abs(), pulse(from, peak + 1)?.abs());
+            let bend = a - 2.0 * b + c;
+            let frac = if bend.abs() > 1e-30 { 0.5 * (a - c) / bend } else { 0.0 };
+            // Half-symbol samples of where the stretch's middle is, and where
+            // its peak is.
+            points.push((2.0 * (from + length / 2) as f64, frac));
+        }
+        let n = points.len() as f64;
+        let (mx, my) = points.iter().fold((0.0, 0.0), |(x, y), p| (x + p.0 / n, y + p.1 / n));
+        let (sxy, sxx) = points.iter().fold((0.0, 0.0), |(xy, xx), p| (xy + (p.0 - mx) * (p.1 - my), xx + (p.0 - mx).powi(2)));
+        Some(sxy / sxx.max(1e-30))
+    }
+
+    /// Take every half-symbol sample from `from` on again, on a clock `drift`
+    /// off the line's, from the line kept. False if the line kept does not
+    /// reach back that far.
+    fn resample(&mut self, from: u64, drift: f64) -> bool {
+        let Some(k0) = from.checked_sub(self.first).map(|k| k as usize) else { return false };
+        let Some(&t0) = self.times.get(k0) else { return false };
+        let step = self.half * (1.0 + drift);
+        let count = self.halves.len() - k0;
+        let mut again = Vec::with_capacity(count);
+        for n in 0..count {
+            let at = t0 + n as f64 * step;
+            match self.interpolate(at) {
+                Some(v) => again.push((v, at)),
+                None => return false,
+            }
+        }
+        for (n, (v, at)) in again.into_iter().enumerate() {
+            self.halves[k0 + n] = v;
+            self.times[k0 + n] = at;
+        }
+        self.drift = drift;
+        self.due = t0 + count as f64 * step;
+        true
+    }
+
     fn finish_training(&mut self, start: u64) {
+        // The clock first, and the samples taken again on it, before the
+        // equaliser is solved for. Where a peak sits between samples is read
+        // a little wrong, and more wrong the further it has moved, so the
+        // estimate is made again on the samples taken again, until what is
+        // left is under half a part per million.
+        if let Some(origin) = self.align(start) {
+            let targets = self.trn1d(0, TRAIN_TO);
+            for _ in 0..8 {
+                let Some(off) = self.drift_across(origin, &targets) else { break };
+                if off.abs() < 0.5e-6 {
+                    break;
+                }
+                let from = origin.saturating_sub((SEARCH + REACH as i64 + 1) as u64);
+                if !self.resample(from, self.drift + off) {
+                    break;
+                }
+            }
+        }
         match self.solve(start) {
             Some(solution) if -10.0 * (solution.mse / self.power_of_uinfo()).max(1e-18).log10() >= KNOWN_ENOUGH => {
                 self.trained_snr = -10.0 * (solution.mse / self.power_of_uinfo()).max(1e-18).log10();
@@ -510,6 +617,7 @@ impl Receiver {
                 let main = self.taps_peak(&solution.taps);
                 self.inverted = main < 0.0;
                 self.taps = solution.taps;
+                self.centre = centre_of(&self.taps);
                 self.feedback = solution.feedback;
                 let known = self.trn1d(TRAIN_TO - FEEDBACK, TRAIN_TO);
                 self.past = known.into_iter().rev().collect();
@@ -537,10 +645,10 @@ impl Receiver {
         taps.iter().copied().fold(0.0, |best, t| if t.abs() > best.abs() { t } else { best })
     }
 
-    /// The equaliser solved for from TRN1d, at the best alignment near
-    /// `start`.
-    fn solve(&self, start: u64) -> Option<Solution> {
-        let targets = self.trn1d(0, TRAIN_TO);
+    /// Where TRN1d's first symbol is, near `start`: the alignment whose
+    /// short fit fits best.
+    fn align(&self, start: u64) -> Option<u64> {
+        let targets = self.trn1d(0, SEARCH_TO);
         let mut best: Option<(f64, u64)> = None;
         for delta in -SEARCH..=SEARCH {
             let Some(origin) = start.checked_add_signed(delta) else { continue };
@@ -549,7 +657,14 @@ impl Receiver {
                 best = Some((solution.mse, origin));
             }
         }
-        let (_, origin) = best?;
+        best.map(|(_, origin)| origin)
+    }
+
+    /// The equaliser solved for from TRN1d, at the best alignment near
+    /// `start`.
+    fn solve(&self, start: u64) -> Option<Solution> {
+        let origin = self.align(start)?;
+        let targets = self.trn1d(0, TRAIN_TO);
         self.fit(origin, &targets, TRAIN_FROM, TRAIN_TO)
     }
 
@@ -622,10 +737,44 @@ impl Receiver {
             self.drift = (self.drift - DRIFT_GAIN * late).clamp(-0.002, 0.002);
             self.error += 0.002 * (e * e - self.error);
         }
+        if index.is_multiple_of(CENTRE_EVERY) && decided.is_some() {
+            self.hold_centre();
+        }
         self.past.pop_back();
         self.past.push_front(decided.unwrap_or(y));
         Symbol { index, value: y, decided }
     }
+
+    /// Keep the equaliser's weight where training left it.
+    ///
+    /// A clock drifting against the far one moves the pulse along this end's
+    /// samples, and an adaptive equaliser follows it: its weight walks, the
+    /// decisions stay good, and the timing loop is never told -- until the
+    /// weight walks off the end. So the walk is read off the taps and given
+    /// to the clock: the sampling moves by as much as the weight did, the
+    /// taps move back to match, and how fast it is walking goes into the
+    /// clock's rate.
+    fn hold_centre(&mut self) {
+        let moved = centre_of(&self.taps) - self.centre;
+        if moved.abs() < 1e-4 {
+            return;
+        }
+        let moved = moved.clamp(-0.25, 0.25);
+        self.due += moved * self.half;
+        self.timed += moved * self.half;
+        self.drift = (self.drift + CENTRE_DRIFT_GAIN * moved / (2 * CENTRE_EVERY) as f64).clamp(-0.002, 0.002);
+        // The taps at i + moved, to first order.
+        let old = self.taps.clone();
+        for i in 1..old.len() - 1 {
+            self.taps[i] = old[i] + moved * 0.5 * (old[i + 1] - old[i - 1]);
+        }
+    }
+}
+
+/// Where a set of taps has its weight, in taps.
+fn centre_of(taps: &[f64]) -> f64 {
+    let (moment, weight) = taps.iter().enumerate().fold((0.0, 0.0), |(m, w), (i, t)| (m + i as f64 * t * t, w + t * t));
+    moment / weight.max(1e-30)
 }
 
 fn apply(taps: &[f64], row: &[f64]) -> f64 {

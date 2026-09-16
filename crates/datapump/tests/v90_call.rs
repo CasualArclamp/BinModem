@@ -33,22 +33,23 @@ struct Call {
     net: Network,
     analogue: analogue::Modem,
     digital: digital::Modem,
-    up: [f64; 2],
+    up: Vec<f64>,
     ticks: u64,
 }
 
 impl Call {
     fn new(net: Network) -> Self {
         let (a, d) = settled();
-        Self { net, analogue: analogue::Modem::new(a, FS), digital: digital::Modem::new(d), up: [0.0; 2], ticks: 0 }
+        Self { net, analogue: analogue::Modem::new(a, FS), digital: digital::Modem::new(d), up: Vec::new(), ticks: 0 }
     }
 
     /// One network sample: 125 microseconds.
     fn tick(&mut self) {
         let to_digital = self.net.up(&self.up);
+        self.up.clear();
         let from_digital = self.digital.step(to_digital);
-        for (k, x) in self.net.down(from_digital).into_iter().enumerate() {
-            self.up[k] = self.analogue.step(x);
+        for x in self.net.down(from_digital) {
+            self.up.push(self.analogue.step(x));
         }
         self.ticks += 1;
     }
@@ -142,7 +143,7 @@ struct FullCall {
     net: Network,
     analogue: datapump::v90::startup::Analogue,
     digital: datapump::v90::startup::Digital,
-    up: [f64; 2],
+    up: Vec<f64>,
     ticks: u64,
 }
 
@@ -152,7 +153,7 @@ impl FullCall {
             net,
             analogue: datapump::v90::startup::Analogue::new(FS),
             digital: datapump::v90::startup::Digital::new(server),
-            up: [0.0; 2],
+            up: Vec::new(),
             ticks: 0,
         }
     }
@@ -163,9 +164,10 @@ impl FullCall {
         let mut last = ("", "");
         while self.ticks < end {
             let to_digital = self.net.up(&self.up);
+            self.up.clear();
             let from_digital = self.digital.step(to_digital);
-            for (k, x) in self.net.down(from_digital).into_iter().enumerate() {
-                self.up[k] = self.analogue.step(x);
+            for x in self.net.down(from_digital) {
+                self.up.push(self.analogue.step(x));
             }
             self.ticks += 1;
             let now = (self.analogue.phase(), self.digital.phase());
@@ -221,9 +223,10 @@ impl FullCall {
         let end = self.ticks + (seconds * 8000.0) as u64;
         while self.ticks < end {
             let to_digital = self.net.up(&self.up);
+            self.up.clear();
             let from_digital = self.digital.step(to_digital);
-            for (k, x) in self.net.down(from_digital).into_iter().enumerate() {
-                self.up[k] = self.analogue.step(x);
+            for x in self.net.down(from_digital) {
+                self.up.push(self.analogue.step(x));
             }
             self.ticks += 1;
             got_down.extend(self.analogue.take_bits());
@@ -276,4 +279,14 @@ fn a_noisy_loop_connects_slower() {
     let call = connects(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(3e-3), server(), 30.0);
     let datapump::v90::startup::Status::Connected { receive, .. } = call.analogue.status() else { unreachable!() };
     assert!(receive < 50_000, "{receive} on a noisy loop");
+}
+
+#[test]
+fn a_sound_card_clock_120_ppm_off_is_followed_through_ten_seconds_of_data() {
+    let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5).with_clock(120.0), server(), 30.0);
+    let drift = call.analogue.v90().unwrap().receiver().drift_ppm();
+    println!("drift read as {drift:.1} ppm");
+    assert_eq!(call.carries_data(10.0), (true, true));
+    let drift = call.analogue.v90().unwrap().receiver().drift_ppm();
+    assert!((drift.abs() - 120.0).abs() < 20.0, "drift read as {drift:.1} ppm");
 }

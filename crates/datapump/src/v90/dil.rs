@@ -228,14 +228,21 @@ fn ladder(route: &Route, law: Law, i: usize, spacing: f64) -> Vec<u8> {
     // robbed bit's neighbours are -- are one level: keep whichever of them
     // arrived as itself.
     let mut levels: Vec<u8> = Vec::new();
+    // Where the current group starts: a group is measured from its bottom,
+    // or a representative that moves up as it is replaced would carry the
+    // group up with it.
+    let mut bottom = f64::NEG_INFINITY;
     for u in order {
         match levels.last_mut() {
-            Some(same) if level(u) - level(*same) < 0.3 * spacing => {
+            Some(same) if level(u) - bottom < 0.3 * spacing => {
                 if moved(u) < moved(*same) {
                     *same = u;
                 }
             }
-            _ => levels.push(u),
+            _ => {
+                bottom = level(u);
+                levels.push(u);
+            }
         }
     }
     let mut chosen: Vec<u8> = Vec::new();

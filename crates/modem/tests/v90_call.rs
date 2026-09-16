@@ -91,7 +91,7 @@ struct Call {
     net: Network,
     caller: Modem,
     server: Server,
-    up: [f64; 2],
+    up: Vec<f64>,
     said: Vec<u8>,
 }
 
@@ -101,7 +101,7 @@ impl Call {
             net: Network::new(Law::Mu, FS).with_delay(0.015, FS).with_noise(1e-5),
             caller: Modem::new(FS),
             server: Server::new(),
-            up: [0.0; 2],
+            up: Vec::new(),
             said: Vec::new(),
         }
     }
@@ -116,9 +116,10 @@ impl Call {
     fn run(&mut self, seconds: f64) {
         for _ in 0..(seconds * NETWORK_FS) as usize {
             let to_server = self.net.up(&self.up);
+            self.up.clear();
             let from_server = self.server.step(to_server);
-            for (k, x) in self.net.down(from_server).into_iter().enumerate() {
-                self.up[k] = self.caller.step(x);
+            for x in self.net.down(from_server) {
+                self.up.push(self.caller.step(x));
                 self.said.extend(self.caller.take_dte());
             }
         }
