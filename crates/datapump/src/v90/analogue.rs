@@ -49,6 +49,12 @@ const R_HEARD: usize = 8;
 /// B1d: "48 data frames" (8.6.1).
 const B1D_FRAMES: usize = 48;
 
+/// Frames over which a read of impossible numbers is counted, how many make
+/// it a lost place, and symbols kept for finding the place again.
+const PLACE_WINDOW: usize = 24;
+const PLACE_LOST: usize = 3;
+const PLACE_KEPT: usize = 48 * INTERVALS;
+
 /// How phases 3 and 4 are going.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -429,6 +435,44 @@ fn levels_for(cp: &Cp, route: &Route) -> Levels {
     })
 }
 
+/// The nearest of an interval's levels to `value`, as (Ucode, positive).
+fn nearest(levels: &[(f64, u8, bool)], value: f64) -> (u8, bool) {
+    levels
+        .iter()
+        .min_by(|a, b| (a.0 - value).abs().total_cmp(&(b.0 - value).abs()))
+        .map_or((0, false), |l| (l.1, l.2))
+}
+
+/// Where the frames are, as a shift from where they were taken to be: the one
+/// under which the symbols kept make the fewest numbers the digital modem
+/// could not have sent. None if that is where they already are.
+fn find_place(frames: &Frames) -> Option<u64> {
+    let mut best: Option<(usize, u64)> = None;
+    for shift in 0..INTERVALS as u64 {
+        let mut current = [(0u8, false); INTERVALS];
+        let mut have = 0usize;
+        let mut impossible = 0usize;
+        for &(index, value) in &frames.history {
+            let i = ((index + shift) % INTERVALS as u64) as usize;
+            current[i] = nearest(&frames.levels[i], value);
+            have = if i == 0 { 1 } else if have > 0 { have + 1 } else { 0 };
+            if i == INTERVALS - 1 && have == INTERVALS {
+                let frame = Frame {
+                    ucodes: std::array::from_fn(|k| current[k].0),
+                    positive: std::array::from_fn(|k| current[k].1),
+                };
+                if !frames.decoder.could_have_sent(&frame) {
+                    impossible += 1;
+                }
+            }
+        }
+        if best.is_none_or(|(count, _)| impossible < count) {
+            best = Some((impossible, shift));
+        }
+    }
+    best.map(|(_, shift)| shift).filter(|&shift| shift != 0)
+}
+
 fn slicer_for(levels: &Levels) -> Slicer {
     Slicer::Levels(Box::new(std::array::from_fn(|i| levels[i].iter().map(|l| l.0).collect())))
 }
@@ -448,6 +492,12 @@ struct Frames {
     ed: bool,
     b1d_left: usize,
     data: bool,
+    /// The last symbols, as (index, value), and whether each of the last
+    /// frames was one the digital modem could have sent.
+    history: VecDeque<(u64, f64)>,
+    impossible: VecDeque<bool>,
+    /// Times the frames were found somewhere else.
+    moved: u32,
 }
 
 /// Where the analogue modem has got to.
@@ -707,6 +757,9 @@ impl Modem {
             }
             Heard::Untrained => self.fail("the digital modem's TRN1d did not train this end"),
             Heard::Symbol(symbol) => self.symbol(symbol),
+            // A slip, or something like one: the receiver holds its loops,
+            // and where the frames went is worked out from what comes after.
+            Heard::Lost | Heard::Found => {}
         }
     }
 
@@ -815,6 +868,9 @@ impl Modem {
                     ed: false,
                     b1d_left: 0,
                     data: false,
+                    history: VecDeque::with_capacity(PLACE_KEPT),
+                    impossible: VecDeque::with_capacity(PLACE_WINDOW),
+                    moved: 0,
                 });
             } else if self.r_watch.heard && !was_heard {
                 self.rx.set_slicer(Slicer::Binary(level));
@@ -831,11 +887,11 @@ impl Modem {
             return;
         }
         let i = symbol.interval();
-        let nearest = frames.levels[i]
-            .iter()
-            .min_by(|a, b| (a.0 - symbol.value).abs().total_cmp(&(b.0 - symbol.value).abs()))
-            .map_or((0, false), |l| (l.1, l.2));
-        frames.frame[i] = nearest;
+        frames.frame[i] = nearest(&frames.levels[i], symbol.value);
+        if frames.history.len() == PLACE_KEPT {
+            frames.history.pop_front();
+        }
+        frames.history.push_back((symbol.index, symbol.value));
         if i != INTERVALS - 1 {
             return;
         }
@@ -843,6 +899,22 @@ impl Modem {
             ucodes: std::array::from_fn(|k| frames.frame[k].0),
             positive: std::array::from_fn(|k| frames.frame[k].1),
         };
+        if frames.impossible.len() == PLACE_WINDOW {
+            frames.impossible.pop_front();
+        }
+        frames.impossible.push_back(!frames.decoder.could_have_sent(&frame));
+        if frames.impossible.iter().filter(|x| **x).count() >= PLACE_LOST
+            && let Some(shift) = find_place(frames)
+        {
+            // The frames are somewhere else: a slip has moved every symbol
+            // after it by a whole twenty milliseconds.
+            frames.moved += 1;
+            frames.impossible.clear();
+            frames.history.clear();
+            let offset = self.rx.frame_offset() + shift;
+            self.rx.set_frame_offset(offset);
+            return;
+        }
         let bits: Vec<bool> = frames.decoder.frame(frame).into_iter().map(|b| frames.descrambler.descramble(b)).collect();
         if frames.data {
             self.received.extend(bits);
@@ -884,6 +956,11 @@ impl Modem {
                 frames.mp = Some(mp);
             }
         }
+    }
+
+    /// Times the downstream frames were found somewhere else after a slip.
+    pub fn frames_moved(&self) -> u32 {
+        self.frames.as_ref().map_or(0, |f| f.moved)
     }
 
     /// Data mode's upstream, as the digital modem's MP asks for it.

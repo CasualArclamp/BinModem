@@ -235,6 +235,21 @@ impl Decoder {
         &self.mapping
     }
 
+    /// Whether a frame's six codewords make a number the modulus encoder
+    /// could have made: less than 2^K, where the constellations can say more.
+    ///
+    /// A frame read with its intervals in the wrong places often makes one it
+    /// could not, and one read in the right places never does.
+    pub fn could_have_sent(&self, frame: &Frame) -> bool {
+        let moduli = self.mapping.moduli();
+        let mut r: u128 = 0;
+        for i in (0..INTERVALS).rev() {
+            let label = self.mapping.sets[i].label(frame.ucodes[i]).unwrap_or(0);
+            r = r * u128::from(moduli[i].max(1)) + u128::from(label);
+        }
+        self.mapping.k >= 128 || r < 1u128 << self.mapping.k
+    }
+
     /// Six codewords back to the D bits they carried.
     pub fn frame(&mut self, frame: Frame) -> Vec<bool> {
         let labels: [u16; INTERVALS] = std::array::from_fn(|i| self.mapping.sets[i].label(frame.ucodes[i]).unwrap_or(0));

@@ -211,6 +211,19 @@ fn connects(net: Network, server: Info0d, seconds: f64) -> FullCall {
 }
 
 impl FullCall {
+    /// Run until the network has carried `seconds` in all.
+    fn run_until_seconds(&mut self, seconds: f64) {
+        while (self.ticks as f64) < seconds * 8000.0 {
+            let to_digital = self.net.up(&self.up);
+            self.up.clear();
+            let from_digital = self.digital.step(to_digital);
+            for x in self.net.down(from_digital) {
+                self.up.push(self.analogue.step(x));
+            }
+            self.ticks += 1;
+        }
+    }
+
     /// Send both ways for a while, and say whether every bit arrived.
     fn carries_data(&mut self, seconds: f64) -> (bool, bool) {
         let down = pattern(30_000, 3);
@@ -279,6 +292,24 @@ fn a_noisy_loop_connects_slower() {
     let call = connects(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(3e-3), server(), 30.0);
     let datapump::v90::startup::Status::Connected { receive, .. } = call.analogue.status() else { unreachable!() };
     assert!(receive < 50_000, "{receive} on a noisy loop");
+}
+
+/// A softphone's jitter buffer slipping twenty milliseconds of the
+/// downstream, once each way, in the middle of data mode: what is lost with
+/// it is lost, and what is sent after it arrives.
+#[test]
+fn a_slip_in_data_mode_is_followed_and_data_after_it_arrives() {
+    for inserted in [true, false] {
+        let net = Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5).with_slips(9.0, inserted);
+        let mut call = connects(net, server(), 30.0);
+        // Past the first slip, which is at nine seconds.
+        call.run_until_seconds(10.0);
+        assert_eq!(call.net.slips(), 1, "no slip happened");
+        let v90 = call.analogue.v90().unwrap();
+        println!("inserted {inserted}: frames moved {}, receiver lost {}", v90.frames_moved(), v90.receiver().slips());
+        assert!(v90.frames_moved() >= 1, "the frames were never found again");
+        assert_eq!(call.carries_data(4.0), (true, true), "inserted {inserted}");
+    }
 }
 
 #[test]

@@ -15,7 +15,7 @@
 //! so is what it asks for.
 
 use super::INTERVALS;
-use super::modulus::{self, Moduli};
+use super::modulus::Moduli;
 use super::sequences::{Cp, Descriptor, Mask};
 use super::sign::Redundancy;
 use super::ucode::{self, Law, UCODES};
@@ -257,6 +257,23 @@ fn ladder(route: &Route, law: Law, i: usize, spacing: f64) -> Vec<u8> {
     chosen
 }
 
+/// How much more a constellation set can say than the bits it carries: a
+/// quarter.
+///
+/// Room that is never used, and there for a reason. A frame read with its
+/// intervals in the wrong places -- which is what a softphone's jitter buffer
+/// does to every frame after a slip -- comes out of the modulus decoder as a
+/// number the encoder could never have made about a fifth of the time, and a
+/// frame read in its right place never does. That is how the analogue modem
+/// knows it has lost its place, and finds it again.
+pub const ROOM: (u128, u128) = (5, 4);
+
+/// Whether these moduli carry `k` bits with [`ROOM`] to spare.
+pub fn fits_with_room(moduli: Moduli, k: u32) -> bool {
+    let product: u128 = moduli.iter().map(|&m| u128::from(m)).product();
+    k < 120 && product * ROOM.1 >= ROOM.0 << k
+}
+
 /// Sets carrying `k` bits at `spacing`, as quiet as they can be: each
 /// interval takes the fewest of its ladder that the bits need, and where one
 /// interval's ladder is short -- a robbed bit halves it -- the others take
@@ -268,7 +285,7 @@ fn quietest(route: &Route, law: Law, k: u32, spacing: f64, limit: f64) -> Option
     let mut sizes: [usize; INTERVALS] = std::array::from_fn(|i| even.min(ladders[i].len()));
     let fits = |sizes: &[usize; INTERVALS]| {
         let moduli: Moduli = std::array::from_fn(|i| sizes[i] as u16);
-        modulus::fits(moduli, k)
+        fits_with_room(moduli, k)
     };
     while !fits(&sizes) {
         let cheapest = (0..INTERVALS)
@@ -474,7 +491,7 @@ mod tests {
         let mut brute = 0.0;
         for m in 0..1u32 << k {
             let bits: Vec<bool> = (0..k).map(|b| m >> b & 1 == 1).collect();
-            let labels = modulus::encode(&bits, moduli);
+            let labels = crate::v90::modulus::encode(&bits, moduli);
             for i in 0..INTERVALS {
                 let mut points = sets[i].clone();
                 points.sort_unstable_by(|a, b| b.cmp(a));

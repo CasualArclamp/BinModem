@@ -105,6 +105,14 @@ const STEP: f64 = 0.004;
 const TIMING_GAIN: f64 = 0.004;
 const DRIFT_GAIN: f64 = 2e-6;
 
+/// Symbols the decisions' recent error is judged over, and how many times
+/// what it settled to it has to reach before the signal is taken to have
+/// jumped. A dense constellation reads garbage at about a twelfth of a
+/// spacing squared, eight times the noise it was built for.
+const JUDGED: usize = 32;
+const LOST_AT: f64 = 4.0;
+const FOUND_AT: f64 = 2.0;
+
 /// Symbols between looks at where the equaliser's weight has got to, and how
 /// much of its movement goes into the clock's rate.
 const CENTRE_EVERY: u64 = 16;
@@ -153,6 +161,11 @@ pub enum Heard {
     /// Nothing trained: TRN1d was not where the reversal said.
     Untrained,
     Symbol(Symbol),
+    /// The decisions went bad all at once -- a jitter buffer's slip, most
+    /// likely -- and the loops are holding still.
+    Lost,
+    /// And they are good again.
+    Found,
 }
 
 /// One symbol, equalised.
@@ -307,6 +320,15 @@ pub struct Receiver {
     timed: f64,
     /// Where training left the equaliser's weight, in taps.
     centre: f64,
+    /// Added to a symbol's index to give its data frame interval, once a slip
+    /// has moved the frames.
+    frame_offset: u64,
+    /// The last symbols' squared errors, what they settle to, and whether the
+    /// loops are holding.
+    recent: VecDeque<f64>,
+    settled: f64,
+    lost: bool,
+    slips: u32,
 }
 
 impl Receiver {
@@ -360,6 +382,11 @@ impl Receiver {
             inverted: false,
             timed: 0.0,
             centre: 0.0,
+            frame_offset: 0,
+            recent: VecDeque::with_capacity(JUDGED),
+            settled: 0.0,
+            lost: false,
+            slips: 0,
         }
     }
 
@@ -382,9 +409,33 @@ impl Receiver {
         matches!(self.stage, Stage::Trained)
     }
 
-    /// What the loops learn from from here on.
+    /// What the loops learn from from here on, forgetting what the last one
+    /// made of the errors.
     pub fn set_slicer(&mut self, slicer: Slicer) {
         self.slicer = slicer;
+        self.recent.clear();
+        self.settled = 0.0;
+        self.lost = false;
+    }
+
+    /// Move where the data frames start, by `offset` symbols: a slip has put
+    /// every symbol after it in a different interval.
+    pub fn set_frame_offset(&mut self, offset: u64) {
+        self.frame_offset = offset % INTERVALS as u64;
+    }
+
+    pub fn frame_offset(&self) -> u64 {
+        self.frame_offset
+    }
+
+    /// Whether the loops are holding through a burst of bad decisions.
+    pub fn is_lost(&self) -> bool {
+        self.lost
+    }
+
+    /// Bursts held through so far.
+    pub fn slips(&self) -> u32 {
+        self.slips
     }
 
     /// Say what the next symbols are, for [`Slicer::Known`].
@@ -716,10 +767,15 @@ impl Receiver {
         let row = &wide[1..wide.len() - 1];
         let y = apply(&self.taps, row) - apply(&self.feedback, self.past.make_contiguous());
         let rate: f64 = self.taps.iter().enumerate().map(|(i, w)| w * 0.5 * (wide[i + 2] - wide[i])).sum();
-        let interval = (index % INTERVALS as u64) as usize;
+        let interval = ((index + self.frame_offset) % INTERVALS as u64) as usize;
         let decided = self.slicer.decide(y, interval);
         if let Some(target) = decided {
             let e = y - target;
+            if self.watch(e * e) {
+                self.past.pop_back();
+                self.past.push_front(target);
+                return Symbol { index: index + self.frame_offset, value: y, decided };
+            }
             let energy: f64 = row.iter().chain(self.past.iter()).map(|x| x * x).sum::<f64>() + 1e-18;
             let back = e * STEP / energy;
             for (tap, x) in self.taps.iter_mut().zip(row) {
@@ -742,7 +798,33 @@ impl Receiver {
         }
         self.past.pop_back();
         self.past.push_front(decided.unwrap_or(y));
-        Symbol { index, value: y, decided }
+        Symbol { index: index + self.frame_offset, value: y, decided }
+    }
+
+    /// Judge one decision's squared error against what the errors settled to.
+    /// True while the loops are to hold still.
+    fn watch(&mut self, squared: f64) -> bool {
+        self.recent.push_back(squared);
+        if self.recent.len() > JUDGED {
+            self.recent.pop_front();
+        }
+        let recent = self.recent.iter().sum::<f64>() / self.recent.len() as f64;
+        if self.recent.len() < JUDGED {
+            self.settled = recent;
+            return false;
+        }
+        if !self.lost && recent > LOST_AT * self.settled {
+            self.lost = true;
+            self.slips += 1;
+            self.heard.push_back(Heard::Lost);
+        } else if self.lost && recent < FOUND_AT * self.settled {
+            self.lost = false;
+            self.heard.push_back(Heard::Found);
+        }
+        if !self.lost {
+            self.settled += 0.005 * (recent - self.settled);
+        }
+        self.lost
     }
 
     /// Keep the equaliser's weight where training left it.
