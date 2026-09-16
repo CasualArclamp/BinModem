@@ -25,7 +25,8 @@
 use dsp::{ReversalDetector, ToneDetector};
 
 use super::dpsk::{self, Side};
-use super::info::{Info, Info0, Info1a, Info1c, Probed, SymbolRate};
+use super::info::{Info, Info0, Info0d, Info1a, Info1aPcm, Info1c, Probed, SymbolRate};
+use crate::v90;
 use super::probe::{self, Analyzer, Reading};
 
 /// Which end of the call this is.
@@ -47,6 +48,34 @@ impl Role {
         match self {
             Self::Call => Side::Answer,
             Self::Answer => Side::Call,
+        }
+    }
+}
+
+/// V.90's part in phase 2 (9.2/V.90), where there is one.
+///
+/// V.90 runs V.34's phase 2 with its own INFO sequences, and gives the two
+/// sides by what the modems are rather than by who dialled: "INFO sequences
+/// are transmitted by the analogue modem with a carrier frequency of 2400 Hz
+/// ... by the digital modem with a carrier frequency of 1200 Hz" (8.2.3.1).
+/// So the analogue modem is V.34's answer modem here even though it placed
+/// the call, and the digital modem V.34's call modem.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Pcm {
+    /// The analogue modem: it asks for V.90 in INFO1a when the far end's
+    /// INFO0 was an INFO0d.
+    Analogue,
+    /// The digital modem, whose INFO0 is this INFO0d. Its bits 12 to 28 are
+    /// filled in from this end's own capabilities.
+    Digital(Info0d),
+}
+
+impl Pcm {
+    /// The V.34 side this takes in phase 2.
+    pub fn role(self) -> Role {
+        match self {
+            Self::Analogue => Role::Answer,
+            Self::Digital(_) => Role::Call,
         }
     }
 }
@@ -245,6 +274,12 @@ pub struct Modem {
     recoveries: u32,
     /// Set when the failure is one to retrain from.
     retrain_instead: bool,
+    /// V.90's part, if this is V.90's phase 2.
+    pcm: Option<Pcm>,
+    /// The far end's INFO0d, if it sent one.
+    far_info0d: Option<Info0d>,
+    /// An INFO1a asking for V.90, sent or received.
+    info1a_pcm: Option<Info1aPcm>,
 }
 
 impl Modem {
@@ -284,6 +319,9 @@ impl Modem {
             info1a: None,
             recoveries: 0,
             retrain_instead: false,
+            pcm: None,
+            far_info0d: None,
+            info1a_pcm: None,
         }
     }
 
@@ -298,9 +336,56 @@ impl Modem {
         modem.speaking = Speaking::Carrier;
         // 11.2.1.1.1 and 11.2.1.2.1: INFO0 "with bit 28 set to 0, followed by"
         // this end's tone -- which the modulator carries on into by itself.
-        let bits = modem.ours.to_bits();
+        let bits = modem.info0_bits();
         modem.tx.send(&bits);
         modem
+    }
+
+    /// V.90's phase 2 from its start (9.2.1.1.1, 9.2.2.1.1).
+    pub fn v90(pcm: Pcm, fs: f64) -> Self {
+        let mut modem = Self::blank(pcm.role(), fs);
+        modem.pcm = Some(pcm);
+        modem.stage = match pcm.role() {
+            Role::Call => Stage::CallInfo0,
+            Role::Answer => Stage::AnswerInfo0,
+        };
+        modem.speaking = Speaking::Carrier;
+        let bits = modem.info0_bits();
+        modem.tx.send(&bits);
+        modem
+    }
+
+    /// V.90's phase 2 as a retrain: "Any subsequent retrains shall use Phase
+    /// 2 of V.90 regardless of the analogue modem's choice of operating mode"
+    /// (9.2.1.1.8, 9.2.2.1.9).
+    pub fn v90_retrain(pcm: Pcm, fs: f64, far: Info0, far_info0d: Option<Info0d>) -> Self {
+        let mut modem = Self::retrain(pcm.role(), fs, far);
+        modem.pcm = Some(pcm);
+        modem.far_info0d = far_info0d;
+        modem
+    }
+
+    /// This end's INFO0 as it goes out: INFO0d from a digital modem.
+    fn info0_bits(&self) -> Vec<bool> {
+        match self.pcm {
+            Some(Pcm::Digital(d)) => Info0d { v34: self.ours, ..d }.to_bits(),
+            _ => self.ours.to_bits(),
+        }
+    }
+
+    /// V.90's part, if this is V.90's phase 2.
+    pub fn pcm(&self) -> Option<Pcm> {
+        self.pcm
+    }
+
+    /// The far end's INFO0d, if it sent one: a V.90 digital modem.
+    pub fn far_info0d(&self) -> Option<Info0d> {
+        self.far_info0d
+    }
+
+    /// The INFO1a asking for V.90, if one went or came.
+    pub fn info1a_pcm(&self) -> Option<Info1aPcm> {
+        self.info1a_pcm
     }
 
     /// Phase 2 as a retrain (11.5): the capabilities were settled the first
@@ -503,6 +588,12 @@ impl Modem {
 
     fn heard(&mut self, info: Info) {
         match (self.role, info) {
+            // A V.90 digital modem's INFO0 carries INFO0a's bits, and is heard
+            // as one -- by a V.34 modem too, which has no use for the rest.
+            (_, Info::Info0d(far)) => {
+                self.far_info0d = Some(far);
+                self.heard(Info::Info0(far.v34));
+            }
             (_, Info::Info0(far)) => {
                 self.far = Some(far);
                 self.far_info0_count += 1;
@@ -516,15 +607,28 @@ impl Modem {
                     // 11.2.2.1.1 and 11.2.2.2.1: the far end is repeating its
                     // INFO0, so it did not get ours. Once more, now saying
                     // that its own arrived.
-                    let bits = self.ours.to_bits();
+                    let bits = self.info0_bits();
                     self.tx.send(&bits);
                 }
             }
             (Role::Answer, Info::Info1c(info1c)) if self.stage == Stage::AnswerInfo1 => {
                 self.info1c = Some(info1c);
-                let bits = self.settle(&info1c).to_bits();
-                // Kept as it went, which is to the field's own resolution.
-                self.info1a = Info1a::from_bits(&bits);
+                // An analogue modem that heard an INFO0d asks for V.90
+                // (9.2.2.1.9); anything else is V.34's INFO1a.
+                let bits = match (self.pcm, self.far_info0d) {
+                    (Some(Pcm::Analogue), Some(far)) => {
+                        let bits = self.settle_pcm(&info1c, &far).to_bits();
+                        self.info1a_pcm = Info1aPcm::from_bits(&bits);
+                        bits
+                    }
+                    _ => {
+                        let bits = self.settle(&info1c).to_bits();
+                        // Kept as it went, which is to the field's own
+                        // resolution.
+                        self.info1a = Info1a::from_bits(&bits);
+                        bits
+                    }
+                };
                 // Straight on from tone A, as one group with it.
                 self.tx.send(&bits);
                 self.tx.silence();
@@ -532,6 +636,14 @@ impl Modem {
             }
             (Role::Call, Info::Info1a(info1a)) if self.stage == Stage::CallInfo1 => {
                 self.info1a = Some(info1a);
+                self.status = Status::Done;
+                self.enter(Stage::Finished);
+            }
+            // 9.2.1.1.8: "the digital modem shall proceed to Phase 3 of the
+            // start-up procedure if bits 37:39 of INFO1a indicate the integer
+            // 6". A V.34 modem never gets one, since it never sent INFO0d.
+            (Role::Call, Info::Info1aPcm(asked)) if self.stage == Stage::CallInfo1 && self.pcm.is_some() => {
+                self.info1a_pcm = Some(asked);
                 self.status = Status::Done;
                 self.enter(Stage::Finished);
             }
@@ -751,8 +863,7 @@ impl Modem {
                 }
             }
             Stage::AnswerInfo1 => {
-                if let Some(info1a) = self.info1a {
-                    let _ = info1a;
+                if self.info1a.is_some() || self.info1a_pcm.is_some() {
                     if !self.tx.is_sending() {
                         self.status = Status::Done;
                         self.enter(Stage::Finished);
@@ -764,6 +875,35 @@ impl Modem {
                 }
             }
             Stage::Finished => {}
+        }
+    }
+
+    /// V.90's INFO1a (Table 10/V.90): the upstream symbol rate, and the
+    /// codeword the digital modem is to train with.
+    fn settle_pcm(&self, info1d: &Info1c, far: &Info0d) -> Info1aPcm {
+        // "An integer between 3 and 5 ... consistent with information in
+        // INFO1d": the fastest the digital modem projected, the lower symbol
+        // rate on a tie; 3429 only where both ends allow it upstream.
+        let allowed = |r: SymbolRate| match r {
+            SymbolRate::S3000 | SymbolRate::S3200 => true,
+            SymbolRate::S3429 => far.upstream_3429 && self.ours.transmit_3429,
+            _ => false,
+        };
+        let upstream = SymbolRate::ALL
+            .iter()
+            .copied()
+            .filter(|&r| allowed(r) && info1d.probed[r.index() as usize].max_rate > 0)
+            .max_by(|a, b| {
+                let rate = |r: &SymbolRate| info1d.probed[r.index() as usize].max_rate;
+                rate(a).cmp(&rate(b)).then(b.index().cmp(&a.index()))
+            })
+            // 6.2: 3200 is the one every analogue modem has.
+            .unwrap_or(SymbolRate::S3200);
+        Info1aPcm {
+            md_length: 0,
+            uinfo: v90::training_codeword(far),
+            upstream,
+            frequency_offset: self.reading.as_ref().and_then(|r| r.frequency_offset),
         }
     }
 
@@ -850,8 +990,11 @@ mod tests {
 
     /// Run the two ends of phase 2 against each other.
     fn call(line: &mut Line, seconds: f64) -> (Modem, Modem) {
-        let mut caller = Modem::new(Role::Call, FS);
-        let mut answerer = Modem::new(Role::Answer, FS);
+        run(line, seconds, Modem::new(Role::Call, FS), Modem::new(Role::Answer, FS))
+    }
+
+    /// The same for any two ends: the first takes V.34's call side.
+    fn run(line: &mut Line, seconds: f64, mut caller: Modem, mut answerer: Modem) -> (Modem, Modem) {
         let (mut from_call, mut from_answer) = (0.0, 0.0);
         for _ in 0..(seconds * FS) as usize {
             let at_call = line.to_call.pop_front().unwrap() + line.echo * from_call + line.noise();
@@ -928,5 +1071,54 @@ mod tests {
             caller.step(0.0);
         }
         assert!(matches!(caller.status(), Status::Failed(_)), "{:?}", caller.status());
+    }
+
+    fn server() -> Info0d {
+        Info0d { nominal_power: 4, max_power: 23, power_at_codec: true, ..Info0d::default() }
+    }
+
+    /// 9.2: a V.90 pair gets through V.34's phase 2 with V.90's sequences in
+    /// it, and the analogue modem asks for V.90 and a codeword to train on.
+    #[test]
+    fn a_v90_pair_settles_on_v90() {
+        let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
+        let (digital, analogue) = run(&mut line, 12.0, Modem::v90(Pcm::Digital(server()), FS), Modem::v90(Pcm::Analogue, FS));
+        assert_eq!(digital.status(), Status::Done, "digital: {}", digital.phase());
+        assert_eq!(analogue.status(), Status::Done, "analogue: {}", analogue.phase());
+        // Each end heard what the other is.
+        assert_eq!(analogue.far_info0d().map(|d| d.max_power), Some(23));
+        assert!(digital.far_info0d().is_none());
+        let asked = analogue.info1a_pcm().expect("the analogue modem sent no V.90 INFO1a");
+        assert_eq!(digital.info1a_pcm(), Some(asked));
+        assert!(digital.info1a().is_none() && analogue.info1a().is_none());
+        assert_eq!(asked.uinfo, 79);
+        assert!(matches!(asked.upstream, SymbolRate::S3000 | SymbolRate::S3200));
+        // And the digital modem probed the upstream, as INFO1d says.
+        assert!(digital.info1c().is_some_and(|i| i.probed[4].max_rate > 0));
+    }
+
+    /// A V.34 modem calling a V.90 digital modem hears an INFO0d as an
+    /// INFO0, and gets V.34.
+    #[test]
+    fn a_v34_modem_calling_a_v90_server_gets_v34() {
+        let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
+        let (digital, v34) = run(&mut line, 12.0, Modem::v90(Pcm::Digital(server()), FS), Modem::new(Role::Answer, FS));
+        assert_eq!(digital.status(), Status::Done, "digital: {}", digital.phase());
+        assert_eq!(v34.status(), Status::Done, "V.34: {}", v34.phase());
+        assert!(v34.info1a().is_some());
+        assert!(digital.info1a().is_some(), "the server did not take V.34's INFO1a");
+        assert!(digital.info1a_pcm().is_none());
+    }
+
+    /// And a V.90 analogue modem that meets a V.34 modem's INFO0 asks for
+    /// V.34.
+    #[test]
+    fn a_v90_analogue_modem_meeting_v34_asks_for_v34() {
+        let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
+        let (v34, analogue) = run(&mut line, 12.0, Modem::new(Role::Call, FS), Modem::v90(Pcm::Analogue, FS));
+        assert_eq!(v34.status(), Status::Done);
+        assert_eq!(analogue.status(), Status::Done);
+        assert!(analogue.info1a().is_some() && analogue.info1a_pcm().is_none());
+        assert!(v34.info1a().is_some());
     }
 }

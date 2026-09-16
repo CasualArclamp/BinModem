@@ -23,12 +23,45 @@
 //! six data frame intervals can carry. That second one costs exactly one bit
 //! per data frame, which is exactly one step of the rate ladder -- see [`RATE_STEP`].
 
+pub mod analogue;
+pub mod dil;
+pub mod digital;
 pub mod encoder;
 pub mod modulus;
+pub mod network;
 pub mod pcm;
 pub mod sequences;
 pub mod sign;
 pub mod ucode;
+
+use crate::v34::info::Info0d;
+
+/// Table 15/V.90: the root of the average power a constellation set may have,
+/// in Table 1's units, for each maximum transmit power INFO0d can name --
+/// -0.5 dBm0 first, down to -16 in half decibels.
+pub const POWER_LIMITS: [u32; 32] = [
+    15124, 14276, 13480, 12724, 12012, 11340, 10708, 10108, 9544, 9008, 8504, 8028, 7580, 7156, 6756, 6380, 6020,
+    5684, 5368, 5068, 4784, 4516, 4264, 4024, 3800, 3588, 3388, 3196, 3020, 2852, 2692, 2540,
+];
+
+/// The limit Table 15 gives for a digital modem's INFO0d.
+pub fn power_limit(far: &Info0d) -> u32 {
+    POWER_LIMITS[usize::from(far.max_power).min(POWER_LIMITS.len() - 1)]
+}
+
+/// UINFO for a digital modem: the loudest codeword whose power stays inside
+/// the digital modem's maximum (Table 10/V.90: "The power of this point shall
+/// not exceed the maximum digital modem transmit power. UINFO shall be
+/// greater than 66").
+///
+/// A two-point train has the power of its one codeword, so the codeword's
+/// size is held to Table 15's root. A Conexant modem training a server whose
+/// ceiling is -12 dBm0 asked for 78, one under the 79 this picks.
+pub fn training_codeword(far: &Info0d) -> u8 {
+    let law = if far.a_law { ucode::Law::A } else { ucode::Law::Mu };
+    let limit = power_limit(far) as i32;
+    (67..ucode::UCODES as u8).rev().find(|&u| ucode::linear(law, u) <= limit).unwrap_or(67)
+}
 
 /// Data frame intervals per data frame (5.4): "data frames in the digital
 /// modem have a six-symbol structure".
@@ -171,6 +204,36 @@ mod tests {
         // And nothing outside K's own range has a row at all.
         assert!(!table_2_has(14, 6));
         assert!(!table_2_has(40, 3));
+    }
+
+    /// Table 15 is a half-decibel ladder from -0.5 dBm0, which is what its
+    /// numbers are: each about 0.944 of the one before.
+    #[test]
+    fn table_fifteen_falls_half_a_decibel_a_row() {
+        for pair in POWER_LIMITS.windows(2) {
+            let ratio = f64::from(pair[1]) / f64::from(pair[0]);
+            assert!((ratio - 10f64.powf(-0.5 / 20.0)).abs() < 0.002, "{pair:?}");
+        }
+        // -12 dBm0 is 23 rows down, and -6 dBm0 is 11.
+        assert_eq!(POWER_LIMITS[23], 4024);
+        assert_eq!(POWER_LIMITS[11], 8028);
+    }
+
+    /// The training codeword for the server on the recording, whose
+    /// ceiling is -12 dBm0.
+    #[test]
+    fn uinfo_is_the_loudest_codeword_under_the_ceiling() {
+        let mut far = Info0d { max_power: 23, ..Info0d::default() };
+        assert_eq!(training_codeword(&far), 79);
+        assert!(ucode::linear(ucode::Law::Mu, 79) <= 4024);
+        assert!(ucode::linear(ucode::Law::Mu, 80) > 4024);
+        // Louder allowed, louder asked for; and never 66 or under.
+        far.max_power = 0;
+        assert!(training_codeword(&far) > 79);
+        far.max_power = 31;
+        assert!(training_codeword(&far) > 66);
+        far.a_law = true;
+        assert!(ucode::linear(ucode::Law::A, training_codeword(&far)) <= 2540);
     }
 
     /// One bit a data frame is one step, which is the arithmetic that makes a

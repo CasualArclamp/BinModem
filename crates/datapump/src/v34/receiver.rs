@@ -227,6 +227,8 @@ pub enum Reference {
 /// What the receiver has to report.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Heard {
+    /// S, sure enough to have learned its template. Said once a hunt.
+    S,
     /// S, and then the change to S-bar. `at` is the half-symbol sample S-bar
     /// is reckoned to start at, give or take one.
     Reversal { at: u64 },
@@ -298,7 +300,7 @@ impl Hunt {
     /// Halves of S in a row before its template is trusted: twenty symbols.
     const HELD: usize = 40;
 
-    fn feed(&mut self, half: Complex, index: u64) -> Option<u64> {
+    fn feed(&mut self, half: Complex, index: u64) -> Option<Hunted> {
         let phase = (index % 4) as usize;
         if self.armed {
             let t = self.template[phase];
@@ -310,7 +312,7 @@ impl Hunt {
             let ratio = along / power.max(1e-12);
             if self.matches.len() == 4 && ratio < -0.5 {
                 // The first of the four that turned it.
-                return Some(index.saturating_sub(3));
+                return Some(Hunted::Reversal(index.saturating_sub(3)));
             }
             if ratio > 0.5 {
                 self.template[phase] = self.template[phase].scale(0.9) + half.scale(0.1);
@@ -350,12 +352,22 @@ impl Hunt {
                 self.armed = true;
                 self.lapsed = 0;
                 self.matches.clear();
+                self.recent.pop_front();
+                self.recent.push_back(half);
+                return Some(Hunted::S);
             }
             self.recent.pop_front();
         }
         self.recent.push_back(half);
         None
     }
+}
+
+/// What a hunt came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hunted {
+    S,
+    Reversal(u64),
 }
 
 /// The far end's signal, one end of phases 3 and 4.
@@ -525,6 +537,27 @@ impl Receiver {
         self.mode = Mode3::Idle;
     }
 
+    /// Go on making symbols with the equaliser as training last left it, the
+    /// first centred on half-symbol sample `first`. False if nothing has
+    /// trained this receiver.
+    ///
+    /// For a far end whose signal after S-bar is not a training sequence:
+    /// V.90's analogue modem sends CPt straight after its S-bar (9.4.2.1),
+    /// to a receiver that trained on its phase 3 and has only hunted since.
+    /// The carrier is turned on by as many symbols as have gone by.
+    pub fn resume(&mut self, first: u64) -> bool {
+        if !self.ever_trained {
+            return false;
+        }
+        let gone = first.saturating_sub(self.next_symbol) / 2;
+        self.rotation = (self.rotation + self.turn * gone as f64).rem_euclid(std::f64::consts::TAU);
+        self.next_symbol = first;
+        self.lost = None;
+        self.recent.clear();
+        self.mode = Mode3::Trained;
+        true
+    }
+
     pub fn is_trained(&self) -> bool {
         matches!(self.mode, Mode3::Trained)
     }
@@ -657,12 +690,14 @@ impl Receiver {
         }
         match &mut self.mode {
             Mode3::Idle => {}
-            Mode3::Hunting(hunt) => {
-                if let Some(at) = hunt.feed(half, index) {
+            Mode3::Hunting(hunt) => match hunt.feed(half, index) {
+                Some(Hunted::S) => self.heard.push_back(Heard::S),
+                Some(Hunted::Reversal(at)) => {
                     self.mode = Mode3::Idle;
                     self.heard.push_back(Heard::Reversal { at });
                 }
-            }
+                None => {}
+            },
             Mode3::Collecting { reference, far, start, second } => {
                 let (reference, far, start, second) = (*reference, *far, *start, *second);
                 let (_, end) = windows(reference, second).1;
@@ -1338,6 +1373,7 @@ mod tests {
             rx.feed(x);
             while let Some(heard) = rx.heard() {
                 match heard {
+                    Heard::S => {}
                     Heard::Reversal { at } => {
                         result.reversal = Some(at);
                         rx.train(Reference::PpThenTrn, Mode::Answer, at);
@@ -1472,6 +1508,7 @@ mod tests {
                 rx.feed(x);
                 while let Some(heard) = rx.heard() {
                     match heard {
+                        Heard::S => {}
                         Heard::Reversal { at } if !phase4 && trainings.is_empty() => rx.train(Reference::PpThenTrn, Mode::Answer, at),
                         Heard::Reversal { at } => {
                             phase4 = true;
@@ -1568,6 +1605,7 @@ mod tests {
             rx.feed(x);
             while let Some(heard) = rx.heard() {
                 match heard {
+                    Heard::S => {}
                     Heard::Reversal { at } => rx.train(Reference::Trn(Size::Sixteen), Mode::Answer, at),
                     Heard::Trained { .. } => {}
                     Heard::Untrained => panic!("did not train"),

@@ -439,6 +439,125 @@ impl Cp {
     }
 }
 
+/// Finds one kind of framed sequence in a stream of descrambled bits.
+///
+/// A sequence starts where a zero follows seventeen ones and not eighteen --
+/// an eighteenth would make the run fill or the last of something else --
+/// and how long it is follows from its first few blocks. Every place that
+/// could be a start is kept until there are enough bits to read it there.
+#[derive(Debug, Clone)]
+struct Finder<T> {
+    bits: Vec<bool>,
+    ones: usize,
+    /// Where candidates start, in `bits`.
+    starts: Vec<usize>,
+    /// Bits needed to know the length, and the length from them.
+    header: usize,
+    length: fn(&[bool]) -> usize,
+    parse: fn(&[bool]) -> Option<T>,
+}
+
+impl<T> Finder<T> {
+    fn new(header_blocks: usize, length: fn(&[bool]) -> usize, parse: fn(&[bool]) -> Option<T>) -> Self {
+        Self { bits: Vec::new(), ones: 0, starts: Vec::new(), header: SYNC_ONES + header_blocks * (BLOCK + 1), length, parse }
+    }
+
+    fn feed(&mut self, bit: bool) -> Option<T> {
+        if !bit && self.ones == SYNC_ONES {
+            self.starts.push(self.bits.len() - SYNC_ONES);
+        }
+        self.ones = if bit { self.ones + 1 } else { 0 };
+        self.bits.push(bit);
+        let mut found = None;
+        let bits = &self.bits;
+        let (header, length, parse) = (self.header, self.length, self.parse);
+        self.starts.retain(|&start| {
+            if found.is_some() {
+                return false;
+            }
+            let have = bits.len() - start;
+            if have < header {
+                return true;
+            }
+            let needed = length(&bits[start..]);
+            if have < needed {
+                return true;
+            }
+            found = parse(&bits[start..start + needed]);
+            false
+        });
+        if found.is_some() {
+            self.starts.clear();
+        }
+        // Keep what the oldest candidate needs, or the last sync's worth.
+        let keep_from = self.starts.first().copied().unwrap_or(self.bits.len().saturating_sub(SYNC_ONES));
+        if keep_from > 4096 {
+            self.bits.drain(..keep_from);
+            for start in &mut self.starts {
+                *start -= keep_from;
+            }
+        }
+        found
+    }
+}
+
+/// A DIL descriptor's length from its first two blocks.
+fn descriptor_length(bits: &[bool]) -> usize {
+    let at = |block: usize, bit: usize| SYNC_ONES + block * (BLOCK + 1) + 1 + bit;
+    let n = get(bits, at(0, 0), 8) as usize;
+    let lsp = get(bits, at(1, 0), 7) as usize + 1;
+    let ltp = get(bits, at(1, 8), 7) as usize + 1;
+    let blocks = 2 + lsp.div_ceil(BLOCK) + ltp.div_ceil(BLOCK) + 8 + n.div_ceil(2);
+    SYNC_ONES + (blocks + 1) * (BLOCK + 1)
+}
+
+/// A CP's length from its first seven blocks.
+fn cp_length(bits: &[bool]) -> usize {
+    let at = |block: usize, bit: usize| SYNC_ONES + block * (BLOCK + 1) + 1 + bit;
+    let largest = (0..6)
+        .map(|i| {
+            let (block, bit) = if i < 4 { (5, 4 * i) } else { (6, 4 * (i - 4)) };
+            get(bits, at(block, bit), 4) as usize
+        })
+        .max()
+        .unwrap_or(0)
+        .min(5);
+    let masks = (largest + 1) * if bits[at(6, 8)] { 2 } else { 1 };
+    SYNC_ONES + (CP_HEADER_BLOCKS + MASK_BLOCKS * masks + 1) * (BLOCK + 1)
+}
+
+/// Finds Ja's DIL descriptors.
+#[derive(Debug, Clone)]
+pub struct DescriptorFinder(Finder<Descriptor>);
+
+impl Default for DescriptorFinder {
+    fn default() -> Self {
+        Self(Finder::new(2, descriptor_length, Descriptor::from_bits))
+    }
+}
+
+impl DescriptorFinder {
+    pub fn feed(&mut self, bit: bool) -> Option<Descriptor> {
+        self.0.feed(bit)
+    }
+}
+
+/// Finds CP sequences.
+#[derive(Debug, Clone)]
+pub struct CpFinder(Finder<Cp>);
+
+impl Default for CpFinder {
+    fn default() -> Self {
+        Self(Finder::new(CP_HEADER_BLOCKS, cp_length, Cp::from_bits))
+    }
+}
+
+impl CpFinder {
+    pub fn feed(&mut self, bit: bool) -> Option<Cp> {
+        self.0.feed(bit)
+    }
+}
+
 /// An MP as the digital modem sends it (Table 16/V.90).
 ///
 /// Table 16 is V.34's MP with the call-to-answer rate, the auxiliary channel
@@ -644,6 +763,30 @@ mod tests {
         assert!(!bits[19], "a CPt");
         assert_eq!(cp.frame_bits(), 8, "drn 0 of a CPt");
         assert_eq!(Cp::from_bits(&bits), Some(cp));
+    }
+
+    /// Repeated, with rubbish before and between, as a receiver gets them.
+    #[test]
+    fn the_finders_pick_sequences_out_of_a_stream() {
+        let mut stream: Vec<bool> = vec![true; 40];
+        stream.extend(bits_of("0110100110"));
+        let d = conexant();
+        for _ in 0..2 {
+            stream.extend(d.to_bits());
+        }
+        let mut finder = DescriptorFinder::default();
+        let found: Vec<Descriptor> = stream.iter().filter_map(|&b| finder.feed(b)).collect();
+        assert_eq!(found, vec![d.clone(), d]);
+
+        let cp = a_cp();
+        let mut stream: Vec<bool> = vec![true; 25];
+        for acknowledge in [false, false, true] {
+            stream.extend(Cp { acknowledge, ..cp.clone() }.to_bits());
+        }
+        let mut finder = CpFinder::default();
+        let found: Vec<bool> = stream.iter().filter_map(|&b| finder.feed(b)).map(|c| c.acknowledge).collect();
+        // The first is behind 25 ones, which make its sync something longer.
+        assert_eq!(found, vec![false, true]);
     }
 
     #[test]

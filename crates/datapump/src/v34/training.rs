@@ -1208,6 +1208,7 @@ impl Modem {
 
     fn heard(&mut self, heard: Heard) {
         match heard {
+            Heard::S => {}
             Heard::Reversal { at } => self.reversal(at),
             Heard::Trained { snr_db } => {
                 match self.stage {

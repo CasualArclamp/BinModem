@@ -288,7 +288,7 @@ impl Rule {
         match self {
             Self::A => false,
             Self::B => true,
-            Self::C => k % 2 == 0,
+            Self::C => k.is_multiple_of(2),
             Self::D => k % 2 == 1,
         }
     }
@@ -515,7 +515,7 @@ impl SignDecoder {
             }
             // The last odd bit of this frame is what the next frame's first
             // odd bit was chained to.
-            self.last_odd = p[(width - 1) - (width - 1 + 1) % 2];
+            self.last_odd = p[if width.is_multiple_of(2) { width - 1 } else { width - 2 }];
         }
         out
     }

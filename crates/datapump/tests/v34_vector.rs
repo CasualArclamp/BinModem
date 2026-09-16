@@ -145,6 +145,7 @@ fn answer_phase3_in(path: &str, channel: usize, from: f64, to: f64) -> Phase3 {
         while let Some(heard) = rx.heard() {
             let now = (first + i) as f64 / fs;
             match heard {
+                Heard::S => {}
                 Heard::Reversal { at } => {
                     found.reversal_at = now;
                     rx.train(Reference::PpThenTrn, Mode::Answer, at);

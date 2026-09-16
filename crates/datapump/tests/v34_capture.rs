@@ -130,6 +130,7 @@ fn a_captured_end_of_phases_3_and_4() {
         rx.feed(f64::from(x));
         while let Some(heard) = rx.heard() {
             match heard {
+                Heard::S => {}
                 Heard::Reversal { at } => {
                     println!("{now:8.3} S-bar");
                     let reference = if stage == Stage::Phase3Hunt { Reference::PpThenTrn } else { Reference::Trn(phase4_size) };
