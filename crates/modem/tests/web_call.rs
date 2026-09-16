@@ -4,13 +4,13 @@
 //! Two modems on a simulated line agree a modulation with V.8, carry bits with
 //! the data pump, make them reliable with V.42 and compress them with V.42bis.
 //! PPP turns the octets back into frames, IPCP gives the two ends addresses,
-//! our own TCP runs over our own IP on top of that, SOCKS 5 asks the answering
-//! end to open a connection, and the answering end opens a real socket to a
-//! real web server -- which is the only part of the path that belongs to the
-//! operating system.
+//! our own TCP runs over our own IP on top of that, an HTTP request asks the
+//! answering end's proxy for a page, and the answering end opens a real socket
+//! to a real web server -- which is the only part of the path that belongs to
+//! the operating system.
 //!
 //! The browser is real too: a socket connecting to the dialling end's
-//! listener, speaking SOCKS at it the way any browser would.
+//! listener and speaking to it as its HTTP proxy, the way any browser would.
 //!
 //! It is slow, because it is a modem. That is the point.
 
@@ -57,33 +57,16 @@ fn a_web_server(body: Vec<u8>) -> (String, thread::JoinHandle<Option<String>>) {
     (address, handle)
 }
 
-/// The browser: connect, speak RFC 1928, ask for a page, read to the end.
+/// The browser: connect, ask its HTTP proxy for a page (RFC 9112 3.2.2), and
+/// read to the end.
 fn a_browser(proxy: String, target: String) -> thread::JoinHandle<Result<Vec<u8>, String>> {
     thread::spawn(move || {
         let mut socket = TcpStream::connect(&proxy).map_err(|e| format!("{proxy}: {e}"))?;
         socket
             .set_read_timeout(Some(Duration::from_secs(300)))
             .map_err(|e| e.to_string())?;
-        socket.write_all(&[5, 1, 0]).map_err(|e| e.to_string())?;
-        let mut greeting = [0u8; 2];
-        socket.read_exact(&mut greeting).map_err(|e| e.to_string())?;
-        if greeting != [5, 0] {
-            return Err(format!("the proxy offered {greeting:?}"));
-        }
-        let (name, port) = target.rsplit_once(':').ok_or("no port")?;
-        let port: u16 = port.parse().map_err(|_| "bad port")?;
-        let mut request = vec![5, 1, 0, 3, name.len() as u8];
-        request.extend_from_slice(name.as_bytes());
-        request.extend_from_slice(&port.to_be_bytes());
-        socket.write_all(&request).map_err(|e| e.to_string())?;
-        let mut reply = [0u8; 10];
-        socket.read_exact(&mut reply).map_err(|e| e.to_string())?;
-        if reply[1] != 0 {
-            return Err(format!("the proxy refused with {}", reply[1]));
-        }
-        socket
-            .write_all(b"GET /over-a-modem HTTP/1.0\r\nHost: example\r\n\r\n")
-            .map_err(|e| e.to_string())?;
+        let request = format!("GET http://{target}/over-a-modem HTTP/1.0\r\nHost: example\r\n\r\n");
+        socket.write_all(request.as_bytes()).map_err(|e| e.to_string())?;
         let mut page = Vec::new();
         socket.read_to_end(&mut page).map_err(|e| e.to_string())?;
         Ok(page)
@@ -185,10 +168,10 @@ fn a_page_over(carrier: &str) {
             client.tick(1);
             server.tick(1);
             for out in client.take_outgoing() {
-                client_link.send_payload(ppp::ip::PROTOCOL_TCP, &out.payload);
+                client_link.send_to(out.to, ppp::ip::PROTOCOL_TCP, &out.payload);
             }
             for out in server.take_outgoing() {
-                server_link.send_payload(ppp::ip::PROTOCOL_TCP, &out.payload);
+                server_link.send_to(out.to, ppp::ip::PROTOCOL_TCP, &out.payload);
             }
         }
 

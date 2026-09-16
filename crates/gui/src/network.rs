@@ -15,16 +15,57 @@
 //! terminal.
 
 use modem::Role;
-use ppp::link::{Authentication, Link, Phase};
+use ppp::link::{Authentication, Counters, Link, Phase};
 use ppp::ping::{Event, Pinger, Stats};
+use proxy::Route;
 use telemetry::{Direction, Publisher};
 
-/// Where a browser on the dialling machine should be pointed.
+/// How the link, and the proxy over it, are set up.
 ///
-/// The loopback rather than every interface: the proxy is for the person at
-/// this machine, and a proxy listening on the network is one anybody on the
-/// network can use to reach the far end of somebody else's telephone call.
-pub const PROXY_AT: &str = "127.0.0.1:1080";
+/// Read when a link starts, so a change applies to the next one: LCP settles
+/// the MRU once, and the proxy decides its route once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkSettings {
+    /// The largest frame to ask the far end for (RFC 1661 6.1).
+    pub mru: u16,
+    /// Which way the browser's requests go.
+    pub route: Route,
+    /// The port the browser is pointed at, on the loopback.
+    pub port: u16,
+}
+
+impl Default for LinkSettings {
+    fn default() -> Self {
+        Self { mru: ppp::lcp::DEFAULT_MRU, route: Route::Auto, port: proxy::DEFAULT_PORT }
+    }
+}
+
+impl LinkSettings {
+    /// Where a browser on the dialling machine should be pointed.
+    ///
+    /// The loopback rather than every interface: the proxy is for the person
+    /// at this machine, and a proxy listening on the network is one anybody on
+    /// the network can use to reach the far end of somebody else's call.
+    pub fn listen_at(&self) -> String {
+        format!("127.0.0.1:{}", self.port)
+    }
+
+    pub fn route_key(&self) -> &'static str {
+        match self.route {
+            Route::Auto => "auto",
+            Route::FarEnd => "far",
+            Route::Direct => "direct",
+        }
+    }
+
+    pub fn route_from(key: &str) -> Route {
+        match key {
+            "far" => Route::FarEnd,
+            "direct" => Route::Direct,
+            _ => Route::Auto,
+        }
+    }
+}
 
 /// The address the end that hands them out keeps for itself.
 ///
@@ -84,6 +125,26 @@ pub struct View {
     /// What RFC 1144 header compression was agreed, in words, once the link is
     /// up. Empty before then, because nothing has been agreed to report.
     pub headers: String,
+    /// What LCP settled, and what has crossed.
+    pub lcp: LcpView,
+    pub counters: Counters,
+}
+
+/// What LCP agreed, each way.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LcpView {
+    /// The largest frame this end asked for, and the largest the far end
+    /// will take.
+    pub mru_in: u16,
+    pub mru_out: u16,
+    /// The character maps: what the far end escapes for this end, and what
+    /// this end escapes for it.
+    pub accm_in: u32,
+    pub accm_out: u32,
+    /// Whether this end leaves out address and control, and shortens the
+    /// protocol field.
+    pub acfc: bool,
+    pub pfc: bool,
 }
 
 /// What the proxy is doing, for the window to show.
@@ -91,14 +152,12 @@ pub struct View {
 pub struct ProxyView {
     /// Whether this end is the one with the internet.
     pub serving: bool,
-    /// Where a browser should be pointed, on the end that dialled.
+    /// Where it is: on the dialling end, where a browser should be pointed.
     pub at: String,
-    /// Connections being carried right now.
+    /// On the end with the internet, connections being carried.
     pub open: usize,
-    /// Connections a browser is waiting on that the far end has not answered.
-    pub waiting: usize,
-    /// Whether the far end has ever answered one of them.
-    pub answered: bool,
+    /// On the dialling end, everything it knows.
+    pub client: Option<proxy::View>,
     pub trouble: Option<String>,
 }
 
@@ -153,6 +212,9 @@ pub struct Networking {
     pub hang_up_after: bool,
     /// Set once the end of the link has been reported.
     ended_reported: bool,
+    settings: LinkSettings,
+    /// Whether the proxy has been sized for what LCP agreed.
+    sized: bool,
 }
 
 impl Networking {
@@ -168,6 +230,7 @@ impl Networking {
         role: Role,
         authentication: Authentication,
         compress_headers: bool,
+        settings: LinkSettings,
         tx: &Publisher,
     ) -> Self {
         let serving = role == Role::Answering;
@@ -200,6 +263,10 @@ impl Networking {
             // once and there is nothing to change afterwards.
             link = link.without_header_compression();
         }
+        if settings.mru != ppp::lcp::DEFAULT_MRU {
+            link = link.with_mru(settings.mru);
+            tx.log(Direction::Note, format!("ppp: asking for frames of {} octets at most", settings.mru));
+        }
         link.open();
         Self {
             link,
@@ -215,6 +282,8 @@ impl Networking {
             asking,
             hang_up_after: false,
             ended_reported: false,
+            settings,
+            sized: false,
         }
     }
 
@@ -253,13 +322,14 @@ impl Networking {
             self.proxy = Some(Proxy::Serving(Box::new(proxy::Server::new(local, seed))));
             return;
         }
-        match proxy::Client::new(PROXY_AT, local, remote, seed) {
+        match proxy::Client::routed(&self.settings.listen_at(), local, remote, seed, self.settings.route) {
             Ok(client) => {
                 tx.log(
                     Direction::Note,
                     format!(
-                        "proxy: point a browser at {} -- as its HTTP proxy,                          which is the faster of the two here, or as its SOCKS                          v5 host",
-                        client.bound()
+                        "proxy: set the browser's HTTP proxy to {} for http and https alike; pages go {}",
+                        client.bound(),
+                        self.settings.route.name()
                     ),
                 );
                 self.proxy = Some(Proxy::Using(Box::new(client)));
@@ -276,10 +346,29 @@ impl Networking {
         if self.want_proxy && self.proxy.is_none() && self.link.up() {
             self.start_proxy(tx);
         }
-        let (local, remote) = self.link.addresses();
         let carried = self.link.take_carried();
+        let problems = self.link.take_problems();
         let mut outgoing = Vec::new();
         let mut log = Vec::new();
+        for problem in &problems {
+            let [a, b, c, d] = problem.about;
+            log.push(format!(
+                "ip: {} says {a}.{b}.{c}.{d}: {}",
+                dotted(problem.from),
+                problem.describe()
+            ));
+        }
+        // What LCP agreed decides how large a segment may be, and it is
+        // settled by the time there is a proxy to tell.
+        let (mru_in, mru_out) = self.link.mru();
+        if !self.sized {
+            match self.proxy.as_mut() {
+                Some(Proxy::Serving(server)) => server.size_for_link(mru_in, mru_out),
+                Some(Proxy::Using(client)) => client.size_for_link(mru_in, mru_out),
+                _ => {}
+            }
+            self.sized = matches!(self.proxy, Some(Proxy::Serving(_) | Proxy::Using(_)));
+        }
         match self.proxy.as_mut() {
             Some(Proxy::Serving(server)) => {
                 for datagram in carried {
@@ -297,6 +386,9 @@ impl Networking {
                         client.deliver(datagram.from, datagram.to, &datagram.payload);
                     }
                 }
+                for problem in &problems {
+                    client.unreachable(problem.about, problem.describe());
+                }
                 client.tick(ms);
                 outgoing = client.take_outgoing();
                 log = client.take_log();
@@ -306,12 +398,15 @@ impl Networking {
             // no stack here to send one.
             Some(Proxy::Refused(_)) | None => {}
         }
-        let _ = (local, remote);
         for line in log {
             tx.log(Direction::Note, line);
         }
+        // Each to where the stack addressed it: the far end, for a BinModem's
+        // proxy, or through it, for a web server.
         for out in outgoing {
-            self.link.send_payload(ppp::ip::PROTOCOL_TCP, &out.payload);
+            if !self.link.send_to(out.to, ppp::ip::PROTOCOL_TCP, &out.payload) {
+                tx.log(Direction::Note, "ip: a segment was too large for the far end's MRU and was not sent");
+            }
         }
     }
 
@@ -376,16 +471,14 @@ impl Networking {
                     serving: true,
                     at: format!("{}:{}", dotted(server.address()), server.port()),
                     open: server.open(),
-                    waiting: 0,
-                    answered: true,
+                    client: None,
                     trouble: None,
                 }),
                 Some(Proxy::Using(client)) => Some(ProxyView {
                     serving: false,
                     at: client.bound().to_string(),
                     open: client.open(),
-                    waiting: client.waiting(),
-                    answered: client.answered(),
+                    client: Some(client.view()),
                     trouble: None,
                 }),
                 Some(Proxy::Refused(why)) => Some(ProxyView {
@@ -413,6 +506,13 @@ impl Networking {
             } else {
                 String::new()
             },
+            lcp: {
+                let (mru_in, mru_out) = self.link.mru();
+                let (accm_in, accm_out) = self.link.accm();
+                let (acfc, pfc) = self.link.compressed_fields();
+                LcpView { mru_in, mru_out, accm_in, accm_out, acfc, pfc }
+            },
+            counters: self.link.counters(),
         }
     }
 
@@ -494,11 +594,11 @@ mod tests {
     #[test]
     fn the_answering_end_is_the_one_with_addresses_to_give() {
         let (tx, _rx) = telemetry::channel(64, 32, 8_000.0);
-        let answering = Networking::start(Role::Answering, Authentication::default(), true, &tx);
+        let answering = Networking::start(Role::Answering, Authentication::default(), true, LinkSettings::default(), &tx);
         assert!(answering.serving);
         assert_eq!(answering.view().local, "10.0.0.1");
 
-        let calling = Networking::start(Role::Calling, Authentication::default(), true, &tx);
+        let calling = Networking::start(Role::Calling, Authentication::default(), true, LinkSettings::default(), &tx);
         assert!(!calling.serving);
         assert_eq!(calling.view().local, "0.0.0.0", "it made an address up");
     }
@@ -508,8 +608,8 @@ mod tests {
     #[test]
     fn two_ends_of_a_call_come_up_and_ping() {
         let (tx, _rx) = telemetry::channel(64, 32, 8_000.0);
-        let mut answering = Networking::start(Role::Answering, Authentication::default(), true, &tx);
-        let mut calling = Networking::start(Role::Calling, Authentication::default(), true, &tx);
+        let mut answering = Networking::start(Role::Answering, Authentication::default(), true, LinkSettings::default(), &tx);
+        let mut calling = Networking::start(Role::Calling, Authentication::default(), true, LinkSettings::default(), &tx);
 
         let mut came_up = None;
         for ms in 0..30_000u32 {

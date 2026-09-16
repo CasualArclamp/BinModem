@@ -9,7 +9,7 @@ one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
 source for every normative constant, and against the RFCs for everything
-carried over the top of them. 1429 tests.
+carried over the top of them. 1446 tests.
 
 ## What works
 
@@ -47,7 +47,7 @@ been checked three other ways: two documents, two methods, one table.
 | **Files** | ZMODEM send and receive |
 | **Fax** | T.30 group 3, sending and receiving; V.29 (7200/9600) and V.27 ter (2400/4800); T.4 Modified Huffman and Modified READ, T.6 MMR; T.30 Annex A error correction mode; pages drawn as they arrive |
 | **Network** | PPP (RFC 1661/1662) with LCP, PAP and CHAP, and IPCP, Van Jacobson header compression (RFC 1144), and a ping over it; a dial-in login prompt, and a login script for dialling out |
-| **Internet** | our own TCP (RFC 9293), and a proxy that speaks both SOCKS 5 (RFC 1928) and HTTP (RFC 9112) on one port: a browser on one machine, the internet on the other |
+| **Internet** | our own TCP (RFC 9293) and an HTTP/HTTPS proxy (RFC 9112): pages straight to the internet through a provider, or through a far BinModem that has it |
 | **Line** | full-duplex sound card, or a WAV to replay |
 
 It is a fax machine as well. A picture loaded in the Fax window becomes a
@@ -69,12 +69,15 @@ coding, which has no end-of-line codes to find its place again by and comes to
 under half the size of the Modified Huffman every machine reads. A page arriving
 is drawn a row at a time as it comes in, the way slow-scan television is.
 
-Two of these on a call carry the internet. The Network panel brings up PPP:
-the end that answered hands out an address, the end that dialled asks for one
-and is told, and an ICMP echo crosses and comes back with a round trip on it.
-Tick *carry web traffic* and the end that answered offers its connection —
-point a browser on the dialling machine at `127.0.0.1:1080`, as an HTTP proxy
-or a SOCKS host, and it goes out through the modem.
+It dials a real provider. The Network panel brings up PPP, logs in if the
+far end asks, is given an address, and an ICMP echo crosses and comes back
+with a round trip on it. Tick *carry web traffic*, set the browser's HTTP
+proxy to `127.0.0.1:8080` for http and https, and pages come straight from the
+internet: the request is read on this machine and the connection goes to the
+web server's own address, with this program's own TCP, through the
+provider's router. Between two of these, the machine that answered offers its
+internet instead, and the proxy finds out which kind of far end it has by
+itself.
 
 The answering end can be a dial-in server, the way a provider's modem pool
 was. A caller gets a banner, `login:` and `Password:`, and a prompt where `ppp`
@@ -85,9 +88,10 @@ another BinModem can dial in.
 
 TCP is ours, written against RFC 9293: the eleven states, retransmission with
 RFC 6298's estimator, Nagle, delayed acknowledgements, zero-window probing,
-out-of-order reassembly, and RFC 5681's fast retransmit. Nothing in the path
-belongs to the operating system except the socket at the far end that actually
-reaches the internet — no driver, no adapter, no route, no administrator.
+out-of-order reassembly, and RFC 5681's fast retransmit. Almost nothing in
+the path belongs to the operating system — the browser's socket to the proxy,
+and the name lookups — and there is no driver, no adapter, no route and no
+administrator.
 
 The tallest test does the whole of it against a simulated line: V.8, V.22bis,
 V.42, V.42bis, PPP, IPCP, TCP, the proxy, and a real web server on the

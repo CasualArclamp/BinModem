@@ -13,6 +13,7 @@ use crate::live;
 use crate::net;
 use crate::scopes::{self, Waterfall};
 use crate::speed;
+use proxy::Route;
 
 /// Where what is on the scope comes from.
 pub enum Source {
@@ -1282,10 +1283,13 @@ impl ScopeApp {
                     if ui
                         .checkbox(&mut self.carry_web, "carry web traffic")
                         .on_hover_text(
-                            "SOCKS 5 over the link: the end that answered the call \
-                             opens the connections, the end that dialled points a \
-                             browser at a local port. Kept for the next link, so a \
-                             dial-in server can offer it before anyone calls",
+                            "An HTTP proxy for a browser, http and https alike. On the \
+                             end that dialled, set the browser's HTTP proxy to the \
+                             address shown, and use it for https too. Pages go through \
+                             the far end if it is a BinModem carrying web traffic, and \
+                             otherwise straight to the internet over this end's own \
+                             TCP/IP. On the end that answered, it offers this \
+                             machine's internet to a BinModem that calls",
                         )
                         .changed()
                     {
@@ -1299,7 +1303,7 @@ impl ScopeApp {
                                 RichText::new(if p.serving {
                                     format!("offering the internet at {}", p.at)
                                 } else {
-                                    format!("HTTP proxy or SOCKS v5 at {}", p.at)
+                                    format!("HTTP proxy at {}", p.at)
                                 })
                                 .monospace()
                                 .small()
@@ -1308,40 +1312,76 @@ impl ScopeApp {
                         }
                     }
                 });
+                // What the next link starts with. Kept with the account, and
+                // sent to the line thread the same way.
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("pages go").small().color(dim));
+                    egui::ComboBox::from_id_salt("proxy route")
+                        .selected_text(self.dialin.link.route.name())
+                        .show_ui(ui, |ui| {
+                            for route in [Route::Auto, Route::FarEnd, Route::Direct] {
+                                ui.selectable_value(&mut self.dialin.link.route, route, route.name());
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "find out: the far end is offered a connection on port \
+                             1080, which a BinModem carrying web traffic answers and \
+                             a provider's router does not. Settled when the proxy \
+                             starts",
+                        );
+                    ui.label(RichText::new("port").small().color(dim));
+                    ui.add(egui::DragValue::new(&mut self.dialin.link.port).range(1024..=65535))
+                        .on_hover_text("the browser's HTTP proxy port, on 127.0.0.1. Used when the proxy starts");
+                    ui.label(RichText::new("MRU").small().color(dim));
+                    egui::ComboBox::from_id_salt("ppp mru")
+                        .selected_text(self.dialin.link.mru.to_string())
+                        .show_ui(ui, |ui| {
+                            for mru in [1500u16, 1006, 576, 296] {
+                                ui.selectable_value(&mut self.dialin.link.mru, mru, mru.to_string());
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "RFC 1661 6.1: the largest frame the far end is asked to \
+                             send, and TCP's segment size follows it. 1500 suits web \
+                             pages over a long round trip; smaller answers typing \
+                             sooner (RFC 1144 5.2). Settled when the link starts",
+                        );
+                });
 
                 let Some(view) = link else { return };
-                if let Some(p) = &view.proxy {
-                    // Connections nobody has answered are not traffic. The far
-                    // end only answers when the machine that answered the call
-                    // is carrying web traffic as well, and when it is not there
-                    // is nothing to refuse them -- they go unanswered, and a
-                    // browser is left with a socket that carried nothing.
-                    if !p.serving && p.waiting > 0 && !p.answered {
+                let client = view.proxy.as_ref().and_then(|p| p.client.as_ref());
+                if let Some(c) = client {
+                    ui.label(
+                        RichText::new(format!(
+                            "pages go {}; {} browser connections, {} waiting",
+                            c.route, c.browsers, c.waiting
+                        ))
+                        .small()
+                        .color(dim),
+                    );
+                    // Asked to go through a far end that is not answering:
+                    // the connections are not refused, they go unanswered,
+                    // and a browser is left with a socket that carried
+                    // nothing.
+                    if c.asked == Route::FarEnd && c.waiting > 0 && !c.answered {
                         ui.label(
                             RichText::new(format!(
-                                "{} waiting: {} is not answering. Tick carry web \
-                                 traffic on the machine that answered the call.",
-                                p.waiting, view.remote
+                                "{} is not answering. Tick carry web traffic on the machine \
+                                 that answered the call, or let pages go straight out.",
+                                view.remote
                             ))
                             .small()
                             .color(bad),
                         );
-                    } else {
-                        if p.open > 0 {
-                            ui.label(
-                                RichText::new(format!("{} connections being carried", p.open))
-                                    .small()
-                                    .color(dim),
-                            );
-                        }
-                        if p.waiting > 0 {
-                            ui.label(
-                                RichText::new(format!("{} waiting to be answered", p.waiting))
-                                    .small()
-                                    .color(dim),
-                            );
-                        }
                     }
+                } else if let Some(p) = view.proxy.as_ref().filter(|p| p.serving && p.open > 0) {
+                    ui.label(
+                        RichText::new(format!("{} connections being carried", p.open))
+                            .small()
+                            .color(dim),
+                    );
                 }
                 ui.separator();
                 egui::Grid::new("ppp addresses")
@@ -1378,6 +1418,7 @@ impl ScopeApp {
                 if let Some(why) = &view.trouble {
                     ui.label(RichText::new(why).small().color(bad));
                 }
+                Self::link_monitor(ui, &view, client);
 
                 ui.separator();
                 ui.add_enabled_ui(view.up, |ui| {
@@ -1438,6 +1479,90 @@ impl ScopeApp {
                 }
             });
         self.network_open = open;
+    }
+
+    /// What the link agreed and what has crossed it, and every connection
+    /// over it.
+    ///
+    /// Folded away until wanted. When a page will not load, these are the
+    /// numbers that say where: a frame size the far end would not take,
+    /// frames arriving broken, datagrams for somebody else, a router saying
+    /// an address is unreachable, or a connection resending into silence.
+    fn link_monitor(ui: &mut egui::Ui, view: &crate::network::View, client: Option<&proxy::View>) {
+        let dim = Color32::from_rgb(140, 150, 165);
+        let bright = Color32::from_rgb(220, 225, 235);
+        let warn = Color32::from_rgb(240, 200, 120);
+        egui::CollapsingHeader::new("link and IP").id_salt("ppp link monitor").show(ui, |ui| {
+            egui::Grid::new("ppp link").num_columns(2).spacing([10.0, 2.0]).show(ui, |ui| {
+                let mut row = |k: &str, v: String, trouble: bool| {
+                    ui.label(RichText::new(k).monospace().small().color(dim));
+                    ui.label(RichText::new(v).monospace().small().color(if trouble { warn } else { bright }));
+                    ui.end_row();
+                };
+                let l = view.lcp;
+                row("MRU", format!("{} in, {} out", l.mru_in, l.mru_out), false);
+                row("char map", format!("{:08x} in, {:08x} out", l.accm_in, l.accm_out), false);
+                row(
+                    "fields",
+                    format!(
+                        "{}, {} protocol",
+                        if l.acfc { "no address or control" } else { "address and control" },
+                        if l.pfc { "short" } else { "full" }
+                    ),
+                    false,
+                );
+                if !view.headers.is_empty() {
+                    row("headers", view.headers.clone(), false);
+                }
+                let n = view.counters;
+                row("frames", format!("{} in, {} out, {} bad", n.frames_in, n.frames_out, n.bad_frames), n.bad_frames > 0);
+                row("datagrams", format!("{} in, {} out", n.datagrams_in, n.datagrams_out), false);
+                row("IP octets", format!("{} in, {} out", n.octets_in, n.octets_out), false);
+                row(
+                    "not taken",
+                    format!("{} dropped, {} too large to send", n.dropped_in, n.too_large),
+                    n.dropped_in > 0 || n.too_large > 0,
+                );
+                row("ICMP errors", n.problems.to_string(), n.problems > 0);
+                if let Some(c) = client {
+                    row("TCP MSS", format!("asks for {}, sends at most {}", c.mss.0, c.mss.1), false);
+                    row(
+                        "names",
+                        format!("{} looked up, {} not found", c.lookups, c.lookup_failures),
+                        c.lookup_failures > 0,
+                    );
+                    row("browser", format!("{} octets to it, {} from it", c.to_browsers, c.from_browsers), false);
+                }
+            });
+        });
+        let Some(c) = client.filter(|c| !c.carried.is_empty()) else { return };
+        egui::CollapsingHeader::new(format!("connections ({})", c.carried.len()))
+            .id_salt("ppp connections")
+            .default_open(true)
+            .show(ui, |ui| {
+                egui::ScrollArea::horizontal().show(ui, |ui| {
+                    egui::Grid::new("tcp connections").striped(true).num_columns(8).spacing([10.0, 2.0]).show(ui, |ui| {
+                        for heading in ["for", "to", "state", "rtt", "rto", "resent", "window", "out / in"] {
+                            ui.label(RichText::new(heading).small().color(dim));
+                        }
+                        ui.end_row();
+                        for t in &c.carried {
+                            let cell = |ui: &mut egui::Ui, text: String, colour: Color32| {
+                                ui.label(RichText::new(text).monospace().small().color(colour));
+                            };
+                            cell(ui, t.name.clone(), bright);
+                            cell(ui, t.address.clone(), dim);
+                            cell(ui, t.state.to_owned(), bright);
+                            cell(ui, if t.srtt_ms == 0 { "-".to_owned() } else { format!("{} ms", t.srtt_ms) }, dim);
+                            cell(ui, format!("{} ms", t.rto_ms), dim);
+                            cell(ui, t.resent.to_string(), if t.resent > 0 { warn } else { dim });
+                            cell(ui, format!("{} / {}", t.cwnd, t.send_mss), dim);
+                            cell(ui, format!("{} / {}", t.sent, t.received), bright);
+                            ui.end_row();
+                        }
+                    });
+                });
+            });
     }
 
     /// The rest of `AT+MS`, in a window rather than typed.

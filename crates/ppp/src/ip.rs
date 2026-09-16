@@ -12,6 +12,10 @@
 /// RFC 792: the two message types this understands.
 pub const ECHO_REPLY: u8 = 0;
 pub const ECHO_REQUEST: u8 = 8;
+/// And the two it reports rather than answers: a router saying a datagram of
+/// this end's could not be delivered, or lived too long on the way.
+pub const DESTINATION_UNREACHABLE: u8 = 3;
+pub const TIME_EXCEEDED: u8 = 11;
 /// RFC 790's protocol numbers, for the two that cross this link.
 pub const PROTOCOL_ICMP: u8 = 1;
 pub const PROTOCOL_TCP: u8 = 6;
@@ -173,6 +177,60 @@ pub fn read(datagram: &[u8]) -> Option<Carried> {
         protocol: datagram[9],
         payload: datagram[header..total].to_vec(),
     })
+}
+
+/// A router's complaint about a datagram this end sent (RFC 792).
+///
+/// Both messages carry "Internet Header + 64 bits of Original Data Datagram",
+/// which is where the address it was going to is found. That is the useful
+/// part: a web server that cannot be reached shows up here, where otherwise a
+/// connection would only time out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Problem {
+    /// Which router said so.
+    pub from: [u8; 4],
+    pub kind: u8,
+    pub code: u8,
+    /// Where the original datagram was going, and what it carried.
+    pub about: [u8; 4],
+    pub protocol: u8,
+}
+
+impl Problem {
+    /// Read one out of an ICMP message, if it is one of the two.
+    pub fn parse(from: [u8; 4], body: &[u8]) -> Option<Self> {
+        if body.len() < 8 + HEADER_LEN || checksum(body) != 0 {
+            return None;
+        }
+        let kind = body[0];
+        if kind != DESTINATION_UNREACHABLE && kind != TIME_EXCEEDED {
+            return None;
+        }
+        let original = &body[8..];
+        Some(Self {
+            from,
+            kind,
+            code: body[1],
+            about: original[16..20].try_into().ok()?,
+            protocol: original[9],
+        })
+    }
+
+    /// What it means, in RFC 792's own words.
+    pub fn describe(&self) -> &'static str {
+        match (self.kind, self.code) {
+            (DESTINATION_UNREACHABLE, 0) => "net unreachable",
+            (DESTINATION_UNREACHABLE, 1) => "host unreachable",
+            (DESTINATION_UNREACHABLE, 2) => "protocol unreachable",
+            (DESTINATION_UNREACHABLE, 3) => "port unreachable",
+            (DESTINATION_UNREACHABLE, 4) => "fragmentation needed and DF set",
+            (DESTINATION_UNREACHABLE, 5) => "source route failed",
+            (DESTINATION_UNREACHABLE, _) => "destination unreachable",
+            (_, 0) => "time to live exceeded in transit",
+            (_, 1) => "fragment reassembly time exceeded",
+            _ => "time exceeded",
+        }
+    }
 }
 
 /// Read a datagram, taking only an echo out of it.

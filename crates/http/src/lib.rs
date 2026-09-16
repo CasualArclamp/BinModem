@@ -1,24 +1,22 @@
 //! The proxy half of HTTP/1.1: RFC 9112 for the syntax, RFC 9110 for what a
 //! proxy is allowed to do with it.
 //!
-//! This is the other way to carry a browser over the link, and on a slow one
-//! it is the better way. SOCKS 5 costs two round trips before a single octet
-//! of the request crosses -- a greeting and its answer, then a connect request
-//! and its answer (RFC 1928 3 and 4) -- and on a call whose round trip is
-//! close to half a second that is a second of nothing per connection, times
-//! however many connections a page needs. An HTTP proxy costs none of them:
-//! RFC 9112 3.2.2 has the browser put the whole target in the request-line, so
-//! the first thing it says is already the request, and the socket at the far
-//! end can be opened while it is still arriving.
+//! This is how a browser is carried over the link, for http and https alike,
+//! and on a slow call it is the right way to do it. RFC 9112 3.2.2 has the
+//! browser put the whole target in the request-line, so the first thing it
+//! says is already the request, and the connection behind it can be opened
+//! while it is still arriving. A protocol with a handshake of its own in front
+//! would cost a round trip or two per connection first, and a round trip on
+//! this line is more than a second.
 //!
 //! What this does not do is cache. RFC 9112 3.2.2 offers the proxy that
 //! choice -- "service that request from a valid cache, if possible, or make
 //! the same request on the client's behalf" -- and the second is the whole of
 //! what happens here.
 //!
-//! The shape deliberately matches [`socks::Session`], because the far end
-//! drives both the same way: feed it what came off the link, ask what it wants
-//! opened, tell it what happened, take what it has to say.
+//! Whoever drives it does the same four things, whichever end of the call it
+//! is on: feed it what the browser sent, ask what it wants opened, tell it
+//! what happened, take what it has to say.
 
 use std::fmt;
 
@@ -576,10 +574,10 @@ fn connection_options(head: &str) -> Vec<String> {
 
 /// Whether the first octet of a connection is a browser speaking HTTP.
 ///
-/// SOCKS 5 opens with its version, which RFC 1928 3 fixes at 5. Every HTTP
-/// method is uppercase letters (RFC 9110 9), so one octet is enough to tell
-/// them apart -- which matters, because the alternative is waiting for more of
-/// a greeting that may be the whole of what the browser is going to say.
+/// Every HTTP method is uppercase letters (RFC 9110 9), so one octet says. The
+/// one worth recognising as not HTTP is a browser still set up for SOCKS,
+/// whose greeting opens with 5 (RFC 1928 3) and which is otherwise left
+/// waiting for an answer that never comes.
 pub fn speaks_http(first: u8) -> bool {
     first.is_ascii_uppercase()
 }

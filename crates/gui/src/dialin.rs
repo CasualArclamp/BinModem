@@ -26,11 +26,18 @@ pub struct Settings {
     pub account: Account,
     /// What to type at the far end's prompt once logged in.
     pub command: String,
+    /// How the link and the proxy over it are set up.
+    pub link: crate::network::LinkSettings,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { serve: false, account: Account::default(), command: "ppp".to_owned() }
+        Self {
+            serve: false,
+            account: Account::default(),
+            command: "ppp".to_owned(),
+            link: crate::network::LinkSettings::default(),
+        }
     }
 }
 
@@ -51,6 +58,9 @@ impl Settings {
         r.set("account_name", &self.account.name);
         r.set("account_password", &self.account.password);
         r.set("login_command", &self.command);
+        r.set("ppp_mru", self.link.mru);
+        r.set("proxy_port", self.link.port);
+        r.set("proxy_route", self.link.route_key());
     }
 
     pub fn recall(r: &crate::remembered::Remembered) -> Self {
@@ -67,12 +77,24 @@ impl Settings {
         if let Some(v) = r.text("login_command") {
             v.clone_into(&mut s.command);
         }
+        if let Some(v) = r.get::<u16>("ppp_mru") {
+            s.link.mru = v.clamp(ppp::lcp::MIN_MRU, ppp::lcp::MAX_MRU);
+        }
+        if let Some(v) = r.get::<u16>("proxy_port").filter(|p| *p != 0) {
+            s.link.port = v;
+        }
+        if let Some(v) = r.text("proxy_route") {
+            s.link.route = crate::network::LinkSettings::route_from(v);
+        }
         s
     }
 
     /// Everything in one string, for noticing that something changed.
     pub fn fingerprint(&self) -> String {
-        format!("{}\u{1}{}\u{1}{}\u{1}{}", self.serve, self.account.name, self.account.password, self.command)
+        format!(
+            "{}\u{1}{}\u{1}{}\u{1}{}\u{1}{:?}",
+            self.serve, self.account.name, self.account.password, self.command, self.link
+        )
     }
 }
 
@@ -295,7 +317,7 @@ mod tests {
 
     #[test]
     fn settings_come_back_as_they_were_left() {
-        let settings = Settings { serve: true, account: Account::new("rory", "hunter 2"), command: "start ppp".into() };
+        let settings = Settings { serve: true, account: Account::new("rory", "hunter 2"), command: "start ppp".into(), ..Settings::default() };
         let mut r = crate::remembered::Remembered::default();
         settings.remember(&mut r);
         assert_eq!(Settings::recall(&r), settings);

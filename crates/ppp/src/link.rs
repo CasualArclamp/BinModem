@@ -51,6 +51,33 @@ pub struct Authentication {
     pub seed: u64,
 }
 
+/// What has crossed the link, counted where it crossed.
+///
+/// A link that is not working looks from outside exactly like one with
+/// nothing on it, and these are the numbers that tell the two apart.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counters {
+    /// Frames read whole, and frames put on the line.
+    pub frames_in: u64,
+    pub frames_out: u64,
+    /// Frames thrown away: a bad FCS, an abort, or too short (RFC 1662 4.3).
+    pub bad_frames: u64,
+    /// IP datagrams taken in and sent, and their octets.
+    pub datagrams_in: u64,
+    pub datagrams_out: u64,
+    pub octets_in: u64,
+    pub octets_out: u64,
+    /// Datagrams that arrived and could not be used: a bad header, a
+    /// fragment, a compressed header nothing could rebuild, or an address
+    /// that is not this end's.
+    pub dropped_in: u64,
+    /// And datagrams that were not sent because the far end's MRU would not
+    /// take them.
+    pub too_large: u64,
+    /// ICMP errors a router sent back about this end's datagrams.
+    pub problems: u64,
+}
+
 /// How many times round [`Link::round`] before giving up on it settling.
 ///
 /// LCP coming up starts authentication or IPCP, each of which has something
@@ -95,6 +122,9 @@ pub struct Link {
     opened: bool,
     /// Whether LCP has ever come up on this link.
     was_up: bool,
+    counters: Counters,
+    /// Routers' complaints, for whatever is above this to report.
+    problems: Vec<ip::Problem>,
 }
 
 impl Link {
@@ -137,7 +167,49 @@ impl Link {
             closing: false,
             opened: false,
             was_up: false,
+            counters: Counters::default(),
+            problems: Vec::new(),
         }
+    }
+
+    /// Ask the far end to send nothing larger than `mru` (RFC 1661 6.1).
+    ///
+    /// Smaller than the default is a request, and 6.1 still has this end
+    /// "able to receive the full 1500 octet information field", which it is.
+    /// What it buys is RFC 1144 5.2's response: nothing typed waits behind a
+    /// large frame. What it costs, on a line with a long round trip, is a web
+    /// server's slow start, which counts in segments -- smaller ones fill the
+    /// line later.
+    pub fn with_mru(mut self, mru: u16) -> Self {
+        self.lcp.protocol.wanted.mru = mru.clamp(crate::lcp::MIN_MRU, crate::lcp::MAX_MRU);
+        self
+    }
+
+    /// The largest frame this end asked to receive, and the largest the far
+    /// end will take from it. 6.1's default each way until LCP has agreed.
+    pub fn mru(&self) -> (u16, u16) {
+        (self.lcp.protocol.wanted.mru, self.lcp.protocol.agreed.mru)
+    }
+
+    /// The character map each way: what this end asked the far end to escape,
+    /// and what the far end asked of this end.
+    pub fn accm(&self) -> (u32, u32) {
+        (self.lcp.protocol.wanted.accm, self.lcp.protocol.agreed.accm)
+    }
+
+    /// Whether this end may leave out the address and control fields, and
+    /// shorten the protocol field, when sending (RFC 1661 6.5, 6.6).
+    pub fn compressed_fields(&self) -> (bool, bool) {
+        (self.lcp.protocol.agreed.acfc, self.lcp.protocol.agreed.pfc)
+    }
+
+    pub fn counters(&self) -> Counters {
+        Counters { bad_frames: self.deframer.bad_fcs + self.deframer.aborted + self.deframer.short, ..self.counters }
+    }
+
+    /// Routers' complaints since this was last called.
+    pub fn take_problems(&mut self) -> Vec<ip::Problem> {
+        std::mem::take(&mut self.problems)
     }
 
     pub fn phase(&self) -> Phase {
@@ -234,6 +306,7 @@ impl Link {
                 d.error();
             }
             if let Ok(Some(packet)) = read {
+                self.counters.frames_in += 1;
                 self.deliver(packet);
                 // Round by round rather than once at the end: what one frame
                 // agreed to governs how the next one is read, and the next one
@@ -283,11 +356,30 @@ impl Link {
     /// Does nothing before the network phase, for the reason 3.6 gives: there
     /// is nowhere to send it and no address to send it from.
     pub fn send_payload(&mut self, protocol: u8, payload: &[u8]) -> bool {
+        let (_, remote) = self.addresses();
+        self.send_to(remote, protocol, payload)
+    }
+
+    /// Put a payload on the link addressed to anywhere at all.
+    ///
+    /// The far end of a PPP link to a provider is a router, and the datagram
+    /// is for whatever it routes to: a web server, addressed by its own
+    /// address. RFC 1661 has nothing to say about where a datagram is going,
+    /// only that it goes over the link.
+    ///
+    /// Refused when the far end's MRU would not take it. This layer does not
+    /// fragment, and a datagram the far end discards is worse than one never
+    /// sent: nothing says it went.
+    pub fn send_to(&mut self, to: [u8; 4], protocol: u8, payload: &[u8]) -> bool {
         if !self.up() {
             return false;
         }
-        let (local, remote) = self.addresses();
-        let datagram = ip::build(local, remote, protocol, payload, self.next_id);
+        if ip::HEADER_LEN + payload.len() > usize::from(self.lcp.protocol.agreed.mru) {
+            self.counters.too_large += 1;
+            return false;
+        }
+        let (local, _) = self.addresses();
+        let datagram = ip::build(local, to, protocol, payload, self.next_id);
         self.next_id = self.next_id.wrapping_add(1);
         self.send_datagram(datagram);
         true
@@ -321,6 +413,8 @@ impl Link {
     /// leaves the compressor's state alone, so there is nothing to decide
     /// above this and nothing gained by deciding it.
     fn send_datagram(&mut self, datagram: Vec<u8>) {
+        self.counters.datagrams_out += 1;
+        self.counters.octets_out += datagram.len() as u64;
         match self.compressor.as_mut() {
             Some(c) => {
                 let (kind, packet) = c.compress(&datagram);
@@ -385,25 +479,34 @@ impl Link {
                     return;
                 };
                 let datagram = match (kind, self.decompressor.as_mut()) {
-                    (vj::Kind::Ip, _) => packet.payload,
+                    (vj::Kind::Ip, _) => Some(packet.payload),
                     // A far end sending these without having been told this
                     // end can read them. Nothing can be done with it, and
                     // 5.7's Protocol-Reject is for a protocol number this end
                     // does not run at all rather than one it did not agree to,
                     // so it is dropped.
-                    (_, None) => return,
-                    (kind, Some(d)) => match d.decompress(kind, &packet.payload) {
-                        Some(datagram) => datagram,
-                        None => return,
-                    },
+                    (_, None) => None,
+                    (kind, Some(d)) => d.decompress(kind, &packet.payload),
                 };
-                let Some(carried) = ip::read(&datagram) else {
+                let (local, _) = self.addresses();
+                // RFC 791 3.2: a host that receives a datagram not addressed to
+                // it has nothing to do with it -- this end routes nothing.
+                let carried = datagram.as_deref().and_then(ip::read).filter(|c| c.to == local);
+                let Some(carried) = carried else {
+                    self.counters.dropped_in += 1;
                     return;
                 };
+                self.counters.datagrams_in += 1;
+                self.counters.octets_in += datagram.map_or(0, |d| d.len() as u64);
                 if carried.protocol != ip::PROTOCOL_ICMP {
                     // Somebody else's business. TCP is the only thing that
                     // asks for it so far.
                     self.carried.push(carried);
+                    return;
+                }
+                if let Some(problem) = ip::Problem::parse(carried.from, &carried.payload) {
+                    self.counters.problems += 1;
+                    self.problems.push(problem);
                     return;
                 }
                 if let Some(echo) = ip::Echo::parse(&carried.payload) {
@@ -669,6 +772,7 @@ impl Link {
         // for a link it thinks is open, at all.
         let unconfigured = protocol == crate::protocol::LCP && matches!(payload.first(), Some(1..=7));
         let packet = Packet { protocol, payload };
+        self.counters.frames_out += 1;
         if unconfigured {
             Framer::new().frame(&packet, &mut self.line);
         } else {

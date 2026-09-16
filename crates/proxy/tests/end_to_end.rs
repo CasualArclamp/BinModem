@@ -1,10 +1,10 @@
 //! A page fetched through the whole thing.
 //!
 //! A real socket at each end and everything in between ours: a browser
-//! connects to the client's listener and speaks SOCKS 5 or HTTP at it, the
-//! request crosses our TCP over a link that behaves like a modem, the server
-//! reads it, opens a real connection to a real web server on the loopback, and
-//! the page comes back the same way.
+//! connects to the client's listener and speaks HTTP at it -- a request, or a
+//! CONNECT for a tunnel -- the request crosses our TCP over a link that
+//! behaves like a modem, the far BinModem reads it, opens a real connection
+//! to a real web server on the loopback, and the page comes back the same way.
 //!
 //! The only thing missing from the picture is the modem itself, and the tests
 //! in `crates/modem` put one under a link like this one.
@@ -141,36 +141,31 @@ fn a_web_server(body: Vec<u8>) -> (String, thread::JoinHandle<Option<String>>) {
     (address, handle)
 }
 
-/// The browser's side: connect to the proxy, speak SOCKS 5, ask for a page.
+/// Ask the proxy for a tunnel (RFC 9112 3.2.3) and read its answer's head.
+fn tunnel(socket: &mut TcpStream, target: &str) -> Result<String, String> {
+    let request = format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
+    socket.write_all(request.as_bytes()).map_err(|e| e.to_string())?;
+    // One octet at a time, so nothing after the head is taken with it.
+    let mut head = Vec::new();
+    let mut octet = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        socket.read_exact(&mut octet).map_err(|e| format!("{e} after {:?}", String::from_utf8_lossy(&head)))?;
+        head.push(octet[0]);
+    }
+    Ok(String::from_utf8_lossy(&head).into_owned())
+}
+
+/// The browser's side of an https page: a tunnel, and a request through it.
 fn a_browser(proxy: String, target: String) -> thread::JoinHandle<Result<Vec<u8>, String>> {
     thread::spawn(move || {
         let mut socket = TcpStream::connect(&proxy).map_err(|e| format!("{proxy}: {e}"))?;
         socket
             .set_read_timeout(Some(Duration::from_secs(60)))
             .map_err(|e| e.to_string())?;
-
-        // RFC 1928 3: version, one method, no authentication.
-        socket.write_all(&[5, 1, 0]).map_err(|e| e.to_string())?;
-        let mut greeting = [0u8; 2];
-        socket.read_exact(&mut greeting).map_err(|e| e.to_string())?;
-        if greeting != [5, 0] {
-            return Err(format!("the proxy offered {greeting:?}"));
+        let head = tunnel(&mut socket, &target)?;
+        if !head.starts_with("HTTP/1.1 200") {
+            return Err(format!("the proxy said {head:?}"));
         }
-
-        // 4: CONNECT to a name, which is what a browser sends.
-        let (name, port) = target.rsplit_once(':').ok_or("no port")?;
-        let port: u16 = port.parse().map_err(|_| "bad port")?;
-        let mut request = vec![5, 1, 0, 3, name.len() as u8];
-        request.extend_from_slice(name.as_bytes());
-        request.extend_from_slice(&port.to_be_bytes());
-        socket.write_all(&request).map_err(|e| e.to_string())?;
-
-        let mut reply = [0u8; 10];
-        socket.read_exact(&mut reply).map_err(|e| e.to_string())?;
-        if reply[1] != 0 {
-            return Err(format!("the proxy refused with {}", reply[1]));
-        }
-
         socket
             .write_all(b"GET /page HTTP/1.0\r\nHost: example\r\n\r\n")
             .map_err(|e| e.to_string())?;
@@ -259,8 +254,8 @@ fn a_page_comes_back_over_a_line_that_loses_things() {
     let _ = web_thread.join();
 }
 
-/// A destination that is not there is refused in the client's own terms rather
-/// than left hanging, which is what makes a browser show the right page.
+/// A destination that is not there is refused in HTTP rather than left
+/// hanging, which is what makes a browser show the right page.
 #[test]
 fn a_destination_that_is_not_there_is_refused() {
     // Bound and dropped, so nothing is listening on a port that certainly
@@ -272,24 +267,12 @@ fn a_destination_that_is_not_there_is_refused() {
 
     let mut link = Link::new(0);
     let proxy = link.client.bound().to_string();
-    let browser = thread::spawn(move || -> u8 {
+    let browser = thread::spawn(move || -> String {
         let mut socket = TcpStream::connect(&proxy).expect("connect");
         socket
             .set_read_timeout(Some(Duration::from_secs(60)))
             .expect("timeout");
-        socket.write_all(&[5, 1, 0]).expect("greeting");
-        let mut greeting = [0u8; 2];
-        socket.read_exact(&mut greeting).expect("no greeting back");
-
-        let (name, port) = closed.rsplit_once(':').expect("no port");
-        let port: u16 = port.parse().expect("bad port");
-        let mut request = vec![5, 1, 0, 3, name.len() as u8];
-        request.extend_from_slice(name.as_bytes());
-        request.extend_from_slice(&port.to_be_bytes());
-        socket.write_all(&request).expect("request");
-        let mut reply = [0u8; 10];
-        socket.read_exact(&mut reply).expect("no reply");
-        reply[1]
+        tunnel(&mut socket, &closed).expect("no answer")
     });
 
     let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -303,8 +286,9 @@ fn a_destination_that_is_not_there_is_refused() {
     let done = finished.clone();
     link.run_until(60, || done.load(std::sync::atomic::Ordering::SeqCst));
     let reply = waiter.join().expect("the waiting thread panicked");
-    // RFC 1928 6: X'05' is "Connection refused".
-    assert_eq!(reply, 5, "it was not told the connection was refused");
+    // RFC 9110 15.6.3: a gateway that could not reach the server it was sent
+    // to says 502.
+    assert!(reply.starts_with("HTTP/1.1 502"), "it was not told: {reply:?}");
 }
 
 /// A browser that asks and then takes its time reading the answer.
@@ -314,17 +298,7 @@ fn a_slow_browser(proxy: String, target: String, wait: Duration) -> thread::Join
         socket
             .set_read_timeout(Some(Duration::from_secs(60)))
             .map_err(|e| e.to_string())?;
-        socket.write_all(&[5, 1, 0]).map_err(|e| e.to_string())?;
-        let mut greeting = [0u8; 2];
-        socket.read_exact(&mut greeting).map_err(|e| e.to_string())?;
-        let (name, port) = target.rsplit_once(':').ok_or("no port")?;
-        let port: u16 = port.parse().map_err(|_| "bad port")?;
-        let mut request = vec![5, 1, 0, 3, name.len() as u8];
-        request.extend_from_slice(name.as_bytes());
-        request.extend_from_slice(&port.to_be_bytes());
-        socket.write_all(&request).map_err(|e| e.to_string())?;
-        let mut reply = [0u8; 10];
-        socket.read_exact(&mut reply).map_err(|e| e.to_string())?;
+        tunnel(&mut socket, &target)?;
         socket
             .write_all(b"GET /page HTTP/1.0\r\nHost: example\r\n\r\n")
             .map_err(|e| e.to_string())?;
@@ -434,9 +408,8 @@ fn a_patient_web_server(
     (address, handle)
 }
 
-/// The browser's side when it is configured with an HTTP proxy rather than a
-/// SOCKS host: no handshake at all, just the request with the whole target in
-/// it (RFC 9112 3.2.2).
+/// The browser's side of an http page: no handshake at all, just the request
+/// with the whole target in it (RFC 9112 3.2.2).
 fn an_http_browser(proxy: String, asks: Vec<String>) -> thread::JoinHandle<Result<Vec<String>, String>> {
     thread::spawn(move || {
         let mut socket = TcpStream::connect(&proxy).map_err(|e| format!("{proxy}: {e}"))?;
@@ -533,9 +506,8 @@ fn a_page_comes_back_through_the_http_proxy() {
 
 /// Two pages from the same host down one connection, opening one socket.
 ///
-/// This is the saving. SOCKS pays a greeting and a connect request -- two round
-/// trips, most of a second on this link -- for every connection a browser
-/// makes; here the second page costs nothing before the request itself.
+/// This is the saving: the second page costs nothing before the request
+/// itself, where a new connection would cost a handshake over the link.
 #[test]
 fn a_second_page_from_the_same_host_opens_no_second_socket() {
     let (web, web_thread) = a_patient_web_server("the page", 2);

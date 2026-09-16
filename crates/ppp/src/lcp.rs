@@ -206,6 +206,15 @@ pub enum Review {
 /// for something absurd is told a number rather than believed.
 pub const MAX_MRU: u16 = 4096;
 
+/// The least this end will ask for.
+///
+/// RFC 1661 sets no floor. RFC 1144 5.2 argues for small packets on a slow
+/// line, "to maintain good interactive response", and measures with a 256
+/// octet MTU (a 216 octet MSS). Below that, two 20 octet headers are most of
+/// every datagram, and 1144's own note 37 warns that a tiny MSS "might
+/// stress-test your TCP implementation".
+pub const MIN_MRU: u16 = 256;
+
 /// Decide what a peer's Configure-Request deserves, and record what is being
 /// agreed to.
 ///

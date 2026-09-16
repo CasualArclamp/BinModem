@@ -63,6 +63,10 @@ pub struct Stack {
     events: Vec<Event>,
     /// Connections that arrived and are waiting to be taken.
     arrived: Vec<Handle>,
+    /// What every new connection asks for, and the most the link below can
+    /// carry in one segment.
+    receive_mss: u16,
+    send_limit: u16,
 }
 
 impl Stack {
@@ -78,7 +82,33 @@ impl Stack {
             out: Vec::new(),
             events: Vec::new(),
             arrived: Vec::new(),
+            receive_mss: 1460,
+            send_limit: u16::MAX,
         }
+    }
+
+    /// Size new connections for the link under them.
+    ///
+    /// `largest_in` is the biggest datagram this end said it can receive and
+    /// `largest_out` the biggest the far end of the link will take, both as
+    /// PPP's MRU counts them. RFC 9293 3.7.1 takes the fixed IP and TCP
+    /// headers off each: the MSS option "should be equal to the effective MTU
+    /// minus the fixed IP and TCP headers", and the effective send MSS is the
+    /// smaller of what the far end offers and what the link permits.
+    pub fn size_for_link(&mut self, largest_in: u16, largest_out: u16) {
+        let headers = (crate::connection::HEADER_LEN + 20) as u16;
+        self.receive_mss = largest_in.saturating_sub(headers).max(88);
+        self.send_limit = largest_out.saturating_sub(headers).max(88);
+    }
+
+    /// The MSS new connections ask for, and the most they will send in one.
+    pub fn sizes(&self) -> (u16, u16) {
+        (self.receive_mss, self.send_limit)
+    }
+
+    /// Every connection, for anything that wants to look at them.
+    pub fn connections(&self) -> impl Iterator<Item = (Handle, &Connection)> {
+        self.connections.iter().map(|(h, c)| (*h, c))
     }
 
     pub fn address(&self) -> [u8; 4] {
@@ -116,7 +146,8 @@ impl Stack {
         }
         let port = self.free_port()?;
         let local = Endpoint::new(self.address, port);
-        let connection = Connection::connect(local, to, self.initial_sequence());
+        let connection =
+            Connection::connect_sized(local, to, self.initial_sequence(), self.receive_mss, self.send_limit);
         Some(self.keep(connection))
     }
 
@@ -187,6 +218,8 @@ impl Stack {
         {
             let mut connection = Connection::listen(local);
             connection.set_initial_sequence(self.initial_sequence());
+            connection.set_receive_mss(self.receive_mss);
+            connection.set_send_limit(self.send_limit);
             connection.receive(from, &segment);
             let handle = self.keep(connection);
             self.arrived.push(handle);

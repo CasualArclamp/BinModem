@@ -1,15 +1,14 @@
-//! The end with the internet.
+//! The end with the internet, when the far end of the call is a BinModem.
 //!
-//! Connections arrive over the link, each one a browser asking for somewhere.
-//! When one says where, a real socket is opened to it and from then on the two
-//! streams are each other's.
+//! Connections arrive over the link, each one a browser's, speaking HTTP to a
+//! proxy. When one says where it wants to go, a real socket is opened there
+//! and from then on the two streams are each other's.
 //!
-//! What it is asking in is decided by the first octet: SOCKS 5 opens with its
-//! version number and every HTTP method starts with a letter, so one octet
-//! separates them and neither has to be configured. That matters beyond
-//! tidiness -- a browser pointed at the wrong one of the two used to open, say
-//! nothing this end understood, and leave a blank page with no explanation
-//! anywhere.
+//! The first octet says whether it is HTTP at all: every method name is
+//! uppercase letters (RFC 9110 9). A browser set up for SOCKS opens with 5
+//! instead (RFC 1928 3), and is told nothing it could use -- this end no
+//! longer speaks SOCKS -- so it is said on the panel, where somebody can put
+//! the setting right.
 //!
 //! The only blocking thing a proxy does is open the outbound connection: a
 //! name has to be resolved and a handshake has to complete, either of which
@@ -22,42 +21,22 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::Duration;
 
-use socks::Reply;
 use tcp::connection::Report;
 use tcp::stack::{Handle, Outgoing, Stack};
 
-use crate::{CHUNK, PROXY_PORT};
+use crate::{CHUNK, FAR_PORT, too_much};
 
 /// How long to wait for the far side of the internet before giving up on it.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
-/// How much may be waiting to go out of a socket before this end stops taking
-/// more in.
-///
-/// The link is slower than the internet by a factor of thousands, so without
-/// a limit the buffer between them is however large the page is.
-const MOST_BUFFERED: usize = 64 * 1024;
-
-/// Somewhere a socket has to be opened, whichever protocol asked for it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Want {
-    /// Host and port, as it was asked for.
-    authority: String,
-    /// Whether what follows is nobody else's business (an HTTP CONNECT).
-    tunnel: bool,
-}
-
 /// What a browser turned out to be speaking.
-///
-/// Decided on the first octet and not before: RFC 1928 3 fixes the SOCKS
-/// greeting's first octet at 5, and every HTTP method name is uppercase
-/// letters, so there is no overlap and nothing to configure. Until something
-/// arrives there is nothing to decide, which is what `Silent` is.
 #[derive(Debug)]
 enum Conversation {
+    /// Nothing has arrived to decide by.
     Silent,
-    Socks(socks::Session),
     Http(http::Session),
+    /// Not HTTP, and nothing more will be made of it.
+    Other(&'static str),
 }
 
 impl Conversation {
@@ -68,103 +47,69 @@ impl Conversation {
         {
             *self = if http::speaks_http(first) {
                 Conversation::Http(http::Session::new())
+            } else if first == 5 {
+                Conversation::Other("a browser set up for SOCKS, which this end does not speak")
             } else {
-                Conversation::Socks(socks::Session::new())
+                Conversation::Other("something that is not HTTP")
             };
         }
         match self {
-            Conversation::Silent => Vec::new(),
-            Conversation::Socks(s) => s.feed(bytes),
             Conversation::Http(h) => h.feed(bytes),
-        }
-    }
-
-    /// What to call it on the panel.
-    fn name(&self) -> &'static str {
-        match self {
-            Conversation::Silent => "nothing yet",
-            Conversation::Socks(_) => "SOCKS 5",
-            Conversation::Http(_) => "HTTP",
+            Conversation::Silent | Conversation::Other(_) => Vec::new(),
         }
     }
 
     /// Somewhere that needs a socket, if anywhere does.
-    fn wants(&self) -> Option<Want> {
+    fn wants(&self) -> Option<http::Target> {
         match self {
-            Conversation::Silent => None,
-            Conversation::Socks(s) => s.request().map(|r| Want {
-                authority: format!("{}:{}", r.destination, r.port),
-                tunnel: false,
-            }),
-            Conversation::Http(h) => h.request().map(|t| Want {
-                authority: t.authority.clone(),
-                tunnel: t.tunnel,
-            }),
+            Conversation::Http(h) => h.request().cloned(),
+            Conversation::Silent | Conversation::Other(_) => None,
         }
     }
 
     /// It opened. Returns anything that was waiting to go out of it.
-    fn opened(&mut self, bound: ([u8; 4], u16)) -> Vec<u8> {
+    fn opened(&mut self) -> Vec<u8> {
         match self {
-            Conversation::Silent => Vec::new(),
-            Conversation::Socks(s) => s.answer(Reply::Succeeded, bound),
             Conversation::Http(h) => h.answer(http::Answer::Opened),
+            Conversation::Silent | Conversation::Other(_) => Vec::new(),
         }
     }
 
-    /// It did not. The browser is told in its own protocol, which is what
-    /// makes it show the right page rather than an empty one.
+    /// It did not. The browser is told in HTTP, which is what makes it show a
+    /// page saying so rather than an empty one.
     fn would_not_open(&mut self, why: &str) {
-        match self {
-            Conversation::Silent => {}
-            Conversation::Socks(s) => {
-                let reply = if why.contains("refused") {
-                    Reply::ConnectionRefused
-                } else if why.contains("resolve") {
-                    Reply::HostUnreachable
-                } else {
-                    Reply::GeneralFailure
-                };
-                let _ = s.answer(reply, ([0, 0, 0, 0], 0));
-            }
-            Conversation::Http(h) => {
-                let answer = if why.contains("refused") {
-                    http::Answer::Refused
-                } else if why.contains("resolve") {
-                    http::Answer::Unreachable
-                } else if why.contains("timed out") {
-                    http::Answer::TimedOut
-                } else {
-                    http::Answer::Failed
-                };
-                let _ = h.answer(answer);
-            }
+        if let Conversation::Http(h) = self {
+            let answer = if why.contains("refused") {
+                http::Answer::Refused
+            } else if why.contains("resolve") {
+                http::Answer::Unreachable
+            } else if why.contains("timed out") {
+                http::Answer::TimedOut
+            } else {
+                http::Answer::Failed
+            };
+            let _ = h.answer(answer);
         }
     }
 
     /// Octets for the browser.
     fn take_out(&mut self) -> Vec<u8> {
         match self {
-            Conversation::Silent => Vec::new(),
-            Conversation::Socks(s) => s.take_out(),
             Conversation::Http(h) => h.take_out(),
+            Conversation::Silent | Conversation::Other(_) => Vec::new(),
         }
     }
 
     fn trouble(&self) -> Option<&'static str> {
         match self {
-            Conversation::Silent => None,
-            Conversation::Socks(s) => s.trouble(),
             Conversation::Http(h) => h.trouble(),
+            Conversation::Other(why) => Some(why),
+            Conversation::Silent => None,
         }
     }
 
     fn open(&self) -> bool {
-        match self {
-            Conversation::Silent => false,
-            Conversation::Socks(s) => s.open(),
-            Conversation::Http(h) => h.open(),
-        }
+        matches!(self, Conversation::Http(h) if h.open())
     }
 }
 
@@ -186,9 +131,6 @@ struct Relayed {
     to_link: Vec<u8>,
     /// Where it was going, for the log.
     going_to: String,
-    /// Whether anything has been heard from the browser yet, so which
-    /// protocol it turned out to be is reported once rather than every round.
-    heard: bool,
     /// Whether the conversation has already been complained about.
     complained: bool,
     /// Whether the socket has said it has no more to give.
@@ -208,16 +150,22 @@ pub struct Server {
 }
 
 impl Server {
-    /// Listen for browsers at `address` over the link, in either protocol.
+    /// Listen for browsers at `address` over the link.
     pub fn new(address: [u8; 4], seed: u32) -> Self {
         let mut stack = Stack::new(address, seed);
-        stack.listen(PROXY_PORT);
+        stack.listen(FAR_PORT);
         Self {
             stack,
             relays: HashMap::new(),
             log: Vec::new(),
-            port: PROXY_PORT,
+            port: FAR_PORT,
         }
+    }
+
+    /// Size connections for what the link carries (see
+    /// [`tcp::Stack::size_for_link`]).
+    pub fn size_for_link(&mut self, largest_in: u16, largest_out: u16) {
+        self.stack.size_for_link(largest_in, largest_out);
     }
 
     /// IPCP settles the address after the link is up, which is later than a
@@ -271,7 +219,6 @@ impl Server {
                     to_socket: Vec::new(),
                     to_link: Vec::new(),
                     going_to: String::new(),
-                    heard: false,
                     complained: false,
                     socket_finished: false,
                     told_socket: false,
@@ -299,7 +246,7 @@ impl Server {
 
     /// Everything one connection has to do this round.
     fn carry(&mut self, handle: Handle) {
-        // Off the link, through SOCKS, and towards the socket.
+        // Off the link, through the HTTP session, and towards the socket.
         let (from_link, browser_finished) = match self.stack.get_mut(handle) {
             Some(connection) => {
                 let data = connection.take_received();
@@ -316,14 +263,6 @@ impl Server {
         if !from_link.is_empty() {
             let forward = relay.talk.feed(&from_link);
             relay.to_socket.extend(forward);
-            // The first octet settles which protocol this is, so it is worth
-            // saying which -- a browser configured one way and reaching a
-            // proxy expecting the other used to stall here in silence.
-            if !relay.heard {
-                relay.heard = true;
-                self.log
-                    .push(format!("proxy: a browser speaking {}", relay.talk.name()));
-            }
         }
         // Whatever it made of it, said once. Without this a browser speaking
         // neither stalls with nothing on the panel at all.
@@ -382,15 +321,7 @@ impl Server {
             match receiver.try_recv() {
                 Ok(Ok(socket)) => {
                     relay.opening = None;
-                    let bound = socket
-                        .local_addr()
-                        .ok()
-                        .and_then(|a| match a {
-                            std::net::SocketAddr::V4(v4) => Some((v4.ip().octets(), v4.port())),
-                            std::net::SocketAddr::V6(_) => None,
-                        })
-                        .unwrap_or(([0, 0, 0, 0], 0));
-                    let early = relay.talk.opened(bound);
+                    let early = relay.talk.opened();
                     relay.to_socket.extend(early);
                     relay.socket = Some(socket);
                     self.log.push(format!("proxy: {} open", relay.going_to));
@@ -520,29 +451,13 @@ fn open(where_to: &str) -> Result<TcpStream, String> {
     Err(last)
 }
 
-/// Whether a relay is holding more than it should be.
-///
-/// Kept as a function rather than folded into the loop so the limit has a name
-/// and one place to be changed.
-pub(crate) fn too_much(buffered: usize) -> bool {
-    buffered >= MOST_BUFFERED
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// It listens where a far end has always found it.
     #[test]
-    fn the_buffer_has_a_limit_and_it_is_not_reached_by_a_page() {
-        assert!(!too_much(0));
-        assert!(!too_much(60_000));
-        assert!(too_much(MOST_BUFFERED));
-    }
-
-    /// The server listens where RFC 1928 3 says a SOCKS server lives, and an
-    /// HTTP proxy is served from the same place.
-    #[test]
-    fn it_listens_where_socks_belongs() {
+    fn it_listens_where_a_browser_on_the_far_end_is_sent() {
         let server = Server::new([10, 0, 0, 1], 1);
         assert_eq!(server.port(), 1080);
         assert_eq!(server.address(), [10, 0, 0, 1]);
@@ -554,25 +469,24 @@ mod tests {
 mod opening {
     use super::Conversation;
 
-    /// One octet decides, because one octet may be all there is for a while.
     #[test]
-    fn the_first_octet_says_which_proxy_a_browser_is_asking_for() {
+    fn a_request_says_where_it_wants_to_go() {
         let mut http = Conversation::Silent;
         http.feed(b"GET http://example.invalid/ HTTP/1.1\r\n\r\n");
-        assert_eq!(http.name(), "HTTP");
-        assert_eq!(
-            http.wants().map(|w| w.authority),
-            Some("example.invalid:80".to_owned())
-        );
-
-        let mut socks = Conversation::Silent;
-        socks.feed(&[5, 1, 0]);
-        assert_eq!(socks.name(), "SOCKS 5");
-
+        assert_eq!(http.wants().map(|w| w.authority), Some("example.invalid:80".to_owned()));
+        assert!(http.trouble().is_none());
         // And until something arrives there is nothing to decide.
-        let quiet = Conversation::Silent;
-        assert_eq!(quiet.name(), "nothing yet");
-        assert!(quiet.wants().is_none());
+        assert!(Conversation::Silent.wants().is_none());
+    }
+
+    /// A browser set up for SOCKS is told nothing, and the panel is told why.
+    #[test]
+    fn a_socks_greeting_is_recognised_and_refused() {
+        let mut socks = Conversation::Silent;
+        assert!(socks.feed(&[5, 1, 0]).is_empty());
+        assert!(socks.wants().is_none());
+        assert!(socks.trouble().is_some_and(|why| why.contains("SOCKS")));
+        assert!(socks.take_out().is_empty());
     }
 
     /// A CONNECT names a tunnel, which is how https goes over the link.

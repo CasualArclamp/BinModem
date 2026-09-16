@@ -52,6 +52,8 @@ struct Pair {
     from_a: Vec<u8>,
     from_b: Vec<u8>,
     held_back: Option<(bool, Vec<u8>)>,
+    /// The most data any one segment from `a` carried.
+    largest_from_a: usize,
 }
 
 impl Pair {
@@ -74,6 +76,7 @@ impl Pair {
             from_a: Vec::new(),
             from_b: Vec::new(),
             held_back: None,
+            largest_from_a: 0,
         }
     }
 
@@ -92,6 +95,9 @@ impl Pair {
         self.clock += STEP_MS;
 
         for (to_b, segment) in self.outbound() {
+            if to_b {
+                self.largest_from_a = self.largest_from_a.max(segment.payload.len());
+            }
             let bytes = if to_b {
                 segment.to_bytes(A, B)
             } else {
@@ -404,4 +410,34 @@ fn both_directions_run_at_once() {
     }
     assert_eq!(pair.from_b, up, "what went up did not arrive");
     assert_eq!(pair.from_a, down, "what came down did not arrive");
+}
+
+/// A far end that says it can take more than the link under this end carries
+/// is sent no more than the link carries.
+///
+/// RFC 9293 3.7.1 (MUST-16): the effective send MSS is the smaller of the
+/// far end's MSS and what the IP layer permits. A web server offers 1460
+/// whatever the modem under this end agreed to, and a PPP link whose far end
+/// asked for a smaller MRU will not take a datagram built to that.
+#[test]
+fn no_segment_is_larger_than_the_link_below_carries() {
+    let page = a_page();
+    let mut pair = Pair::new(Line::default());
+    pair.b.set_receive_mss(1460);
+    pair.a.set_send_limit(256);
+    pair.connect();
+    assert_eq!(pair.a.status().send_mss, 256, "the far end's 1460 was taken as it stood");
+
+    let mut at = 0;
+    for _ in 0..20_000 {
+        if at < page.len() {
+            at += pair.a.send(&page[at..]);
+        }
+        pair.step();
+        if pair.from_b.len() >= page.len() {
+            break;
+        }
+    }
+    assert_eq!(pair.from_b, page, "the page did not arrive whole");
+    assert_eq!(pair.largest_from_a, 256, "a segment was larger than the link carries, or none was full");
 }

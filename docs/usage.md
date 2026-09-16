@@ -261,54 +261,92 @@ far end put the link down.
 
 ### Web traffic over it
 
-Tick **carry web traffic** on **both machines**. It is one proxy in two
-halves and each machine runs the half its end of the call calls for, so a
-single tick is half a proxy and carries nothing. The setting is kept for the
-next link, so a machine answering with a login prompt can offer it before
-anyone has called.
+Tick **carry web traffic** on the machine that dialled. It is an HTTP proxy for
+a browser on that machine, for http and https alike. In Firefox, go to
+Settings → Network Settings → Manual, fill in the **HTTP Proxy** box, and tick
+*Also use this proxy for HTTPS*:
 
-The end that answered the call has the internet and offers it, and says
-*offering the internet at 10.0.0.1:1080*; the end that dialled listens on
-`127.0.0.1:1080` and says so.
+    HTTP Proxy  127.0.0.1    Port 8080
 
-It speaks both proxy protocols on that one port and tells them apart from the
-first octet a browser sends, so either box in Firefox's Settings → Network
-Settings → Manual will work. **Use the HTTP Proxy box**, and tick *Also use
-this proxy for HTTPS*:
+A browser still set up for SOCKS gets nowhere. The transcript says so --
+*127.0.0.1:6817 is set up for SOCKS; set it to use an HTTP proxy* -- and the
+fix is the box above.
 
-    HTTP Proxy  127.0.0.1    Port 1080
+Where a page goes from there depends on what answered the call, and the proxy
+finds out for itself when the link comes up (**pages go: find out**):
 
-SOCKS still works — **SOCKS Host** `127.0.0.1` port `1080`, SOCKS v5, with
-*Proxy DNS when using SOCKS v5* ticked — but it is slower here, and on this
-link the difference is not small. SOCKS agrees what to open before the request
-crosses: a greeting and its answer, then a connect request and its answer (RFC
-1928 3 and 4). That is two round trips, and a round trip on a V.34 call between
-two of these is about 460 ms, so it is close to a second of silence before a
-browser has asked for anything — once per connection, and a page needs several.
-An HTTP proxy spends none of it, because RFC 9112 3.2.2 puts the whole target
-in the request line: the first thing the browser says is already the request,
-and the far end starts opening the socket while the rest of it is still
-arriving. It also keeps the connection to the far end between requests, so a
-second page from the same site opens no second socket.
+- **A provider** -- a modem pool, whose far end is a router. The dialling
+  machine reads the browser's request itself and opens the connection straight
+  to the web server's own address, with its own TCP, through the provider's
+  router. https is a CONNECT, and what goes through the tunnel is never read.
+  *pages go straight to the internet*.
+- **Another BinModem** with **carry web traffic** ticked too. That machine has
+  the internet, and offers it on port 1080 over the link; the dialling machine
+  passes each browser connection across untouched. *pages go through the far
+  BinModem's proxy*.
 
-Whichever is used, names are resolved at the far end, where there is something
-to resolve them with.
+Finding out is a single connection offered to the far end's port 1080. A
+BinModem answers it; a provider's router refuses it, or says nothing for eight
+seconds. Browser connections that arrive while it is finding out wait for the
+answer. **pages go** can also be set to either way outright.
+
+The one thing that does not cross the call is looking up names. There is no
+DNS client here: nothing in this program is written from memory of a
+protocol, and the RFCs for DNS are not among the ones it was written from. So
+the machine's own resolver is asked, over whatever connection the machine
+already has, and only the address it gives is used. The connection to that
+address goes over the modem. A name served from many places may be pointed
+near the machine's own network rather than near the provider, but it is still
+an address on the internet and the router carries it there. IPv4 only, since
+the stack under the call is.
+
+An HTTP proxy costs no round trips before the request: RFC 9112 3.2.2 puts the
+whole target in the request line, so the first thing the browser says is
+already the request, and the connection behind it is opened while the rest is
+still arriving. It also keeps each connection between requests, so a second
+page from the same site opens no second connection. On a call to a provider
+the round trip is over a second, so both matter.
 
 Firefox opens up to six connections per proxy by default, and on a link this
 slow that is six lots of setting up at once rather than six lots of progress.
 Setting `network.http.max-persistent-connections-per-proxy` to `2` in
 `about:config` is worth doing.
 
-If the far end is not carrying web traffic there is nothing at its port to
-refuse the connections, so they are not refused: they go unanswered, and a
-browser is left with a socket that opened and closed having carried nothing,
-which Firefox reports as an empty page. The panel says so rather than counting
-them as traffic — *2 waiting: 10.0.0.1 is not answering* — which is the tick
-missing at the other end.
+The proxy listens on the loopback rather than every interface, deliberately:
+a proxy listening on the network is one anybody on the network can use to
+reach the far end of somebody else's telephone call.
 
-The loopback rather than every interface, deliberately: a proxy listening on
-the network is one anybody on the network can use to reach the far end of
-somebody else's telephone call.
+#### Settings and what to watch
+
+Beside **pages go** are the **port** the browser is pointed at, and the
+**MRU**: the largest frame the far end is asked to send (RFC 1661 6.1). TCP's
+segment size follows it -- RFC 9293 3.7.1 has the MSS option be "the effective
+MTU minus the fixed IP and TCP headers", and nothing larger than the far end's
+MRU is ever built, whatever a web server says it can take. 1500 suits web
+pages on a long round trip, because a server's slow start counts segments.
+Smaller answers typing sooner (RFC 1144 5.2). All three are read when a link
+starts.
+
+**link and IP** folds open to show what LCP agreed each way (MRU, character
+map, whether address, control and protocol are compressed), the header
+compression, and what has crossed: frames in, out and broken, datagrams and
+their octets, datagrams dropped (not for this address, unreadable, or a
+compressed header nothing could rebuild), datagrams too large for the far end
+and so never sent, and ICMP errors from routers. Below that are the TCP MSS the
+proxy asks for and sends at, how many names were looked up and not found, and
+the octets to and from the browser.
+
+**connections** lists every TCP connection over the link: what it is for, the
+address it goes to, its state, RFC 6298's smoothed round trip and timeout,
+segments sent again, the congestion window and segment size, and the octets
+each way. A connection whose resends climb while nothing comes back is the
+line; one stuck in SYN-SENT is a server not answering; a router's *host
+unreachable* is in the transcript and ends the attempt at once.
+
+On the machine that answered, **carry web traffic** offers its internet to a
+BinModem that calls, and says *offering the internet at 10.0.0.1:1080*. The
+setting is kept for the next link, so a machine answering with a login prompt
+can offer it before anyone has called.
 
 The transcript says whether the headers are being compressed — *ppp: headers
 compressed both ways, 16 slots*. That is RFC 1144, and it matters more here
@@ -322,8 +360,9 @@ forty go. A far end that will not do it says so and the link carries on
 without it, which the transcript also says.
 
 What crosses is our own TCP (RFC 9293) over our own IP over PPP over the
-modem. The only part of the path belonging to the operating system is the
-socket the answering end opens to the site. Expect a page in tens of seconds
+modem. The only parts of the path belonging to the operating system are the
+browser's socket to the proxy, the name lookups, and, between two BinModems,
+the socket the answering end opens to the site. Expect a page in tens of seconds
 at 2400 and rather better at 9600; a modern page with a hundred requests on it
 will not be pleasant, and a page from 1996 will be exactly as it was.
 
@@ -334,8 +373,8 @@ compression itself, and 791, 792 and 1071 for the datagram, the echo and
 the checksum over both. `crates/login` has no RFC behind it, because the text
 before PPP never had one. `crates/tcp` is RFC 9293, with
 6298 for the retransmission timer and 5681 for what to do about a loss;
-`crates/socks` is RFC 1928 and `crates/http` is RFC 9112 with RFC 9110 for
-what a proxy may do to a message as it goes past.
+`crates/http` is RFC 9112 with RFC 9110 for what a proxy may do to a message
+as it goes past.
 
 ## One file
 

@@ -176,7 +176,16 @@ pub struct Status {
     pub rcv_nxt: u32,
     pub rcv_wnd: u32,
     pub rto_ms: u32,
+    /// RFC 6298's smoothed round trip, zero until there is a measurement.
+    pub srtt_ms: u32,
     pub retransmits: u32,
+    /// Segments sent again since the connection began, where `retransmits`
+    /// counts only the backoffs in a row.
+    pub resent: u32,
+    /// The segment size in use each way: what this end sends in, after
+    /// RFC 9293 3.7.1's limit, and what it asked the far end for.
+    pub send_mss: u16,
+    pub receive_mss: u16,
     pub cwnd: u32,
     pub ssthresh: u32,
     /// Octets given to this end and not yet acknowledged by the other.
@@ -215,6 +224,10 @@ pub struct Connection {
     send_mss: u16,
     /// And what this end asks for.
     recv_mss: u16,
+    /// The most the layer below can carry in one datagram, less the headers:
+    /// RFC 9293 3.7.1's MMS_S less twenty. Whatever the far end says it can
+    /// take, a segment larger than this does not fit the link.
+    send_limit: u16,
 
     /// The retransmission queue: everything from SND.UNA that has been given
     /// to this connection and not yet acknowledged. `snd_nxt - snd_una` octets
@@ -255,6 +268,7 @@ pub struct Connection {
     /// segment is ambiguous, so the timing is abandoned when one is resent.
     timing: Option<(Seq, u64)>,
     retransmits: u32,
+    resent: u32,
 
     /// Milliseconds since the connection began. Every deadline below is a
     /// point on this.
@@ -284,7 +298,17 @@ impl Connection {
     /// 3.4.1 wants unpredictable and which the caller is better placed to
     /// choose than this is.
     pub fn connect(local: Endpoint, remote: Endpoint, isn: u32) -> Self {
+        Self::connect_sized(local, remote, isn, 1460, u16::MAX)
+    }
+
+    /// The active OPEN over a link that carries at most `send_limit` octets
+    /// of segment, asking the far end for `receive_mss`.
+    ///
+    /// Sized before the SYN goes, because the SYN is what carries the option.
+    pub fn connect_sized(local: Endpoint, remote: Endpoint, isn: u32, receive_mss: u16, send_limit: u16) -> Self {
         let mut c = Self::new(local, remote, Seq(isn), State::SynSent, false);
+        c.set_receive_mss(receive_mss);
+        c.set_send_limit(send_limit);
         // <SEQ=ISS><CTL=SYN>, and 3.7.1 SHLD-5 puts the size on it.
         c.snd_nxt = c.iss + 1;
         let mss = c.recv_mss;
@@ -322,6 +346,7 @@ impl Connection {
             // option carry "the effective MTU minus the fixed IP and TCP
             // headers".
             recv_mss: 1460,
+            send_limit: u16::MAX,
             outgoing: VecDeque::new(),
             incoming: VecDeque::new(),
             held: Vec::new(),
@@ -333,6 +358,7 @@ impl Connection {
             rttvar_ms: 0,
             timing: None,
             retransmits: 0,
+            resent: 0,
             clock: 0,
             retransmit_at: None,
             time_wait_at: None,
@@ -350,6 +376,23 @@ impl Connection {
         self.recv_mss = mss.max(88);
     }
 
+    /// The largest segment the link below can carry.
+    ///
+    /// RFC 9293 3.7.1: "the effective send MSS ... MUST be the smaller
+    /// (MUST-16) of the send MSS ... and the largest transmission size
+    /// permitted by the IP layer". A web server says 1460 whatever the modem
+    /// under this end agreed to, and a segment built to that on a link with a
+    /// smaller MRU is one the far end of the link will not take.
+    pub fn set_send_limit(&mut self, limit: u16) {
+        self.send_limit = limit.max(88);
+        self.send_mss = self.send_mss.min(self.send_limit);
+    }
+
+    /// The far end's MSS, or 3.7.1's default, within what the link carries.
+    fn effective_mss(&self, offered: Option<u16>) -> u16 {
+        offered.unwrap_or(DEFAULT_MSS).min(self.send_limit)
+    }
+
     /// 3.10.6's STATUS call: "state, active/passive, ... send window, receive
     /// window", and what this end is waiting on.
     ///
@@ -365,7 +408,11 @@ impl Connection {
             rcv_nxt: self.rcv_nxt.0,
             rcv_wnd: self.rcv_wnd,
             rto_ms: self.rto_ms,
+            srtt_ms: self.srtt_ms,
             retransmits: self.retransmits,
+            resent: self.resent,
+            send_mss: self.send_mss,
+            receive_mss: self.recv_mss,
             cwnd: self.cwnd,
             ssthresh: self.ssthresh,
             unacknowledged: self.outgoing.len(),
@@ -564,7 +611,7 @@ impl Connection {
         self.snd_nxt = self.iss + 1;
         self.snd_wnd = u32::from(segment.window);
         self.snd_wl1 = Seq(segment.sequence);
-        self.send_mss = segment.mss.unwrap_or(DEFAULT_MSS);
+        self.send_mss = self.effective_mss(segment.mss);
         self.state = State::SynReceived;
         // <SEQ=ISS><ACK=RCV.NXT><CTL=SYN,ACK>
         let (iss, rcv_nxt, mss) = (self.iss, self.rcv_nxt, self.recv_mss);
@@ -632,7 +679,7 @@ impl Connection {
         }
         self.irs = Seq(segment.sequence);
         self.rcv_nxt = Seq(segment.sequence) + 1;
-        self.send_mss = segment.mss.unwrap_or(DEFAULT_MSS);
+        self.send_mss = self.effective_mss(segment.mss);
         if segment.ack() {
             // Only the SYN can have been acknowledged here, and a SYN takes a
             // place in the sequence space and no room in the queue.
@@ -1242,6 +1289,7 @@ impl Connection {
     /// again, reinitialize the retransmission timer".
     fn retransmit(&mut self) {
         self.retransmits += 1;
+        self.resent = self.resent.saturating_add(1);
         if self.retransmits > MAX_RETRANSMITS {
             // 3.8.3: past R2 the connection is aborted and the user told.
             self.abort();

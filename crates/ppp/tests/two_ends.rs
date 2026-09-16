@@ -381,3 +381,108 @@ fn a_ping_crosses_a_compressed_link_untouched() {
     assert_eq!(carried.len(), 1);
     assert_eq!(&carried[0].payload[20..], b"efgh");
 }
+
+/// Frame a datagram the way a far end's router would put it on the line.
+fn framed(datagram: Vec<u8>) -> Vec<u8> {
+    let mut out = Vec::new();
+    ppp::Framer::new().frame(&ppp::Packet { protocol: ppp::protocol::IP, payload: datagram }, &mut out);
+    out
+}
+
+/// Every IP datagram in what an end put on the line.
+fn datagrams_in(line: &[u8]) -> Vec<ppp::ip::Carried> {
+    // The map the router asked for, which is none: control characters cross
+    // as they are, and a default deframer would strip them as line noise.
+    let mut deframer = ppp::Deframer::new();
+    deframer.set_accm(0);
+    line.iter()
+        .filter_map(|&b| deframer.feed(b).ok().flatten())
+        .filter(|p| p.protocol == ppp::protocol::IP)
+        .filter_map(|p| ppp::ip::read(&p.payload))
+        .collect()
+}
+
+/// A provider's end of a link is a router, and what goes to it is addressed
+/// to wherever it is going.
+#[test]
+fn a_datagram_for_the_internet_is_addressed_to_the_internet() {
+    let mut router = Link::new([192, 168, 9, 1], [192, 168, 9, 40]).without_header_compression();
+    let mut caller = Link::new([0, 0, 0, 0], [0, 0, 0, 0]).without_header_compression();
+    connect(&mut router, &mut caller, 30_000);
+    let _ = caller.take_line();
+
+    let web = [93, 184, 216, 34];
+    assert!(caller.send_to(web, ppp::ip::PROTOCOL_TCP, b"a segment for a web server"));
+    let sent = datagrams_in(&caller.take_line());
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(sent[0].from, [192, 168, 9, 40]);
+    assert_eq!(sent[0].to, web, "it went to the router rather than through it");
+    assert_eq!(sent[0].payload, b"a segment for a web server");
+
+    // And the answer, from the web server, through the router.
+    let answer = ppp::ip::build(web, [192, 168, 9, 40], ppp::ip::PROTOCOL_TCP, b"the answer", 9);
+    caller.feed(&framed(answer));
+    let carried = caller.take_carried();
+    assert_eq!(carried.len(), 1);
+    assert_eq!(carried[0].from, web);
+    assert_eq!(carried[0].payload, b"the answer");
+    let counted = caller.counters();
+    assert_eq!((counted.datagrams_out, counted.datagrams_in), (1, 1));
+}
+
+/// RFC 791 3.2: a host has nothing to do with a datagram for somebody else,
+/// and this end routes nothing.
+#[test]
+fn a_datagram_for_another_address_is_dropped_and_counted() {
+    let mut router = Link::new([192, 168, 9, 1], [192, 168, 9, 40]).without_header_compression();
+    let mut caller = Link::new([0, 0, 0, 0], [0, 0, 0, 0]).without_header_compression();
+    connect(&mut router, &mut caller, 30_000);
+    let stray = ppp::ip::build([93, 184, 216, 34], [192, 168, 9, 99], ppp::ip::PROTOCOL_TCP, b"not ours", 1);
+    caller.feed(&framed(stray));
+    assert!(caller.take_carried().is_empty());
+    assert_eq!(caller.counters().dropped_in, 1);
+}
+
+/// The far end asked for small frames, and nothing larger is put on the line
+/// for it to throw away.
+#[test]
+fn a_datagram_the_far_end_would_not_take_is_not_sent() {
+    let mut router = Link::new([192, 168, 9, 1], [192, 168, 9, 40]).with_mru(576);
+    let mut caller = Link::new([0, 0, 0, 0], [0, 0, 0, 0]);
+    connect(&mut router, &mut caller, 30_000);
+    assert_eq!(router.mru().0, 576);
+    assert_eq!(caller.mru().1, 576, "the caller did not agree to the router's MRU");
+    assert_eq!(caller.mru().0, 1500);
+
+    let web = [93, 184, 216, 34];
+    assert!(!caller.send_to(web, ppp::ip::PROTOCOL_TCP, &[0u8; 557]), "a 577 octet datagram was sent");
+    assert_eq!(caller.counters().too_large, 1);
+    assert!(caller.send_to(web, ppp::ip::PROTOCOL_TCP, &[0u8; 556]), "a 576 octet one was not");
+}
+
+/// RFC 792: a router's word that a datagram of this end's went nowhere, with
+/// where it was going.
+#[test]
+fn a_router_saying_a_host_is_unreachable_is_reported() {
+    let mut router = Link::new([192, 168, 9, 1], [192, 168, 9, 40]).without_header_compression();
+    let mut caller = Link::new([0, 0, 0, 0], [0, 0, 0, 0]).without_header_compression();
+    connect(&mut router, &mut caller, 30_000);
+
+    // The datagram that went nowhere: its header and eight octets of its data.
+    let original = ppp::ip::build([192, 168, 9, 40], [203, 0, 113, 7], ppp::ip::PROTOCOL_TCP, &[0u8; 20], 3);
+    let mut icmp = vec![ppp::ip::DESTINATION_UNREACHABLE, 1, 0, 0, 0, 0, 0, 0];
+    icmp.extend_from_slice(&original[..28]);
+    let sum = ppp::ip::checksum(&icmp);
+    icmp[2..4].copy_from_slice(&sum.to_be_bytes());
+    let datagram = ppp::ip::build([192, 168, 9, 1], [192, 168, 9, 40], ppp::ip::PROTOCOL_ICMP, &icmp, 4);
+    caller.feed(&framed(datagram));
+
+    let problems = caller.take_problems();
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert_eq!(problems[0].about, [203, 0, 113, 7]);
+    assert_eq!(problems[0].from, [192, 168, 9, 1]);
+    assert_eq!(problems[0].protocol, ppp::ip::PROTOCOL_TCP);
+    assert_eq!(problems[0].describe(), "host unreachable");
+    assert_eq!(caller.counters().problems, 1);
+    assert!(caller.take_arrived().is_empty(), "it was taken for an echo");
+}

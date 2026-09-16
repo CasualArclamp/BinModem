@@ -1713,6 +1713,7 @@ fn start_link(
         role,
         authentication,
         session.compress_headers.load(Ordering::Relaxed),
+        settings.link,
         tx,
     );
     if session.carry_web.load(Ordering::Relaxed) {

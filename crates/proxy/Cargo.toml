@@ -6,7 +6,6 @@ license.workspace = true
 
 [dependencies]
 http  = { path = "../http" }
-socks = { path = "../socks" }
 tcp   = { path = "../tcp" }
 
 [lints]
