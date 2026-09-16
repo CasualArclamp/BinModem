@@ -231,7 +231,7 @@ fn far_role(role: Role) -> Role {
 /// renegotiation's four-point signal by being a pure tone: all of its energy
 /// at one frequency and next to none 150 Hz off it.
 #[derive(Debug, Clone)]
-struct RetrainWatch {
+pub(crate) struct RetrainWatch {
     on: dsp::ToneDetector,
     below: dsp::ToneDetector,
     above: dsp::ToneDetector,
@@ -241,7 +241,7 @@ struct RetrainWatch {
 impl RetrainWatch {
     /// `far` is the tone the far end sends to start a retrain: Tone A at
     /// 2400 Hz from the answer modem, Tone B at 1200 Hz from the call modem.
-    fn new(far: Role, fs: f64) -> Self {
+    pub(crate) fn new(far: Role, fs: f64) -> Self {
         let freq = match far {
             Role::Call => 1200.0,
             Role::Answer => 2400.0,
@@ -256,7 +256,7 @@ impl RetrainWatch {
 
     /// Hear one sample, and say whether the tone has now stood long enough to
     /// be a retrain.
-    fn feed(&mut self, x: f64, fs: f64) -> bool {
+    pub(crate) fn feed(&mut self, x: f64, fs: f64) -> bool {
         self.on.feed(x);
         self.below.feed(x);
         self.above.feed(x);

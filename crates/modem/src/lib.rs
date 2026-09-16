@@ -1786,6 +1786,9 @@ impl Modem {
             Some(Pump::V34(m)) => {
                 m.retrain();
             }
+            Some(Pump::V90(m)) => {
+                m.retrain();
+            }
             Some(Pump::V32(m)) => m.ask_for_retrain(),
             _ => {}
         }
@@ -1898,19 +1901,22 @@ impl Modem {
         }
     }
 
+    /// Carry out what a command line asked for.
+    ///
+    /// Only D, A and O leave their result code to the modem (V.250 5.7.1);
+    /// the interpreter has already said OK to everything else on the line,
+    /// and a line gets one final result code however many commands it held.
     fn run_actions(&mut self) {
         for action in self.at.take_actions() {
             match action {
                 Action::Dial(_) => self.place_call(Role::Calling),
                 Action::Answer => self.place_call(Role::Answering),
                 Action::HangUp => {
-                    if self.pump.is_some() || self.fax.is_some() {
-                        self.end_call(Ended::LocalRequest);
-                    } else {
-                        self.at.emit(ResultCode::Ok);
+                    if self.pump.is_some() || self.negotiation.is_some() || self.fax.is_some() {
+                        self.drop_call();
                     }
                 }
-                Action::OffHook => self.at.emit(ResultCode::Ok),
+                Action::OffHook => {}
                 Action::ReturnOnline => {
                     if self.state == State::OnlineCommand {
                         self.state = State::Data;
@@ -1926,27 +1932,18 @@ impl Modem {
                     // so nothing from before it survives. Anything on the
                     // line goes, because a fax call and a data call have no
                     // state in common to carry across.
-                    if self.pump.is_some() || self.fax.is_some() {
-                        self.end_call(Ended::LocalRequest);
-                    } else {
-                        self.at.emit(ResultCode::Ok);
+                    if self.pump.is_some() || self.negotiation.is_some() || self.fax.is_some() {
+                        self.drop_call();
                     }
                 }
-                Action::SelectModulation(_) | Action::SelectCompression(_) => {
-                    // Both take effect on the next call, so there is nothing
-                    // to do now beyond acknowledging: the interpreter has
-                    // already recorded what was asked for.
-                    self.at.emit(ResultCode::Ok);
-                }
-                Action::SelectErrorControl(e) => {
-                    self.want_error_control = e.wanted();
-                    self.at.emit(ResultCode::Ok);
-                }
+                // Both take effect on the next call, and the interpreter has
+                // already recorded what was asked for.
+                Action::SelectModulation(_) | Action::SelectCompression(_) => {}
+                Action::SelectErrorControl(e) => self.want_error_control = e.wanted(),
                 Action::ResetProfile(_) | Action::FactoryDefaults(_) => {
-                    if self.pump.is_some() {
-                        self.end_call(Ended::LocalRequest);
+                    if self.pump.is_some() || self.negotiation.is_some() || self.fax.is_some() {
+                        self.drop_call();
                     }
-                    self.at.emit(ResultCode::Ok);
                 }
             }
         }
@@ -2255,7 +2252,22 @@ impl Modem {
         self.state = State::Handshaking;
     }
 
+    /// End the call and tell the terminal why.
     fn end_call(&mut self, why: Ended) {
+        self.drop_call();
+        self.at.emit(match why {
+            Ended::LocalRequest => ResultCode::Ok,
+            // 6.3.1: what a dial that did not get there reports.
+            Ended::Aborted => ResultCode::NoCarrier,
+            Ended::CarrierLost | Ended::NoErrorControl | Ended::NoCompression => {
+                ResultCode::NoCarrier
+            }
+            Ended::NoAnswer => ResultCode::NoAnswer,
+        });
+    }
+
+    /// End the call, leaving what the terminal is told to whoever asked.
+    fn drop_call(&mut self) {
         // A fax call is a call too, and putting the line down has to stop it
         // -- otherwise the only way out of a fax that has gone wrong is to
         // close the program. What it learned is kept for the window.
@@ -2273,15 +2285,6 @@ impl Modem {
         self.outbound.clear();
         self.escape.reset();
         self.state = State::Command;
-        self.at.emit(match why {
-            Ended::LocalRequest => ResultCode::Ok,
-            // 6.3.1: what a dial that did not get there reports.
-            Ended::Aborted => ResultCode::NoCarrier,
-            Ended::CarrierLost | Ended::NoErrorControl | Ended::NoCompression => {
-                ResultCode::NoCarrier
-            }
-            Ended::NoAnswer => ResultCode::NoAnswer,
-        });
     }
 }
 

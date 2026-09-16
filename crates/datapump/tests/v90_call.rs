@@ -312,6 +312,35 @@ fn a_slip_in_data_mode_is_followed_and_data_after_it_arrives() {
     }
 }
 
+/// A retrain from data mode, from either end (9.5): both go back through
+/// V.90's phase 2, train again, and carry data again.
+#[test]
+fn a_retrain_from_either_end_comes_back_up() {
+    use datapump::v90::startup::Status;
+    for from_server in [true, false] {
+        let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5), server(), 30.0);
+        let up = |s: Status| matches!(s, Status::Connected { .. });
+        assert!(if from_server { call.digital.retrain() } else { call.analogue.retrain() });
+        // Down, then up again.
+        let start = call.ticks;
+        let mut went_down = false;
+        while call.ticks < start + 30 * 8000 {
+            call.run_until_seconds((call.ticks + 800) as f64 / 8000.0);
+            if !up(call.analogue.status()) {
+                went_down = true;
+            }
+            if went_down && up(call.analogue.status()) && up(call.digital.status()) {
+                break;
+            }
+        }
+        println!("from the server {from_server}: {:?} {:?}", call.analogue.status(), call.digital.status());
+        assert!(went_down, "the call never left data mode");
+        assert!(up(call.analogue.status()) && up(call.digital.status()), "the retrain never came back up");
+        assert!(call.analogue.is_v90());
+        assert_eq!(call.carries_data(3.0), (true, true), "from the server {from_server}");
+    }
+}
+
 #[test]
 fn a_sound_card_clock_120_ppm_off_is_followed_through_ten_seconds_of_data() {
     let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5).with_clock(120.0), server(), 30.0);

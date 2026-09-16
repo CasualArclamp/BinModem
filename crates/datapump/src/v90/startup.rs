@@ -36,7 +36,8 @@ pub struct Analogue {
     fs: f64,
     v34: v34::Modem,
     v90: Option<analogue::Modem>,
-    retrains: u32,
+    /// V.90 start-ups that have failed in a row.
+    failed_starts: u32,
     connected_once: bool,
     last_failure: Option<&'static str>,
 }
@@ -48,7 +49,7 @@ impl Analogue {
             fs,
             v34: v34::Modem::with_phase2(phase2::Modem::v90(Pcm::Analogue, fs), fs),
             v90: None,
-            retrains: 0,
+            failed_starts: 0,
             connected_once: false,
             last_failure: None,
         }
@@ -76,7 +77,9 @@ impl Analogue {
 
     /// Full retrains since the call began.
     pub fn retrains(&self) -> u32 {
-        self.retrains + self.v34.retrains()
+        // Every one of them, V.90's included, goes back through V.34's
+        // start-up's phase 2.
+        self.v34.retrains()
     }
 
     /// Why the last V.90 start-up failed, if one has.
@@ -155,19 +158,38 @@ impl Analogue {
         }
     }
 
+    /// Start a full retrain (9.5.2.1): back through V.90's phase 2. False if
+    /// there is no call to retrain.
+    pub fn retrain(&mut self) -> bool {
+        match self.v90.as_mut() {
+            Some(m) => {
+                m.start_retrain();
+                true
+            }
+            None => self.v34.retrain(),
+        }
+    }
+
     /// Carry the start-up one sample further.
     pub fn step(&mut self, line: f64) -> f64 {
         if let Some(m) = self.v90.as_mut() {
             let out = m.step(line);
+            if m.take_retrain() {
+                // 9.5.2: tone A and phase 2, whichever end began it; the
+                // capabilities are not exchanged again.
+                self.v90 = None;
+                self.v34.restart_phase2();
+                return out;
+            }
             match m.status() {
                 analogue::Status::Connected { .. } => {
                     self.connected_once = true;
-                    self.retrains = 0;
+                    self.failed_starts = 0;
                 }
-                analogue::Status::Failed(why) if self.retrains < V90_RETRAINS => {
+                analogue::Status::Failed(why) if self.failed_starts < V90_RETRAINS => {
                     // 9.5.2.1: back to V.90's phase 2.
                     self.last_failure = Some(why);
-                    self.retrains += 1;
+                    self.failed_starts += 1;
                     self.v90 = None;
                     self.v34.restart_phase2();
                 }
@@ -270,10 +292,27 @@ impl Digital {
         }
     }
 
+    /// Start a full retrain (9.5.1.1).
+    pub fn retrain(&mut self) -> bool {
+        match self.v90.as_mut() {
+            Some(m) => {
+                m.start_retrain();
+                true
+            }
+            None => self.v34.retrain(),
+        }
+    }
+
     /// One network sample in, one out.
     pub fn step(&mut self, input: f64) -> f64 {
         if let Some(m) = self.v90.as_mut() {
-            return m.step(input);
+            let out = m.step(input);
+            if m.take_retrain() {
+                // 9.5.1: tone B and phase 2.
+                self.v90 = None;
+                self.v34.restart_phase2();
+            }
+            return out;
         }
         let out = self.v34.step(input);
         let p2 = self.v34.phase2();

@@ -161,4 +161,20 @@ fn dialling_a_v90_server_connects_at_pcm_rates_and_carries_text() {
     }
     call.run(3.0);
     assert!(call.saw().contains("and back again"), "the terminal saw {:?}", call.saw());
+
+    // A server that retrains (9.5.1) takes the call back through phase 2 and
+    // up again, and V.42 carries on over it.
+    assert!(call.server.startup.as_mut().unwrap().retrain());
+    call.run(0.5);
+    assert!(call.caller.retraining(), "the caller never saw the retrain");
+    call.run(15.0);
+    assert!(!call.caller.retraining(), "still retraining, phase {}", call.caller.line_phase());
+    assert_eq!(call.caller.state(), State::Data, "{:?}", call.saw());
+    assert_eq!(call.caller.standard(), "V.90");
+    for b in b"after the retrain" {
+        call.caller.feed_dte(*b);
+    }
+    call.run(3.0);
+    let got = String::from_utf8_lossy(&call.server.received).into_owned();
+    assert!(got.contains("after the retrain"), "the server got {got:?}");
 }

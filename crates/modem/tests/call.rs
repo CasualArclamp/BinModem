@@ -82,6 +82,19 @@ fn a_terminal_talks_to_the_modem_before_there_is_a_call() {
     assert_eq!(p.caller.state(), State::Command);
 }
 
+/// V.250 5.7: a command line gets one final result code, however many
+/// commands it held and whatever they asked the modem to do.
+#[test]
+fn every_command_line_is_answered_once() {
+    for line in ["AT+MS=V90", "ATH", "ATZ", "AT&F", "AT+ES=3", "AT+DS=3", "AT+FCLASS=0", "AT+MS=V34;+ES=3;+DS=0", "ATE1"] {
+        let mut p = Pair::new();
+        Pair::type_at(&mut p.caller, line);
+        p.run(0.05);
+        let saw = p.caller_saw();
+        assert_eq!(saw.matches("OK").count(), 1, "{line} was answered {saw:?}");
+    }
+}
+
 #[test]
 fn dialling_reaches_a_connection_and_says_so() {
     let p = connect();
@@ -276,6 +289,7 @@ fn hanging_up_ends_the_call_at_both_ends() {
         "the host's terminal saw {:?}",
         p.host_saw()
     );
+    assert_eq!(p.caller_saw().matches("OK").count(), 2, "the caller saw {:?}", p.caller_saw());
 }
 
 #[test]

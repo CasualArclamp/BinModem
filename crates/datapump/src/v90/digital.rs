@@ -19,6 +19,8 @@ use crate::v34::data::{Decoder as UpstreamDecoder, Params};
 use crate::v34::frame::Framing;
 use crate::v34::info::{Info1aPcm, Info1c};
 use crate::v34::mp::{Mp, Trellis};
+use crate::v34::phase2::Role;
+use crate::v34::training::RetrainWatch;
 use crate::v34::qam::Band;
 use crate::v34::receiver::{self, Heard, Receiver, Reference};
 use crate::v34::signals::{self, Reader, Size};
@@ -427,6 +429,10 @@ pub struct Modem {
     received: Vec<bool>,
     upstream_rate: u32,
     phase3_snr: Option<f64>,
+    /// The analogue modem's tone A, which starts a retrain (9.5.1.2), and
+    /// whether one is wanted.
+    retrain_watch: RetrainWatch,
+    wants_retrain: bool,
 }
 
 impl Modem {
@@ -459,6 +465,8 @@ impl Modem {
             received: Vec::new(),
             upstream_rate: 0,
             phase3_snr: None,
+            retrain_watch: RetrainWatch::new(Role::Answer, FS),
+            wants_retrain: false,
         };
         // 9.4.1: B1 "within 15 s plus 5 round-trip delays after receiving
         // INFO1a".
@@ -506,6 +514,16 @@ impl Modem {
         std::mem::take(&mut self.received)
     }
 
+    /// Whether V.90's phase 2 should be run again: read once, and cleared.
+    pub fn take_retrain(&mut self) -> bool {
+        std::mem::take(&mut self.wants_retrain)
+    }
+
+    /// Start a retrain (9.5.1.1).
+    pub fn start_retrain(&mut self) {
+        self.wants_retrain = true;
+    }
+
     pub fn send_bits(&mut self, bits: &[bool]) {
         self.source.data.extend(bits.iter().copied());
     }
@@ -525,6 +543,10 @@ impl Modem {
     pub fn step(&mut self, input: f64) -> f64 {
         self.now += 1;
         self.rx.feed(input);
+        // 9.3.1, 9.4.1 and 9.6.1: tone A is the analogue modem retraining.
+        if self.stage != Stage::Finished && self.retrain_watch.feed(input, FS) {
+            self.wants_retrain = true;
+        }
         while let Some(heard) = self.rx.heard() {
             if self.stage != Stage::Finished {
                 self.heard(heard);

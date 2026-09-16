@@ -26,7 +26,9 @@ use crate::v34::info::{Info0d, Info1aPcm, Info1c};
 use crate::v34::mp::{Finder, Found, Mp, Trellis};
 use crate::v34::qam::{Band, Transmitter};
 use crate::v34::receiver;
+use crate::v34::phase2::Role;
 use crate::v34::signals::{self, Sender, Size};
+use crate::v34::training::RetrainWatch;
 use crate::v34::trellis::Code;
 
 use super::INTERVALS;
@@ -543,6 +545,12 @@ pub struct Modem {
     /// The last two symbols as the equaliser gave them, for the scope.
     last: [f64; 2],
     heard_any: bool,
+    /// The digital modem's tone B, which starts a retrain (9.5.2.2), and
+    /// whether one is wanted.
+    retrain_watch: RetrainWatch,
+    wants_retrain: bool,
+    /// Since the receiver last held a place, in samples.
+    lost_since: Option<u64>,
 }
 
 impl Modem {
@@ -584,6 +592,10 @@ impl Modem {
             downstream_rate: 0,
             last: [0.0; 2],
             heard_any: false,
+            // The digital modem takes V.34's call side, and tone B is its.
+            retrain_watch: RetrainWatch::new(Role::Call, fs),
+            wants_retrain: false,
+            lost_since: None,
         };
         // 9.4.2: B1d "within 15 s plus 5 round-trip delays after sending
         // INFO1a".
@@ -677,6 +689,16 @@ impl Modem {
         std::mem::take(&mut self.received)
     }
 
+    /// Whether V.90's phase 2 should be run again: read once, and cleared.
+    pub fn take_retrain(&mut self) -> bool {
+        std::mem::take(&mut self.wants_retrain)
+    }
+
+    /// Start a retrain (9.5.2.1).
+    pub fn start_retrain(&mut self) {
+        self.wants_retrain = true;
+    }
+
     pub fn send_bits(&mut self, bits: &[bool]) {
         self.source.data.extend(bits.iter().copied());
     }
@@ -699,6 +721,23 @@ impl Modem {
     pub fn step(&mut self, line: f64) -> f64 {
         self.now += 1;
         self.rx.feed(line);
+        // 9.3.2, 9.4.2 and 9.6.2: tone B, in phase 3, phase 4 or data mode, is
+        // the digital modem retraining.
+        if self.stage != Stage::Finished && self.retrain_watch.feed(line, self.fs) {
+            self.wants_retrain = true;
+        }
+        // A receiver that has held still for three seconds is not going to
+        // find its place again: 9.5.2.1, "The analogue modem may initiate a
+        // retrain at any time".
+        match (self.rx.is_lost(), self.lost_since) {
+            (true, None) => self.lost_since = Some(self.now),
+            (false, Some(_)) => self.lost_since = None,
+            (true, Some(since)) if self.now - since > (3.0 * self.fs) as u64 && self.stage == Stage::Data => {
+                self.wants_retrain = true;
+                self.lost_since = None;
+            }
+            _ => {}
+        }
         while let Some(heard) = self.rx.heard() {
             if self.stage != Stage::Finished {
                 self.heard(heard);
