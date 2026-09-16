@@ -521,20 +521,22 @@ fn a_call_survives_an_echo_as_loud_as_what_was_sent() {
 ///
 /// Which is every real call: the calling modem goes off hook, the network
 /// takes its time, and the far end answers when it answers.
+///
+/// Returns every phase each end went through, calling end first.
 fn late_call(
     seconds: f64,
     delay: usize,
     echo: f64,
     far: f64,
     quiet_ms: f64,
-) -> (Modem, f64) {
+) -> (Vec<&'static str>, Vec<&'static str>) {
     let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
     let mut calling = Modem::new(Role::Calling, offer, FS);
     let mut answering = Modem::new(Role::Answering, offer, FS);
     let mut a = std::collections::VecDeque::from(vec![0.0; 2 * delay + 1]);
     let mut b = std::collections::VecDeque::from(vec![0.0; 2 * delay + 1]);
     let (mut from_calling, mut from_answering) = (0.0, 0.0);
-    let mut at = f64::NAN;
+    let (mut calling_went, mut answering_went) = (Vec::new(), Vec::new());
     let starts = (quiet_ms / 1000.0 * FS) as usize;
     for i in 0..(seconds * FS) as usize {
         a.pop_back();
@@ -547,11 +549,13 @@ fn late_call(
         from_calling = calling.step(to_calling);
         // The far end is not on the line yet.
         from_answering = if i < starts { answering.step(0.0) * 0.0 } else { answering.step(to_answering) };
-        if at.is_nan() && matches!(calling.status(), Status::Connected(_)) {
-            at = i as f64 / FS;
+        for (modem, went) in [(&calling, &mut calling_went), (&answering, &mut answering_went)] {
+            if went.last() != Some(&modem.phase()) {
+                went.push(modem.phase());
+            }
         }
     }
-    (calling, at)
+    (calling_went, answering_went)
 }
 
 #[test]
@@ -571,13 +575,28 @@ fn a_quiet_far_end_is_heard_through_an_echo_at_full_strength() {
     // The modem waited for a reversal it could no longer see, which is exactly
     // what it looked like from the outside: sometimes it does not detect the
     // answering modem and the call never starts.
+    //
+    // Asked of what each end went through rather than of where the calling
+    // end is when the time runs out, which this used to be and which stopped
+    // meaning it. It passed on a call that was stuck in CC, with the answering
+    // end in CA unable to hear the reversal it was waiting for: its detector
+    // had spent three seconds on the skirt of its own answering tone coming
+    // back off the cable, and still thought 1800 Hz was a tone turning fast.
+    // That end hears it now, the start-up goes on to the rate signals -- and a
+    // start-up that gets no further than that goes back to AA by 5.4.1's own
+    // rule, which the old question could not tell from never having left.
     const CABLE_ECHO: f64 = 1.03;
     for quiet_ms in [0.0, 500.0, 2000.0] {
-        let (calling, _) = late_call(12.0, 320, CABLE_ECHO, 0.1, quiet_ms);
-        let phase = calling.phase();
+        let (calling, answering) = late_call(12.0, 320, CABLE_ECHO, 0.1, quiet_ms);
         assert!(
-            !matches!(phase, "listening" | "AA"),
-            "after a {quiet_ms:.0} ms pause the calling modem was still in {phase}"
+            calling.contains(&"AA to CC"),
+            "after a {quiet_ms:.0} ms pause the calling modem never heard the far end \
+             turn over: {calling:?}"
+        );
+        assert!(
+            answering.contains(&"CA to AC"),
+            "after a {quiet_ms:.0} ms pause the answering modem never heard the calling \
+             modem answer: {answering:?}"
         );
     }
 }
@@ -879,6 +898,121 @@ fn the_retrain_tone_alone_is_enough_to_follow() {
         "the calling end sat through the answering end's retrain tone: {}",
         calling.phase()
     );
+}
+
+/// One call retrained `attempts` times by `asker`, each a second or so after
+/// the last one came back and a little later into that second each time.
+///
+/// Returns how long each took, or where the two ends were left if one did not
+/// come back at all.
+fn retrain_again_and_again(
+    asker: Role,
+    echo: f64,
+    far: f64,
+    delay: usize,
+    attempts: usize,
+) -> Result<Vec<f64>, String> {
+    let offer = rate_signal(Rates::between(4800, 9600));
+    let mut calling = Modem::new(Role::Calling, offer, FS);
+    let mut answering = Modem::new(Role::Answering, offer, FS);
+    let mut to_answering = std::collections::VecDeque::from(vec![0.0; delay]);
+    let mut to_calling = std::collections::VecDeque::from(vec![0.0; delay]);
+    let (mut from_calling, mut from_answering) = (0.0, 0.0);
+    let mut step = |calling: &mut Modem, answering: &mut Modem| {
+        to_answering.push_front(from_calling);
+        to_calling.push_front(from_answering);
+        let (heard_by_calling, heard_by_answering) = (
+            to_calling.pop_back().unwrap_or(0.0),
+            to_answering.pop_back().unwrap_or(0.0),
+        );
+        let (a, b) = (from_calling, from_answering);
+        from_calling = calling.step(heard_by_calling * far + a * echo);
+        from_answering = answering.step(heard_by_answering * far + b * echo);
+        let _ = (calling.take_bytes(), answering.take_bytes());
+    };
+    let up = |calling: &Modem, answering: &Modem| {
+        matches!(calling.status(), Status::Connected(_))
+            && matches!(answering.status(), Status::Connected(_))
+    };
+
+    for _ in 0..(40.0 * FS) as usize {
+        if up(&calling, &answering) {
+            break;
+        }
+        step(&mut calling, &mut answering);
+    }
+    if !up(&calling, &answering) {
+        return Err(format!("never connected: {} and {}", calling.phase(), answering.phase()));
+    }
+    let mut took = Vec::new();
+    for attempt in 0..attempts {
+        // Where the retrain lands in what the line is carrying is the whole
+        // variable, so it moves by a prime number of samples each time.
+        for _ in 0..FS as usize + attempt * 113 {
+            step(&mut calling, &mut answering);
+        }
+        match asker {
+            Role::Calling => calling.ask_for_retrain(),
+            Role::Answering => answering.ask_for_retrain(),
+        }
+        let mut samples = 0;
+        // Take it out of data first, which the check below would otherwise
+        // see as having come back before it left.
+        while up(&calling, &answering) && samples < FS as usize {
+            step(&mut calling, &mut answering);
+            samples += 1;
+        }
+        while !up(&calling, &answering) && samples < (20.0 * FS) as usize {
+            step(&mut calling, &mut answering);
+            samples += 1;
+        }
+        if !up(&calling, &answering) {
+            return Err(format!(
+                "retrain {attempt} never came back: calling end in {}, answering end in {}",
+                calling.phase(),
+                answering.phase()
+            ));
+        }
+        took.push(samples as f64 / FS);
+    }
+    Ok(took)
+}
+
+/// A retrain comes back whenever it is asked for, and whichever end asks.
+///
+/// Where it lands was the whole of it. The far end is still sending data
+/// when a retrain begins, and goes on sending it until it has heard enough of
+/// the retrain to follow; the end that asked was treating that data as the
+/// tone it had to hear first, and treating the step from the data to the tone
+/// as the reversal it was waiting for. Or its reversal detector had spent the
+/// wait on the data and refused the real reversal when it came. Either way
+/// the two ends each ended up waiting for something the other had already
+/// sent, and stayed that way until a minute's patience ran out.
+///
+/// So it depended on the moment, and on the line. Asked for from the calling
+/// end it stuck in 18 retrains of 30 on a direct line, 19 of 20 once that line
+/// had a 100 ms round trip, and all 20 over a hybrid with a 200 ms one; from
+/// the answering end, 2 of 30, 3 of 20 and 7 of 20. On a call it looked like a
+/// retrain that worked followed by a line that carried nothing, and was found
+/// as exactly that: V.42 connected, data typed, nothing arriving.
+#[test]
+fn a_retrain_comes_back_whenever_it_is_asked_for_and_whoever_asks() {
+    // The far end at full strength with nothing else on the line, as two
+    // modems joined directly give, and a hybrid. Both with a round trip,
+    // because the answering end's half of this needs one: its far end's data
+    // has to still be arriving once it has begun listening for state A.
+    let lines = [
+        ("a direct line with a 100 ms round trip", 0.0, 1.0, 800),
+        ("a hybrid with a 200 ms round trip", ECHO, FAR, 1600),
+    ];
+    for (line, echo, far, delay) in lines {
+        for asker in [Role::Calling, Role::Answering] {
+            match retrain_again_and_again(asker, echo, far, delay, 4) {
+                Ok(took) => println!("  {line}, asked by {asker:?}: back after {took:.2?} s"),
+                Err(stuck) => panic!("on {line}, asked for by the {asker:?} end: {stuck}"),
+            }
+        }
+    }
 }
 
 /// The margins around 5.4.1's S sequence, over a line with length.

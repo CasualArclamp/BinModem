@@ -48,6 +48,25 @@ const AUDIBLE: f64 = 0.008;
 const STANDING: f64 = 0.7;
 const STANDING_SIDEBAND: f64 = 0.5;
 
+/// How far a line must stand above the band either side of it before it is a
+/// tone rather than a slice of a signal spread across the band.
+///
+/// Measured against 1200 and 2400 Hz rather than against the level of the
+/// whole signal, which is what [`STANDING`] and [`STANDING_SIDEBAND`] do,
+/// because that level has this modem's own echo in it. At 1200 and 2400
+/// nothing in the start-up puts a line at all, from either end, so what is
+/// there is scrambled data or the skirt of something somewhere else.
+///
+/// Measured through retrains asked for from each end and through first calls,
+/// on a line with no echo, behind a hybrid, and down a cable that returns the
+/// echo whole. The far end's data reads 1.0 at most once the envelopes have
+/// settled, and 2.1 while they are still rising from nothing. A tone at the
+/// moment it is acted on reads 18 or more at the sidebands, and 11 at the
+/// carrier where it is worst -- a far end 20 dB down, heard through this end's
+/// own alternation coming back at full strength. Four is in the gap: twice the
+/// one, and a little over a third of the other.
+const ABOVE_BETWEEN: f64 = 4.0;
+
 /// What the line is carrying, as far as the start-up needs to know.
 ///
 /// The distinctions are all between waveforms rather than between messages,
@@ -105,15 +124,41 @@ pub struct Listener {
     /// than by the signal: whichever rises first wins the first tenth of a
     /// second of every call, whatever is on the line.
     sideband_envelope: dsp::filter::OnePole,
+    /// The band in narrow slices 600 Hz apart, from one sideband to the other:
+    /// the three places the start-up puts its lines, and the two halfway
+    /// between them where it puts none.
+    ///
+    /// For telling a line apart from a slice of a signal spread across the
+    /// band, which needs the slices alike -- a wider detector collects more of
+    /// a spread signal than a narrower one does, and rises sooner, so that a
+    /// comparison between unlike ones is decided by the detectors.
+    slices: [ToneDetector; SLICES],
+    /// The amplitude in each, slow enough to ride through a reversal.
+    slice_envelopes: [dsp::filter::OnePole; SLICES],
     /// Total power on the line, to tell a spread signal from silence.
     power: dsp::filter::OnePole,
 }
+
+/// How many slices [`Listener`] cuts the band into, and which is which.
+const SLICES: usize = 5;
+const LOW_SIDEBAND: usize = 0;
+const BELOW_CARRIER: usize = 1;
+const AT_CARRIER: usize = 2;
+const ABOVE_CARRIER: usize = 3;
+const HIGH_SIDEBAND: usize = 4;
 
 impl Listener {
     pub fn new(fs: f64) -> Self {
         // Narrow enough to separate lines 1200 Hz apart with room to spare,
         // wide enough to answer within a few tens of symbols.
         const BANDWIDTH: f64 = 60.0;
+        // Narrower for the slices, which are only 600 Hz apart. Whichever
+        // line this modem is sending lands in the slices either side of it,
+        // and at 60 Hz the skirt of an echo at full strength put a fortieth
+        // of itself there -- enough that an alternation 20 dB down scarcely
+        // stood above it. Nothing judged on these follows a reversal, so the
+        // time a narrower detector takes is free.
+        const SLICE_BANDWIDTH: f64 = 15.0;
         Self {
             answer: ToneDetector::new(super::ANSWER_TONE, BANDWIDTH, fs),
             // Long against the few milliseconds a reversal costs, short
@@ -123,6 +168,15 @@ impl Listener {
             carrier: ToneDetector::new(super::CARRIER, BANDWIDTH, fs),
             low: ToneDetector::new(super::CARRIER - OFFSET, BANDWIDTH, fs),
             high: ToneDetector::new(super::CARRIER + OFFSET, BANDWIDTH, fs),
+            slices: std::array::from_fn(|i| {
+                let from_carrier = i as f64 - AT_CARRIER as f64;
+                ToneDetector::new(
+                    super::CARRIER + from_carrier * OFFSET / 2.0,
+                    SLICE_BANDWIDTH,
+                    fs,
+                )
+            }),
+            slice_envelopes: std::array::from_fn(|_| dsp::filter::OnePole::new(0.100, fs)),
             power: dsp::filter::OnePole::new(0.020, fs),
         }
     }
@@ -135,6 +189,10 @@ impl Listener {
         self.high.feed(x);
         self.sideband_envelope
             .process(self.low.amplitude().min(self.high.amplitude()));
+        for (slice, envelope) in self.slices.iter_mut().zip(&mut self.slice_envelopes) {
+            slice.feed(x);
+            envelope.process(slice.amplitude());
+        }
         self.power.process(x.abs());
     }
 
@@ -150,6 +208,39 @@ impl Listener {
         // The envelope, so that this and the answering tone it is weighed
         // against are measured the same way.
         self.sideband_envelope.value()
+    }
+
+    /// Whether 600 and 3000 Hz are tones: audible, and standing well above
+    /// the band between them.
+    ///
+    /// Not the same question as whether there is anything at 600 and 3000,
+    /// which scrambled data answers yes to as readily as an alternation does.
+    /// A far end in the middle of a call is sending data right up to the
+    /// moment it starts to retrain, and a calling modem that took that for
+    /// the tone was then looking for a reversal against it -- and found one
+    /// in the step from the one signal to the other.
+    pub fn sidebands_standing(&self) -> bool {
+        let sidebands = self.slice(LOW_SIDEBAND).min(self.slice(HIGH_SIDEBAND));
+        self.stands(sidebands)
+    }
+
+    /// Whether 1800 Hz is a tone, on the same terms.
+    ///
+    /// The answering modem's side of the same fault. Its far end is sending
+    /// data until it notices the retrain, and on a line with any length to it
+    /// that data is still arriving after this end has begun listening for
+    /// state A -- which it has plenty of at 1800.
+    pub fn carrier_standing(&self) -> bool {
+        self.stands(self.slice(AT_CARRIER))
+    }
+
+    fn slice(&self, index: usize) -> f64 {
+        self.slice_envelopes[index].value()
+    }
+
+    fn stands(&self, level: f64) -> bool {
+        let between = self.slice(BELOW_CARRIER).max(self.slice(ABOVE_CARRIER));
+        level > AUDIBLE && level > ABOVE_BETWEEN * between
     }
 
     /// Amplitude of the answering tone (5.1).
@@ -1363,14 +1454,35 @@ impl Startup {
                 // turns over a tenth of a second after this end started
                 // listening, and a detector still full of data will believe
                 // anything.
-                // Measured where the tone is rather than by classifying the
-                // whole line: this end is transmitting 1800 Hz into its own
-                // hybrid, so `classify` sees a carrier and sidebands together
-                // and calls it something else entirely. The sidebands are the
-                // one place this modem's own signal is not.
-                let sidebands = self.listener.sideband_amplitude();
-                let steady =
-                    self.hold(sidebands > AUDIBLE) >= timing::HEARD_CARRIER;
+                //
+                // Anything includes data, which is what the far end is still
+                // sending when a retrain this end asked for begins. It went
+                // wrong two ways. Data puts as much at 600 and 3000 as
+                // anywhere, so the tone was "heard" before the far end had
+                // noticed anything, and the step from its data to its
+                // alternation read as the reversal. And where that did not
+                // happen, the reversal detectors had spent the wait learning
+                // how fast the far end's data was turning, and refused the
+                // real reversal as a tone off frequency. Either way the two
+                // ends never met again -- one in CC or AA, the other in CA or
+                // AC, each waiting for the other until a minute's patience ran
+                // out. Asked for from this end, that was most retrains on a
+                // clean line and every one over a hybrid with a round trip.
+                //
+                // So a tone is the sidebands standing above the band between
+                // them, where data is and an alternation is not; and the
+                // reversal is looked for in that tone from the moment it
+                // stands, with nothing carried over from before. Measured in
+                // those places rather than by classifying the whole line,
+                // because this end is transmitting 1800 Hz into its own
+                // hybrid and `classify` would see a carrier and sidebands
+                // together and call it something else entirely.
+                let standing = self.listener.sidebands_standing();
+                if standing && self.held == 0 {
+                    self.low_reversals.restart();
+                    self.high_reversals.restart();
+                }
+                let steady = self.hold(standing) >= timing::HEARD_CARRIER;
                 // The far end is alternating, so its reversal is in the
                 // sidebands. This end is repeating a state, which puts nothing
                 // there at all.
@@ -1496,14 +1608,34 @@ impl Startup {
                 // periods". Looked for at 1800 Hz exactly, where this modem's
                 // own alternation puts nothing at all, so its echo of itself
                 // cannot be mistaken for the far end.
+                //
+                // And a tone rather than anything at all at 1800, for the
+                // reason AA gives. In a retrain this end asks for, the far end
+                // goes on sending data until it has heard enough of this end's
+                // alternation, and on a line with a round trip in it that data
+                // is still arriving once this state is listening. Counted as
+                // the tone, it turned this end over before the far end had
+                // sent a state A at all, and CA then found its reversal in the
+                // step from data to state A when that arrived.
                 self.note_carrier();
                 let long_enough =
                     self.symbols >= timing::MIN_ALTERNATION && self.symbols.is_multiple_of(2);
-                let tone = self.listener.carrier_amplitude() > AUDIBLE;
-                if long_enough && self.hold(tone) >= timing::HEARD_CARRIER {
-                    self.timer = Some(0);
-                    tx.set_signal(Signal::AlternateCA);
-                    self.enter(State::Ca);
+                if long_enough {
+                    let tone = self.listener.carrier_standing();
+                    // What CA listens for is a reversal in this tone, so it is
+                    // judged against this tone and not against whatever the
+                    // detector was hearing before it began: the far end's data
+                    // in a retrain, and on a cable the skirt of this end's own
+                    // answering tone, which left it refusing the reversal as a
+                    // tone turning fast. See AA.
+                    if tone && self.held == 0 {
+                        self.carrier_reversals.restart();
+                    }
+                    if self.hold(tone) >= timing::HEARD_CARRIER {
+                        self.timer = Some(0);
+                        tx.set_signal(Signal::AlternateCA);
+                        self.enter(State::Ca);
+                    }
                 }
             }
             State::Ca => {

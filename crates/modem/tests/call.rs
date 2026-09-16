@@ -1469,7 +1469,14 @@ fn a_retrain_is_not_mistaken_for_the_far_end_hanging_up() {
     Pair::type_at(&mut p.caller, "ATD5551234");
     // Long enough for error control and compression to have finished
     // negotiating, which is what a call asking for a retrain has behind it.
-    p.run(20.0);
+    //
+    // And no longer than that. Where in the far end's data the retrain lands
+    // used to decide whether it ever finished, so any figure here that passed
+    // was a figure that happened to pass: this was 14, V.44's longer XID moved
+    // everything after it, and 20 was simply a moment that worked. The start-up
+    // was what was wrong, and the data pump's own tests now ask at many moments
+    // (`a_retrain_comes_back_whenever_it_is_asked_for_and_whoever_asks`).
+    p.run(14.0);
     assert_eq!(p.caller.state(), State::Data, "never connected to begin with");
     assert!(p.caller.compressing(), "compression never came up");
     let before = p.caller.retrains();
