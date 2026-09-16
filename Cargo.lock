@@ -1327,6 +1327,7 @@ version = "0.1.0"
 dependencies = [
  "at",
  "datapump",
+ "dsp",
  "ec",
  "fax 0.1.0",
  "line",
