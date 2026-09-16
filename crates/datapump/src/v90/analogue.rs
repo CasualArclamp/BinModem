@@ -49,8 +49,27 @@ const PHASE3_TRN: f64 = 1.0;
 /// "70 +- 5 ms" of silence after INFO1a (9.3.2.1).
 const SILENCE_BEFORE_S: f64 = 0.070;
 
-/// Frames of R in a row before it is believed.
+/// Frames of R in a row before it is believed, and of R a whole number of
+/// symbols out of step before the frames are taken to have moved.
 const R_HEARD: usize = 8;
+const R_MOVED: usize = 6;
+
+/// The DIL: symbols read before they are counted, so that what arrived just
+/// before a loss was noticed is held with what comes after it; symbols a
+/// search for where the DIL went looks at; and how far a slip can move it.
+const DIL_DELAY: usize = 96;
+const DIL_SEARCH: usize = 128;
+const DIL_MOST_MOVED: i64 = 400;
+
+/// When to look for where the DIL went, and how often after that: a buffer
+/// that made up what it lost plays a faded copy of what went before for
+/// twenty milliseconds or more, and nothing fits that until it is over. What
+/// is kept meanwhile, and how closely the DIL must fit what arrived, as the
+/// error's power against the signal's.
+const DIL_FIRST_LOOK: usize = 288;
+const DIL_LOOK_EVERY: usize = 32;
+const DIL_KEPT_LOST: usize = 2048;
+const DIL_FIT: f64 = 0.01;
 
 /// B1d: "48 data frames" (8.6.1).
 const B1D_FRAMES: usize = 48;
@@ -389,64 +408,80 @@ impl JdReader {
 }
 
 /// Watches for R and its turn to R-bar (8.6.4).
+///
+/// The equaliser has already turned a line that inverts the signal back
+/// over, so R and R-bar are told apart by their signs. What the watch cannot
+/// take for granted is where the frames are: a jitter buffer's slip moves
+/// every symbol after it by a whole number of symbols, and R, which is the
+/// same frame over and over, shows by how many. R-bar is R moved by three,
+/// which no slip of whole milliseconds does.
 #[derive(Debug, Clone, Default)]
 struct RWatch {
     frame: [f64; INTERVALS],
-    /// Frames of R in a row, and which way round.
+    /// Frames in a row of R moved by `moved` symbols.
     run: usize,
-    turned: bool,
+    moved: usize,
     heard: bool,
-    /// Whether the last whole frame looked like R or R-bar.
+    /// Whether the last whole frame looked like R or R-bar, however moved.
     looked: bool,
 }
 
+/// What the watch made of a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RSeen {
+    Nothing,
+    /// R has turned into R-bar: TRN2d begins at this symbol.
+    Turned(u64),
+    /// R is arriving this many symbols late: the frames have moved.
+    Moved(usize),
+}
+
 impl RWatch {
-    /// One symbol, and the level R has in each interval. The index of the
-    /// frame after R-bar ends -- TRN2d's first -- once the turn is seen.
-    fn feed(&mut self, symbol: &pcm::Symbol, levels: &[f64; INTERVALS]) -> Option<u64> {
+    /// One symbol, and the level R has in each interval.
+    fn feed(&mut self, symbol: &pcm::Symbol, levels: &[f64; INTERVALS]) -> RSeen {
         let i = symbol.interval();
         self.frame[i] = symbol.value;
         if i != INTERVALS - 1 {
-            return None;
+            return RSeen::Nothing;
         }
-        let near = self.frame.iter().zip(levels).all(|(v, level)| (0.5 * level..1.5 * level).contains(&v.abs()));
-        let signs: Vec<bool> = self.frame.iter().map(|v| *v >= 0.0).collect();
-        let r = [true, true, true, false, false, false];
-        let r_bar = [false, false, false, true, true, true];
-        // "Neither R nor R-bar are differentially encoded ... the receiver
-        // [has] to be able to detect these sequences regardless of their
-        // polarity."
-        let pattern = if signs == r {
-            Some(false)
-        } else if signs == r_bar {
-            Some(true)
-        } else {
-            None
-        };
-        self.looked = near && pattern.is_some();
-        match (near, pattern) {
-            (true, Some(way)) if !self.heard || way == self.turned => {
-                if self.run > 0 && way != self.turned {
-                    self.run = 0;
-                }
-                self.turned = way;
-                self.run += 1;
+        // R moved by m: "+ + + - - -" starting m symbols in.
+        let late = (0..INTERVALS).find(|&m| {
+            (0..INTERVALS).all(|j| {
+                let k = (j + INTERVALS - m) % INTERVALS;
+                let v = self.frame[j];
+                (v >= 0.0) == (k < 3) && (0.5 * levels[k]..1.5 * levels[k]).contains(&v.abs())
+            })
+        });
+        self.looked = late.is_some();
+        match late {
+            Some(0) => {
+                self.run = if self.moved == 0 { self.run + 1 } else { 1 };
+                self.moved = 0;
                 if self.run >= R_HEARD {
                     self.heard = true;
                 }
-                None
+                RSeen::Nothing
             }
-            (true, Some(_)) => {
-                // R turned: the first of R-bar's four frames. TRN2d starts
-                // after the other three.
+            Some(3) if self.heard => {
+                // R-bar's first frame. TRN2d starts after the other three.
                 let frame_start = symbol.index + 1 - INTERVALS as u64;
-                Some(frame_start + 4 * INTERVALS as u64)
+                RSeen::Turned(frame_start + 4 * INTERVALS as u64)
+            }
+            Some(m) if m != 3 => {
+                self.run = if self.moved == m { self.run + 1 } else { 1 };
+                self.moved = m;
+                if self.run < R_MOVED {
+                    return RSeen::Nothing;
+                }
+                self.run = 0;
+                self.moved = 0;
+                RSeen::Moved(m)
             }
             _ => {
                 if !self.heard {
                     self.run = 0;
                 }
-                None
+                RSeen::Nothing
             }
         }
     }
@@ -597,14 +632,29 @@ pub struct Modem {
     stage: Stage,
     status: Status,
     deadline: Option<(u64, &'static str)>,
+    /// B1d "within 15 s plus 5 round-trip delays after sending INFO1a".
+    start_deadline: (u64, &'static str),
     tx: Transmitter,
     source: Source,
     rx: pcm::Receiver,
     descriptor: Descriptor,
     jd: JdReader,
     far_jd: Option<Jd>,
-    dil_from: u64,
     dil: Vec<(u8, bool)>,
+    /// The DIL as it is read (9.3.2.9): the receiver's count at its first
+    /// symbol, moved by any slip since; the frame interval that symbol was
+    /// in; which symbols have been read, and how many are left.
+    dil_base: i64,
+    dil_interval: usize,
+    dil_read: Vec<bool>,
+    dil_left: usize,
+    /// Symbols not yet counted, and since a slip was noticed, how many have
+    /// been gathered to find where the DIL went.
+    dil_recent: VecDeque<(u64, f64)>,
+    dil_lost: Option<usize>,
+    dil_moved: u32,
+    /// Times R showed the frames had moved.
+    r_moved: u32,
     analysis: Analysis,
     route: Option<Route>,
     choice: Option<Choice>,
@@ -665,6 +715,7 @@ impl Modem {
             stage: Stage::SendTraining,
             status: Status::Running,
             deadline: None,
+            start_deadline: (0, ""),
             tx: Transmitter::new(settings.upstream, settings.pre_emphasis, settings.power_reduction, fs),
             source,
             rx,
@@ -672,7 +723,14 @@ impl Modem {
             descriptor,
             jd: JdReader::new(),
             far_jd: None,
-            dil_from: 0,
+            dil_base: 0,
+            dil_interval: 0,
+            dil_read: Vec::new(),
+            dil_left: 0,
+            dil_recent: VecDeque::new(),
+            dil_lost: None,
+            dil_moved: 0,
+            r_moved: 0,
             analysis: Analysis::new(),
             route: None,
             choice: None,
@@ -702,7 +760,8 @@ impl Modem {
         };
         // 9.4.2: B1d "within 15 s plus 5 round-trip delays after sending
         // INFO1a".
-        modem.deadline = Some((modem.samples(15.0 + 5.0 * settings.round_trip), "no B1d from the digital modem"));
+        modem.start_deadline = (modem.samples(15.0 + 5.0 * settings.round_trip), "no B1d from the digital modem");
+        modem.deadline = Some(modem.start_deadline);
         modem
     }
 
@@ -916,6 +975,18 @@ impl Modem {
         }
     }
 
+    /// R has shown the frames arriving `late` symbols later than they were
+    /// taken to.
+    fn move_frames(&mut self, late: usize) {
+        let offset = (self.rx.frame_offset() + (INTERVALS - late) as u64) % INTERVALS as u64;
+        self.rx.set_frame_offset(offset);
+        self.r_moved += 1;
+        if let Some(frames) = self.frames.as_mut() {
+            frames.impossible.clear();
+            frames.history.clear();
+        }
+    }
+
     /// Rd's level in each interval: "the highest power PCM codeword from the
     /// data mode constellation" (8.6.4), as the route delivers it.
     fn rd_levels(&self) -> [f64; INTERVALS] {
@@ -1051,6 +1122,11 @@ impl Modem {
             }
             Heard::Untrained => self.fail("the digital modem's TRN1d did not train this end"),
             Heard::Symbol(symbol) => self.symbol(symbol),
+            Heard::Lost if self.stage == Stage::Dil && self.dil_lost.is_none() => {
+                // What arrived just before the loss was noticed is held with
+                // the rest until it is known whether anything moved.
+                self.dil_lost = Some(0);
+            }
             // A slip, or something like one: the receiver holds its loops,
             // and where the frames went is worked out from what comes after.
             Heard::Lost | Heard::Found => {}
@@ -1072,34 +1148,128 @@ impl Modem {
                     self.source.s_length = None;
                     self.source.change(Up::S);
                     self.stage = Stage::AwaitJdPrime;
-                    self.deadline = None;
+                    self.deadline = Some(self.start_deadline);
                 }
                 if jd_prime && self.stage == Stage::AwaitJdPrime {
                     // 9.3.2.8: S-bar for 16T, and the DIL straight after J'd.
                     self.source.after_s_bar = Up::Silence;
                     self.source.change(Up::SBar);
                     self.stage = Stage::Dil;
-                    self.dil_from = symbol.index + 1;
-                    let law = self.settings.law;
-                    let levels: Vec<f64> = self
-                        .dil
-                        .iter()
-                        .map(|&(u, positive)| ucode::level(law, u) * if positive { 1.0 } else { -1.0 })
-                        .collect();
+                    self.dil_base = symbol.raw as i64 + 1;
+                    self.dil_interval = (symbol.interval() + 1) % INTERVALS;
+                    self.dil_read = vec![false; self.dil.len()];
+                    self.dil_left = self.dil.len();
+                    self.dil_recent.clear();
+                    self.dil_lost = None;
+                    // Two passes: one, and what a slip loses of it read again.
+                    let levels = self.dil_levels(self.dil_base, 2 * self.dil.len());
                     self.rx.expect(levels);
                 }
             }
-            Stage::Dil => {
-                let at = (symbol.index - self.dil_from) as usize;
-                if let Some(&(u, positive)) = self.dil.get(at) {
-                    self.analysis.feed(u, positive, symbol.interval(), symbol.value);
-                }
-                if at + 1 == self.dil.len() {
-                    self.finish_dil();
-                }
-            }
+            Stage::Dil => self.dil_symbol(symbol.raw, symbol.value),
             Stage::Phase4 | Stage::Data => self.phase4_symbol(symbol),
             _ => {}
+        }
+    }
+
+    /// The DIL's signed levels from the receiver's count `from`, for `n`
+    /// symbols, as the DIL now stands against that count.
+    fn dil_levels(&self, from: i64, n: usize) -> Vec<f64> {
+        let law = self.settings.law;
+        let len = self.dil.len() as i64;
+        (0..n as i64)
+            .map(|k| {
+                let (u, positive) = self.dil[(from + k - self.dil_base).rem_euclid(len) as usize];
+                ucode::level(law, u) * if positive { 1.0 } else { -1.0 }
+            })
+            .collect()
+    }
+
+    /// Times a slip moved the DIL and it was found again.
+    pub fn dil_moved(&self) -> u32 {
+        self.dil_moved
+    }
+
+    fn dil_symbol(&mut self, raw: u64, value: f64) {
+        self.dil_recent.push_back((raw, value));
+        if let Some(gathered) = self.dil_lost {
+            if self.dil_recent.len() > DIL_KEPT_LOST {
+                self.dil_recent.pop_front();
+            }
+            self.dil_lost = Some(gathered + 1);
+            if gathered + 1 >= DIL_FIRST_LOOK && (gathered + 1).is_multiple_of(DIL_LOOK_EVERY) {
+                self.find_dil();
+            }
+            return;
+        }
+        while self.dil_recent.len() > DIL_DELAY {
+            let Some((raw, value)) = self.dil_recent.pop_front() else { break };
+            self.count_dil(raw, value);
+            if self.stage != Stage::Dil {
+                return;
+            }
+        }
+    }
+
+    /// One DIL symbol read, wherever in the DIL it falls: the DIL repeats,
+    /// so a symbol a slip spoiled comes round again.
+    fn count_dil(&mut self, raw: u64, value: f64) {
+        let len = self.dil.len() as i64;
+        let at = (raw as i64 - self.dil_base).rem_euclid(len) as usize;
+        if self.dil_read[at] {
+            return;
+        }
+        self.dil_read[at] = true;
+        self.dil_left -= 1;
+        let (u, positive) = self.dil[at];
+        self.analysis.feed(u, positive, (at + self.dil_interval) % INTERVALS, value);
+        if self.dil_left == 0 {
+            self.finish_dil();
+        }
+    }
+
+    /// Where the DIL went after a loss: the move that makes what has arrived
+    /// lately most like it, once one does so clearly -- closely, and far
+    /// better than any other. No move at all, if that fits: a route that
+    /// robs a bit, or a burst of noise, spoils the reading without moving
+    /// anything.
+    fn find_dil(&mut self) {
+        let law = self.settings.law;
+        let len = self.dil.len() as i64;
+        let expected = |at: i64| {
+            let (u, positive) = self.dil[at.rem_euclid(len) as usize];
+            ucode::level(law, u) * if positive { 1.0 } else { -1.0 }
+        };
+        let window: Vec<(u64, f64)> = self.dil_recent.iter().skip(self.dil_recent.len().saturating_sub(DIL_SEARCH)).copied().collect();
+        let cost = |moved: i64| -> f64 { window.iter().map(|&(raw, v)| (v - expected(raw as i64 - self.dil_base - moved)).powi(2)).sum() };
+        let costs: Vec<(i64, f64)> = (-DIL_MOST_MOVED..=DIL_MOST_MOVED).map(|m| (m, cost(m))).collect();
+        let Some(&(moved, least)) = costs.iter().min_by(|a, b| a.1.total_cmp(&b.1)) else { return };
+        let next_least = costs.iter().filter(|c| (c.0 - moved).abs() > 1).map(|c| c.1).fold(f64::INFINITY, f64::min);
+        let power: f64 = window.iter().map(|&(raw, _)| expected(raw as i64 - self.dil_base - moved).powi(2)).sum();
+        if least > DIL_FIT * power || (moved != 0 && next_least < 4.0 * least) {
+            return;
+        }
+        self.dil_lost = None;
+        // Nothing moved: everything held is good. A move: only what it was
+        // found from is sure to be past the slip, and the next pass has the
+        // rest.
+        let recent: Vec<(u64, f64)> = if moved == 0 { self.dil_recent.drain(..).collect() } else { window };
+        self.dil_recent.clear();
+        let next = recent.last().map_or(0, |r| r.0 as i64 + 1);
+        if moved != 0 {
+            self.dil_moved += 1;
+            self.dil_base += moved;
+            // The frames moved with it.
+            let offset = (self.rx.frame_offset() as i64 - moved).rem_euclid(INTERVALS as i64) as u64;
+            self.rx.set_frame_offset(offset);
+        }
+        let levels = self.dil_levels(next, 2 * self.dil.len());
+        self.rx.expect_afresh(levels);
+        for (raw, value) in recent {
+            self.count_dil(raw, value);
+            if self.stage != Stage::Dil {
+                return;
+            }
         }
     }
 
@@ -1136,7 +1306,12 @@ impl Modem {
         if self.trn2d_from.is_none() {
             let level = ucode::level(self.settings.law, self.settings.uinfo);
             let was_heard = self.r_watch.heard;
-            if let Some(from) = self.r_watch.feed(&symbol, &[level; INTERVALS]) {
+            let seen = self.r_watch.feed(&symbol, &[level; INTERVALS]);
+            if let RSeen::Moved(late) = seen {
+                self.move_frames(late);
+                return;
+            }
+            if let RSeen::Turned(from) = seen {
                 // 9.4.2.2: the current CPt whole, then CP.
                 self.trn2d_from = Some(from);
                 self.source.next_cp = Some((choice.data.to_bits(), false));
@@ -1158,9 +1333,16 @@ impl Modem {
         if self.stage == Stage::Data && (receiving || self.awaiting_turn) {
             let levels = self.rd_levels();
             let was_heard = self.rd_watch.heard;
-            if let Some(from) = self.rd_watch.feed(&symbol, &levels) {
-                self.turned(from);
-                return;
+            match self.rd_watch.feed(&symbol, &levels) {
+                RSeen::Turned(from) => {
+                    self.turned(from);
+                    return;
+                }
+                RSeen::Moved(late) => {
+                    self.move_frames(late);
+                    return;
+                }
+                RSeen::Nothing => {}
             }
             if self.rd_watch.heard {
                 if !was_heard {
@@ -1313,9 +1495,10 @@ impl Modem {
         cp.lookahead = 0;
     }
 
-    /// Times the downstream frames were found somewhere else after a slip.
+    /// Times the downstream frames were found somewhere else after a slip,
+    /// from the data frames themselves or from R.
     pub fn frames_moved(&self) -> u32 {
-        self.frames.as_ref().map_or(0, |f| f.moved)
+        self.frames.as_ref().map_or(0, |f| f.moved) + self.r_moved
     }
 
     /// Data mode's upstream, as the digital modem's MP asks for it.

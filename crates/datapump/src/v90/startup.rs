@@ -261,6 +261,8 @@ pub struct Digital {
     /// Phase 2 goes out through the codec like anything else, at the power
     /// INFO0d names; so does V.34, if that is what the call became.
     phase2_gain: f64,
+    /// V.90 start-ups that have failed in a row.
+    failed_starts: u32,
 }
 
 impl Digital {
@@ -273,6 +275,7 @@ impl Digital {
             v34: v34::Modem::with_phase2(phase2::Modem::v90(Pcm::Digital(info0d), digital::FS), digital::FS),
             v90: None,
             phase2_gain,
+            failed_starts: 0,
         }
     }
 
@@ -363,8 +366,13 @@ impl Digital {
     pub fn step(&mut self, input: f64) -> f64 {
         if let Some(m) = self.v90.as_mut() {
             let out = m.step(input);
-            if m.take_retrain() {
+            let failed = matches!(m.status(), digital::Status::Failed(_));
+            if matches!(m.status(), digital::Status::Connected { .. }) {
+                self.failed_starts = 0;
+            }
+            if m.take_retrain() || (failed && self.failed_starts < V90_RETRAINS) {
                 // 9.5.1: tone B and phase 2.
+                self.failed_starts += u32::from(failed);
                 self.v90 = None;
                 self.v34.restart_phase2();
             }

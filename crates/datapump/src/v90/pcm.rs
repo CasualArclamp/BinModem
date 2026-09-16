@@ -175,8 +175,11 @@ pub enum Heard {
 /// One symbol, equalised.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Symbol {
-    /// Symbols since TRN1d began: TRN1d's first is 0.
+    /// Symbols since TRN1d began, TRN1d's first being 0, and moved on by
+    /// the frame offset: what [`Self::interval`] is worked out from.
     pub index: u64,
+    /// The same count as this receiver kept it, with no offset.
+    pub raw: u64,
     /// The equaliser's output, in the scale of [`ucode::level`].
     pub value: f64,
     /// What the slicer decided it was, if it decided.
@@ -442,6 +445,12 @@ impl Receiver {
     /// Bursts held through so far.
     pub fn slips(&self) -> u32 {
         self.slips
+    }
+
+    /// Say what the next symbols are, for [`Slicer::Known`], forgetting what
+    /// was said before: a slip has moved them.
+    pub fn expect_afresh(&mut self, levels: impl IntoIterator<Item = f64>) {
+        self.set_slicer(Slicer::Known(levels.into_iter().collect()));
     }
 
     /// Say what the next symbols are, for [`Slicer::Known`].
@@ -778,9 +787,17 @@ impl Receiver {
         if let Some(target) = decided {
             let e = y - target;
             if self.watch(e * e) {
+                // A known sequence a slip has moved is no guide to what went
+                // before, and feeding it back would spoil every output after
+                // it; whatever was sent was a codeword, and the nearest one is
+                // a better guess. But a known sequence nothing moved is the
+                // truth, on a noisy line where the nearest codeword is often
+                // not: it stands wherever the output is anywhere near it.
+                let known = matches!(self.slicer, Slicer::Known(_));
+                let fed = if known && e * e > 16.0 * self.settled { self.nearest_codeword(y) } else { target };
                 self.past.pop_back();
-                self.past.push_front(target);
-                return Symbol { index: index + self.frame_offset, value: y, decided };
+                self.past.push_front(fed);
+                return Symbol { index: index + self.frame_offset, raw: index, value: y, decided };
             }
             let energy: f64 = row.iter().chain(self.past.iter()).map(|x| x * x).sum::<f64>() + 1e-18;
             let back = e * STEP / energy;
@@ -804,7 +821,13 @@ impl Receiver {
         }
         self.past.pop_back();
         self.past.push_front(decided.unwrap_or(y));
-        Symbol { index: index + self.frame_offset, value: y, decided }
+        Symbol { index: index + self.frame_offset, raw: index, value: y, decided }
+    }
+
+    /// The G.711 level nearest `y`.
+    fn nearest_codeword(&self, y: f64) -> f64 {
+        let (u, negative) = ucode::nearest(self.law, (y * 32768.0).round().clamp(-32768.0, 32767.0) as i32);
+        ucode::level(self.law, u) * if negative { -1.0 } else { 1.0 }
     }
 
     /// Judge one decision's squared error against what the errors settled to.

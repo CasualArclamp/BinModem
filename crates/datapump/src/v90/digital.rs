@@ -647,17 +647,14 @@ impl Modem {
             self.md_until = None;
             self.rx.hunt();
         }
-        if let Some((at, why)) = self.deadline
+        if let Some((at, _)) = self.deadline
             && self.now > at
             && self.status == Status::Running
         {
-            if self.renegotiating {
-                // 9.6.1: a renegotiation that goes nowhere is a retrain.
-                self.deadline = None;
-                self.wants_retrain = true;
-            } else {
-                self.fail(why);
-            }
+            // 9.4.1 and 9.6.1: a start-up or a renegotiation that goes
+            // nowhere is a retrain.
+            self.deadline = None;
+            self.wants_retrain = true;
         }
         self.stage_step();
         self.source.next()

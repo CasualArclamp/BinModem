@@ -457,3 +457,30 @@ fn a_sound_card_clock_120_ppm_off_is_followed_through_ten_seconds_of_data() {
     let drift = call.analogue.v90().unwrap().receiver().drift_ppm();
     assert!((drift.abs() - 120.0).abs() < 20.0, "drift read as {drift:.1} ppm");
 }
+/// A softphone's jitter buffer slipping twenty milliseconds of the
+/// downstream every few seconds, over a VoIP call's round trip, landing in
+/// phase 3's training, the DIL and phase 4: each is followed, and the start-up
+/// connects the first time.
+#[test]
+fn slips_during_the_start_up_are_followed() {
+    let (mut dil_moved, mut frames_moved) = (0, 0);
+    for (period, inserted) in [(5.9, false), (2.9, true), (4.3, true), (3.1, false), (2.3, true)] {
+        let net = Network::new(Law::Mu, FS).with_delay(0.6, FS).with_noise(1e-5).with_slips(period, inserted);
+        let mut call = FullCall::new(net, server());
+        let ok = call.run(25.0);
+        let v90 = call.analogue.v90();
+        println!(
+            "slips every {period} s, inserted {inserted}: {} slips, DIL moved {:?}, frames moved {:?}",
+            call.net.slips(),
+            v90.map(|m| m.dil_moved()),
+            v90.map(|m| m.frames_moved())
+        );
+        assert!(ok, "slips every {period} s: {} / {}", call.analogue.phase(), call.digital.phase());
+        assert_eq!(call.analogue.retrains(), 0, "slips every {period} s: {:?}", call.analogue.last_failure());
+        assert!(call.net.slips() >= 2);
+        dil_moved += v90.map_or(0, |m| m.dil_moved());
+        frames_moved += v90.map_or(0, |m| m.frames_moved());
+    }
+    assert!(dil_moved > 0, "no slip landed in a DIL");
+    assert!(frames_moved > 0, "no slip moved the frames in phase 4");
+}
