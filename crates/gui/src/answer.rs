@@ -166,9 +166,9 @@ pub fn run(args: Vec<String>) -> ExitCode {
         match (&mut above, host.state()) {
             (Above::Nothing, State::Data) => {
                 println!(
-                    "[{:>6.2}s connected at {} bit/s, error control {}, compression {}]",
+                    "[{:>6.2}s connected at {}, error control {}, compression {}]",
                     stamp(),
-                    host.rate().unwrap_or(0),
+                    crate::live::line_rates(&host),
                     host.error_control_detail(),
                     host.compression_name().unwrap_or("off")
                 );

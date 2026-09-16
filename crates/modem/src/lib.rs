@@ -116,26 +116,29 @@ impl Pump {
             Self::V22bis(m) => match m.status() {
                 v22bis::handshake::Status::Negotiating => Progress::Negotiating,
                 v22bis::handshake::Status::Connected(r) => {
-                    Progress::Connected(r.bits_per_second())
+                    Progress::both_ways(r.bits_per_second())
                 }
                 v22bis::handshake::Status::Failed => Progress::Failed,
             },
             Self::V32(m) => match m.status() {
                 v32::startup::Status::Negotiating => Progress::Negotiating,
                 v32::startup::Status::Retraining => Progress::Retraining,
-                v32::startup::Status::Connected(rate) => Progress::Connected(rate),
+                v32::startup::Status::Connected(rate) => Progress::both_ways(rate),
                 v32::startup::Status::Failed => Progress::Failed,
             },
             Self::Bell103(m) => match m.status() {
                 bell103::Status::Negotiating => Progress::Negotiating,
-                bell103::Status::Connected(rate) => Progress::Connected(rate),
+                bell103::Status::Connected(rate) => Progress::both_ways(rate),
                 bell103::Status::Failed => Progress::Failed,
             },
-            // Rates can differ each way; the one reported is what arrives,
-            // which is what the terminal on this end gets to see.
+            // Rates can differ each way, and V.34 is the one modulation here
+            // where they do: each end asks for what it can receive (MP, 10.1.3),
+            // so a line that is worse one way round settles two rates.
             Self::V34(m) => match m.status() {
                 v34::startup::Status::Running => Progress::Negotiating,
-                v34::startup::Status::Connected { receive, .. } => Progress::Connected(receive),
+                v34::startup::Status::Connected { receive, transmit } => {
+                    Progress::Connected { receive, transmit }
+                }
                 // A rate renegotiation keeps the call up as a V.32bis retrain
                 // does; a cleardown is the far end hanging up politely.
                 v34::startup::Status::Retraining => Progress::Retraining,
@@ -644,8 +647,17 @@ enum Progress {
     /// A call that was up and is going through its start-up again, which only
     /// V.32bis 7 defines.
     Retraining,
-    Connected(u32),
+    /// Up, at these rates: what arrives here and what goes from here.
+    Connected { receive: u32, transmit: u32 },
     Failed,
+}
+
+impl Progress {
+    /// Connected at one rate in both directions, which is every modulation
+    /// but V.34.
+    fn both_ways(rate: u32) -> Self {
+        Self::Connected { receive: rate, transmit: rate }
+    }
 }
 
 /// How long after dialling a character is taken as an instruction to stop.
@@ -665,8 +677,11 @@ pub struct Modem {
     fs: f64,
     /// The line side, once off hook.
     pump: Option<Pump>,
-    /// The rate the handshake settled on.
+    /// The rate the handshake settled on, arriving.
     rate: u32,
+    /// And going. The same as `rate` except on V.34, whose two directions
+    /// are settled separately.
+    transmit_rate: u32,
     /// Whether the line is going through its start-up again (V.32bis 7).
     retraining: bool,
     /// Error control over it, once connected.
@@ -762,6 +777,7 @@ impl Modem {
             fs,
             pump: None,
             rate: 0,
+            transmit_rate: 0,
             retraining: false,
             ec: None,
             want_error_control: true,
@@ -813,8 +829,19 @@ impl Modem {
     }
 
     /// The rate agreed, once there is a connection.
+    ///
+    /// The receiving rate, which is the one a CONNECT reports: it is what the
+    /// terminal on this end gets to see arrive.
     pub fn rate(&self) -> Option<u32> {
         (self.rate > 0).then_some(self.rate)
+    }
+
+    /// The rate this end sends at, once there is a connection.
+    ///
+    /// The far end's [`Self::rate`], seen from here. Only V.34 can make it
+    /// differ from this end's own.
+    pub fn transmit_rate(&self) -> Option<u32> {
+        (self.transmit_rate > 0).then_some(self.transmit_rate)
     }
 
     /// The modulation in use, by the name `+MS` knows it as.
@@ -1428,8 +1455,9 @@ impl Modem {
             // A retrain cannot happen before the call is up, so during the
             // handshake it means nothing.
             Progress::Negotiating | Progress::Retraining => {}
-            Progress::Connected(rate) => {
+            Progress::Connected { receive: rate, transmit } => {
                 self.rate = rate;
+                self.transmit_rate = transmit;
                 if let Some(Pump::V34(m)) = self.pump.as_ref() {
                     self.v34_report = Some(V34Report::of(m));
                 }
@@ -1604,9 +1632,10 @@ impl Modem {
         let Some(status) = self.pump.as_ref().map(Pump::status) else { return };
         match status {
             Progress::Retraining => self.retraining = true,
-            Progress::Connected(rate) if self.retraining => {
+            Progress::Connected { receive, transmit } if self.retraining => {
                 self.retraining = false;
-                self.rate = rate;
+                self.rate = receive;
+                self.transmit_rate = transmit;
                 // A V.34 renegotiation settles new MPs and new rates.
                 if let Some(Pump::V34(m)) = self.pump.as_ref() {
                     self.v34_report = Some(V34Report::of(m));
@@ -1834,6 +1863,7 @@ impl Modem {
         if self.at.service_class == at::ServiceClass::Fax {
             self.since_dial_ms = 0;
             self.rate = 0;
+            self.transmit_rate = 0;
             self.ec = None;
             self.pump = None;
             self.negotiation = None;
@@ -1857,6 +1887,7 @@ impl Modem {
         }
         self.since_dial_ms = 0;
         self.rate = 0;
+        self.transmit_rate = 0;
         self.ec = None;
         self.far_menu = None;
         self.v34_report = None;
@@ -2124,6 +2155,7 @@ impl Modem {
         self.pump = None;
         self.negotiation = None;
         self.rate = 0;
+        self.transmit_rate = 0;
         self.ec = None;
         // A call that ends before its CONNECT went out never connected, and
         // the terminal is about to be told why instead.

@@ -132,8 +132,11 @@ pub struct Frame {
     /// Owned strings rather than borrowed, because most of these are numbers
     /// the far end chose and none of them are known at compile time.
     pub distant: Vec<(&'static str, String)>,
-    /// Negotiated line rate once connected.
+    /// Negotiated line rate once connected: the one arriving here.
     pub bit_rate: Option<u32>,
+    /// And the one this end sends at. Only V.34 settles the two separately,
+    /// so everywhere else this is `bit_rate` again.
+    pub tx_bit_rate: Option<u32>,
     pub rx_bytes: u64,
     pub tx_bytes: u64,
     /// How much of this end's own transmission the echo canceller is taking
@@ -203,6 +206,7 @@ impl Frame {
             modulation: "-",
             line_phase: "-",
             bit_rate: None,
+            tx_bit_rate: None,
             rx_bytes: 0,
             echo_loss_db: None,
             reception: None,

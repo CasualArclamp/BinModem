@@ -107,6 +107,9 @@ fn dialling_reaches_a_connection_and_says_so() {
         p.caller_saw()
     );
     assert_eq!(p.caller.rate(), p.host.rate(), "the two ends disagree");
+    // And what each end sends at is what the other receives at.
+    assert_eq!(p.caller.transmit_rate(), p.host.rate(), "the caller's sending rate");
+    assert_eq!(p.host.transmit_rate(), p.caller.rate(), "the host's sending rate");
 }
 
 #[test]
@@ -397,6 +400,7 @@ fn two_modems_asked_for_v34_connect_at_33600_and_carry_data() {
     assert_eq!(p.host.state(), State::Data, "{}", p.host_saw());
     assert!(p.caller_saw().contains("CONNECT 33600"), "{}", p.caller_saw());
     assert_eq!(p.caller.rate(), Some(33_600));
+    assert_eq!(p.caller.transmit_rate(), Some(33_600));
 
     p.at_caller.clear();
     p.at_host.clear();
@@ -442,6 +446,12 @@ fn two_modems_asked_for_v34_connect_at_33600_and_carry_data() {
     assert_eq!((p.caller.state(), p.host.state()), (State::Data, State::Data), "{} / {}", p.caller_saw(), p.host_saw());
     assert!(!p.caller_saw().contains("NO CARRIER") && !p.caller_saw().contains("CONNECT"), "{}", p.caller_saw());
     assert_eq!(p.caller.rate(), Some(28_800));
+    // The renegotiation asked the host to send slower and nothing of the
+    // caller, so the two directions have parted: the caller still sends at
+    // 33 600, and the host, which receives that, says so.
+    assert_eq!(p.caller.transmit_rate(), Some(33_600), "the caller's sending rate moved");
+    assert_eq!(p.host.rate(), Some(33_600));
+    assert_eq!(p.host.transmit_rate(), Some(28_800), "the host is not sending at what the caller receives");
     for b in b"ls -l\r" {
         p.caller.feed_dte(*b);
     }

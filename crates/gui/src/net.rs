@@ -328,6 +328,7 @@ fn publish(
         // Not a line rate. There is no line, and a number here would be a
         // guess dressed up as a measurement.
         f.bit_rate = None;
+        f.tx_bit_rate = None;
         f.rx_bytes = rx_bytes;
         f.tx_bytes = tx_bytes;
         f.carrier = connected;

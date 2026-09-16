@@ -2399,11 +2399,11 @@ impl ScopeApp {
                 row("state", f.state.label().into(), bright);
                 row("modulation", f.modulation.into(), bright);
                 row("phase", f.line_phase.into(), dim);
-                row(
-                    "rate",
-                    f.bit_rate.map(|r| format!("{r} bps")).unwrap_or_else(|| "-".into()),
-                    bright,
-                );
+                // Both directions, because they need not match: V.34 settles
+                // each separately, from what each end's receiver asked for.
+                let bps = |r: Option<u32>| r.map(|r| format!("{r} bps")).unwrap_or_else(|| "-".into());
+                row("rx rate", bps(f.bit_rate), bright);
+                row("tx rate", bps(f.tx_bit_rate), bright);
                 row(
                     "carrier",
                     if f.carrier { "detected" } else { "none" }.into(),

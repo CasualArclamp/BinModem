@@ -53,6 +53,32 @@ pub const LINE_IN: &[&str] = &["CABLE-A Output", "CABLE Output"];
 pub const LINE_OUT: &[&str] = &["CABLE-B Input", "CABLE Input"];
 
 /// Where in `names` the first of `wanted` appears, if any of them does.
+/// A call's rates as one phrase: one number when both directions agree,
+/// which is every modulation but V.34, and both when they do not.
+pub fn line_rates(modem: &Modem) -> String {
+    let (receive, send) = (modem.rate().unwrap_or(0), modem.transmit_rate().unwrap_or(0));
+    if receive == send {
+        format!("{receive} bit/s")
+    } else {
+        format!("{receive} bit/s receiving / {send} sending")
+    }
+}
+
+/// Which way a retrain moved the rates, both directions considered.
+///
+/// A V.34 renegotiation asks the far end to change what it sends, so one
+/// direction can drop while the other holds -- or, on a line that is worse
+/// one way round, one drop and the other climb.
+fn retrain_went(before: (u32, u32), after: (u32, u32)) -> &'static str {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    match (after.0.cmp(&before.0), after.1.cmp(&before.1)) {
+        (Equal, Equal) => "the same",
+        (Less | Equal, Less | Equal) => "slower",
+        (Greater | Equal, Greater | Equal) => "faster",
+        _ => "one way faster, the other slower",
+    }
+}
+
 pub fn named(names: &[String], wanted: &[&str]) -> Option<usize> {
     wanted
         .iter()
@@ -694,7 +720,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // Whether the line was retraining last time round, and what it was
     // carrying before it started.
     let mut was_retraining = false;
-    let mut rate_before = 0;
+    let mut rates_before = (0, 0);
     // The transfer, while there is one, when it started, and how fast it is
     // going.
     let mut job: Option<Job> = None;
@@ -903,7 +929,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                             Direction::Note,
                             format!("sending {} ({} bytes)", info.name, data.len()),
                         );
-                        let rate = modem.rate().unwrap_or(2400);
+                        // What the file goes out at is this end's sending
+                        // rate, which on V.34 need not be the one arriving.
+                        let rate = modem.transmit_rate().unwrap_or(2400);
                         job = Some(Job::Sending(Box::new(
                             transfer::zmodem::Sender::new(info, data, rate),
                         )));
@@ -936,7 +964,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             // keep the modem busy through any scheduling hiccup, and short
             // enough that when the far end asks the sender to go back, what
             // has to drain first is two seconds and not the rest of the file.
-            let ahead = (modem.rate().unwrap_or(2400) as usize / 4).max(1024);
+            // The queue drains at the sending rate, so that is the one to size
+            // it by.
+            let ahead = (modem.transmit_rate().unwrap_or(2400) as usize / 4).max(1024);
             let room = ahead.saturating_sub(modem.queued());
             let (out, mut done) = step_job(active, &tx, room);
             for b in out {
@@ -947,7 +977,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             done.0.average = meter.average();
             done.0.elapsed = meter.elapsed();
             done.0.remaining = done.0.total.and_then(|total| meter.remaining(total));
-            done.0.line_bps = modem.rate();
+            // The share of the line a file gets is a share of the direction
+            // it is moving in.
+            done.0.line_bps =
+                if done.0.sending { modem.transmit_rate() } else { modem.rate() };
             session.set_transfer(Some(done.0));
             if done.1 {
                 // The last of it stays on the window: what it came to, and how
@@ -1166,23 +1199,21 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         // procedure.
         let retraining = modem.retraining();
         if retraining != was_retraining {
+            let rates =
+                (modem.rate().unwrap_or(0), modem.transmit_rate().unwrap_or(0));
             if retraining {
-                rate_before = modem.rate().unwrap_or(0);
+                rates_before = rates;
                 tx.log(
                     Direction::Note,
-                    format!("retraining, was {rate_before} bit/s"),
+                    format!("retraining, was {}", line_rates(&modem)),
                 );
             } else {
-                let now = modem.rate().unwrap_or(0);
-                let note = match now.cmp(&rate_before) {
-                    std::cmp::Ordering::Less => "slower",
-                    std::cmp::Ordering::Greater => "faster",
-                    std::cmp::Ordering::Equal => "the same",
-                };
+                let note = retrain_went(rates_before, rates);
                 tx.log(
                     Direction::Note,
                     format!(
-                        "retrained: {now} bit/s, {note} ({} so far)",
+                        "retrained: {}, {note} ({} so far)",
+                        line_rates(&modem),
                         modem.retrains()
                     ),
                 );
@@ -1236,9 +1267,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 // side, which sees a CONNECT and a rate and nothing else.
                 State::Data => {
                     let mut s = format!(
-                        "connected: {} at {} bit/s, error control {}, compression {}",
+                        "connected: {} at {}, error control {}, compression {}",
                         modem.standard(),
-                        modem.rate().unwrap_or(0),
+                        line_rates(&modem),
                         modem.error_control_detail(),
                         modem.compression_name().unwrap_or("off")
                     );
@@ -1276,6 +1307,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     .sqrt()
             };
             let rate = modem.rate();
+            let transmit_rate = modem.transmit_rate();
             let recent = |at: Instant| at.elapsed() < Duration::from_millis(250);
 
             tx.publish(|f| {
@@ -1305,6 +1337,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 f.distant.clear();
                 f.distant.extend(modem.distant());
                 f.bit_rate = rate;
+                f.tx_bit_rate = transmit_rate;
                 f.rx_bytes = rx_bytes;
                 f.tx_bytes = tx_bytes;
                 f.echo_loss_db = modem.echo_return_loss_now();
