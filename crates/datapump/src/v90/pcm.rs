@@ -81,6 +81,12 @@ const SD_BAR_SYMBOLS: usize = 48;
 const TRAIN_FROM: usize = 64;
 const TRAIN_TO: usize = 1600;
 
+/// Stretches of TRN1d tried before the training is given up, and how far
+/// either way of where it should be a later one is looked for, in symbols:
+/// forty milliseconds.
+const TRAIN_TRIES: u32 = 3;
+const COARSE_SYMBOLS: i64 = 320;
+
 /// Half symbols either side of where the reversal puts TRN1d that training
 /// tries.
 const SEARCH: i64 = 12;
@@ -216,7 +222,10 @@ impl Symbol {
 enum Stage {
     Idle,
     Hunting(Hunt),
-    Collecting { start: u64 },
+    /// TRN1d arriving: the half-symbol sample its first symbol is near, the
+    /// symbol of it the training stretch begins at, and how many stretches
+    /// have been tried.
+    Collecting { start: u64, base: usize, tries: u32 },
     Trained,
 }
 
@@ -557,14 +566,17 @@ impl Receiver {
                 if let Some(at) = hunt.feed(half, index) {
                     self.heard.push_back(Heard::Reversal { at });
                     // TRN1d follows S-bar-d's 48 symbols.
-                    self.stage = Stage::Collecting { start: at + 2 * SD_BAR_SYMBOLS as u64 };
+                    self.stage = Stage::Collecting { start: at + 2 * SD_BAR_SYMBOLS as u64, base: 0, tries: 0 };
                 }
             }
-            Stage::Collecting { start } => {
-                let start = *start;
-                let needed = start + SEARCH as u64 + 2 * TRAIN_TO as u64 + REACH as u64 + 1;
+            Stage::Collecting { start, base, tries } => {
+                let (start, base, tries) = (*start, *base, *tries);
+                // A later stretch is looked for a slip either way of where
+                // it should be, and all of that has to have arrived.
+                let reach = if tries > 0 { 2 * COARSE_SYMBOLS as u64 } else { 0 };
+                let needed = start + 2 * base as u64 + reach + SEARCH as u64 + 2 * TRAIN_TO as u64 + REACH as u64 + 1;
                 if self.made > needed {
-                    self.finish_training(start);
+                    self.finish_training(start, base, tries);
                 }
             }
             Stage::Trained => self.symbols(),
@@ -600,6 +612,26 @@ impl Receiver {
             .map(|_| if scrambler.scramble(true) { level } else { -level })
             .skip(from)
             .collect()
+    }
+
+    /// Where a stretch of known symbols sits, as half-symbol samples from
+    /// `start`, by where it correlates best with the line within a slip's
+    /// reach either way.
+    fn coarse(&self, start: u64, targets: &[f64]) -> Option<i64> {
+        let reach = 2 * COARSE_SYMBOLS;
+        let mut best: Option<(f64, i64)> = None;
+        for lag in -reach..=reach {
+            let mut sum = 0.0;
+            for (k, &target) in targets.iter().enumerate().skip(TRAIN_FROM) {
+                let Some(at) = (start + 2 * k as u64).checked_add_signed(lag).and_then(|a| a.checked_sub(self.first)) else { continue };
+                let Some(&v) = self.halves.get(at as usize) else { continue };
+                sum += v * target;
+            }
+            if best.is_none_or(|(b, _)| sum.abs() > b) {
+                best = Some((sum.abs(), lag));
+            }
+        }
+        best.map(|(_, lag)| lag)
     }
 
     /// How far the far clock is off this one, as a fraction, from where the
@@ -670,14 +702,29 @@ impl Receiver {
         true
     }
 
-    fn finish_training(&mut self, start: u64) {
+    /// Train on the stretch of TRN1d from symbol `base`, near half-symbol
+    /// sample `start + 2 * base`.
+    ///
+    /// A stretch a softphone's jitter buffer cut into does not fit, and on a
+    /// live call one did not. TRN1d can go on for four seconds, so a stretch
+    /// that fails is followed by the next, a few times over, before the
+    /// training is given up.
+    fn finish_training(&mut self, first: u64, base: usize, tries: u32) {
+        let mut start = first + 2 * base as u64;
+        // A later stretch may not be where the first was: the cut that
+        // spoiled the first moved everything after it.
+        if tries > 0
+            && let Some(lag) = self.coarse(start, &self.trn1d(base, base + TRAIN_TO))
+        {
+            start = start.saturating_add_signed(lag);
+        }
         // The clock first, and the samples taken again on it, before the
         // equaliser is solved for. Where a peak sits between samples is read
         // a little wrong, and more wrong the further it has moved, so the
         // estimate is made again on the samples taken again, until what is
         // left is under half a part per million.
-        if let Some(origin) = self.align(start) {
-            let targets = self.trn1d(0, TRAIN_TO);
+        if let Some(origin) = self.align(start, base) {
+            let targets = self.trn1d(base, base + TRAIN_TO);
             for _ in 0..8 {
                 let Some(off) = self.drift_across(origin, &targets) else { break };
                 if off.abs() < 0.5e-6 {
@@ -689,7 +736,7 @@ impl Receiver {
                 }
             }
         }
-        match self.solve(start) {
+        match self.solve(start, base) {
             Some(solution) if -10.0 * (solution.mse / self.power_of_uinfo()).max(1e-18).log10() >= KNOWN_ENOUGH => {
                 self.trained_snr = -10.0 * (solution.mse / self.power_of_uinfo()).max(1e-18).log10();
                 // Which way round the line has the signal: the main tap's
@@ -699,15 +746,18 @@ impl Receiver {
                 self.taps = solution.taps;
                 self.centre = centre_of(&self.taps);
                 self.feedback = solution.feedback;
-                let known = self.trn1d(TRAIN_TO - FEEDBACK, TRAIN_TO);
+                let known = self.trn1d(base + TRAIN_TO - FEEDBACK, base + TRAIN_TO);
                 self.past = known.into_iter().rev().collect();
                 self.error = solution.mse;
                 self.next_half = solution.origin + 2 * TRAIN_TO as u64;
-                self.next_symbol = TRAIN_TO as u64;
+                self.next_symbol = (base + TRAIN_TO) as u64;
                 self.slicer = Slicer::Binary(ucode::level(self.law, self.uinfo));
                 self.stage = Stage::Trained;
                 self.heard.push_back(Heard::Trained { snr_db: self.trained_snr, inverted: self.inverted });
                 self.symbols();
+            }
+            _ if tries + 1 < TRAIN_TRIES => {
+                self.stage = Stage::Collecting { start: first, base: base + TRAIN_TO, tries: tries + 1 };
             }
             _ => {
                 self.stage = Stage::Idle;
@@ -727,8 +777,8 @@ impl Receiver {
 
     /// Where TRN1d's first symbol is, near `start`: the alignment whose
     /// short fit fits best.
-    fn align(&self, start: u64) -> Option<u64> {
-        let targets = self.trn1d(0, SEARCH_TO);
+    fn align(&self, start: u64, base: usize) -> Option<u64> {
+        let targets = self.trn1d(base, base + SEARCH_TO);
         let mut best: Option<(f64, u64)> = None;
         for delta in -SEARCH..=SEARCH {
             let Some(origin) = start.checked_add_signed(delta) else { continue };
@@ -750,9 +800,9 @@ impl Receiver {
     /// reads loud codewords a percent or two out, everywhere. So symbols the
     /// first fit puts squarely on another codeword are taken to be that one,
     /// and the fit made again.
-    fn solve(&self, start: u64) -> Option<Solution> {
-        let origin = self.align(start)?;
-        let mut targets = self.trn1d(0, TRAIN_TO);
+    fn solve(&self, start: u64, base: usize) -> Option<Solution> {
+        let origin = self.align(start, base)?;
+        let mut targets = self.trn1d(base, base + TRAIN_TO);
         let first = self.fit(origin, &targets, TRAIN_FROM, TRAIN_TO)?;
         let outputs = self.outputs(origin, &targets, &first, TRAIN_FROM, TRAIN_TO)?;
         let mut misses: Vec<f64> = outputs.iter().map(|&(k, y)| (y - targets[k]).abs()).collect();

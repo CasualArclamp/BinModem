@@ -41,8 +41,8 @@ use super::ucode::{self, Law};
 /// The network's rate.
 pub const FS: f64 = 8000.0;
 
-/// TRN1d: "a minimum of 2040T" (9.3.1.4).
-const TRN1D_SYMBOLS: usize = 2400;
+/// S after TRN1d begins: "within 5100 ms plus a round-trip delay" (9.3.1.5).
+const S_WITHIN: f64 = 5.1;
 
 /// Ri before CPt can have been answered: "a minimum of 192T" (9.4.1.1).
 const RI_SYMBOLS: usize = 192;
@@ -82,6 +82,30 @@ pub enum Status {
     Failed(&'static str),
 }
 
+/// How a digital modem goes about the parts the Recommendation leaves open.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Habits {
+    /// TRN1d, in seconds: "a minimum of 2040T", and Jd "within 4000 ms".
+    pub trn1d: f64,
+    /// Whether 9.3.1.5's wait for S has the round trip added to it.
+    pub s_wait_counts_round_trip: bool,
+}
+
+impl Habits {
+    /// Short TRN1d, and the Recommendation's wait for S.
+    pub const PROMPT: Self = Self { trn1d: 0.3, s_wait_counts_round_trip: true };
+
+    /// What a live server did: four seconds of TRN1d, and a wait for S that
+    /// did not allow for a second-long round trip.
+    pub const LIVE_SERVER: Self = Self { trn1d: 4.05, s_wait_counts_round_trip: false };
+}
+
+impl Default for Habits {
+    fn default() -> Self {
+        Self::PROMPT
+    }
+}
+
 /// What phase 2 settled, as the digital modem needs it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Settings {
@@ -97,6 +121,7 @@ pub struct Settings {
     /// Whether both ends have the 1664-point constellation the upstream's
     /// top rates need.
     pub wide: bool,
+    pub habits: Habits,
 }
 
 impl Settings {
@@ -113,6 +138,7 @@ impl Settings {
             // modem must have (5.4.5.5: "ld of 0 and 1 are mandatory").
             jd: Jd { rates: Jd::ALL_RATES, sixteen_in_training: false, sixteen_in_renegotiation: false, lookahead: 1 },
             wide,
+            habits: Habits::default(),
         }
     }
 }
@@ -174,11 +200,13 @@ struct Source {
     /// Rd's codeword in each interval.
     r_codes: [u8; INTERVALS],
     data: VecDeque<bool>,
+    trn1d_symbols: usize,
 }
 
 impl Source {
-    fn new(law: Law, uinfo: u8, jd: Jd) -> Self {
+    fn new(law: Law, uinfo: u8, jd: Jd, trn1d: f64) -> Self {
         Self {
+            trn1d_symbols: (trn1d * FS) as usize,
             law,
             uinfo,
             out: Out::Silence,
@@ -280,7 +308,7 @@ impl Source {
                     return self.level(u, positive ^ (self.out == Out::SdBar));
                 }
                 Out::Trn1d => {
-                    if self.count >= TRN1D_SYMBOLS && self.at_frame_boundary() {
+                    if self.count >= self.trn1d_symbols && self.at_frame_boundary() {
                         // 8.4.2: "The differential encoder shall be
                         // initialized with the final symbol of the transmitted
                         // TRN1d" -- which `sign` already is.
@@ -472,6 +500,9 @@ pub struct Modem {
     /// whether one is wanted.
     retrain_watch: RetrainWatch,
     wants_retrain: bool,
+    /// The analogue modem's S after Ja, and when it has to have come by.
+    s_heard: bool,
+    s_deadline: Option<u64>,
     /// The analogue modem's S and S-bar, which begin or answer a rate
     /// renegotiation (9.6.1.2); whether S-bar has been heard in this one.
     s_watch: SWatch,
@@ -495,7 +526,7 @@ impl Modem {
             stage: Stage::AwaitS,
             status: Status::Running,
             deadline: None,
-            source: Source::new(settings.law, settings.uinfo, settings.jd),
+            source: Source::new(settings.law, settings.uinfo, settings.jd, settings.habits.trn1d),
             rx,
             reader: Reader::new(Mode::Answer),
             in_trn: true,
@@ -516,6 +547,8 @@ impl Modem {
             phase3_snr: None,
             retrain_watch: RetrainWatch::new(Role::Answer, FS),
             wants_retrain: false,
+            s_heard: false,
+            s_deadline: None,
             s_watch: SWatch::default(),
             far_s_bar: false,
             renegotiating: false,
@@ -752,6 +785,24 @@ impl Modem {
 
     fn stage_step(&mut self) {
         match self.stage {
+            Stage::SendJd => {
+                if self.source.out == Out::Trn1d && self.s_deadline.is_none() {
+                    let trip = if self.settings.habits.s_wait_counts_round_trip { self.settings.round_trip } else { 0.0 };
+                    self.s_deadline = Some(self.samples(S_WITHIN + trip));
+                }
+                if self.s_heard && self.source.out == Out::Jd && self.source.pending.is_none() {
+                    // 9.3.1.5: "complete the current Jd sequence and then
+                    // transmit J'd", and the DIL after it.
+                    let dil = self.descriptor.as_ref().is_some_and(|d| !d.is_empty());
+                    self.source.after_jd_prime = if dil { Out::Dil } else { Out::Ri };
+                    self.source.change(Out::JdPrime);
+                    self.stage = Stage::AwaitFirstReversal;
+                } else if self.s_deadline.is_some_and(|at| self.now > at) {
+                    // "... it shall initiate a retrain."
+                    self.s_deadline = None;
+                    self.wants_retrain = true;
+                }
+            }
             Stage::Phase4Cp if self.clearing => {
                 if self.source.out == Out::Mp && self.source.mps_sent >= CLEARDOWN_MPS {
                     self.cleared_down();
@@ -785,16 +836,10 @@ impl Modem {
 
     fn heard(&mut self, heard: Heard) {
         match heard {
-            Heard::S => {
-                if self.stage == Stage::SendJd {
-                    // 9.3.1.5: "complete the current Jd sequence and then
-                    // transmit J'd", and the DIL after it.
-                    let dil = self.descriptor.as_ref().is_some_and(|d| !d.is_empty());
-                    self.source.after_jd_prime = if dil { Out::Dil } else { Out::Ri };
-                    self.source.change(Out::JdPrime);
-                    self.stage = Stage::AwaitFirstReversal;
-                }
-            }
+            // Kept until Jd is going out, which is when 9.3.1.4 has the
+            // receiver listen for it.
+            Heard::S if self.stage == Stage::SendJd => self.s_heard = true,
+            Heard::S => {}
             Heard::Reversal { at } => self.reversal(at),
             Heard::Trained { snr_db } => {
                 if self.stage == Stage::Training {

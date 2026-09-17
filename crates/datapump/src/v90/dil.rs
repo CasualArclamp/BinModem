@@ -176,8 +176,11 @@ impl Route {
     /// is fitted as a floor plus a share of each segment's power, across every
     /// codeword read, and taken at data mode's power.
     pub fn noise_at(&self, law: Law, rms: f64) -> f64 {
+        // Nothing louder than a constellation uses: a route that holds the
+        // loud ones down reads them anywhere, and they would say nothing of
+        // the rest but pull the fit up with them.
         let points: Vec<(f64, f64)> = (0..UCODES)
-            .filter(|&u| self.spread[u].is_finite())
+            .filter(|&u| self.spread[u].is_finite() && ucode::level(law, u as u8) <= LOUDEST)
             .map(|u| (ucode::level(law, u as u8).powi(2), self.spread[u].powi(2)))
             .collect();
         if points.len() < 2 {

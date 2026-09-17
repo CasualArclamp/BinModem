@@ -37,6 +37,7 @@ use crate::v34::trellis::Code;
 
 use super::INTERVALS;
 use super::dil::{self, Analysis, Choice, Route};
+use super::digital;
 use super::encoder::{Decoder, Frame, Mapping};
 use super::pcm::{self, Heard, Slicer};
 use super::sequences::{self, Cp, Descriptor, JD_BITS, JD_PRIME_BITS, Jd};
@@ -48,6 +49,23 @@ const PHASE3_TRN: f64 = 1.0;
 
 /// "70 +- 5 ms" of silence after INFO1a (9.3.2.1).
 const SILENCE_BEFORE_S: f64 = 0.070;
+
+/// Sd: "within 1500 ms from the start of Ja" (9.3.2.4), which a digital
+/// modem that "may wait for up to 500 ms" after reading Ja (9.3.1.3) cannot
+/// meet across a VoIP call's second-long round trip. A live server's came
+/// two seconds after Ja began; waiting is cheaper than retraining.
+const SD_WAIT: f64 = 2.0;
+
+/// Jd: "Within 4000 ms of starting to transmit TRN1d the digital modem shall
+/// transmit Jd" (9.3.1.4), and S is wanted back "within 5100 ms plus a
+/// round-trip delay from the start of TRN1d" (9.3.1.5). A live server sent
+/// Jd at the last moment and gave up on S a second later, round trip or
+/// none: one that takes a second to cross could not answer Jd in time. So
+/// S goes before Jd arrives, to reach the digital modem this long after the
+/// latest it can have begun Jd -- S goes on until J'd, and a digital modem
+/// not yet listening for it hears it when it is.
+const JD_LATEST: f64 = 4.0;
+const S_AFTER_JD: f64 = 0.1;
 
 /// Frames of R in a row before it is believed, and of R a whole number of
 /// symbols out of step before the frames are taken to have moved.
@@ -80,6 +98,12 @@ const DIL_TRUSTED: f64 = 0.3;
 /// its references, and the frame after them, which on a live call still
 /// carried a few thousandths of full scale of it.
 const DIL_SPILL: usize = 2 * INTERVALS;
+
+/// A segment after one more than this many times as loud, and louder than
+/// this, is spilled into too: where one sweep up the codewords ends and the
+/// next begins.
+const DIL_SPILL_RATIO: f64 = 4.0;
+const DIL_SPILL_LEVEL: f64 = 0.01;
 
 /// Training symbols a stretch of the DIL has to have, loud enough to judge,
 /// before where it falls can be judged from it.
@@ -563,13 +587,18 @@ fn least_gap(cp: &Cp, route: &Route) -> f64 {
 /// Which of a DIL's symbols can be learned from and judged by (see
 /// `Modem::dil_trusted`).
 fn trusted_symbols(descriptor: &Descriptor, law: Law) -> Vec<Trust> {
-    let loud = |u: u8| ucode::level(law, u) > DIL_TRUSTED;
+    let level = |u: u8| ucode::level(law, u);
+    let loud = |u: u8| level(u) > DIL_TRUSTED;
+    // What a louder segment leaves behind is small, but not beside a
+    // segment a great deal quieter.
+    let spills = |before: u8, u: u8| loud(before) || level(before) > (DIL_SPILL_RATIO * level(u)).max(DIL_SPILL_LEVEL);
     let mut out = Vec::with_capacity(descriptor.len());
     // The DIL repeats, so the first segment comes after the last.
-    let mut after_loud = descriptor.ucodes.last().is_some_and(|&u| loud(u));
+    let mut before = descriptor.ucodes.last().copied();
     for &u in &descriptor.ucodes {
+        let spoiled = before.is_some_and(|b| spills(b, u));
         for n in 0..descriptor.segment_length(u) {
-            out.push(if after_loud && n < DIL_SPILL {
+            out.push(if spoiled && n < DIL_SPILL {
                 Trust::Spoiled
             } else if loud(u) {
                 Trust::Loud
@@ -577,7 +606,7 @@ fn trusted_symbols(descriptor: &Descriptor, law: Law) -> Vec<Trust> {
                 Trust::Yes
             });
         }
-        after_loud = loud(u);
+        before = Some(u);
     }
     out
 }
@@ -712,6 +741,10 @@ pub struct Modem {
     deadline: Option<(u64, &'static str)>,
     /// B1d "within 15 s plus 5 round-trip delays after sending INFO1a".
     start_deadline: (u64, &'static str),
+    /// When Sd is to have come by.
+    sd_deadline: (u64, &'static str),
+    /// Whether S is going out ahead of Jd.
+    sending_s: bool,
     tx: Transmitter,
     source: Source,
     rx: pcm::Receiver,
@@ -795,8 +828,10 @@ impl Modem {
         source.change(Up::S);
         let descriptor = dil::design(settings.law, settings.uinfo);
         source.ja = descriptor.to_bits();
-        let mut rx = pcm::Receiver::new(settings.law, fs);
-        rx.hunt(settings.uinfo);
+        // Nothing to hunt for until Ja: before then, the digital modem's
+        // tone from phase 2 can still be arriving, and a tone near 1333 Hz
+        // looks enough like Sd to set a hunt off.
+        let rx = pcm::Receiver::new(settings.law, fs);
         let mut modem = Self {
             settings,
             fs,
@@ -805,6 +840,8 @@ impl Modem {
             status: Status::Running,
             deadline: None,
             start_deadline: (0, ""),
+            sd_deadline: (u64::MAX, ""),
+            sending_s: false,
             tx: Transmitter::new(settings.upstream, settings.pre_emphasis, settings.power_reduction, fs),
             source,
             rx,
@@ -1180,8 +1217,10 @@ impl Modem {
         match self.stage {
             Stage::SendTraining if self.source.up == Up::Ja => {
                 self.stage = Stage::AwaitSd;
+                self.rx.hunt(self.settings.uinfo);
                 // 9.3.2.4: S-bar-d within 1500 ms of the start of Ja.
-                self.deadline = Some((self.samples(1.5 + self.settings.round_trip), "no Sd from the digital modem"));
+                self.sd_deadline = (self.samples(SD_WAIT + 2.0 * self.settings.round_trip), "no Sd from the digital modem");
+                self.deadline = Some(self.sd_deadline);
             }
             Stage::Data if self.clearing => {
                 if self.source.up == Up::Cp && self.source.cps >= CLEARDOWN_CPS {
@@ -1227,6 +1266,14 @@ impl Modem {
                     self.stage = Stage::AwaitJd;
                 }
             }
+            Heard::Untrained if self.stage == Stage::Training && self.now < self.sd_deadline.0 => {
+                // Something that was not Sd set the hunt off: back to Ja
+                // and the hunt, while Sd can still come.
+                self.stage = Stage::AwaitSd;
+                self.source.change(Up::Ja);
+                self.rx.hunt(self.settings.uinfo);
+                self.deadline = Some(self.sd_deadline);
+            }
             Heard::Untrained => self.fail("the digital modem's TRN1d did not train this end"),
             Heard::Symbol(symbol) => self.symbol(symbol),
             Heard::Lost if self.stage == Stage::Dil && self.dil_lost.is_none() => {
@@ -1247,14 +1294,19 @@ impl Modem {
         match self.stage {
             Stage::AwaitJd | Stage::AwaitJdPrime => {
                 let jd_prime = self.jd.feed(symbol.index, symbol.positive());
+                let early = (JD_LATEST + S_AFTER_JD - self.settings.round_trip).max(0.0) * digital::FS;
+                if self.stage == Stage::AwaitJd && !self.sending_s && symbol.raw as f64 >= early {
+                    self.send_s();
+                }
                 if self.stage == Stage::AwaitJd
                     && let Some((_, jd)) = self.jd.last
                 {
                     // 9.3.2.7: S, and listen for J'd.
                     self.far_jd = Some(jd);
                     self.source.size = if jd.sixteen_in_training { Size::Sixteen } else { Size::Four };
-                    self.source.s_length = None;
-                    self.source.change(Up::S);
+                    if !self.sending_s {
+                        self.send_s();
+                    }
                     self.stage = Stage::AwaitJdPrime;
                     self.deadline = Some(self.start_deadline);
                 }
@@ -1287,6 +1339,13 @@ impl Modem {
             Stage::Phase4 | Stage::Data => self.phase4_symbol(symbol),
             _ => {}
         }
+    }
+
+    /// S until J'd (9.3.2.7).
+    fn send_s(&mut self) {
+        self.sending_s = true;
+        self.source.s_length = None;
+        self.source.change(Up::S);
     }
 
     /// The DIL from the receiver's count `first` (9.3.2.8): S-bar for 16T,
@@ -1468,6 +1527,12 @@ impl Modem {
             .collect();
         let Some(&(moved, fit)) = fits.iter().min_by(|a, b| a.1.total_cmp(&b.1)) else { return };
         let next = fits.iter().filter(|f| (f.0 - moved).abs() > 1).map(|f| f.1).fold(f64::INFINITY, f64::min);
+        // A move is only a move against staying put: where the stretch is
+        // too quiet to say whether it is where it was, wait for one that
+        // is not.
+        if moved != 0 && !fits.iter().any(|f| f.0 == 0) && self.fit_dil(&window, self.dil_base).is_none() {
+            return;
+        }
         if fit > DIL_FIT || (moved != 0 && next < 4.0 * fit) {
             return;
         }

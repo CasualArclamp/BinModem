@@ -74,8 +74,10 @@ pub struct Network {
     /// delivers a modem's -9 to -12 dBm to the codec well inside its range;
     /// this is where that happens.
     up_gain: f64,
-    /// Downstream slips: how often, and whether audio is made up or lost.
+    /// Downstream slips: how often, and whether audio is made up or lost;
+    /// or one, at a given codeword.
     slips: Option<(u64, bool)>,
+    slip_at: Option<(u64, bool)>,
     /// Codewords of a lost stretch still to drop.
     dropping: usize,
     /// The last slip's worth of codewords, for concealment to repeat.
@@ -110,6 +112,7 @@ impl Network {
             quantised: true,
             up_gain: 0.25,
             slips: None,
+            slip_at: None,
             dropping: 0,
             recent: VecDeque::with_capacity(SLIP),
             slip_count: 0,
@@ -185,6 +188,12 @@ impl Network {
         self
     }
 
+    /// One downstream slip, `seconds` into the call.
+    pub fn with_slip_at(mut self, seconds: f64, inserted: bool) -> Self {
+        self.slip_at = Some(((seconds * NETWORK_FS) as u64, inserted));
+        self
+    }
+
     /// Slips so far.
     pub fn slips(&self) -> u32 {
         self.slip_count
@@ -226,9 +235,9 @@ impl Network {
         let carried = self.carry(level);
         self.now += 1;
         // The jitter buffer, between the network and the sound card.
-        if let Some((every, inserted)) = self.slips
-            && self.now.is_multiple_of(every)
-        {
+        let periodic = self.slips.filter(|(every, _)| self.now.is_multiple_of(*every));
+        let once = self.slip_at.filter(|(at, _)| self.now == *at);
+        if let Some((_, inserted)) = periodic.or(once) {
             self.slip_count += 1;
             if inserted {
                 // Twenty milliseconds of the last twenty, fading: what packet

@@ -274,6 +274,7 @@ pub struct Digital {
     failed_starts: u32,
     /// Renegotiations in V.90 data modes a retrain has since replaced.
     renegotiations: u32,
+    habits: digital::Habits,
 }
 
 impl Digital {
@@ -288,7 +289,14 @@ impl Digital {
             phase2_gain,
             failed_starts: 0,
             renegotiations: 0,
+            habits: digital::Habits::default(),
         }
+    }
+
+    /// Go about phase 3 this way.
+    pub fn with_habits(mut self, habits: digital::Habits) -> Self {
+        self.habits = habits;
+        self
     }
 
     pub fn v34(&self) -> &v34::Modem {
@@ -459,7 +467,8 @@ impl Digital {
             && let (Some(asked), Some(info1d)) = (p2.info1a_pcm(), p2.info1c())
         {
             let wide = p2.far_capabilities().is_some_and(|f| f.constellation_1664);
-            let settings = digital::Settings::new(self.law, &info1d, &asked, p2.round_trip().unwrap_or(0.0), wide);
+            let mut settings = digital::Settings::new(self.law, &info1d, &asked, p2.round_trip().unwrap_or(0.0), wide);
+            settings.habits = self.habits;
             self.v90 = Some(digital::Modem::new(settings));
         }
         // Everything that is not V.90's codewords goes out at that power:

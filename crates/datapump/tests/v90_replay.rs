@@ -60,7 +60,7 @@ fn probe_replay_v90() {
                     )
                 })
                 .unwrap_or_default();
-            println!("{:8.3}  {:<28} {detail}", i as f64 / FS, now.0);
+            println!("{:8.3}  {:<28} {detail}{}", i as f64 / FS, now.0, modem.round_trip().map(|r| format!(" round trip {r:.3} s")).unwrap_or_default());
             last = Some(now);
         }
     }
