@@ -437,11 +437,19 @@ impl Xid {
                     // for it. Bit 24 is the last one the note names and three
                     // octets hold it, so a shorter mask is read with the rest
                     // as zero.
-                    if value.is_empty() || value.len() > 4 {
-                        return Err(XidError::BadLength { pi, len: value.len() as u8 });
+                    //
+                    // And a longer one for its first four, because everything
+                    // past them is bits the note defines no meaning for, and
+                    // 12.2.2 says what to do with those: "fields that are not
+                    // recognized are ignored". Refusing the parameter instead
+                    // put the whole XID beyond reading, which is the same
+                    // whole-frame rejection a three-octet mask used to get.
+                    if value.is_empty() {
+                        return Err(XidError::BadLength { pi, len: 0 });
                     }
                     let mut octets = [0u8; 4];
-                    octets[..value.len()].copy_from_slice(value);
+                    let read = value.len().min(octets.len());
+                    octets[..read].copy_from_slice(&value[..read]);
                     let mask = u32::from_le_bytes(octets);
                     // The options and nothing else. Note 1: "A receiver of
                     // these frames should ignore these bit positions" -- the
@@ -1035,7 +1043,32 @@ mod tests {
         // Bit 24 in a three-octet one.
         assert!(field(&[0, 0, 0x80]).expect("three octets").srej_multiple);
         assert_eq!(field(&[]), Err(XidError::BadLength { pi: pi::HDLC_OPTIONAL, len: 0 }));
-        assert_eq!(field(&[0; 5]), Err(XidError::BadLength { pi: pi::HDLC_OPTIONAL, len: 5 }));
+    }
+
+    /// And a longer one for the four octets Table 11a Note 1 defines.
+    ///
+    /// The note names bit positions up to 24 and no further, so a fifth octet
+    /// is a field 12.2.2 has an answer for -- "fields that are not recognized
+    /// are ignored" -- and not a reason to refuse the XID it came in. Refusing
+    /// it made the whole frame damaged and went unanswered, which is the
+    /// rejection a three-octet mask was rescued from a few changes ago.
+    #[test]
+    fn an_option_mask_longer_than_four_octets_is_read_for_the_four() {
+        let field = |mask: &[u8]| {
+            let mut params = Vec::new();
+            push_param(&mut params, pi::HDLC_OPTIONAL, mask);
+            let mut bytes = vec![FI_GENERAL_PURPOSE];
+            push_subfield(&mut bytes, GI_PARAMETER, &params);
+            Xid::decode(&bytes).expect("a long option mask was refused")
+        };
+        // Bits 3 and 17 in the first four octets, and two octets after them.
+        let heard = field(&[0x04, 0, 0x01, 0, 0xff, 0xff]);
+        assert!(heard.srej_single, "bit 3 was not read");
+        assert!(heard.fcs32, "bit 17 was not read");
+        // Nothing past the fourth octet reaches anything: bit 24 is the last
+        // position the note gives a meaning, and it is in the third.
+        assert!(!heard.srej_multiple, "a bit past the mask was read as bit 24");
+        assert_eq!(heard, field(&[0x04, 0, 0x01, 0]), "the extra octets changed the reading");
     }
 
     /// The bits 12.2.2 Note 1 requires a transmitter to set whatever it does.
