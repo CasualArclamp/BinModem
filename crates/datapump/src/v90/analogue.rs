@@ -1567,11 +1567,18 @@ impl Modem {
             .collect();
         let Some(&(moved, fit)) = fits.iter().min_by(|a, b| a.1.total_cmp(&b.1)) else { return };
         let next = fits.iter().filter(|f| (f.0 - moved).abs() > 1).map(|f| f.1).fold(f64::INFINITY, f64::min);
-        // A move is only a move against staying put: where the stretch is
-        // too quiet to say whether it is where it was, wait for one that
-        // is not.
+        // A move is only a move against staying put. Where the stretch is
+        // too quiet to say whether it is where it was, everything since the
+        // loss is asked instead -- waiting for a louder stretch can wait
+        // until the DIL has wrapped round to its own quiet start, where the
+        // true move cannot be judged either -- and failing that, wait.
         if moved != 0 && !fits.iter().any(|f| f.0 == 0) && self.fit_dil(&window, self.dil_base).is_none() {
-            return;
+            let gathered = self.dil_lost.unwrap_or(0);
+            let since: Vec<(u64, f64)> = self.dil_recent.iter().skip(self.dil_recent.len().saturating_sub(gathered)).copied().collect();
+            match self.fit_dil(&since, self.dil_base) {
+                Some((fit, agree)) if fit > DIL_FIT || agree < DIL_SIGNS => {}
+                _ => return,
+            }
         }
         if fit > DIL_FIT || (moved != 0 && next < 4.0 * fit) {
             return;
