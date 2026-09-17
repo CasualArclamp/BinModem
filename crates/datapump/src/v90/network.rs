@@ -81,6 +81,10 @@ pub struct Network {
     /// The last slip's worth of codewords, for concealment to repeat.
     recent: VecDeque<f64>,
     slip_count: u32,
+    /// A softphone's gain control on what it plays: the loudest it lets
+    /// through, how fast it recovers, in seconds, and where it has got to.
+    gain_control: Option<(f64, f64)>,
+    gain: f64,
 }
 
 impl Network {
@@ -109,6 +113,8 @@ impl Network {
             dropping: 0,
             recent: VecDeque::with_capacity(SLIP),
             slip_count: 0,
+            gain_control: None,
+            gain: 1.0,
         }
     }
 
@@ -166,6 +172,16 @@ impl Network {
     /// `inserted`, lost otherwise.
     pub fn with_slips(mut self, seconds: f64, inserted: bool) -> Self {
         self.slips = Some(((seconds * NETWORK_FS) as u64, inserted));
+        self
+    }
+
+    /// A gain control on the downstream as the analogue modem hears it:
+    /// anything louder than `ceiling` of full scale is turned down to it at
+    /// once, and the gain comes back up over `release` seconds -- what a live
+    /// call through a softphone did to codewords above about a third of full
+    /// scale.
+    pub fn with_gain_control(mut self, ceiling: f64, release: f64) -> Self {
+        self.gain_control = Some((ceiling, release));
         self
     }
 
@@ -256,8 +272,16 @@ impl Network {
                 let Some(&v) = self.down_levels.get(index as usize) else { continue };
                 sum += v * kernel(t - j as f64, 3800.0 / NETWORK_FS, DOWN_REACH as f64 + 1.0);
             }
+            let mut heard = sum;
+            if let Some((ceiling, release)) = self.gain_control {
+                if (sum * self.gain).abs() > ceiling {
+                    self.gain = ceiling / sum.abs();
+                }
+                heard = sum * self.gain;
+                self.gain += (1.0 - self.gain) / (release * self.fs);
+            }
             let noise = self.noise * self.gaussian();
-            out.push(sum + noise);
+            out.push(heard + noise);
             self.down_next += step;
         }
         while self.down_first + (DOWN_REACH as f64) + 1.0 < self.down_next.floor() && self.down_levels.len() > 1 {

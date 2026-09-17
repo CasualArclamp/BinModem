@@ -9,7 +9,7 @@ one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
 source for every normative constant, and against the RFCs for everything
-carried over the top of them. 1518 tests.
+carried over the top of them. 1521 tests.
 
 ## What works
 
@@ -202,7 +202,10 @@ the analogue modem asked for. Against a simulated server over a simulated
 G.711 network -- A-law and μ-law, a robbed bit, a pad, noise, a VoIP round
 trip, a sound card 120 ppm out, and a jitter buffer slipping every few seconds
 -- it connects at 52 000 to 56 000, renegotiates and retrains from either end,
-and carries V.42 at `AT+MS=V90`. Nothing has been tried on the line yet.
+and carries V.42 at `AT+MS=V90`. The first live call reached the DIL against a
+real server and showed two things the simulation did not have: a jitter buffer
+cutting ten milliseconds out of the DIL on every pass, and a gain control
+holding loud codewords down. Both are now simulated, and followed.
 
 Next, V.17 for fax at 14 400, and V.33 beside it -- the same trellis code as
 V.32bis again, on a fax call and a leased line respectively -- and more than

@@ -410,6 +410,15 @@ impl Modem {
         self.info1a_pcm
     }
 
+    /// The fastest V.34 the far end's line probe says this end could
+    /// receive, in bit/s: what a V.90 analogue modem gives up by choosing
+    /// V.90. None before the probe has been read.
+    pub fn v34_receive_rate(&self) -> Option<u32> {
+        let (reading, far) = (self.reading.as_ref()?, self.far?);
+        let wide = far.constellation_1664 && self.ours.constellation_1664;
+        SymbolRate::ALL.iter().map(|&r| u32::from(reading.probed(r, &far, wide).max_rate) * 2400).max()
+    }
+
     /// Phase 2 as a retrain (11.5): the capabilities were settled the first
     /// time and are not exchanged again, so INFO0 is skipped and this end goes
     /// straight to its tone and the reversal handshake. `far` is what the far

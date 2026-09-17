@@ -128,8 +128,11 @@ pub enum Slicer {
     /// One codeword, either sign: TRN1d, Jd, J'd and R.
     Binary(f64),
     /// The symbols the caller has said are coming, in order, and then
-    /// nothing to learn from until it says more: a DIL.
-    Known(VecDeque<f64>),
+    /// nothing to learn from until it says more: a DIL. A symbol given as
+    /// NaN is one not to learn from. `first` is the receiver's count at the
+    /// first of them, so that they stay with the symbols they were said for
+    /// however many are decided at once.
+    Known { first: u64, levels: VecDeque<f64> },
     /// The nearest of each data frame interval's signed levels, largest
     /// first: phase 4 and data mode.
     Levels(Box<[Vec<f64>; INTERVALS]>),
@@ -138,11 +141,21 @@ pub enum Slicer {
 }
 
 impl Slicer {
-    /// The level to learn from for a symbol in `interval`, if there is one.
-    fn decide(&mut self, y: f64, interval: usize) -> Option<f64> {
+    /// The level to learn from for symbol `index`, in `interval`, if there
+    /// is one.
+    fn decide(&mut self, y: f64, interval: usize, index: u64) -> Option<f64> {
         match self {
+            Self::Known { first, levels } => {
+                if index < *first {
+                    return None;
+                }
+                for _ in *first..index {
+                    levels.pop_front();
+                }
+                *first = index + 1;
+                levels.pop_front().filter(|v| v.is_finite())
+            }
             Self::Binary(level) => Some(if y < 0.0 { -*level } else { *level }),
-            Self::Known(queue) => queue.pop_front(),
             Self::Levels(levels) => nearest(&levels[interval], y),
             Self::Free => None,
         }
@@ -447,17 +460,18 @@ impl Receiver {
         self.slips
     }
 
-    /// Say what the next symbols are, for [`Slicer::Known`], forgetting what
-    /// was said before: a slip has moved them.
-    pub fn expect_afresh(&mut self, levels: impl IntoIterator<Item = f64>) {
-        self.set_slicer(Slicer::Known(levels.into_iter().collect()));
+    /// Say what the symbols from the receiver's count `first` are, for
+    /// [`Slicer::Known`], forgetting what was said before: a slip has moved
+    /// them.
+    pub fn expect_from(&mut self, first: u64, levels: impl IntoIterator<Item = f64>) {
+        self.set_slicer(Slicer::Known { first, levels: levels.into_iter().collect() });
     }
 
     /// Say what the next symbols are, for [`Slicer::Known`].
     pub fn expect(&mut self, levels: impl IntoIterator<Item = f64>) {
         match &mut self.slicer {
-            Slicer::Known(queue) => queue.extend(levels),
-            other => *other = Slicer::Known(levels.into_iter().collect()),
+            Slicer::Known { levels: queue, .. } => queue.extend(levels),
+            other => *other = Slicer::Known { first: self.next_symbol, levels: levels.into_iter().collect() },
         }
     }
 
@@ -728,10 +742,48 @@ impl Receiver {
 
     /// The equaliser solved for from TRN1d, at the best alignment near
     /// `start`.
+    ///
+    /// Twice, if the route moved some of TRN1d onto other codewords. A
+    /// robbed bit moves UINFO onto its neighbour in one data frame interval
+    /// of the six, and a fit to what was sent leans a sixth of the way
+    /// towards what arrived, in gain and in everything after: the DIL then
+    /// reads loud codewords a percent or two out, everywhere. So symbols the
+    /// first fit puts squarely on another codeword are taken to be that one,
+    /// and the fit made again.
     fn solve(&self, start: u64) -> Option<Solution> {
         let origin = self.align(start)?;
-        let targets = self.trn1d(0, TRAIN_TO);
+        let mut targets = self.trn1d(0, TRAIN_TO);
+        let first = self.fit(origin, &targets, TRAIN_FROM, TRAIN_TO)?;
+        let outputs = self.outputs(origin, &targets, &first, TRAIN_FROM, TRAIN_TO)?;
+        let mut misses: Vec<f64> = outputs.iter().map(|&(k, y)| (y - targets[k]).abs()).collect();
+        misses.sort_by(f64::total_cmp);
+        // The noise, from the middle of the misses: a robbed sixth cannot
+        // move that.
+        let noise = 1.4826 * misses.get(misses.len() / 2).copied().unwrap_or(0.0);
+        let mut moved = 0;
+        for &(k, y) in &outputs {
+            let arrived = self.nearest_codeword(y);
+            let apart = (arrived - targets[k]).abs();
+            if self.neighbours(arrived, targets[k]) && (y - arrived).abs() < 0.4 * apart && apart > 2.5 * noise {
+                targets[k] = arrived;
+                moved += 1;
+            }
+        }
+        if moved == 0 {
+            return Some(first);
+        }
         self.fit(origin, &targets, TRAIN_FROM, TRAIN_TO)
+    }
+
+    /// What a fit makes of symbols `from` to `to`, as (symbol, output).
+    fn outputs(&self, origin: u64, targets: &[f64], solution: &Solution, from: usize, to: usize) -> Option<Vec<(usize, f64)>> {
+        let mut out = Vec::with_capacity(to - from);
+        for k in from.max(FEEDBACK)..to.min(targets.len()) {
+            let row = self.samples(origin + 2 * k as u64, REACH)?;
+            let fed: Vec<f64> = (1..=FEEDBACK).map(|m| targets[k - m]).collect();
+            out.push((k, apply(&solution.taps, &row) - apply(&solution.feedback, &fed)));
+        }
+        Some(out)
     }
 
     /// Least squares over symbols `from` to `to` of `targets`, the first of
@@ -783,7 +835,22 @@ impl Receiver {
         let y = apply(&self.taps, row) - apply(&self.feedback, self.past.make_contiguous());
         let rate: f64 = self.taps.iter().enumerate().map(|(i, w)| w * 0.5 * (wide[i + 2] - wide[i])).sum();
         let interval = ((index + self.frame_offset) % INTERVALS as u64) as usize;
-        let decided = self.slicer.decide(y, interval);
+        let mut decided = self.slicer.decide(y, interval, index);
+        if let (Some(sent), Slicer::Known { .. }) = (decided, &self.slicer) {
+            // A known symbol the route moved onto the codeword next to it -- a
+            // robbed bit does, to every other one in its interval -- arrived
+            // as that codeword, and learning from the one that was sent would
+            // teach the equaliser the route's doing and feed it back into the
+            // next symbol.
+            // Only where codewords stand far enough apart for the noise
+            // training found to be no reason for it.
+            let arrived = self.nearest_codeword(y);
+            let apart = (arrived - sent).abs();
+            let floor = ucode::level(self.law, self.uinfo) * 10f64.powf(-self.trained_snr / 20.0);
+            if self.neighbours(arrived, sent) && (y - arrived).abs() < 0.25 * apart && apart > 4.0 * floor {
+                decided = Some(arrived);
+            }
+        }
         if let Some(target) = decided {
             let e = y - target;
             if self.watch(e * e) {
@@ -793,8 +860,15 @@ impl Receiver {
                 // a better guess. But a known sequence nothing moved is the
                 // truth, on a noisy line where the nearest codeword is often
                 // not: it stands wherever the output is anywhere near it.
-                let known = matches!(self.slicer, Slicer::Known(_));
-                let fed = if known && e * e > 16.0 * self.settled { self.nearest_codeword(y) } else { target };
+                // Two levels are no guide to a signal that has stopped being
+                // two levels, either, though they are the best there is for
+                // one that has not.
+                let guess = match self.slicer {
+                    Slicer::Known { .. } => e * e > 16.0 * self.settled,
+                    Slicer::Binary(level) => (y.abs() - level).abs() > 0.3 * level,
+                    _ => false,
+                };
+                let fed = if guess { self.nearest_codeword(y) } else { target };
                 self.past.pop_back();
                 self.past.push_front(fed);
                 return Symbol { index: index + self.frame_offset, raw: index, value: y, decided };
@@ -820,8 +894,24 @@ impl Receiver {
             self.hold_centre();
         }
         self.past.pop_back();
-        self.past.push_front(decided.unwrap_or(y));
+        // A known sequence with nothing to say about this symbol still had a
+        // codeword in it, and the nearest one is a better guess to feed back
+        // than an output with all its noise.
+        let fed = match (decided, &self.slicer) {
+            (Some(target), _) => target,
+            (None, Slicer::Known { .. } | Slicer::Free) => self.nearest_codeword(y),
+            (None, _) => y,
+        };
+        self.past.push_front(fed);
         Symbol { index: index + self.frame_offset, raw: index, value: y, decided }
+    }
+
+    /// Whether two levels are codewords one step apart, on the same side of
+    /// zero: all a robbed bit ever moves one by.
+    fn neighbours(&self, a: f64, b: f64) -> bool {
+        let code = |v: f64| ucode::nearest(self.law, (v * 32768.0).round().clamp(-32768.0, 32767.0) as i32);
+        let ((ua, na), (ub, nb)) = (code(a), code(b));
+        na == nb && ua.abs_diff(ub) == 1
     }
 
     /// The G.711 level nearest `y`.

@@ -27,27 +27,60 @@ const H: u8 = 5;
 /// Pattern length, which is the segment's.
 const PATTERN: usize = (H as usize + 1) * INTERVALS;
 
+/// Codewords between one DIL segment and the next.
+const ORDER_STEP: usize = 3;
+
+/// The loudest codeword the DIL asks for, and so the loudest any
+/// constellation uses, as a fraction of full scale.
+///
+/// A codeword is a sample, but what reaches the analogue modem is the
+/// waveform the far codec draws through its samples, and that goes a good
+/// deal higher than the loudest of them. On a live call through a softphone,
+/// everything to about a third of full scale arrived exactly, and everything
+/// much above it was held down by something with a gain control, which went
+/// on reading the codewords after it low for a third of a second. Table 15's
+/// powers put nothing up there that a constellation needs.
+pub const LOUDEST: f64 = 0.3;
+
 /// Spacing between neighbouring levels, in the noise's standard deviations,
 /// that a constellation is built to: five either side of the decision
 /// boundary, which a Gaussian error passes once in three and a half million
 /// symbols.
 pub const SPACING: f64 = 10.0;
 
-/// The DIL this modem asks for: every codeword, in order, each in a segment
-/// of six frames -- the first all references at UINFO, the other five the
-/// codeword itself -- with signs from a fixed balanced pattern.
+/// The DIL this modem asks for: every codeword up to [`LOUDEST`] but UINFO,
+/// each in a segment of six frames -- the first all references at UINFO, the
+/// other five the codeword itself -- with signs from a fixed balanced
+/// pattern.
 ///
-/// Every codeword because the route is unknown; six frames because five
-/// readings an interval is enough, pooled over 128 codewords, to see a
-/// robbed bit or a pad. A pass is 4608 symbols, 0.58 s.
-pub fn design(uinfo: u8) -> Descriptor {
+/// Every codeword because the route is unknown, and UINFO read from the
+/// references instead; six frames because five readings an interval is
+/// enough, pooled over the codewords, to see a robbed bit or a pad. A pass is
+/// 98 segments under μ-law, 3528 symbols, 0.44 s.
+///
+/// Three times up the codewords, three at a time, rather than once one at a
+/// time. 8.4.1 restarts the sign pattern in every segment, so every segment
+/// has the same signs, and a softphone whose jitter buffer shortens its delay
+/// cuts where the audio repeats: on a live call, ten milliseconds a pass of
+/// the DIL. Reading the DIL again after a cut is a matter of telling a
+/// segment from its neighbour, which one codeword apart are all but alike,
+/// and three apart are not. Nor are neighbours so far apart that one's
+/// errors land in the other's reading: a DIL in any order reads each
+/// codeword with an error that grows with what surrounds it, and in a random
+/// order that is a loud neighbour as often as not.
+pub fn design(law: Law, uinfo: u8) -> Descriptor {
     // The sign pattern: scrambled ones, so positive and negative in about
     // equal numbers and no line in the spectrum for an echo canceller in the
     // network to take for a tone.
     let mut scrambler = crate::v32::Scrambler::new(crate::v32::Mode::Answer);
     let signs: Vec<bool> = (0..PATTERN).map(|_| scrambler.scramble(true)).collect();
     let training: Vec<bool> = (0..PATTERN).map(|n| n >= INTERVALS).collect();
-    Descriptor { signs, training, h: [H; 8], refs: [uinfo; 8], ucodes: (0..UCODES as u8).collect() }
+    let ucodes = (0..ORDER_STEP)
+        .flat_map(|first| (first..UCODES).step_by(ORDER_STEP))
+        .map(|u| u as u8)
+        .filter(|&u| u != uinfo && ucode::level(law, u) <= LOUDEST)
+        .collect();
+    Descriptor { signs, training, h: [H; 8], refs: [uinfo; 8], ucodes }
 }
 
 /// What the route did, as far as the DIL showed it.
@@ -248,9 +281,16 @@ pub struct Choice {
 ///
 /// Two codewords the route put within `spacing` of each other cannot both be
 /// used; of the two, the one that arrived as itself is kept.
+///
+/// A codeword whose own readings spread over half a spacing is not a level
+/// at all -- the loudest ones, where a softphone's sample rate conversion
+/// has run out of headroom, come back anywhere below where they were sent --
+/// and is left out.
 fn ladder(route: &Route, law: Law, i: usize, spacing: f64) -> Vec<u8> {
     let level = |u: u8| route.levels[i][usize::from(u)];
-    let mut order: Vec<u8> = (0..UCODES as u8).filter(|&u| route.readings[i][usize::from(u)] > 0).collect();
+    let mut order: Vec<u8> = (0..UCODES as u8)
+        .filter(|&u| route.readings[i][usize::from(u)] > 0 && 2.0 * route.spread[usize::from(u)] <= spacing)
+        .collect();
     order.sort_by(|&a, &b| level(a).total_cmp(&level(b)));
     let moved = |u: u8| (level(u) - ucode::level(law, u)).abs();
     // Codewords the route put in the same place -- within a few noises, as a
@@ -420,15 +460,23 @@ mod tests {
 
     #[test]
     fn our_dil_asks_for_every_codeword_in_six_frames_each() {
-        let d = design(79);
-        assert_eq!(d.ucodes.len(), 128);
-        assert_eq!(d.len(), 128 * 36);
+        let d = design(Law::Mu, 79);
+        // Every codeword once up to a third of full scale, bar UINFO, which
+        // the references read.
+        let mut ucodes = d.ucodes.clone();
+        ucodes.sort_unstable();
+        assert_eq!(ucodes, (0..99u8).filter(|&u| u != 79).collect::<Vec<_>>());
+        assert!(ucode::level(Law::Mu, 98) <= LOUDEST && ucode::level(Law::Mu, 99) > LOUDEST);
+        assert_eq!(d.len(), 98 * 36);
         let bits = d.to_bits();
         assert_eq!(Descriptor::from_bits(&bits), Some(d.clone()));
         // A frame of references and five of the codeword, in every segment.
         let symbols: Vec<(u8, bool)> = d.symbols().collect();
+        let fiftieth = d.ucodes[50];
         assert!(symbols[36 * 50..36 * 50 + 6].iter().all(|&(u, _)| u == 79));
-        assert!(symbols[36 * 50 + 6..36 * 51].iter().all(|&(u, _)| u == 50));
+        assert!(symbols[36 * 50 + 6..36 * 51].iter().all(|&(u, _)| u == fiftieth));
+        // And no two neighbours alike.
+        assert!(d.ucodes.windows(2).all(|w| w[0].abs_diff(w[1]) >= 3), "{:?}", d.ucodes);
         // Signs about balanced.
         let positive = d.signs.iter().filter(|b| **b).count();
         assert!((12..=24).contains(&positive), "{positive} of 36 positive");
@@ -443,7 +491,7 @@ mod tests {
     }
 
     fn analyse(noise: f64, rob: bool) -> Route {
-        let d = design(79);
+        let d = design(Law::Mu, 79);
         let mut analysis = Analysis::new();
         let mut x = 0x1234_5678_9abc_def0u64;
         for (n, (u, positive)) in d.symbols().enumerate() {
@@ -464,7 +512,8 @@ mod tests {
         let route = analyse(0.002, false);
         assert!((route.noise() / 0.002 - 1.0).abs() < 0.2, "noise read as {}", route.noise());
         for i in 0..INTERVALS {
-            for u in [0u8, 40, 79, 127] {
+            // UINFO read off the references, and the loudest the DIL asks for.
+            for u in [0u8, 40, 79, 98] {
                 let want = ucode::level(Law::Mu, u);
                 assert!((route.levels[i][usize::from(u)] - want).abs() < 0.003, "interval {i} code {u}");
             }
@@ -477,10 +526,12 @@ mod tests {
         let spacing = SPACING * route.noise();
         let clean = ladder(&route, Law::Mu, 0, spacing);
         let robbed_set = ladder(&route, Law::Mu, 3, spacing);
-        let top = |set: &[u8]| set.iter().filter(|&&u| u >= 96).count();
+        let top = |set: &[u8]| set.iter().filter(|&&u| u >= 64).count();
         assert!(top(&clean) >= 30, "{clean:?}");
         assert!(top(&robbed_set) <= top(&clean) / 2 + 1, "{robbed_set:?}");
-        for &u in &robbed_set {
+        // Below Uchord 2 a robbed bit moves a codeword by less than the noise
+        // here, and nothing can tell which of a pair arrived as itself.
+        for &u in robbed_set.iter().filter(|&&u| u >= 16) {
             assert_eq!(robbed(u), u, "{u} is not one the robbed bit leaves alone");
         }
         // And a route like it still gets a choice. Interval 3 need not come
@@ -500,7 +551,7 @@ mod tests {
         let robbed_set = route.constellation(3, SPACING, Law::Mu);
         // The loud end, where the codes are sparse enough to use them all,
         // loses half of itself.
-        let top = |set: &[u8]| set.iter().filter(|&&u| u >= 96).count();
+        let top = |set: &[u8]| set.iter().filter(|&&u| u >= 64).count();
         assert!(top(&clean) >= 30, "{clean:?}");
         assert!(top(&robbed_set) <= top(&clean) / 2 + 1, "{robbed_set:?}");
         // And what is left in it arrives as itself.
@@ -582,4 +633,3 @@ mod tests {
         assert_eq!(choose(&Route::clean(Law::Mu, 0.05), Law::Mu, 15124, |_| true), None);
     }
 }
-

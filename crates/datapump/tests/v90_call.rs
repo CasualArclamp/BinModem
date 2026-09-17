@@ -259,6 +259,7 @@ fn a_robbed_bit_route_connects_and_carries_data() {
     let moved: Vec<usize> = (0..6)
         .map(|i| {
             (1..127u8)
+                .filter(|&u| route.readings[i][usize::from(u)] > 0)
                 .filter(|&u| {
                     let level = |u: u8| datapump::v90::ucode::level(Law::Mu, u);
                     let step = level(u + 1) - level(u);
@@ -497,4 +498,31 @@ fn a_line_that_will_not_carry_pcm_comes_up_as_v34() {
     assert_eq!(call.analogue.last_failure(), Some("the route cannot carry V.90's slowest rate"));
     assert_eq!(call.analogue.retrains(), 1);
     assert_eq!(call.carries_data(3.0), (true, true));
+}
+
+/// What a live call through a softphone did to the start-up: a gain control
+/// that held anything much above a third of full scale down and took a third
+/// of a second to recover, and a jitter buffer cutting ten milliseconds out
+/// wherever the audio repeated itself. The DIL asks for nothing loud enough to
+/// set the gain control off, and a cut in it is found again.
+#[test]
+fn a_softphone_with_a_gain_control_and_a_hasty_jitter_buffer_is_followed() {
+    for (period, inserted) in [(0.7, false), (2.9, true), (3.1, false)] {
+        let net = Network::new(Law::Mu, FS)
+            .with_delay(0.6, FS)
+            .with_noise(1e-5)
+            .with_gain_control(0.8, 0.3)
+            .with_slips(period, inserted);
+        let mut call = FullCall::new(net, server());
+        let ok = call.run(40.0);
+        let v90 = call.analogue.v90();
+        println!(
+            "slips every {period} s, inserted {inserted}: {:?}, {} retrains, DIL moved {:?}",
+            call.analogue.status(),
+            call.analogue.retrains(),
+            v90.map(|m| m.dil_moved())
+        );
+        assert!(ok, "slips every {period} s: {} / {}", call.analogue.phase(), call.digital.phase());
+        assert!(call.analogue.is_v90(), "slips every {period} s: {:?}", call.analogue.last_failure());
+    }
 }

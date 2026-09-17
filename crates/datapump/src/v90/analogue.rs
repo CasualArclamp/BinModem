@@ -71,6 +71,30 @@ const DIL_LOOK_EVERY: usize = 32;
 const DIL_KEPT_LOST: usize = 2048;
 const DIL_FIT: f64 = 0.01;
 
+/// DIL levels above this are not learned from or judged by: the loudest
+/// codewords are where a softphone's conversion runs out of headroom, and
+/// they come back wherever it leaves them. As a fraction of full scale.
+const DIL_TRUSTED: f64 = 0.3;
+
+/// Symbols at the start of a DIL segment that a loud one before it spoils:
+/// its references, and the frame after them, which on a live call still
+/// carried a few thousandths of full scale of it.
+const DIL_SPILL: usize = 2 * INTERVALS;
+
+/// Training symbols a stretch of the DIL has to have, loud enough to judge,
+/// before where it falls can be judged from it.
+const DIL_TRAINED_JUDGED: usize = 32;
+
+/// Signs a move has to agree with, of the DIL symbols it is judged on.
+const DIL_SIGNS: f64 = 0.9;
+
+/// Finding the DIL when J'd went unread: how long after the last Jd before
+/// looking, how often, how much is kept to look in, and how much of it a
+/// start is judged on.
+const JD_GONE: u64 = 3 * JD_BITS as u64;
+const DIL_START_KEPT: usize = 1200;
+const DIL_START_WINDOW: usize = 480;
+
 /// B1d: "48 data frames" (8.6.1).
 const B1D_FRAMES: usize = 48;
 
@@ -123,6 +147,9 @@ pub struct Settings {
     /// Whether both ends have the 1664-point constellation the upstream's
     /// top rates need.
     pub wide: bool,
+    /// What V.34 would carry downstream instead, as phase 2's probe put it:
+    /// a V.90 slower than that is not worth having.
+    pub v34_receive: u32,
 }
 
 impl Settings {
@@ -138,6 +165,7 @@ impl Settings {
             power_reduction: info1d.min_power_reduction,
             round_trip,
             wide: ours_wide && server.v34.constellation_1664,
+            v34_receive: 0,
         }
     }
 }
@@ -368,11 +396,23 @@ struct JdReader {
     bits: VecDeque<bool>,
     /// The last Jd read whole, and the symbol after it.
     last: Option<(u64, Jd)>,
+    /// Its bits, as they went.
+    jd_bits: Vec<bool>,
 }
+
+/// The end of a Jd that J'd is found after: its CRC and fill.
+const JD_TAIL: usize = 24;
 
 impl JdReader {
     fn new() -> Self {
-        Self { descrambler: Scrambler::new(Mode::Call), differential: false, previous: false, bits: VecDeque::new(), last: None }
+        Self {
+            descrambler: Scrambler::new(Mode::Call),
+            differential: false,
+            previous: false,
+            bits: VecDeque::new(),
+            last: None,
+            jd_bits: Vec::new(),
+        }
     }
 
     /// One symbol's sign. True when this symbol ended a J'd.
@@ -389,21 +429,25 @@ impl JdReader {
         }
         self.previous = positive;
         self.bits.push_back(bit);
-        if self.bits.len() > JD_BITS {
+        if self.bits.len() > JD_BITS + JD_PRIME_BITS {
             self.bits.pop_front();
         }
-        if self.bits.len() == JD_BITS
-            && let Some(jd) = Jd::from_bits(self.bits.make_contiguous())
+        let n = self.bits.len();
+        let bits = self.bits.make_contiguous();
+        if n >= JD_BITS
+            && let Some(jd) = Jd::from_bits(&bits[n - JD_BITS..])
         {
             self.last = Some((index + 1, jd));
+            self.jd_bits = bits[n - JD_BITS..].to_vec();
         }
-        // "12 binary zeroes" where the next Jd's sync would start.
-        match self.last {
-            Some((end, _)) if index + 1 == end + JD_PRIME_BITS as u64 => {
-                self.bits.iter().rev().take(JD_PRIME_BITS).all(|b| !*b)
-            }
-            _ => false,
-        }
+        // "12 binary zeroes" where the next Jd's sync would start: after the
+        // end of a Jd, wherever that fell. A softphone that cut a few
+        // milliseconds out of the last Jd leaves it unreadable whole, but
+        // its tail is the tail of every other.
+        self.jd_bits.len() == JD_BITS
+            && n >= JD_TAIL + JD_PRIME_BITS
+            && bits[n - JD_PRIME_BITS..].iter().all(|b| !*b)
+            && bits[n - JD_PRIME_BITS - JD_TAIL..n - JD_PRIME_BITS] == self.jd_bits[JD_BITS - JD_TAIL..]
     }
 }
 
@@ -514,6 +558,40 @@ fn least_gap(cp: &Cp, route: &Route) -> f64 {
             levels.windows(2).map(|w| w[1] - w[0]).fold(f64::INFINITY, f64::min)
         })
         .fold(f64::INFINITY, f64::min)
+}
+
+/// Which of a DIL's symbols can be learned from and judged by (see
+/// `Modem::dil_trusted`).
+fn trusted_symbols(descriptor: &Descriptor, law: Law) -> Vec<Trust> {
+    let loud = |u: u8| ucode::level(law, u) > DIL_TRUSTED;
+    let mut out = Vec::with_capacity(descriptor.len());
+    // The DIL repeats, so the first segment comes after the last.
+    let mut after_loud = descriptor.ucodes.last().is_some_and(|&u| loud(u));
+    for &u in &descriptor.ucodes {
+        for n in 0..descriptor.segment_length(u) {
+            out.push(if after_loud && n < DIL_SPILL {
+                Trust::Spoiled
+            } else if loud(u) {
+                Trust::Loud
+            } else {
+                Trust::Yes
+            });
+        }
+        after_loud = loud(u);
+    }
+    out
+}
+
+/// What a DIL symbol can be used for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Trust {
+    /// Learned from, judged by, and counted.
+    Yes,
+    /// A codeword too loud to trust: only counted, so that the route shows
+    /// what happened to it.
+    Loud,
+    /// The start of a segment a loud codeword spilled into: none of those.
+    Spoiled,
 }
 
 /// The nearest of an interval's levels to `value`, as (Ucode, positive).
@@ -641,6 +719,10 @@ pub struct Modem {
     jd: JdReader,
     far_jd: Option<Jd>,
     dil: Vec<(u8, bool)>,
+    /// Whether each DIL symbol can be learned from and judged by: not in a
+    /// segment of a codeword too loud to trust, and not at the start of the
+    /// segment after one, which what the loud one did spills into.
+    dil_trusted: Vec<Trust>,
     /// The DIL as it is read (9.3.2.9): the receiver's count at its first
     /// symbol, moved by any slip since; the frame interval that symbol was
     /// in; which symbols have been read, and how many are left.
@@ -653,6 +735,11 @@ pub struct Modem {
     dil_recent: VecDeque<(u64, f64)>,
     dil_lost: Option<usize>,
     dil_moved: u32,
+    /// Symbols while J'd is awaited, for finding the DIL if J'd goes unread,
+    /// and whether it was found that way.
+    before_dil: VecDeque<(u64, f64)>,
+    dil_found_late: bool,
+    jd_gone: bool,
     /// Times R showed the frames had moved.
     r_moved: u32,
     analysis: Analysis,
@@ -666,6 +753,8 @@ pub struct Modem {
     downstream_rate: u32,
     /// The last two symbols as the equaliser gave them, for the scope.
     last: [f64; 2],
+    /// The last symbol whole, for anything reading a call back.
+    last_symbol: Option<pcm::Symbol>,
     heard_any: bool,
     /// The digital modem's tone B, which starts a retrain (9.5.2.2), and
     /// whether one is wanted.
@@ -704,7 +793,7 @@ impl Modem {
         source.hold = silence.saturating_sub(Transmitter::lookahead());
         source.after_s_bar = Up::Pp;
         source.change(Up::S);
-        let descriptor = dil::design(settings.uinfo);
+        let descriptor = dil::design(settings.law, settings.uinfo);
         source.ja = descriptor.to_bits();
         let mut rx = pcm::Receiver::new(settings.law, fs);
         rx.hunt(settings.uinfo);
@@ -720,6 +809,7 @@ impl Modem {
             source,
             rx,
             dil: descriptor.symbols().collect(),
+            dil_trusted: trusted_symbols(&descriptor, settings.law),
             descriptor,
             jd: JdReader::new(),
             far_jd: None,
@@ -730,6 +820,9 @@ impl Modem {
             dil_recent: VecDeque::new(),
             dil_lost: None,
             dil_moved: 0,
+            before_dil: VecDeque::new(),
+            dil_found_late: false,
+            jd_gone: false,
             r_moved: 0,
             analysis: Analysis::new(),
             route: None,
@@ -741,6 +834,7 @@ impl Modem {
             upstream_rate: 0,
             downstream_rate: 0,
             last: [0.0; 2],
+            last_symbol: None,
             heard_any: false,
             // The digital modem takes V.34's call side, and tone B is its.
             retrain_watch: RetrainWatch::new(Role::Call, fs),
@@ -760,6 +854,7 @@ impl Modem {
         };
         // 9.4.2: B1d "within 15 s plus 5 round-trip delays after sending
         // INFO1a".
+        modem.dil_left = modem.dil.len();
         modem.start_deadline = (modem.samples(15.0 + 5.0 * settings.round_trip), "no B1d from the digital modem");
         modem.deadline = Some(modem.start_deadline);
         modem
@@ -821,6 +916,18 @@ impl Modem {
             (Some(_), Some(c)) => 2 * c.training.points(0).len(),
             _ => 2,
         }
+    }
+
+    /// The last downstream symbol the receiver gave, and which stage of the
+    /// start-up read it: for reading a call back.
+    pub fn last_symbol(&self) -> Option<(pcm::Symbol, &'static str)> {
+        self.last_symbol.map(|s| (s, self.phase()))
+    }
+
+    /// Where the DIL's first symbol is, as the receiver counts, and the
+    /// frame interval it is in.
+    pub fn dil_start(&self) -> (i64, usize) {
+        (self.dil_base, self.dil_interval)
     }
 
     /// The DIL this end asked for.
@@ -1135,6 +1242,7 @@ impl Modem {
 
     fn symbol(&mut self, symbol: pcm::Symbol) {
         self.last = [self.last[1], symbol.value];
+        self.last_symbol = Some(symbol);
         self.heard_any = true;
         match self.stage {
             Stage::AwaitJd | Stage::AwaitJdPrime => {
@@ -1150,20 +1258,29 @@ impl Modem {
                     self.stage = Stage::AwaitJdPrime;
                     self.deadline = Some(self.start_deadline);
                 }
-                if jd_prime && self.stage == Stage::AwaitJdPrime {
-                    // 9.3.2.8: S-bar for 16T, and the DIL straight after J'd.
-                    self.source.after_s_bar = Up::Silence;
-                    self.source.change(Up::SBar);
-                    self.stage = Stage::Dil;
-                    self.dil_base = symbol.raw as i64 + 1;
-                    self.dil_interval = (symbol.interval() + 1) % INTERVALS;
-                    self.dil_read = vec![false; self.dil.len()];
-                    self.dil_left = self.dil.len();
-                    self.dil_recent.clear();
-                    self.dil_lost = None;
-                    // Two passes: one, and what a slip loses of it read again.
-                    let levels = self.dil_levels(self.dil_base, 2 * self.dil.len());
-                    self.rx.expect(levels);
+                if self.stage != Stage::AwaitJdPrime {
+                    return;
+                }
+                if jd_prime {
+                    self.begin_dil(symbol.raw + 1, &[]);
+                    return;
+                }
+                self.before_dil.push_back((symbol.raw, symbol.value));
+                if self.before_dil.len() > DIL_START_KEPT {
+                    self.before_dil.pop_front();
+                }
+                // A Jd stream that has stopped with no J'd read: the DIL is
+                // under way, and is looked for in what has arrived.
+                let gone = self.jd.last.is_some_and(|(end, _)| symbol.index + 1 > end + JD_GONE);
+                if gone && !self.jd_gone {
+                    // Whatever is arriving is not two levels any more, and
+                    // learning from it as if it were would ruin the
+                    // equaliser before the DIL is found.
+                    self.jd_gone = true;
+                    self.rx.set_slicer(Slicer::Free);
+                }
+                if gone && self.before_dil.len() >= DIL_START_WINDOW + INTERVALS && symbol.raw.is_multiple_of(64) {
+                    self.find_dil_start();
                 }
             }
             Stage::Dil => self.dil_symbol(symbol.raw, symbol.value),
@@ -1172,15 +1289,114 @@ impl Modem {
         }
     }
 
+    /// The DIL from the receiver's count `first` (9.3.2.8): S-bar for 16T,
+    /// the frames put where the DIL says they are, and the symbols in
+    /// `already` read as its first.
+    fn begin_dil(&mut self, first: u64, already: &[(u64, f64)]) {
+        self.source.after_s_bar = Up::Silence;
+        self.source.change(Up::SBar);
+        self.stage = Stage::Dil;
+        self.dil_base = first as i64;
+        // J'd ends on a frame boundary -- Jd does, and J'd is two frames --
+        // so the DIL's first symbol is in interval 0, whatever a slip did to
+        // the frames on the way.
+        self.dil_interval = 0;
+        self.rx.set_frame_offset((INTERVALS as u64 - first % INTERVALS as u64) % INTERVALS as u64);
+        self.dil_read = vec![false; self.dil.len()];
+        self.dil_left = self.dil.len();
+        self.dil_recent.clear();
+        self.dil_lost = None;
+        self.before_dil.clear();
+        let next = already.last().map_or(first, |s| s.0 + 1);
+        // Two passes: one, and what a slip loses of it read again.
+        let levels = self.dil_levels(next as i64, 2 * self.dil.len());
+        self.rx.expect_from(next, levels);
+        for &(raw, value) in already {
+            self.dil_symbol(raw, value);
+        }
+    }
+
+    /// The DIL's start, from what has arrived since J'd was due: where the
+    /// DIL fits what came after it closely and far better than anywhere else.
+    fn find_dil_start(&mut self) {
+        let arrived: Vec<(u64, f64)> = self.before_dil.iter().copied().collect();
+        let Some(&(newest, _)) = arrived.last() else { return };
+        let oldest = arrived[0].0;
+        let mut fits = Vec::new();
+        for first in oldest..=newest.saturating_sub(DIL_START_WINDOW as u64) {
+            let from = (first - oldest) as usize;
+            let window = &arrived[from..(from + DIL_START_WINDOW).min(arrived.len())];
+            if let Some((fit, agree)) = self.fit_dil(window, first as i64)
+                && agree >= DIL_SIGNS
+            {
+                fits.push((first, fit));
+            }
+        }
+        let Some(&(first, fit)) = fits.iter().min_by(|a, b| a.1.total_cmp(&b.1)) else { return };
+        let next = fits.iter().filter(|f| f.0.abs_diff(first) > 1).map(|f| f.1).fold(f64::INFINITY, f64::min);
+        if fit > DIL_FIT || next < 4.0 * fit {
+            return;
+        }
+        self.dil_found_late = true;
+        let from = (first - oldest) as usize;
+        self.begin_dil(first, &arrived[from..]);
+    }
+
+    /// How well `window` fits the DIL taken to start at the receiver's count
+    /// `first`, over the symbols it can be judged on: the error's power
+    /// against the DIL's, and the share of signs that agree. None if too few
+    /// of the symbols are training symbols to tell one segment from another:
+    /// every segment's references are alike.
+    fn fit_dil(&self, window: &[(u64, f64)], first: i64) -> Option<(f64, f64)> {
+        let law = self.settings.law;
+        let len = self.dil.len() as i64;
+        let (mut cost, mut power, mut agree, mut judged, mut trained) = (0.0, 0.0, 0usize, 0usize, 0usize);
+        for &(raw, v) in window {
+            let at = (raw as i64 - first).rem_euclid(len) as usize;
+            let (u, positive) = self.dil[at];
+            let level = ucode::level(law, u);
+            // Too quiet for a sign to mean anything, or too near a loud
+            // codeword to trust.
+            if self.dil_trusted[at] != Trust::Yes || level < 0.004 {
+                continue;
+            }
+            let e = if positive { level } else { -level };
+            cost += (v - e).powi(2);
+            power += e * e;
+            judged += 1;
+            if u != self.settings.uinfo {
+                trained += 1;
+            }
+            if (v >= 0.0) == positive {
+                agree += 1;
+            }
+        }
+        (trained >= DIL_TRAINED_JUDGED && power > 0.0).then(|| (cost / power, agree as f64 / judged as f64))
+    }
+
+    /// Whether the DIL had to be found without J'd.
+    pub fn dil_found_late(&self) -> bool {
+        self.dil_found_late
+    }
+
     /// The DIL's signed levels from the receiver's count `from`, for `n`
-    /// symbols, as the DIL now stands against that count.
+    /// symbols, as the DIL now stands against that count: NaN where a level
+    /// is too loud to learn from.
     fn dil_levels(&self, from: i64, n: usize) -> Vec<f64> {
         let law = self.settings.law;
         let len = self.dil.len() as i64;
         (0..n as i64)
             .map(|k| {
-                let (u, positive) = self.dil[(from + k - self.dil_base).rem_euclid(len) as usize];
-                ucode::level(law, u) * if positive { 1.0 } else { -1.0 }
+                let at = (from + k - self.dil_base).rem_euclid(len) as usize;
+                let (u, positive) = self.dil[at];
+                let level = ucode::level(law, u);
+                if self.dil_trusted[at] != Trust::Yes {
+                    f64::NAN
+                } else if positive {
+                    level
+                } else {
+                    -level
+                }
             })
             .collect()
     }
@@ -1188,6 +1404,12 @@ impl Modem {
     /// Times a slip moved the DIL and it was found again.
     pub fn dil_moved(&self) -> u32 {
         self.dil_moved
+    }
+
+    /// How much of the DIL has been read, of how much there is, and whether
+    /// the reading is waiting to find where it went.
+    pub fn dil_progress(&self) -> (usize, usize, bool) {
+        (self.dil.len() - self.dil_left, self.dil.len(), self.dil_lost.is_some())
     }
 
     fn dil_symbol(&mut self, raw: u64, value: f64) {
@@ -1222,7 +1444,9 @@ impl Modem {
         self.dil_read[at] = true;
         self.dil_left -= 1;
         let (u, positive) = self.dil[at];
-        self.analysis.feed(u, positive, (at + self.dil_interval) % INTERVALS, value);
+        if self.dil_trusted[at] != Trust::Spoiled {
+            self.analysis.feed(u, positive, (at + self.dil_interval) % INTERVALS, value);
+        }
         if self.dil_left == 0 {
             self.finish_dil();
         }
@@ -1234,19 +1458,17 @@ impl Modem {
     /// robs a bit, or a burst of noise, spoils the reading without moving
     /// anything.
     fn find_dil(&mut self) {
-        let law = self.settings.law;
-        let len = self.dil.len() as i64;
-        let expected = |at: i64| {
-            let (u, positive) = self.dil[at.rem_euclid(len) as usize];
-            ucode::level(law, u) * if positive { 1.0 } else { -1.0 }
-        };
         let window: Vec<(u64, f64)> = self.dil_recent.iter().skip(self.dil_recent.len().saturating_sub(DIL_SEARCH)).copied().collect();
-        let cost = |moved: i64| -> f64 { window.iter().map(|&(raw, v)| (v - expected(raw as i64 - self.dil_base - moved)).powi(2)).sum() };
-        let costs: Vec<(i64, f64)> = (-DIL_MOST_MOVED..=DIL_MOST_MOVED).map(|m| (m, cost(m))).collect();
-        let Some(&(moved, least)) = costs.iter().min_by(|a, b| a.1.total_cmp(&b.1)) else { return };
-        let next_least = costs.iter().filter(|c| (c.0 - moved).abs() > 1).map(|c| c.1).fold(f64::INFINITY, f64::min);
-        let power: f64 = window.iter().map(|&(raw, _)| expected(raw as i64 - self.dil_base - moved).powi(2)).sum();
-        if least > DIL_FIT * power || (moved != 0 && next_least < 4.0 * least) {
+        // (move, relative error) for each move whose signs agree.
+        let fits: Vec<(i64, f64)> = (-DIL_MOST_MOVED..=DIL_MOST_MOVED)
+            .filter_map(|m| {
+                let (fit, agree) = self.fit_dil(&window, self.dil_base + m)?;
+                (agree >= DIL_SIGNS).then_some((m, fit))
+            })
+            .collect();
+        let Some(&(moved, fit)) = fits.iter().min_by(|a, b| a.1.total_cmp(&b.1)) else { return };
+        let next = fits.iter().filter(|f| (f.0 - moved).abs() > 1).map(|f| f.1).fold(f64::INFINITY, f64::min);
+        if fit > DIL_FIT || (moved != 0 && next < 4.0 * fit) {
             return;
         }
         self.dil_lost = None;
@@ -1264,7 +1486,7 @@ impl Modem {
             self.rx.set_frame_offset(offset);
         }
         let levels = self.dil_levels(next, 2 * self.dil.len());
-        self.rx.expect_afresh(levels);
+        self.rx.expect_from(next as u64, levels);
         for (raw, value) in recent {
             self.count_dil(raw, value);
             if self.stage != Stage::Dil {
@@ -1284,6 +1506,15 @@ impl Modem {
             self.fail("the route cannot carry V.90's slowest rate");
             return;
         };
+        let rate = sequences::data_rate(choice.data.drn).unwrap_or(0);
+        if rate < self.settings.v34_receive {
+            // A route that is an ordinary line with G.711's noise on it --
+            // a softphone that converted the sample rate on the way to its
+            // encoder -- carries V.34 at least as well.
+            self.route = Some(route);
+            self.fail("V.34 carries more than V.90 on this route");
+            return;
+        }
         self.finish_cp(&mut choice.data);
         self.finish_cp(&mut choice.training);
         self.downstream_rate = sequences::data_rate(choice.data.drn).unwrap_or(0);
@@ -1522,5 +1753,67 @@ impl Modem {
             mode: Mode::Answer,
         };
         self.source.encoder = Some(UpstreamEncoder::new(params));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// TRN1d's signs, `repeats` Jds and J'd, as the digital modem sends them
+    /// (8.4.2, 8.4.3, 8.4.5), and then signs that mean nothing.
+    fn phase3_signs(jd: &Jd, repeats: usize) -> (Vec<bool>, usize) {
+        let mut scrambler = Scrambler::new(Mode::Call);
+        let mut sign = false;
+        let mut signs = Vec::new();
+        for _ in 0..2400 {
+            sign = scrambler.scramble(true);
+            signs.push(sign);
+        }
+        for _ in 0..repeats {
+            for bit in jd.to_bits() {
+                sign ^= scrambler.scramble(bit);
+                signs.push(sign);
+            }
+        }
+        for _ in 0..JD_PRIME_BITS {
+            sign ^= scrambler.scramble(false);
+            signs.push(sign);
+        }
+        let end = signs.len();
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        for _ in 0..500 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            signs.push(x & 1 == 1);
+        }
+        (signs, end)
+    }
+
+    /// Where a reader says J'd ended, if it does.
+    fn jd_prime_at(signs: &[bool]) -> Option<usize> {
+        let mut reader = JdReader::new();
+        signs.iter().enumerate().find_map(|(i, &s)| reader.feed(i as u64, s).then_some(i + 1))
+    }
+
+    #[test]
+    fn j_prime_is_read_after_whole_jds() {
+        let jd = Jd { rates: Jd::ALL_RATES, lookahead: 1, ..Jd::default() };
+        let (signs, end) = phase3_signs(&jd, 12);
+        assert_eq!(jd_prime_at(&signs), Some(end));
+    }
+
+    /// A softphone that cut ten milliseconds out of the Jds, into the start
+    /// of the last, leaves that one unreadable whole; J'd is still found
+    /// after its tail. (A cut nearer J'd than the descrambler's memory is
+    /// beyond reading at all, and the DIL is found from its own levels.)
+    #[test]
+    fn j_prime_is_read_after_a_jd_a_slip_cut_into() {
+        let jd = Jd { rates: Jd::ALL_RATES, lookahead: 1, ..Jd::default() };
+        let (mut signs, end) = phase3_signs(&jd, 12);
+        let last = end - JD_PRIME_BITS - JD_BITS;
+        signs.drain(last - 60..last + 20);
+        assert_eq!(jd_prime_at(&signs), Some(end - 80));
     }
 }

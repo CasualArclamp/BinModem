@@ -152,7 +152,8 @@ From that it picks the constellations for phase 4 and for data mode, spaced
 for the noise it measured at the power the server may send, and in phase 4 the
 two ends swap CP and MP and go to data. `CONNECT` gives the downstream rate,
 from 28 000 to 56 000 in steps of 1333; the upstream is V.34 and the panel shows
-it. The log goes `V.90 phase 2`, `V.90 phase 3: training`, `V.90 phase 3: Jd`,
+it. A route whose V.90 would come out slower than the V.34 phase 2's probe
+promised is not worth it: the call is retrained as V.34. The log goes `V.90 phase 2`, `V.90 phase 3: training`, `V.90 phase 3: Jd`,
 `V.90 phase 3: DIL`, `V.90 phase 4`, `V.90 data`.
 
 There is no I and Q to plot for PCM, so the constellation scope plots each
@@ -205,9 +206,22 @@ softphone uses G.711 (PCMU or PCMA) and nothing on the way processes the audio.
 In the softphone, allow only PCMU and PCMA, and turn off echo cancellation,
 noise suppression, automatic gain and voice activity detection or silence
 suppression. Set both volumes to 100%, and turn off Windows' audio enhancements
-on the VB-Cable devices. The jitter buffer's slips are followed: during the
-start-up, R and the DIL show where the frames went; in data mode, the frames
-themselves do. Press **Record** before dialling: a capture of a V.90 call that
+on the VB-Cable devices -- Loudness Equalization above all.
+
+Something with a gain control was in the path on the first live call: every
+codeword up to about a third of full scale arrived exactly, anything much
+louder was held down, and everything after it read low for a third of a
+second. The DIL this modem asks for now stops at a third of full scale, and so
+do its constellations, which Table 15's powers never needed above that
+anyway; but a gain control that acts lower than that will still spoil it.
+
+The same call's jitter buffer shortened its delay by cutting ten milliseconds
+out of the DIL on every pass, at the place where it repeated itself most. The
+DIL now steps through the codewords three at a time, so that one segment is
+never mistaken for the next when the reading is picked up again after a cut; a
+J'd whose Jd was cut into is still read, and if J'd is lost entirely the DIL is
+found from its own levels. In data mode, the frames themselves show where a
+slip took them. Press **Record** before dialling: a capture of a V.90 call that
 went wrong is what gets it fixed.
 
 ## Moving a file

@@ -252,7 +252,8 @@ impl Analogue {
             && let (Some(asked), Some(server), Some(info1d)) = (p2.info1a_pcm(), p2.far_info0d(), p2.info1c())
         {
             let ours_wide = true;
-            let settings = analogue::Settings::new(&server, &info1d, &asked, p2.round_trip().unwrap_or(0.0), ours_wide);
+            let mut settings = analogue::Settings::new(&server, &info1d, &asked, p2.round_trip().unwrap_or(0.0), ours_wide);
+            settings.v34_receive = p2.v34_receive_rate().unwrap_or(0);
             self.v90 = Some(analogue::Modem::new(settings, self.fs));
         }
         out
