@@ -744,8 +744,11 @@ impl Stack {
                 // is handed goes to its detector rather than its deframer. An
                 // XID sent into that window is simply consumed. Repeating it
                 // costs nothing and makes the window harmless.
+                //
+                // P is 0 on a command as on a response: 8.2.4.13 says "the
+                // P/F bit of an XID frame is set to 0" and names no exception.
                 let body = Frame::Xid {
-                    pf: self.role == Role::Originator,
+                    pf: false,
                     info: self.proposal().encode(),
                 }
                 .encode(DLCI_DATA, self.role, Kind::Command);
@@ -1502,6 +1505,29 @@ mod tests {
         assert_eq!(offer.receive.n2, 1024);
     }
 
+    /// V.42 8.2.4.13: "The P/F bit of an XID frame is set to 0."
+    ///
+    /// Commands too. This end polled with every XID it sent, and the far ends
+    /// it called on real lines answered none of them; the calling modem in
+    /// the V.22bis vector sends its XID command with the bit clear.
+    #[test]
+    fn an_xid_command_goes_out_with_its_poll_bit_clear() {
+        for role in [Role::Originator, Role::Answerer] {
+            let mut stack = Stack::new(role, Params::default()).without_detection();
+            let mut decoder = Decoder::new(Fcs::Bits16);
+            let mut control = None;
+            for _ in 0..4_000 {
+                if let Some(Ok(body)) = decoder.feed(stack.next_bit()) {
+                    control = Some(body[1]);
+                    break;
+                }
+            }
+            let control = control.expect("no frame went out");
+            assert_eq!(control & !0x10, 0xaf, "the first frame was not an XID");
+            assert_eq!(control, 0xaf, "the {role:?}'s XID has P set");
+        }
+    }
+
     #[test]
     fn a_release_is_seen_at_both_ends() {
         let (mut a, mut b) = pair();
@@ -1552,7 +1578,7 @@ mod tests {
         // Then the originator's arrives, offering 32 bits as this modem does.
         let offer = Xid::proposal(Compression::Neither);
         assert!(offer.fcs32, "nothing here to agree to");
-        let xid = Frame::Xid { pf: true, info: offer.encode() }
+        let xid = Frame::Xid { pf: false, info: offer.encode() }
             .encode(DLCI_DATA, Role::Originator, Kind::Command);
         wire(&mut answerer, &xid, Fcs::Bits16);
         let answered = answerer
