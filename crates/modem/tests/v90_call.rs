@@ -295,6 +295,15 @@ fn two_of_these_connect_at_pcm_rates_when_the_codewords_reach_the_encoder() {
         assert_eq!(pair.host.state(), State::Data, "phase {phase}");
         assert_eq!(pair.caller.standard(), pair.host.standard());
         rates.push((pair.caller.standard(), pair.caller.rate().unwrap_or(0)));
+        // Each says which half of V.90 the other offered in V.8.
+        let modulations = |m: &Modem| m.distant().into_iter().find(|r| r.0 == "modulations").map(|r| r.1).unwrap_or_default();
+        assert!(modulations(&pair.host).starts_with("V.90 analogue, V.34"), "{}", modulations(&pair.host));
+        assert!(modulations(&pair.caller).starts_with("V.90 digital, V.34"), "{}", modulations(&pair.caller));
+        // And the server's scope is sized for the hundreds of points coming
+        // up, which reach well past one.
+        if pair.host.standard() == "V.90" {
+            assert!(pair.host.constellation_peak() > 1.2, "peak {}", pair.host.constellation_peak());
+        }
 
         pair.run(2.0);
         for b in b"from the caller" {

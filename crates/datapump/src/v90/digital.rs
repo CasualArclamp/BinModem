@@ -572,6 +572,16 @@ impl Modem {
         self.rx.last_point().map(Into::into)
     }
 
+    /// The largest coordinate the upstream's points reach, at the unit mean
+    /// power [`Self::last_point`] gives them in.
+    pub fn upstream_peak(&self) -> f64 {
+        match self.decoder.as_ref() {
+            Some(decoder) => decoder.peak(),
+            None if self.rx.size() == Size::Sixteen => 3.0 / 10f64.sqrt(),
+            None => std::f64::consts::FRAC_1_SQRT_2,
+        }
+    }
+
     /// Points the upstream is being decided against: four or sixteen in
     /// training, and data mode's L once B1 has begun.
     pub fn upstream_points(&self) -> usize {

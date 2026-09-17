@@ -772,7 +772,7 @@ impl ScopeApp {
                 if ui
                     .selectable_label(recording, label)
                     .on_hover_text(
-                        "Keep the call as a stereo file: what arrived on one                          channel, what was sent on the other, so it can be run                          through a receiver again afterwards",
+                        "Keep the call as a stereo file: what arrived on one channel, what was sent on the other, so it can be run through a receiver again afterwards",
                     )
                     .clicked()
                 {
@@ -802,7 +802,7 @@ impl ScopeApp {
                             .color(Color32::from_rgb(235, 100, 90)),
                     )
                     .on_hover_text(
-                        "Times the line had nothing to send and sent silence.                          The far end hears a dropout",
+                        "Times the line had nothing to send and sent silence. The far end hears a dropout",
                     );
                 }
                 if state.framing_errors > 0 {
@@ -815,7 +815,7 @@ impl ScopeApp {
                         .color(Color32::from_rgb(230, 180, 90)),
                     )
                     .on_hover_text(
-                        "Characters whose stop bit was in the wrong place. A few                          a second is noise on the line; dozens at once with quiet                          in between is a network dropping packets, which only                          error control hides",
+                        "Characters whose stop bit was in the wrong place. A few a second is noise on the line; dozens at once with quiet in between is a network dropping packets, which only error control hides",
                     );
                 }
                 if state.dropped > 0 {
@@ -1007,7 +1007,7 @@ impl ScopeApp {
             if ui
                 .selectable_label(self.fax.open, "Fax")
                 .on_hover_text(
-                    "T.30: send a picture as a fax, and see what the machine                      answering can do",
+                    "T.30: send a picture as a fax, and see what the machine answering can do",
                 )
                 .clicked()
             {
@@ -1654,7 +1654,7 @@ impl ScopeApp {
                 if self.modulation.max_rate < top {
                     ui.label(
                         RichText::new(format!(
-                            "Held to {}. On a line that cannot carry {top}, that is not                              the slower connection -- it is the one that works.",
+                            "Held to {}. On a line that cannot carry {top}, that is not the slower connection -- it is the one that works.",
                             self.modulation.max_rate
                         ))
                         .small()
@@ -1663,7 +1663,7 @@ impl ScopeApp {
                 } else {
                     ui.label(
                         RichText::new(
-                            "A ceiling is worth setting on purpose. Every rate here                              is 2400 baud and they differ only in how crowded the                              constellation is: four points at 4800, a hundred and                              twenty-eight at 14 400, and about 20 dB more signal to                              noise wanted across that span.",
+                            "A ceiling is worth setting on purpose. Every rate here is 2400 baud and they differ only in how crowded the constellation is: four points at 4800, a hundred and twenty-eight at 14 400, and about 20 dB more signal to noise wanted across that span.",
                         )
                         .small()
                         .color(dim),
@@ -2457,7 +2457,7 @@ impl ScopeApp {
             if ui
                 .checkbox(&mut automode, "V.8")
                 .on_hover_text(
-                    "Negotiate the modulation with the far end (AT+MS                      <automode>). Off means the one chosen above and nothing                      else.",
+                    "Negotiate the modulation with the far end (AT+MS <automode>). Off means the one chosen above and nothing else.",
                 )
                 .clicked()
             {
@@ -2475,7 +2475,7 @@ impl ScopeApp {
             if ui
                 .checkbox(&mut protect, "V.42")
                 .on_hover_text(
-                    "Error control: what arrives is what was sent, or the                      call ends (AT+ES).",
+                    "Error control: what arrives is what was sent, or the call ends (AT+ES).",
                 )
                 .clicked()
             {
@@ -2493,7 +2493,7 @@ impl ScopeApp {
             let response = ui
                 .add_enabled(protect, egui::Checkbox::new(&mut compress, "compress"))
                 .on_hover_text(
-                    "Compression, which needs error control underneath it                      (AT+DS).",
+                    "Compression, which needs error control underneath it (AT+DS).",
                 )
                 .on_disabled_hover_text(
                     "V.44 and V.42bis both ride on LAPM and there is nowhere \
@@ -2745,7 +2745,7 @@ impl ScopeApp {
         if self.frame.distant.is_empty() {
             ui.label(
                 RichText::new(
-                    "Nothing said yet. A far end describes itself in the V.8 menu,                      in the detection phase, and in XID -- and a call that gets                      none of the way through says nothing at all.",
+                    "Nothing said yet. A far end describes itself in the V.8 menu, in the detection phase, and in XID -- and a call that gets none of the way through says nothing at all.",
                 )
                 .small()
                 .color(dim),

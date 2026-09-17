@@ -1056,6 +1056,11 @@ impl Modem {
             // power reaches about one and a half: drawn at one, its outer
             // rings were all piled up along the edge of the box.
             Some(Pump::V34(m)) => m.constellation_peak().map_or(1.0, |peak| peak.max(1.0) as f32),
+            // PCM's pairs are drawn to one already; V.34, when that is what
+            // the call became, is V.34's.
+            Some(Pump::V90(m)) if !m.is_v90() => m.v34().constellation_peak().map_or(1.0, |peak| peak.max(1.0) as f32),
+            // The server plots what comes up, which is V.34's.
+            Some(Pump::V90Server(m)) => m.modem().constellation_peak().map_or(1.0, |peak| peak.max(1.0) as f32),
             _ => 1.0,
         }
     }
@@ -1196,7 +1201,14 @@ impl Modem {
                 }
                 .to_owned(),
             ));
-            let modes: Vec<&str> = menu.modulations.iter().map(v8::Modulation::name).collect();
+            // V.90 is not a modulation octet but a category of its own
+            // (Table 5), and says which half the far end can be.
+            let pcm = menu.pcm.unwrap_or_default();
+            let mut modes: Vec<&str> = [(pcm.analogue, "V.90 analogue"), (pcm.digital, "V.90 digital"), (pcm.v91, "V.91")]
+                .into_iter()
+                .filter_map(|(has, name)| has.then_some(name))
+                .collect();
+            modes.extend(menu.modulations.iter().map(v8::Modulation::name));
             rows.push((
                 "modulations",
                 if modes.is_empty() { "none in common".to_owned() } else { modes.join(", ") },

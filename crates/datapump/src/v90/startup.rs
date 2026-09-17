@@ -343,6 +343,15 @@ impl Digital {
         }
     }
 
+    /// The largest coordinate the upstream's points reach, in the units of
+    /// [`Self::constellation_point`].
+    pub fn constellation_peak(&self) -> Option<f64> {
+        match self.v90.as_ref() {
+            Some(m) => Some(m.upstream_peak()),
+            None => self.v34.constellation_peak(),
+        }
+    }
+
     /// Points the upstream is read against.
     pub fn constellation_size(&self) -> Option<usize> {
         match self.v90.as_ref() {

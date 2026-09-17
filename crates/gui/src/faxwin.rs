@@ -580,7 +580,7 @@ impl Fax {
                         );
                     });
                     ui.checkbox(&mut self.error_correction, "ECM").on_hover_text(
-                        "Error correction mode, T.30 Annex A: the page goes in                          numbered frames, and any the far end cannot read are                          sent again instead of printed as streaks. Used only                          when the far end offers it too",
+                        "Error correction mode, T.30 Annex A: the page goes in numbered frames, and any the far end cannot read are sent again instead of printed as streaks. Used only when the far end offers it too",
                     );
                 });
                 if again {
