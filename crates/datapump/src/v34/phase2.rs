@@ -103,8 +103,34 @@ const AFTER_REVERSAL: f64 = 0.010;
 /// 11.2.1.2.3 and exactly 50 in 11.2.1.2.6.
 const TONE_A_FIRST: f64 = 0.050;
 
-/// How long L2 is read for: "a period of time not to exceed 500 ms".
-const L2_READ: f64 = 0.500;
+/// How long L2 is read for: "a period of time not to exceed 500 ms", and
+/// well short of that.
+///
+/// The limit is a comparison with the far end's clock, not a target. The end
+/// sending L2 gives the other's tone "600 ms plus a round trip delay from the
+/// beginning of L2" (11.2.2.2.3; 650 for the call modem's wait, 11.2.2.1.5),
+/// and the round trips cancel: a tone started after 500 ms of L2 reaches the
+/// far end with 100 ms left for its detector to hear it over the echo of its
+/// own L2. A real modem called on 2026-09-17, with a line that echoed us back
+/// only 25 dB down, used all of it: in each of three attempts its tone A came
+/// 92 to 103 ms after ours arrived, a few milliseconds either side of that
+/// deadline. Each time it then ignored our reversal and probe, and retrained
+/// 2 s and two round trips later. The modems that get through answer 20 to
+/// 50 ms after our tone arrives, and dialup.world reads only about 250 ms of
+/// our L2. Three hundred is fourteen of the analyzer's windows, which its
+/// median still reads a jitter-buffer slip or two past.
+const L2_READ: f64 = 0.300;
+
+/// Silence before the tone that starts or answers a retrain: "70 ± 5 ms"
+/// (11.5.1.1, 11.5.1.2, 11.5.2.1, 11.5.2.2).
+const RETRAIN_SILENCE: f64 = 0.070;
+
+/// Allowed on top of the recommendation's waits for the far end's tone after
+/// this end's L2 (11.2.2.1.5, 11.2.2.2.3). The far end may read the whole
+/// 500 ms, which leaves 150 and 100 ms of those waits, and a jitter-buffer
+/// slip can take twenty of them. Waiting longer costs nothing: the far end's
+/// own wait for what follows has seconds in it.
+const TONE_AFTER_PROBE_SLACK: f64 = 0.300;
 
 /// What is let go past before reading L2, so the windows see the line settled
 /// on it rather than the step from L1.
@@ -249,6 +275,8 @@ pub struct Modem {
     silence_at: Option<u64>,
     /// L1 starts at this sample.
     probe_at: Option<u64>,
+    /// This end's tone starts at this sample, after a retrain's silence.
+    tone_at: Option<u64>,
 
     rx: dpsk::Receiver,
     reversals: ReversalDetector,
@@ -305,6 +333,7 @@ impl Modem {
             reversed_at: None,
             silence_at: None,
             probe_at: None,
+            tone_at: None,
             rx: dpsk::Receiver::new(role.far(), fs),
             reversals: ReversalDetector::new(far_tone, REVERSAL_BANDWIDTH, AUDIBLE, fs),
             presence: Presence::new(far_tone, fs),
@@ -436,10 +465,14 @@ impl Modem {
         modem.far = Some(far);
         modem.far_info0_count = 1;
         modem.ours.acknowledge = true;
-        modem.start_tone();
+        // Silence first, then the tone. Going straight from data or L2 into
+        // the tone left a far end one retrain handled late and another it
+        // began itself.
+        modem.speaking = Speaking::Silent;
+        modem.tone_at = Some(modem.ms(RETRAIN_SILENCE));
         // The step from data or a renegotiation tone into this one is not a
         // reversal, however it reads.
-        modem.ignore_reversals_until = modem.ms(0.050);
+        modem.ignore_reversals_until = modem.ms(RETRAIN_SILENCE + 0.050);
         modem.stage = match role {
             Role::Call => Stage::CallFirstReversal,
             Role::Answer => Stage::AnswerAwaitTone,
@@ -586,6 +619,13 @@ impl Modem {
 
     /// Everything scheduled for this sample.
     fn timers(&mut self) {
+        if self.tone_at == Some(self.now) {
+            self.tone_at = None;
+            self.start_tone();
+            // The stage's own clock -- tone A's 50 ms before its reversal --
+            // starts with the tone.
+            self.since = self.now;
+        }
         if self.reverse_at == Some(self.now) {
             self.reverse_at = None;
             self.tx.reverse();
@@ -697,7 +737,7 @@ impl Modem {
                 let ours = self.reversed_at.expect("checked");
                 self.round_trip = Some((at - ours).saturating_sub(self.ms(TURN)));
                 // L1 begins 10 ms after that reversal and runs 160 ms, and L2
-                // is read for 500 after it.
+                // is read for L2_READ after it.
                 let l2 = at + self.ms(AFTER_REVERSAL + probe::L1_SECONDS);
                 self.read_from = l2 + self.ms(L2_SETTLE);
                 self.read_until = l2 + self.ms(L2_READ);
@@ -783,7 +823,7 @@ impl Modem {
                 let Speaking::Probe { l1_until } = self.speaking else { return };
                 if self.deadline.is_none() {
                     // Measured from the beginning of L2.
-                    self.deadline = Some(l1_until + self.ms(0.650) + self.rtd());
+                    self.deadline = Some(l1_until + self.ms(0.650 + TONE_AFTER_PROBE_SLACK) + self.rtd());
                 }
                 // 11.2.1.1.7: tone A, heard over the echo of L2, and INFO1c.
                 if now > l1_until && self.presence.held >= self.ms(TONE_HELD) {
@@ -840,7 +880,10 @@ impl Modem {
             }
             Stage::AnswerAwaitTone => {
                 // 11.2.1.2.3: tone B heard, and tone A on for 50 ms.
-                if self.presence.held >= self.ms(TONE_HELD) && now - self.since >= self.ms(TONE_A_FIRST) {
+                if self.tone_at.is_none()
+                    && self.presence.held >= self.ms(TONE_HELD)
+                    && now - self.since >= self.ms(TONE_A_FIRST)
+                {
                     self.reverse_at = Some(now + 1);
                     self.enter(Stage::AnswerRanging);
                     self.deadline = Some(now + self.ms(REVERSAL_WAIT));
@@ -864,7 +907,7 @@ impl Modem {
             Stage::AnswerSendProbe => {
                 let Speaking::Probe { l1_until } = self.speaking else { return };
                 if self.deadline.is_none() {
-                    self.deadline = Some(l1_until + self.ms(0.600) + self.rtd());
+                    self.deadline = Some(l1_until + self.ms(0.600 + TONE_AFTER_PROBE_SLACK) + self.rtd());
                 }
                 // 11.2.1.2.6: tone B over the echo of L2, then tone A for 50 ms,
                 // its reversal, 10 ms more and silence.
@@ -1141,8 +1184,79 @@ mod tests {
         assert!(digital.info1a_pcm().is_none());
     }
 
-    /// And a V.90 analogue modem that meets a V.34 modem's INFO0 asks for
-    /// V.34.
+    /// When each end starts its tone after reading the other's L2, against
+    /// the far end's deadline for hearing it (11.2.2.2.3 and 11.2.2.1.5), in
+    /// seconds to spare once the tone has crossed the line.
+    fn time_to_spare(one_way: f64) -> (f64, f64) {
+        let mut line = Line::new(one_way, 20.0, 15.0, 60.0);
+        let (mut caller, mut answerer) = (Modem::new(Role::Call, FS), Modem::new(Role::Answer, FS));
+        let (mut from_call, mut from_answer) = (0.0, 0.0);
+        // Where each end's L2 began, and where the other's tone began after it.
+        let (mut answer_l2, mut call_l2, mut tone_b, mut tone_a) = (None, None, None, None);
+        for _ in 0..(20.0 * FS) as usize {
+            let at_call = line.to_call.pop_front().unwrap() + line.echo * from_call + line.noise();
+            let at_answer = line.to_answer.pop_front().unwrap() + line.echo * from_answer + line.noise();
+            let (call_was, answer_was) = (caller.stage, answerer.stage);
+            from_call = caller.step(at_call);
+            from_answer = answerer.step(at_answer);
+            line.to_answer.push_back(from_call * line.loss);
+            line.to_call.push_back(from_answer * line.loss);
+            if let (Stage::AnswerSendProbe, Speaking::Probe { l1_until }) = (answerer.stage, answerer.speaking) {
+                answer_l2.get_or_insert(l1_until);
+            }
+            if let (Stage::CallSendProbe, Speaking::Probe { l1_until }) = (caller.stage, caller.speaking) {
+                call_l2.get_or_insert(l1_until);
+            }
+            if call_was == Stage::CallReadProbe && caller.stage == Stage::CallAwaitTone {
+                tone_b.get_or_insert(caller.now);
+            }
+            if answer_was == Stage::AnswerReadProbe && answerer.stage == Stage::AnswerInfo1 {
+                tone_a.get_or_insert(answerer.now);
+            }
+            if caller.status() != Status::Running && answerer.status() != Status::Running {
+                break;
+            }
+        }
+        assert_eq!(caller.status(), Status::Done, "call modem stuck at {}", caller.phase());
+        let crossing = (one_way * FS) as u64;
+        let spare = |l2: Option<u64>, tone: Option<u64>, wait: f64, far: &Modem| {
+            let (l2, tone) = (l2.expect("no L2"), tone.expect("no tone"));
+            let deadline = l2 + far.ms(wait) + far.rtd();
+            (deadline as f64 - (tone + crossing) as f64) / FS
+        };
+        (
+            spare(answer_l2, tone_b, 0.600, &answerer),
+            spare(call_l2, tone_a, 0.650, &caller),
+        )
+    }
+
+    #[test]
+    fn each_end_leaves_the_other_time_to_hear_its_tone() {
+        // Reading the whole 500 ms the recommendation allows left a real
+        // modem's detector 100 ms, and it missed its deadline by one. The
+        // round trips cancel, so the margin is the same on every line.
+        for one_way in [0.010, 0.650, 0.750] {
+            let (for_answer, for_call) = time_to_spare(one_way);
+            assert!(for_answer > 0.25, "{one_way} s each way: the answer modem has {for_answer:.3} s to hear tone B");
+            assert!(for_call > 0.30, "{one_way} s each way: the call modem has {for_call:.3} s to hear tone A");
+        }
+    }
+
+    #[test]
+    fn a_retrain_begins_with_70_ms_of_silence_and_then_the_tone() {
+        // 11.5.1.1 and 11.5.2.2 alike, from either end.
+        for role in [Role::Call, Role::Answer] {
+            let mut m = Modem::retrain(role, FS, Info0::default());
+            let out: Vec<f64> = (0..(0.2 * FS) as usize).map(|_| m.step(0.0)).collect();
+            let first = out.iter().position(|s| s.abs() > 1e-9).expect("no tone at all");
+            let ms = first as f64 / FS * 1000.0;
+            assert!((65.0..=75.0).contains(&ms), "{role:?}: the tone began after {ms} ms");
+            let loudest = out[first + 320..].iter().fold(0.0f64, |m, s| m.max(s.abs()));
+            assert!(loudest > 0.1, "{role:?}: the tone is at {loudest}");
+        }
+    }
+
+    /// And a V.90 analogue modem that meets a V.34 modem's INFO0 asks for V.34.
     #[test]
     fn a_v90_analogue_modem_meeting_v34_asks_for_v34() {
         let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
