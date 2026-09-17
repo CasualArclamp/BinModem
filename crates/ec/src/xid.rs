@@ -2,7 +2,9 @@
 //!
 //! The information field of an XID frame carries a format identifier followed
 //! by subfields, each a group identifier, a two-octet group length, and a run
-//! of parameter identifier / length / value triples.
+//! of parameter identifier / length / value triples. The user data subfield,
+//! last when it is there, is the exception: it has no group length and runs to
+//! the end of the field (V.42 12.2.1.3).
 //!
 //! This is how N401, the window size, the frame check sequence width and the
 //! V.42bis parameters are actually agreed. Without it both ends simply run on
@@ -25,6 +27,12 @@ pub const GI_PRIVATE: u8 = 0b1111_0000;
 /// subfield shall appear in the XID frame immediately before the FCS." A
 /// different subfield from V.42bis's, which is what lets one XID offer both
 /// and let the far end pick.
+///
+/// Unlike the other two it carries no group length. V.42 12.2.1.3: "This
+/// subfield, which follows all data link layer subfields as Figure 11 shows,
+/// does not contain a GL. The subsequent information is bounded by the frame's
+/// FCS field." V.44 Table A.1 has the same, the parameter set identifier
+/// straight after the group identifier.
 pub const GI_USER_DATA: u8 = 0b1111_1111;
 
 /// Parameter identifiers within the parameter negotiation subfield (Table 11a).
@@ -335,7 +343,11 @@ impl Xid {
             push_param(&mut user, user_pi::MAX_STRING_RECEIVE, &[v44.receive.n7]);
             push_param(&mut user, user_pi::HISTORY_TRANSMIT, &v44.transmit.n8.to_be_bytes());
             push_param(&mut user, user_pi::HISTORY_RECEIVE, &v44.receive.n8.to_be_bytes());
-            push_subfield(&mut out, GI_USER_DATA, &user);
+            // No group length. With one, a far end reading this as V.42
+            // describes saw a parameter 0x00 of 33 octets, which is to say
+            // nothing at all, and never learnt that V.44 was on offer.
+            out.push(GI_USER_DATA);
+            out.extend_from_slice(&user);
         }
         out
     }
@@ -387,6 +399,14 @@ impl Xid {
 
         while pos < body.len() {
             let gi = body[pos];
+            if gi == GI_USER_DATA {
+                // 12.2.1.3: no group length, and everything to the end of the
+                // field is its own. Read as a group, "40 03" is a length of
+                // 16387, and the XID of any far end offering V.44 was thrown
+                // away whole.
+                xid.read_user_data(&body[pos + 1..])?;
+                break;
+            }
             if pos + 3 > body.len() {
                 return Err(XidError::Truncated);
             }
@@ -400,7 +420,6 @@ impl Xid {
             match gi {
                 GI_PARAMETER => xid.read_parameters(&body[start..end])?,
                 GI_PRIVATE => xid.read_private(&body[start..end])?,
-                GI_USER_DATA => xid.read_user_data(&body[start..end])?,
                 _ => {} // an unrecognized group is skipped whole
             }
             pos = end;
@@ -844,13 +863,17 @@ mod tests {
     #[test]
     fn unrecognized_groups_and_parameters_are_ignored() {
         // V.42 12.2.2: "Fields that are not recognized are ignored."
-        let mut bytes = Xid::proposal(Compression::Both).encode(Kind::Command);
-        // Append a group nobody has defined.
-        bytes.push(0x55);
+        let proposal = Xid::proposal(Compression::Both).encode(Kind::Command);
+        // A group nobody has defined, where 12.2.1.2's ascending order puts
+        // it: ahead of the others, since the user data subfield after them
+        // runs to the end of the field.
+        let mut bytes = vec![proposal[0], 0x55];
         bytes.extend_from_slice(&3u16.to_be_bytes());
         bytes.extend_from_slice(&[1, 2, 3]);
+        bytes.extend_from_slice(&proposal[1..]);
         let decoded = Xid::decode(&bytes).unwrap();
         assert_eq!(decoded.window_transmit, Some(crate::lapm::DEFAULT_K));
+        assert!(decoded.v44.is_some(), "what followed it was lost");
     }
 
     #[test]
@@ -944,24 +967,64 @@ mod v44_negotiation {
         assert_eq!(PARAMETER_SET_V44, [0x56, 0x34, 0x34]);
         let bytes = Xid::proposal(Compression::Both).encode(Kind::Command);
         // Walked rather than searched for: 0xff is a perfectly ordinary
-        // parameter value and looking for the octet finds one of those.
+        // parameter value and looking for the octet finds one of those. The
+        // data link layer subfields have lengths, and the user data subfield
+        // is what is left.
         let mut at = 1usize;
         let mut groups = Vec::new();
-        while at < bytes.len() {
+        while at < bytes.len() && bytes[at] != GI_USER_DATA {
             let len = u16::from_be_bytes([bytes[at + 1], bytes[at + 2]]) as usize;
-            groups.push((bytes[at], at));
+            groups.push(bytes[at]);
             at += 3 + len;
         }
-        assert_eq!(at, bytes.len(), "the subfields do not tile the field");
+        assert_eq!(groups, [GI_PARAMETER, GI_PRIVATE]);
         // 7.3 puts it "immediately before the FCS", which is to say last.
-        let (gi, gi_at) = *groups.last().expect("no subfields at all");
-        assert_eq!(gi, GI_USER_DATA);
-        assert!(groups.iter().any(|&(g, _)| g == GI_PARAMETER));
-        assert!(groups.iter().any(|&(g, _)| g == GI_PRIVATE));
-        // Group identifier, two octets of length, then the first parameter.
-        assert_eq!(bytes[gi_at + 3], user_pi::PARAMETER_SET);
-        assert_eq!(bytes[gi_at + 4], 3, "the identifier is three octets");
-        assert_eq!(&bytes[gi_at + 5..gi_at + 8], &PARAMETER_SET_V44);
+        assert_eq!(bytes.get(at), Some(&GI_USER_DATA), "no user data subfield");
+        // Group identifier, then the first parameter: 12.2.1.3 gives this
+        // subfield no group length.
+        assert_eq!(bytes[at + 1], user_pi::PARAMETER_SET);
+        assert_eq!(bytes[at + 2], 3, "the identifier is three octets");
+        assert_eq!(&bytes[at + 3..at + 6], &PARAMETER_SET_V44);
+        // And the parameters run to the end of the field.
+        let mut field = &bytes[at + 1..];
+        let mut last = 0;
+        while let Some((pi, _, rest)) = take_param(field).expect("the parameters do not tile") {
+            last = pi;
+            field = rest;
+        }
+        assert_eq!(last, user_pi::HISTORY_RECEIVE);
+    }
+
+    /// V.44 Table A.1 laid out by hand, as a far end that follows it sends it:
+    /// the group identifier and then the parameters, with no length between.
+    #[test]
+    fn a_v44_offer_laid_out_as_table_a1_is_read() {
+        let mut bytes = vec![FI_GENERAL_PURPOSE];
+        let mut params = Vec::new();
+        push_param(&mut params, pi::WINDOW_TRANSMIT, &[15]);
+        push_subfield(&mut bytes, GI_PARAMETER, &params);
+        bytes.extend_from_slice(&[
+            0xff, // GI 11111111
+            0x40, 0x03, b'V', b'4', b'4',
+            0x41, 0x01, 0x00,
+            0x42, 0x01, 0x03,
+            0x43, 0x02, 0x08, 0x00,
+            0x44, 0x02, 0x04, 0x00,
+            0x45, 0x01, 0xff,
+            0x46, 0x01, 0x40,
+            0x47, 0x02, 0x18, 0x00,
+            0x48, 0x02, 0x0c, 0x00,
+        ]);
+        let xid = Xid::decode(&bytes).expect("did not decode");
+        assert_eq!(xid.window_transmit, Some(15));
+        assert_eq!(
+            xid.v44,
+            Some(V44Offer {
+                compression: Compression::Both,
+                transmit: v44::Params { n2: 2048, n7: 255, n8: 6144 },
+                receive: v44::Params { n2: 1024, n7: 64, n8: 3072 },
+            })
+        );
     }
 
     /// An XID offers both algorithms, because 7.3 has the responder pick one.
@@ -1048,8 +1111,8 @@ mod v44_negotiation {
         push_param(&mut user, user_pi::PARAMETER_SET, b"XYZ");
         push_param(&mut user, user_pi::REQUEST, &[0b11]);
         push_param(&mut user, user_pi::MAX_STRING_TRANSMIT, &[99]);
-        let mut bytes = vec![FI_GENERAL_PURPOSE];
-        push_subfield(&mut bytes, GI_USER_DATA, &user);
+        let mut bytes = vec![FI_GENERAL_PURPOSE, GI_USER_DATA];
+        bytes.extend_from_slice(&user);
         let xid = Xid::decode(&bytes).expect("did not decode");
         assert_eq!(xid.v44, None);
     }
