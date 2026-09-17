@@ -502,9 +502,27 @@ impl Lapm {
     /// T401, set V(S), V(R) and V(A) to 0, and enter the connected state,
     /// telling the control function with an L-ESTABLISH confirm. T403, which
     /// the clause also starts, is not implemented.
+    ///
+    /// That list and no more. The responder's list, a few lines earlier in the
+    /// same clause, has two entries this one has not -- "clear all existing
+    /// exception conditions" and "clear any existing peer-receiver busy
+    /// condition" -- and the originator does not need them, because it cleared
+    /// them where the clause opens: "a request to establish the error-corrected
+    /// connection is initiated by the transmission of the SABME command. All
+    /// existing exception conditions shall be cleared, the retransmission
+    /// counter shall be reset", which is [`Self::connect`].
+    ///
+    /// A blanket reset was the same thing in practice while a UA was the only
+    /// way in. It is the wrong shape to leave behind now that an I or
+    /// supervisory frame standing in for a lost UA comes through the same door
+    /// and is processed immediately after: what that frame meets should be
+    /// what the clause gives a newly connected originator, and not whatever a
+    /// wider reset happens to coincide with.
     fn establish(&mut self) {
         self.stop_timer();
-        self.reset_variables();
+        self.vs = 0;
+        self.va = 0;
+        self.vr = 0;
         self.state = State::Connected;
         self.events.push_back(Event::Connected);
     }
