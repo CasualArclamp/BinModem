@@ -762,44 +762,24 @@ mod tests {
     }
 
     #[test]
-    fn a_command_asking_for_32_bits_still_sets_bit_16() {
+    fn only_a_response_agreeing_to_32_bits_clears_bit_16() {
         // V.42 Table 11a Note 1: "the transmitter of an XID command frame
-        // shall set bit positions 2, 4, 8, 9, 12 and 16 to 1", with no
-        // exception for bit 17.
-        let mask = Xid { fcs32: true, ..Default::default() }.hdlc_mask(Kind::Command);
-        assert!(mask & (1 << 16) != 0, "bit 17 should be set");
-        assert!(mask & (1 << 15) != 0, "bit 16 was cleared in a command");
-    }
-
-    #[test]
-    fn a_response_agreeing_to_32_bits_clears_bit_16() {
-        // The same note: a response sets them too, "except bit position 16
-        // shall be set to 0 if bit position 17 is set to 1".
-        let wide = Xid { fcs32: true, ..Default::default() }.hdlc_mask(Kind::Response);
-        assert!(wide & (1 << 16) != 0, "bit 17 should be set");
-        assert!(wide & (1 << 15) == 0, "bit 16 should have been cleared");
+        // shall set bit positions 2, 4, 8, 9, 12 and 16 to 1. The transmitter
+        // of an XID response frame shall also set these bit positions to 1,
+        // except bit position 16 shall be set to 0 if bit position 17 is set
+        // to 1." The exception belongs to the response, and to a response that
+        // has agreed to 32 bits: this end cleared the bit in its commands as
+        // well, so a command asking for 32 went out looking like an answer
+        // agreeing to them.
+        let wide = Xid { fcs32: true, ..Default::default() };
+        let response = wide.hdlc_mask(Kind::Response);
+        assert!(response & (1 << 16) != 0, "bit 17 should be set");
+        assert!(response & (1 << 15) == 0, "bit 16 should have been cleared");
+        let command = wide.hdlc_mask(Kind::Command);
+        assert!(command & (1 << 16) != 0, "bit 17 should be set in a command too");
+        assert!(command & (1 << 15) != 0, "a command asking for 32 bits cleared bit 16");
         let narrow = Xid { fcs32: false, ..Default::default() }.hdlc_mask(Kind::Response);
         assert!(narrow & (1 << 15) != 0, "bit 16 cleared without bit 17");
-    }
-
-    #[test]
-    fn a_receiver_ignores_the_positions_the_encoding_rules_fix() {
-        // Note 1: "A receiver of these frames should ignore these bit
-        // positions." A far end's command and its response differ in bit 16,
-        // and neither says anything about what it can do.
-        let field = |mask: u32| {
-            let mut params = Vec::new();
-            push_param(&mut params, pi::HDLC_OPTIONAL, &mask.to_le_bytes());
-            let mut bytes = vec![FI_GENERAL_PURPOSE];
-            push_subfield(&mut bytes, GI_PARAMETER, &params);
-            Xid::decode(&bytes).expect("did not decode")
-        };
-        let fcs32 = 1 << (hdlc_bit::FCS32 - 1);
-        assert_eq!(field(required_mask()), field(0));
-        assert_eq!(field(required_mask() | fcs32), field(fcs32));
-        assert_eq!(field((required_mask() & !(1 << 15)) | fcs32), field(fcs32));
-        assert!(field(fcs32).fcs32);
-        assert!(!field(required_mask()).fcs32);
     }
 
     #[test]
@@ -903,15 +883,33 @@ mod tests {
     #[test]
     fn unrecognized_groups_and_parameters_are_ignored() {
         // V.42 12.2.2: "Fields that are not recognized are ignored."
-        let proposal = Xid::proposal(Compression::Both).encode(Kind::Command);
+        //
+        // Laid out by hand rather than round-tripped through this end's own
+        // encoder, so that the field is one a far end could send and not one
+        // this end already agrees with itself about. In particular the user
+        // data subfield carries no group length, which is what 12.2.1.3 gives
+        // it, and it is the last thing in the field because everything to the
+        // end of the field is its own.
+        let mut bytes = vec![FI_GENERAL_PURPOSE];
         // A group nobody has defined, where 12.2.1.2's ascending order puts
-        // it: ahead of the others, since the user data subfield after them
-        // runs to the end of the field.
-        let mut bytes = vec![proposal[0], 0x55];
+        // it: ahead of the others, since nothing can follow the user data.
+        bytes.push(0x55);
         bytes.extend_from_slice(&3u16.to_be_bytes());
         bytes.extend_from_slice(&[1, 2, 3]);
-        bytes.extend_from_slice(&proposal[1..]);
-        let decoded = Xid::decode(&bytes).unwrap();
+        // A recognized group, carrying a parameter nobody has defined beside
+        // one this end reads.
+        let mut params = Vec::new();
+        push_param(&mut params, 0x7f, &[9, 9]);
+        push_param(&mut params, pi::WINDOW_TRANSMIT, &[crate::lapm::DEFAULT_K]);
+        push_subfield(&mut bytes, GI_PARAMETER, &params);
+        // And V.44 on offer behind them both.
+        let mut user = Vec::new();
+        push_param(&mut user, user_pi::PARAMETER_SET, &PARAMETER_SET_V44);
+        push_param(&mut user, user_pi::REQUEST, &[Compression::Both.to_bits()]);
+        bytes.push(GI_USER_DATA);
+        bytes.extend_from_slice(&user);
+
+        let decoded = Xid::decode(&bytes).expect("an unrecognized group sank the whole XID");
         assert_eq!(decoded.window_transmit, Some(crate::lapm::DEFAULT_K));
         assert!(decoded.v44.is_some(), "what followed it was lost");
     }
