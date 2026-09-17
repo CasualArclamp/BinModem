@@ -665,7 +665,6 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     let mut modem = Modem::new(FS);
     let mut spectrum = Spectrum::new(FFT_SIZE, FS);
     let mut waveform = Ring::new(SCOPE_LEN);
-    let mut baseband = Ring::new(SCOPE_LEN);
     let mut bins = vec![0.0f64; SPECTRUM_BINS];
     let mut symbols: std::collections::VecDeque<f32> =
         std::collections::VecDeque::with_capacity(SYMBOL_HISTORY);
@@ -1139,7 +1138,6 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     points.push_back(p);
                 }
             }
-            baseband.push(modem.discriminator().unwrap_or(0.0) as f32);
             spectrum.push(heard);
             waveform.push(s);
         }
@@ -1324,7 +1322,6 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             tx.publish(|f| {
                 f.sample_rate = FS;
                 waveform.copy_into(&mut f.waveform);
-                baseband.copy_into(&mut f.baseband);
                 for (slot, &v) in f.spectrum_db.iter_mut().zip(bins.iter()) {
                     *slot = v as f32;
                 }

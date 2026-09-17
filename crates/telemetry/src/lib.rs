@@ -79,9 +79,6 @@ pub struct Frame {
     pub sample_rate: f64,
     /// Recent line samples, oldest first.
     pub waveform: Vec<f32>,
-    /// Recent demodulator output. For FSK this is the frequency discriminator,
-    /// where +1 is a mark and -1 a space; for QAM it is unused.
-    pub baseband: Vec<f32>,
     /// Received constellation points as (I, Q). Empty for FSK, which has none.
     pub constellation: Vec<(f32, f32)>,
     /// Recent slicer decisions, one per recovered bit, newest last.
@@ -191,7 +188,6 @@ impl Frame {
             seq: 0,
             sample_rate,
             waveform: vec![0.0; scope_len],
-            baseband: vec![0.0; scope_len],
             constellation: Vec::with_capacity(256),
             symbols: Vec::with_capacity(256),
             // Ten rows is more than the far end has ever had to say, and

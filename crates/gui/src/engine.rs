@@ -284,14 +284,6 @@ impl Demod {
         }
     }
 
-    /// Trace for the baseband scope.
-    fn baseband(&self) -> f32 {
-        match self {
-            Self::Bell103 { host, .. } => host.level() as f32,
-            Self::V22bis { host, .. } => host.constellation_point().0 as f32,
-        }
-    }
-
     /// Carrier present, as (host, caller).
     fn carriers(&self) -> (bool, bool) {
         match self {
@@ -473,7 +465,6 @@ fn run(
 
     let mut spectrum = Spectrum::new(FFT_SIZE, fs);
     let mut waveform = Ring::new(SCOPE_LEN);
-    let mut baseband = Ring::new(SCOPE_LEN);
     let mut bins = vec![0.0f64; SPECTRUM_BINS];
     let mut symbols: VecDeque<f32> = VecDeque::with_capacity(SYMBOL_HISTORY);
     let mut points: VecDeque<(f32, f32)> = VecDeque::with_capacity(SYMBOL_HISTORY);
@@ -567,7 +558,6 @@ fn run(
                         }
                         points.push_back(p);
                     }
-                baseband.push(d.baseband());
             }
 
             spectrum.push(x);
@@ -614,7 +604,6 @@ fn run(
             tx.publish(|f| {
                 f.sample_rate = fs;
                 waveform.copy_into(&mut f.waveform);
-                baseband.copy_into(&mut f.baseband);
                 for (slot, &v) in f.spectrum_db.iter_mut().zip(bins.iter()) {
                     *slot = v as f32;
                 }

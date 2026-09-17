@@ -241,49 +241,6 @@ pub fn spectrum(
     frame_border(&painter, rect);
 }
 
-/// Discriminator trace with mark and space decision levels.
-///
-/// This is the FSK equivalent of a constellation: above the centre line is a
-/// mark, below is a space, and the vertical spread shows the margin the slicer
-/// has to work with.
-pub fn discriminator(ui: &mut Ui, samples: &[f32], height: f32) {
-    let (rect, painter) = allocate(ui, height);
-    painter.rect_filled(rect, 0.0, BACKDROP);
-
-    let level_y = |v: f32| rect.center().y - rect.height() * 0.5 * v.clamp(-1.5, 1.5) / 1.5;
-
-    // Mark, space and decision threshold.
-    for (v, colour, label) in [
-        (1.0f32, Color32::from_rgb(90, 200, 120), "mark"),
-        (0.0, GRID, "slice"),
-        (-1.0, Color32::from_rgb(220, 120, 110), "space"),
-    ] {
-        let y = level_y(v);
-        painter.line_segment(
-            [pos2(rect.left(), y), pos2(rect.right(), y)],
-            Stroke::new(1.0, colour.gamma_multiply(0.7)),
-        );
-        painter.text(
-            pos2(rect.right() - 3.0, y),
-            Align2::RIGHT_BOTTOM,
-            label,
-            FontId::monospace(9.0),
-            colour,
-        );
-    }
-
-    if samples.len() >= 2 {
-        let step = rect.width() / (samples.len() - 1) as f32;
-        let mut prev = pos2(rect.left(), level_y(samples[0]));
-        for (i, &v) in samples.iter().enumerate().skip(1) {
-            let p = pos2(rect.left() + i as f32 * step, level_y(v));
-            painter.line_segment([prev, p], Stroke::new(1.0, TRACE));
-            prev = p;
-        }
-    }
-    frame_border(&painter, rect);
-}
-
 /// Symbol scope, in the style ARDOP uses for its FSK modes.
 ///
 /// A cross of axes with the decision threshold at the centre. Each recovered

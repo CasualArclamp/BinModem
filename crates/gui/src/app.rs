@@ -3036,7 +3036,7 @@ impl eframe::App for ScopeApp {
 
         egui::CentralPanel::default().show(ui, |ui| {
             ui.label(RichText::new("waterfall  (0 - 4000 Hz)").strong());
-            let available = (ui.available_height() - 150.0).max(140.0);
+            let available = (ui.available_height() - 60.0).max(140.0);
             self.waterfall.paint(ui, available * 0.60, self.frame.modulation);
             ui.add_space(6.0);
             ui.label(RichText::new("spectrum").strong());
@@ -3049,9 +3049,6 @@ impl eframe::App for ScopeApp {
                 self.waterfall.ceiling_db,
                 self.frame.modulation,
             );
-            ui.add_space(6.0);
-            ui.label(RichText::new("discriminator  (answer band)").strong());
-            scopes::discriminator(ui, &self.frame.baseband, 84.0);
         });
     }
 }
