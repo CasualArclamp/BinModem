@@ -607,6 +607,34 @@ mod tests {
         assert_eq!(got[0].as_ref().unwrap(), payload);
     }
 
+    /// A frame that the other width reads is not a discarded frame.
+    ///
+    /// 8.10.2 has a called DCE check both widths until a SABME settles which
+    /// one the connection uses, so a frame that fails at 16 bits and passes at
+    /// 32 is delivered. The record of what the line spoiled is written before
+    /// that second look, and a frame the second look rescues has to be taken
+    /// out of it again -- otherwise every 32-bit frame of an XID exchange
+    /// leaves its octets sitting where a panel reads the last thing the line
+    /// damaged, and the frames that really were damaged are lost among them.
+    #[test]
+    fn a_frame_the_other_width_reads_is_not_left_among_the_damaged() {
+        let mut enc = Encoder::new(Fcs::Bits32);
+        let payload = b"\x03\x73either width";
+        enc.frame(payload);
+        let mut dec = Decoder::new(Fcs::Bits16);
+        dec.accept_either();
+        let mut seen = Vec::new();
+        while let Some(bit) = enc.next_bit() {
+            if let Some(r) = dec.feed(bit) {
+                seen.push((r, dec.discarded().to_vec()));
+            }
+        }
+        assert_eq!(seen.len(), 1, "{seen:02x?}");
+        assert_eq!(seen[0].0.as_ref().expect("the 32-bit frame was not read"), payload);
+        assert_eq!(dec.matched_fcs(), Fcs::Bits32);
+        assert!(seen[0].1.is_empty(), "the frame was reported as damaged as well as read");
+    }
+
     #[test]
     fn bit_stuffing_survives_a_payload_full_of_ones() {
         // 0xFF runs are what stuffing exists for: without it these would look
