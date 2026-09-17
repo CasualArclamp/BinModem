@@ -816,6 +816,11 @@ impl Stack {
         // direction it was travelling: "receipt of a SABME frame with 16- or
         // 32-bit FCS indicates use of the corresponding FCS for all subsequent
         // frames", and the answer to one says the same thing back.
+        //
+        // Not an I or supervisory frame that LAPM takes in place of a lost UA
+        // (8.3.2.1): the far end may have sent it before the SABME reached
+        // it, at the width it was using then. Where 32 bits were agreed the
+        // decoder goes on reading both until a UA or SABME settles it.
         if matches!(frame, Frame::Sabme { .. } | Frame::Ua { .. }) {
             let width = self.decoder.matched_fcs();
             self.decoder.set_fcs(width);
