@@ -24,9 +24,13 @@
 //! per data frame, which is exactly one step of the rate ladder -- see [`RATE_STEP`].
 
 pub mod analogue;
-mod carrier;
+/// Named from `datapump::v92` as well as from here: the V.92 analogue and
+/// digital modems watch the far end with this same watch (AD-1), and a
+/// private module could not be reached from a sibling of `v90`.
+pub(crate) mod carrier;
 pub mod dil;
 pub mod digital;
+pub(crate) mod downstream;
 pub mod encoder;
 pub mod modulus;
 pub mod network;
