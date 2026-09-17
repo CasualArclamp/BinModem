@@ -323,3 +323,47 @@ fn two_of_these_connect_at_pcm_rates_when_the_codewords_reach_the_encoder() {
     assert_eq!(rates[1].0, "V.90", "{rates:?}");
     assert!(rates[1].1 >= 48_000, "{rates:?}");
 }
+
+/// Two of these in V.90 data mode, then one puts the line down: the other
+/// says NO CARRIER and goes back to command state by itself, a few seconds
+/// later. It used to stay in data mode, sending PCM or V.34 at a far end that
+/// had gone, until somebody stopped it.
+#[test]
+fn when_one_end_hangs_up_the_other_notices() {
+    for host_hangs_up in [true, false] {
+        let mut pair = Pair::new(Network::new(Law::Mu, FS).with_delay(0.015, FS).with_noise(1e-5), 0);
+        pair.straight = Some(0);
+        Pair::type_at(&mut pair.host, "AT+MS=V90");
+        Pair::type_at(&mut pair.caller, "AT+MS=V90");
+        pair.run(0.05);
+        Pair::type_at(&mut pair.host, "ATA");
+        Pair::type_at(&mut pair.caller, "ATD5551234");
+        for _ in 0..40 {
+            pair.run(1.0);
+            if pair.caller.state() == State::Data && pair.host.state() == State::Data {
+                break;
+            }
+        }
+        assert_eq!((pair.caller.state(), pair.host.state()), (State::Data, State::Data));
+        assert_eq!(pair.caller.standard(), "V.90");
+        pair.run(2.0);
+        pair.caller_said.clear();
+        pair.host_said.clear();
+        if host_hangs_up {
+            pair.host.hang_up();
+        } else {
+            pair.caller.hang_up();
+        }
+        let mut waited = 0.0;
+        let left = |pair: &Pair| if host_hangs_up { pair.caller.state() } else { pair.host.state() };
+        while left(&pair) != State::Command && waited < 10.0 {
+            pair.run(0.25);
+            waited += 0.25;
+        }
+        let said = String::from_utf8_lossy(if host_hangs_up { &pair.caller_said } else { &pair.host_said }).into_owned();
+        println!("host hangs up {host_hangs_up}: the other end noticed after {waited} s and said {said:?}");
+        assert_eq!(left(&pair), State::Command, "host hangs up {host_hangs_up}: still {:?} after {waited} s", left(&pair));
+        assert!(waited <= 4.0, "host hangs up {host_hangs_up}: {waited} s");
+        assert!(said.contains("NO CARRIER"), "host hangs up {host_hangs_up}: {said:?}");
+    }
+}

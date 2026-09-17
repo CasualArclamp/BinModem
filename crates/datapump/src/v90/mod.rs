@@ -24,6 +24,7 @@
 //! per data frame, which is exactly one step of the rate ladder -- see [`RATE_STEP`].
 
 pub mod analogue;
+mod carrier;
 pub mod dil;
 pub mod digital;
 pub mod encoder;

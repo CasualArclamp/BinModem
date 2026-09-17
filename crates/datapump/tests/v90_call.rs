@@ -476,7 +476,7 @@ fn slips_during_the_start_up_are_followed() {
             v90.map(|m| m.dil_moved()),
             v90.map(|m| m.frames_moved())
         );
-        assert!(ok, "slips every {period} s: {} / {}", call.analogue.phase(), call.digital.phase());
+        assert!(ok, "slips every {period} s: {} / {} ({:?})", call.analogue.phase(), call.digital.phase(), call.analogue.last_failure());
         assert_eq!(call.analogue.retrains(), 0, "slips every {period} s: {:?}", call.analogue.last_failure());
         assert!(call.net.slips() >= 2);
         dil_moved += v90.map_or(0, |m| m.dil_moved());
@@ -571,4 +571,87 @@ fn a_cut_in_the_training_stretch_is_trained_past() {
         assert!(ok, "inserted {inserted}: {} / {}", call.analogue.phase(), call.digital.phase());
         assert_eq!(call.analogue.retrains(), 0, "inserted {inserted}");
     }
+}
+
+impl FullCall {
+    /// Run with one direction silenced, as a far end that has hung up leaves
+    /// it, and say how long the other end took to notice: the analogue
+    /// modem when the server stops, the digital modem when the client does.
+    fn notices_silence(&mut self, server_stops: bool, seconds: f64) -> Option<f64> {
+        let start = self.ticks;
+        let end = self.ticks + (seconds * 8000.0) as u64;
+        while self.ticks < end {
+            let up: Vec<f64> = if server_stops { self.up.clone() } else { vec![0.0; self.up.len()] };
+            let to_digital = self.net.up(&up);
+            self.up.clear();
+            let from_digital = self.digital.step(to_digital);
+            for x in self.net.down(if server_stops { 0.0 } else { from_digital }) {
+                self.up.push(self.analogue.step(x));
+            }
+            self.ticks += 1;
+            let (gone, other) = if server_stops {
+                (!self.analogue.carrier(), self.digital.carrier())
+            } else {
+                (!self.digital.carrier(), self.analogue.carrier())
+            };
+            // The end still being sent to has nothing to notice.
+            assert!(other, "the end still hearing its far end lost it");
+            if gone {
+                let went = if server_stops {
+                    self.analogue.v90().map(|m| m.far_end_went())
+                } else {
+                    self.digital.v90().map(|m| m.far_end_went())
+                };
+                assert_eq!(went, Some(true), "ended, but not for the far end's silence");
+                return Some((self.ticks - start) as f64 / 8000.0);
+            }
+        }
+        None
+    }
+}
+
+/// A far end that hangs up in data mode stops sending, and says nothing
+/// first. V.90 has no carrier detector of its own, and a receiver that reads
+/// silence as the quietest codewords never counts itself lost, so the end left
+/// behind stayed in data mode for as long as anyone let it.
+#[test]
+fn a_far_end_that_stops_sending_is_noticed_at_either_end() {
+    for server_stops in [true, false] {
+        let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.6, FS).with_noise(1e-5), server(), 40.0);
+        assert_eq!(call.carries_data(2.0), (true, true));
+        assert!(call.analogue.carrier() && call.digital.carrier());
+        let after = call.notices_silence(server_stops, 6.0);
+        println!("server stops {server_stops}: noticed after {after:?} s");
+        let after = after.unwrap_or_else(|| panic!("server stops {server_stops}: never noticed"));
+        // Two seconds of quiet once the silence has crossed the line, which
+        // takes 0.6 s upstream here.
+        assert!(after < 3.5, "server stops {server_stops}: {after} s");
+    }
+}
+
+/// And a far end that is still there is never taken for one that has gone:
+/// a softphone's gain control and jitter buffer, a VoIP round trip, a
+/// renegotiation from each end, and data all the while.
+#[test]
+fn a_softphone_line_keeps_its_carrier_through_data_and_renegotiations() {
+    let net = Network::new(Law::Mu, FS)
+        .with_delay(0.6, FS)
+        .with_noise(1e-5)
+        .with_gain_control(0.8, 0.3)
+        .with_slips(2.9, true);
+    let mut call = connects(net, server(), 40.0);
+    let watch = |call: &mut FullCall, seconds: f64| {
+        let end = call.ticks + (seconds * 8000.0) as u64;
+        while call.ticks < end {
+            call.run_until_seconds((call.ticks + 1) as f64 / 8000.0);
+            assert!(call.analogue.carrier(), "the analogue modem lost a server that is there, at {} s", call.ticks / 8000);
+            assert!(call.digital.carrier(), "the server lost a client that is there, at {} s", call.ticks / 8000);
+        }
+    };
+    watch(&mut call, 8.0);
+    assert!(call.digital.renegotiate(8));
+    watch(&mut call, 8.0);
+    assert!(call.analogue.renegotiate(40_000));
+    watch(&mut call, 8.0);
+    assert!(call.analogue.is_v90());
 }

@@ -800,6 +800,9 @@ pub struct Modem {
     in_use: Option<Cp>,
     /// Rd and its turn, in data mode and a renegotiation (9.6.2).
     rd_watch: RWatch,
+    /// Whether the digital modem is still sending, in data mode.
+    far_end: super::carrier::Watch,
+    far_end_went: bool,
     renegotiating: bool,
     /// Whether this end began the renegotiation, and whether R-bar-d is
     /// still to come in it.
@@ -879,6 +882,8 @@ impl Modem {
             lost_since: None,
             in_use: None,
             rd_watch: RWatch::default(),
+            far_end: super::carrier::Watch::new(fs),
+            far_end_went: false,
             renegotiating: false,
             initiated: false,
             awaiting_turn: false,
@@ -903,6 +908,28 @@ impl Modem {
 
     pub fn status(&self) -> Status {
         self.status
+    }
+
+    /// Whether the digital modem's signal is there: in data mode, or in a
+    /// renegotiation begun from it.
+    pub fn carrier(&self) -> bool {
+        self.watching().is_some()
+    }
+
+    /// Whether the call ended because the digital modem stopped sending.
+    pub fn far_end_went(&self) -> bool {
+        self.far_end_went
+    }
+
+    /// Whether the far end's level is being watched, and whether what
+    /// arrives is data mode's to learn from: in data mode, and in phase 4
+    /// again from it -- a renegotiation, and the moment after one.
+    fn watching(&self) -> Option<bool> {
+        match self.status {
+            Status::Connected { .. } => Some(!self.renegotiating),
+            Status::Running if self.renegotiations > 0 => Some(false),
+            _ => None,
+        }
     }
 
     pub fn settings(&self) -> Settings {
@@ -1172,6 +1199,19 @@ impl Modem {
     pub fn step(&mut self, line: f64) -> f64 {
         self.now += 1;
         self.rx.feed(line);
+        match self.watching() {
+            Some(learn) => {
+                self.far_end.feed(line, learn);
+                if self.far_end.gone() {
+                    // A far end that has hung up says nothing first. Nothing
+                    // more goes to it, and the call is over, as if it had
+                    // cleared down: a retrain would only call into silence.
+                    self.far_end_went = true;
+                    self.cleared_down();
+                }
+            }
+            None => self.far_end.reset(),
+        }
         // 9.3.2, 9.4.2 and 9.6.2: tone B, in phase 3, phase 4 or data mode, is
         // the digital modem retraining.
         if self.stage != Stage::Finished && self.retrain_watch.feed(line, self.fs) {

@@ -1066,6 +1066,21 @@ impl ScopeApp {
             {
                 session.type_bytes(b"ATH\r");
             }
+            // One click, in any state. The two above go through the command
+            // interpreter, which a modem in data state is not listening to
+            // until the escape has had its second of quiet either side -- and
+            // a call whose far end has gone, or whose error control is still
+            // sending, is exactly the one that never gives it that.
+            if ui
+                .add_enabled(!on_hook, egui::Button::new("Force hang up"))
+                .on_hover_text(
+                    "Put the line down now, whatever the modem is doing: no escape, \
+                     no ATH, nothing more sent to the far end. For a call that will not end",
+                )
+                .clicked()
+            {
+                session.hang_up();
+            }
             ui.label(
                 RichText::new(self.frame.state.label())
                     .monospace()

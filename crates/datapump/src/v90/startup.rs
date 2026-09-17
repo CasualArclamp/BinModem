@@ -195,7 +195,7 @@ impl Analogue {
     /// Whether the far end's data signal is there.
     pub fn carrier(&self) -> bool {
         match self.v90.as_ref() {
-            Some(m) => matches!(m.status(), analogue::Status::Connected { .. }),
+            Some(m) => m.carrier(),
             None => self.v34.carrier(),
         }
     }
@@ -275,6 +275,9 @@ pub struct Digital {
     /// Renegotiations in V.90 data modes a retrain has since replaced.
     renegotiations: u32,
     habits: digital::Habits,
+    /// Whether data mode has been reached, after which a start-up is a
+    /// retrain or a renegotiation rather than the call being placed.
+    connected_once: bool,
 }
 
 impl Digital {
@@ -290,6 +293,7 @@ impl Digital {
             failed_starts: 0,
             renegotiations: 0,
             habits: digital::Habits::default(),
+            connected_once: false,
         }
     }
 
@@ -327,7 +331,7 @@ impl Digital {
     /// Whether the far end's data signal is there.
     pub fn carrier(&self) -> bool {
         match self.v90.as_ref() {
-            Some(m) => matches!(m.status(), digital::Status::Connected { .. }),
+            Some(m) => m.carrier(),
             None => self.v34.carrier(),
         }
     }
@@ -375,12 +379,18 @@ impl Digital {
             }
             Some(digital::Status::Failed(why)) => Status::Failed(why),
             Some(digital::Status::ClearedDown) => Status::ClearedDown,
+            // A renegotiation, or phases 3 and 4 again after a retrain: the
+            // call is still up, as the analogue modem's start-up says too.
+            // Reported as the start-up it is, a renegotiation looked to the
+            // modem above like a call with no carrier, and ended it.
+            Some(digital::Status::Running) if self.connected_once => Status::Retraining,
             Some(digital::Status::Running) => Status::Running,
             None => match self.v34.status() {
                 v34::Status::Connected { transmit, receive } => Status::Connected { transmit, receive },
                 v34::Status::Failed(why) => Status::Failed(why),
                 v34::Status::Retraining => Status::Retraining,
                 v34::Status::ClearedDown => Status::ClearedDown,
+                _ if self.connected_once => Status::Retraining,
                 _ => Status::Running,
             },
         }
@@ -450,6 +460,7 @@ impl Digital {
             let failed = matches!(m.status(), digital::Status::Failed(_));
             if matches!(m.status(), digital::Status::Connected { .. }) {
                 self.failed_starts = 0;
+                self.connected_once = true;
             }
             if m.take_retrain() || (failed && self.failed_starts < V90_RETRAINS) {
                 // 9.5.1: tone B and phase 2.
@@ -461,6 +472,9 @@ impl Digital {
             return out;
         }
         let out = self.v34.step(input);
+        if matches!(self.v34.status(), v34::Status::Connected { .. }) {
+            self.connected_once = true;
+        }
         let p2 = self.v34.phase2();
         if p2.status() == phase2::Status::Done
             && self.v34.training().is_none()
