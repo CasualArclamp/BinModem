@@ -95,6 +95,15 @@ pub mod timing {
 /// sequence that arrived with octets missing is one that was not received.
 const IDENTICAL: u32 = 2;
 
+/// How many torn sequences in a row are skipped before they count anyway.
+///
+/// Four of them is a little over a second at 300 bit/s, by which time the line
+/// has said plainly that it is going to tear everything and no amount of
+/// waiting will produce a whole sequence. `live-1789647424` tore six of the
+/// far end's eight JMs but not four running, so a line like that one still
+/// settles on the whole sequences it did deliver.
+const TORN_IN_A_ROW: u32 = 4;
+
 /// What the procedure has decided.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -162,10 +171,12 @@ pub struct Modem {
     last: Option<Menu>,
     last_octets: Vec<u8>,
     repeats: u32,
-    /// Framing errors the receiver has counted, and whether one of them fell
-    /// inside the sequence being gathered now.
+    /// Framing errors the receiver has counted, whether one of them fell
+    /// inside the sequence being gathered now, and how many sequences running
+    /// have been thrown away for it.
     framing_errors: u64,
     torn: bool,
+    torn_in_a_row: u32,
     /// What was agreed, once it has been.
     chosen: Option<Modulation>,
     /// The error control both ends named, if they named any (Table 6).
@@ -212,6 +223,7 @@ impl Modem {
             repeats: 0,
             framing_errors: 0,
             torn: false,
+            torn_in_a_row: 0,
             chosen: None,
             agreed: Protocol::Unstated,
             far_menu: None,
@@ -337,23 +349,48 @@ impl Modem {
 
     /// An octet came off the line.
     fn heard(&mut self, octet: u8) {
+        // The synchronisation octet that ends one sequence begins the next
+        // (clause 5), so this is the boundary: what the flag holds belongs to
+        // the sequence ending here, and the one starting here begins clean.
+        //
+        // Taken here rather than where a menu is reported, because not every
+        // sequence is reported -- a body that will not parse as a menu, a run
+        // of zeros read as CJ, an octet lost out of the synchronisation
+        // itself. The flag used to survive all of those and condemn the next
+        // sequence for a tear that was not in it.
+        let torn = octet == v8::SYNC_MENU && std::mem::take(&mut self.torn);
         let Some(heard) = self.decoder.feed(octet) else { return };
         match heard {
             // The same octets whichever way they came; which channel carried
             // them is what says whether this is a call menu or a joint one,
             // and that is settled by which end we are.
             Heard::Cm(menu) => {
-                // The synchronisation octet that ends one sequence begins the
-                // next, so whatever has been torn since the last one was
-                // reported tore this one.
-                if std::mem::take(&mut self.torn) {
-                    // Octets are missing, so these are not the octets the far
-                    // end sent and this sequence has not been received.
-                    // Skipped rather than counted against the run: 8.1.2 and
-                    // 8.2.2 ask for "a minimum of 2 identical" and not for two
-                    // in a row, and a sequence nobody received contradicts
-                    // nothing.
+                if torn {
+                    self.torn_in_a_row += 1;
+                }
+                // Octets are missing, so these are not the octets the far end
+                // sent and this sequence has not been received. Skipped rather
+                // than counted against the run: 8.1.2 and 8.2.2 ask for "a
+                // minimum of 2 identical" and not for two in a row, and a
+                // sequence nobody received contradicts nothing.
+                //
+                // Only while there is some prospect of a whole one. A line
+                // that tears every sequence would otherwise leave the run at
+                // nothing for ever: the answerer's ANSam would run out with no
+                // JM sent (8.2.2), the caller would never send CJ (8.1.2), and
+                // the call would leave V.8 altogether with no modulation and
+                // no protocol agreed -- which is worse than any menu it could
+                // have mis-read. So after [`TORN_IN_A_ROW`] of them the
+                // requirement that is left is the one the clauses actually
+                // state: two sequences identical octet for octet. A tear
+                // deletes bit times wherever the line happened to slip, so two
+                // of them coming out the same is a far longer shot than the
+                // damage this skipping was put in for.
+                if torn && self.torn_in_a_row <= TORN_IN_A_ROW {
                     return;
+                }
+                if !torn {
+                    self.torn_in_a_row = 0;
                 }
                 // Identical means the octets, not the menu they parse to.
                 // Clause 6 has a receiver ignore every code and octet reserved
@@ -471,6 +508,7 @@ impl Modem {
                 // 8.1.2: "after a minimum of 2 identical JM sequences have
                 // been received... signal CJ shall be transmitted."
                 if let Some(jm) = self.settled() {
+                    eprintln!("SETTLED at t={:.3} octets={:x?} menu={:?}", self.total, self.last_octets, jm);
                     self.far_menu = Some(jm);
                     self.chosen = jm.chosen();
                     // A JM naming LAPM is an answer to the CM that asked, so
@@ -755,6 +793,48 @@ mod tests {
         ]);
         assert!(torn >= 2, "the framer counted {torn} torn characters");
         let heard = heard.expect("no menu was acted on");
+        assert_eq!(heard.protocol, Protocol::Lapm, "{heard:?}");
+        assert!(heard.access.is_some(), "{heard:?}");
+    }
+
+    /// A tear belongs to the sequence it fell in and to no other.
+    ///
+    /// The flag was cleared only where a menu was reported, and a sequence the
+    /// line tore to nothing reports no menu -- so the tear outlived it and
+    /// threw away the next sequence too, whole and clean though that one was.
+    /// Here the first sequence loses every octet it had, and the two good ones
+    /// behind it are what 8.2.2's "minimum of 2 identical" is counted from.
+    #[test]
+    fn a_tear_belongs_to_the_sequence_it_fell_in() {
+        const NOTHING_LEFT: &[u8] = &[];
+        let (heard, torn) = menus_at_an_answerer(&[
+            (NOTHING_LEFT, true),
+            (WHOLE_MENU, false),
+            (WHOLE_MENU, false),
+            (WHOLE_MENU, false),
+        ]);
+        assert_eq!(torn, 1, "the framer counted {torn} torn characters");
+        let heard = heard.expect("the tear was still held against a whole sequence");
+        assert_eq!(heard.protocol, Protocol::Lapm, "{heard:?}");
+        assert!(heard.access.is_some(), "{heard:?}");
+    }
+
+    /// A line that tears every sequence still gets a menu read off it.
+    ///
+    /// Skipping a torn sequence has to be bounded, because there is a line on
+    /// which every attempt is torn and no number of them adds up to 8.2.2's
+    /// "minimum of 2 identical CM sequences". Skipping for ever there means
+    /// the answerer's ANSam runs out with no JM sent, the caller never sends
+    /// CJ, and the call leaves V.8 with neither a modulation nor a protocol
+    /// agreed -- worse than the mis-read menu the skipping was put in for. The
+    /// requirement that is left is the one the clause states: two sequences
+    /// the same, octet for octet.
+    #[test]
+    fn a_line_that_tears_every_sequence_still_settles_a_menu() {
+        let torn_all = [(WHOLE_MENU, true); 8];
+        let (heard, torn) = menus_at_an_answerer(&torn_all);
+        assert!(torn >= 7, "the framer counted {torn} torn characters");
+        let heard = heard.expect("no menu was acted on, so the call left V.8");
         assert_eq!(heard.protocol, Protocol::Lapm, "{heard:?}");
         assert!(heard.access.is_some(), "{heard:?}");
     }
