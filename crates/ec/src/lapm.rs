@@ -279,6 +279,15 @@ impl Lapm {
         self.params.n400 = n400;
     }
 
+    /// The retransmission limit as it now stands.
+    ///
+    /// N400 counts retransmissions of any command awaiting a reply, and the
+    /// XID exchange above this is one of them (8.10.3), so it is asked for
+    /// here rather than kept twice.
+    pub fn retransmissions(&self) -> u32 {
+        self.params.n400
+    }
+
     /// Use the selective retransmission procedure (V.42 8.4.5.1).
     ///
     /// Optional, and only after both ends have said so in XID: 8.4.5.1 has an

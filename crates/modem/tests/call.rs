@@ -622,6 +622,12 @@ fn error_control_is_asked_for_once_over_a_line_with_a_long_round_trip() {
     );
     assert_eq!(asked, 1, "error control was asked for {asked} times");
     assert_eq!(answered, 1, "and answered {answered} times");
+    // And the single XID command of V.42 8.10.2 reached the far end, at both
+    // ends of a line this long. What used to make that certain was the fifty
+    // to two hundred further copies of it that followed.
+    for (who, modem) in [("caller", &caller), ("host", &host)] {
+        assert!(modem.compression_name().is_some(), "the {who} negotiated no compression");
+    }
 }
 
 #[test]
