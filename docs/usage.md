@@ -251,7 +251,7 @@ rate before anything is dialled.
 a softphone, place the call there first and press it once the far end has
 answered; the calling tone goes out, the far end says what it is, and the page
 follows. **Wait for a fax** types `AT+FCLASS=1` and `ATA` instead: this end
-answers with 2100 Hz, says what it can receive, and keeps whatever page
+answers with 2100 Hz, says what it can receive, and keeps every page that
 arrives.
 
 A page arriving is drawn as it comes in, a row at a time from the top the way
@@ -283,7 +283,14 @@ is shared. The **coded** row under the page to send gives its size in all three,
 and the times beside each rate run from MMR's to Modified Huffman's.
 
 The far end's number and what its DIS says appear as soon as they arrive,
-whether or not a page follows. One page to a call.
+whether or not a page follows.
+
+A call can bring any number of pages. Each is drawn as it arrives, the heading
+and the progress line say which page it is, and **<** and **>** go back through
+the pages of the call that came before it. **Save as PNG** writes the page in
+view; **Save all** writes every page of the call to its own file, the name
+chosen with the page's number after it: `fax-1.png`, `fax-2.png` and so on.
+The window sends one page to a call.
 
 The modem stays in fax class after a call, as V.250 asks, so `AT+FCLASS=0`
 makes it a modem again before dialling a board.

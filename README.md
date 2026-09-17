@@ -9,7 +9,7 @@ one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
 source for every normative constant, and against the RFCs for everything
-carried over the top of them. 1523 tests.
+carried over the top of them. 1529 tests.
 
 ## What works
 
@@ -45,7 +45,7 @@ been checked three other ways: two documents, two methods, one table.
 | **Terminal** | ANSI/CP437 with mouse reporting; telnet (RFC 854) to use it alone |
 | **Settings** | remembered between runs, so the modem comes back where it was left |
 | **Files** | ZMODEM send and receive |
-| **Fax** | T.30 group 3, sending and receiving; V.29 (7200/9600) and V.27 ter (2400/4800); T.4 Modified Huffman and Modified READ, T.6 MMR; T.30 Annex A error correction mode; pages drawn as they arrive |
+| **Fax** | T.30 group 3, sending and receiving; V.29 (7200/9600) and V.27 ter (2400/4800); T.4 Modified Huffman and Modified READ, T.6 MMR; T.30 Annex A error correction mode; any number of pages in a call, each drawn as it arrives |
 | **Network** | PPP (RFC 1661/1662) with LCP, PAP and CHAP, and IPCP, Van Jacobson header compression (RFC 1144), and a ping over it; a dial-in login prompt, and a login script for dialling out |
 | **Internet** | our own TCP (RFC 9293) and an HTTP/HTTPS proxy (RFC 9112): pages straight to the internet through a provider, or through a far BinModem that has it |
 | **Line** | full-duplex sound card, or a WAV to replay |
@@ -209,7 +209,7 @@ holding loud codewords down. Both are now simulated, and followed.
 
 Next, V.17 for fax at 14 400, and V.33 beside it -- the same trellis code as
 V.32bis again, on a fax call and a leased line respectively -- and more than
-one page to a fax call.
+one page to send from the fax window.
 
 Alongside them: MNP as an alternative to LAPM, since it is what a modem without
 V.42 will offer.

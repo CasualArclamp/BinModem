@@ -1717,7 +1717,7 @@ fn one_modem_faxes_a_page_to_another_over_at_commands() {
         let _ = caller.take_dte();
         let _ = answerer.take_dte();
         if arrived.is_none() {
-            arrived = answerer.take_received_page();
+            arrived = answerer.take_received_page().map(|(_, page)| page);
         }
         let both_done = caller
             .fax_call()
@@ -1812,7 +1812,7 @@ fn fax_between(caller: &mut Modem, answerer: &mut Modem) -> Faxed {
             error_correction = call.error_correction();
         }
         if arrived.is_none() {
-            arrived = answerer.take_received_page();
+            arrived = answerer.take_received_page().map(|(_, page)| page);
         }
         let done = caller.fax_call().is_some_and(|c| c.phase().is_over())
             && answerer.fax_call().is_some_and(|c| c.phase().is_over());

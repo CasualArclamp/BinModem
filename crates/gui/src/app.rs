@@ -1104,8 +1104,8 @@ impl ScopeApp {
                 self.fax.open = true;
             }
         }
-        if let Some(page) = session.take_fax_received() {
-            self.fax.arrived(page);
+        while let Some((sheet, page)) = session.take_fax_received() {
+            self.fax.arrived(sheet, page);
             self.fax.open = true;
         }
         let on_hook = self.frame.state == telemetry::CallState::Idle;

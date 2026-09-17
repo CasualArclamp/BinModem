@@ -617,7 +617,7 @@ impl Decoder {
         }
         self.segment.push(bit);
         if self.segment.len() > LONGEST_LINE {
-            self.damaged += 1;
+            self.spoiled();
             self.hunting = true;
             self.segment.clear();
             self.above = None;
@@ -683,9 +683,23 @@ impl Decoder {
                 self.lines.push(line);
             }
             Err(_) => {
-                self.damaged += 1;
+                self.spoiled();
                 self.above = None;
             }
+        }
+    }
+
+    /// A line that could not be read.
+    ///
+    /// Counted only once a line has been. A receiver hands over whatever its
+    /// training made of the line before the page starts, and eleven zeros and
+    /// a one in that are an EOL as far as anything can tell -- so what lies
+    /// between it and the page's own first EOL reads as a spoiled line that
+    /// was never sent. Counted, it made a clean six-line page one line in
+    /// six bad, and asked for again.
+    fn spoiled(&mut self) {
+        if !self.lines.is_empty() {
+            self.damaged += 1;
         }
     }
 }
@@ -710,6 +724,22 @@ mod tests {
                     .collect()
             })
             .collect()
+    }
+
+    #[test]
+    fn noise_in_front_of_the_page_is_not_a_spoiled_line() {
+        let page = a_page(10, 64);
+        // Noise with something that looks like an EOL in it, and then more.
+        let mut bits: Vec<bool> = [0b1011_0110u8, 0b0100_1101, 0, 0b0001_1011, 0b1101_0010]
+            .iter()
+            .flat_map(|b| (0..8).rev().map(move |i| b >> i & 1 == 1))
+            .collect();
+        bits.extend(bits_of(&encode_padded(&page, 0)));
+        let mut decoder = Decoder::with_width(64);
+        decoder.feed_bits(&bits);
+        assert!(decoder.is_done());
+        assert_eq!(decoder.lines(), &page[..]);
+        assert_eq!(decoder.damaged(), 0, "the noise was counted as a line");
     }
 
     fn bits_of(coded: &Bits) -> Vec<bool> {

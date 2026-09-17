@@ -2180,8 +2180,9 @@ impl Modem {
         self.fax.as_ref().or(self.fax_result.as_ref())
     }
 
-    /// A page a fax call received, handed over once and then gone.
-    pub fn take_received_page(&mut self) -> Option<fax::page::Page> {
+    /// A page a fax call received, with its number in the call, handed over
+    /// once and then gone.
+    pub fn take_received_page(&mut self) -> Option<(usize, fax::page::Page)> {
         self.fax
             .as_mut()
             .and_then(FaxCall::take_received)

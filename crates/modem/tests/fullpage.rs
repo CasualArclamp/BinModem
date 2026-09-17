@@ -68,7 +68,7 @@ fn a_whole_page_crosses() {
             let _ = caller.take_dte();
             let _ = answerer.take_dte();
             if arrived.is_none() {
-                arrived = answerer.take_received_page();
+                arrived = answerer.take_received_page().map(|(_, page)| page);
             }
             // Everything a window reads, every sample, because a panel that
             // panics is a call that ends.

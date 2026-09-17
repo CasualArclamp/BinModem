@@ -270,8 +270,9 @@ pub struct Session {
     /// Taken rather than read, and a page is megabytes of booleans, so it
     /// crosses the two threads exactly once.
     fax_page: Mutex<Option<fax::page::Page>>,
-    /// A page that arrived, waiting for the window to take it.
-    fax_received: Mutex<Option<fax::page::Page>>,
+    /// Pages that arrived, with their numbers in the call, waiting for the
+    /// window to take them.
+    fax_received: Mutex<std::collections::VecDeque<(usize, fax::page::Page)>>,
     /// Lines of a page that is still arriving, waiting for the window.
     fax_arriving: Mutex<Option<Arriving>>,
 }
@@ -286,6 +287,8 @@ pub struct Arriving {
     /// Which page these lines belong to. A different number is a different
     /// page, and whatever the window had drawn of the last one goes.
     pub page: u64,
+    /// And which page of its call that is, counting from one.
+    pub sheet: usize,
     pub resolution: fax::page::Resolution,
     /// Where in the page the first of `lines` goes.
     pub from: usize,
@@ -379,15 +382,15 @@ impl Session {
         self.fax_page.lock().ok().and_then(|mut v| v.take())
     }
 
-    fn set_fax_received(&self, page: fax::page::Page) {
+    fn set_fax_received(&self, sheet: usize, page: fax::page::Page) {
         if let Ok(mut v) = self.fax_received.lock() {
-            *v = Some(page);
+            v.push_back((sheet, page));
         }
     }
 
-    /// A page that arrived, once and only once.
-    pub fn take_fax_received(&self) -> Option<fax::page::Page> {
-        self.fax_received.lock().ok().and_then(|mut v| v.take())
+    /// A page that arrived, with its number in the call, once and only once.
+    pub fn take_fax_received(&self) -> Option<(usize, fax::page::Page)> {
+        self.fax_received.lock().ok().and_then(|mut v| v.pop_front())
     }
 
     /// More lines of the page arriving.
@@ -676,9 +679,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     let mut drawing = modem.shape();
     // How much of the page arriving the window has been handed, and which
     // page that was. A page that starts again -- a new call, or the next page
-    // of this one -- has fewer lines than were handed over, and gets a new
-    // number.
-    let (mut fax_page_number, mut fax_lines_handed) = (0u64, 0usize);
+    // of this one -- has a different number in its call, or fewer lines than
+    // were handed over, and gets a new number.
+    let (mut fax_page_number, mut fax_lines_handed, mut fax_sheet) = (0u64, 0usize, 0usize);
 
     let mut from_line: Vec<f32> = Vec::with_capacity(4096);
     let mut to_line: Vec<f32> = Vec::with_capacity(4096);
@@ -1014,13 +1017,15 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             .filter(|c| c.role() == fax::call::Role::Answerer)
         {
             let lines = call.lines();
-            if lines.len() < fax_lines_handed {
+            if lines.len() < fax_lines_handed || call.sheet() != fax_sheet {
                 fax_page_number += 1;
                 fax_lines_handed = 0;
+                fax_sheet = call.sheet();
             }
             if lines.len() > fax_lines_handed {
                 session.push_fax_lines(Arriving {
                     page: fax_page_number,
+                    sheet: fax_sheet,
                     resolution: call.resolution(),
                     from: fax_lines_handed,
                     lines: lines[fax_lines_handed..].to_vec(),
@@ -1028,8 +1033,8 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 fax_lines_handed = lines.len();
             }
         }
-        if let Some(page) = modem.take_received_page() {
-            session.set_fax_received(page);
+        while let Some((sheet, page)) = modem.take_received_page() {
+            session.set_fax_received(sheet, page);
         }
 
         if session.take_hang_up() {
@@ -1357,6 +1362,8 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     f.fax_progress = call.progress();
                     f.fax_rate = call.rate();
                     f.fax_lines = call.lines_received();
+                    f.fax_sheet = call.sheet();
+                    f.fax_sheets = call.sheets();
                     f.fax_error_correction = call.error_correction();
                     f.fax_coding = call.coding().name();
                     f.fax_sending = call.role() == fax::call::Role::Caller;
@@ -1759,6 +1766,7 @@ mod arriving_tests {
     fn batch(page: u64, from: usize, count: usize) -> Arriving {
         Arriving {
             page,
+            sheet: 1,
             resolution: Resolution::Standard,
             from,
             lines: (from..from + count).map(|y| vec![y % 2 == 0; 4]).collect(),

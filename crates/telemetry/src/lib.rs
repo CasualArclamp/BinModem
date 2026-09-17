@@ -164,6 +164,10 @@ pub struct Frame {
     pub fax_progress: Option<f64>,
     pub fax_rate: u32,
     pub fax_lines: usize,
+    /// Which page of the call that is, counting from one, and how many the
+    /// call has as far as this end knows.
+    pub fax_sheet: usize,
+    pub fax_sheets: usize,
     /// Whether the page is going in error correction mode's frames, and in
     /// which coding: both settled by the DCS, so false and "-" until one has
     /// gone.
@@ -217,6 +221,8 @@ impl Frame {
             fax_progress: None,
             fax_rate: 0,
             fax_lines: 0,
+            fax_sheet: 0,
+            fax_sheets: 0,
             fax_error_correction: false,
             fax_coding: "-",
             fax_sending: false,

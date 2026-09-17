@@ -64,6 +64,11 @@ impl FaxCall {
         Self::with(Call::originate(fs, identification, page), fs)
     }
 
+    /// The end that dialled, with several pages to send, in order.
+    pub fn originate_pages(fs: f64, identification: &str, pages: Vec<Page>) -> Self {
+        Self::with(Call::originate_pages(fs, identification, pages), fs)
+    }
+
     /// The end that answered.
     pub fn answer(fs: f64, identification: &str) -> Self {
         Self::with(Call::answer(fs, identification), fs)
@@ -178,17 +183,34 @@ impl FaxCall {
         self.call.resolution()
     }
 
-    /// The page that arrived, once one has.
+    /// The oldest page that arrived and has not been taken, once one has.
     pub fn received(&self) -> Option<&Page> {
-        self.call.received.as_ref()
+        self.call.received()
     }
 
-    /// The page that arrived, handed over and forgotten.
+    /// The oldest page that arrived, with its number in the call, handed over
+    /// and forgotten.
     ///
     /// A page is a couple of megabytes of booleans, so it is moved rather
     /// than copied and moved exactly once. Whoever takes it owns it.
-    pub fn take_received(&mut self) -> Option<Page> {
-        self.call.received.take()
+    pub fn take_received(&mut self) -> Option<(usize, Page)> {
+        self.call.take_received()
+    }
+
+    /// Pages finished so far in this call.
+    pub fn pages_received(&self) -> usize {
+        self.call.pages_received()
+    }
+
+    /// Which page of the call is going or arriving, or last arrived,
+    /// counting from one.
+    pub fn sheet(&self) -> usize {
+        self.call.sheet()
+    }
+
+    /// How many pages the call has, as far as this end knows.
+    pub fn sheets(&self) -> usize {
+        self.call.sheets()
     }
 
     /// Why the call went badly, if it did.
@@ -1053,5 +1075,94 @@ mod tests {
         between(&mut caller, &mut answerer, 40.0);
         assert_eq!(caller.phase(), Phase::Done);
         assert!(answerer.received().is_none(), "a page arrived from nowhere");
+    }
+
+    /// Three pages that differ, so one arriving in another's place shows.
+    fn three_pages() -> Vec<Page> {
+        (0..3)
+            .map(|n| {
+                let mut page = a_page(6 + 2 * n);
+                for line in &mut page.lines {
+                    for pel in &mut line[n * 300..n * 300 + 100] {
+                        *pel = true;
+                    }
+                }
+                page
+            })
+            .collect()
+    }
+
+    /// Run a call to the end, handing back the pages the answering end
+    /// received with their numbers, every frame it heard, and which
+    /// modulation it was listening on while the caller was part way through a
+    /// page.
+    fn run_pages(
+        caller: &mut FaxCall,
+        answerer: &mut FaxCall,
+    ) -> (Vec<(usize, Page)>, Vec<Frame>, Vec<&'static str>) {
+        let (mut to_caller, mut to_answerer) = (0.0, 0.0);
+        let (mut pages, mut heard, mut listening) = (Vec::new(), Vec::new(), Vec::new());
+        for _ in 0..(FS * 120.0) as usize {
+            let a = caller.step(to_caller);
+            let b = answerer.step(to_answerer);
+            to_caller = b;
+            to_answerer = a;
+            heard.extend(answerer.take_heard().into_iter().map(|m| m.frame));
+            pages.extend(answerer.take_received());
+            // Early in the burst: at its end, under error correction, the
+            // receiver has seen the RCP frames and gone back to control
+            // before the sender's modulator has emptied.
+            if caller.phase() == Phase::Sending
+                && caller.progress().is_some_and(|p| (0.2..0.4).contains(&p))
+            {
+                let standard = answerer.standard();
+                if listening.last() != Some(&standard) {
+                    listening.push(standard);
+                }
+            }
+            if caller.phase().is_over() && answerer.phase().is_over() {
+                break;
+            }
+        }
+        (pages, heard, listening)
+    }
+
+    #[test]
+    fn several_pages_arrive_in_one_call_with_error_correction_or_without() {
+        for error_correction in [false, true] {
+            let sent = three_pages();
+            let mut caller = FaxCall::originate_pages(FS, "61399990000", sent.clone());
+            let mut answerer =
+                FaxCall::answer(FS, "61388880000").with_error_correction(error_correction);
+            let (got, heard, listening) = run_pages(&mut caller, &mut answerer);
+            for (end, call) in [("caller", &caller), ("answerer", &answerer)] {
+                assert_eq!(
+                    call.phase(),
+                    Phase::Done,
+                    "the {end} ended at {} ({:?}), ecm {error_correction}",
+                    call.phase().name(),
+                    call.trouble()
+                );
+                assert_eq!(call.trouble(), None, "the {end}, ecm {error_correction}: {heard:?}");
+            }
+            assert_eq!((caller.sheet(), caller.sheets()), (3, 3));
+            assert_eq!((answerer.sheet(), answerer.sheets()), (3, 3));
+            let numbers: Vec<usize> = got.iter().map(|(n, _)| *n).collect();
+            assert_eq!(numbers, [1, 2, 3], "ecm {error_correction}: {heard:?}");
+            for ((n, page), want) in got.iter().zip(&sent) {
+                assert_eq!(page.lines, want.lines, "page {n} came out different, ecm {error_correction}");
+            }
+            assert_eq!(answerer.pages_received(), 3);
+            // What the user saw on a real call: the second page drawn as the
+            // control channel's FSK, because nothing was listening for it.
+            assert_eq!(listening, ["V.29"], "ecm {error_correction}");
+            let count = |f: Frame| heard.iter().filter(|h| **h == f).count();
+            if error_correction {
+                assert!(count(Frame::Pps) >= 3, "{heard:?}");
+                assert_eq!(count(Frame::Mps) + count(Frame::Eop), 0, "{heard:?}");
+            } else {
+                assert_eq!((count(Frame::Mps), count(Frame::Eop)), (2, 1), "{heard:?}");
+            }
+        }
     }
 }

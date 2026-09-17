@@ -59,6 +59,9 @@ pub struct Fax {
     pub progress: Option<f64>,
     pub rate: u32,
     pub lines: usize,
+    /// Which page of the call is going or arriving, and how many it has.
+    pub sheet: usize,
+    pub sheets: usize,
     /// Whether the call in progress is using error correction mode, and the
     /// coding the page is in.
     pub correcting: bool,
@@ -69,10 +72,16 @@ pub struct Fax {
     /// The number to dial, and what this end calls itself.
     pub number: String,
     pub identification: String,
-    /// A page that arrived.
+    /// A page that arrived: the one `scan` is a picture of.
     incoming: Option<Page>,
     /// The page arriving, or the last one that did, drawn as it came in.
     scan: Option<Scan>,
+    /// The pages of the same call that arrived before that one, with their
+    /// numbers in it.
+    earlier: Vec<(usize, Page)>,
+    /// One of those being looked at instead, by its place in `earlier`, and
+    /// its picture.
+    looking: Option<(usize, Scan)>,
     /// What was said about saving the last page.
     pub saved: Option<String>,
 }
@@ -154,8 +163,10 @@ fn picture_size(width: f32, rows: usize) -> egui::Vec2 {
 /// again -- so each new row costs the texture a strip of 576 texels rather
 /// than the whole page every time a line comes off the decoder.
 struct Scan {
-    /// Which page this is, as the line numbered it.
+    /// Which page this is, as the line numbered it, and which page of its
+    /// call.
     page: u64,
+    sheet: usize,
     resolution: Resolution,
     lines: Vec<Vec<bool>>,
     /// The rows finished so far, SCAN_WIDTH texels to a row.
@@ -170,9 +181,17 @@ struct Scan {
 }
 
 impl Scan {
-    fn new(page: u64, resolution: Resolution) -> Self {
+    /// The picture of a page that is already whole.
+    fn of(sheet: usize, page: &Page) -> Self {
+        let mut scan = Self::new(u64::MAX, sheet, page.resolution);
+        scan.extend(0, page.lines.clone());
+        scan
+    }
+
+    fn new(page: u64, sheet: usize, resolution: Resolution) -> Self {
         Self {
             page,
+            sheet,
             resolution,
             lines: Vec::new(),
             pixels: Vec::new(),
@@ -277,6 +296,25 @@ impl Scan {
         }
         self.texture.clone()
     }
+}
+
+/// Write a page out as a picture, each line as many pixels tall as makes the
+/// pels square.
+fn write_page(lines: &[Vec<bool>], resolution: Resolution, path: &std::path::Path) -> Result<(), String> {
+    let tall = (fax::page::PELS_PER_MM / resolution.lines_per_mm())
+        .round()
+        .max(1.0) as usize;
+    let width = fax::page::WIDTH;
+    let height = lines.len() * tall;
+    let mut pixels = Vec::with_capacity(width * height);
+    for line in lines {
+        for _ in 0..tall {
+            pixels.extend(line.iter().map(|ink| if *ink { 0u8 } else { 255u8 }));
+        }
+    }
+    let image = image::GrayImage::from_raw(width as u32, height as u32, pixels)
+        .ok_or_else(|| "the page did not come out rectangular".to_owned())?;
+    image.save(path).map_err(|e| format!("{e}"))
 }
 
 impl Fax {
@@ -402,6 +440,8 @@ impl Fax {
         self.progress = frame.fax_progress;
         self.rate = frame.fax_rate;
         self.lines = frame.fax_lines;
+        self.sheet = frame.fax_sheet;
+        self.sheets = frame.fax_sheets;
         self.correcting = frame.fax_error_correction;
         self.coding = frame.fax_coding;
         self.sending = frame.fax_sending;
@@ -431,19 +471,53 @@ impl Fax {
     /// window did not get every line of it -- or got the page before the last
     /// few, which the two threads are free to do -- the picture is made again
     /// from the page itself.
-    pub fn arrived(&mut self, page: Page) {
-        let drawn = self.scan.as_ref().is_some_and(|scan| {
-            scan.lines.len() == page.lines.len() && scan.resolution == page.resolution
-        });
+    pub fn arrived(&mut self, sheet: usize, page: Page) {
+        let same = self.scan.as_ref().is_some_and(|scan| scan.sheet == sheet);
+        let drawn = same
+            && self.scan.as_ref().is_some_and(|scan| {
+                scan.lines.len() == page.lines.len() && scan.resolution == page.resolution
+            });
+        if !same {
+            self.next_sheet(sheet);
+        }
         if !drawn {
             // Keep the number of the page being drawn, so the lines of it
             // still on their way are known for what they are.
-            let number = self.scan.as_ref().map_or(u64::MAX, |scan| scan.page);
-            let mut scan = Scan::new(number, page.resolution);
-            scan.extend(0, page.lines.clone());
+            let mut scan = Scan::of(sheet, &page);
+            scan.page = self.scan.as_ref().map_or(u64::MAX, |scan| scan.page);
             self.scan = Some(scan);
         }
         self.incoming = Some(page);
+        self.saved = None;
+    }
+
+    /// Another page of a call is starting. The one before it goes with the
+    /// call's others -- or, if this is the first page of a call, the last
+    /// call's pages go.
+    fn next_sheet(&mut self, sheet: usize) {
+        if let Some(page) = self.incoming.take() {
+            let before = self.scan.as_ref().map_or(0, |scan| scan.sheet);
+            self.earlier.push((before, page));
+        }
+        if sheet <= 1 {
+            self.earlier.clear();
+        }
+        self.looking = None;
+        self.saved = None;
+    }
+
+    /// Look at the page `step` places away from the one in view, among the
+    /// call's pages.
+    fn look(&mut self, step: isize) {
+        let at = self.looking.as_ref().map_or(self.earlier.len(), |(i, _)| *i);
+        let last = self.earlier.len() + usize::from(self.scan.is_some());
+        let Some(to) = at.checked_add_signed(step).filter(|to| *to < last) else {
+            return;
+        };
+        self.looking = self
+            .earlier
+            .get(to)
+            .map(|(sheet, page)| (to, Scan::of(*sheet, page)));
         self.saved = None;
     }
 
@@ -458,12 +532,12 @@ impl Fax {
             .as_ref()
             .is_none_or(|scan| scan.page != arriving.page && arriving.from == 0);
         if fresh {
-            self.scan = Some(Scan::new(arriving.page, arriving.resolution));
-            self.incoming = None;
-            self.saved = None;
+            self.next_sheet(arriving.sheet);
+            self.scan = Some(Scan::new(arriving.page, arriving.sheet, arriving.resolution));
         }
         if let Some(scan) = self.scan.as_mut() {
             scan.page = arriving.page;
+            scan.sheet = arriving.sheet;
             scan.extend(arriving.from, arriving.lines);
             scan.last_line = now;
         }
@@ -481,30 +555,63 @@ impl Fax {
     /// A page still arriving saves as far as it has got, which is also what
     /// is left of a call that ended part way down the page.
     pub fn save(&mut self, path: &std::path::Path) {
-        let (lines, resolution) = match (self.incoming.as_ref(), self.scan.as_ref()) {
-            (Some(page), _) => (&page.lines, page.resolution),
-            (None, Some(scan)) if !scan.lines.is_empty() => (&scan.lines, scan.resolution),
-            _ => return,
-        };
-        let tall = (fax::page::PELS_PER_MM / resolution.lines_per_mm())
-            .round()
-            .max(1.0) as usize;
-        let width = fax::page::WIDTH;
-        let height = lines.len() * tall;
-        let mut pixels = Vec::with_capacity(width * height);
-        for line in lines {
-            for _ in 0..tall {
-                pixels.extend(line.iter().map(|ink| if *ink { 0u8 } else { 255u8 }));
-            }
-        }
-        let said = match image::GrayImage::from_raw(width as u32, height as u32, pixels) {
-            None => "the page did not come out rectangular".to_owned(),
-            Some(image) => match image.save(path) {
+        let said = match self.in_view() {
+            Some((_, lines, resolution)) => match write_page(lines, resolution, path) {
                 Ok(()) => format!("saved to {}", path.display()),
-                Err(e) => format!("{e}"),
+                Err(e) => e,
             },
+            None => return,
         };
         self.saved = Some(said);
+    }
+
+    /// The page in view: an earlier one being looked at, or the last to
+    /// arrive, or as much of the one arriving as has.
+    fn in_view(&self) -> Option<(usize, &[Vec<bool>], Resolution)> {
+        if let Some((i, _)) = &self.looking {
+            let (sheet, page) = self.earlier.get(*i)?;
+            return Some((*sheet, &page.lines, page.resolution));
+        }
+        let scan = self.scan.as_ref();
+        let sheet = scan.map_or(0, |scan| scan.sheet);
+        match (self.incoming.as_ref(), scan) {
+            (Some(page), _) => Some((sheet, &page.lines, page.resolution)),
+            (None, Some(scan)) if !scan.lines.is_empty() => {
+                Some((sheet, &scan.lines, scan.resolution))
+            }
+            _ => None,
+        }
+    }
+
+    /// Every page of the call, each to its own file: `fax.png` becomes
+    /// `fax-1.png`, `fax-2.png` and so on, by the page's number in the call.
+    pub fn save_all(&mut self, path: &std::path::Path) {
+        let stem = path.file_stem().map_or_else(|| "fax".into(), |s| s.to_string_lossy());
+        let named = |sheet: usize| path.with_file_name(format!("{stem}-{sheet}.png"));
+        let mut pages: Vec<(usize, &[Vec<bool>], Resolution)> = self
+            .earlier
+            .iter()
+            .map(|(sheet, page)| (*sheet, page.lines.as_slice(), page.resolution))
+            .collect();
+        if let Some(scan) = self.scan.as_ref() {
+            match self.incoming.as_ref() {
+                Some(page) => pages.push((scan.sheet, &page.lines, page.resolution)),
+                None if !scan.lines.is_empty() => pages.push((scan.sheet, &scan.lines, scan.resolution)),
+                None => {}
+            }
+        }
+        let mut written = 0;
+        let mut trouble = None;
+        for (sheet, lines, resolution) in pages {
+            match write_page(lines, resolution, &named(sheet)) {
+                Ok(()) => written += 1,
+                Err(e) => trouble = Some(e),
+            }
+        }
+        self.saved = Some(match trouble {
+            Some(e) => e,
+            None => format!("{written} pages saved as {}", named(0).with_file_name(format!("{stem}-N.png")).display()),
+        });
     }
 
     /// Draw the window. Returns what the user asked the modem to do.
@@ -851,6 +958,16 @@ impl Fax {
             if self.correcting {
                 ui.label(RichText::new("with error correction").small().color(dim));
             }
+            if self.sending && self.sheets > 1 {
+                ui.label(
+                    RichText::new(format!("page {} of {}", self.sheet, self.sheets))
+                        .small()
+                        .color(dim),
+                );
+            }
+            if !self.sending && self.sheet > 1 {
+                ui.label(RichText::new(format!("page {}", self.sheet)).small().color(dim));
+            }
             if !self.sending && self.lines > 0 {
                 ui.label(
                     RichText::new(format!("{} lines", self.lines))
@@ -873,26 +990,71 @@ impl Fax {
     fn receive_row(&mut self, ui: &mut egui::Ui, dim: Color32, bright: Color32) {
         ui.separator();
         let now = ui.input(|i| i.time);
-        let arriving = self
-            .scan
-            .as_ref()
-            .is_some_and(|scan| self.incoming.is_none() && now - scan.last_line < STILL_ARRIVING);
-        let heading = match (self.scan.as_ref(), self.incoming.is_some(), arriving) {
-            (None, _, _) => "page received".to_owned(),
-            (Some(scan), _, true) => format!("page arriving: {} lines", scan.lines.len()),
-            (Some(scan), true, false) => format!("page received: {} lines", scan.lines.len()),
-            // A call that ended part way down a page, or one whose page has
-            // stopped and not yet been handed over.
-            (Some(scan), false, false) => {
-                format!("page, as far as it came: {} lines", scan.lines.len())
+        let arriving = self.looking.is_none()
+            && self
+                .scan
+                .as_ref()
+                .is_some_and(|scan| self.incoming.is_none() && now - scan.last_line < STILL_ARRIVING);
+        let pages = self.earlier.len() + usize::from(self.scan.is_some());
+        let at = self.looking.as_ref().map_or(self.earlier.len(), |(i, _)| *i);
+        // "Page" alone for a call of one page, and its number for any other.
+        let named = |sheet: usize| {
+            if pages > 1 || sheet > 1 {
+                format!("page {sheet}")
+            } else {
+                "page".to_owned()
             }
         };
-        let mut save = false;
+        let heading = match (&self.looking, self.scan.as_ref(), self.incoming.is_some(), arriving) {
+            (Some((_, scan)), _, _, _) => {
+                format!("{} received: {} lines", named(scan.sheet), scan.lines.len())
+            }
+            (None, None, _, _) => "page received".to_owned(),
+            (None, Some(scan), _, true) => {
+                format!("{} arriving: {} lines", named(scan.sheet), scan.lines.len())
+            }
+            (None, Some(scan), true, false) => {
+                format!("{} received: {} lines", named(scan.sheet), scan.lines.len())
+            }
+            // A call that ended part way down a page, or one whose page has
+            // stopped and not yet been handed over.
+            (None, Some(scan), false, false) => {
+                format!("{}, as far as it came: {} lines", named(scan.sheet), scan.lines.len())
+            }
+        };
+        let (mut save, mut save_all, mut step) = (false, false, 0isize);
         egui::CollapsingHeader::new(RichText::new(heading).color(dim))
             .id_salt("fax-receive")
             .default_open(true)
             .show(ui, |ui| {
-                let Some(scan) = self.scan.as_mut() else {
+                if pages > 1 {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(at > 0, egui::Button::new("<"))
+                            .on_hover_text("the page before")
+                            .clicked()
+                        {
+                            step = -1;
+                        }
+                        ui.label(
+                            RichText::new(format!("{} of {pages} pages", at + 1))
+                                .monospace()
+                                .color(bright),
+                        );
+                        if ui
+                            .add_enabled(at + 1 < pages, egui::Button::new(">"))
+                            .on_hover_text("the page after, and the last is the one arriving")
+                            .clicked()
+                        {
+                            step = 1;
+                        }
+                    });
+                }
+                let (scan, page) = match self.looking.as_mut() {
+                    Some((i, scan)) => (Some(scan), self.earlier.get(*i).map(|(_, page)| page)),
+                    None => (self.scan.as_mut(), self.incoming.as_ref()),
+                };
+                let Some(scan) = scan else {
                     ui.label(
                         RichText::new(
                             "Nothing yet. Press Wait for a fax, and a page \
@@ -945,7 +1107,7 @@ impl Fax {
                             .monospace()
                             .color(bright),
                     );
-                    if let Some(page) = self.incoming.as_ref() {
+                    if let Some(page) = page {
                         ui.label(
                             RichText::new(format!(
                                 "{:.1}% of the paper is ink",
@@ -962,6 +1124,15 @@ impl Fax {
                              arriving or the call ended part way down it",
                         )
                         .clicked();
+                    if pages > 1 {
+                        save_all = ui
+                            .button(format!("Save all {pages}"))
+                            .on_hover_text(
+                                "Every page of the call, each to its own file: \
+                                 the name chosen with the page's number after it",
+                            )
+                            .clicked();
+                    }
                 });
                 if let Some(saved) = &self.saved {
                     ui.label(RichText::new(saved).small().color(dim));
@@ -972,13 +1143,27 @@ impl Fax {
             // be about to ask for a frame when it does.
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
         }
+        if step != 0 {
+            self.look(step);
+        }
         if save
+            && let Some(chosen) = rfd::FileDialog::new()
+                .add_filter("pictures", &["png"])
+                .set_file_name(match self.in_view() {
+                    Some((sheet, _, _)) if pages > 1 => format!("fax-{sheet}.png"),
+                    _ => "fax.png".to_owned(),
+                })
+                .save_file()
+        {
+            self.save(&chosen);
+        }
+        if save_all
             && let Some(chosen) = rfd::FileDialog::new()
                 .add_filter("pictures", &["png"])
                 .set_file_name("fax.png")
                 .save_file()
         {
-            self.save(&chosen);
+            self.save_all(&chosen);
         }
     }
 
@@ -1033,7 +1218,7 @@ mod tests {
         // down and 215 across -- not a standard page half the height of the
         // same page sent fine.
         for resolution in [Resolution::Standard, Resolution::Fine] {
-            let mut scan = Scan::new(0, resolution);
+            let mut scan = Scan::new(0, 1, resolution);
             scan.extend(0, lines_of(resolution.lines(), false));
             let tall = scan.rows as f64 / SCAN_WIDTH as f64;
             assert!(
@@ -1051,7 +1236,7 @@ mod tests {
         // could still change would have to be sent again.
         for resolution in [Resolution::Standard, Resolution::Fine] {
             let page = page_of(300);
-            let mut scan = Scan::new(0, resolution);
+            let mut scan = Scan::new(0, 1, resolution);
             let mut before: Vec<Color32> = Vec::new();
             for (i, line) in page.lines.iter().enumerate() {
                 scan.extend(i, vec![line.clone()]);
@@ -1059,7 +1244,7 @@ mod tests {
                 assert_eq!(&scan.pixels[..before.len()], &before[..], "a finished row changed");
                 before.clone_from(&scan.pixels);
             }
-            let mut whole = Scan::new(0, resolution);
+            let mut whole = Scan::new(0, 1, resolution);
             whole.extend(0, page.lines.clone());
             assert_eq!(scan.pixels, whole.pixels, "a line at a time is not the same picture");
         }
@@ -1067,7 +1252,7 @@ mod tests {
 
     #[test]
     fn ink_draws_dark_and_paper_light() {
-        let mut scan = Scan::new(0, Resolution::Standard);
+        let mut scan = Scan::new(0, 1, Resolution::Standard);
         scan.extend(0, lines_of(20, true));
         scan.extend(20, lines_of(20, false));
         assert_eq!(scan.pixels.first(), Some(&Color32::from_rgb(0, 0, 0)));
@@ -1076,7 +1261,7 @@ mod tests {
 
     #[test]
     fn lines_that_come_twice_are_drawn_once_and_lines_past_a_gap_not_at_all() {
-        let mut scan = Scan::new(0, Resolution::Standard);
+        let mut scan = Scan::new(0, 1, Resolution::Standard);
         scan.extend(0, lines_of(10, false));
         scan.extend(5, lines_of(10, false));
         assert_eq!(scan.lines.len(), 15);
@@ -1091,26 +1276,28 @@ mod tests {
         let page = page_of(40);
         let batch = |from: usize, to: usize| Arriving {
             page: 3,
+            sheet: 1,
             resolution: Resolution::Standard,
             from,
             lines: page.lines[from..to].to_vec(),
         };
         let mut fax = Fax::new();
         assert!(fax.arriving(batch(0, 30), 1.0), "the top of a page is a new page");
-        fax.arrived(page.clone());
+        fax.arrived(1, page.clone());
         assert!(!fax.arriving(batch(30, 40), 1.1), "its own last lines are not");
         assert_eq!(fax.scan.as_ref().map(|s| &s.lines), Some(&page.lines));
         assert!(fax.incoming.is_some(), "the page that arrived was forgotten");
 
         // A page handed over whole before any of its lines were.
         let mut fax = Fax::new();
-        fax.arrived(page.clone());
+        fax.arrived(1, page.clone());
         assert!(!fax.arriving(batch(35, 40), 2.0));
         assert_eq!(fax.scan.as_ref().map(|s| &s.lines), Some(&page.lines));
 
         // And the next page is new, and the last one goes.
         let next = Arriving {
             page: 4,
+            sheet: 1,
             resolution: Resolution::Fine,
             from: 0,
             lines: page.lines[..5].to_vec(),
@@ -1128,6 +1315,7 @@ mod tests {
         fax.arriving(
             Arriving {
                 page: 0,
+                sheet: 1,
                 resolution: Resolution::Standard,
                 from: 0,
                 lines: page_of(25).lines,
@@ -1147,7 +1335,7 @@ mod tests {
     fn the_texture_has_room_for_a_sheet_and_grows_for_a_longer_page() {
         let ctx = egui::Context::default();
         let largest = ctx.input(|i| i.max_texture_side);
-        let mut scan = Scan::new(0, Resolution::Standard);
+        let mut scan = Scan::new(0, 1, Resolution::Standard);
         assert!(scan.texture(&ctx).is_none(), "a texture for nothing");
         scan.extend(0, lines_of(100, false));
         let texture = scan.texture(&ctx).expect("no texture");
@@ -1211,6 +1399,7 @@ mod tests {
             fax.arriving(
                 Arriving {
                     page: 0,
+                    sheet: 1,
                     resolution: Resolution::Standard,
                     from: had,
                     lines: page.lines[had..lines].to_vec(),
@@ -1282,7 +1471,7 @@ mod tests {
             let mut fax = Fax::new();
             let mut page = page_of(20);
             page.resolution = resolution;
-            fax.arrived(page);
+            fax.arrived(1, page);
             let path = dir.join(format!("{}.png", resolution.name().replace(['.', ',', ' ', '/'], "-")));
             fax.save(&path);
             let saved = fax.saved.clone().unwrap_or_default();
@@ -1292,5 +1481,60 @@ mod tests {
             assert_eq!(image.height() as usize, 20 * tall);
             let _ = std::fs::remove_file(&path);
         }
+    }
+
+    #[test]
+    fn the_pages_of_a_call_are_kept_and_can_be_looked_at_and_saved() {
+        let pages: Vec<Page> = (0..3).map(|n| page_of(10 + n)).collect();
+        let mut fax = Fax::new();
+        for (n, page) in pages.iter().enumerate() {
+            let sheet = n + 1;
+            let arriving = Arriving {
+                page: 10 + n as u64,
+                sheet,
+                resolution: Resolution::Standard,
+                from: 0,
+                lines: page.lines[..4].to_vec(),
+            };
+            assert!(fax.arriving(arriving, n as f64), "page {sheet} is not a new page");
+            fax.arrived(sheet, page.clone());
+        }
+        let kept: Vec<(usize, usize)> = fax.earlier.iter().map(|(n, p)| (*n, p.lines.len())).collect();
+        assert_eq!(kept, [(1, 10), (2, 11)]);
+        assert_eq!(fax.in_view().map(|(n, l, _)| (n, l.len())), Some((3, 12)));
+
+        fax.look(-1);
+        assert_eq!(fax.in_view().map(|(n, l, _)| (n, l.len())), Some((2, 11)));
+        fax.look(-1);
+        fax.look(-1);
+        assert_eq!(fax.in_view().map(|(n, _, _)| n), Some(1), "went before the first");
+        fax.look(1);
+        fax.look(1);
+        assert_eq!(fax.in_view().map(|(n, _, _)| n), Some(3));
+        assert!(fax.looking.is_none(), "the last page is the one arriving");
+        fax.look(1);
+        assert_eq!(fax.in_view().map(|(n, _, _)| n), Some(3), "went past the last");
+
+        let dir = std::env::temp_dir().join("binmodem-faxwin-pages");
+        let _ = std::fs::create_dir_all(&dir);
+        fax.save_all(&dir.join("call.png"));
+        for (n, page) in pages.iter().enumerate() {
+            let path = dir.join(format!("call-{}.png", n + 1));
+            let image = image::open(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            assert_eq!(image.height() as usize, page.lines.len() * 2);
+            let _ = std::fs::remove_file(&path);
+        }
+        assert!(fax.saved.as_deref().is_some_and(|s| s.starts_with("3 pages")), "{:?}", fax.saved);
+
+        // A new call's first page, and the last call's pages go.
+        let arriving = Arriving {
+            page: 20,
+            sheet: 1,
+            resolution: Resolution::Standard,
+            from: 0,
+            lines: pages[0].lines[..2].to_vec(),
+        };
+        assert!(fax.arriving(arriving, 9.0));
+        assert!(fax.earlier.is_empty(), "the last call's pages are still there");
     }
 }

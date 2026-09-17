@@ -17,6 +17,8 @@
 //! are talking, and every turnaround has a settling time either side of it
 //! that is longer than it looks like it should be.
 
+use std::collections::VecDeque;
+
 use crate::coding::{self, Coding};
 use crate::ecm;
 use crate::frames::{Message, Reader, Sender};
@@ -314,11 +316,22 @@ pub struct Call {
     ecm_fed: usize,
     ecm_expected: usize,
     ecm_confirmed: Option<(u8, u8)>,
-    ecm_response: Option<Message>,
+    /// The answer to go out next, and where the call goes once it has.
+    response: Option<Message>,
     after_answering: Phase,
+    /// The last post-message command answered without error correction, and
+    /// the answer. A sender that did not hear the answer sends the command
+    /// again (5.4.2), and it gets the same answer rather than a second
+    /// judgement of a page that has gone.
+    answered: Option<(Frame, Frame, Phase)>,
+    /// When the call last went back to phase B, which is where T1 counts from
+    /// for the command that should follow.
+    phase_b_since: f64,
 
     /// The page this end is sending, if it has one.
     page: Option<Page>,
+    /// And the pages to send after it, in order.
+    more: VecDeque<Page>,
     /// That page coded, and how far through it the line has got.
     fast_out: Vec<bool>,
     fast_at: usize,
@@ -340,8 +353,14 @@ pub struct Call {
     held: f64,
     /// The page arriving, if one is.
     decoder: coding::Decoder,
-    /// The page that arrived.
-    pub received: Option<Page>,
+    /// Pages that have arrived and not been taken yet, oldest first, each with
+    /// its number in the call.
+    received: VecDeque<(usize, Page)>,
+    /// Pages finished so far, which page of the call is arriving or last
+    /// arrived, counting from one, and whether that one has been finished.
+    pages_received: usize,
+    sheet: usize,
+    kept: bool,
     /// Whether the last thing judged was good, which decides what follows the
     /// frame now going out.
     accepted: bool,
@@ -358,15 +377,24 @@ impl Call {
     /// anything: a call with no page still identifies itself, learns what the
     /// far end is, and hangs up politely.
     pub fn originate(fs: f64, identification: &str, page: Option<Page>) -> Self {
-        Self::new(Role::Caller, fs, identification, page)
+        Self::new(Role::Caller, fs, identification, page.into_iter().collect())
+    }
+
+    /// The end that dialled, with several pages to send, in order.
+    pub fn originate_pages(fs: f64, identification: &str, pages: Vec<Page>) -> Self {
+        Self::new(Role::Caller, fs, identification, pages)
     }
 
     /// The end that answered.
     pub fn answer(fs: f64, identification: &str) -> Self {
-        Self::new(Role::Answerer, fs, identification, None)
+        Self::new(Role::Answerer, fs, identification, Vec::new())
     }
 
-    fn new(role: Role, fs: f64, identification: &str, page: Option<Page>) -> Self {
+    fn new(role: Role, fs: f64, identification: &str, pages: Vec<Page>) -> Self {
+        let mut more: VecDeque<Page> = pages.into();
+        let page = more.pop_front();
+        let fine = page.iter().chain(&more).any(|p| p.resolution == Resolution::Fine);
+        let sheet = usize::from(page.is_some());
         Self {
             role,
             phase: match role {
@@ -391,7 +419,7 @@ impl Call {
             fallback: Vec::new(),
             offer: OUR_MODULATIONS.to_vec(),
             scan_line_field: 0b111,
-            resolution: page.as_ref().map_or(Resolution::Standard, |p| p.resolution),
+            resolution: if fine { Resolution::Fine } else { Resolution::Standard },
             coding: Coding::ModifiedHuffman,
             error_correction_offered: true,
             ecm: false,
@@ -406,9 +434,12 @@ impl Call {
             ecm_fed: 0,
             ecm_expected: 0,
             ecm_confirmed: None,
-            ecm_response: None,
+            response: None,
             after_answering: Phase::AwaitingDisconnect,
+            answered: None,
+            phase_b_since: 0.0,
             page,
+            more,
             fast_out: Vec::new(),
             fast_at: 0,
             fast_in: Vec::new(),
@@ -419,7 +450,10 @@ impl Call {
             control_carrier: false,
             held: 0.0,
             decoder: coding::Decoder::new(Coding::ModifiedHuffman),
-            received: None,
+            received: VecDeque::new(),
+            pages_received: 0,
+            sheet,
+            kept: false,
             accepted: false,
             attempts: 0,
             trouble: None,
@@ -528,6 +562,37 @@ impl Call {
         }
     }
 
+    /// The oldest page that has arrived and not been taken.
+    pub fn received(&self) -> Option<&Page> {
+        self.received.front().map(|(_, page)| page)
+    }
+
+    /// The oldest page that has arrived, with its number in the call, handed
+    /// over and forgotten.
+    pub fn take_received(&mut self) -> Option<(usize, Page)> {
+        self.received.pop_front()
+    }
+
+    /// Pages finished so far in this call, taken or not.
+    pub fn pages_received(&self) -> usize {
+        self.pages_received
+    }
+
+    /// Which page of the call is going or arriving, or last arrived,
+    /// counting from one. Nought before the first arrives.
+    pub fn sheet(&self) -> usize {
+        self.sheet
+    }
+
+    /// How many pages the call has: the ones to send, for the end sending,
+    /// and the ones that have arrived or are arriving, for the end receiving.
+    pub fn sheets(&self) -> usize {
+        match self.role {
+            Role::Caller => self.sheet + self.more.len(),
+            Role::Answerer => self.sheet,
+        }
+    }
+
     /// Lines of the page that have arrived.
     pub fn lines_received(&self) -> usize {
         self.decoder.lines().len()
@@ -594,7 +659,7 @@ impl Call {
     /// A bit recovered from the control channel.
     pub fn control_bit(&mut self, bit: bool) {
         if let Some(message) = self.reader.feed(bit) {
-            self.received(message);
+            self.frame_arrived(message);
         }
     }
 
@@ -804,11 +869,11 @@ impl Call {
                     if self.ecm_octets.is_empty() && self.collector.count() == 0 {
                         // Nothing of this page is here yet, so it is a new
                         // one and the last page's lines can go.
-                        self.decoder.reset_to(self.coding);
+                        self.new_sheet();
                         self.ecm_fed = 0;
                     }
                 } else {
-                    self.decoder.reset_to(self.coding);
+                    self.new_sheet();
                 }
                 self.fast_seen = false;
                 self.fast_up = 0.0;
@@ -840,7 +905,7 @@ impl Call {
 
     // ---- what the far end said --------------------------------------------
 
-    fn received(&mut self, message: Message) {
+    fn frame_arrived(&mut self, message: Message) {
         // Everything that arrives on the control channel resets the clock:
         // the far end is there and is talking, which is what the timers are
         // really asking about.
@@ -918,6 +983,7 @@ impl Call {
                     self.collector = ecm::Collector::new();
                     self.ecm_octets.clear();
                     self.ecm_confirmed = None;
+                    self.answered = None;
                     self.pause_then(Phase::CheckingTraining);
                 }
             }
@@ -941,6 +1007,20 @@ impl Call {
                 if self.phase == Phase::AwaitingReceipt {
                     if self.ecm {
                         self.next_block();
+                    } else if let Some(next) = self.more.pop_front() {
+                        self.page = Some(next);
+                        self.sheet += 1;
+                        self.attempts = 0;
+                        // 5.3.6.1.6: after MCF to a multi-page signal the
+                        // next page follows at once. After RTP it follows
+                        // "after retransmission of training and CFR"
+                        // (5.3.6.1.7), which is a command and a training
+                        // check first.
+                        if message.frame == Frame::Rtp {
+                            self.pause_then(Phase::Commanding);
+                        } else {
+                            self.pause_then(Phase::Sending);
+                        }
                     } else {
                         self.pause_then(Phase::Ending);
                     }
@@ -976,8 +1056,19 @@ impl Call {
             // it is waiting for the page carrier: a sender whose partial page
             // signal went unanswered sends it again, and it has to be heard.
             Frame::Pps => {
-                if self.ecm && matches!(self.phase, Phase::Receiving | Phase::AwaitingPostMessage) {
-                    self.partial_page_signal(&message.fif);
+                if self.ecm {
+                    match self.phase {
+                        Phase::Receiving | Phase::AwaitingPostMessage => {
+                            self.partial_page_signal(&message.fif);
+                        }
+                        // The confirmation of a page's last block was lost,
+                        // and the call had already gone where the command
+                        // sent it.
+                        Phase::AwaitingCommand | Phase::AwaitingDisconnect => {
+                            self.last_block_again(&message.fif);
+                        }
+                        _ => {}
+                    }
                 }
             }
             Frame::Eor => {
@@ -1004,8 +1095,13 @@ impl Call {
             }
             Frame::Eop | Frame::Mps | Frame::Eom => {
                 if self.phase == Phase::AwaitingPostMessage {
-                    self.finish_page();
-                    self.pause_then(Phase::Acknowledging);
+                    self.post_message(message.frame);
+                } else if !self.ecm
+                    && self.may_be_asked_again()
+                    && let Some((command, answer, next)) = self.answered
+                    && command == message.frame
+                {
+                    self.respond(Message::new(answer, false), next);
                 }
             }
             // 5.3.7: either end may disconnect at any point, and a disconnect
@@ -1048,7 +1144,7 @@ impl Call {
                 }
             }
             Phase::AwaitingCommand => {
-                if self.elapsed > T1_SECONDS {
+                if self.elapsed - self.phase_b_since > T1_SECONDS {
                     self.give_up("the far end never said what it wanted");
                 } else {
                     // 5.4.2: say it again. A DIS that was not heard is the
@@ -1136,8 +1232,8 @@ impl Call {
         // if not. And the two-dimensional coding whenever the far end reads
         // it, since on anything with lines in it the page comes out smaller.
         if let Some(caps) = self.capabilities.as_ref() {
-            let wanted = self.page.as_ref().map_or(Resolution::Standard, |p| p.resolution);
-            self.resolution = if wanted == Resolution::Fine && caps.fine_resolution {
+            let wanted = self.page.iter().chain(&self.more).any(|p| p.resolution == Resolution::Fine);
+            self.resolution = if wanted && caps.fine_resolution {
                 Resolution::Fine
             } else {
                 Resolution::Standard
@@ -1210,13 +1306,20 @@ impl Call {
         };
         // A fine page to a machine that only prints standard loses every
         // other line: 7.7 lines to the millimetre is exactly twice 3.85, so
-        // that is the same page at the resolution it can take.
-        let halved: Vec<Vec<bool>>;
-        let lines = if page.resolution == Resolution::Fine && self.resolution == Resolution::Standard {
-            halved = page.lines.iter().step_by(2).cloned().collect();
-            &halved
-        } else {
-            &page.lines
+        // that is the same page at the resolution it can take. A standard
+        // page in a call that went fine for another page is the other way
+        // round, every line twice.
+        let resized: Vec<Vec<bool>>;
+        let lines = match (page.resolution, self.resolution) {
+            (Resolution::Fine, Resolution::Standard) => {
+                resized = page.lines.iter().step_by(2).cloned().collect();
+                &resized
+            }
+            (Resolution::Standard, Resolution::Fine) => {
+                resized = page.lines.iter().flat_map(|line| [line.clone(), line.clone()]).collect();
+                &resized
+            }
+            _ => &page.lines,
         };
         self.coding.encode(lines, self.resolution, min_bits)
     }
@@ -1261,18 +1364,21 @@ impl Call {
 
     fn send_end_of_page(&mut self) {
         self.attempts += 1;
+        let more = !self.more.is_empty();
         if !self.ecm {
-            // One page and no more, so end of procedure rather than
-            // multi-page signal (6.2.9).
-            self.sender.send(&[Message::new(Frame::Eop, true)]);
+            // A multi-page signal while there are pages to come, and end of
+            // procedure after the last (5.3.6.1.6). The pages go at the terms
+            // already agreed, so there is never an end of message.
+            let frame = if more { Frame::Mps } else { Frame::Eop };
+            self.sender.send(&[Message::new(frame, true)]);
             return;
         }
         let frames = self.ecm_block_frames().len();
         let last = self.ecm_block + 1 >= self.ecm_blocks();
-        let command = if last {
-            ecm::PostMessage::Eop
-        } else {
-            ecm::PostMessage::Null
+        let command = match (last, more) {
+            (false, _) => ecm::PostMessage::Null,
+            (true, true) => ecm::PostMessage::Mps,
+            (true, false) => ecm::PostMessage::Eop,
         };
         let message = match self.ecm_command {
             EcmCommand::Pps => Message::new(Frame::Pps, true).with_fif(&ecm::pps_field(
@@ -1307,6 +1413,15 @@ impl Call {
         self.ecm_command = EcmCommand::Pps;
         self.attempts = 0;
         if self.ecm_block < self.ecm_blocks() {
+            self.pause_then(Phase::Sending);
+        } else if let Some(next) = self.more.pop_front() {
+            // A new page is a new page count in the PPS, and its own frames
+            // from its own first block.
+            self.page = Some(next);
+            self.sheet += 1;
+            self.ecm_frames.clear();
+            self.ecm_block = 0;
+            self.ecm_page = self.ecm_page.wrapping_add(1);
             self.pause_then(Phase::Sending);
         } else {
             self.pause_then(Phase::Ending);
@@ -1360,6 +1475,12 @@ impl Call {
         self.sender.send(&[Message::new(frame, false)]);
     }
 
+    fn send_acknowledgement(&mut self) {
+        if let Some(message) = self.response.take() {
+            self.sender.send(&[message]);
+        }
+    }
+
     /// Confirm the page, or ask for it again (6.2.7 and 6.3.2).
     ///
     /// T.30 leaves the threshold to the receiver, as it does with the
@@ -1367,21 +1488,48 @@ impl Call {
     /// signal it received is acceptable. A twentieth of the lines spoiled is
     /// the ordinary limit, and it is generous -- a page that far gone is
     /// still readable, and asking for it again costs another minute.
-    fn send_acknowledgement(&mut self) {
-        if let Some(message) = self.ecm_response.take() {
-            self.sender.send(&[message]);
-            return;
-        }
+    fn judge_page(&mut self) -> Frame {
         let lines = self.decoder.lines().len();
         let good = lines > 0 && self.decoder.damaged() * 20 <= lines;
-        let frame = if good { Frame::Mcf } else { Frame::Rtn };
-        if !good {
-            self.trouble = Some(format!(
-                "{} of {lines} lines came out wrong",
-                self.decoder.damaged()
-            ));
+        if good {
+            return Frame::Mcf;
         }
-        self.sender.send(&[Message::new(frame, false)]);
+        self.trouble = Some(format!(
+            "{} of {lines} lines came out wrong",
+            self.decoder.damaged()
+        ));
+        Frame::Rtn
+    }
+
+    /// A post-message command after a page sent without error correction.
+    ///
+    /// 5.3.6.1.6. MCF to a multi-page signal is the next page, straight away
+    /// and at the same terms: back to the page carrier. MCF to an end of
+    /// message is phase B again, where the sender may change the terms. MCF
+    /// to an end of procedure is the end of the call. And RTN to anything is
+    /// phase B too: further pages are possible "provided training is
+    /// retransmitted" (5.3.6.1.7).
+    fn post_message(&mut self, command: Frame) {
+        self.finish_page();
+        let answer = self.judge_page();
+        let next = match (answer, command) {
+            (Frame::Rtn, _) | (_, Frame::Eom) => Phase::AwaitingCommand,
+            (_, Frame::Mps) => Phase::Receiving,
+            _ => Phase::AwaitingDisconnect,
+        };
+        self.answered = Some((command, answer, next));
+        self.respond(Message::new(answer, false), next);
+    }
+
+    /// Whether a post-message command arriving now can only be the last one
+    /// again: the call has gone where it sent it, and nothing of what was to
+    /// follow has come.
+    fn may_be_asked_again(&self) -> bool {
+        match self.phase {
+            Phase::AwaitingCommand | Phase::AwaitingDisconnect => true,
+            Phase::Receiving => !self.fast_seen && self.decoder.lines().is_empty(),
+            _ => false,
+        }
     }
 
     /// Judge a training check (6.2.6).
@@ -1433,10 +1581,13 @@ impl Call {
         self.enter(Phase::AwaitingPostMessage);
     }
 
-    /// Answer under error correction mode, then go on to `next`.
+    /// Answer, then go on to `next`.
     fn respond(&mut self, message: Message, next: Phase) {
-        self.ecm_response = Some(message);
+        self.response = Some(message);
         self.after_answering = next;
+        if next == Phase::AwaitingCommand {
+            self.phase_b_since = self.elapsed;
+        }
         self.pause_then(Phase::Acknowledging);
     }
 
@@ -1470,6 +1621,17 @@ impl Call {
         } else {
             let fif = ecm::ppr_field(frames, |i| self.collector.has(i));
             self.respond(Message::new(Frame::Ppr, false).with_fif(&fif), Phase::Receiving);
+        }
+    }
+
+    /// A PPS once the call has already acted on it: the same answer again,
+    /// if it is the page's last block, the one confirmed.
+    fn last_block_again(&mut self, fif: &[u8]) {
+        let Some((command, page, block, _)) = ecm::read_pps(fif) else {
+            return;
+        };
+        if command != ecm::PostMessage::Null && self.ecm_confirmed == Some((page, block)) {
+            self.respond(Message::new(Frame::Mcf, false), Self::after(command));
         }
     }
 
@@ -1525,15 +1687,25 @@ impl Call {
     /// missing frames left out, which is what T.4's coding resynchronizes on.
     fn finish_ecm_page(&mut self) {
         self.follow_ecm_page();
-        if self.received.is_none() && !self.decoder.lines().is_empty() {
-            self.received = Some(self.decoder.page(self.resolution));
-        }
+        self.finish_page();
     }
 
+    /// Keep the page that has arrived, once.
     fn finish_page(&mut self) {
-        if self.received.is_none() && !self.decoder.lines().is_empty() {
-            self.received = Some(self.decoder.page(self.resolution));
+        if self.kept || self.decoder.lines().is_empty() {
+            return;
         }
+        self.kept = true;
+        self.pages_received += 1;
+        self.received
+            .push_back((self.sheet, self.decoder.page(self.resolution)));
+    }
+
+    /// Clear the decoder for the page about to arrive.
+    fn new_sheet(&mut self) {
+        self.decoder.reset_to(self.coding);
+        self.kept = false;
+        self.sheet = self.pages_received + 1;
     }
 
     // ---- both -------------------------------------------------------------
@@ -1556,18 +1728,12 @@ impl Call {
                     self.enter(Phase::AwaitingCommand);
                 }
             }
-            Phase::Acknowledging => {
-                if self.ecm {
-                    match self.after_answering {
-                        // The sender turns its carrier round and trains; the
-                        // settling gap is this end's half of that.
-                        Phase::Receiving => self.pause_then(Phase::Receiving),
-                        next => self.enter(next),
-                    }
-                } else {
-                    self.enter(Phase::AwaitingDisconnect);
-                }
-            }
+            Phase::Acknowledging => match self.after_answering {
+                // The sender turns its carrier round and trains; the settling
+                // gap is this end's half of that.
+                Phase::Receiving => self.pause_then(Phase::Receiving),
+                next => self.enter(next),
+            },
             Phase::EndingPage => self.enter(Phase::AwaitingReceipt),
             _ => {}
         }
@@ -1887,7 +2053,7 @@ mod tests {
     /// cannot happen. The scan line time was exactly such a thing.
     fn command_for(page: Option<Page>, dis: &[u8]) -> Vec<u8> {
         let mut call = Call::originate(FS, "1", page);
-        call.received(Message::new(Frame::Dis, false).with_fif(dis));
+        call.frame_arrived(Message::new(Frame::Dis, false).with_fif(dis));
         assert!(call.trouble.is_none(), "{:?}", call.trouble);
         call.enter(Phase::Commanding);
         let bits: Vec<bool> = std::iter::from_fn(|| call.next_control_bit()).collect();
@@ -1983,7 +2149,7 @@ mod tests {
             }
             let mut call = Call::answer(FS, "1");
             call.enter(Phase::AwaitingCommand);
-            call.received(Message::new(Frame::Dcs, true).with_fif(&dcs));
+            call.frame_arrived(Message::new(Frame::Dcs, true).with_fif(&dcs));
             assert_eq!(call.coding, want, "bits {bits:?}");
             assert_eq!(call.decoder.coding(), Coding::ModifiedHuffman, "decoding before the page starts");
         }
@@ -2071,7 +2237,7 @@ mod tests {
     fn the_disconnect_that_ends_an_ordinary_call_is_not_trouble() {
         let mut call = Call::answer(FS, "1");
         call.enter(Phase::AwaitingDisconnect);
-        call.received(Message::new(Frame::Dcn, true));
+        call.frame_arrived(Message::new(Frame::Dcn, true));
         assert_eq!(call.phase(), Phase::Done);
         assert_eq!(call.trouble, None);
     }
@@ -2106,7 +2272,7 @@ mod tests {
         // the DIS's 20 ms, as they were, the fine lines came to twice that.
         for (resolution, per_line) in [(Resolution::Fine, 96), (Resolution::Standard, 192)] {
             let mut call = Call::originate(FS, "1", Some(blank_page(10, resolution)));
-            call.received(Message::new(Frame::Dis, false).with_fif(&HALVING_DIS));
+            call.frame_arrived(Message::new(Frame::Dis, false).with_fif(&HALVING_DIS));
             assert_eq!(call.rate, 9600);
             assert_eq!(call.resolution, resolution);
             assert_eq!(call.fast_out_page().len(), 10 * per_line + 72, "{resolution:?}");
@@ -2328,5 +2494,130 @@ mod tests {
             seconds * 1000.0,
             TURNAROUND_SECONDS * 1000.0
         );
+    }
+
+    /// An answering end that has been told how a page without error
+    /// correction is coming, and is listening for it.
+    fn waiting_for_a_page() -> Call {
+        let mut call = Call::answer(FS, "61388880000");
+        let dcs = t30::command(Command {
+            modulation: Modulation::V29,
+            bits_per_second: 9600,
+            fine: false,
+            scan_line_field: 0,
+            coding: Coding::ModifiedHuffman,
+            error_correction: false,
+        });
+        call.frame_arrived(Message::new(Frame::Dcs, true).with_fif(&dcs));
+        call.pause = 0.0;
+        call.after_pause = None;
+        call.enter(Phase::Receiving);
+        call
+    }
+
+    /// Time passing, with whatever this end sends read back as frames, until
+    /// `done` or ten seconds.
+    fn carry_on(call: &mut Call, said: &mut Vec<Frame>, done: impl Fn(&Call) -> bool) {
+        let mut reader = frames::Reader::new();
+        for _ in 0..(10.0 * FS) as usize {
+            call.tick(true);
+            while let Some(bit) = call.next_control_bit() {
+                if let Some(m) = reader.feed(bit) {
+                    said.push(m.frame);
+                }
+            }
+            if done(call) {
+                return;
+            }
+        }
+    }
+
+    /// A page of `rows` lines with `mark` in it, coded as it goes on the line.
+    fn page_bits(rows: usize, mark: usize) -> (Vec<Vec<bool>>, Vec<bool>) {
+        let lines: Vec<Vec<bool>> = (0..rows)
+            .map(|y| (0..crate::page::WIDTH).map(|x| (x / 100 == mark) != (y % 2 == 0)).collect())
+            .collect();
+        let bits = Coding::ModifiedHuffman.encode(&lines, Resolution::Standard, 0);
+        (lines, bits)
+    }
+
+    #[test]
+    fn a_multi_page_signal_heard_twice_is_answered_twice_and_the_next_page_still_arrives() {
+        let mut call = waiting_for_a_page();
+        let mut said = Vec::new();
+        let (first, bits) = page_bits(12, 1);
+        call.fast_bits(&bits);
+        carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingPostMessage);
+        assert_eq!(call.phase(), Phase::AwaitingPostMessage);
+
+        call.frame_arrived(Message::new(Frame::Mps, true));
+        carry_on(&mut call, &mut said, |c| matches!(c.line(), Line::FastListen(_)));
+        assert_eq!(said, vec![Frame::Mcf]);
+        assert_eq!(call.phase(), Phase::Receiving, "not back on the page carrier");
+
+        // The MCF was lost, so the sender asks again.
+        call.frame_arrived(Message::new(Frame::Mps, true));
+        carry_on(&mut call, &mut said, |c| matches!(c.line(), Line::FastListen(_)));
+        assert_eq!(said, vec![Frame::Mcf, Frame::Mcf], "not answered again");
+        assert_eq!(call.phase(), Phase::Receiving);
+
+        let (second, bits) = page_bits(16, 3);
+        call.fast_bits(&bits);
+        carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingPostMessage);
+        call.frame_arrived(Message::new(Frame::Eop, true));
+        carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingDisconnect);
+        assert_eq!(said, vec![Frame::Mcf, Frame::Mcf, Frame::Mcf]);
+        assert_eq!(call.phase(), Phase::AwaitingDisconnect);
+
+        // The EOP's MCF is lost too.
+        call.frame_arrived(Message::new(Frame::Eop, true));
+        carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingDisconnect);
+        assert_eq!(said.len(), 4, "the EOP was not answered again: {said:?}");
+
+        assert_eq!(call.pages_received(), 2);
+        let (n, page) = call.take_received().expect("no first page");
+        assert_eq!((n, &page.lines), (1, &first));
+        let (n, page) = call.take_received().expect("no second page");
+        assert_eq!((n, &page.lines), (2, &second));
+        assert!(call.take_received().is_none(), "a page twice");
+    }
+
+    #[test]
+    fn after_an_end_of_message_the_answerer_waits_for_a_command_and_then_says_what_it_is() {
+        let mut call = waiting_for_a_page();
+        // Well past T1 from the start of the call, which is not what T1
+        // counts from once a page has gone.
+        call.elapsed = 3.0 * T1_SECONDS;
+        let mut said = Vec::new();
+        let (_, bits) = page_bits(8, 2);
+        call.fast_bits(&bits);
+        carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingPostMessage);
+        call.frame_arrived(Message::new(Frame::Eom, true));
+        carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingCommand);
+        assert_eq!(said, vec![Frame::Mcf]);
+        carry_on(&mut call, &mut said, |c| c.phase() == Phase::Identifying);
+        assert!(call.seconds() - 3.0 * T1_SECONDS > T2_SECONDS, "DIS before T2 ran out");
+        carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingCommand);
+        assert_eq!(said, vec![Frame::Mcf, Frame::Csi, Frame::Dis], "no DIS once T2 ran out");
+        assert_eq!(call.phase(), Phase::AwaitingCommand, "{:?}", call.trouble);
+    }
+
+    #[test]
+    fn a_page_asked_for_again_is_phase_b_again() {
+        let mut call = waiting_for_a_page();
+        let mut said = Vec::new();
+        // A page with a bit in every hundred wrong, which spoils most lines.
+        let (_, mut bits) = page_bits(40, 4);
+        let end = bits.len() - 72;
+        for bit in bits[..end].iter_mut().step_by(100) {
+            *bit = !*bit;
+        }
+        call.fast_bits(&bits);
+        carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingPostMessage);
+        assert_eq!(call.phase(), Phase::AwaitingPostMessage, "{} lines, {} damaged", call.decoder.lines().len(), call.decoder.damaged());
+        call.frame_arrived(Message::new(Frame::Mps, true));
+        carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingCommand);
+        assert_eq!(said, vec![Frame::Rtn]);
+        assert_eq!(call.phase(), Phase::AwaitingCommand, "a page it refused is not followed by the next");
     }
 }
