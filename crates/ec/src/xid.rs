@@ -8,6 +8,7 @@
 //! V.42bis parameters are actually agreed. Without it both ends simply run on
 //! defaults, which works but leaves compression switched off.
 
+use crate::frame::Kind;
 use crate::{v42bis, v44};
 
 /// The ISO "general purpose" format identifier (V.42 12.2.2).
@@ -106,6 +107,8 @@ mod hdlc_bit {
     /// Bit positions the encoding rules require a transmitter to set, whatever
     /// it actually supports. Receivers are told to ignore them.
     pub const REQUIRED: [u32; 6] = [2, 4, 8, 9, 12, 16];
+    /// The one of them a response clears when it agrees to 32 bits.
+    pub const CLEARED_BY_FCS32: u32 = 16;
 }
 
 /// Which directions V.42bis compression is requested for (V.42 Table 11b, P0).
@@ -279,13 +282,16 @@ impl Xid {
         }
     }
 
-    /// Encode as the information field of an XID frame.
-    pub fn encode(&self) -> Vec<u8> {
+    /// Encode as the information field of an XID command or response.
+    ///
+    /// Which one matters to a single bit of the HDLC optional functions mask,
+    /// and nowhere else.
+    pub fn encode(&self, kind: Kind) -> Vec<u8> {
         let mut out = vec![FI_GENERAL_PURPOSE];
 
         // Parameter negotiation subfield.
         let mut params = Vec::new();
-        push_param(&mut params, pi::HDLC_OPTIONAL, &self.hdlc_mask().to_le_bytes());
+        push_param(&mut params, pi::HDLC_OPTIONAL, &self.hdlc_mask(kind).to_le_bytes());
         // V.42 12.2.2 Note 3: N401 is in octets, but negotiated in bits.
         if let Some(n) = self.n401_transmit {
             push_param(&mut params, pi::N401_TRANSMIT, &(n * 8).to_be_bytes());
@@ -334,8 +340,16 @@ impl Xid {
         out
     }
 
-    /// The 32-bit HDLC optional functions mask (V.42 12.2.2 Note 1).
-    fn hdlc_mask(&self) -> u32 {
+    /// The 32-bit HDLC optional functions mask (V.42 Table 11a, Note 1).
+    ///
+    /// "The transmitter of an XID command frame shall set bit positions 2, 4,
+    /// 8, 9, 12 and 16 to 1. The transmitter of an XID response frame shall
+    /// also set these bit positions to 1, except bit position 16 shall be set
+    /// to 0 if bit position 17 is set to 1." So bit 16 depends on which of the
+    /// two this is: a command asking for 32 bits still sets it, and only an
+    /// answer agreeing to them clears it. This end cleared it in its commands
+    /// too, and the far ends it called on real lines never answered them.
+    fn hdlc_mask(&self, kind: Kind) -> u32 {
         let mut mask = 0u32;
         for bit in hdlc_bit::REQUIRED {
             mask |= 1 << (bit - 1);
@@ -348,8 +362,9 @@ impl Xid {
         }
         if self.fcs32 {
             mask |= 1 << (hdlc_bit::FCS32 - 1);
-            // Note 1: bit 16 is cleared when bit 17 is set.
-            mask &= !(1 << 15);
+            if kind == Kind::Response {
+                mask &= !(1 << (hdlc_bit::CLEARED_BY_FCS32 - 1));
+            }
         }
         if self.srej_multiple {
             mask |= 1 << (hdlc_bit::SREJ_MULTIPLE - 1);
@@ -402,6 +417,10 @@ impl Xid {
                         return Err(XidError::BadLength { pi, len: value.len() as u8 });
                     }
                     let mask = u32::from_le_bytes([value[0], value[1], value[2], value[3]]);
+                    // The options and nothing else. Note 1: "A receiver of
+                    // these frames should ignore these bit positions" -- the
+                    // ones the encoding rules fix, of which bit 16 differs
+                    // between a command and a response.
                     self.srej_single = mask & (1 << (hdlc_bit::SREJ_SINGLE - 1)) != 0;
                     self.test_frame = mask & (1 << (hdlc_bit::TEST_FRAME - 1)) != 0;
                     self.fcs32 = mask & (1 << (hdlc_bit::FCS32 - 1)) != 0;
@@ -594,20 +613,20 @@ mod tests {
     #[test]
     fn a_proposal_round_trips() {
         let xid = Xid::proposal(Compression::Both);
-        let decoded = Xid::decode(&xid.encode()).unwrap();
+        let decoded = Xid::decode(&xid.encode(Kind::Command)).unwrap();
         assert_eq!(decoded, xid);
     }
 
     #[test]
     fn the_format_identifier_is_the_general_purpose_one() {
         // V.42 12.2.2.
-        let bytes = Xid::proposal(Compression::Both).encode();
+        let bytes = Xid::proposal(Compression::Both).encode(Kind::Command);
         assert_eq!(bytes[0], 0b1000_0010);
     }
 
     #[test]
     fn subfields_carry_the_specified_group_identifiers() {
-        let bytes = Xid::proposal(Compression::Both).encode();
+        let bytes = Xid::proposal(Compression::Both).encode(Kind::Command);
         assert!(bytes.contains(&GI_PARAMETER), "parameter subfield missing");
         assert!(bytes.contains(&GI_PRIVATE), "private subfield missing");
         assert_eq!(GI_PARAMETER, 0b1000_0000);
@@ -618,7 +637,7 @@ mod tests {
     fn n401_is_carried_in_bits_not_octets() {
         // V.42 12.2.2 Note 3.
         let xid = Xid { n401_transmit: Some(128), ..Default::default() };
-        let bytes = xid.encode();
+        let bytes = xid.encode(Kind::Command);
         let at = bytes
             .windows(2)
             .position(|w| w == [pi::N401_TRANSMIT, 2])
@@ -636,7 +655,7 @@ mod tests {
             codewords: Some(0x0400),
             ..Default::default()
         };
-        let bytes = xid.encode();
+        let bytes = xid.encode(Kind::Command);
         let at = bytes
             .windows(2)
             .position(|w| w == [private_pi::CODEWORDS, 2])
@@ -656,7 +675,7 @@ mod tests {
     #[test]
     fn the_parameter_set_identifier_comes_first_in_the_private_subfield() {
         // V.42 12.2.2 Note 2 requires it.
-        let bytes = Xid::proposal(Compression::Both).encode();
+        let bytes = Xid::proposal(Compression::Both).encode(Kind::Command);
         let gi_at = bytes.iter().position(|&b| b == GI_PRIVATE).unwrap();
         assert_eq!(bytes[gi_at + 3], private_pi::PARAMETER_SET);
     }
@@ -677,18 +696,63 @@ mod tests {
     #[test]
     fn the_hdlc_mask_sets_the_positions_the_encoding_rules_demand() {
         // V.42 12.2.2 Note 1.
-        let mask = Xid { test_frame: false, ..Default::default() }.hdlc_mask();
+        let mask = Xid { test_frame: false, ..Default::default() }.hdlc_mask(Kind::Command);
         for bit in hdlc_bit::REQUIRED {
             assert!(mask & (1 << (bit - 1)) != 0, "bit {bit} should be set");
         }
     }
 
     #[test]
-    fn requesting_a_32_bit_fcs_clears_bit_16() {
-        // V.42 12.2.2 Note 1: bit 16 is cleared when bit 17 is set.
-        let mask = Xid { fcs32: true, ..Default::default() }.hdlc_mask();
+    fn a_command_asking_for_32_bits_still_sets_bit_16() {
+        // V.42 Table 11a Note 1: "the transmitter of an XID command frame
+        // shall set bit positions 2, 4, 8, 9, 12 and 16 to 1", with no
+        // exception for bit 17.
+        let mask = Xid { fcs32: true, ..Default::default() }.hdlc_mask(Kind::Command);
         assert!(mask & (1 << 16) != 0, "bit 17 should be set");
-        assert!(mask & (1 << 15) == 0, "bit 16 should have been cleared");
+        assert!(mask & (1 << 15) != 0, "bit 16 was cleared in a command");
+    }
+
+    #[test]
+    fn a_response_agreeing_to_32_bits_clears_bit_16() {
+        // The same note: a response sets them too, "except bit position 16
+        // shall be set to 0 if bit position 17 is set to 1".
+        let wide = Xid { fcs32: true, ..Default::default() }.hdlc_mask(Kind::Response);
+        assert!(wide & (1 << 16) != 0, "bit 17 should be set");
+        assert!(wide & (1 << 15) == 0, "bit 16 should have been cleared");
+        let narrow = Xid { fcs32: false, ..Default::default() }.hdlc_mask(Kind::Response);
+        assert!(narrow & (1 << 15) != 0, "bit 16 cleared without bit 17");
+    }
+
+    #[test]
+    fn a_receiver_ignores_the_positions_the_encoding_rules_fix() {
+        // Note 1: "A receiver of these frames should ignore these bit
+        // positions." A far end's command and its response differ in bit 16,
+        // and neither says anything about what it can do.
+        let field = |mask: u32| {
+            let mut params = Vec::new();
+            push_param(&mut params, pi::HDLC_OPTIONAL, &mask.to_le_bytes());
+            let mut bytes = vec![FI_GENERAL_PURPOSE];
+            push_subfield(&mut bytes, GI_PARAMETER, &params);
+            Xid::decode(&bytes).expect("did not decode")
+        };
+        let fcs32 = 1 << (hdlc_bit::FCS32 - 1);
+        assert_eq!(field(required_mask()), field(0));
+        assert_eq!(field(required_mask() | fcs32), field(fcs32));
+        assert_eq!(field((required_mask() & !(1 << 15)) | fcs32), field(fcs32));
+        assert!(field(fcs32).fcs32);
+        assert!(!field(required_mask()).fcs32);
+    }
+
+    #[test]
+    fn a_command_and_its_response_agree_on_everything_but_bit_16() {
+        let xid = Xid::proposal(Compression::Both);
+        let command = xid.encode(Kind::Command);
+        let response = xid.encode(Kind::Response);
+        assert_eq!(Xid::decode(&command), Xid::decode(&response));
+        let differing: Vec<usize> =
+            (0..command.len()).filter(|&i| command[i] != response[i]).collect();
+        assert_eq!(differing.len(), 1, "{command:02x?} against {response:02x?}");
+        assert_eq!(command[differing[0]] ^ response[differing[0]], 0x80, "not bit 16");
     }
 
     #[test]
@@ -699,7 +763,7 @@ mod tests {
             srej_multiple: true,
             ..Default::default()
         };
-        let back = Xid::decode(&xid.encode()).unwrap();
+        let back = Xid::decode(&xid.encode(Kind::Command)).unwrap();
         assert!(back.fcs32 && back.test_frame && back.srej_multiple);
     }
 
@@ -780,7 +844,7 @@ mod tests {
     #[test]
     fn unrecognized_groups_and_parameters_are_ignored() {
         // V.42 12.2.2: "Fields that are not recognized are ignored."
-        let mut bytes = Xid::proposal(Compression::Both).encode();
+        let mut bytes = Xid::proposal(Compression::Both).encode(Kind::Command);
         // Append a group nobody has defined.
         bytes.push(0x55);
         bytes.extend_from_slice(&3u16.to_be_bytes());
@@ -834,7 +898,7 @@ mod tests {
         // to set positions 2, 4, 8, 9, 12 and 16 whatever it supports, and 3
         // is the one gap in that run -- the position left for the option the
         // note is describing.
-        let mask = Xid { srej_single: true, ..Default::default() }.hdlc_mask();
+        let mask = Xid { srej_single: true, ..Default::default() }.hdlc_mask(Kind::Command);
         assert_eq!(mask & !required_mask(), 1 << 2, "bit 3 counting from one");
     }
 
@@ -862,7 +926,7 @@ mod tests {
         // V.42 12.2.2 Note 3: absence leaves a previously negotiated value
         // unchanged, so it must be distinguishable from a value of zero.
         let sparse = Xid { window_receive: Some(7), ..Default::default() };
-        let back = Xid::decode(&sparse.encode()).unwrap();
+        let back = Xid::decode(&sparse.encode(Kind::Command)).unwrap();
         assert_eq!(back.window_receive, Some(7));
         assert_eq!(back.window_transmit, None);
         assert_eq!(back.n401_transmit, None);
@@ -878,7 +942,7 @@ mod v44_negotiation {
     #[test]
     fn the_user_data_subfield_names_the_recommendation_first() {
         assert_eq!(PARAMETER_SET_V44, [0x56, 0x34, 0x34]);
-        let bytes = Xid::proposal(Compression::Both).encode();
+        let bytes = Xid::proposal(Compression::Both).encode(Kind::Command);
         // Walked rather than searched for: 0xff is a perfectly ordinary
         // parameter value and looking for the octet finds one of those.
         let mut at = 1usize;
@@ -906,7 +970,7 @@ mod v44_negotiation {
         let xid = Xid::proposal(Compression::Both);
         assert!(xid.compression.is_some(), "V.42bis was not offered");
         assert!(xid.v44.is_some(), "V.44 was not offered");
-        let back = Xid::decode(&xid.encode()).expect("did not decode");
+        let back = Xid::decode(&xid.encode(Kind::Command)).expect("did not decode");
         assert_eq!(back.v44, xid.v44);
         assert_eq!(back.compression, xid.compression);
         assert_eq!(back.codewords, xid.codewords);
@@ -922,7 +986,7 @@ mod v44_negotiation {
             transmit: v44::Params { n2: 4096, n7: 200, n8: 9000 },
             receive: v44::Params { n2: 1024, n7: 64, n8: 3072 },
         });
-        let back = Xid::decode(&xid.encode()).expect("did not decode");
+        let back = Xid::decode(&xid.encode(Kind::Command)).expect("did not decode");
         assert_eq!(back.v44, xid.v44);
     }
 
@@ -1009,7 +1073,7 @@ mod v44_negotiation {
     #[test]
     fn the_capability_byte_says_modem_and_xid() {
         assert_eq!(CAPABILITY_MODEM, 0);
-        let bytes = Xid::proposal(Compression::Both).encode();
+        let bytes = Xid::proposal(Compression::Both).encode(Kind::Command);
         let at = bytes
             .windows(3)
             .position(|w| w == [user_pi::CAPABILITY, 1, CAPABILITY_MODEM])

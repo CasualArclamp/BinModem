@@ -766,7 +766,7 @@ fn every_repeated_xid_command_is_answered() {
     }
     assert_eq!(stack.phase(), ec::stack::Phase::Negotiating, "never left detection");
 
-    let command = Frame::Xid { pf: false, info: Xid::proposal(Compression::Both).encode() }
+    let command = Frame::Xid { pf: false, info: Xid::proposal(Compression::Both).encode(Kind::Command) }
         .encode(DLCI_DATA, Role::Originator, Kind::Command);
     let mut encoder = Encoder::new(Fcs::Bits16);
     let mut answers = 0;

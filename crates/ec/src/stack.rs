@@ -749,7 +749,7 @@ impl Stack {
                 // P/F bit of an XID frame is set to 0" and names no exception.
                 let body = Frame::Xid {
                     pf: false,
-                    info: self.proposal().encode(),
+                    info: self.proposal().encode(Kind::Command),
                 }
                 .encode(DLCI_DATA, self.role, Kind::Command);
                 self.encoder.frame_with(&body, Fcs::Bits16);
@@ -876,7 +876,7 @@ impl Stack {
         if kind == Kind::Command {
             let body = Frame::Xid {
                 pf: false,
-                info: self.proposal().encode(),
+                info: self.proposal().encode(Kind::Response),
             }
             .encode(DLCI_DATA, self.role, Kind::Response);
             // 8.10.2 keeps this one at 16 bits whatever the connection has
@@ -1578,7 +1578,7 @@ mod tests {
         // Then the originator's arrives, offering 32 bits as this modem does.
         let offer = Xid::proposal(Compression::Neither);
         assert!(offer.fcs32, "nothing here to agree to");
-        let xid = Frame::Xid { pf: false, info: offer.encode() }
+        let xid = Frame::Xid { pf: false, info: offer.encode(Kind::Command) }
             .encode(DLCI_DATA, Role::Originator, Kind::Command);
         wire(&mut answerer, &xid, Fcs::Bits16);
         let answered = answerer
