@@ -1664,8 +1664,24 @@ impl Modem {
                     // decide. What runs is the intersection, so offering more
                     // than the far end can do costs nothing.
                     let c = self.at.compression;
-                    if c.wanted() {
+                    let v44 = self.at.v44;
+                    if c.wanted() || v44.wanted() {
                         stack.offer_compression(Compression::Both);
+                        // Each is offered only if its own command asked for it.
+                        // Both offered, V.44 runs wherever the far end has it.
+                        if !c.wanted() {
+                            stack.without_v42bis();
+                        }
+                        if v44.wanted() {
+                            let each = |i: usize| ec::v44::Params {
+                                n2: [v44.max_codewords.0, v44.max_codewords.1][i],
+                                n7: [v44.max_string.0, v44.max_string.1][i],
+                                n8: [v44.max_history.0, v44.max_history.1][i],
+                            };
+                            stack.offer_v44_limits(each(0), each(1));
+                        } else {
+                            stack.without_v44();
+                        }
                         // V.250 Table 27: `<max_dict>` and `<max_string>` are
                         // the terminal's ceilings on V.42bis P1 and P2, "based
                         // on its knowledge of the nature of the data to be
@@ -1721,7 +1737,13 @@ impl Modem {
         // And V.250 Table 27's <compression_negotiation> of 1: "disconnect if
         // ITU-T Rec. V.42 bis is not negotiated by the remote DCE as specified
         // in <direction>".
-        if self.at.compression.required && !self.compressing() {
+        //
+        // Any compression satisfies it: with both offered, a far end that has
+        // V.44 gets V.44, and hanging up on the better of the two because it
+        // is not the one this parameter names would be perverse. Table 28's
+        // own <compression_negotiation>, below, is the one that insists.
+        let v44_short = self.at.v44.required && self.compression_name() != Some("V.44");
+        if (self.at.compression.required && !self.compressing()) || v44_short {
             self.announce = None;
             self.end_call(Ended::NoCompression);
             return;
@@ -1736,11 +1758,16 @@ impl Modem {
             let kind = if self.error_controlled() { "LAPM" } else { "NONE" };
             self.at.emit(ResultCode::Extended(format!("+ER: {kind}")));
         }
-        // Table 29/V.250. V.42bis is negotiated as a pair here -- both
+        // Table 29/V.250. Both are negotiated as a pair here -- both
         // directions or neither -- so the one-directional reports cannot
-        // arise.
+        // arise. It used to say V42B whenever anything was compressing,
+        // V.44 included.
         if self.at.config.report_compression {
-            let kind = if self.compressing() { "V42B" } else { "NONE" };
+            let kind = match self.compression_name() {
+                Some("V.44") => "V44",
+                Some(_) => "V42B",
+                None => "NONE",
+            };
             self.at.emit(ResultCode::Extended(format!("+DR: {kind}")));
         }
         // V.250 6.2.7: with X at 1 or above the CONNECT carries the rate,
@@ -1997,7 +2024,7 @@ impl Modem {
                 }
                 // Both take effect on the next call, and the interpreter has
                 // already recorded what was asked for.
-                Action::SelectModulation(_) | Action::SelectCompression(_) => {}
+                Action::SelectModulation(_) | Action::SelectCompression(_) | Action::SelectV44(_) => {}
                 Action::SelectErrorControl(e) => self.want_error_control = e.wanted(),
                 Action::ResetProfile(_) | Action::FactoryDefaults(_) => {
                     if self.pump.is_some() || self.negotiation.is_some() || self.fax.is_some() {

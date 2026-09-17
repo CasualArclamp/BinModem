@@ -658,9 +658,10 @@ fn a_v32_call_carries_data_both_ways() {
 
 #[test]
 fn turning_compression_off_is_obeyed() {
-    // AT+DS=0. Error control stays, and only the compression goes.
+    // AT+DS=0 and AT+DS44=0: V.42bis and V.44 each have their own switch.
+    // Error control stays, and only the compression goes.
     let mut p = Pair::new();
-    Pair::type_at(&mut p.caller, "AT+DS=0");
+    Pair::type_at(&mut p.caller, "AT+DS=0;+DS44=0");
     Pair::type_at(&mut p.host, "ATA");
     Pair::type_at(&mut p.caller, "ATD5551234");
     p.run(12.0);
@@ -669,6 +670,18 @@ fn turning_compression_off_is_obeyed() {
         !p.caller.compressing() && !p.host.compressing(),
         "compression was used after being turned off"
     );
+}
+
+#[test]
+fn turning_v42bis_off_leaves_v44() {
+    // AT+DS is V.42bis's switch and nothing else's (V.250 6.6.1, 6.6.2).
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "AT+DS=0");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(12.0);
+    assert_eq!(p.caller.compression_name(), Some("V.44"));
+    assert_eq!(p.host.compression_name(), Some("V.44"));
 }
 
 #[test]
@@ -1139,10 +1152,38 @@ fn the_reports_come_out_in_the_order_v250_gives_them() {
 
     let saw = p.caller_saw();
     let er = saw.find("+ER: LAPM").expect("no error control report");
-    let dr = saw.find("+DR: V42B").expect("no compression report");
+    // Two of these both have V.44, and that is what they use and report.
+    let dr = saw.find("+DR: V44").expect("no compression report");
     let connect = saw.find("CONNECT").expect("never connected");
     assert!(er < dr, "+DR should follow +ER");
     assert!(dr < connect, "CONNECT is the final result code and comes last");
+}
+
+#[test]
+fn without_v44_the_report_says_v42bis() {
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "AT+DR=1;+DS44=0");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(20.0);
+    let saw = p.caller_saw();
+    assert!(saw.contains("+DR: V42B"), "{saw:?}");
+    assert!(saw.contains("CONNECT"), "{saw:?}");
+}
+
+#[test]
+fn insisting_on_v44_hangs_up_on_a_far_end_that_will_not() {
+    // Table 28's <compression_negotiation> of 1, against a far end with
+    // V.44 turned off: V.42bis would run, and that is not what was asked.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "AT+DS44=3,1");
+    Pair::type_at(&mut p.host, "AT+DS44=0");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(20.0);
+    let saw = p.caller_saw();
+    assert!(saw.contains("NO CARRIER"), "{saw:?}");
+    assert!(!saw.contains("CONNECT"), "{saw:?}");
 }
 
 #[test]
@@ -1477,9 +1518,12 @@ fn compression_can_be_made_a_condition_of_the_call_too() {
     // Rec. V.42 bis is not negotiated by the remote DCE as specified in
     // <direction>". The same bargain as <orig_fbk> makes for error control,
     // one layer up.
+    //
+    // A far end that still had V.44 would satisfy it -- any compression does
+    // -- so this one has neither.
     let mut p = Pair::new();
     Pair::type_at(&mut p.caller, "AT+DS=3,1");
-    Pair::type_at(&mut p.host, "AT+DS=0");
+    Pair::type_at(&mut p.host, "AT+DS=0;+DS44=0");
     Pair::type_at(&mut p.host, "ATA");
     Pair::type_at(&mut p.caller, "ATD5551234");
     p.run(25.0);

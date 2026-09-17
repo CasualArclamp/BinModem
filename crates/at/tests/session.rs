@@ -551,7 +551,7 @@ fn the_capability_list_names_what_is_answered() {
     // than one that lists nothing, because a DTE will believe it.
     let mut it = quiet_dce();
     let (out, _) = send(&mut it, "AT+GCAP\r");
-    for name in ["+FCLASS", "+MS", "+ES", "+ER", "+DS", "+DR"] {
+    for name in ["+FCLASS", "+MS", "+ES", "+ER", "+DS", "+DS44", "+DR"] {
         assert!(out.contains(name), "{name} is missing from +GCAP");
         let (answer, _) = send(&mut it, &format!("AT{name}=?\r"));
         assert!(!answer.contains("ERROR"), "{name} is listed but not answered");
@@ -572,6 +572,56 @@ fn the_compression_parameters_are_all_four_of_them() {
     // V.250 5.4.2.1: an omitted subparameter keeps what it had.
     send(&mut it, "AT+DS=,,4096\r");
     assert_eq!(send(&mut it, "AT+DS?\r").0, "\r\n+DS: 3,1,4096,32\r\n\r\nOK\r\n");
+}
+
+#[test]
+fn the_v44_parameters_are_all_nine_of_them() {
+    // V.250 6.6.2: direction, what to do without it, the method, and each of
+    // codewords, string and history in both directions.
+    let mut it = quiet_dce();
+    assert_eq!(
+        send(&mut it, "AT+DS44?\r").0,
+        "\r\n+DS44: 3,0,0,2048,2048,255,255,6144,6144\r\n\r\nOK\r\n"
+    );
+    let (out, actions) = send(&mut it, "AT+DS44=3,1,0,1024,512,64,32,3072,1536\r");
+    assert!(out.contains("OK"), "{out:?}");
+    assert_eq!(actions.len(), 1, "{actions:?}");
+    assert_eq!(
+        send(&mut it, "AT+DS44?\r").0,
+        "\r\n+DS44: 3,1,0,1024,512,64,32,3072,1536\r\n\r\nOK\r\n"
+    );
+    // An omitted subparameter keeps what it had (5.4.2.1).
+    send(&mut it, "AT+DS44=0\r");
+    assert_eq!(
+        send(&mut it, "AT+DS44?\r").0,
+        "\r\n+DS44: 0,1,0,1024,512,64,32,3072,1536\r\n\r\nOK\r\n"
+    );
+    // And &F puts it back, as it does +DS.
+    send(&mut it, "AT&F\r");
+    assert_eq!(it.v44, at::V44::default());
+    let (test, _) = send(&mut it, "AT+DS44=?\r");
+    assert!(test.contains("+DS44: (0,3),(0,1),(0),(256-65535)"), "{test:?}");
+}
+
+#[test]
+fn v44_values_outside_table_28_are_refused() {
+    let mut it = quiet_dce();
+    for bad in [
+        "AT+DS44=1",
+        "AT+DS44=2",
+        "AT+DS44=3,2",
+        "AT+DS44=3,0,1",
+        "AT+DS44=3,0,0,255",
+        "AT+DS44=3,0,0,65536",
+        "AT+DS44=3,0,0,,,31",
+        "AT+DS44=3,0,0,,,,256",
+        "AT+DS44=3,0,0,,,,,511",
+        "AT+DS44=3,0,0,2048,2048,255,255,6144,6144,1",
+    ] {
+        let (out, _) = send(&mut it, &format!("{bad}\r"));
+        assert!(out.contains("ERROR"), "{bad} was accepted: {out:?}");
+    }
+    assert_eq!(it.v44, at::V44::default(), "a refused line changed something");
 }
 
 #[test]

@@ -37,6 +37,8 @@ pub enum Action {
     SelectErrorControl(ErrorControl),
     /// `AT+DS=` — whether to negotiate V.42bis (V.250 6.6.1).
     SelectCompression(Compression),
+    /// `AT+DS44=` — whether to negotiate V.44, and within what (V.250 6.6.2).
+    SelectV44(V44),
     /// `AT+FCLASS=` — data or facsimile (V.250 6.1.10).
     SelectServiceClass(ServiceClass),
 }
@@ -164,6 +166,55 @@ impl Default for Compression {
         // badly. 250 is the top of the permitted range and a far end that can
         // only manage 6 still gets 6.
         Self { direction: 3, required: false, max_dict: 2048, max_string: 250 }
+    }
+}
+
+/// What `+DS44` asked for, in the terms of V.250 Table 28.
+///
+/// Each parameter comes as a transmit and a receive value, and they are kept
+/// that way: V.44 negotiates its two directions separately (7.4), so a
+/// terminal can ask for a large dictionary one way and a small one the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct V44 {
+    /// `<direction>`: 0 none, 3 both. As with `+DS`, only the pair: one
+    /// direction alone is a promise this DCE cannot keep.
+    pub direction: u8,
+    /// `<compression_negotiation>`: 1 disconnects if the far end will not.
+    pub required: bool,
+    /// `<capability>`: 0, the stream method. V.44 7.3 has the packet methods'
+    /// bits "ignored for modem connections", so they are refused here rather
+    /// than accepted and quietly not done.
+    pub capability: u8,
+    /// `<max_codewords_tx>`, `<max_codewords_rx>`: N2, 256 to 65535.
+    pub max_codewords: (u16, u16),
+    /// `<max_string_tx>`, `<max_string_rx>`: N7, 32 to 255.
+    pub max_string: (u8, u8),
+    /// `<max_history_tx>`, `<max_history_rx>`: N8, 512 and up.
+    pub max_history: (u16, u16),
+}
+
+impl V44 {
+    /// Whether V.44 should be asked for at all.
+    pub fn wanted(self) -> bool {
+        self.direction != 0
+    }
+}
+
+impl Default for V44 {
+    fn default() -> Self {
+        // Table 28 recommends both directions, carrying on without it, and the
+        // stream method, and leaves the sizes to the manufacturer (Appendix
+        // I/V.44). These are the V.44 coder's own proposal: 2048 codewords,
+        // the longest string there is, and a history three times the
+        // dictionary, as Table 10 pairs them.
+        Self {
+            direction: 3,
+            required: false,
+            capability: 0,
+            max_codewords: (2048, 2048),
+            max_string: (255, 255),
+            max_history: (6144, 6144),
+        }
     }
 }
 
@@ -295,6 +346,8 @@ pub struct Interpreter {
     pub error_control: ErrorControl,
     /// What `+DS` last selected: whether V.42bis may be negotiated.
     pub compression: Compression,
+    /// What `+DS44` last selected: whether V.44 may be negotiated.
+    pub v44: V44,
     /// What `+FCLASS` last selected: a modem or a fax.
     pub service_class: ServiceClass,
     state: LineState,
@@ -336,6 +389,7 @@ impl Interpreter {
             modulation: Modulation::default(),
             error_control: ErrorControl::default(),
             compression: Compression::default(),
+            v44: V44::default(),
             service_class: ServiceClass::default(),
             state: LineState::Idle,
             body: Vec::new(),
@@ -375,6 +429,7 @@ impl Interpreter {
         self.modulation = Modulation::default();
         self.error_control = ErrorControl::default();
         self.compression = Compression::default();
+        self.v44 = V44::default();
     }
 
     /// Queue an unsolicited or deferred result code, such as `RING` or the
@@ -834,6 +889,94 @@ impl Interpreter {
         }
     }
 
+    /// `+DS44` — V.44 data compression (V.250 6.6.2, Table 28).
+    fn v44_select(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
+        match op {
+            ExtOp::Read => {
+                let v = self.v44;
+                // The read syntax prints no comma after <direction>; its own
+                // example does, and a list a DTE can split is the one to send.
+                let text = format!(
+                    "+DS44: {},{},{},{},{},{},{},{},{}",
+                    v.direction,
+                    u8::from(v.required),
+                    v.capability,
+                    v.max_codewords.0,
+                    v.max_codewords.1,
+                    v.max_string.0,
+                    v.max_string.1,
+                    v.max_history.0,
+                    v.max_history.1
+                );
+                self.fmt.info(&text, &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Test => {
+                // What this DCE honours. Table 28 allows 65536 codewords, but
+                // XID carries N2 in sixteen bits (V.44 7.3), so 65535 is the
+                // most two modems can agree.
+                self.fmt.info(
+                    "+DS44: (0,3),(0,1),(0),(256-65535),(256-65535),(32-255),(32-255),(512-65535),(512-65535)",
+                    &self.regs,
+                    &mut self.out,
+                );
+                Ok(None)
+            }
+            ExtOp::Set(value) => {
+                let mut parts = value.split(',');
+                let field = |p: Option<&str>| -> Option<Option<u32>> {
+                    match p.map(str::trim) {
+                        // 5.4.2.1: an omitted subparameter keeps its value.
+                        None | Some("") => Some(None),
+                        Some(v) => v.parse().ok().map(Some),
+                    }
+                };
+                let mut values = [None; 9];
+                for slot in &mut values {
+                    *slot = field(parts.next()).ok_or(ResultCode::Error)?;
+                }
+                if parts.next().is_some() {
+                    return Err(ResultCode::Error);
+                }
+                let in_range = |n: u32, low: u32, high: u32| (low..=high).contains(&n).then_some(n).ok_or(ResultCode::Error);
+                let mut v = self.v44;
+                if let Some(d) = values[0] {
+                    if d != 0 && d != 3 {
+                        return Err(ResultCode::Error);
+                    }
+                    v.direction = d as u8;
+                }
+                if let Some(r) = values[1] {
+                    v.required = in_range(r, 0, 1)? == 1;
+                }
+                if let Some(c) = values[2] {
+                    v.capability = in_range(c, 0, 0)? as u8;
+                }
+                if let Some(n) = values[3] {
+                    v.max_codewords.0 = in_range(n, 256, 65535)? as u16;
+                }
+                if let Some(n) = values[4] {
+                    v.max_codewords.1 = in_range(n, 256, 65535)? as u16;
+                }
+                if let Some(n) = values[5] {
+                    v.max_string.0 = in_range(n, 32, 255)? as u8;
+                }
+                if let Some(n) = values[6] {
+                    v.max_string.1 = in_range(n, 32, 255)? as u8;
+                }
+                if let Some(n) = values[7] {
+                    v.max_history.0 = in_range(n, 512, 65535)? as u16;
+                }
+                if let Some(n) = values[8] {
+                    v.max_history.1 = in_range(n, 512, 65535)? as u16;
+                }
+                self.v44 = v;
+                Ok(Some(Action::SelectV44(v)))
+            }
+            ExtOp::Execute => Err(ResultCode::Error),
+        }
+    }
+
     fn extended(&mut self, name: &str, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
         // V.250 6.1.4 to 6.1.9. These are all read-only identification actions,
         // so Execute and Read behave alike and Test reports support.
@@ -846,11 +989,12 @@ impl Interpreter {
             // Everything named here is answered below; a DCE that lists a
             // command it does not implement is worse than one that lists
             // nothing, because a DTE will believe it.
-            "GCAP" => "+GCAP: +FCLASS,+MS,+ES,+ER,+DS,+DR".into(),
+            "GCAP" => "+GCAP: +FCLASS,+MS,+ES,+ER,+DS,+DS44,+DR".into(),
             "FCLASS" => return self.fclass(op),
             "MS" => return self.modulation_select(op),
             "ES" => return self.error_control_select(op),
             "DS" => return self.compression_select(op),
+            "DS44" => return self.v44_select(op),
             // V.250 6.5.5 and 6.6.3. The same parameter twice over: one bit,
             // defaulting to off, saying whether the DCE should report what it
             // negotiated with the far end before it says CONNECT.

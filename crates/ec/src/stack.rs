@@ -123,8 +123,12 @@ pub struct Stack {
     limits: (u16, u8),
     /// Whether the far end has already said it does LAPM, in V.8.
     declared: bool,
-    /// Whether V.44 is offered alongside V.42bis.
+    /// Whether V.44 is offered alongside V.42bis, and V.42bis alongside V.44.
     offer_v44: bool,
+    offer_v42bis: bool,
+    /// Ceilings on the V.44 parameters this end proposes, transmit and
+    /// receive, if the terminal set any (V.250 Table 28).
+    v44_limits: Option<(v44::Params, v44::Params)>,
     /// Whether this end is answering the detection phase with a refusal.
     ///
     /// It still runs: 7.2.1.3 has the answerer reply to the ODP whatever its
@@ -321,6 +325,8 @@ impl Stack {
             guessed_wrong: false,
             declared: false,
             offer_v44: true,
+            offer_v42bis: true,
+            v44_limits: None,
             declining: false,
             heard_adp: None,
             heard_xid: None,
@@ -438,6 +444,23 @@ impl Stack {
         self.offer_v44 = false;
     }
 
+    /// Do not offer V.42bis, leaving V.44.
+    ///
+    /// The XID still carries V.42bis's group, saying no direction: a far end
+    /// that knows only V.42bis then settles on nothing, as a terminal that
+    /// asked for V.44 alone wants.
+    pub fn without_v42bis(&mut self) {
+        self.offer_v42bis = false;
+    }
+
+    /// Cap the V.44 parameters this end proposes, each way.
+    ///
+    /// V.250 Table 28's `<max_codewords>`, `<max_string>` and `<max_history>`.
+    /// 7.4 then takes the lower of the two ends' proposals.
+    pub fn offer_v44_limits(&mut self, transmit: v44::Params, receive: v44::Params) {
+        self.v44_limits = Some((transmit, receive));
+    }
+
     /// Cap the V.42bis parameters this end proposes.
     ///
     /// V.250 Table 27's `<max_dict>` and `<max_string>`, which a terminal sets
@@ -451,8 +474,14 @@ impl Stack {
         let mut xid = Xid::proposal(self.offer);
         xid.codewords = Some(self.limits.0.min(v42bis::OFFERED_N2));
         xid.max_string = Some(self.limits.1.min(v42bis::OFFERED_N7));
+        if !self.offer_v42bis {
+            xid.compression = Some(Compression::Neither);
+        }
         if !self.offer_v44 {
             xid.v44 = None;
+        } else if let (Some(offer), Some((transmit, receive))) = (xid.v44.as_mut(), self.v44_limits) {
+            offer.transmit = offer.transmit.resolve(transmit);
+            offer.receive = offer.receive.resolve(receive);
         }
         xid
     }
@@ -1430,6 +1459,47 @@ mod tests {
         a.send(b"and this still crosses");
         settle(&mut a, &mut b, 200_000, |_, bit| bit);
         assert_eq!(b.take_received(), b"and this still crosses");
+    }
+
+    #[test]
+    fn v44_alone_is_offered_and_used_with_a_far_end_that_has_both() {
+        let (mut a, mut b) = negotiated_pair();
+        a.without_v42bis();
+        a.connect();
+        settle(&mut a, &mut b, 40_000, |_, bit| bit);
+        assert_eq!(a.compression_name(), Some("V.44"));
+        assert_eq!(b.compression_name(), Some("V.44"));
+        a.send(b"through V.44 alone");
+        settle(&mut a, &mut b, 200_000, |_, bit| bit);
+        assert_eq!(b.take_received(), b"through V.44 alone");
+    }
+
+    #[test]
+    fn v44_alone_meets_v42bis_alone_and_nothing_is_compressed() {
+        // Each end asked for one and not the other; there is nothing both
+        // will run, and the link carries on uncompressed rather than failing.
+        let (mut a, mut b) = negotiated_pair();
+        a.without_v42bis();
+        b.without_v44();
+        a.connect();
+        settle(&mut a, &mut b, 40_000, |_, bit| bit);
+        assert!(a.is_connected() && b.is_connected());
+        assert_eq!(a.compression_name(), None);
+        assert_eq!(b.compression_name(), None);
+        a.send(b"plain");
+        settle(&mut a, &mut b, 200_000, |_, bit| bit);
+        assert_eq!(b.take_received(), b"plain");
+    }
+
+    #[test]
+    fn the_terminal_s_v44_ceilings_go_into_the_offer() {
+        let (mut a, _) = negotiated_pair();
+        a.offer_v44_limits(v44::Params { n2: 512, n7: 40, n8: 1024 }, v44::Params { n2: 1024, n7: 255, n8: 65535 });
+        let offer = a.proposal().v44.expect("V.44 not offered");
+        assert_eq!(offer.transmit, v44::Params { n2: 512, n7: 40, n8: 1024 });
+        // A ceiling above what the coder offers leaves the coder's offer.
+        assert_eq!(offer.receive, v44::Params::of(v44::OFFERED_N2, v44::OFFERED_N7).resolve(v44::Params { n2: 1024, n7: 255, n8: 65535 }));
+        assert_eq!(offer.receive.n2, 1024);
     }
 
     #[test]

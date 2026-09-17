@@ -96,6 +96,10 @@ struct Protection {
     fallback: u8,
     /// `+ER`: report which error control was negotiated.
     report_error_control: bool,
+    /// `+DS44` `<direction>`: 3 both ways or 0 not at all, and its
+    /// `<compression_negotiation>`.
+    v44: bool,
+    v44_required: bool,
     /// `+DS` `<direction>`: 3 both ways or 0 not at all.
     compress: bool,
     /// `+DS` `<compression_negotiation>`: 1 hangs up if the far end will not.
@@ -115,6 +119,8 @@ impl Default for Protection {
             request: 3,
             fallback: 0,
             report_error_control: false,
+            v44: true,
+            v44_required: false,
             compress: true,
             compress_required: false,
             max_dict: 2048,
@@ -155,6 +161,11 @@ impl Protection {
                 u8::from(self.compress_required),
                 self.max_dict,
                 self.max_string
+            ),
+            format!(
+                "AT+DS44={},{}",
+                if self.v44 { 3 } else { 0 },
+                u8::from(self.v44_required)
             ),
             format!(
                 "AT+ER={};+DR={}",
@@ -451,6 +462,7 @@ impl ScopeApp {
                 | at::Action::SelectModulation(_)
                 | at::Action::SelectErrorControl(_)
                 | at::Action::SelectCompression(_)
+                | at::Action::SelectV44(_)
                 | at::Action::OffHook
                 | at::Action::ResetProfile(_)
                 | at::Action::FactoryDefaults(_) => {}
@@ -2041,10 +2053,24 @@ impl ScopeApp {
                         ui.label(RichText::new("compression").monospace().color(dim));
                         ui.add_enabled_ui(p.wants_error_control(), |ui| {
                             ui.vertical(|ui| {
+                                ui.checkbox(&mut p.v44, "V.44, both directions")
+                                    .on_hover_text(
+                                        "AT+DS44. The newer of the two and the better on \
+                                         text and web pages, used whenever the far end has \
+                                         it too",
+                                    );
+                                ui.add_enabled_ui(p.v44, |ui| {
+                                    ui.checkbox(&mut p.v44_required, "hang up without V.44")
+                                        .on_hover_text(
+                                            "V.250 Table 28: disconnect if V.44 is not \
+                                             negotiated by the remote DCE as specified",
+                                        );
+                                });
                                 ui.checkbox(&mut p.compress, "V.42bis, both directions")
                                     .on_hover_text(
-                                        "V.42bis rides on LAPM and there is nowhere else \
-                                         for it to be, so error control off is compression \
+                                        "AT+DS. The older one, for a far end without V.44. \
+                                         Both ride on LAPM and there is nowhere else for \
+                                         them to be, so error control off is compression \
                                          off. Negotiated as a pair: one direction only is \
                                          a promise this modem cannot keep",
                                     );
@@ -2843,6 +2869,8 @@ fn to_remember(
     r.set("es_request", protection.request);
     r.set("es_fallback", protection.fallback);
     r.set("report_error_control", protection.report_error_control);
+    r.set("v44", protection.v44);
+    r.set("v44_required", protection.v44_required);
     r.set("compress", protection.compress);
     r.set("compress_required", protection.compress_required);
     r.set("max_dict", protection.max_dict);
@@ -2895,6 +2923,12 @@ fn from_remembered(
     }
     if let Some(v) = r.get("report_error_control") {
         p.report_error_control = v;
+    }
+    if let Some(v) = r.get("v44") {
+        p.v44 = v;
+    }
+    if let Some(v) = r.get("v44_required") {
+        p.v44_required = v;
     }
     if let Some(v) = r.get("compress") {
         p.compress = v;
@@ -3209,6 +3243,8 @@ mod tests {
         let protection = Protection {
             request: 2,
             fallback: 2,
+            v44: false,
+            v44_required: false,
             compress: false,
             compress_required: false,
             max_dict: 1024,
@@ -3271,6 +3307,8 @@ mod tests {
         let protection = Protection {
             request: 2,
             fallback: 2,
+            v44: true,
+            v44_required: true,
             compress: true,
             compress_required: false,
             max_dict: 1024,
@@ -3333,6 +3371,8 @@ mod tests {
                 ..Protection::default()
             },
             Protection { max_dict: 512, max_string: 6, ..Protection::default() },
+            Protection { v44: false, ..Protection::default() },
+            Protection { v44_required: true, compress: false, ..Protection::default() },
             Protection { max_dict: 32768, max_string: 250, ..Protection::default() },
         ] {
             for command in p.commands() {
@@ -3349,6 +3389,8 @@ mod tests {
         let p = Protection {
             request: 2,
             fallback: 2,
+            v44: false,
+            v44_required: false,
             compress: true,
             compress_required: true,
             max_dict: 4096,
@@ -3369,6 +3411,7 @@ mod tests {
         assert_eq!(it.error_control.fallback, 2);
         assert_eq!(it.compression.direction, 3);
         assert!(it.compression.required);
+        assert_eq!(it.v44.direction, 0, "V.44 was unticked");
         assert_eq!(it.compression.max_dict, 4096);
         assert_eq!(it.compression.max_string, 32);
         assert!(it.config.report_error_control);

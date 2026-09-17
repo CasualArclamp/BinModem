@@ -32,7 +32,8 @@ fn record(carrier: &str, text: &str, seconds: f64) -> Vec<f32> {
             m.feed_dte(b);
         }
         m.take_dte();
-        // AT+DS=0: error control stays and compression goes.
+        // AT+DS=0 and AT+DS44=0: error control stays and compression goes,
+        // V.42bis and V.44 each by its own switch.
         //
         // What this test reads is the modulation and the framing, and it does
         // that by looking for the greeting inside the frames. A compressed
@@ -40,7 +41,7 @@ fn record(carrier: &str, text: &str, seconds: f64) -> Vec<f32> {
         // so the very first character is already a codeword, and V.42bis gets
         // there too once the text repeats. Turning it off keeps the test about
         // the thing it is named for.
-        for b in b"AT+DS=0\r" {
+        for b in b"AT+DS=0;+DS44=0\r" {
             m.feed_dte(*b);
         }
         m.take_dte();
