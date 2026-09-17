@@ -1528,6 +1528,40 @@ mod tests {
         }
     }
 
+    /// Each frame the line spoils is recorded and counted once.
+    ///
+    /// From `live-1789647424.wav`, whose record of frames showed pairs of
+    /// identical damaged frames 20 ms apart: the second of each was an abort,
+    /// logged with the octets of the damaged frame before it and counted as
+    /// damage again. And a line that goes to marks after a flag has not
+    /// damaged anything.
+    #[test]
+    fn a_damaged_frame_is_logged_and_counted_once() {
+        let mut stack = Stack::new(Role::Originator, Params::default()).without_detection();
+        let mut e = Encoder::new(Fcs::Bits16);
+        let rr = Frame::Rr { nr: 0, pf: true }.encode(DLCI_DATA, Role::Answerer, Kind::Command);
+        e.frame(&rr);
+        let mut bits: Vec<bool> = std::iter::from_fn(|| e.next_bit()).collect();
+        bits[12] = !bits[12];
+        // Two octets of a frame after the damaged one's closing flag, then an
+        // abort; then a flag, and marks.
+        let octet = |o: u8| (0..8).map(move |i| o & (1 << i) != 0);
+        bits.extend(octet(0x41).chain(octet(0x42)));
+        bits.extend([true; 8]);
+        bits.extend(octet(0x7e));
+        bits.extend([true; 64]);
+        for bit in bits {
+            stack.next_bit();
+            stack.feed_bit(bit);
+        }
+        let heard: Vec<Crossed> = stack.take_log().into_iter().filter(|f| !f.outbound).collect();
+        assert_eq!(heard.len(), 2, "{heard:02x?}");
+        assert!(heard.iter().all(|f| !f.intact));
+        assert_eq!(heard[0].body.len(), rr.len() + 2, "the damaged frame was not kept");
+        assert_eq!(heard[1].body, [0x41, 0x42], "the abort was not logged as itself");
+        assert_eq!(stack.damaged_frames(), 2);
+    }
+
     #[test]
     fn a_release_is_seen_at_both_ends() {
         let (mut a, mut b) = pair();
