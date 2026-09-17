@@ -432,10 +432,18 @@ impl Xid {
             field = rest;
             match pi {
                 pi::HDLC_OPTIONAL => {
-                    if value.len() != 4 {
+                    // Table 11a Note 1 makes this four octets, and real
+                    // modems send three: both ends of the call in the V.22bis
+                    // vector do, and each of their XIDs was thrown away whole
+                    // for it. Bit 24 is the last one the note names and three
+                    // octets hold it, so a shorter mask is read with the rest
+                    // as zero.
+                    if value.is_empty() || value.len() > 4 {
                         return Err(XidError::BadLength { pi, len: value.len() as u8 });
                     }
-                    let mask = u32::from_le_bytes([value[0], value[1], value[2], value[3]]);
+                    let mut octets = [0u8; 4];
+                    octets[..value.len()].copy_from_slice(value);
+                    let mask = u32::from_le_bytes(octets);
                     // The options and nothing else. Note 1: "A receiver of
                     // these frames should ignore these bit positions" -- the
                     // ones the encoding rules fix, of which bit 16 differs
@@ -937,6 +945,73 @@ mod tests {
         assert!(asking.resolve(&asking).srej_single, "both offered");
         assert!(!asking.resolve(&silent).srej_single, "the far end did not");
         assert!(!silent.resolve(&asking).srej_single, "this end did not");
+    }
+
+    /// The information fields of the two XIDs in `tests/vectors/v22bis-2400.wav`,
+    /// a Conexant softmodem calling an ISP: its command, and the host's
+    /// response. Both carry a three-octet option mask, and the command ends
+    /// with a V.44 offer laid out as Table A.1 has it.
+    const CALLER_XID: &[u8] = &[
+        0x82, 0x80, 0x00, 0x13, 0x03, 0x03, 0x8a, 0x89, 0x00, 0x05, 0x02, 0x04, 0x00, 0x06, 0x02,
+        0x04, 0x00, 0x07, 0x01, 0x0f, 0x08, 0x01, 0x0f, 0xf0, 0x00, 0x0f, 0x00, 0x03, 0x56, 0x34,
+        0x32, 0x01, 0x01, 0x03, 0x02, 0x02, 0x08, 0x00, 0x03, 0x01, 0x20, 0xff, 0x40, 0x03, 0x56,
+        0x34, 0x34, 0x41, 0x01, 0x00, 0x42, 0x01, 0x03, 0x43, 0x02, 0x08, 0x00, 0x44, 0x02, 0x08,
+        0x00, 0x45, 0x01, 0x8e, 0x46, 0x01, 0x8e, 0x47, 0x02, 0x20, 0x00, 0x48, 0x02, 0x20, 0x00,
+    ];
+    const HOST_XID: &[u8] = &[
+        0x82, 0x80, 0x00, 0x13, 0x03, 0x03, 0x8a, 0x89, 0x00, 0x05, 0x02, 0x04, 0x00, 0x06, 0x02,
+        0x04, 0x00, 0x07, 0x01, 0x0f, 0x08, 0x01, 0x0f, 0xf0, 0x00, 0x0f, 0x00, 0x03, 0x56, 0x34,
+        0x32, 0x01, 0x01, 0x03, 0x02, 0x02, 0x08, 0x00, 0x03, 0x01, 0x20,
+    ];
+
+    #[test]
+    fn the_xids_of_a_real_call_are_read() {
+        let host = Xid::decode(HOST_XID).expect("the host's XID was refused");
+        assert_eq!(
+            host,
+            Xid {
+                n401_transmit: Some(128),
+                n401_receive: Some(128),
+                window_transmit: Some(15),
+                window_receive: Some(15),
+                fcs32: false,
+                srej_single: false,
+                test_frame: false,
+                srej_multiple: false,
+                compression: Some(Compression::Both),
+                codewords: Some(2048),
+                max_string: Some(32),
+                v44: None,
+            }
+        );
+        let caller = Xid::decode(CALLER_XID).expect("the caller's XID was refused");
+        let offer = v44::Params { n2: 2048, n7: 142, n8: 8192 };
+        assert_eq!(
+            caller,
+            Xid {
+                v44: Some(V44Offer { compression: Compression::Both, transmit: offer, receive: offer }),
+                ..host
+            }
+        );
+        // And answered, this end would have agreed V.44 with it.
+        assert!(Xid::proposal(Compression::Both).resolve(&caller).v44.is_some());
+    }
+
+    #[test]
+    fn an_option_mask_shorter_than_four_octets_is_read_as_far_as_it_goes() {
+        let field = |mask: &[u8]| {
+            let mut params = Vec::new();
+            push_param(&mut params, pi::HDLC_OPTIONAL, mask);
+            let mut bytes = vec![FI_GENERAL_PURPOSE];
+            push_subfield(&mut bytes, GI_PARAMETER, &params);
+            Xid::decode(&bytes)
+        };
+        // Bit 3, single-frame selective reject, in a one-octet mask.
+        assert!(field(&[0x04]).expect("one octet").srej_single);
+        // Bit 24 in a three-octet one.
+        assert!(field(&[0, 0, 0x80]).expect("three octets").srej_multiple);
+        assert_eq!(field(&[]), Err(XidError::BadLength { pi: pi::HDLC_OPTIONAL, len: 0 }));
+        assert_eq!(field(&[0; 5]), Err(XidError::BadLength { pi: pi::HDLC_OPTIONAL, len: 5 }));
     }
 
     /// The bits 12.2.2 Note 1 requires a transmitter to set whatever it does.
