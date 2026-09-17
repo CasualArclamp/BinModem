@@ -281,11 +281,10 @@ impl Xid {
             compression: Some(compression),
             codewords: Some(v42bis::OFFERED_N2),
             max_string: Some(v42bis::OFFERED_N7),
-            // Both are offered in the one XID. 7.3: "the responder shall
-            // include parameters for at most one compression algorithm
-            // (V.42 bis or V.44) in the response XID", so the far end picks
-            // and a far end that has never heard of V.44 skips the subfield it
-            // does not know and answers about V.42bis.
+            // Both are offered in the one XID, which only a command may do:
+            // the far end picks, and one that has never heard of V.44 skips
+            // the subfield it does not know and answers about V.42bis. 7.3
+            // holds an answer to one of the two -- see [`Xid::answering`].
             v44: Some(V44Offer::proposal(compression)),
         }
     }
@@ -563,6 +562,31 @@ impl Xid {
             // taking the lower of matching fields, so it has its own.
             v44: self.v44_params(other),
         }
+    }
+
+    /// This proposal as an answer, naming one compression algorithm at most.
+    ///
+    /// V.44 7.3, NOTE: "The responder shall include parameters for at most one
+    /// compression algorithm (V.42 bis or V.44) in the response XID." A
+    /// command may name both, and this end's does, because that is how a far
+    /// end which has never heard of V.44 gets to skip the user data subfield
+    /// and answer about V.42bis instead. An answer may not: two subfields side
+    /// by side say what the responder can do and not which of the two the
+    /// connection is going to use, which is the one thing the answer is for.
+    ///
+    /// Which of them is not a free choice. `settled` is this end's proposal
+    /// already met against the command it is answering ([`Self::resolve`]), so
+    /// it names V.44 exactly when both ends offered it and both wanted it, and
+    /// that is the one [`crate::Stack`] turns on; otherwise the answer is
+    /// about V.42bis, including when nothing was agreed, since a far end told
+    /// no direction has been answered and a far end told nothing has not.
+    pub fn answering(mut self, settled: &Self) -> Self {
+        if settled.v44.is_some() {
+            self.compression = None;
+        } else {
+            self.v44 = None;
+        }
+        self
     }
 
     /// V.42bis parameters implied by a settled negotiation.

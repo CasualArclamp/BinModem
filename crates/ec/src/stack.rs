@@ -930,9 +930,12 @@ impl Stack {
         // silence until it gives up on compression or, following Appendix
         // III.3, on the call.
         if kind == Kind::Command {
+            // What goes back is this end's proposal with one compression
+            // algorithm in it, the one `agreed` came to -- V.44 7.3's NOTE,
+            // and the same choice made a few lines above.
             let body = Frame::Xid {
                 pf: false,
-                info: self.proposal().encode(Kind::Response),
+                info: self.proposal().answering(&agreed).encode(Kind::Response),
             }
             .encode(DLCI_DATA, self.role, Kind::Response);
             // 8.10.2 keeps this one at 16 bits whatever the connection has
@@ -1523,6 +1526,66 @@ mod tests {
         a.send(b"and this still crosses");
         settle(&mut a, &mut b, 200_000, |_, bit| bit);
         assert_eq!(b.take_received(), b"and this still crosses");
+    }
+
+    /// V.44 7.3, NOTE: "The responder shall include parameters for at most one
+    /// compression algorithm (V.42 bis or V.44) in the response XID."
+    ///
+    /// This end answered every command with its whole standing proposal, which
+    /// names both, and that is not an answer: it says what this end can do
+    /// rather than what the call is going to use. A far end reading the
+    /// V.42bis half of it and turning V.42bis on would then be compressing
+    /// with one algorithm against a decoder running the other, which does not
+    /// fail cleanly -- every codeword means something else and the screen
+    /// fills with nonsense on a link that looks perfect.
+    #[test]
+    fn an_xid_response_names_one_compression_algorithm() {
+        /// Every XID an end sent as a response, read as the far end reads it.
+        fn answers(stack: &mut Stack, role: Role) -> Vec<Xid> {
+            stack
+                .take_log()
+                .into_iter()
+                .filter(|f| f.outbound)
+                .filter_map(|f| Frame::decode(&f.body, role.peer()).ok())
+                .filter_map(|(address, frame)| match frame {
+                    Frame::Xid { info, .. } if address.kind == Kind::Response => {
+                        Some(Xid::decode(&info).expect("this end's own XID would not decode"))
+                    }
+                    _ => None,
+                })
+                .collect()
+        }
+
+        // Both ends offering both algorithms: V.44 is what they settle on, so
+        // V.44 is the one their answers name.
+        let (mut a, mut b) = negotiated_pair();
+        a.connect();
+        settle(&mut a, &mut b, 40_000, |_, bit| bit);
+        assert_eq!(a.compression_name(), Some("V.44"), "nothing was settled to answer about");
+        let mut both = answers(&mut a, Role::Originator);
+        both.extend(answers(&mut b, Role::Answerer));
+        assert!(!both.is_empty(), "neither end answered an XID command");
+        for xid in both {
+            assert!(xid.v44.is_some(), "an answer dropped the agreed V.44");
+            assert!(xid.compression.is_none(), "an answer named V.42bis as well as V.44");
+        }
+
+        // And an end that has never heard of V.44 is answered about the
+        // algorithm it did offer, which is the whole of the choice.
+        let mut a = Stack::new(Role::Originator, Params::default());
+        let mut b = Stack::new(Role::Answerer, Params::default());
+        a.offer_compression(Compression::Both);
+        b.offer_compression(Compression::Both);
+        b.without_v44();
+        a.connect();
+        settle(&mut a, &mut b, 40_000, |_, bit| bit);
+        assert_eq!(a.compression_name(), Some("V.42bis"), "nothing was settled to answer about");
+        let answered = answers(&mut a, Role::Originator);
+        assert!(!answered.is_empty(), "the originator answered no XID command");
+        for xid in answered {
+            assert!(xid.compression.is_some(), "the originator's answer dropped V.42bis");
+            assert!(xid.v44.is_none(), "the originator offered V.44 to an end without it");
+        }
     }
 
     #[test]
