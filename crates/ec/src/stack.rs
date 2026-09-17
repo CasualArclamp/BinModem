@@ -38,14 +38,29 @@ const DLCI_DATA: u8 = 0;
 /// it cannot miss the change and then miss the frame as well.
 const LEADING_FLAGS: usize = 16;
 
-/// How long to wait for the far end's XID before giving up on negotiating.
+/// N400 for the XID exchange: how many times the command is sent again.
 ///
-/// V.42 8.10 does not name a figure. A second is generous at any rate this
-/// modem reaches and short enough that a modem which does error control but
-/// not parameter negotiation is not left waiting -- on a line that answers
-/// promptly. A line the data pump has measured adds its round trip to it
-/// ([`Stack::over_a_round_trip`]).
-const XID_WAIT_MS: u32 = 1000;
+/// 8.10.3 bounds the retransmissions by N400 and 9.2.2 sets no default for it,
+/// only "a minimum value of 1"; Appendix III.2's large figure is argued for
+/// the *establishment* phase, where detection has already shown the far end
+/// does LAPM and every retry is spent on a connection worth having. Nothing
+/// has shown the far end negotiates, so this one is the minimum.
+///
+/// It decides how long a call spends negotiating, because the wait is now
+/// exactly the retransmissions: one XID, T401, one more, T401 again, and then
+/// 8.10.3's other ending. Two T401s is the least any retransmission can cost,
+/// and T401 is already the line's own figure -- 1038 ms at 28 800 bit/s with
+/// nothing measured, 1751 ms behind a measured 1142 ms round trip -- so the
+/// budget comes to about 2.1 s and 3.5 s on those two lines, the same order as
+/// the fixed second this replaces. Allowing two retransmissions would have put
+/// a third of a call's set-up time into asking a question twice over.
+///
+/// The one loss this covers is the reason the second copy is worth sending at
+/// all: 7.2.1.3 has the answerer send its detection pattern at least ten times
+/// and stay in the detection phase until it has, feeding what arrives to its
+/// detector rather than its deframer, so an XID that reaches it inside that
+/// window is swallowed whole.
+const XID_N400: u32 = 1;
 
 /// Where a V.42 connection has got to.
 ///
@@ -162,7 +177,6 @@ pub struct Stack {
     gave_up: bool,
     /// Whether the run of flags that opens the protocol phase has been queued.
     opened: bool,
-    waited_ms: u32,
     /// The XID exchange's own copy of the machinery in 8.10.2 and 8.10.3: an
     /// XID command waiting to go out, how long since the last one went, and
     /// how many times it has been sent again.
@@ -341,7 +355,6 @@ impl Stack {
             undecodable: 0,
             gave_up: false,
             opened: false,
-            waited_ms: 0,
             xid_due: false,
             xid_ms: 0,
             xid_retries: 0,
@@ -406,16 +419,16 @@ impl Stack {
     /// all required transmissions including a single satellite link", and a
     /// call carried over a SIP trunk is further away than a satellite. The
     /// data pump has measured the line by the time this is built, so the
-    /// detection phase and the XID exchange each wait that much longer.
+    /// detection phase waits that much longer.
     ///
-    /// Without it, on a line with a 1.1 s round trip, both went wrong. The
-    /// originator's T400 ran out before any ADP could arrive, so only a far
-    /// end that had named LAPM in V.8 got error control at all; and an
-    /// answerer gave up on XID before the originator's could reach it, which
-    /// is survivable only because an XID that arrives late is still acted on.
+    /// Without it, on a line with a 1.1 s round trip, the originator's T400 ran
+    /// out before any ADP could arrive, so only a far end that had named LAPM
+    /// in V.8 got error control at all.
     ///
     /// T401 is not set here: it depends on the line rate as well, and comes in
-    /// with the [`Params`] -- see [`crate::lapm::t401_for_line`].
+    /// with the [`Params`] -- see [`crate::lapm::t401_for_line`]. The XID
+    /// exchange takes the line from there, since 8.10.2 and 8.10.3 time it by
+    /// T401 and nothing else.
     pub fn over_a_round_trip(mut self, round_trip_ms: u32) -> Self {
         self.round_trip_ms = round_trip_ms;
         if !matches!(self.detect, Detect::Done) {
@@ -427,11 +440,6 @@ impl Stack {
     /// V.42 9.1.1's default, and the line on top of it.
     fn t400_ms(&self) -> u32 {
         crate::detect::DEFAULT_T400_MS.saturating_add(self.round_trip_ms)
-    }
-
-    /// How long to wait for the far end's XID, on the same terms.
-    fn xid_wait_ms(&self) -> u32 {
-        XID_WAIT_MS.saturating_add(self.round_trip_ms)
     }
 
     /// Offer V.42bis in the XID exchange.
@@ -680,31 +688,37 @@ impl Stack {
                 self.settle_detection(outcome);
             }
             Phase::Negotiating => {
-                self.waited_ms = self.waited_ms.saturating_add(dt_ms);
                 self.xid_ms = self.xid_ms.saturating_add(dt_ms);
-                // 8.10.3 on expiry of T401 with no XID response: "retransmit
-                // the XID command as above; restart timer T401; and increment
-                // the retransmission counter (N400)". The timer is LAPM's own,
-                // because it is the same line and the same round trip, and it
-                // is the one the data pump's measurement went into.
-                if !self.xid_due
-                    && self.xid_ms >= self.lapm.t401_ms()
-                    && self.xid_retries < self.lapm.retransmissions()
-                {
-                    self.xid_retries += 1;
-                    self.xid_due = true;
-                }
-                if self.waited_ms >= self.xid_wait_ms() {
-                    // A modem that does error control but declines to negotiate
-                    // is a modem to talk to without compression, not one to
-                    // wait for indefinitely. This is also where 8.10.3's other
-                    // ending lands -- "after retransmission of the XID command
-                    // N400 times and failure to receive an XID response ...
-                    // notify the control function that the negotiation
-                    // /indication procedure did not complete" -- since the two
-                    // of them have the same consequence here and this wait is
-                    // the shorter on any line either end would answer on.
-                    self.begin_protocol();
+                // T401 is LAPM's own, because it is the same line and the same
+                // round trip, and it is the one the data pump's measurement
+                // went into. It is also the whole of the wait: an XID command
+                // that is still out with the timer running has not gone
+                // unanswered yet, so there is nothing else to give up on.
+                //
+                // Not while one is due and unsent. The timer 8.10.2 starts is
+                // started by transmitting the frame, and the encoder may still
+                // be laying out the last one; counting a retransmission before
+                // the copy it belongs to has left would spend N400 on frames
+                // the far end never saw.
+                if !self.xid_due && self.xid_ms >= self.lapm.t401_ms() {
+                    if self.xid_retries < XID_N400 {
+                        // 8.10.3: "retransmit the XID command as above; restart
+                        // timer T401; and increment the retransmission counter
+                        // (N400)". The restart is where the frame goes out.
+                        self.xid_retries += 1;
+                        self.xid_due = true;
+                    } else {
+                        // 8.10.3's other ending: "after retransmission of the
+                        // XID command N400 times and failure to receive an XID
+                        // response ... notify the control function that the
+                        // negotiation/indication procedure did not complete".
+                        // Here that notification is simply going on without
+                        // anything negotiated -- a modem that does error
+                        // control but declines to negotiate is a modem to talk
+                        // to without compression, not one to wait for
+                        // indefinitely.
+                        self.begin_protocol();
+                    }
                 }
             }
             Phase::Protocol | Phase::Transparent => {}
@@ -1004,7 +1018,6 @@ impl Stack {
     fn enter_negotiating(&mut self) {
         self.detect = Detect::Done;
         self.phase = Phase::Negotiating;
-        self.waited_ms = 0;
         self.xid_due = true;
         self.xid_ms = 0;
         self.xid_retries = 0;
@@ -1577,48 +1590,76 @@ mod tests {
     }
 
     /// V.42 8.10.2 sends one XID command and starts T401; 8.10.3 is the only
-    /// thing that sends another.
+    /// thing that sends another, and it sends it N400 times.
     ///
-    /// This end queued a fresh one every time the encoder ran dry, which on a
-    /// real call put between 50 and 206 identical copies on the line back to
-    /// back -- a second or two of a connection spent asking a question that
-    /// had already been asked, and that one XID response would have answered.
+    /// On the T401 figures a call is really built with, which is the whole
+    /// point of the test. This end first queued a fresh XID every time the
+    /// encoder ran dry -- between 50 and 206 identical copies on a real call.
+    /// The timer that replaced it was then raced by a separate wait for the
+    /// response that expired first on nearly every line, so a call sent one
+    /// XID and never asked again; and one XID is exactly the frame an answerer
+    /// still finishing its detection pattern (7.2.1.3) swallows whole. The
+    /// test that guarded it pinned T401 at 200 ms, which no line produces.
     #[test]
-    fn an_xid_command_is_repeated_only_when_its_timer_expires() {
-        // 96 bits to the tick is 9600 bit/s, and the tick is also the
-        // granularity of every time below: a frame is seen to have gone out at
-        // the tick after its closing flag, so a gap measured here can be a
-        // tick shorter than the timer that opened it.
+    fn an_xid_command_is_sent_again_on_every_line_a_call_measures() {
+        // The tick is the granularity of every time below: a frame is seen to
+        // have gone out at the tick after its closing flag, so a gap measured
+        // here can be a tick shorter than the timer that opened it.
+        const RATE: u32 = 28_800;
         const TICK_MS: u32 = 10;
-        const BITS_PER_TICK: usize = 96;
-        const T401_MS: u32 = 200;
+        const BITS_PER_TICK: usize = (RATE * TICK_MS / 1000) as usize;
 
-        let params = Params { t401_ms: T401_MS, ..Default::default() };
-        let mut stack = Stack::new(Role::Originator, params).without_detection();
-        let mut decoder = Decoder::new(Fcs::Bits16);
-        let mut sent: Vec<u32> = Vec::new();
-        let mut elapsed = 0;
-        for i in 0..20_000 {
-            if let Some(Ok(body)) = decoder.feed(stack.next_bit())
-                && body[1] & !0x10 == 0xaf
-            {
-                sent.push(elapsed);
+        // What builds a stack: no measurement at all, which is every V.22bis,
+        // V.32 and V.32bis call and a V.34 one whose phase 2 measured nothing,
+        // and then three lines the data pump has put a figure on.
+        for round_trip_ms in [None, Some(200), Some(1142), Some(4_000)] {
+            let t401_ms = match round_trip_ms {
+                Some(ms) => crate::lapm::t401_for_line(RATE, ms),
+                None => crate::lapm::t401_for(RATE),
+            };
+            let params = Params { t401_ms, ..Default::default() };
+            let mut stack = Stack::new(Role::Originator, params);
+            if let Some(ms) = round_trip_ms {
+                stack = stack.over_a_round_trip(ms);
             }
-            if i % BITS_PER_TICK == BITS_PER_TICK - 1 {
-                stack.tick(TICK_MS);
-                elapsed += TICK_MS;
+            let mut stack = stack.without_detection();
+            let mut decoder = Decoder::new(Fcs::Bits16);
+            let mut sent: Vec<u32> = Vec::new();
+            let mut elapsed = 0;
+            let mut i = 0;
+            // Until the exchange gives up, which is what bounds it: a budget
+            // that ended the negotiation before the retransmission was due
+            // would stop the loop with one XID on the line.
+            while stack.phase() == Phase::Negotiating && elapsed < 60_000 {
+                if let Some(Ok(body)) = decoder.feed(stack.next_bit())
+                    && body[1] & !0x10 == 0xaf
+                {
+                    sent.push(elapsed);
+                }
+                if i % BITS_PER_TICK == BITS_PER_TICK - 1 {
+                    stack.tick(TICK_MS);
+                    elapsed += TICK_MS;
+                }
+                i += 1;
             }
-        }
-        // The one of 8.10.2 and N400 retransmissions of it, and nothing after
-        // that: the wait for a response runs out and the call goes on without
-        // anything negotiated.
-        assert_eq!(
-            sent.len(),
-            1 + crate::lapm::UNCONFIRMED_N400 as usize,
-            "XIDs went out at {sent:?} ms"
-        );
-        for pair in sent.windows(2) {
-            assert!(pair[1] - pair[0] + TICK_MS >= T401_MS, "XIDs went out at {sent:?} ms");
+            let line = match round_trip_ms {
+                Some(ms) => format!("a {ms} ms line"),
+                None => "an unmeasured line".to_string(),
+            };
+            // The one of 8.10.2 and N400 retransmissions of it, on every line:
+            // the give-up cannot come first, because it is what happens when
+            // the last of those retransmissions goes unanswered.
+            assert_eq!(
+                sent.len(),
+                1 + XID_N400 as usize,
+                "on {line} (T401 {t401_ms} ms) XIDs went out at {sent:?} ms"
+            );
+            for pair in sent.windows(2) {
+                assert!(
+                    pair[1] - pair[0] + TICK_MS >= t401_ms,
+                    "on {line} (T401 {t401_ms} ms) XIDs went out at {sent:?} ms"
+                );
+            }
         }
     }
 
@@ -1693,8 +1734,9 @@ mod tests {
             }
             stack.tick(0);
         };
-        // The wait runs out with nothing heard.
-        for _ in 0..20 {
+        // The exchange runs out with nothing heard: one XID, T401, the
+        // retransmission, T401 again (8.10.3).
+        for _ in 0..80 {
             for _ in 0..1_000 {
                 answerer.next_bit();
                 answerer.feed_bit(true);
@@ -1780,9 +1822,10 @@ mod tests {
         };
         // Let it send its XID and its SABME into a silence that answers
         // neither, which is what the recording has.
-        // Time as well as bits: the XID wait is a timer, and a stack that is
-        // only ever handed bits never reaches the end of it.
-        for _ in 0..20 {
+        // Time as well as bits: the XID exchange ends on T401 and N400
+        // (8.10.3), and a stack that is only ever handed bits never reaches
+        // the end of it.
+        for _ in 0..80 {
             for _ in 0..4_000 {
                 stack.next_bit();
                 stack.feed_bit(true);
@@ -1838,7 +1881,9 @@ mod tests {
             }
             stack.tick(0);
         };
-        for _ in 0..20 {
+        // Long enough for the XID exchange to give up on its own terms: T401,
+        // the one retransmission, and T401 again (8.10.3).
+        for _ in 0..80 {
             for _ in 0..4_000 {
                 stack.next_bit();
                 stack.feed_bit(true);
