@@ -674,6 +674,8 @@ pub struct Decoder {
     kind: Option<Signal>,
     body: Vec<u8>,
     zeros: usize,
+    /// The octets the menu last reported was read from.
+    reported: Vec<u8>,
 }
 
 /// What a decoder found.
@@ -761,13 +763,29 @@ impl Decoder {
         }
     }
 
+    /// The octets the menu last reported was read from, without its
+    /// synchronisation.
+    ///
+    /// 8.1.2 and 8.2.2 act on "2 identical" sequences, and clause 5 says what
+    /// a sequence is: ten ONEs, ten bits of synchronisation, and then the
+    /// information-bearing octets. So whether two of them are identical is a
+    /// question about these octets, and it has to be asked before clause 6's
+    /// other rule -- ignore every code and octet reserved for future
+    /// definition -- has been applied, because that rule is exactly what can
+    /// make two different sequences parse alike.
+    pub fn sequence(&self) -> &[u8] {
+        &self.reported
+    }
+
     fn finish(&mut self) -> Option<Heard> {
         let body = std::mem::take(&mut self.body);
         self.kind = None;
         if body.is_empty() {
             return None;
         }
-        Menu::parse(&body).map(Heard::Cm)
+        let menu = Menu::parse(&body)?;
+        self.reported = body;
+        Some(Heard::Cm(menu))
     }
 }
 
@@ -1136,6 +1154,38 @@ mod tests {
             }
         }
         assert_eq!(heard, Some(Heard::Cm(menu)), "a category past the end costs nothing");
+    }
+
+    #[test]
+    fn two_sequences_that_parse_alike_are_still_told_apart_by_their_octets() {
+        // Clause 6 has a receiver "ignore all bits, codes and octets reserved
+        // for such future definition", which is what makes a menu robust and
+        // what makes two damaged sequences indistinguishable once they have
+        // been parsed: `a9` carries a tag Table 2 does not give and is ignored
+        // away, and `10` is an extension octet with every modulation bit
+        // clear. Both leave the same menu behind. 8.1.2 and 8.2.2 count
+        // "identical" sequences, and clause 5 says a sequence is its octets,
+        // so whoever counts them has to be able to ask about the octets.
+        //
+        // These two are from `live-1789647424.wav`, where a jitter buffer took
+        // the last three octets off six of the far end's eight JMs.
+        let bodies: [&[u8]; 2] = [&[0xc1, 0x45, 0x13, 0xa9], &[0xc1, 0x45, 0x13, 0x10]];
+        assert_ne!(bodies[0], bodies[1]);
+        assert_eq!(Menu::parse(bodies[0]), Menu::parse(bodies[1]));
+
+        let mut decoder = Decoder::new();
+        let mut seen: Vec<Vec<u8>> = Vec::new();
+        // The synchronisation of the next sequence is what ends this one, so
+        // the last body needs one behind it to be reported at all.
+        for body in [bodies[0], bodies[1], bodies[0]] {
+            decoder.feed(SYNC_MENU);
+            for &octet in body {
+                decoder.feed(octet);
+            }
+            seen.push(decoder.sequence().to_vec());
+        }
+        assert_eq!(seen[1], bodies[0], "{seen:02x?}");
+        assert_eq!(seen[2], bodies[1], "{seen:02x?}");
     }
 
     #[test]

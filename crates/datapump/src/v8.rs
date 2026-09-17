@@ -86,7 +86,13 @@ pub mod timing {
     pub const PATIENCE: f64 = 60.0;
 }
 
-/// 7.3 and 7.4: a menu is believed once it has arrived twice the same.
+/// 8.1.2 and 8.2.2: a menu is believed once it has arrived twice the same.
+///
+/// "After a minimum of 2 identical JM sequences have been received, the call
+/// DCE shall complete the current octet ... and then signal CJ shall be
+/// transmitted", and "upon receiving a minimum of 2 identical CM sequences,
+/// the DCE shall transmit JM". A minimum of two, and not two in a row: a
+/// sequence that arrived with octets missing is one that was not received.
 const IDENTICAL: u32 = 2;
 
 /// What the procedure has decided.
@@ -151,9 +157,15 @@ pub struct Modem {
     /// Seconds since the whole thing began.
     total: f64,
     fs: f64,
-    /// The last menu heard, and how many times running it has arrived the same.
+    /// The last menu heard, the octets it was read from, and how many times
+    /// that same sequence has arrived.
     last: Option<Menu>,
+    last_octets: Vec<u8>,
     repeats: u32,
+    /// Framing errors the receiver has counted, and whether one of them fell
+    /// inside the sequence being gathered now.
+    framing_errors: u64,
+    torn: bool,
     /// What was agreed, once it has been.
     chosen: Option<Modulation>,
     /// The error control both ends named, if they named any (Table 6).
@@ -196,7 +208,10 @@ impl Modem {
             total: 0.0,
             fs,
             last: None,
+            last_octets: Vec::new(),
             repeats: 0,
+            framing_errors: 0,
+            torn: false,
             chosen: None,
             agreed: Protocol::Unstated,
             far_menu: None,
@@ -300,7 +315,19 @@ impl Modem {
         self.level.process(line.abs());
 
         self.answer.feed(line);
-        if let Some(octet) = self.rx.feed(line) {
+        let octet = self.rx.feed(line);
+        // A character whose stop bit was not a mark. Clause 5 runs a sequence
+        // octet against octet with nothing between them, so a framing error
+        // means the framer spent the rest of that character, and usually the
+        // next one or two, hunting for a clean start bit -- and the sequence
+        // being gathered now has a hole in it. A packet network's jitter
+        // buffer deletes or inserts a couple of bit times every few seconds,
+        // which at 300 bit/s is exactly this.
+        if self.rx.framing_errors() != self.framing_errors {
+            self.framing_errors = self.rx.framing_errors();
+            self.torn = true;
+        }
+        if let Some(octet) = octet {
             self.heard(octet);
         }
 
@@ -316,12 +343,33 @@ impl Modem {
             // them is what says whether this is a call menu or a joint one,
             // and that is settled by which end we are.
             Heard::Cm(menu) => {
-                if self.last == Some(menu) {
+                // The synchronisation octet that ends one sequence begins the
+                // next, so whatever has been torn since the last one was
+                // reported tore this one.
+                if std::mem::take(&mut self.torn) {
+                    // Octets are missing, so these are not the octets the far
+                    // end sent and this sequence has not been received.
+                    // Skipped rather than counted against the run: 8.1.2 and
+                    // 8.2.2 ask for "a minimum of 2 identical" and not for two
+                    // in a row, and a sequence nobody received contradicts
+                    // nothing.
+                    return;
+                }
+                // Identical means the octets, not the menu they parse to.
+                // Clause 6 has a receiver ignore every code and octet reserved
+                // for future definition, so an octet damaged into an unknown
+                // tag disappears without changing the menu: on a real call two
+                // JMs that had each lost their last three octets, one ending
+                // `13 a9` and the next `13 10`, compared equal. This end sent
+                // CJ on them 0.6 s before the first undamaged JM arrived, and
+                // so never read the protocol octet that said LAPM.
+                if self.last_octets == self.decoder.sequence() {
                     self.repeats += 1;
                 } else {
-                    self.last = Some(menu);
+                    self.last_octets = self.decoder.sequence().to_vec();
                     self.repeats = 1;
                 }
+                self.last = Some(menu);
             }
             // 8.2.3: JM stops when "all 3 octets of CJ have been received".
             Heard::Cj => self.cj = v8::CJ.len(),
@@ -463,6 +511,7 @@ impl Modem {
                     self.chosen = jm.chosen();
                     self.agreed = jm.protocol;
                     self.last = None;
+                    self.last_octets.clear();
                     self.repeats = 0;
                     let octets = v8::sequence(Signal::Jm, &jm);
                     self.send_sequence(octets);
@@ -615,6 +664,99 @@ mod tests {
             to_answering = from_calling;
         }
         (calling.lapm(), answering.lapm())
+    }
+
+    /// The JM the far end sent all through the call in `live-1789647424.wav`:
+    /// data call function, two modulation octets and an empty extension, LAPM,
+    /// PSTN access, and PCM availability with nothing set.
+    const WHOLE_MENU: &[u8] = &[0xc1, 0x45, 0x13, 0x10, 0x2a, 0x0d, 0x07];
+
+    /// What the framer recovered of it wherever a slip had eaten the tail.
+    const CUT_SHORT: &[u8] = &[0xc1, 0x45, 0x13, 0x10];
+
+    /// Play a series of menus at an answering modem and give back the one it
+    /// acted on.
+    ///
+    /// Each is clause 5's sequence: ten ONEs, Table 1's synchronisation, and
+    /// the body. Where `torn`, a character whose stop bit is a space follows
+    /// the body -- which is what a jitter buffer that has deleted two or three
+    /// bit times leaves behind at 300 bit/s. The octets after the hole never
+    /// arrive, and the fault is the one thing the framer records.
+    ///
+    /// The last menu given is never acted on: nothing ends a sequence but the
+    /// synchronisation of the next one, because a menu carries no length.
+    fn menus_at_an_answerer(sequences: &[(&[u8], bool)]) -> (Option<Menu>, u64) {
+        let mut modem = Modem::new(Role::Answering, CallFunction::Data, all(), FS);
+        let framing = AsyncBits::new(8);
+        let mut tx = Bell103Tx::with_tones(LOW.0, LOW.1, FS);
+        tx.set_transmitting(true);
+        for (body, torn) in sequences {
+            let mut bits = vec![true; v8::PREAMBLE_ONES];
+            for octet in std::iter::once(&v8::SYNC_MENU).chain(*body) {
+                bits.extend(framing.encode(*octet));
+            }
+            if *torn {
+                bits.extend([false; 10]);
+            }
+            tx.push_bits(&bits);
+        }
+        // 8.2: "for a period of at least 0.2 s after connection to line, the
+        // answer DCE shall transmit no signal", and it is listening for a menu
+        // only once its ANSam has begun.
+        for _ in 0..=(timing::ANSWER_QUIET * FS) as usize {
+            modem.step(0.0);
+        }
+        while tx.pending_bits() > 0 {
+            modem.step(tx.next_sample());
+        }
+        (modem.far_menu(), modem.rx.framing_errors())
+    }
+
+    /// Two menus that parse alike are not two identical sequences.
+    ///
+    /// 8.2.2 acts on "a minimum of 2 identical CM sequences", and clause 5
+    /// says a sequence is its octets. Comparing the parsed menus instead takes
+    /// two different sequences for one, because clause 6 has a receiver ignore
+    /// every code reserved for future definition: `a9` has a tag Table 2 does
+    /// not give and vanishes, and `10` is an extension octet with no
+    /// modulation bit set. Both leave the same menu.
+    #[test]
+    fn a_menu_is_believed_on_its_octets_and_not_on_what_they_parse_to() {
+        let (heard, torn) = menus_at_an_answerer(&[
+            (&[0xc1, 0x45, 0x13, 0xa9], false),
+            (CUT_SHORT, false),
+            (WHOLE_MENU, false),
+            (WHOLE_MENU, false),
+            (WHOLE_MENU, false),
+        ]);
+        assert_eq!(torn, 0, "the line was clean and the framer disagrees");
+        let heard = heard.expect("no menu was acted on");
+        assert_eq!(heard.protocol, Protocol::Lapm, "{heard:?}");
+        assert!(heard.access.is_some(), "{heard:?}");
+    }
+
+    /// A menu the line tore is a menu that was not received.
+    ///
+    /// From `live-1789647424.wav`: six of the far end's eight JM sequences
+    /// lost octets to a jitter buffer, and this end sent CJ on a pair of them
+    /// 0.6 s before the first whole one arrived -- so the call went on without
+    /// ever reading the octet that said LAPM, and the report of it said the
+    /// protocol was not stated. 8.1.2 and 8.2.2 ask for "a minimum of 2
+    /// identical", not for two in a row, so a sequence with a hole in it is
+    /// left out of the count rather than breaking it.
+    #[test]
+    fn a_menu_the_line_tore_is_not_one_that_was_received() {
+        let (heard, torn) = menus_at_an_answerer(&[
+            (CUT_SHORT, true),
+            (CUT_SHORT, true),
+            (WHOLE_MENU, false),
+            (WHOLE_MENU, false),
+            (WHOLE_MENU, false),
+        ]);
+        assert!(torn >= 2, "the framer counted {torn} torn characters");
+        let heard = heard.expect("no menu was acted on");
+        assert_eq!(heard.protocol, Protocol::Lapm, "{heard:?}");
+        assert!(heard.access.is_some(), "{heard:?}");
     }
 
     #[test]
