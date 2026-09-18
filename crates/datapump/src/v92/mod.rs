@@ -654,8 +654,8 @@ pub type Deadline = (u64, &'static str);
 ///
 /// Slots are named by `&'static str` rather than by an enum variant on
 /// purpose: a later package can arm a timer this module has never heard of
-/// without editing this file -- which its own file list forbids it -- and the
-/// name is what turns up in a trace.
+/// without editing this file, which its own file list forbids, and the name is
+/// what turns up in a trace.
 ///
 /// What that buys is paid for in the name being checked at run time rather
 /// than by the compiler. Arming `"TR3"` and clearing `"Tr3"` compiles, leaves
