@@ -30,7 +30,10 @@
 //! the model: a 257-tap windowed sinc for every network sample. Its taps
 //! depend only on where the sampling instant falls between two line samples,
 //! so they are tabulated for that phase and rebuilt only when it moves --
-//! which, the clocks being the same, it usually never does.
+//! which, the clocks being the same, it never does. Two clocks that differ
+//! move it every sample, and then the table costs what the computation it
+//! replaces cost; `tabulate_up_kernel` says why it is not rounded to a grid
+//! to get out of that.
 //!
 //! Nothing here is a claim about any real network, only about what V.90 and
 //! V.92 have to get through.
@@ -597,9 +600,19 @@ impl Network {
     ///
     /// The taps are what the filter used to work out for every one of them on
     /// every network sample. With both clocks at the same rate the fraction
-    /// never changes, so they are worked out once for a whole call; when the
-    /// clocks differ the sampling instant drifts and they are rebuilt, which
-    /// is what the filter did anyway.
+    /// never changes, so they are worked out once for a whole call: ten
+    /// seconds of line costs 39 ms here against 268 ms per tap. When the
+    /// clocks differ the sampling instant drifts and they are rebuilt every
+    /// sample, which costs what the filter cost anyway -- 266 ms of the
+    /// 305 ms a ten-second call 120 ppm off takes.
+    ///
+    /// Rounding the fraction to a grid would make it a table under a skew as
+    /// well, and is refused. At 120 ppm the instant moves 2.4e-4 of a line
+    /// sample per network sample, so a grid of 1/1024 would be reused about
+    /// four times over -- and it moves 248 of 19 600 upstream codewords, one
+    /// symbol in eighty of what a V.92 receiver decides on, with the coarser
+    /// grids worse. A route that invents its own symbol errors cannot measure
+    /// anyone else's, and four times over is not worth it.
     fn tabulate_up_kernel(&mut self, frac: f64, reach: f64) {
         let taps = reach as i64;
         let wanted = 2 * taps as usize + 1;
@@ -701,11 +714,16 @@ mod tests {
 
     /// The upstream A/D as it was written before its kernel was tabulated:
     /// every tap worked out from sines and cosines, for every sample.
-    fn kernel_per_tap(history: &[f64], up_next: f64, fs: f64) -> f64 {
-        let per = fs / NETWORK_FS;
+    ///
+    /// The lag, the cutoff and the way a clock `ppm` off and a sampling phase
+    /// move the instant are spelled out here rather than taken from the
+    /// network, so that a mis-transcribed one of them is a failure and not an
+    /// agreement.
+    fn kernel_per_tap(history: &[f64], up_next: f64, fs: f64, ppm: f64, phase: f64) -> f64 {
+        let per = fs / ((1.0 - ppm * 1e-6) * NETWORK_FS);
         let reach = UP_REACH * fs;
         let lag = DOWN_REACH as f64 + 2.0 + UP_REACH * NETWORK_FS;
-        let t = (up_next - lag).max(0.0) * per;
+        let t = (up_next - lag + phase).max(0.0) * per;
         let centre = t.floor() as i64;
         let cutoff = 3700.0 / fs;
         let mut sum = 0.0;
@@ -723,17 +741,37 @@ mod tests {
     /// the same its instants repeat exactly and one table of taps serves the
     /// whole call. It has to be the filter that was there before it, to the
     /// last bit, or every V.90 test is a different test.
+    ///
+    /// 8.6.3's phase and a sound card's clock both move the instant off a
+    /// line sample, and neither may move a level, so the table is checked
+    /// where it is kept and where it is rebuilt every sample. That is also
+    /// what stands in the way of rounding the phase to a grid to make the
+    /// skewed case a table again: the grid would be a level change, and this
+    /// says so.
     #[test]
     fn the_tabulated_upstream_kernel_gives_the_same_levels_as_before() {
-        let mut net = Network::new(Law::Mu, FS).with_upstream_gain(1.0).unquantised();
-        let mut history: Vec<f64> = Vec::new();
-        let mut seed = 0x1234_5678_9abc_def1u64;
-        for n in 0..2000u64 {
-            let pair = [random(&mut seed), random(&mut seed)];
-            history.extend_from_slice(&pair);
-            let got = net.up(&pair);
-            let want = kernel_per_tap(&history, n as f64, FS);
-            assert_eq!(got.to_bits(), want.to_bits(), "sample {n}: {got} against {want}");
+        // Not a phase of a half: with no skew that lands the fraction on the
+        // window's own symmetry, where a tap read from the wrong side of the
+        // table would still match.
+        for (ppm, phase) in [(0.0, 0.0), (0.0, 0.3), (120.0, 0.0), (-120.0, 0.37)] {
+            let mut net = Network::new(Law::Mu, FS)
+                .with_upstream_gain(1.0)
+                .unquantised()
+                .with_clock(ppm)
+                .with_upstream_phase(phase);
+            let mut history: Vec<f64> = Vec::new();
+            let mut seed = 0x1234_5678_9abc_def1u64;
+            for n in 0..2000u64 {
+                let pair = [random(&mut seed), random(&mut seed)];
+                history.extend_from_slice(&pair);
+                let got = net.up(&pair);
+                let want = kernel_per_tap(&history, n as f64, FS, ppm, phase);
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "{ppm} ppm, phase {phase}, sample {n}: {got} against {want}"
+                );
+            }
         }
     }
 
