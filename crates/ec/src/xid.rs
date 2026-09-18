@@ -246,14 +246,17 @@ impl V44Offer {
     }
 }
 
+/// Why an XID information field could not be walked.
+///
+/// Both of these are about the shape of the field and not about any one item
+/// in it: a parameter that cannot be read is ignored instead (see
+/// [`Xid::decode`]), because refusing it costs the whole negotiation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum XidError {
     /// The information field ended mid-structure.
     Truncated,
     /// A format identifier other than the general purpose one.
     UnknownFormat(u8),
-    /// A parameter carried a length its type does not allow.
-    BadLength { pi: u8, len: u8 },
 }
 
 impl Xid {
@@ -386,7 +389,24 @@ impl Xid {
     /// Decode an XID information field.
     ///
     /// V.42 12.2.2: fields that are not recognized are ignored, so unknown
-    /// groups and parameters are skipped rather than rejected.
+    /// groups and parameters are skipped rather than rejected -- and so are
+    /// recognized ones carrying a length their own entry does not allow, since
+    /// a parameter that cannot be read is one whose value was not conveyed,
+    /// and 9.2.3 and 9.2.4 both say what a value not conveyed means: the
+    /// default.
+    ///
+    /// What stays an error is a field that runs off its own declared length: a
+    /// group length or a PL reaching past the information field, or an
+    /// information field with no format identifier at all. Those are not one
+    /// unreadable item among many but a frame whose structure cannot be walked
+    /// -- the next parameter's position is not known, so nothing after the
+    /// break can be trusted to be a parameter. A format identifier that is not
+    /// the general purpose one goes with them, because 12.2.2 fixes it at
+    /// "10000010" and everything below is read on the strength of it.
+    ///
+    /// The distinction matters because [`crate::Stack::receive_xid`] turns any
+    /// error here into a damaged frame and no response at all, so anything
+    /// fatal costs the whole negotiation and not merely the item it was about.
     pub fn decode(body: &[u8]) -> Result<Self, XidError> {
         let mut xid = Self::default();
         let mut cursor = body.iter().copied();
@@ -444,8 +464,14 @@ impl Xid {
                     // recognized are ignored". Refusing the parameter instead
                     // put the whole XID beyond reading, which is the same
                     // whole-frame rejection a three-octet mask used to get.
+                    //
+                    // No octets at all is nothing to read, and by 12.2.2 an
+                    // item nothing can be read from is one to ignore, which
+                    // leaves this end's defaults standing: every option here
+                    // is used only where both ends asked for it, so an unread
+                    // mask is a far end that asked for none of them.
                     if value.is_empty() {
-                        return Err(XidError::BadLength { pi, len: 0 });
+                        continue;
                     }
                     let mut octets = [0u8; 4];
                     let read = value.len().min(octets.len());
@@ -460,10 +486,14 @@ impl Xid {
                     self.fcs32 = mask & (1 << (hdlc_bit::FCS32 - 1)) != 0;
                     self.srej_multiple = mask & (1 << (hdlc_bit::SREJ_MULTIPLE - 1)) != 0;
                 }
-                pi::N401_TRANSMIT => self.n401_transmit = Some(be_u16(pi, value)? / 8),
-                pi::N401_RECEIVE => self.n401_receive = Some(be_u16(pi, value)? / 8),
-                pi::WINDOW_TRANSMIT => self.window_transmit = Some(be_u16(pi, value)? as u8),
-                pi::WINDOW_RECEIVE => self.window_receive = Some(be_u16(pi, value)? as u8),
+                // Note 3 puts N401 in bits and Note 4 has the higher-order
+                // octet first. Neither names a width, so one that will not
+                // read as a 16-bit value is a value not conveyed, and 9.2.3
+                // and 9.2.4 both have the default stand for that.
+                pi::N401_TRANSMIT => self.n401_transmit = be_u16(value).map(|v| v / 8),
+                pi::N401_RECEIVE => self.n401_receive = be_u16(value).map(|v| v / 8),
+                pi::WINDOW_TRANSMIT => self.window_transmit = be_u16(value).map(|v| v as u8),
+                pi::WINDOW_RECEIVE => self.window_receive = be_u16(value).map(|v| v as u8),
                 _ => {}
             }
         }
@@ -478,15 +508,17 @@ impl Xid {
                 private_pi::PARAMETER_SET => is_v42bis = value == PARAMETER_SET_V42,
                 // Everything after the identifier belongs to whichever set it
                 // named, so ignore the rest if it was not V.42bis.
+                // And an empty value for any of these three is a parameter
+                // with nothing in it to read, so V.42bis 6.4's defaults stand
+                // in the same way.
                 private_pi::COMPRESSION_REQUEST if is_v42bis => {
-                    let v = *value.first().ok_or(XidError::Truncated)?;
-                    self.compression = Some(Compression::from_bits(v));
+                    self.compression = value.first().map(|&v| Compression::from_bits(v));
                 }
                 private_pi::CODEWORDS if is_v42bis => {
-                    self.codewords = Some(be_u16(pi, value)?);
+                    self.codewords = be_u16(value);
                 }
                 private_pi::MAX_STRING if is_v42bis => {
-                    self.max_string = Some(*value.first().ok_or(XidError::Truncated)?);
+                    self.max_string = value.first().copied();
                 }
                 _ => {}
             }
@@ -510,22 +542,22 @@ impl Xid {
                 // named, and this one is not V.44.
                 continue;
             }
+            // `offer` starts at the proposal's own values, so a parameter that
+            // cannot be read leaves the one it would have set at that -- which
+            // is what V.44 Table A.1's defaults are for.
             match pi {
                 user_pi::REQUEST => {
-                    let v = *value.first().ok_or(XidError::Truncated)?;
-                    offer.compression = Compression::from_bits(v);
-                    said_anything = true;
+                    if let Some(&v) = value.first() {
+                        offer.compression = Compression::from_bits(v);
+                        said_anything = true;
+                    }
                 }
-                user_pi::CODEWORDS_TRANSMIT => offer.transmit.n2 = be_u16(pi, value)?,
-                user_pi::CODEWORDS_RECEIVE => offer.receive.n2 = be_u16(pi, value)?,
-                user_pi::MAX_STRING_TRANSMIT => {
-                    offer.transmit.n7 = *value.first().ok_or(XidError::Truncated)?;
-                }
-                user_pi::MAX_STRING_RECEIVE => {
-                    offer.receive.n7 = *value.first().ok_or(XidError::Truncated)?;
-                }
-                user_pi::HISTORY_TRANSMIT => offer.transmit.n8 = be_u16(pi, value)?,
-                user_pi::HISTORY_RECEIVE => offer.receive.n8 = be_u16(pi, value)?,
+                user_pi::CODEWORDS_TRANSMIT => set(&mut offer.transmit.n2, be_u16(value)),
+                user_pi::CODEWORDS_RECEIVE => set(&mut offer.receive.n2, be_u16(value)),
+                user_pi::MAX_STRING_TRANSMIT => set(&mut offer.transmit.n7, value.first().copied()),
+                user_pi::MAX_STRING_RECEIVE => set(&mut offer.receive.n7, value.first().copied()),
+                user_pi::HISTORY_TRANSMIT => set(&mut offer.transmit.n8, be_u16(value)),
+                user_pi::HISTORY_RECEIVE => set(&mut offer.receive.n8, be_u16(value)),
                 // C0's packet-method bits are "ignored for modem connections".
                 _ => {}
             }
@@ -625,11 +657,27 @@ fn lower<T: Ord + Copy>(a: Option<T>, b: Option<T>, default: T) -> Option<T> {
     Some(a.unwrap_or(default).min(b.unwrap_or(default)))
 }
 
-fn be_u16(pi: u8, value: &[u8]) -> Result<u16, XidError> {
+/// A parameter value carried in one or two octets, "the first octet
+/// transmitted ... the higher-order bits" (V.42 Table 11a, Note 4).
+///
+/// None where the value is longer or shorter than a 16-bit item can be, which
+/// is a value the far end did not manage to convey rather than a frame this
+/// end cannot read: the caller leaves its default standing. This used to
+/// return an error, and [`crate::Stack::receive_xid`] turns any error here
+/// into a damaged frame and no response, so an N401 in three octets cost the
+/// negotiation that would otherwise have settled everything else.
+fn be_u16(value: &[u8]) -> Option<u16> {
     match value.len() {
-        1 => Ok(u16::from(value[0])),
-        2 => Ok(u16::from_be_bytes([value[0], value[1]])),
-        len => Err(XidError::BadLength { pi, len: len as u8 }),
+        1 => Some(u16::from(value[0])),
+        2 => Some(u16::from_be_bytes([value[0], value[1]])),
+        _ => None,
+    }
+}
+
+/// Take a value that could be read, and leave the default where none could.
+fn set<T>(field: &mut T, value: Option<T>) {
+    if let Some(v) = value {
+        *field = v;
     }
 }
 
@@ -1040,7 +1088,11 @@ mod tests {
         assert!(field(&[0x04]).expect("one octet").srej_single);
         // Bit 24 in a three-octet one.
         assert!(field(&[0, 0, 0x80]).expect("three octets").srej_multiple);
-        assert_eq!(field(&[]), Err(XidError::BadLength { pi: pi::HDLC_OPTIONAL, len: 0 }));
+        // And no octets at all is a parameter with nothing in it to read,
+        // which by 12.2.2 is ignored: the XID is still an XID, and the far end
+        // has asked for none of the options.
+        let empty = field(&[]).expect("an empty option mask was refused");
+        assert_eq!(empty, Xid::default(), "an empty mask was read as saying something");
     }
 
     /// And a longer one for the four octets Table 11a Note 1 defines.
@@ -1067,6 +1119,39 @@ mod tests {
         // position the note gives a meaning, and it is in the third.
         assert!(!heard.srej_multiple, "a bit past the mask was read as bit 24");
         assert_eq!(heard, field(&[0x04, 0, 0x01, 0]), "the extra octets changed the reading");
+    }
+
+    /// An item in a width its own entry does not allow costs only itself.
+    ///
+    /// 12.2.2: "Fields that are not recognized are ignored." N401 (PI 5 and 6)
+    /// and the window size (PI 7 and 8) are 16-bit items, and one arriving in
+    /// three or four octets used to be an error -- which
+    /// [`crate::Stack::receive_xid`] turns into a damaged frame and no
+    /// response at all, so one odd parameter took the check sequence width,
+    /// the options and the compression down with it. What a far end did not
+    /// manage to convey is what 9.2.3 and 9.2.4 give a default for.
+    #[test]
+    fn a_parameter_too_wide_for_its_entry_costs_only_itself() {
+        let mut params = Vec::new();
+        push_param(&mut params, pi::N401_TRANSMIT, &[0, 0, 0x04]);
+        push_param(&mut params, pi::WINDOW_RECEIVE, &[0, 0, 0, 0x07]);
+        // Beside them, the two octets Note 4 asks for: 1024 bits of N401.
+        push_param(&mut params, pi::N401_RECEIVE, &[0x04, 0x00]);
+        push_param(&mut params, pi::HDLC_OPTIONAL, &[0, 0, 0x01, 0]);
+        let mut bytes = vec![FI_GENERAL_PURPOSE];
+        push_subfield(&mut bytes, GI_PARAMETER, &params);
+        let heard = Xid::decode(&bytes).expect("one odd parameter refused the whole XID");
+
+        assert_eq!(heard.n401_transmit, None, "a three-octet N401 was read anyway");
+        assert_eq!(heard.window_receive, None, "a four-octet window size was read anyway");
+        assert_eq!(heard.n401_receive, Some(128), "the parameter beside them was lost with them");
+        assert!(heard.fcs32, "the option mask beside them was lost with them");
+
+        // And what was not conveyed settles at the Recommendation's default
+        // rather than at whatever this end proposed.
+        let agreed = Xid::proposal(Compression::Neither).resolve(&heard);
+        assert_eq!(agreed.n401_transmit, Some(N401_DEFAULT));
+        assert_eq!(agreed.window_receive, Some(K_DEFAULT));
     }
 
     /// The bits 12.2.2 Note 1 requires a transmitter to set whatever it does.
