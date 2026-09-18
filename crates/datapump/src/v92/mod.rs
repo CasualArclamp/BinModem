@@ -644,8 +644,12 @@ pub struct PeerSuv {
     pub wait_for_cp: bool,
 }
 
-/// The one flag the exchange takes from a peer's CP: CPu bit 34, CPus bit 34 or
-/// CPd bit 33.
+/// The one flag the exchange takes from a peer's CP, which is bit 33 in every
+/// one of them: CPu and CPt (Table 23), CPus (Table 24) and CPd (Table 30) all
+/// print "Acknowledge bit" at 33 and "Start bit: 0" at 34. Bit 34 is therefore
+/// never the acknowledge -- an acknowledge written there goes out clear and
+/// every primed sequence reads as unacknowledged. `v92::sequences` owns the
+/// encoding; the position is here only so that it is not guessed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PeerCp {
     /// "The other modem's CP sequence has been received."
