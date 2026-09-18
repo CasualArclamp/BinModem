@@ -508,7 +508,6 @@ impl Modem {
                 // 8.1.2: "after a minimum of 2 identical JM sequences have
                 // been received... signal CJ shall be transmitted."
                 if let Some(jm) = self.settled() {
-                    eprintln!("SETTLED at t={:.3} octets={:x?} menu={:?}", self.total, self.last_octets, jm);
                     self.far_menu = Some(jm);
                     self.chosen = jm.chosen();
                     // A JM naming LAPM is an answer to the CM that asked, so
