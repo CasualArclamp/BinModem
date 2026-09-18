@@ -625,7 +625,7 @@ not listed must not be touched.
 
 ### Wave 2: codecs, signal blocks and the Phase 2 flags
 
-#### V92-09: The 12-interval modulus encoder and decoder (S)
+#### V92-09: The 12-interval modulus encoder and decoder (M)
 
 - **Depends on:** V92-01.
 - **Clauses:** 6.4.1.
@@ -636,15 +636,25 @@ not listed must not be touched.
   the differential `d(f) = s(f) ^ d(f-1)`, and step 4's `d(f-1)` reading from section 4. `Decoder { d_prev }`
   rebuilds R0, R, s and d, keeping d from **R**, not from R0's half, because those differ when M is odd and
   R = (M-1)/2. Both have `reset()`, which zeroes d, because 8.7.1 zeroes the memories before B1u.
+  R is carried as a value, `FrameBits`, rather than as a `Vec<bool>`: step 1 makes the frame an integer,
+  the whole module works in u128, and the data path runs 667 frames a second. The two readings of
+  section 4 are `STEP4_USES_PREVIOUS_D` and `D_BEFORE_THE_FIRST_FRAME`, and `LONGEST_FRAME` is the K = 72
+  bound the arithmetic is built to.
 - **Tests:**
   - `random_frames_round_trip_for_even_and_odd_products` - 2000 frames each, K = 36..=72, including
-    R = 0, R = M-1 and R = (M-1)/2.
+    R = 0, R = M-1 and R = (M-1)/2. R = M-1 is only a legal frame when M = 2^K exactly, because 2^K <= M
+    and M-1 < 2^K force it, so one of the three sets is twelve 64s; the middle value is legal at
+    K = capacity for every set, and odd there only for the odd one.
   - `the_middle_value_of_an_odd_product_keeps_the_sign_chain`.
   - `an_inverted_channel_decodes_with_the_decoder_started_inverted` - mapping every Ki to Mi-1-Ki and
     inverting the decoder's d recovers the same bits, which is why the differential step exists.
   - `a_frame_that_does_not_fit_is_refused`.
   - `the_memory_starts_at_zero` - the first frame after a reset matches a hand-worked value.
   - `seventy_two_bits_need_u128` - M = 255^12.
+  - `the_alternative_reading_of_step_4_is_not_one_to_one` - reflecting on d(f) instead of d(f-1) folds
+    [0, M) into half of itself, so two frames share an R0 and no decoder could mirror it.
+  - `the_sign_splits_the_frame_at_the_middle`, `the_first_bit_in_time_is_the_lowest_in_value` and
+    `the_moduli_come_out_of_the_parameters` - steps 1 and 2 on their own, and AD-3's boundary.
 
 #### V92-10: Precoder, prefilter, constellations, the inverse map and the 4T trellis (M)
 
@@ -2857,3 +2867,15 @@ bounded separately by named constants carrying their measured values. The median
 convention for a statistic a jitter buffer disturbs (memory `voip-jitter-slips`). The entry also gained
 the untrained-clock behaviour, which the review found the doc promising and the code not delivering, and
 the three tests the package had added beyond the two the plan named.
+
+**V92-09: the alternative reading of step 4 is not a reading, and the package is M.** Section 4 fixes step
+4 on d(f-1) "as printed" and asks for a named constant so that one edit flips it. The constant is there
+(`STEP4_USES_PREVIOUS_D`), but the entry should not leave the impression that d(f) is a second working
+convention waiting for a capture to choose it. Reflecting on d(f) rather than d(f-1) sends every R into
+the same half of [0, M): with M = 105, R = 51 and R = 53 both give R0 = 51, and only 53 of the 105 values
+of R0 are reachable at all. There is therefore nothing for a decoder to mirror, and a capture that
+disagreed with the printed reading would mean the differential step means something else again, not that
+this switch is the wrong way up. The module says so, `Decoder::decode` refuses rather than guessing, and
+`the_alternative_reading_of_step_4_is_not_one_to_one` is the proof. Q-1's "both readings decode" is the
+one line of INTRO 9.4 this contradicts. The sizing was also wrong: the file came to 750 lines, a third of
+it the clause quotations the house rule asks for, so the package is **M** and not **S**.
