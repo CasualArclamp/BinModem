@@ -404,10 +404,52 @@ impl Decoder {
             }
             State::Terminator => {
                 if bit {
-                    // Seven ones: an abort (V.42 8.1.4).
-                    let had_content = !self.bits.is_empty();
+                    // Seven ones: an abort (V.42 8.1.4). Five of them are
+                    // already in the buffer, and the line does not say whose:
+                    // a frame whose last bits were ones has some of its own in
+                    // that run, and the abort made up the rest. Dropping a
+                    // flat five therefore ate up to four bits of the frame,
+                    // and since a record is kept in octets that cost a whole
+                    // octet of it whenever the run reached back past one.
+                    //
+                    // 8.1.1.2 stuffs a zero after five contiguous ones inside
+                    // a frame, so at most four of the five can be the frame's;
+                    // and 8.1.3 c) has a frame "consist of an integral number
+                    // of octets ... following zero-bit extraction". Between
+                    // them there is at most one reading of the buffer that
+                    // comes to whole octets, and where the frame was whole
+                    // octets that reading is the frame.
+                    //
+                    // Where it was not, the reading is a guess and can be
+                    // generous. 8.1.3 c) calls a frame that is not whole
+                    // octets invalid, but the line still carries them, and
+                    // the search reaches four bits past what is certainly the
+                    // frame's, so up to four of the abort's own ones can be
+                    // kept as content: thirteen content bits with no trailing
+                    // ones of their own come out as two octets rather than
+                    // one, three of the abort's counted in. The figure goes
+                    // only to the record of what the line spoiled, so guessing
+                    // long on a frame that was invalid anyway is the cheaper
+                    // error -- dropping a flat five loses a whole octet of
+                    // frames that were perfectly well formed.
+                    let len = self.bits.len();
+                    let certain = len.saturating_sub(5);
+                    let content =
+                        (certain..len).find(|n| n.is_multiple_of(8)).unwrap_or(certain);
+                    // Its own octets, whatever the frame before it was. Left
+                    // alone, this still held that frame's, and every abort
+                    // that followed a damaged frame was logged and counted
+                    // as a second copy of it.
+                    self.discarded = octets(&self.bits[..content]);
                     self.reset_to_hunt();
-                    return had_content.then_some(Err(FrameError::Aborted));
+                    // 8.1.4 has the abort "ignore the frame currently being
+                    // received", and one is being received as soon as a bit
+                    // that is not the abort's own has arrived -- whether or
+                    // not it made a whole octet, so a frame aborted before its
+                    // first one is an abort with nothing to show for it. A
+                    // flag with only marks behind it is not: every bit in the
+                    // buffer is the abort's, and an idle line is not damage.
+                    return (len > 5).then_some(Err(FrameError::Aborted));
                 }
                 // A complete flag. The six bits it already contributed to the
                 // buffer -- its leading zero and five ones -- are not frame
@@ -422,16 +464,7 @@ impl Decoder {
                 // Kept before the other width is tried, since that may succeed
                 // and this is wanted only for the frames that do not.
                 self.discarded = match &done {
-                    Some(Err(_)) => bits
-                        .as_chunks::<8>()
-                        .0
-                        .iter()
-                        .map(|c| {
-                            c.iter().enumerate().fold(0u8, |b, (i, &v)| {
-                                b | (u8::from(v) << i)
-                            })
-                        })
-                        .collect(),
+                    Some(Err(_)) => octets(&bits),
                     _ => Vec::new(),
                 };
                 // The other width, only if this one failed the check and the
@@ -445,6 +478,7 @@ impl Decoder {
                     };
                     if let Some(Ok(frame)) = Self::finish(bits, other, overlong) {
                         self.matched = other;
+                        self.discarded.clear();
                         return Some(Ok(frame));
                     }
                 }
@@ -492,14 +526,7 @@ impl Decoder {
         if !bits.len().is_multiple_of(8) {
             return Some(Err(FrameError::NotOctetAligned));
         }
-        let frame: Vec<u8> = bits
-            .as_chunks::<8>().0.iter()
-            .map(|c| {
-                c.iter()
-                    .enumerate()
-                    .fold(0u8, |acc, (i, &b)| acc | (u8::from(b) << i))
-            })
-            .collect();
+        let frame = octets(&bits);
         // An address octet, a control octet and the FCS are the minimum.
         if frame.len() < 2 + fcs.octets() {
             return Some(Err(FrameError::TooShort));
@@ -510,6 +537,20 @@ impl Decoder {
         let keep = frame.len() - fcs.octets();
         Some(Ok(frame[..keep].to_vec()))
     }
+}
+
+/// Whole octets from received bits, low-order bit first. A partial octet at
+/// the end is dropped.
+fn octets(bits: &[bool]) -> Vec<u8> {
+    bits.as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| {
+            c.iter()
+                .enumerate()
+                .fold(0u8, |acc, (i, &b)| acc | (u8::from(b) << i))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -576,6 +617,34 @@ mod tests {
         let payload = b"\x03\x73wide check sequence";
         let got = round_trip(payload, Fcs::Bits32);
         assert_eq!(got[0].as_ref().unwrap(), payload);
+    }
+
+    /// A frame that the other width reads is not a discarded frame.
+    ///
+    /// 8.10.2 has a called DCE check both widths until a SABME settles which
+    /// one the connection uses, so a frame that fails at 16 bits and passes at
+    /// 32 is delivered. The record of what the line spoiled is written before
+    /// that second look, and a frame the second look rescues has to be taken
+    /// out of it again -- otherwise every 32-bit frame of an XID exchange
+    /// leaves its octets sitting where a panel reads the last thing the line
+    /// damaged, and the frames that really were damaged are lost among them.
+    #[test]
+    fn a_frame_the_other_width_reads_is_not_left_among_the_damaged() {
+        let mut enc = Encoder::new(Fcs::Bits32);
+        let payload = b"\x03\x73either width";
+        enc.frame(payload);
+        let mut dec = Decoder::new(Fcs::Bits16);
+        dec.accept_either();
+        let mut seen = Vec::new();
+        while let Some(bit) = enc.next_bit() {
+            if let Some(r) = dec.feed(bit) {
+                seen.push((r, dec.discarded().to_vec()));
+            }
+        }
+        assert_eq!(seen.len(), 1, "{seen:02x?}");
+        assert_eq!(seen[0].0.as_ref().expect("the 32-bit frame was not read"), payload);
+        assert_eq!(dec.matched_fcs(), Fcs::Bits32);
+        assert!(seen[0].1.is_empty(), "the frame was reported as damaged as well as read");
     }
 
     #[test]
@@ -686,6 +755,89 @@ mod tests {
             }
         }
         assert_eq!(results, vec![Err(FrameError::Aborted)]);
+    }
+
+    /// Bits for a flag, and for octets laid down low-order first without
+    /// stuffing, which is enough for octets that never have five ones in a row.
+    fn raw(octets: &[u8]) -> Vec<bool> {
+        octets.iter().flat_map(|&o| (0..8).map(move |i| o & (1 << i) != 0)).collect()
+    }
+
+    #[test]
+    fn an_abort_reports_its_own_octets_rather_than_the_last_bad_frame_s() {
+        // A damaged frame and then an aborted one, which is what a line
+        // breaking up delivers. The abort used to leave the damaged frame's
+        // octets where the caller reads them, so a record of the call showed
+        // the one frame twice and counted it twice.
+        let mut enc = Encoder::new(Fcs::Bits16);
+        enc.frame(b"\x03\x73damaged");
+        let mut bits: Vec<bool> = std::iter::from_fn(|| enc.next_bit()).collect();
+        bits[40] = !bits[40];
+        // The closing flag opens the aborted frame: two octets, then ones.
+        bits.extend(raw(&[0x41, 0x42]));
+        bits.extend(std::iter::repeat_n(true, 8));
+        let mut dec = Decoder::new(Fcs::Bits16);
+        let mut seen = Vec::new();
+        for b in bits {
+            if let Some(r) = dec.feed(b) {
+                seen.push((r, dec.discarded().to_vec()));
+            }
+        }
+        assert_eq!(seen.len(), 2, "{seen:02x?}");
+        assert_eq!(seen[0].0, Err(FrameError::BadFcs));
+        assert_eq!(seen[0].1.len(), 11, "the damaged frame and its check sequence");
+        assert_eq!(seen[1], (Err(FrameError::Aborted), vec![0x41, 0x42]));
+    }
+
+    /// An abort whose ones run into the frame's own still reports its octets.
+    ///
+    /// Five ones are in the buffer when the abort is seen and the line does
+    /// not say whose they are. Taking all five as the abort's ate the frame's
+    /// trailing ones, and `0x41 0xe1` -- two whole octets, the second of which
+    /// goes on the line ending in three ones -- came back as one.
+    #[test]
+    fn an_abort_keeps_the_octets_its_own_ones_ran_into() {
+        let mut bits = raw(&[FLAG]);
+        bits.extend(raw(&[0x41, 0xe1]));
+        bits.extend(std::iter::repeat_n(true, 8));
+        let mut dec = Decoder::new(Fcs::Bits16);
+        let seen: Vec<_> = bits
+            .into_iter()
+            .filter_map(|b| dec.feed(b).map(|r| (r, dec.discarded().to_vec())))
+            .collect();
+        assert_eq!(seen, vec![(Err(FrameError::Aborted), vec![0x41, 0xe1])]);
+    }
+
+    /// And a frame aborted before its first whole octet is still an abort.
+    ///
+    /// 8.1.4 ignores "the frame currently being received", and three bits in
+    /// there is one, whether or not those bits came to an octet. What decides
+    /// is the buffer and not the octets read off it, and the two have just
+    /// come apart: the octets are now rounded to the frame's own boundary, so
+    /// an abort with nothing whole to show for it still happened.
+    #[test]
+    fn an_abort_before_the_first_whole_octet_is_still_an_abort() {
+        let mut bits = raw(&[FLAG]);
+        bits.extend([false, true, false]);
+        bits.extend(std::iter::repeat_n(true, 8));
+        let mut dec = Decoder::new(Fcs::Bits16);
+        let seen: Vec<_> = bits
+            .into_iter()
+            .filter_map(|b| dec.feed(b).map(|r| (r, dec.discarded().to_vec())))
+            .collect();
+        assert_eq!(seen, vec![(Err(FrameError::Aborted), Vec::new())]);
+    }
+
+    #[test]
+    fn a_flag_followed_by_a_line_gone_to_marks_aborts_nothing() {
+        // V.42 8.1.4 has an abort make the receiver "ignore the frame
+        // currently being received", and straight after a flag there is none:
+        // the ones are the abort's own. An idle line is not a damaged frame.
+        let mut bits = raw(&[FLAG]);
+        bits.extend(std::iter::repeat_n(true, 64));
+        let mut dec = Decoder::new(Fcs::Bits16);
+        let results: Vec<_> = bits.into_iter().filter_map(|b| dec.feed(b)).collect();
+        assert!(results.is_empty(), "{results:?}");
     }
 
     #[test]

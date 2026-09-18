@@ -91,7 +91,7 @@ pub fn t401_for_line(bits_per_second: u32, round_trip_ms: u32) -> u32 {
 /// Ta + Tb + Te + Tf where nothing has measured them: the propagation each way
 /// and the processing at each end, which is the part that does not depend on
 /// the line rate.
-const PROPAGATION_MS: u32 = 1000;
+pub const PROPAGATION_MS: u32 = 1000;
 
 /// Tc + Td: the longest frame that could already be going out -- information
 /// field plus address, control and check sequence -- and the supervisory frame
@@ -275,6 +275,14 @@ impl Lapm {
     ///
     /// How much patience is warranted is not known when the entity is built:
     /// it depends on how the detection phase came out, which happens later.
+    ///
+    /// This is the limit on the procedures this entity runs, and not the one
+    /// the XID exchange above it uses: 9.2.2 lets "the two error-correcting
+    /// entities associated with an error-corrected connection ... operate with
+    /// a different value of N400", and by the same token the two questions are
+    /// separate. Establishment is retried at a far end the detection phase has
+    /// shown does LAPM; the XID exchange is asking a far end that has shown
+    /// nothing of the sort whether it negotiates at all.
     pub fn set_retransmissions(&mut self, n400: u32) {
         self.params.n400 = n400;
     }
@@ -412,6 +420,27 @@ impl Lapm {
 
     /// Handle a frame from the peer.
     pub fn receive(&mut self, frame: Frame, kind: Kind) {
+        // V.42 8.3.2.1: "Upon receipt of an I frame or a supervisory frame,
+        // the originator of the SABME command may assume that the responding
+        // error-correcting entity has received and accepted the SABME command
+        // and sent a UA response, but that the UA response was lost in
+        // transmission. It may proceed as though a UA response has been
+        // received, and perform the actions noted above for reception of the
+        // UA response before processing the received I frame or supervisory
+        // frame." Discarding it instead left a real far end's poll unanswered
+        // for the 0.58 s until its UA came in behind it.
+        if self.state == State::AwaitingEstablishment
+            && matches!(
+                frame,
+                Frame::I { .. }
+                    | Frame::Rr { .. }
+                    | Frame::Rnr { .. }
+                    | Frame::Rej { .. }
+                    | Frame::Srej { .. }
+            )
+        {
+            self.establish();
+        }
         match &frame {
             // Set-mode and release commands are handled in every state
             // (V.42 8.8, 8.9).
@@ -462,15 +491,39 @@ impl Lapm {
 
     fn on_ua(&mut self, final_bit: bool) {
         match self.state {
-            State::AwaitingEstablishment if final_bit => {
-                self.reset_variables();
-                self.state = State::Connected;
-                self.stop_timer();
-                self.events.push_back(Event::Connected);
-            }
+            State::AwaitingEstablishment if final_bit => self.establish(),
             State::AwaitingRelease if final_bit => self.enter_disconnected(Cause::Local),
             _ => {}
         }
+    }
+
+    /// What the originator of a SABME does on its UA (V.42 8.3.2.1): stop
+    /// T401, set V(S), V(R) and V(A) to 0, and enter the connected state,
+    /// telling the control function with an L-ESTABLISH confirm. T403, which
+    /// the clause also starts, is not implemented.
+    ///
+    /// That list and no more. The responder's list, a few lines earlier in the
+    /// same clause, has two entries this one has not -- "clear all existing
+    /// exception conditions" and "clear any existing peer-receiver busy
+    /// condition" -- and the originator does not need them, because it cleared
+    /// them where the clause opens: "a request to establish the error-corrected
+    /// connection is initiated by the transmission of the SABME command. All
+    /// existing exception conditions shall be cleared, the retransmission
+    /// counter shall be reset", which is [`Self::connect`].
+    ///
+    /// A blanket reset was the same thing in practice while a UA was the only
+    /// way in. It is the wrong shape to leave behind now that an I or
+    /// supervisory frame standing in for a lost UA comes through the same door
+    /// and is processed immediately after: what that frame meets should be
+    /// what the clause gives a newly connected originator, and not whatever a
+    /// wider reset happens to coincide with.
+    fn establish(&mut self) {
+        self.stop_timer();
+        self.vs = 0;
+        self.va = 0;
+        self.vr = 0;
+        self.state = State::Connected;
+        self.events.push_back(Event::Connected);
     }
 
     fn on_dm(&mut self, final_bit: bool) {
@@ -1158,6 +1211,77 @@ mod tests {
         a.connect();
         a.receive(Frame::Dm { final_bit: false }, Kind::Response);
         assert_eq!(a.state(), State::AwaitingEstablishment);
+    }
+
+    /// V.42 8.3.2.1: an I or supervisory frame while the SABME is unanswered
+    /// stands in for a UA that was lost, and is then acted on as usual.
+    ///
+    /// From `live-1789647424.wav`: the far end's RR poll arrived 0.58 s
+    /// before its UA, and was dropped as if nothing were being established.
+    #[test]
+    fn a_poll_that_arrives_before_the_ua_establishes_and_is_answered() {
+        let params = Params { t401_ms: 1000, ..Default::default() };
+        let mut a = Lapm::new(Role::Originator, DLCI_DATA, params);
+        a.send_data(b"queued before the link");
+        a.connect();
+        let _ = std::iter::from_fn(|| a.poll_transmit()).count();
+
+        a.receive(Frame::Rr { nr: 0, pf: true }, Kind::Command);
+        assert_eq!(a.state(), State::Connected);
+        assert_eq!(events(&mut a), vec![Event::Connected], "no L-ESTABLISH confirm");
+        let sent: Vec<_> = std::iter::from_fn(|| a.poll_transmit()).collect();
+        assert!(
+            sent.contains(&(Frame::Rr { nr: 0, pf: true }, Kind::Response)),
+            "the poll was not answered: {sent:?}"
+        );
+        assert!(
+            sent.contains(&(Frame::I { ns: 0, nr: 0, poll: false, info: b"queued before the link".to_vec() }, Kind::Command)),
+            "V(S) did not start from 0: {sent:?}"
+        );
+
+        // T401 was stopped for the SABME: nothing is sent again for it, and
+        // the UA that follows changes nothing.
+        a.receive(Frame::Ua { final_bit: true }, Kind::Response);
+        assert_eq!(a.state(), State::Connected);
+        assert!(events(&mut a).is_empty());
+        a.receive(Frame::Rr { nr: 1, pf: false }, Kind::Response);
+        a.tick(10_000);
+        let later: Vec<_> = std::iter::from_fn(|| a.poll_transmit()).collect();
+        assert!(
+            !later.iter().any(|(f, _)| matches!(f, Frame::Sabme { .. })),
+            "the SABME was sent again: {later:?}"
+        );
+    }
+
+    #[test]
+    fn an_i_frame_that_arrives_before_the_ua_is_delivered() {
+        let mut a = Lapm::new(Role::Originator, DLCI_DATA, Params::default());
+        a.connect();
+        let _ = std::iter::from_fn(|| a.poll_transmit()).count();
+        a.receive(Frame::I { ns: 0, nr: 0, poll: false, info: b"login: ".to_vec() }, Kind::Command);
+        assert!(a.is_connected());
+        assert_eq!(data_from(&mut a), b"login: ");
+    }
+
+    #[test]
+    fn only_i_and_supervisory_frames_stand_in_for_a_lost_ua() {
+        for frame in [
+            Frame::Ui { pf: false, info: b"x".to_vec() },
+            Frame::Xid { pf: false, info: vec![0x82] },
+            Frame::Test { pf: false, info: vec![] },
+            Frame::Ua { final_bit: false },
+            Frame::Dm { final_bit: false },
+        ] {
+            let mut a = Lapm::new(Role::Originator, DLCI_DATA, Params::default());
+            a.connect();
+            a.receive(frame.clone(), Kind::Response);
+            assert_eq!(a.state(), State::AwaitingEstablishment, "{frame:?} established");
+        }
+        // And nothing stands in for anything when nothing was asked for.
+        let mut idle = Lapm::new(Role::Answerer, DLCI_DATA, Params::default());
+        idle.receive(Frame::Rr { nr: 0, pf: true }, Kind::Command);
+        assert_eq!(idle.state(), State::Disconnected);
+        assert!(idle.poll_transmit().is_none());
     }
 
     #[test]
