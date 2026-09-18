@@ -998,9 +998,13 @@ mod tests {
             pcm: None,
         };
         let mut octets = crate::sequence(crate::Signal::Cm, &menu);
-        // Spliced in behind the first modulation octet, where a real
-        // extension octet would go.
-        octets.insert(2, SYNC_QC);
+        // Spliced in directly behind the modulation category octet, which is
+        // where 5.2/V.8 puts an extension octet: "any number of extension
+        // octets may follow directly after a category octet". `sequence` is
+        // the synchronisation, the call function octet, then the three
+        // modulation octets, so index 3 is behind the first of those three --
+        // and the two real extension octets of the category follow it.
+        octets.insert(3, SYNC_QC);
 
         // CM is "a repetitive sequence of bits" (7.3/V.8): ten ONEs and then
         // the octets, over and over.
