@@ -680,7 +680,7 @@ not listed must not be touched.
   - `the_memories_are_zero_before_b1u` - the first 12 outputs after a reset are a fixed vector.
   - `the_state_is_never_saturated_only_the_output`.
 
-#### V92-11: The V.92 framed sequences (M)
+#### V92-11: The V.92 framed sequences (L)
 
 - **Depends on:** V92-01, V92-03.
 - **Clauses:** 8.5.4 (Table 20); 8.6.2-8.6.4 (Tables 21, 22, and Jp-prime); 8.7.3 (Tables 23, 24);
@@ -707,9 +707,14 @@ not listed must not be touched.
     2^K <= product M), and `merged_over(previous)` for absent parts.
   - **`From<&Parameters> for Cpd`** and **`TryFrom<&Cpd> for Parameters`** (AD-3).
   - **`CpFamily`** dispatch on bit 18 (SUV = 1, CP = 0) and the type at 19:20; CPt and CPu go through the
-    V92-03 V.92 layout.
-  - **A stream finder** for SUV and CP, tolerant of long runs of ones, with a length callback: CPd header
-    words then counts, `cp_length` for CPu.
+    V92-03 V.92 layout. Downstream needs a second enumeration, `DownFamily` (CPd or SUVd), because CPd has
+    no type field at 19:20 at all - those bits are its part flags - so only the direction chooses the
+    reading, and one enumeration would have to guess (section 14, "V92-11 as built").
+  - **A stream finder for each direction**, tolerant of long runs of ones, with a length callback that
+    reports "not yet" while a CPd's header words are still arriving: CPd header words then counts, and
+    `v90::sequences::CpFinder::v92` for the long CPs, whose `cp_length` is private to that module.
+  - **The CPd point reading** (section 4) as `set_levels`, a function rather than a `pub const`, because
+    the reading is a rule - unsigned magnitudes, mirrored by a(-eta-1) = -a(eta) - and not a value.
   - **Pad helpers** for 24, 36 and K bits upstream and D bits downstream.
   - **`rm_k(i, m, prime)`**: Tables 25 and 26 with the interval-11 errata reading (row 11 is K11).
   - **Q formats**: V92-01's signed and unsigned `Qa.b` helpers are used as they stand, at Q0.15, Q1.14,
@@ -2845,6 +2850,23 @@ was added instead is proof - the bit-exact test now runs off phase zero and at p
 well, so anyone who does round the phase breaks it at once.
 
 Notes from the package reviews follow, one per package that changed its own entry.
+
+**V92-11 as built: one enumeration became two, one constant became a function, and the package is L.**
+The entry named `CpFamily` alone. Upstream it works as written - bit 18, then the type at 19:20 - but the
+digital modem's own sequences cannot be read that way: CPd's bits 19:21 are the flags saying which of its
+three parts are present, so a CPd and a CPu differ only in which way the receiver is listening. A single
+enumeration would have had to guess, and guessing wrong turns a part flag into a type. So there are two,
+`CpFamily` and `DownFamily`, and each finder is told which direction it is in by which one it returns. The
+entry also asked the finder to use `cp_length` for CPu: that function and the `Shape` it takes are private
+to `v90::sequences`, which V92-03 did not export and this package may not edit, so the long CPs are found
+by `CpFinder::v92` itself - the same arithmetic, already proved, and no second copy of it. Third, section
+4's "CPd point linear value" is a reading rather than a number, so its home here is `set_levels`, whose doc
+carries the clause, the scale and the alternative; a `pub const` would have had to be a tautology to be
+used at all. Last, the sizing: the file is 1789 lines, 693 of them the sixteen named tests and the five the
+package added, and 370 of the remaining 1096 the clause quotations the house rule asks for. Seven wire
+formats, two finders and a part walker were never an M. The entry is marked **L**, but honestly it is past
+the top of that band by about a third, and section 2's bands have nothing above L. It could not be split:
+the Files line is one file, and a second one would have been a file outside it.
 
 **V92-06: "within 1 ppm" is the rate, read as the median of each second, not every single reading.** The
 package reads the clock after every line sample, which is what the upstream transmitter will do, and a
