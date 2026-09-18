@@ -132,9 +132,14 @@ pub const JA_MASK_ALL: u32 = (1 << UP_RATES) - 1;
 
 /// The mask bit that stands for `drn`, or `None` if `drn` is off the ladder.
 ///
-/// Table 20 lays the mask out by rate, not by drn: "bit 188+P+k is
-/// 24 000 + k x 8000/6 bit/s for k = 0..15", carrying on into the second word
-/// at 45 333, 46 667 and 48 000. 24 000 is drn 1, so mask bit k is drn k + 1.
+/// Table 20 lays the mask out by rate, not by drn, in two runs either side of
+/// a start bit. Every position in it is offset by the DIL descriptor's
+/// beta + ceil(N/2) x 17, written P below: bits 188+P to 203+P are 24 000,
+/// 25 333, ... 44 000, and bits 205+P to 207+P are 45 333, 46 666 and 48 000,
+/// with 208+P to 220+P reserved. 24 000 is drn 1, so mask bit k is drn k + 1.
+///
+/// The table prints 46 666, not 46 667, which is the same floor of 46 666 2/3
+/// that [`up_rate`] takes -- see the test.
 pub fn ja_mask_bit(drn: u8) -> Option<u32> {
     (1..=UP_RATES as u8).contains(&drn).then(|| u32::from(drn) - 1)
 }
@@ -909,9 +914,13 @@ mod tests {
         assert_eq!(ja_mask_bit(19), Some(18));
         assert_eq!(ja_mask_bit(0), None, "drn 0 is cleardown, not a rate");
         assert_eq!(ja_mask_bit(20), None);
-        // The first word is 24 000 to 44 000, the second 45 333 to 48 000.
-        assert_eq!(up_rate(16), 44_000, "the last rate of mask word 1");
-        assert_eq!(up_rate(17), 45_333, "the first rate of mask word 2");
+        // The first run is 24 000 to 44 000, the second 45 333 to 48 000, and
+        // Table 20 prints every one of them. The second run is where the
+        // ladder's floor shows: 46 666 2/3 is printed 46 666.
+        assert_eq!(up_rate(16), 44_000, "the last rate of mask run 1");
+        assert_eq!(up_rate(17), 45_333, "the first rate of mask run 2");
+        assert_eq!(up_rate(18), 46_666, "Table 20 prints 46 666, not 46 667");
+        assert_eq!(up_rate(19), 48_000, "the last rate of mask run 2");
         let mask = ja_mask_with(ja_mask_with(0, 19), 1);
         assert_eq!(ja_mask_drns(mask), vec![1, 19]);
         assert!(ja_mask_has(mask, 19) && !ja_mask_has(mask, 18));
