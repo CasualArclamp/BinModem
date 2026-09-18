@@ -17,7 +17,7 @@
 use super::INTERVALS;
 use super::modulus::Moduli;
 use super::sequences::{Cp, Descriptor, Mask};
-use super::sign::Redundancy;
+use super::shaping::Shaping;
 use super::ucode::{self, Law, UCODES};
 
 /// Symbols a segment: H of 5 is six data frames, one of references and five
@@ -403,22 +403,35 @@ fn widest(route: &Route, law: Law, k: u32, least: f64, limit: f64) -> Option<[Ve
 ///
 /// None if the route cannot carry V.90's slowest rate.
 pub fn choose(route: &Route, law: Law, limit: u32, enabled: impl Fn(u8) -> bool) -> Option<Choice> {
+    choose_shaped(route, law, limit, enabled, Shaping::NONE)
+}
+
+/// The same, with the digital modem asked to shape its spectrum: `shaping`
+/// goes into both CP and CPt, and the Sr signs it spends come out of every
+/// data frame (5.4.1: "S + Sr = 6").
+///
+/// Both, because phase 4's TRN2d, MP and Ed "use the spectral shaping
+/// parameters defined by CPt" (8.6): the equaliser learns the shaped
+/// spectrum before data mode sends it.
+pub fn choose_shaped(route: &Route, law: Law, limit: u32, enabled: impl Fn(u8) -> bool, shaping: Shaping) -> Option<Choice> {
     let limit = f64::from(limit).powi(2);
-    let s = Redundancy::None.data_bits() as u32;
+    let s = shaping.redundancy.data_bits() as u32;
     let (k_low, k_high) = (super::D_RANGE.0 - s, super::largest_k(s));
     let (k, sets) = (k_low..=k_high)
         .rev()
         .filter(|&k| enabled((k + s - 20) as u8))
         .find_map(|k| widest(route, law, k, SPACING, limit).map(|sets| (k, sets)))?;
     let data_power = average_power(law, &sets, k);
-    let data = cp_for(&sets, (k + s - 20) as u8, true);
+    let mut data = cp_for(&sets, (k + s - 20) as u8, true);
 
-    // Table 17: K from 6 to 24 with S at 6.
+    // Table 17: K from 6 to 24, with S anywhere from 3 to 6.
     let (k, training_sets) = (6..=24u32)
         .rev()
         .find_map(|k| widest(route, law, k, 2.0 * SPACING, limit).filter(|sets| 2.0 * average_power(law, sets, k) >= data_power).map(|sets| (k, sets)))
         .or_else(|| (6..=24u32).rev().find_map(|k| widest(route, law, k, 2.0 * SPACING, limit).map(|sets| (k, sets))))?;
-    let training = cp_for(&training_sets, (k + s - 8) as u8, false);
+    let mut training = cp_for(&training_sets, (k + s - 8) as u8, false);
+    shaping.apply(&mut data);
+    shaping.apply(&mut training);
     Some(Choice { data, training })
 }
 

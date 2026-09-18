@@ -656,20 +656,125 @@ fn a_softphone_line_keeps_its_carrier_through_data_and_renegotiations() {
     assert!(call.analogue.is_v90());
 }
 
+impl FullCall {
+    /// Run for `seconds`, and say what share of the digital modem's output
+    /// power lay above 3.8 kHz.
+    fn top_of_band(&mut self, seconds: f64) -> f64 {
+        const BLOCK: usize = 256;
+        let mut sent = Vec::new();
+        let end = self.ticks + (seconds * 8000.0) as u64;
+        while self.ticks < end {
+            let to_digital = self.net.up(&self.up);
+            self.up.clear();
+            let from_digital = self.digital.step(to_digital);
+            sent.push(from_digital);
+            for x in self.net.down(from_digital) {
+                self.up.push(self.analogue.step(x));
+            }
+            self.ticks += 1;
+        }
+        let (mut top, mut all) = (0.0, 0.0);
+        for block in sent.as_chunks::<BLOCK>().0 {
+            for k in 0..=BLOCK / 2 {
+                let (mut re, mut im) = (0.0, 0.0);
+                for (n, x) in block.iter().enumerate() {
+                    let w = 2.0 * std::f64::consts::PI * (k * n) as f64 / BLOCK as f64;
+                    re += x * w.cos();
+                    im -= x * w.sin();
+                }
+                let power = re * re + im * im;
+                all += power;
+                if k as f64 * 8000.0 / BLOCK as f64 >= 3800.0 {
+                    top += power;
+                }
+            }
+        }
+        top / all
+    }
+}
+
 fn plain_line() -> Network {
     Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5)
 }
 
 /// A path that takes the top of the downstream's band away, as a live call
-/// over a VoIP provider's did (live-1789732858): flat to 3.6 kHz and next to
-/// nothing at 4. No equaliser gives back a band that is not there, and what
-/// the equaliser cannot undo rings on in every decision. The DIL reads the
-/// route as more than twice as noisy as a clean one, and the downstream comes
-/// up rungs short of a clean line's.
+/// over a VoIP provider's did (live-1789732858). No equaliser gives back a
+/// band that is not there, and what the equaliser cannot undo rings on in
+/// every decision: unshaped, the route read twice as noisy as a clean one and
+/// came up at 44 000, five rungs short of a clean line's 50 666.
+///
+/// So the analogue modem asks for spectral shaping (5.4.5): signs spent so
+/// that the digital modem sends next to nothing where the ring is, with a
+/// filter whose zero is at 4 kHz, in CP and CPt both, and the look-ahead the
+/// digital modem's Jd offers. The digital modem sends by it, the decisions
+/// ring far less, and the downstream comes up faster than it did unshaped --
+/// and far faster than the V.34 it would have fallen back to.
 #[test]
-fn a_band_edge_cut_costs_the_downstream_rungs() {
-    let clean = connects(plain_line(), server(), 30.0).rates().0;
-    let cut = connects(plain_line().with_band_edge_cut(), server(), 30.0).rates().0;
-    println!("{clean} clean, {cut} over the cut");
-    assert!(cut + 4 * 1333 < clean, "{cut} against {clean}");
+fn a_band_edge_cut_is_shaped_away() {
+    use datapump::v90::shaping::Shaping;
+    use datapump::v90::sign::Redundancy;
+    let mut call = connects(plain_line().with_band_edge_cut(), server(), 30.0);
+    assert!(call.analogue.is_v90());
+    assert_eq!(call.analogue.retrains(), 0);
+    let (down, _) = call.rates();
+    let v90 = call.analogue.v90().unwrap();
+    let (asked, left) = v90.shaping();
+    let v34 = v90.settings().v34_receive;
+    println!("{down} down with {asked:?}, expected to leave {left:.2} of the error; V.34 would carry {v34}");
+    assert_ne!(asked.redundancy, Redundancy::None);
+    assert!(asked.filter[0] <= -56, "no zero at 4 kHz: {:?}", asked.filter);
+    assert_eq!(asked.lookahead, 1, "not the look-ahead our digital modem's Jd offers");
+    assert!(down >= 48_000, "{down}");
+    assert!(down > v34.max(33_600));
+    // The CP and the CPt that went out ask for it, and the digital modem
+    // took them at their word.
+    let digital = call.digital.v90().unwrap();
+    assert_eq!(digital.cp().map(Shaping::of), Some(asked));
+    assert_eq!(digital.cpt().map(Shaping::of), Some(asked));
+    // What goes down has next to nothing at the top of the band: a white
+    // signal has a twentieth of its power above 3.8 kHz.
+    let top = call.top_of_band(1.0);
+    println!("{top:.3} of the power above 3.8 kHz");
+    assert!(top < 0.025, "{top:.3} above 3.8 kHz");
+    // And the decisions are the better for it: data mode reads more cleanly
+    // than TRN1d, unshaped, did.
+    let rx = call.analogue.v90().unwrap().receiver();
+    println!("trained {:.1} dB, data mode {:.1} dB", rx.trained_snr_db(), rx.snr_db());
+    assert!(rx.snr_db() > rx.trained_snr_db() + 2.0);
+    assert_eq!(call.carries_data(4.0), (true, true));
+}
+
+/// The shaping holds through a rate renegotiation from either end (9.6):
+/// each new CP asks for what the first did, TRN2d, MP and Ed go out with it
+/// (8.6), and data after.
+#[test]
+fn a_shaped_call_renegotiates_from_either_end() {
+    use datapump::v90::shaping::Shaping;
+    let mut call = connects(plain_line().with_band_edge_cut(), server(), 30.0);
+    let (asked, _) = call.analogue.v90().unwrap().shaping();
+    let (down, _) = call.rates();
+    assert!(call.analogue.renegotiate(down - 4000));
+    assert!(call.comes_back_up(10.0), "{} / {}", call.analogue.phase(), call.digital.phase());
+    let (slower, _) = call.rates();
+    assert!(slower < down, "{slower} after asking for less than {down}");
+    assert_eq!(call.digital.v90().unwrap().cp().map(Shaping::of), Some(asked));
+    assert_eq!(call.carries_data(3.0), (true, true));
+    assert!(call.digital.renegotiate(8));
+    assert!(call.comes_back_up(10.0), "{} / {}", call.analogue.phase(), call.digital.phase());
+    assert_eq!(call.carries_data(3.0), (true, true));
+    assert_eq!(call.analogue.retrains(), 0);
+}
+
+/// A clean line leaves nothing at the top of the band worth a sign a frame:
+/// no shaping is asked for -- CP's Sr is 0, "spectral shaping is disabled"
+/// (5.4.5) -- and the rate is what it always was.
+#[test]
+fn a_clean_line_asks_for_no_shaping() {
+    use datapump::v90::shaping::Shaping;
+    let call = connects(plain_line(), server(), 30.0);
+    assert_eq!(call.analogue.v90().unwrap().shaping().0, Shaping::NONE);
+    let digital = call.digital.v90().unwrap();
+    assert_eq!(digital.cp().map(Shaping::of), Some(Shaping::NONE));
+    assert_eq!(digital.cpt().map(Shaping::of), Some(Shaping::NONE));
+    assert_eq!(call.rates().0, 50_666);
 }

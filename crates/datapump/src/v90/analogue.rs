@@ -16,7 +16,9 @@
 //! (8.5.2), and then V.34's data mode as the digital modem's MP asks. What
 //! comes down is read by [`super::pcm`], and what it means is worked out
 //! here: Jd and J'd from the signs, the route from the DIL, R from its sign
-//! pattern, and TRN2d, MP, Ed, B1d and data from whole data frames.
+//! pattern, and TRN2d, MP, Ed, B1d and data from whole data frames. What CP
+//! asks for is the DIL's to say, and whether to ask for spectral shaping is
+//! what the equaliser left of TRN1d and Jd has to say ([`super::shaping`]).
 
 use std::collections::VecDeque;
 
@@ -41,6 +43,7 @@ use super::digital;
 use super::encoder::{Decoder, Frame, Mapping};
 use super::pcm::{self, Heard, Slicer};
 use super::sequences::{self, Cp, Descriptor, JD_BITS, JD_PRIME_BITS, Jd};
+use super::shaping::{self, Shaping};
 use super::ucode::{self, Law};
 
 /// TRN in phase 3: "at least 512T" (9.3.2.3), and a far receiver trains
@@ -818,6 +821,9 @@ pub struct Modem {
     short: u32,
     /// How much worse than the DIL showed data mode has found the line.
     worse: f64,
+    /// The spectral shaping asked for, and the share of the DIL's error
+    /// power it was expected to leave (5.4.5).
+    shaping: (Shaping, f64),
 }
 
 impl Modem {
@@ -893,6 +899,7 @@ impl Modem {
             margin_at: 0,
             short: 0,
             worse: 1.0,
+            shaping: (Shaping::NONE, 1.0),
         };
         // 9.4.2: B1d "within 15 s plus 5 round-trip delays after sending
         // INFO1a".
@@ -1014,6 +1021,12 @@ impl Modem {
         self.choice.as_ref()
     }
 
+    /// The spectral shaping this end asked for, and the share of the DIL's
+    /// error power it expected the shaping to leave.
+    pub fn shaping(&self) -> (Shaping, f64) {
+        self.shaping
+    }
+
     /// The digital modem's MP.
     pub fn far_mp(&self) -> Option<Mp> {
         self.frames.as_ref().and_then(|f| f.mp)
@@ -1052,11 +1065,11 @@ impl Modem {
         let limit = super::power_limit(&self.settings.server);
         let jd = self.far_jd.unwrap_or_default();
         let slow_enough = |drn: u8| jd.enables(drn) && sequences::data_rate(drn).is_some_and(|rate| rate <= most);
-        let mut route = route.clone();
-        for spread in route.spread.iter_mut() {
-            *spread *= self.worse;
-        }
-        let Some(new) = dil::choose(&route, law, limit, slow_enough) else { return false };
+        // The shaping asked for at the start, and the errors it was expected
+        // to leave, and then as much worse as data mode has found the line.
+        let (shaping, left) = self.shaping;
+        let route = shaping::scaled(route, left * self.worse * self.worse);
+        let Some(new) = dil::choose_shaped(&route, law, limit, slow_enough, shaping) else { return false };
         let mut data = new.data;
         self.finish_cp(&mut data);
         let training = choice.training.clone();
@@ -1613,11 +1626,16 @@ impl Modem {
         let law = self.settings.law;
         let limit = super::power_limit(&self.settings.server);
         let jd = self.far_jd.unwrap_or_default();
-        let Some(mut choice) = dil::choose(&route, law, limit, |drn| jd.enables(drn)) else {
+        // Shaped or not, whichever carries more (5.4.5): what the equaliser
+        // left of TRN1d and Jd says what shaping would take away.
+        let leftover = self.rx.residue().leftover();
+        let Some(asked) = shaping::choose(&route, law, limit, |drn| jd.enables(drn), jd.lookahead, leftover.as_ref()) else {
             self.route = Some(route);
             self.fail("the route cannot carry V.90's slowest rate");
             return;
         };
+        self.shaping = (asked.shaping, asked.left);
+        let mut choice = asked.choice;
         let rate = sequences::data_rate(choice.data.drn).unwrap_or(0);
         if rate < self.settings.v34_receive {
             // A route that is an ordinary line with G.711's noise on it --
@@ -1822,7 +1840,8 @@ impl Modem {
         // The next rate is chosen for the line as data mode finds it.
         if let Some(route) = self.route.as_ref() {
             let limit = f64::from(super::power_limit(&self.settings.server)) / 32768.0;
-            self.worse = self.worse.max(rms / route.noise_at(law, limit));
+            let expected = route.noise_at(law, limit) * self.shaping.1.sqrt();
+            self.worse = self.worse.max(rms / expected);
         }
         let most = self.downstream_rate.saturating_sub(1);
         if !self.renegotiate(most) {
@@ -1831,11 +1850,11 @@ impl Modem {
         }
     }
 
-    /// What every CP this end sends says besides its constellations and rate.
+    /// What every CP this end sends says besides its constellations, rate and
+    /// shaping.
     fn finish_cp(&self, cp: &mut Cp) {
         cp.a_law = self.settings.law == Law::A;
         cp.upstream_rates = if self.settings.wide { 0x1fff } else { 0x07ff };
-        cp.lookahead = 0;
     }
 
     /// Times the downstream frames were found somewhere else after a slip,

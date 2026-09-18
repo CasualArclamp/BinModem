@@ -128,6 +128,17 @@ const HELD_AT_MOST: u32 = 4000;
 const CENTRE_EVERY: u64 = 16;
 const CENTRE_DRIFT_GAIN: f64 = 0.3;
 
+/// How far either side of a symbol the error is looked for what the symbols
+/// sent left in it, in symbols: eight milliseconds, well past the equaliser's
+/// own reach, and past the ringing of a filter that cuts the top of the band
+/// off sharply -- which is what leaves the most.
+pub const RESIDUE_LAGS: usize = 64;
+
+/// Symbols the residue has to have been read over before it says anything:
+/// a tenth of a second, over which each lag's reading is good to a few
+/// percent of the error.
+const RESIDUE_LEAST: u64 = 800;
+
 /// What the decisions that keep the loops going are made against.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Slicer {
@@ -295,6 +306,132 @@ impl Hunt {
     }
 }
 
+/// What the equaliser leaves of the signal, read while TRN1d and Jd arrive.
+///
+/// An equaliser and its decisions fed back undo what the line does to the
+/// signal, but not all of it. What it leaves is a sum of the symbols sent,
+/// each at some lag -- a line that takes the top of the band away rings on at
+/// the top of the band for longer than the equaliser reaches -- and the rest
+/// of the error is noise. The two call for different things. Noise is what it
+/// is; what the symbols carry into their neighbours depends on the symbols,
+/// and a digital modem asked to shape its spectrum (V.90 5.4.5) sends less of
+/// the band the line takes away, and so leaves less of it.
+///
+/// TRN1d and Jd are one codeword with scrambled signs -- as good as white --
+/// and every decision on them is right, so the error set against the symbols
+/// sent at each lag is the residue's response at that lag, and what is left
+/// over is the noise.
+#[derive(Debug, Clone)]
+pub struct Residue {
+    /// The last symbols sent and their errors, oldest first, `2 LAGS + 1` of
+    /// them once full.
+    sent: VecDeque<f64>,
+    errors: VecDeque<f64>,
+    /// The error at the middle of them against the symbol at each lag, from
+    /// `-LAGS` (a symbol still to come) to `LAGS`.
+    cross: Vec<f64>,
+    power: f64,
+    error: f64,
+    count: u64,
+    /// Whether what arrives is TRN1d or Jd: R is one codeword too, but its
+    /// signs repeat every frame, and set against a pattern that repeats the
+    /// error says nothing about any one lag.
+    open: bool,
+}
+
+impl Default for Residue {
+    fn default() -> Self {
+        Self {
+            sent: VecDeque::with_capacity(2 * RESIDUE_LAGS + 1),
+            errors: VecDeque::with_capacity(2 * RESIDUE_LAGS + 1),
+            cross: vec![0.0; 2 * RESIDUE_LAGS + 1],
+            power: 0.0,
+            error: 0.0,
+            count: 0,
+            open: false,
+        }
+    }
+}
+
+impl Residue {
+    /// One symbol: the level sent, and the error in what the equaliser made
+    /// of it.
+    pub fn feed(&mut self, sent: f64, error: f64) {
+        if !self.open {
+            return;
+        }
+        self.sent.push_back(sent);
+        self.errors.push_back(error);
+        if self.sent.len() > 2 * RESIDUE_LAGS + 1 {
+            self.sent.pop_front();
+            self.errors.pop_front();
+        }
+        if self.sent.len() < 2 * RESIDUE_LAGS + 1 {
+            return;
+        }
+        let e = self.errors[RESIDUE_LAGS];
+        // Lag k is the symbol k before the middle one, and `cross` holds lag
+        // -LAGS first.
+        for (j, cross) in self.cross.iter_mut().enumerate() {
+            *cross += e * self.sent[2 * RESIDUE_LAGS - j];
+        }
+        self.power += self.sent[RESIDUE_LAGS].powi(2);
+        self.error += e * e;
+        self.count += 1;
+    }
+
+    /// A symbol that cannot be used -- a slip, a decision in doubt -- breaks
+    /// the run: the lags are counted again from the next.
+    pub fn gap(&mut self) {
+        self.sent.clear();
+        self.errors.clear();
+    }
+
+    /// Read from here on, or no longer.
+    fn open(&mut self, open: bool) {
+        self.open = open;
+        self.gap();
+    }
+
+    /// Symbols read.
+    pub fn count(&self) -> u64 {
+        self.count
+    }
+
+    /// What has been read, once enough has. None until then.
+    pub fn leftover(&self) -> Option<Leftover> {
+        if self.count < RESIDUE_LEAST || self.power <= 0.0 {
+            return None;
+        }
+        let n = self.count as f64;
+        let response: Vec<f64> = self.cross.iter().map(|c| c / self.power).collect();
+        let power = self.power / n;
+        let error = self.error / n;
+        // Each lag is read with an error of its own, the error's share of
+        // the symbols' over the count; summed over every lag that much of the
+        // noise looks like residue, and is not.
+        let misread = response.len() as f64 * error / (power * n);
+        let carried = (response.iter().map(|c| c * c).sum::<f64>() - misread).max(0.0) * power;
+        Some(Leftover { response, noise: (error - carried).max(0.0), power, misread })
+    }
+}
+
+/// What a [`Residue`] came to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Leftover {
+    /// The error's response to the symbols sent, lag `-LAGS` first, as a
+    /// share of the symbol.
+    pub response: Vec<f64>,
+    /// The error's power that no symbol carried.
+    pub noise: f64,
+    /// The power of the symbols it was read on.
+    pub power: f64,
+    /// How much of any signal's power the response seems to leave that is
+    /// only the reading's own error, as a share: the same for every signal,
+    /// since it is spread evenly across the lags.
+    pub misread: f64,
+}
+
 /// An equaliser training came to.
 #[derive(Debug, Clone)]
 struct Solution {
@@ -359,6 +496,8 @@ pub struct Receiver {
     lost: bool,
     held: u32,
     slips: u32,
+    /// What the equaliser leaves of TRN1d and Jd.
+    residue: Residue,
 }
 
 impl Receiver {
@@ -418,6 +557,7 @@ impl Receiver {
             lost: false,
             held: 0,
             slips: 0,
+            residue: Residue::default(),
         }
     }
 
@@ -447,6 +587,8 @@ impl Receiver {
         self.recent.clear();
         self.settled = 0.0;
         self.lost = false;
+        // Whatever follows, it is not TRN1d or Jd.
+        self.residue.open(false);
     }
 
     /// Move where the data frames start, by `offset` symbols: a slip has put
@@ -510,6 +652,12 @@ impl Receiver {
     /// The equaliser, for looking at.
     pub fn taps(&self) -> &[f64] {
         &self.taps
+    }
+
+    /// What the equaliser has left of the signal, so far as TRN1d and Jd
+    /// have shown it.
+    pub fn residue(&self) -> &Residue {
+        &self.residue
     }
 
     pub fn heard(&mut self) -> Option<Heard> {
@@ -752,6 +900,7 @@ impl Receiver {
                 self.next_half = solution.origin + 2 * TRAIN_TO as u64;
                 self.next_symbol = (base + TRAIN_TO) as u64;
                 self.slicer = Slicer::Binary(ucode::level(self.law, self.uinfo));
+                self.residue.open(true);
                 self.stage = Stage::Trained;
                 self.heard.push_back(Heard::Trained { snr_db: self.trained_snr, inverted: self.inverted });
                 self.symbols();
@@ -921,7 +1070,17 @@ impl Receiver {
                 let fed = if guess { self.nearest_codeword(y) } else { target };
                 self.past.pop_back();
                 self.past.push_front(fed);
+                self.residue.gap();
                 return Symbol { index: index + self.frame_offset, raw: index, value: y, decided };
+            }
+            if let Slicer::Binary(level) = self.slicer {
+                // One codeword either sign: a decision is sure unless the
+                // output is nowhere near it.
+                if (y.abs() - level).abs() < 0.3 * level {
+                    self.residue.feed(target, e);
+                } else {
+                    self.residue.gap();
+                }
             }
             let energy: f64 = row.iter().chain(self.past.iter()).map(|x| x * x).sum::<f64>() + 1e-18;
             let back = e * STEP / energy;
@@ -1270,6 +1429,42 @@ mod tests {
             .collect();
         let mean = values.iter().sum::<f64>() / values.len() as f64;
         assert!((mean / a - 1.0).abs() < 0.02, "UINFO came out at {:.4} of itself", mean / a);
+    }
+
+    /// What the error carries of the symbols is read lag by lag, and what it
+    /// does not is the noise: here a ring at the top of the band, three
+    /// symbols before and after, and as much noise again.
+    #[test]
+    fn the_residue_reads_the_response_and_the_noise_apart() {
+        let ring = [(-3i64, -0.004), (-1, 0.006), (0, 0.001), (1, -0.006), (3, 0.004)];
+        let mut residue = Residue::default();
+        residue.feed(1.0, 0.5);
+        assert_eq!(residue.count(), 0, "read while shut");
+        residue.open(true);
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x
+        };
+        let sent: Vec<f64> = (0..40_000).map(|_| if next() & 1 == 1 { 0.1 } else { -0.1 }).collect();
+        let noise = 1e-3;
+        for n in 10..sent.len() - 10 {
+            let carried: f64 = ring.iter().map(|&(k, c)| c * sent[(n as i64 - k) as usize]).sum();
+            let gaussian = ((next() >> 11) as f64 / (1u64 << 53) as f64 - 0.5) * 12f64.sqrt();
+            residue.feed(sent[n], carried + noise * gaussian);
+        }
+        let leftover = residue.leftover().expect("enough was read");
+        let lags = RESIDUE_LAGS as i64;
+        for k in -lags..=lags {
+            let want = ring.iter().find(|r| r.0 == k).map_or(0.0, |r| r.1);
+            let got = leftover.response[(k + lags) as usize];
+            assert!((got - want).abs() < 3e-4, "lag {k}: {got} against {want}");
+        }
+        let ratio = leftover.noise / (noise * noise);
+        assert!((0.8..1.25).contains(&ratio), "noise read as {ratio} of itself");
+        assert!((leftover.power / 0.01 - 1.0).abs() < 1e-9);
     }
 
     #[test]
