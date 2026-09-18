@@ -17,7 +17,7 @@ use std::collections::VecDeque;
 
 use dsp::{ComplexFir, Nco, fir_lowpass, rrc_at, rrc_taps};
 
-use super::info::{self, Info, Info0, Info0d, Info1a, Info1aPcm, Info1c};
+use super::info::{self, Info, Info0, Info0d, Info1a, Info1aPcmUp, Info1aV34Up, Info1c, Mh};
 
 /// "600 bit/s ± 0.01%", one bit a symbol.
 pub const BAUD: f64 = 600.0;
@@ -84,10 +84,18 @@ impl Side {
     /// -- 1200 Hz and tone B, whichever end dialled -- and sends INFO0d, which
     /// is longer than V.34's INFO0. Its analogue modem's INFO0a and INFO1a are
     /// V.34's lengths, and INFO1d is INFO1c.
-    fn lengths(self) -> &'static [usize] {
-        match self {
-            Self::Call => &[info::INFO0_BITS, info::INFO0D_BITS, info::INFO1C_BITS],
-            Self::Answer => &[info::INFO0_BITS, info::INFO1A_BITS],
+    ///
+    /// V.92's MH sequence is forty bits and comes from either side, but only
+    /// where a modem-on-hold transaction is expected, so it is asked for
+    /// rather than always looked for.
+    fn lengths(self, mh: bool) -> &'static [usize] {
+        match (self, mh) {
+            (Self::Call, false) => &[info::INFO0_BITS, info::INFO0D_BITS, info::INFO1C_BITS],
+            (Self::Call, true) => {
+                &[info::MH_BITS, info::INFO0_BITS, info::INFO0D_BITS, info::INFO1C_BITS]
+            }
+            (Self::Answer, false) => &[info::INFO0_BITS, info::INFO1A_BITS],
+            (Self::Answer, true) => &[info::MH_BITS, info::INFO0_BITS, info::INFO1A_BITS],
         }
     }
 }
@@ -274,6 +282,8 @@ pub struct Receiver {
     /// Smoothed magnitude of the selected channel.
     level: f64,
     level_step: f64,
+    /// Whether forty-bit MH sequences are looked for as well.
+    mh: bool,
 }
 
 impl Receiver {
@@ -302,7 +312,22 @@ impl Receiver {
                 .collect(),
             level: 0.0,
             level_step: 1.0 - (-1.0 / (0.020 * fs)).exp(),
+            mh: false,
         }
+    }
+
+    /// The same receiver, also listening for V.92's forty-bit MH sequences
+    /// (Table 32/V.92).
+    ///
+    /// Either side may send them, and they ride on this very modulation
+    /// (8.9.2), so nothing else changes. They are opt-in because a
+    /// modem-on-hold transaction begins in the middle of a call, where a
+    /// receiver otherwise has no reason to be trying a fifth length against
+    /// every symbol -- and because a hold request starts exactly as a retrain
+    /// does, so only the stages that could be hearing one ask for them.
+    pub fn with_mh(mut self) -> Self {
+        self.mh = true;
+        self
     }
 
     /// How strong the carrier in this receiver's band is, as a magnitude.
@@ -331,7 +356,7 @@ impl Receiver {
                 );
                 branch.next += self.sps;
                 if found.is_none() {
-                    found = decide(branch, at, self.side);
+                    found = decide(branch, at, self.side, self.mh);
                 }
             }
         }
@@ -347,7 +372,7 @@ impl Receiver {
 }
 
 /// One branch's decision on a symbol, and the sequence it completes if any.
-fn decide(branch: &mut Branch, symbol: (f64, f64), side: Side) -> Option<Info> {
+fn decide(branch: &mut Branch, symbol: (f64, f64), side: Side, mh: bool) -> Option<Info> {
     // The differential decision: a point turned half way round from the last
     // one is a 1. Nothing about the carrier's absolute phase matters, which is
     // why there is no carrier loop here at all -- a few hertz of offset turns
@@ -362,7 +387,7 @@ fn decide(branch: &mut Branch, symbol: (f64, f64), side: Side) -> Option<Info> {
     branch.bits.push_back(turned < 0.0);
 
     let bits = branch.bits.make_contiguous();
-    for &length in side.lengths() {
+    for &length in side.lengths(mh) {
         // Checked the moment the CRC is in: the trailing fill says nothing,
         // and whatever follows a sequence may not be ones at all.
         let without_fill = length - info::FILL.len();
@@ -371,13 +396,30 @@ fn decide(branch: &mut Branch, symbol: (f64, f64), side: Side) -> Option<Info> {
         }
         let candidate = &bits[bits.len() - without_fill..];
         let found = match (side, length) {
+            (_, info::MH_BITS) => Mh::from_bits(candidate).map(Info::Mh),
             (_, info::INFO0_BITS) => Info0::from_bits(candidate).map(Info::Info0),
             (Side::Call, info::INFO0D_BITS) => Info0d::from_bits(candidate).map(Info::Info0d),
             (Side::Call, _) => Info1c::from_bits(candidate).map(Info::Info1c),
-            // The same length either way; bits 37:39 say which.
+            // The same length whichever layout it is; bits 37:39 and 34:36
+            // between them say which (10.4 of `spec-phase2-signals.md`). Six
+            // in 37:39 and six in 34:36 is V.92's Table 18, asking for PCM
+            // upstream; six and one of V.34's rates is V.90's Table 10, or
+            // V.92's Table 19, which is the same bits with the reserved bit 33
+            // given to the upstream carrier -- so a set bit 33 is handed over
+            // as a Table 19 frame and a clear one as the Table 10 it is
+            // identical to.
             (Side::Answer, _) => Info1a::from_bits(candidate)
                 .map(Info::Info1a)
-                .or_else(|| Info1aPcm::from_bits(candidate).map(Info::Info1aPcm)),
+                .or_else(|| Info1aPcmUp::from_bits(candidate).map(Info::Info1aPcmUp))
+                .or_else(|| {
+                    Info1aV34Up::from_bits(candidate).map(|table19| {
+                        if table19.high_carrier {
+                            Info::Info1aV34Up(table19)
+                        } else {
+                            Info::Info1aPcm(table19.v90)
+                        }
+                    })
+                }),
         };
         if found.is_some() {
             return found;
@@ -388,7 +430,7 @@ fn decide(branch: &mut Branch, symbol: (f64, f64), side: Side) -> Option<Info> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::info::{Probed, SymbolRate};
+    use super::super::info::{Cleardown, Info1aPcm, Probed, SymbolRate, T1};
     use super::*;
 
     const FS: f64 = 16_000.0;
@@ -600,6 +642,95 @@ mod tests {
             let far = db(side * 560.0);
             assert!(far < -20.0, "{} Hz: {far:.2} dB", side * 560.0);
         }
+    }
+
+    /// A transmitter straight into a receiver of the caller's choosing, and
+    /// everything that receiver found.
+    fn heard_by(side: Side, sequences: &[Vec<bool>], mut rx: Receiver) -> Vec<Info> {
+        let mut tx = Transmitter::new(side, FS);
+        for bits in sequences {
+            tx.send(bits);
+        }
+        tx.silence();
+        let mut found = Vec::new();
+        while tx.is_sending() {
+            if let Some(info) = rx.feed(tx.next_sample()) {
+                found.push(info);
+            }
+        }
+        for _ in 0..(FS as usize) / 4 {
+            if let Some(info) = rx.feed(0.0) {
+                found.push(info);
+            }
+        }
+        found
+    }
+
+    /// 8.4.1 and 10.4 of `spec-phase2-signals.md`: the answer modem's seventy
+    /// bits are four layouts in V.92, and each has to reach the caller as
+    /// itself. Today's receiver drops a Table 18 frame with a good CRC,
+    /// because both its symbol-rate fields hold six.
+    #[test]
+    fn every_info1a_layout_reaches_the_caller_as_itself() {
+        let table18 =
+            Info1aPcmUp { sections: 3, ltot_code: 1, lmax_code: 0, md_length: 4, uinfo: 90 };
+        let table10 = Info1aPcm {
+            md_length: 20,
+            uinfo: 78,
+            upstream: SymbolRate::S3200,
+            frequency_offset: Some(-0.5),
+        };
+        let table19 = Info1aV34Up {
+            v90: Info1aPcm { uinfo: 77, upstream: SymbolRate::S3429, ..table10 },
+            high_carrier: true,
+        };
+        let sequences =
+            [results().to_bits(), table18.to_bits(), table10.to_bits(), table19.to_bits()];
+        let found = heard_by(Side::Answer, &sequences, Receiver::new(Side::Answer, FS));
+        assert_eq!(
+            found,
+            vec![
+                Info::Info1a(results()),
+                Info::Info1aPcmUp(table18),
+                Info::Info1aPcm(table10),
+                Info::Info1aV34Up(table19),
+            ]
+        );
+
+        // A Table 19 asking for the low carrier is a Table 10 frame bit for
+        // bit, and there is nothing to tell them apart with, so it arrives as
+        // the Table 10 it is -- which says the low carrier just the same.
+        let low = Info1aV34Up { high_carrier: false, ..table19 };
+        let found = heard_by(Side::Answer, &[low.to_bits()], Receiver::new(Side::Answer, FS));
+        assert_eq!(found, vec![Info::Info1aPcm(low.v90)]);
+    }
+
+    /// 9.10.1: MH sequences are sent back to back, and 8.9.2 puts them on this
+    /// very modulation -- so a run of them is one group with one leading point
+    /// at an arbitrary phase, exactly as a group of INFO sequences is.
+    ///
+    /// A receiver that has not been asked for them hears none, which is what
+    /// keeps a forty-bit window out of every start-up that will never hold.
+    #[test]
+    fn mh_frames_are_heard_back_to_back_only_when_asked_for() {
+        let sent = [Mh::req(), Mh::ack(T1::from_code(5)), Mh::clrd(Cleardown::IncomingCall)];
+        let bits: Vec<Vec<bool>> = sent.iter().map(Mh::to_bits).collect();
+        let wanted: Vec<Info> = sent.iter().map(|&mh| Info::Mh(mh)).collect();
+        for side in [Side::Call, Side::Answer] {
+            let listening = Receiver::new(side, FS).with_mh();
+            assert_eq!(heard_by(side, &bits, listening), wanted, "{side:?}");
+            let deaf = Receiver::new(side, FS);
+            assert_eq!(heard_by(side, &bits, deaf), Vec::new(), "{side:?}");
+        }
+
+        // And asking for them costs the phase 2 sequences nothing: a receiver
+        // listening for both still hears an INFO0 and an INFO1a.
+        let sequences = [capabilities().to_bits(), results().to_bits()];
+        let listening = Receiver::new(Side::Answer, FS).with_mh();
+        assert_eq!(
+            heard_by(Side::Answer, &sequences, listening),
+            vec![Info::Info0(capabilities()), Info::Info1a(results())]
+        );
     }
 
     #[test]
