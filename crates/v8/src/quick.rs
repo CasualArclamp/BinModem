@@ -1040,13 +1040,14 @@ mod tests {
         assert_eq!(heard(&stream), vec![], "no quick connect anywhere in a CM");
 
         // That stream is easy, because its two 0x55s are eighty bits apart
-        // and the window needs thirty. The hard one is a CM carrying 0x55
-        // twice, three octets apart, with the same octet behind each: that
-        // puts two framed synchronisations exactly thirty bits apart with a
-        // well-formed information frame after each, which is everything bits
-        // 10:59 of a QC1a hold. All that is left to tell them apart is bits
-        // 0:9 and 30:39, and in a CM those hold framed octets, because 5/V.8
-        // puts the preamble in front of a sequence and nowhere inside it.
+        // and the window needs thirty. The hard one is the run of octets a
+        // CM body would show if it carried 0x55 twice, three octets apart,
+        // with the same octet behind each: two framed synchronisations
+        // exactly thirty bits apart, a well-formed information frame after
+        // each, and the two frames equal -- everything bits 10:59 of a QC1a
+        // hold. All that is left to tell them apart is bits 0:9 and 30:39,
+        // and in a CM those hold framed octets, because 5/V.8 puts the
+        // preamble in front of a sequence and nowhere inside it.
         let category = octets[1];
         let body = Qc::qc1a(Uqts::from_ucode(70).unwrap(), true).octet();
         let mut stream = Vec::new();
