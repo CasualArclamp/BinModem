@@ -911,7 +911,7 @@ not listed must not be touched.
     `wait_for_cp` set no CP goes before the peer's CP arrives; with it clear the CP goes after the first
     peer SUV; and a peer that asks and then never sends a CP does not stall us past the repeat window.
 
-#### V92-15: The PCM upstream transmitter (M)
+#### V92-15: The PCM upstream transmitter (L)
 
 - **Depends on:** V92-01, V92-04, V92-06.
 - **Clauses:** 6.2; 8.5.6 with 9.5.2.1.7-9.5.2.1.8; 8.6.3; 3.8.
@@ -920,10 +920,17 @@ not listed must not be touched.
   P3P (7.1 A7-A8, 13.2 item 5).
 - **Description:** `PcmTransmitter::new(fs, Mode)` in the pull shape of `v34::qam::Transmitter`, with
   `next_sample(clock, next_level)`, turning 8000 symbols/s levels into line samples (AD-8).
-  - `Mode::Interpolated`: windowed-sinc reconstruction just under 4 kHz, as `pcm::Receiver` builds its own,
-    with an arbitrary fractional delay.
+  - `Mode::Interpolated`: a windowed-sinc reconstruction with an arbitrary fractional delay, as
+    `pcm::Receiver` builds its own, but **with its cutoff at exactly 4 kHz** and not just under it, because
+    only a sinc whose cutoff is the symbol rate's own Nyquist has its zeros on the other symbols' instants,
+    and without that an unshifted line sample is the symbol plus a few per cent of its neighbours. The
+    window then puts the response "just under 4 kHz" in practice. Interpolate *between* two of the table's
+    phases rather than rounding to the nearer, which `pcm::Receiver` may do and this may not: epsilon
+    resolves 1/65536 of a symbol and a grid of 1/512 would quantise it to about a thousandth.
   - `Mode::Straight`: at fs = 16 000, the level on the codec's phase and a band-limited midpoint between;
-    exact only for multiples of 0.5 T, which the module doc states.
+    exact only for multiples of 0.5 T, which the module doc states. It is the same kernel as
+    `Mode::Interpolated` read at the only two phases where that kernel is a delta and a midpoint, so one
+    reconstruction serves both and a bug in it is a bug in both; off those two phases it takes the nearer.
   - `lookahead()` in symbols, so mid-segment cuts are computed on the symbol stream, never on line time.
   - `delay(fraction_of_t)`: a one-off shift, used twice only - +0.5 T at the first S-bar-u (24.5T) and
     +epsilon·T at the second ((24+epsilon)T) - and never re-stepped afterwards.
@@ -932,16 +939,36 @@ not listed must not be touched.
   - Clock slaving: free-run at a nominal 8000 symbols/s until the downstream receiver has trained, then
     follow `symbol_clock()`; the switch happens in the silence after Ja, where a phase step costs nothing.
   - LU scaling with peaks bounded to 0.3 of full scale, the `dil::LOUDEST` ceiling, because the softphone
-    capture path has its own limiter.
+    capture path has its own limiter. LU is held under that ceiling where it is *chosen* rather than by
+    squashing samples, so `PEAK`, a named `CREST` of 3 (the reading, with 2 as the alternative) and
+    `LU_LOUDEST = PEAK / CREST` are the three constants, and `peak()` reports what was actually made.
 - **Tests:**
-  - `at_twice_the_rate_every_other_sample_is_the_level` - fs = 16 000, phase 0, both modes.
-  - `through_the_network_the_codec_reads_back_the_levels_sent` - unquantised, gain 1, error below -40 dB.
-  - `a_half_symbol_delay_moves_the_codec_samples_by_half_a_symbol`.
+  - `at_twice_the_rate_every_other_sample_is_the_level` - fs = 16 000, phase 0, both modes. The odd
+    samples are asserted on a *steady* level only: between two unequal levels a band-limited midpoint is
+    not their average, because the reconstruction rings.
+  - `through_the_network_the_codec_reads_back_the_levels_sent` - unquantised, gain 1, error below -40 dB,
+    **with the network's own upstream anti-alias filter opened to the line's Nyquist**. See the note in
+    section 14: at 4 kHz it cannot be done at all, and the reason is worth knowing.
+  - `a_half_symbol_delay_moves_the_codec_samples_by_half_a_symbol` - `with_upstream_phase(0.5)` and the
+    same shift in the transmitter, which cancel; and the control run, where they do not.
   - `epsilon_resolves_to_a_sixty_five_thousandth_of_a_symbol` - eight epsilon values measured back through
-    `Network::with_upstream_phase`; epsilon = 0x4000 moves the waveform by T/4 within 1 %.
+    `Network::with_upstream_phase`; epsilon = 0x4000 moves the waveform by T/4 within 1 %. Measure the
+    shift as the phase of a tone at the far A/D, and hold every one of the eight to **half a code of Jp**,
+    so a transmitter that rounded epsilon to a coarser grid than the field's own fails here.
   - `the_transmitter_follows_a_network_120_ppm_fast` - over 10 s the symbol instants at the far A/D stay
-    within a stated fraction of T.
+    within a stated fraction of T, against a control that free-runs and walks 7.7 T. The clock is a
+    synthetic `SymbolClock` carrying the true rate, not a trained `pcm::Receiver`: what a real receiver's
+    clock leaves is V92-06's question, and its
+    `an_upstream_timed_by_the_symbol_clock_keeps_its_phase_for_ten_seconds` already answers it.
   - `the_transmitter_is_never_re_stepped_after_epsilon`.
+  - And, beyond the six: `a_shift_delays_the_symbols_rather_than_adding_one`,
+    `symbol_at_says_when_a_symbol_reached_the_line`,
+    `a_symbol_is_asked_for_a_lookahead_before_it_reaches_the_line`,
+    `a_transmitter_free_runs_until_the_receiver_has_trained`,
+    `taking_the_clock_up_does_not_step_the_phase`,
+    `straight_is_the_interpolated_reconstruction_at_its_two_exact_phases`,
+    `the_reconstruction_carries_a_steady_level_at_every_phase` and
+    `lu_is_held_under_the_ceiling_the_capture_path_imposes`.
 
 #### V92-16: Phase 2: the V.92 flags and the Table 18 choice in full Phase 2 (M)
 
@@ -2937,6 +2964,26 @@ package added, and 370 of the remaining 1096 the clause quotations the house rul
 formats, two finders and a part walker were never an M. The entry is marked **L**, but honestly it is past
 the top of that band by about a third, and section 2's bands have nothing above L. It could not be split:
 the Files line is one file, and a second one would have been a file outside it.
+
+**V92-15: two half-band filters in cascade are not one, and the package is L.** The entry asked for
+`through_the_network_the_codec_reads_back_the_levels_sent` at 40 dB and did not say what the network had to
+be. It cannot be done with the model's upstream anti-alias filter anywhere near 4 kHz, and the reason is
+not a modelling artefact. The transmitter's own reconstruction is already the band-limiting filter and it
+is a *half-band* one - `H(f) + H(8000 - f) = 1`, which is exactly what puts its zeros on the other symbols'
+instants - so an A/D that samples on those instants and folds our image back reads the level exactly, with
+no filter of its own needed at all. Put a second half-band filter in front of that A/D and the product is
+not half-band: at 4 kHz each passes half, the pair passes a quarter twice over, and a random level
+sequence, which fills its band right up to the edge, comes back about 22 dB down (measured 21.9). Widening
+the filter instead of removing it is worse, because then our own out-of-band image aliases. So the test
+opens it to the line's Nyquist, where the A/D is transparent, and the read-back is exact to floating point
+(measured 305 dB down). The 4 kHz filter is a real thing on a real gateway; it is a *channel*, and
+equalizing the channel is what the prefilter the digital modem designs and downloads is for (6.4.2). The
+entry's `a_half_symbol_delay_...` test keeps a control run at the same settings, so the exactness is not
+mistaken for the route doing nothing. Two smaller corrections in the same entry: `Mode::Interpolated`'s
+cutoff is exactly 4 kHz and not "just under", because only the symbol rate's own Nyquist has zeros on the
+symbol instants, and the table is interpolated between phases rather than rounded to one of them, because
+1/512 of a symbol is thirty times coarser than a code of Jp. And the sizing was wrong: `transmit.rs` came
+to 1026 lines, 560 of them tests, so the package is **L** and not M.
 
 **V92-06: "within 1 ppm" is the rate, read as the median of each second, not every single reading.** The
 package reads the clock after every line sample, which is what the upstream transmitter will do, and a
