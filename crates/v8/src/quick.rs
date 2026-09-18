@@ -180,6 +180,37 @@ impl Kind {
 /// read as a number, W most significant.
 const UCODES: [u8; 15] = [61, 62, 63, 66, 67, 70, 71, 74, 75, 78, 79, 82, 83, 86, 87];
 
+/// One of the fifteen Ucodes Table 2 lists, and so one U_QTS can ask for.
+///
+/// It holds the WXYZ pattern, not the Ucode, which is what makes
+/// [`Uqts::pattern`] total: there is no way to build a `Uqts::Ucode` around a
+/// Ucode with no pattern to be sent as. That matters because the Ucode a
+/// modem wants comes from outside -- the memo of the last call to this server
+/// -- and a value Table 2 does not list has to be turned away at
+/// [`Table2Ucode::new`], where the caller can choose a neighbour, rather than
+/// half way through building a sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Table2Ucode(u8);
+
+impl Table2Ucode {
+    /// The code for a Ucode, if Table 2 lists it. Fifteen of the hundred and
+    /// twenty-eight can be asked for, and a modem that wants one of the other
+    /// hundred and thirteen has to settle for a neighbour.
+    pub fn new(ucode: u8) -> Option<Self> {
+        UCODES.iter().position(|&c| c == ucode).map(|p| Self(p as u8))
+    }
+
+    /// The Ucode itself, as Table 1/V.90 numbers it.
+    pub fn get(self) -> u8 {
+        UCODES[usize::from(self.0)]
+    }
+
+    /// The WXYZ pattern that asks for it, W in the most significant bit.
+    fn pattern(self) -> u8 {
+        self.0
+    }
+}
+
 /// U_QTS: which PCM codeword the digital modem is to use for QTS (Table 2).
 ///
 /// The analogue modem chooses it, in QC1a or QCA1a, and the digital modem
@@ -189,8 +220,9 @@ const UCODES: [u8; 15] = [61, 62, 63, 66, 67, 70, 71, 74, 75, 78, 79, 82, 83, 86
 pub enum Uqts {
     /// One of the fifteen Ucodes Table 2 lists. Build it with
     /// [`Uqts::from_ucode`] or [`Uqts::from_pattern`]: a Ucode the table does
-    /// not list has no pattern to be sent as.
-    Ucode(u8),
+    /// not list has no pattern to be sent as, and [`Table2Ucode`] is what
+    /// keeps one out of here.
+    Ucode(Table2Ucode),
     /// The sixteenth pattern, `1111`, which Table 2 gives no Ucode at all:
     /// "Cleardown from on-hold state". 9.10.2.1: "If signal QC is detected
     /// with the UQTS code set to 1111, cleardown from on-hold state, the
@@ -209,22 +241,20 @@ impl Uqts {
     pub fn from_pattern(pattern: u8) -> Option<Self> {
         match pattern {
             0b1111 => Some(Self::Cleardown),
-            p if p < 0b1111 => Some(Self::Ucode(UCODES[usize::from(p)])),
+            p if p < 0b1111 => Some(Self::Ucode(Table2Ucode(p))),
             _ => None,
         }
     }
 
-    /// The code for a Ucode, if Table 2 lists it. Fifteen of the hundred and
-    /// twenty-eight Ucodes can be asked for, and a modem that wants one of
-    /// the other hundred and thirteen has to settle for a neighbour.
+    /// The code for a Ucode, if Table 2 lists it. See [`Table2Ucode::new`].
     pub fn from_ucode(ucode: u8) -> Option<Self> {
-        UCODES.contains(&ucode).then_some(Self::Ucode(ucode))
+        Table2Ucode::new(ucode).map(Self::Ucode)
     }
 
     /// The WXYZ pattern, W in the most significant of the four bits.
     pub fn pattern(self) -> u8 {
         match self {
-            Self::Ucode(u) => UCODES.iter().position(|&c| c == u).expect("a Ucode Table 2 lists") as u8,
+            Self::Ucode(u) => u.pattern(),
             Self::Cleardown => 0b1111,
         }
     }
@@ -232,7 +262,7 @@ impl Uqts {
     /// The Ucode, unless this is the cleardown code, which names none.
     pub fn ucode(self) -> Option<u8> {
         match self {
-            Self::Ucode(u) => Some(u),
+            Self::Ucode(u) => Some(u.get()),
             Self::Cleardown => None,
         }
     }
@@ -650,10 +680,10 @@ mod tests {
         ];
         for (pattern, ucode) in table {
             let uqts = Uqts::from_pattern(pattern).expect("a pattern Table 2 lists");
-            assert_eq!(uqts, Uqts::Ucode(ucode), "pattern {pattern:04b}");
-            assert_eq!(uqts.ucode(), Some(ucode));
+            assert_eq!(uqts.ucode(), Some(ucode), "pattern {pattern:04b}");
             assert_eq!(uqts.pattern(), pattern, "and back again");
             assert_eq!(Uqts::from_ucode(ucode), Some(uqts), "found by its Ucode");
+            assert_eq!(Table2Ucode::new(ucode).map(Uqts::Ucode), Some(uqts));
         }
         // The sixteenth row has no Ucode at all: "Cleardown from on-hold
         // state". 9.10.2.1: "If signal QC is detected with the UQTS code set
@@ -666,6 +696,34 @@ mod tests {
         // A Ucode beside one of Table 2's is not one of Table 2's.
         for ucode in [0, 60, 64, 65, 88, 127] {
             assert_eq!(Uqts::from_ucode(ucode), None, "Ucode {ucode} is not in Table 2");
+        }
+    }
+
+    #[test]
+    fn a_ucode_table_2_does_not_list_is_turned_away_before_a_sequence_is_built() {
+        // Table 2 gives patterns to fifteen of the hundred and twenty-eight
+        // Ucodes. The other hundred and thirteen have no pattern at all, and
+        // the place to find that out is here -- not part-way through building
+        // a QC1a out of a U_QTS remembered from an earlier call, where the
+        // only honest answers left would be a panic or a Ucode nobody asked
+        // for. Table2Ucode is the gate, and it is the only way into
+        // Uqts::Ucode.
+        for ucode in 0..=u8::MAX {
+            let listed = UCODES.contains(&ucode);
+            assert_eq!(Table2Ucode::new(ucode).is_some(), listed, "Ucode {ucode}");
+            assert_eq!(Uqts::from_ucode(ucode).is_some(), listed);
+            if let Some(code) = Table2Ucode::new(ucode) {
+                assert_eq!(code.get(), ucode, "and it remembers which one it is");
+            }
+        }
+        // Every Uqts there is has a pattern, an octet and a sequence, and
+        // none of the three can fail.
+        for pattern in 0..16u8 {
+            let uqts = Uqts::from_pattern(pattern).expect("sixteen patterns");
+            assert_eq!(uqts.pattern(), pattern);
+            let qc = Qc::qc1a(uqts, true);
+            assert_eq!(Qc::from_octet(qc.octet()), Some(qc));
+            assert_eq!(qc.bits().len(), QC_BITS);
         }
     }
 
