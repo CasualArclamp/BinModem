@@ -475,8 +475,14 @@ not listed must not be touched.
   applied *before* `Jd::from_bits` is called at all - V.90 passes `|_| true`, and V.92 will pass
   `|bits| !bits[47]`, so a Jp is never decoded as a Jd full of nonsense rates. The closure needs nothing
   from V92-03, which is what keeps this package a pure move with no dependency inside its own wave; the
-  bit-47 knowledge stays wholly in V92-03 and V92-11. `RWatch` and `RSeen`, with the levels supplied by the caller **and the pattern period made a
-  parameter** (6 for R, Ri, Rd and Rt; 4 for Rf), so V.92 needs no second copy; `Levels`, `levels_for`,
+  bit-47 knowledge stays wholly in V92-03 and V92-11. `RWatch` and `RSeen`, with the levels supplied by the
+  caller **and the pattern's period and origin both made parameters** - 6 for R, Ri, Rd and Rt, all of
+  which begin where a data frame does, and 4 for Rf, which "shall begin on the boundary of a data frame"
+  (9.9.1.1.1/V.92) but whose pattern is not a frame long, so that boundary is as often two symbols into the
+  pattern as none and the symbol count alone is not its phase. The levels stay the data frame's six,
+  because R's codewords are per data frame interval (8.6.4, and 8.8.4/V.92 for Rf) however long the sign
+  pattern is; and `RSeen::Moved` is reported only by a watch whose pattern is a data frame long, since no
+  rotation of four determines a move of six. So V.92 needs no second copy; `Levels`, `levels_for`,
   `least_gap`, `nearest`, `slicer_for`; `Trust` and `trusted_symbols`; `find_place`; `Frames`, with a
   pluggable sequence finder; and a `DilReader` owning the `dil*` state, `before_dil` and `analysis`, with
   `begin_dil`, `find_dil_start`, `fit_dil`, `dil_levels`, `dil_symbol`, `count_dil` and `find_dil`, each
@@ -489,14 +495,21 @@ not listed must not be touched.
     `v90_vector.rs` pass unchanged; the two J-prime-d tests move into `downstream.rs`.
   - `an_r_watch_finds_a_four_symbol_pattern_too` - a synthetic plus-plus-minus-minus sequence in both
     polarities.
+  - `an_r_watch_hears_a_four_symbol_pattern_that_began_on_an_odd_frame` - the same sequence from a data
+    frame boundary two symbols into the pattern, heard when the origin is given and not heard when it is
+    not.
+  - `a_four_symbol_pattern_is_judged_against_the_data_frames_levels` - six unequal levels, refused when
+    they sit in the wrong intervals.
   - `a_jd_reader_with_a_callers_acceptance_closure_ignores_frames_it_rejects` - a frame with bit 47 set is
     refused by a `|bits| !bits[47]` closure and accepted by `|_| true`, and the refused one never reaches
     `Jd::from_bits`.
-  - `the_carrier_watch_can_be_named_from_outside_v90` - a compile-level check that
-    `crate::v90::carrier::Watch` resolves from a sibling module.
+  - `the_carrier_watch_can_be_named_from_outside_v90` - a `#[cfg(test)] pub(crate) use super::carrier;`,
+    which is E0365 unless `mod carrier` is `pub(crate)`. Not a path from a sibling module: everything in
+    `v90/downstream.rs` is a descendant of `v90` and would resolve `crate::v90::carrier::Watch` either way.
   - `an_r_watch_takes_its_levels_from_the_caller`.
-  - Run the ignored DIL slip sweep before and after and record the same failure count (17 of 260) in the
-    commit message.
+  - Rebuild the DIL slip sweep from project memory `v34-phase2-tone-deadline` (it was never committed, and
+    `crates/datapump/tests/` is not on the Files line), run it before and after, record the same failure
+    count (17 of 260) in the commit message, and delete it again.
 
 #### V92-06: `pcm::Receiver::symbol_clock()`, for slaving the upstream (S)
 
@@ -2705,6 +2718,20 @@ V92-58 from 16 to 17 and V92-59 from 17 to 18, and adds a nineteenth wave. Hold 
 **later**, not earlier. If the maintainer wants hold sooner regardless, the cheapest real lever is to cut
 V92-53's cleardown half - the seam the package already names - into its own package, which would free
 V92-56 and let hold run a wave ahead of FPE; that is a change to make deliberately, not a reordering.
+
+**7. V92-05's `RWatch` takes a phase origin, and its carrier check is not a sibling.** Two amendments to
+that entry, both made while resolving the package review. First, "the pattern period made a parameter" is
+not enough for Rf: 8.8.4/V.92 prints Rf as a 12-symbol sequence whose signs repeat every 4, and 9.9.1.1.1
+makes it begin on a data-frame boundary, which is six symbols - so Rf's first symbol lands on 0 or 2 of its
+own 4, and a watch reading its phase off the symbol count would read the 2 case as R-bar-f's rotation in
+every group, never hear Rf, and never report the turn. The entry now asks for the pattern's origin beside
+its period, and says the levels stay the frame's six. Second, the entry asked for
+`the_carrier_watch_can_be_named_from_outside_v90` to be "a compile-level check that
+`crate::v90::carrier::Watch` resolves from a sibling module". That check cannot exist as written: privacy
+in Rust reaches every descendant, so any module the package could add resolves a private `carrier` too,
+and no module outside `v90` is on its Files line. What does force the visibility is a `pub(crate)`
+re-export, which is E0365 on a private module; the entry now says so, and says the guard is `#[cfg(test)]`
+because an unconditional one is an unused import under `-D warnings`.
 
 Two further judgements worth recording, both accepted from the review but resolved with a choice:
 
