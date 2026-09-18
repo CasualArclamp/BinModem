@@ -25,12 +25,14 @@
 //!
 //! It lives on its own because V.92's analogue modem reads exactly the same
 //! things. V.92 rewrites the upstream and takes the downstream over by
-//! reference: its DIL is 8.6.1 -> 8.4.1/V.90 and its R, R-bar and Ri are
-//! 8.6.5 -> 8.6.4/V.90, both word for word. So the only V.92-shaped seams
+//! reference, in one sentence each: its DIL is 8.6.1 -> 8.4.1/V.90, its Ri is
+//! 8.6.5 -> 8.6.4/V.90, and its Rd and Rt are 8.8.4 -> 8.6.4/V.90, which is
+//! where R and R-bar themselves are defined. So the only V.92-shaped seams
 //! here are the three a caller supplies -- which frames a [`JdReader`] will
-//! decode at all, how long a [`RWatch`]'s sign pattern is, and what sequence
-//! finder a [`Frames`] runs the descrambled bits through -- and nothing in
-//! this module needs to know which Recommendation is calling it.
+//! decode at all, how long a [`RWatch`]'s sign pattern is and where it
+//! starts, and what sequence finder a [`Frames`] runs the descrambled bits
+//! through -- and nothing in this module needs to know which Recommendation
+//! is calling it.
 
 use std::collections::VecDeque;
 
@@ -52,10 +54,14 @@ const JD_TAIL: usize = 24;
 const R_HEARD: usize = 8;
 const R_MOVED: usize = 6;
 
-/// How long R-bar runs, in symbols. 8.6.4: "R-bar consists of 4 repetitions
-/// of the 6-symbol sequence", which is 24T; V.92's R-bar-f, whose pattern
-/// repeats every 4 symbols rather than every 6, is "24T" too (V.92 8.8.4).
-/// The same length in symbols either way, so it is counted in symbols.
+/// How long R-bar runs, in symbols. Neither 8.6.4 nor 8.8.4/V.92 prints a
+/// duration for it: both count repetitions. 8.6.4 says "R-bar consists of 4
+/// repetitions of the 6-symbol sequence", which is 24 symbols, and 8.8.4/V.92
+/// says "R-bar-f consists of 2 repetitions of the 12-symbol sequence", which
+/// is 24 again although its signs repeat every 4 symbols rather than every 6.
+/// The clause that does print a duration is 9.9.1.1.1/V.92, "signal Rf for
+/// 384T followed by R-bar-f for 24T", and it agrees. The same length whatever
+/// the pattern, so it is counted in symbols.
 const R_BAR_SYMBOLS: u64 = 24;
 
 /// The DIL: symbols read before they are counted, so that what arrived just
@@ -999,9 +1005,10 @@ mod tests {
         assert_eq!(turned, Some(72));
     }
 
-    /// V.92 8.8.4: Rf repeats "+ + - -", a pattern four symbols long, and
-    /// R-bar-f is that turned over -- so the watch has to take the period
-    /// from its caller rather than assume 8.6.4's six.
+    /// 8.8.4/V.92 transmits Rf by "repeating the 12-symbol sequence
+    /// containing the PCM codewords with the sign pattern" it then prints as
+    /// twelve signs: `+ + - -` three times over. So the watch has to take
+    /// the period from its caller rather than assume 8.6.4's six.
     ///
     /// Both polarities, because "neither R nor R-bar are differentially
     /// encoded" (8.6.4 NOTE): the watch finds a rotation of the pattern in
