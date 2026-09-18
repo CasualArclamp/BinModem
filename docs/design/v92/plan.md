@@ -546,18 +546,31 @@ not listed must not be touched.
 #### V92-06: `pcm::Receiver::symbol_clock()`, for slaving the upstream (S)
 
 - **Depends on:** none.
-- **Clauses:** 6.2.
+- **Clauses:** 6.2; 8.6.3 with Table 22, 9.5.1.1.6-7 and 9.5.2.1.8 for the hand-over note on the phase.
 - **Files:** `crates/datapump/src/v90/pcm.rs`.
 - **Digests:** CA (11.3 "Clock slaving", 13.2).
 - **Description:** `pub fn symbol_clock(&self) -> SymbolClock`, giving the line samples one far-end symbol
   takes, smoothed from `drift` rather than from `due`. `due` steps by up to a quarter half-symbol in
   `hold_centre` and on every timing-loop update; an upstream transmitter that followed it would jitter at
-  the far A/D. Nothing else in `pcm.rs` changes.
+  the far A/D. The reported period is held at the nominal `fs / 8000` while the receiver is untrained: a
+  `Receiver` carries its `drift` through a retrain, and a failed training leaves behind the rate it had
+  fitted, so neither is offered to an upstream that 6.2 asks to free-run until it can see the network's
+  clock. Nothing else in `pcm.rs` changes.
 - **Tests:**
   - `the_symbol_clock_follows_a_network_120_ppm_fast` - over 10 s of `Network::with_clock(120)` the
-    reported period is within 1 ppm of the truth.
+    reported rate is within 1 ppm of the truth in every one of the ten seconds, read as that second's
+    median (measured at most 0.19 ppm out). A single reading also carries the timing loop's dither, which
+    is bounded separately by named constants: 1.25 ppm once the loop has settled and 4 ppm in the first
+    second after training (measured 1.04 and 3.19). See review note V92-06 in section 14.
   - `the_symbol_clock_does_not_jump_when_the_timing_loop_steps` - the sample-to-sample change stays under a
     stated bound while `due` steps.
+  - `the_symbol_clock_is_the_nominal_one_until_the_receiver_trains` and
+    `the_symbol_clock_goes_back_to_nominal_when_a_trained_receiver_hunts_again` - the period is nominal
+    while `trained` is false, both on a fresh `Receiver` and on one that has trained at 120 ppm and been
+    hunted again for a retrain, so a stale rate never reaches an upstream.
+  - `an_upstream_timed_by_the_symbol_clock_keeps_its_phase_for_ten_seconds` - a transmitter that takes the
+    phase once in the silence after Ja and then follows the rate is still inside 0.05 T of the far end's
+    symbols ten seconds later, which is what V92-15 will do.
   - The existing `pcm.rs` tests pass.
 
 #### V92-07: The V.8 quick-connect sequence codec (S)
@@ -2830,3 +2843,17 @@ codeword the analogue modem meant. What it costs to leave alone is bounded and s
 seconds of skewed line against 39 ms unskewed, and one integration test in twenty sets `with_clock`. What
 was added instead is proof - the bit-exact test now runs off phase zero and at plus and minus 120 ppm as
 well, so anyone who does round the phase breaks it at once.
+
+Notes from the package reviews follow, one per package that changed its own entry.
+
+**V92-06: "within 1 ppm" is the rate, read as the median of each second, not every single reading.** The
+package reads the clock after every line sample, which is what the upstream transmitter will do, and a
+single reading carries the timing loop's own dither on top of the rate. Measured over ten seconds of a
+120 ppm network: the per-second medians come out at most 0.19 ppm from the truth, but individual readings
+reach 1.04 ppm once the loop has settled and 3.19 ppm in the first second after training. So the figure
+was not assertable as written on a per-reading basis, and the entry now puts the plan's 1 ppm on the rate
+in every one of the ten seconds - where the original test looked only at the last - with the dither
+bounded separately by named constants carrying their measured values. The median is also the project's
+convention for a statistic a jitter buffer disturbs (memory `voip-jitter-slips`). The entry also gained
+the untrained-clock behaviour, which the review found the doc promising and the code not delivering, and
+the three tests the package had added beyond the two the plan named.

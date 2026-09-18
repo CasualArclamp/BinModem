@@ -218,6 +218,73 @@ impl Symbol {
     }
 }
 
+/// The far end's symbol clock, as the downstream receiver has it.
+///
+/// V.92 asks for an upstream at "8000 symbol/s derived from the digital
+/// network" (6.2/V.92), and the only sight this end has of the network's
+/// clock is the downstream it has trained on. So the upstream transmitter
+/// times itself by this: [`Self::period`] line samples to a far-end symbol,
+/// in the same line samples the receiver is being fed.
+///
+/// The period is the rate the timing loop has settled to, and not the spacing
+/// of the sampling instants themselves. Those move by up to a quarter of a
+/// half symbol every time the equaliser's weight is put back where training
+/// left it, and by the timing gain on every symbol besides -- corrections a
+/// receiver can take in its stride, since they only choose which sample to
+/// read. An upstream that followed them would carry every one of them to the
+/// far codec's A/D, where there is nothing to take them out again.
+///
+/// [`Self::at`] is a phase to take once and then leave: V.92's analogue modem
+/// may start its upstream where it likes, because the digital modem measures
+/// the phase off Su -- "It should use signal Su to measure the phase
+/// information" (9.5.1.1.6/V.92, and again on the Su that follows the
+/// reversal, 9.5.1.1.7) -- and then asks for the shift it wants in Jp. What
+/// Jp carries is not a shift of Su but the fraction of a symbol by which the
+/// S-bar-u at the Jp-to-J'p transition is to be lengthened: bits 18:33, "a
+/// 16-bit unsigned integer covering the range [0, 1) symbol or [0, T)
+/// seconds" (Table 22, in 8.6.3), the epsilon of Figure 10. The analogue
+/// modem applies it once, by sending that S-bar-u for 24T plus the fraction
+/// (9.5.2.1.8), and the upstream is never re-stepped afterwards.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SymbolClock {
+    /// Line samples one far-end symbol takes.
+    pub period: f64,
+    /// Line samples one symbol would take if neither clock were off:
+    /// `fs / 8000`.
+    pub nominal: f64,
+    /// Where the centre of symbol [`Self::index`] falls, in line samples
+    /// since the receiver's first. Only a symbol once [`Self::trained`]:
+    /// before that it is where the next half-symbol sample is due.
+    pub at: f64,
+    /// The receiver's count of that symbol, as [`Symbol::raw`] counts it and
+    /// not as [`Symbol::index`] does: the frame offset is not added. Pair it
+    /// with `raw`, or a slip that has moved the frames puts the two out by up
+    /// to [`INTERVALS`] - 1 symbols.
+    pub index: u64,
+    /// Whether the receiver has trained. Until it has, nothing has been read
+    /// off the line that an upstream may follow: [`Self::period`] is held at
+    /// [`Self::nominal`] and an upstream free-runs at its own 8000 symbol/s.
+    ///
+    /// Held, rather than simply being nominal: a receiver carries the rate it
+    /// learnt through a retrain, and a training that failed leaves behind the
+    /// rate it had fitted to the stretch it then gave up on. Both would read
+    /// as a network clock here and neither has been checked against anything.
+    /// [`Receiver::drift_ppm`] still gives the raw figure, for looking at.
+    pub trained: bool,
+}
+
+impl SymbolClock {
+    /// Where the centre of far-end symbol `index` falls, in line samples.
+    pub fn centre(&self, index: u64) -> f64 {
+        self.at + (index as i64 - self.index as i64) as f64 * self.period
+    }
+
+    /// How far the far clock runs from this end's, in parts per million.
+    pub fn drift_ppm(&self) -> f64 {
+        (self.period / self.nominal - 1.0) * 1e6
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Stage {
     Idle,
@@ -505,6 +572,38 @@ impl Receiver {
     /// How far off the far clock this end's is, as the timing loop has it.
     pub fn drift_ppm(&self) -> f64 {
         self.drift * 1e6
+    }
+
+    /// The far end's symbol clock, for an upstream that has to be sent on it
+    /// (6.2/V.92).
+    ///
+    /// The rate comes from `drift`; the phase from where the next symbol's
+    /// samples were actually taken, which the timing loop steps every symbol.
+    /// See [`SymbolClock`] for which of the two an upstream may follow.
+    ///
+    /// `drift` is smoothed but it is not slew-limited. The timing loop moves
+    /// it by at most a millionth a symbol, but `hold_centre` writes it as
+    /// well, by `CENTRE_DRIFT_GAIN` of how far the tap centre walked over
+    /// twice `CENTRE_EVERY`: with that walk clamped to a quarter symbol, up
+    /// to 2.3e-3 of drift in a single call. A settled line stays far below
+    /// that -- 2.7e-6 of a line sample, measured -- but a caller driving a
+    /// transmitter off this wants to know that the floor is empirical and
+    /// not a bound the code enforces.
+    pub fn symbol_clock(&self) -> SymbolClock {
+        let nominal = 2.0 * self.half;
+        let trained = matches!(self.stage, Stage::Trained);
+        let at = self
+            .next_half
+            .checked_sub(self.first)
+            .and_then(|k| self.times.get(k as usize).copied())
+            .filter(|_| trained)
+            .unwrap_or(self.due);
+        // Untrained, `drift` is whatever the last attempt left behind: the
+        // rate a previous training learnt, or one `resample` fitted to a
+        // stretch that `solve` then gave up on. Neither is a rate to put on
+        // the line, so the reported one waits for the training to stand.
+        let drift = if trained { self.drift } else { 0.0 };
+        SymbolClock { period: nominal * (1.0 + drift), nominal, at, index: self.next_symbol, trained }
     }
 
     /// The equaliser, for looking at.
@@ -1106,10 +1205,55 @@ fn bessel_i0(x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::v90::network::Network;
     use crate::v90::sequences::{JD_BITS, Jd};
 
     const FS: f64 = 16_000.0;
     const UINFO: u8 = 78;
+
+    /// The sound card's clock against the network's, in parts per million.
+    /// Live VoIP calls measured "+69.9 ppm clock" (memory
+    /// `v34-phase2-tone-deadline`) and "a steady ~114 ppm" (memory
+    /// `voip-jitter-slips`); both were read off V.34 captures, but the offset
+    /// is the sound card against the far clock and does not depend on the
+    /// modulation. The drift test above uses 120, so this does too.
+    const PPM: f64 = 120.0;
+
+    /// How far one reading of the period may sit from the truth, in parts per
+    /// million, once the timing loop has settled -- and how far in the first
+    /// second after training, while it is still settling.
+    ///
+    /// The rate itself is good to a fraction of either: what is left in a
+    /// single reading is the loop's own dither, and the upstream is timed by
+    /// the rate. Measured over ten seconds of a network 120 ppm fast, worst
+    /// reading of each second: 3.19 in the first, then 1.04, 1.03, 1.01,
+    /// 1.01, 1.00, 0.98, 0.99, 0.96, 0.97 -- against per-second medians of
+    /// 0.19 and under.
+    const READING_WITHIN: f64 = 1.25;
+    const SETTLING_WITHIN: f64 = 4.0;
+
+    /// Line samples the reported symbol period may move from one line sample
+    /// to the next, and the least the timing loop has to have stepped the
+    /// sampling by for the comparison between the two to say anything.
+    ///
+    /// The period moves only with `drift`. The timing loop changes that by at
+    /// most half of [`DRIFT_GAIN`] a symbol -- two millionths of a line
+    /// sample -- but `hold_centre` writes it too, by [`CENTRE_DRIFT_GAIN`] of
+    /// the tap centre's walk over twice [`CENTRE_EVERY`]. With that walk
+    /// clamped to a quarter symbol its worst call is 2.3e-3 of drift, or
+    /// 4.7e-3 of a line sample, so the bound below is what a settled line
+    /// does and not what the code guarantees. The sampling itself is stepped
+    /// by [`TIMING_GAIN`] of how late every symbol was, and by `hold_centre`
+    /// every [`CENTRE_EVERY`] symbols. Measured on a noisy line 120 ppm off:
+    /// 2.7e-6 against 1.6e-3.
+    const CLOCK_JUMP: f64 = 1e-5;
+    const LOOP_STEP: f64 = 1e-4;
+
+    /// How far an upstream may walk in ten seconds from a phase taken once,
+    /// in symbols: following the clock's rate, and taking the rate once as
+    /// well and never looking again. Measured at 0.014 T and 0.124 T.
+    const PHASE_WITHIN: f64 = 0.05;
+    const RATE_ONCE_WITHIN: f64 = 0.25;
 
     /// What the digital modem sends in phase 3 from Sd, as levels: Sd,
     /// S-bar-d, TRN1d, Jd `repeats` times and J'd (8.4).
@@ -1270,6 +1414,177 @@ mod tests {
             .collect();
         let mean = values.iter().sum::<f64>() / values.len() as f64;
         assert!((mean / a - 1.0).abs() < 0.02, "UINFO came out at {:.4} of itself", mean / a);
+    }
+
+    /// Line samples one far-end symbol really takes when the sound card is
+    /// `ppm` fast: what [`SymbolClock::period`] has to come out as.
+    fn true_period(ppm: f64) -> f64 {
+        FS / ((1.0 - ppm * 1e-6) * BAUD)
+    }
+
+    /// The receiver taken through Sd, S-bar-d and `seconds` of TRN1d over a
+    /// network whose clock is `ppm` from this end's, with the symbol clock
+    /// read after every line sample once the training is done, and what the
+    /// timing loop moved the sampling by in the same sample.
+    ///
+    /// Reading it every sample is the point: that is what the upstream
+    /// transmitter does with it.
+    fn slaved(ppm: f64, seconds: f64, noise: f64) -> (Vec<SymbolClock>, Vec<f64>) {
+        let mut network = Network::new(Law::Mu, FS).with_clock(ppm).with_noise(noise);
+        let levels = phase3_levels(Law::Mu, (seconds * BAUD) as usize, &Jd::default(), 0);
+        let mut rx = Receiver::new(Law::Mu, FS);
+        rx.hunt(UINFO);
+        let mut clocks = Vec::new();
+        let mut steps = Vec::new();
+        for &level in &levels {
+            for sample in network.down(level * 0.3) {
+                let before = rx.timed;
+                rx.feed(sample);
+                while rx.heard().is_some() {}
+                if rx.is_trained() {
+                    clocks.push(rx.symbol_clock());
+                    steps.push(rx.timed - before);
+                }
+            }
+        }
+        assert!(!clocks.is_empty(), "nothing trained, so there was no clock to read");
+        (clocks, steps)
+    }
+
+    /// 6.2: "The upstream symbol rate shall be 8000 symbol/s derived from the
+    /// digital network" -- and the only sight the analogue modem has of the
+    /// network's clock is the downstream it has trained on. Over ten seconds
+    /// of a sound card 120 ppm fast the reported period is the network's
+    /// within a part per million.
+    ///
+    /// Within a part per million on the rate, which is what an upstream is
+    /// timed by and which is read here as the median of each of the ten
+    /// seconds. A single reading carries the timing loop's dither on top of
+    /// the rate, and is bounded separately by [`READING_WITHIN`], or by
+    /// [`SETTLING_WITHIN`] in the first second while the loop settles.
+    #[test]
+    fn the_symbol_clock_follows_a_network_120_ppm_fast() {
+        let (clocks, _) = slaved(PPM, 10.0, 0.0);
+        let truth = true_period(PPM);
+        assert!(clocks.last().is_some_and(|c| c.trained), "the clock never said it had trained");
+        assert!(clocks.len() > 9 * FS as usize, "only {} readings, so ten seconds were not covered", clocks.len());
+        // Every second of the ten, not only the last: the rate is settled
+        // long before the end, and a regression that spoiled the middle of a
+        // call would not show at the end of one.
+        for (second, chunk) in clocks.chunks(FS as usize).enumerate() {
+            let mut errors: Vec<f64> = chunk.iter().map(|c| (c.period / truth - 1.0) * 1e6).collect();
+            errors.sort_by(f64::total_cmp);
+            let median = errors[errors.len() / 2];
+            let worst = errors.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
+            let bound = if second == 0 { SETTLING_WITHIN } else { READING_WITHIN };
+            println!("second {second}: the clock came out {median:+.3} ppm from the truth, with no reading more than {worst:.3} ppm off");
+            assert!(median.abs() < 1.0, "the rate in second {second} was {median:+.3} ppm off");
+            assert!(worst < bound, "one reading in second {second} was {worst:.3} ppm off");
+        }
+    }
+
+    /// The rate has to come from the timing loop's settled drift and not from
+    /// the sampling instants: the loop moves those on every symbol, and
+    /// [`Receiver::hold_centre`] moves them again by up to a quarter of a
+    /// half symbol. A transmitter following them would carry every step to
+    /// the digital modem's A/D, where nothing takes it out again (6.2).
+    #[test]
+    fn the_symbol_clock_does_not_jump_when_the_timing_loop_steps() {
+        let (clocks, steps) = slaved(PPM, 2.0, 0.002);
+        let truth = true_period(PPM);
+        let jump = clocks.windows(2).map(|w| (w[1].period - w[0].period).abs()).fold(0.0f64, f64::max);
+        let stepped = steps.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
+        // What a period taken from the instants would have said, symbol by
+        // symbol, against the same truth.
+        let instants = clocks
+            .windows(2)
+            .filter(|w| w[1].index > w[0].index)
+            .map(|w| ((w[1].at - w[0].at) / (w[1].index - w[0].index) as f64 - truth).abs())
+            .fold(0.0f64, f64::max);
+        println!("the period moved by at most {jump:.3e} line samples a sample; the instants were off by {instants:.3e}, and the loop stepped the sampling by {stepped:.3e}");
+        assert!(jump < CLOCK_JUMP, "the period jumped by {jump:.3e} line samples");
+        assert!(stepped > LOOP_STEP, "the timing loop only stepped by {stepped:.3e}, so nothing was shown");
+        assert!(instants > 50.0 * CLOCK_JUMP, "the instants only wandered by {instants:.3e}");
+    }
+
+    /// Until the receiver has trained there is nothing of the network's clock
+    /// to be had, and the clock says so: an upstream free-runs at its own
+    /// 8000 symbol/s until the silence after Ja, where a phase step costs
+    /// nothing (6.2).
+    #[test]
+    fn the_symbol_clock_is_the_nominal_one_until_the_receiver_trains() {
+        let mut rx = Receiver::new(Law::Mu, FS);
+        let clock = rx.symbol_clock();
+        assert!(!clock.trained);
+        assert_eq!(clock.period, FS / BAUD);
+        assert_eq!(clock.nominal, FS / BAUD);
+        assert_eq!(clock.drift_ppm(), 0.0);
+        // Sd and its reversal, and two hundred symbols of TRN1d: the reversal
+        // is heard, but that is nothing like the stretch training needs.
+        rx.hunt(UINFO);
+        for x in line(&phase3_levels(Law::Mu, 200, &Jd::default(), 0), 0.0, 0.3, 50.0, false) {
+            rx.feed(x);
+            while rx.heard().is_some() {}
+        }
+        assert!(!rx.is_trained());
+        assert!(!rx.symbol_clock().trained);
+    }
+
+    /// The same, for the receiver `v90::analogue` really has: one that has
+    /// trained once and is hunted again for a retrain. It carries the rate it
+    /// learnt, which is right for the receiver -- the network clock did not
+    /// change -- but it is not a rate this end has checked against anything
+    /// on the line yet, and 6.2 asks the upstream for the network's clock as
+    /// the downstream has it now. An upstream reading the period straight out
+    /// would free-run over a hundred parts per million off instead of at its
+    /// own 8000 symbol/s.
+    #[test]
+    fn the_symbol_clock_goes_back_to_nominal_when_a_trained_receiver_hunts_again() {
+        let mut network = Network::new(Law::Mu, FS).with_clock(PPM);
+        let mut rx = Receiver::new(Law::Mu, FS);
+        rx.hunt(UINFO);
+        for &level in &phase3_levels(Law::Mu, 3000, &Jd::default(), 0) {
+            for sample in network.down(level * 0.3) {
+                rx.feed(sample);
+                while rx.heard().is_some() {}
+            }
+        }
+        assert!(rx.is_trained(), "nothing trained, so there was no rate to carry over");
+        assert!(rx.drift_ppm() > 100.0, "the timing loop never picked the network's rate up");
+        // The retrain: `v90::analogue` hunts the same receiver again.
+        rx.hunt(UINFO);
+        let clock = rx.symbol_clock();
+        assert!(!clock.trained, "a hunting receiver said it had trained");
+        assert_eq!(clock.period, clock.nominal, "an upstream would have free-run {:.1} ppm off", clock.drift_ppm());
+        // Withheld, not forgotten: the receiver still trains from where it
+        // had got to.
+        assert!(rx.drift_ppm() > 100.0, "the receiver threw away the rate it had learnt");
+    }
+
+    /// What the clock is for: the digital modem's A/D samples on the
+    /// network's clock, and V.92 has no way to re-align an upstream short of
+    /// a retrain, so a transmitter that takes its phase once in the silence
+    /// after Ja and is never re-stepped has to still land near the network's
+    /// symbols ten seconds later (6.2, 8.6.3).
+    ///
+    /// Both readings of the clock hold: the rate followed from then on, which
+    /// is what the transmitter will do, and the rate taken once with it.
+    #[test]
+    fn an_upstream_timed_by_the_symbol_clock_keeps_its_phase_for_ten_seconds() {
+        let (clocks, _) = slaved(PPM, 10.0, 0.0);
+        // A reading from the first of the ten seconds, and every one after.
+        let later = &clocks[clocks.len() / 16..];
+        let taken = later[0];
+        let once = later.iter().map(|c| (taken.centre(c.index) - c.at).abs() / c.period).fold(0.0f64, f64::max);
+        let (mut phase, mut index, mut followed) = (taken.at, taken.index, 0.0f64);
+        for clock in later {
+            phase += (clock.index - index) as f64 * clock.period;
+            index = clock.index;
+            followed = followed.max((phase - clock.at).abs() / clock.period);
+        }
+        println!("the phase walked {followed:.4} T on the rate followed, and {once:.4} T on the rate taken once");
+        assert!(followed < PHASE_WITHIN, "the phase walked {followed:.4} T on the rate followed");
+        assert!(once < RATE_ONCE_WITHIN, "the phase walked {once:.4} T on the rate taken once");
     }
 
     #[test]
