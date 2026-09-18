@@ -114,19 +114,24 @@ pub fn training_bits(drn: u8) -> usize {
     usize::from(drn) + 8
 }
 
-/// PCM upstream rates are numbered from 24 000 up in steps of 8000/6, and
-/// there are nineteen of them: "24 000 bit/s ... 48 000 bit/s" in the mask
-/// Table 20/V.92 adds to the DIL descriptor (8.5.4), which matches the ladder
-/// of 6.1/V.92.
-pub const UPSTREAM_RATES: usize = 19;
+/// The PCM upstream ladder: nineteen rates numbered from 24 000 up in steps
+/// of 8000/6, which is "24 000 bit/s to 48 000 bit/s" (6.1/V.92) as the mask
+/// Table 20/V.92 adds to the DIL descriptor spells it out (8.5.4).
+///
+/// "PCM" is in the name because this is the third thing in this crate called
+/// an upstream rate, and the only one that means V.92's PCM upstream: the
+/// others are [`Cp::upstream_rates`], Table 14/V.90's thirteen-bit mask of
+/// the V.34 ladder from 4800 to 33 600, and `super::digital::upstream_rate`,
+/// which picks a V.34 rate out of that mask and an MP.
+pub const PCM_UPSTREAM_RATES: usize = 19;
 
-/// Every upstream rate enabled, for [`Descriptor::to_bits_in`].
-pub const ALL_UPSTREAM_RATES: u32 = (1 << UPSTREAM_RATES) - 1;
+/// Every PCM upstream rate enabled, for [`Descriptor::to_bits_in`].
+pub const ALL_PCM_UPSTREAM_RATES: u32 = (1 << PCM_UPSTREAM_RATES) - 1;
 
-/// The upstream rate bit `urn` of Table 20/V.92 names: 24 000 + urn*8000/6,
-/// so bit 0 is 24 000 and bit 18 is 48 000.
-pub fn upstream_rate(urn: usize) -> Option<u32> {
-    (urn < UPSTREAM_RATES).then(|| super::rate_for(urn as u32 + 18))
+/// The PCM upstream rate bit `urn` of Table 20/V.92 names: 24 000 +
+/// urn*8000/6, so bit 0 is 24 000 and bit 18 is 48 000.
+pub fn pcm_upstream_rate(urn: usize) -> Option<u32> {
+    (urn < PCM_UPSTREAM_RATES).then(|| super::rate_for(urn as u32 + 18))
 }
 
 /// Jd (Table 13/V.90): the digital modem's downstream capabilities.
@@ -309,7 +314,7 @@ impl Descriptor {
     /// `None` is Table 12/V.90: the CRC, "Fill bit: 0", and one more fill bit
     /// if it takes one to make the length even. `Some(mask)` is Table
     /// 20/V.92, which keeps every V.90 field and then adds two more words --
-    /// the nineteen-bit upstream rate mask of [`upstream_rate`] at 188+P, and
+    /// the nineteen-bit rate mask of [`pcm_upstream_rate`] at 188+P, and
     /// thirteen bits reserved for the ITU -- before the CRC at 222+P, a
     /// single fill bit, and zeros to a multiple of [`JA_UNIT_BITS`] (8.5.4).
     /// The CRC covers the new words like any other information bits.
@@ -436,9 +441,10 @@ pub struct Cp {
     /// Bits 36:48: upstream rates the analogue modem's transmitter has
     /// enabled, 4800 in bit 0 up to 33 600 in bit 12.
     ///
-    /// Reserved in V.92, whose PCM upstream mask went into the DIL descriptor
-    /// instead ([`Descriptor::to_bits_in`]), so under [`Layout::V92`] this is
-    /// neither sent nor read, and comes back zero.
+    /// This is the V.34 ladder, not V.92's PCM one. Reserved in V.92, whose
+    /// PCM upstream mask ([`PCM_UPSTREAM_RATES`]) went into the DIL
+    /// descriptor instead ([`Descriptor::to_bits_in`]), so under
+    /// [`Layout::V92`] this is neither sent nor read, and comes back zero.
     pub upstream_rates: u16,
     /// Bits 49:50: ld, the shaper's look-ahead.
     pub lookahead: u8,
@@ -834,7 +840,7 @@ impl DescriptorFinder {
 
     /// The upstream rate mask that came with the descriptor [`Self::feed`]
     /// last reported: `None` under V.90's layout, which has no such field,
-    /// and `Some` of the nineteen bits of [`upstream_rate`] under V.92's.
+    /// and `Some` of the nineteen bits of [`pcm_upstream_rate`] under V.92's.
     pub fn upstream_rates(&self) -> Option<u32> {
         self.upstream_rates
     }
@@ -1246,7 +1252,7 @@ mod tests {
         assert_eq!(Cp::from_bits_in(Layout::V92, &spoiled), Some(cpt), "not one of them is interpreted");
 
         let d = Descriptor::none();
-        let bits = d.to_bits_in(Some(ALL_UPSTREAM_RATES));
+        let bits = d.to_bits_in(Some(ALL_PCM_UPSTREAM_RATES));
         // Table 20's own reserved runs with N = 0, where beta and P are 34:
         // after N, either side of L_TP - 1, after H1, and the thirteen bits
         // above the nineteenth upstream rate.
@@ -1254,7 +1260,7 @@ mod tests {
         let spoiled = with_bits_set(&bits, 14, &reserved);
         assert_ne!(spoiled, bits);
         let read = Descriptor::from_bits_in(Layout::V92, &spoiled);
-        assert_eq!(read, Some((d, Some(ALL_UPSTREAM_RATES))));
+        assert_eq!(read, Some((d, Some(ALL_PCM_UPSTREAM_RATES))));
     }
 
     /// Bit 18 and the type at 19:20 are the only dispatch fields, and the
@@ -1279,7 +1285,7 @@ mod tests {
     #[test]
     fn a_v92_descriptor_with_no_dil_is_276_bits() {
         let d = Descriptor::none();
-        let bits = d.to_bits_in(Some(ALL_UPSTREAM_RATES));
+        let bits = d.to_bits_in(Some(ALL_PCM_UPSTREAM_RATES));
         assert_eq!(bits.len(), 276, "273 bits filled to a multiple of twelve");
         // With N = 0, beta and P are both 34: the mask words sit at 188 + P
         // and 205 + P, and the CRC at 222 + P.
@@ -1287,10 +1293,10 @@ mod tests {
         assert_eq!(get(&bits, 239, 3), 0x7, "45 333, 46 667 and 48 000");
         assert_eq!(get(&bits, 242, 13), 0, "and thirteen bits reserved above them");
         assert_eq!(get(&bits, 256, 16), 0xB71C, "the CRC the digest derived");
-        assert_eq!(Descriptor::from_bits_in(Layout::V92, &bits), Some((d, Some(ALL_UPSTREAM_RATES))));
-        assert_eq!(upstream_rate(0), Some(24_000));
-        assert_eq!(upstream_rate(18), Some(48_000));
-        assert_eq!(upstream_rate(UPSTREAM_RATES), None);
+        assert_eq!(Descriptor::from_bits_in(Layout::V92, &bits), Some((d, Some(ALL_PCM_UPSTREAM_RATES))));
+        assert_eq!(pcm_upstream_rate(0), Some(24_000));
+        assert_eq!(pcm_upstream_rate(18), Some(48_000));
+        assert_eq!(pcm_upstream_rate(PCM_UPSTREAM_RATES), None);
         // V.90's own descriptor ends after the CRC with a fill bit and, if it
         // takes one, a second to make the length even.
         assert_eq!(Descriptor::none().to_bits().len(), 240);
