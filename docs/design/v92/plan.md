@@ -394,13 +394,20 @@ not listed must not be touched.
     reserved; no silence bit and no upstream rate mask, so 36:48 are reserved too. **The V.92 layout
     writes zeros into bits 26:30 and 36:48 on transmission and ignores them on reception**, which is what
     Table 23 asks for ("set to 0", not interpreted) - so `silence` reads back as false and
-    `upstream_rates` as `None` whatever arrives, and a far end using a future ITU extension, or leaving
+    `Cp::upstream_rates` as 0 whatever arrives. That field stays V.90's `u16` rather than becoming an
+    `Option`, because `v90/analogue.rs` and `v90/digital.rs` assign and read it and are not in this
+    package's Files line. A far end using a future ITU extension, or leaving
     stale bits set, still connects. Only bit 18 and the type field at 19:20 are dispatch fields and may be
     refused. Bits 31 onward as V.90; one fill bit, then zeros to the pad unit.
     `cp_length` and the mask code are shared.
-  - **Descriptor.** `Descriptor.upstream_rates: Option<u32>` (19 bits); `Some` selects the V.92 layout:
-    two mask words, then a start bit, the CRC and one fill bit at 221+P..238+P, then zeros to a multiple of
-    12 bits, giving `descriptor_length` + 2 blocks.
+  - **Descriptor.** The 19-bit upstream rate mask as an `Option<u32>` carried *beside* the descriptor,
+    not as a field in it: `Descriptor::to_bits_in(upstream_rates)`,
+    `Descriptor::from_bits_in(layout, bits) -> Option<(Descriptor, Option<u32>)>`, and
+    `DescriptorFinder::upstream_rates()` as an accessor beside `feed` (AD-5's shape). `Some` selects the
+    V.92 layout: two mask words, then a start bit, the CRC and one fill bit at 221+P..238+P, then zeros to
+    a multiple of 12 bits, giving `descriptor_length` + 2 blocks. A field would read better, but
+    `Descriptor` derives no `Default` and is built by struct literal in `v90/dil.rs` and
+    `tests/dil_sounds.rs`, neither of which is in this package's Files line (section 14, last note).
   - **Guard.** A V.92 reader must dispatch on bit 47 before anything else, or a Jp reads as a Jd full of
     nonsense rates with `sixteen_in_training` set. Add an acceptance predicate parameter so `v92` can
     require bit 47 = 0 for Jd and 1 for Jp. V.90's own `Jd::from_bits` keeps today's behaviour.
@@ -2717,3 +2724,15 @@ Two further judgements worth recording, both accepted from the review but resolv
   The analogue mirror was already in V92-39, the existing V.90 modems already carry the data-holdback
   semantics, and a Phase 4 in which only one side's circuits exist would make the FPE circuit tests of
   V92-53 untestable on the digital side.
+
+Amendments made while a package was being built are recorded here too, one paragraph each.
+
+- **V92-03's upstream rate mask is an argument and an accessor, not a `Descriptor` field.** The entry asked
+  for `Descriptor.upstream_rates: Option<u32>`. A new public field cannot be added inside V92-03's Files
+  line: `Descriptor` derives no `Default` and is built by struct literal in `crates/datapump/src/v90/dil.rs`
+  and `crates/datapump/tests/dil_sounds.rs`, and neither file belongs to any package in section 5. The mask
+  is therefore a parameter to `to_bits_in`, the second half of what `from_bits_in` returns, and
+  `DescriptorFinder::upstream_rates()` beside `feed` -- which is AD-5's shape anyway. V92-11 and V92-22
+  read the mask from the accessor, not from the descriptor. For the same reason `Cp::upstream_rates` stays
+  V.90's `u16` and reads back as 0 under `Layout::V92`, rather than becoming the `Option` the entry names:
+  `v90/analogue.rs` and `v90/digital.rs` both use that field and are outside the Files line as well.
