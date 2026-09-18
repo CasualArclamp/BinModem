@@ -951,9 +951,10 @@ not listed must not be touched.
 #### V92-18: Probe the V.92 capture (S)
 
 - **Depends on:** V92-02, V92-07.
-- **Clauses:** 8.2.1; 8.4.1 (Tables 15-19); 9.1; 9.3.
+- **Clauses:** 8.2.1, 8.2.2 (Table 3), 8.2.5; 8.3.1 (Table 6), 8.3.5 (Table 14), 8.3.6; 8.4.1
+  (Tables 15-19); 9.1; 9.2, 9.2.1.3, 9.2.4.2; 9.3.
 - **Files:** `crates/datapump/tests/v92_vector.rs` (new).
-- **Digests:** CT (2.2, 8.4, 9.5); CV (Q8); P2S (10.4, 15).
+- **Digests:** CT (2.2, 8.4, 9.5); CV (Q8); P2S (10.4, 15); P1P (3.1-3.8, Figure 5, 5.1, 5.4).
 - **Description:** read `tests/vectors/v92-56k.wav` the way `v90_vector.rs` reads its file, and pin what
   the 2005 Conexant softmodem and its server actually negotiated. The vectors README calls this file
   "V.34-style startup", so the honest expectation is that it may contain no PCM upstream and no QC1a at
@@ -963,13 +964,33 @@ not listed must not be touched.
   - Copy the helpers of `v90_vector.rs`.
   - Read the V.8 menus; run `v8::quick::BitWatcher` on V.21(L) before the CM looking for a QC1a; read the
     INFO sequences with their V.92 bits; classify the INFO1a.
+
+  **What it turned out to hold** (section 14, "V92-18 as built"): a **short Phase 1 over the V.8 bis
+  opening**, Figure 5 -- QC2a on V.21(H), QCA2d on V.21(L), then QTS, QTS\, ANSpcm and TONEq -- with no CM,
+  no JM and no CJ anywhere, and then a full Phase 2 in which the analogue modem declines the PCM upstream
+  its server offers. So the package also reads the two V.8 bis identification fields (Tables 3 and 14) with
+  `ec::hdlc`, feeding the fields themselves to V92-07's `Uqts` and `AnspcmLevel`, and measures the short
+  Phase 1 timings off the tap. It does **not** add a V.8 bis codec: `v8::quick` stays V.8-framed, and the
+  two octets are unpicked in the test.
 - **Tests:**
-  - `the_v92_menus_offer_pcm` - the CM and JM octets.
+  - `the_v8_menus_never_come_because_this_call_used_short_phase_1` - replaces `the_v92_menus_offer_pcm`,
+    which has no answer in this capture. No CM and no JM in either V.21 channel, with the five CMs and
+    three JMs of `v90-56k.wav` as the positive control.
   - `a_qc1a_before_the_cm_is_looked_for` - asserts presence or absence, as found, and records which.
+    Absent, in both channels; and the V.92 synchronisation pattern *does* appear once, inside QC2a's own
+    HDLC body, with no ten ONEs in front of it, which is why `BitWatcher` anchors its whole window.
+  - `the_quick_connect_is_the_v8_bis_pair_qc2a_and_qca2d` - identification octets `2D 25` and `2D E2`,
+    each with a good FCS: U_QTS = Ucode 79 and P = 1 from the analogue modem, LM = 01 (-12 dBm0) and P = 1
+    from the digital one. The QCA2d field is byte for byte the vector P1P 3.3 derived beforehand.
+  - `qts_follows_qca2d_by_seventy_five_milliseconds_and_runs_for_768_symbols` - the 9.2.4.2 silence, the
+    8000/6 Hz tone with its 4 kHz partner, and the QTS/QTS\ reversal at 768 symbols.
+  - `anspcm_reverses_every_3612_symbols_until_toneq_answers_it` - both reversals, the one second of 9.2.1.3
+    before TONEq, and the 93 ms this modem leaves before INFO0a where the clause asks for 75 +/- 5.
   - `the_info_sequences_say_whether_v92_and_pcm_upstream_were_used` - INFO0d bit 27, INFO0a bit 26 where
     readable, INFO1d bit 70, and the INFO1a layout from bits 34:39.
   - `if_pcm_upstream_was_used_ru_and_trn1u_are_on_the_tap` - a period-6 hunt after INFO1a; `#[ignore]`d
-    with its finding recorded if the capture turns out not to contain it.
+    with its finding recorded if the capture turns out not to contain it. It does not: the hunt runs
+    against QTS as a control and finds nothing after INFO1a.
 
 ### Wave 3: the chain, the decoder, the design, the choice, the receiver
 
@@ -2857,3 +2878,38 @@ bounded separately by named constants carrying their measured values. The median
 convention for a statistic a jitter buffer disturbs (memory `voip-jitter-slips`). The entry also gained
 the untrained-clock behaviour, which the review found the doc promising and the code not delivering, and
 the three tests the package had added beyond the two the plan named.
+
+**V92-18 as built: the capture is a short Phase 1 over V.8 bis, and it declines PCM upstream.** The entry
+asked for the V.8 menus and for a QC1a on V.21(L) before the CM. `tests/vectors/v92-56k.wav` has neither,
+and not because anything failed to read it: there is no CM, no JM and no CJ on either V.21 channel, while
+the same two passes over `v90-56k.wav` find that recording's five CMs and three JMs. What the clip holds
+instead, from 1.1 s to 3.4 s, is the second half of Figure 5/V.92 - **QC2a** on V.21(H) from the analogue
+calling modem, **QCA2d** on V.21(L) from the digital answering one, then 75 ms of silence, QTS, QTS\ and
+ANSpcm, and TONEq one second after ANSpcm began. The CRe that opened it is before the clip starts.
+
+Three consequences, all recorded rather than acted on.
+
+- **`v8::quick` could not have found it, and is right as it stands.** V92-07 codes the four V.8-framed
+  sequences and says in its module comment that the V.8 bis pair is out of scope because this modem has no
+  V.8 bis to send them on. That remains true, and V92-18 does not add one: it reads the two identification
+  octets of Tables 3 and 14 with `ec::hdlc` - V.8 bis 7.2 frames a message exactly as LAPM frames one -
+  and hands the fields to V92-07's `Uqts` and `AnspcmLevel`, which are the same codes in both framings. If
+  short Phase 1 is ever offered on a live line, though, this is the evidence that the V.8 bis opening is
+  the one a real V.92 pair took, and a package that adds QC2x/QCA2x has a capture to check itself against.
+- **The digests' derived vectors hold up against the wire.** QCA2d reads `2D E2`, which is byte for byte
+  the vector P1P 3.3 worked out from the Recommendation before this file was read, and QC2a reads `2D 25`:
+  U_QTS = Ucode 79, P = 1 both ways, LM = 01 (-12 dBm0). QTS runs 96 ms and turns over into QTS\ at
+  exactly 768 symbols; ANSpcm reverses at 450 and 455 ms where 8.3.1 says 3612 symbols. Every printed
+  number that reaches the wire in short Phase 1 is now confirmed by a real modem.
+- **There is no PCM upstream on this recording.** Both INFO0s say V.92 and the server sets INFO1d bit 70,
+  so 9.3 leaves the analogue modem free to send a Table 18 INFO1a - and it sends Table 10/V.90 instead,
+  8000 down and V.34 at 3200 up, with the same UINFO 78, MD 20 and S3200 as the V.90 recording. So no Ru,
+  no TRN1u, no Jp and no CPd exist in any capture this project owns, and V92-26's spike, V92-30's choice
+  and the Phase 3 packages have only the Recommendation and our own two ends to check themselves against.
+  Section 13's live requests are the only route to a real one, and INFO1d bit 70 arriving set from a real
+  server is the first thing worth capturing there.
+
+One measured departure is recorded and not asserted as conformance: between TONEq stopping and INFO0a
+starting this modem leaves 93 ms, where 9.2.1.3 asks for 75 +/- 5. The last 35 ms of the tone come back
+about 15 dB down, which is the line's own echo of it, so the true figure depends on where one calls the
+tone over; it is one 2005 modem either way, and nothing in our transmitter was changed to match it.
