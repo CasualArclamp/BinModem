@@ -412,7 +412,7 @@ impl Decoder {
                     // and since a record is kept in octets that cost a whole
                     // octet of it whenever the run reached back past one.
                     //
-                    // 8.1.1.4 stuffs a zero after five contiguous ones inside
+                    // 8.1.1.2 stuffs a zero after five contiguous ones inside
                     // a frame, so at most four of the five can be the frame's;
                     // and 8.1.3 c) has a frame "consist of an integral number
                     // of octets ... following zero-bit extraction". Between
