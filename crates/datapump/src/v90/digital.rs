@@ -34,7 +34,7 @@ use crate::v34::signals::{self, Reader, Size};
 use crate::v34::trellis::Code;
 
 use super::INTERVALS;
-use super::encoder::{Encoder, Mapping};
+use super::encoder::{Encoder, Frame, Mapping};
 use super::sequences::{self, Cp, CpFinder, Descriptor, DescriptorFinder, JD_PRIME_BITS, Jd};
 use super::ucode::{self, Law};
 
@@ -172,8 +172,8 @@ struct Source {
     out: Out,
     /// Symbols since Sd began: where in its data frame each one falls.
     symbol: u64,
-    /// Symbols, or for signals made of data frames frames, of the current
-    /// signal sent.
+    /// Symbols of the current signal sent, or for a signal made of data
+    /// frames, frames of it mapped.
     count: usize,
     pending: Option<Out>,
     after_jd_prime: Out,
@@ -384,10 +384,18 @@ impl Source {
                 }
                 Out::Trn2d | Out::Mp | Out::Ed | Out::B1d | Out::Data => {
                     if self.frame.is_empty() {
-                        if self.frame_boundary_change() {
-                            continue;
+                        // A frame goes once the shaper has seen as far past
+                        // it as ld asks (5.4.5.5); until then another is
+                        // mapped, of this signal or of the one after it.
+                        match self.encoder.as_mut().and_then(|e| e.pop(false)) {
+                            Some(frame) => self.emit(frame),
+                            None => {
+                                if !self.frame_boundary_change() {
+                                    self.map_frame();
+                                }
+                                continue;
+                            }
                         }
-                        self.make_frame();
                     }
                     return self.frame.pop_front().unwrap_or(0.0);
                 }
@@ -395,8 +403,9 @@ impl Source {
         }
     }
 
-    /// Where a signal made of data frames moves on, at a frame boundary.
-    /// True if it did.
+    /// Where a signal made of data frames moves on, at a frame boundary: as
+    /// the frames are mapped, which with look-ahead is ahead of where they go.
+    /// True if it did, or if what the encoder still held went first.
     fn frame_boundary_change(&mut self) -> bool {
         let next = match self.out {
             Out::Trn2d if self.count >= TRN2D_FRAMES => Some(Out::Mp),
@@ -420,35 +429,45 @@ impl Source {
             }
             Out::Ed if self.count == ED_FRAMES => Some(Out::B1d),
             Out::B1d if self.count == B1D_FRAMES => Some(Out::Data),
-            Out::Data => self.pending.take(),
+            Out::Data => self.pending,
             _ => None,
         };
-        match next {
-            Some(out) => {
-                self.start(out);
-                true
-            }
-            None => false,
+        let Some(out) = next else { return false };
+        // B1d starts the coding again and Rd is not coded at all: frames
+        // already mapped carry what they were mapped from, and go first.
+        let continues = matches!(out, Out::Mp | Out::Ed | Out::Data);
+        if !continues && let Some(frame) = self.encoder.as_mut().and_then(|e| e.pop(true)) {
+            self.emit(frame);
+            return true;
         }
+        if self.out == Out::Data {
+            self.pending = None;
+        }
+        self.start(out);
+        true
     }
 
-    /// One data frame of the current signal.
-    fn make_frame(&mut self) {
-        let Some(encoder) = self.encoder.as_mut() else {
+    /// Map one data frame of the current signal.
+    fn map_frame(&mut self) {
+        let Some(d) = self.encoder.as_ref().map(Encoder::frame_bits) else {
             self.frame.extend([0.0; INTERVALS]);
             return;
         };
-        let d = encoder.frame_bits();
         let source: Vec<bool> = match self.out {
             Out::Trn2d | Out::B1d => vec![true; d],
             Out::Ed => vec![false; d],
             Out::Mp => (0..d).map(|_| self.bits.pop_front().unwrap_or(false)).collect(),
             _ => (0..d).map(|_| self.data.pop_front().unwrap_or(true)).collect(),
         };
-        let scrambler = &mut self.scrambler;
-        let mut given = source.into_iter();
-        let frame = encoder.next_frame(|| scrambler.scramble(given.next().unwrap_or(true)));
+        let bits: Vec<bool> = source.into_iter().map(|b| self.scrambler.scramble(b)).collect();
+        if let Some(encoder) = self.encoder.as_mut() {
+            encoder.push(&bits);
+        }
         self.count += 1;
+    }
+
+    /// One data frame out.
+    fn emit(&mut self, frame: Frame) {
         let law = self.law;
         self.frame.extend(frame.amplitudes(law).iter().map(|&a| f64::from(a) / 32768.0));
     }
@@ -1119,4 +1138,82 @@ impl Modem {
 pub fn upstream_rate(cp: &Cp, mp: &Mp) -> u8 {
     let enabled = (u32::from(cp.upstream_rates) << 1) & u32::from(mp.rates);
     (2..=mp.answer_to_call.min(14)).rev().find(|r| enabled >> (r - 1) & 1 == 1).unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::v90::encoder::Decoder;
+    use crate::v90::modulus::Constellation;
+    use crate::v90::sign::Redundancy;
+
+    /// A mapping with shaping on: Sr one, ld one, a zero at 4 kHz.
+    fn shaped() -> Mapping {
+        let sets: [Constellation; INTERVALS] = std::array::from_fn(|_| Constellation::new((40..100).collect()));
+        let mut mapping = Mapping::best(sets, Redundancy::One);
+        mapping.k = 30;
+        mapping.lookahead = 1;
+        mapping.shaping = [-64, 0, -32, 0];
+        mapping
+    }
+
+    /// The data frames coming out of `source`, read back as the analogue
+    /// modem reads them: 5.4's decoder, and the scrambler undone.
+    fn read(source: &mut Source, frames: usize, decoder: &mut Decoder, descrambler: &mut Scrambler) -> Vec<Vec<bool>> {
+        (0..frames)
+            .map(|_| {
+                let mut ucodes = [0u8; INTERVALS];
+                let mut positive = [false; INTERVALS];
+                for i in 0..INTERVALS {
+                    let (u, negative) = ucode::nearest(Law::Mu, (source.next() * 32768.0).round() as i32);
+                    ucodes[i] = u;
+                    positive[i] = !negative;
+                }
+                let frame = Frame { ucodes, positive };
+                decoder.frame(frame).into_iter().map(|b| descrambler.descramble(b)).collect()
+            })
+            .collect()
+    }
+
+    /// 5.4.5.5: with look-ahead, a frame's bits are taken ld shaping frames
+    /// before it can go. TRN2d, MP and Ed are one run of the coding and B1d
+    /// starts another (8.6.1, 8.6.5), so Ed's two frames of zeros have to be
+    /// out before B1d's first -- which, with the next frame's bits made up
+    /// where they were not known, they were not: one frame of Ed went, and
+    /// the analogue modem never saw Ed at all.
+    #[test]
+    fn a_look_ahead_leaves_every_frame_where_it_belongs() {
+        let mut source = Source::new(Law::Mu, 79, Jd::default(), 0.3);
+        source.training = Some(shaped());
+        source.data_mode = Some(shaped());
+        source.mp = Some(Mp::default());
+        source.start(Out::Trn2d);
+        let mut decoder = Decoder::new(shaped());
+        let mut descrambler = Scrambler::new(Mode::Call);
+        // TRN2d: scrambled ones, every frame of it.
+        let trn2d = read(&mut source, TRN2D_FRAMES, &mut decoder, &mut descrambler);
+        assert!(trn2d.iter().all(|f| f.iter().all(|&b| b)), "TRN2d did not come back as ones");
+        // A few MPs, and then Ed.
+        let _ = read(&mut source, 40, &mut decoder, &mut descrambler);
+        source.change(Out::Ed);
+        let mut zeros = 0;
+        let mut frames = 0;
+        while zeros < ED_FRAMES {
+            let frame = read(&mut source, 1, &mut decoder, &mut descrambler).remove(0);
+            zeros = if frame.iter().all(|&b| !b) { zeros + 1 } else { 0 };
+            frames += 1;
+            assert!(frames < 100, "Ed never came whole");
+        }
+        // B1d, with the coding started afresh, and data after it: in order,
+        // and from its first bit.
+        let sent: Vec<bool> = (0..3000).map(|n| n % 7 < 3).collect();
+        source.data.extend(sent.iter().copied());
+        let mut decoder = Decoder::new(shaped());
+        let mut descrambler = Scrambler::new(Mode::Call);
+        let b1d = read(&mut source, B1D_FRAMES, &mut decoder, &mut descrambler);
+        assert!(b1d.iter().all(|f| f.iter().all(|&b| b)), "B1d did not follow Ed");
+        let d = shaped().frame_bits();
+        let got: Vec<bool> = read(&mut source, sent.len() / d, &mut decoder, &mut descrambler).concat();
+        assert_eq!(got[..], sent[..got.len()]);
+    }
 }

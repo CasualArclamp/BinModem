@@ -130,6 +130,12 @@ impl Mapping {
 /// Built afresh wherever the Recommendation starts the coding again -- TRN2d
 /// and B1d both begin with "the scrambler, differential encoder and spectral
 /// shape filter memory ... initialized to zero" -- so there is no reset.
+///
+/// With look-ahead, what goes in and what comes out are not in step. The
+/// shaper chooses a frame's signs from "the PCM symbol magnitudes produced by
+/// the mapper for spectral shaping frames j, j+1, ..., j+ld" (5.4.5.5), so a
+/// frame is mapped, and its bits taken, up to ld shaping frames before it can
+/// go: [`Self::push`] maps, and [`Self::pop`] gives up what is ready.
 #[derive(Debug, Clone)]
 pub struct Encoder {
     mapping: Mapping,
@@ -140,6 +146,8 @@ pub struct Encoder {
     /// their shaping frames still to go.
     magnitudes: VecDeque<[u8; INTERVALS]>,
     shaping: VecDeque<ShapingFrame>,
+    /// Unshaped frames, whose signs are chosen as they are mapped.
+    ready: VecDeque<Frame>,
 }
 
 impl Encoder {
@@ -152,6 +160,7 @@ impl Encoder {
             shaper,
             magnitudes: VecDeque::new(),
             shaping: VecDeque::new(),
+            ready: VecDeque::new(),
         }
     }
 
@@ -189,25 +198,33 @@ impl Encoder {
         (ucodes, s)
     }
 
-    /// The next data frame, pulling D bits from `bit` for each frame that has
-    /// to be mapped to get it out: the frame itself, and with look-ahead the
-    /// frames after it, whose magnitudes the shaper needs to see.
-    pub fn next_frame(&mut self, mut bit: impl FnMut() -> bool) -> Frame {
-        let d = self.frame_bits();
+    /// Map one data frame's D bits. Unshaped, it is ready at once; shaped, once
+    /// the shaper has seen ld shaping frames past it.
+    pub fn push(&mut self, bits: &[bool]) {
+        let (ucodes, s) = self.map(bits);
         if self.mapping.redundancy == Redundancy::None {
-            let bits: Vec<bool> = (0..d).map(|_| bit()).collect();
-            let (ucodes, s) = self.map(&bits);
             let s: Signs = std::array::from_fn(|i| s[i]);
-            return Frame { ucodes, positive: self.signs.encode(s) };
+            let positive = self.signs.encode(s);
+            self.ready.push_back(Frame { ucodes, positive });
+            return;
+        }
+        let levels = std::array::from_fn(|i| ucode::level(self.law, ucodes[i]));
+        let frames = self.shaper.prepare(&s, levels);
+        self.magnitudes.push_back(ucodes);
+        self.shaping.extend(frames);
+    }
+
+    /// The next frame out, if the shaper has seen far enough past it; or,
+    /// `finishing` -- nothing more to be mapped before the coding starts
+    /// again -- with however far there is to see.
+    pub fn pop(&mut self, finishing: bool) -> Option<Frame> {
+        if let Some(frame) = self.ready.pop_front() {
+            return Some(frame);
         }
         let per = self.shaper.frames_per_data_frame();
-        while self.shaping.len() < per + self.shaper.lookahead() {
-            let bits: Vec<bool> = (0..d).map(|_| bit()).collect();
-            let (ucodes, s) = self.map(&bits);
-            let levels = std::array::from_fn(|i| ucode::level(self.law, ucodes[i]));
-            let frames = self.shaper.prepare(&s, levels);
-            self.magnitudes.push_back(ucodes);
-            self.shaping.extend(frames);
+        let wanted = if finishing { per } else { per + self.shaper.lookahead() };
+        if per == 0 || self.shaping.len() < wanted {
+            return None;
         }
         let mut positive = Vec::with_capacity(INTERVALS);
         for _ in 0..per {
@@ -215,8 +232,21 @@ impl Encoder {
             positive.extend(self.shaper.choose(frames));
             self.shaping.pop_front();
         }
-        let ucodes = self.magnitudes.pop_front().expect("a frame was mapped for every one taken");
-        Frame { ucodes, positive: std::array::from_fn(|i| positive[i]) }
+        let ucodes = self.magnitudes.pop_front()?;
+        Some(Frame { ucodes, positive: std::array::from_fn(|i| positive[i]) })
+    }
+
+    /// The next data frame, pulling D bits from `bit` for each frame that has
+    /// to be mapped to get it out: the frame itself, and with look-ahead the
+    /// frames after it, whose magnitudes the shaper needs to see.
+    pub fn next_frame(&mut self, mut bit: impl FnMut() -> bool) -> Frame {
+        loop {
+            if let Some(frame) = self.pop(false) {
+                return frame;
+            }
+            let bits: Vec<bool> = (0..self.frame_bits()).map(|_| bit()).collect();
+            self.push(&bits);
+        }
     }
 
     /// One data frame of `bits`, for an encoder that needs nothing ahead of
