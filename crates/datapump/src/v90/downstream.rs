@@ -260,21 +260,33 @@ impl RWatch {
         self.looked
     }
 
-    /// One symbol, and the level R has in each interval of the pattern.
-    pub(crate) fn feed(&mut self, symbol: &pcm::Symbol, levels: &[f64]) -> RSeen {
+    /// One symbol, and the level R has in each interval of the **data
+    /// frame**. Not of the pattern: the signs repeat on the pattern's period,
+    /// but the codewords are "the highest power PCM codeword from the data
+    /// mode constellation of each data frame interval" (8.6.4, and 8.8.4/V.92
+    /// for Rf in the same words), which repeat on the frame's six however
+    /// long the pattern is. So the levels are always six, which is also what
+    /// keeps a caller from handing a four-symbol pattern four of them.
+    pub(crate) fn feed(&mut self, symbol: &pcm::Symbol, levels: &[f64; INTERVALS]) -> RSeen {
         let period = self.period;
         let i = ((symbol.index + period as u64 - self.phase) % period as u64) as usize;
         self.frame[i] = symbol.value;
         if i != period - 1 {
             return RSeen::Nothing;
         }
+        let frame_start = symbol.index + 1 - period as u64;
         // R moved by m: "+ + + - - -", or whatever the period makes of it,
-        // starting m symbols in.
+        // starting m symbols in. A symbol found m late was sent m earlier, so
+        // it carries the codeword of the interval m before the one it landed
+        // in -- which for V.90, whose pattern and frame are both six and
+        // start together, is the pattern position k itself.
         let late = (0..period).find(|&m| {
             (0..period).all(|j| {
                 let k = (j + period - m) % period;
-                let v = self.frame[j];
-                (v >= 0.0) == (k < period / 2) && (0.5 * levels[k]..1.5 * levels[k]).contains(&v.abs())
+                let back = (m % INTERVALS) as u64;
+                let sent = ((frame_start + j as u64 + INTERVALS as u64 - back) % INTERVALS as u64) as usize;
+                let (v, level) = (self.frame[j], levels[sent]);
+                (v >= 0.0) == (k < period / 2) && (0.5 * level..1.5 * level).contains(&v.abs())
             })
         });
         self.looked = late.is_some();
@@ -290,7 +302,6 @@ impl RWatch {
             }
             Some(m) if m == turn && self.heard => {
                 // R-bar's first frame, and R-bar runs 24 symbols.
-                let frame_start = symbol.index + 1 - period as u64;
                 RSeen::Turned(frame_start + R_BAR_SYMBOLS)
             }
             Some(m) if m != turn => {
@@ -997,7 +1008,7 @@ mod tests {
     /// always made of an inverted R.
     #[test]
     fn an_r_watch_finds_a_four_symbol_pattern_too() {
-        let levels = [0.15; 4];
+        let levels = [0.15; INTERVALS];
         let plus = [true, true, false, false];
         let minus = [false, false, true, true];
         for signs in [plus, minus] {
@@ -1039,7 +1050,7 @@ mod tests {
     /// at all.
     #[test]
     fn an_r_watch_hears_a_four_symbol_pattern_that_began_on_an_odd_frame() {
-        let levels = [0.15; 4];
+        let levels = [0.15; INTERVALS];
         let plus = [true, true, false, false];
         let minus = [false, false, true, true];
         // A data frame boundary two symbols into the four-symbol pattern.
@@ -1065,6 +1076,41 @@ mod tests {
         }
         assert!(blind.looked(), "the rotated pattern was not found at all");
         assert!(!blind.heard(), "Rf was heard against an origin it does not have");
+    }
+
+    /// 8.8.4/V.92 gives Rf "the highest power PCM codeword from the data mode
+    /// constellation of each data frame interval as passed in CPu" -- the
+    /// words 8.6.4 gives Rd. So the codewords come round every six symbols
+    /// while the signs come round every four, and the levels a watch judges
+    /// by belong to the data frame whatever its pattern's period is.
+    #[test]
+    fn a_four_symbol_pattern_is_judged_against_the_data_frames_levels() {
+        let levels: [f64; INTERVALS] = [0.05, 0.1, 0.15, 0.2, 0.25, 0.3];
+        let plus = [true, true, false, false];
+        let start = INTERVALS as u64;
+        // Rf from `start`: its signs on the pattern, its levels on the frame,
+        // with `shift` intervals of error in the levels.
+        let rf = |shift: usize| -> Vec<pcm::Symbol> {
+            (0..8 * 4u64)
+                .map(|k| {
+                    let index = start + k;
+                    let level = levels[(index as usize + shift) % INTERVALS];
+                    let value = if plus[k as usize % plus.len()] { level } else { -level };
+                    pcm::Symbol { index, raw: index, value, decided: None }
+                })
+                .collect()
+        };
+        let mut watch = RWatch::new(4, start);
+        for s in rf(0) {
+            assert_eq!(watch.feed(&s, &levels), RSeen::Nothing);
+        }
+        assert!(watch.heard(), "Rf at the data frame's own levels was not heard");
+        // The same signs, every level one interval round: not Rf.
+        let mut wrong = RWatch::new(4, start);
+        for s in rf(1) {
+            assert_eq!(wrong.feed(&s, &levels), RSeen::Nothing);
+        }
+        assert!(!wrong.heard(), "Rf was heard with its levels in the wrong intervals");
     }
 
     /// The levels are the caller's: R is "PCM codewords" the CP named
