@@ -857,9 +857,18 @@ pub(crate) fn find_place<F>(frames: &Frames<F>) -> Option<u64> {
 
 /// AD-1 assumes `datapump::v92` can name `carrier::Watch`. A re-export at
 /// crate visibility is only legal if `mod carrier` is itself `pub(crate)`
-/// (E0365), which is what makes this a compile-level check rather than a
-/// reachability one: a unit test here is a descendant of `v90` and could name
-/// a private module either way.
+/// (E0365, "`carrier` is private, and cannot be re-exported"), which is what
+/// makes this a compile-level check rather than a reachability one: anything
+/// written in this file is a descendant of `v90` and would resolve
+/// `crate::v90::carrier::Watch` whether the module were private or not, so a
+/// path that merely resolves proves nothing.
+///
+/// It is `#[cfg(test)]` because nothing in the crate consumes the re-export
+/// yet, and an unconditional one is an unused import under `-D warnings`.
+/// So a narrowing of `pub(crate) mod carrier` is caught by `cargo test` and
+/// by `cargo clippy --all-targets`, which every work package runs, but not
+/// by a plain `cargo build`. When `v92` names the watch for real
+/// (V92-41/42/55) this stands down: the real use is the real check.
 #[cfg(test)]
 pub(crate) use super::carrier;
 
