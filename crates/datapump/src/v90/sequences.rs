@@ -1319,7 +1319,7 @@ mod tests {
         assert_eq!(get(&bits, 242, 13), 0, "and thirteen bits reserved above them");
         assert_eq!(get(&bits, 256, 16), 0xB71C, "the CRC the digest derived");
         assert_eq!(Descriptor::from_bits_in(Layout::V92, &bits), Some((d, Some(ALL_PCM_UPSTREAM_RATES))));
-        // The four rungs Table 20 prints, as it prints them: the ladder is
+        // The six rungs Table 20 prints, as it prints them: the ladder is
         // truncated, not rounded, so bit 206+P is 46 666 and not 46 667.
         assert_eq!(pcm_upstream_rate(0), Some(24_000));
         assert_eq!(pcm_upstream_rate(1), Some(25_333));
@@ -1375,11 +1375,11 @@ mod tests {
 
     /// A CPu fills to twelve symbols of whatever TRN2u is carrying it, so the
     /// unit is twenty-four bits on four points and thirty-six on eight (8.7.3
-    /// with Jp bits 48:49), and the transmitter and the finder are told it
-    /// separately. "When multiple CPu and CPu' sequences are transmitted as a
-    /// group, they shall all contain identical information" -- so if the two
-    /// ever read the unit differently, the second of a group would start
-    /// inside the first one's fill.
+    /// with Jp bits 48:49). The transmitter and the finder are told that unit
+    /// separately, and only twelve was ever carried end to end: if the two
+    /// ever read it differently, the second CPu of a group would start inside
+    /// the first one's fill, and the CPu' that acknowledges CPd -- the last
+    /// of the group here -- would be the one lost.
     #[test]
     fn a_group_of_cpu_is_found_whole_on_every_pad_unit() {
         let cpu = Cp { data_mode: true, drn: 22, ..a_cpt() };
