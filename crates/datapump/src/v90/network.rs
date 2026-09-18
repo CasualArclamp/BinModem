@@ -387,6 +387,13 @@ impl Network {
     /// A V.92 upstream receiver decides on codewords rather than on levels,
     /// and A-law has no exact zero, so a test that wants to know what arrived
     /// wants this rather than `up`.
+    ///
+    /// Under `unquantised` the A/D makes no codeword, and this is the one the
+    /// level came nearest: still an answer about the last sample, never a
+    /// stale one from before the quantiser was taken out. It has had neither
+    /// the upstream robbed bit nor the upstream pad, because neither can be
+    /// done to something that is not a codeword -- and neither has the level
+    /// `up` returned.
     pub fn up_code(&self) -> (u8, bool) {
         self.up_last
     }
@@ -563,7 +570,15 @@ impl Network {
             self.up_samples.pop_front();
             self.up_first += 1.0;
         }
-        if self.quantised { self.carry_up(sum) } else { sum }
+        if self.quantised {
+            self.carry_up(sum)
+        } else {
+            // No codeword is made, but `up_code` still has to be about this
+            // sample rather than about the last one the quantiser saw.
+            let (u, negative) = ucode::nearest(self.law, (sum * 32768.0).round() as i32);
+            self.up_last = (u, !negative);
+            sum
+        }
     }
 
     /// Codewords the far end's buffer is holding, over and above the filter's
@@ -805,21 +820,33 @@ mod tests {
     /// codeword the digital modem is handed is the one the analogue modem
     /// meant to send. A V.92 receiver decides on these, not on levels, and
     /// A-law's Ucode 0 is not silence, so the sign has to come back too.
+    ///
+    /// Taking the quantiser out is how a test asks what quantising costs, and
+    /// it must not leave this answering about a sample from before that.
     #[test]
     fn the_upstream_codeword_is_the_level_we_meant() {
         for law in [Law::Mu, Law::A] {
-            let mut net = Network::new(law, FS).with_upstream_gain(1.0);
-            for u in [0u8, 1, 7, 16, 45, 90, 127] {
-                for positive in [true, false] {
-                    let level = ucode::level(law, u) * if positive { 1.0 } else { -1.0 };
-                    if level == 0.0 && !positive {
-                        // mu-law's zero has no sign to carry.
-                        continue;
+            for quantised in [true, false] {
+                let mut net = Network::new(law, FS).with_upstream_gain(1.0);
+                if !quantised {
+                    net = net.unquantised();
+                }
+                for u in [0u8, 1, 7, 16, 45, 90, 127] {
+                    for positive in [true, false] {
+                        let level = ucode::level(law, u) * if positive { 1.0 } else { -1.0 };
+                        if level == 0.0 && !positive {
+                            // mu-law's zero has no sign to carry.
+                            continue;
+                        }
+                        for _ in 0..250 {
+                            net.up(&[level, level]);
+                        }
+                        assert_eq!(
+                            net.up_code(),
+                            (u, positive),
+                            "{law:?} Ucode {u}, positive {positive}, quantised {quantised}"
+                        );
                     }
-                    for _ in 0..250 {
-                        net.up(&[level, level]);
-                    }
-                    assert_eq!(net.up_code(), (u, positive), "{law:?} Ucode {u}, positive {positive}");
                 }
             }
         }
