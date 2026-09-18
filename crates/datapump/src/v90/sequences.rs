@@ -259,11 +259,17 @@ pub struct Descriptor {
 
 /// The two words Table 20/V.92 adds after V.90's Table 12, holding the
 /// nineteen-bit upstream rate mask and thirteen reserved bits (8.5.4).
+///
+/// Table 20 writes every bit position of those words as an offset from
+/// `beta + ceil(N/2) x 17`, where beta is the length of the two padded
+/// patterns; this module writes that offset as **P** throughout, so Table
+/// 20's "188 + beta + ceil(N/2) x 17" is 188+P here.
 const MASK_WORDS: usize = 2;
 
-/// "Ja shall be a whole number of 12 bit units in length" (8.5.4/V.92), and
-/// each descriptor is padded to that unit, so the repetitions stay on the
-/// upstream data frame grid. Ja carries one bit per symbol, so twelve
+/// "Ja shall be an integer multiple of 12 bits long" (8.5.4/V.92), and each
+/// descriptor ends with "Fill bits: 0s to extend the Ja sequence length to
+/// the next multiple of 12 bits" (Table 20/V.92), so the repetitions stay on
+/// the upstream data frame grid. Ja carries one bit per symbol, so twelve
 /// symbols are twelve bits.
 pub const JA_UNIT_BITS: usize = 12;
 
@@ -350,8 +356,11 @@ impl Descriptor {
         let padded = information.len().div_ceil(BLOCK) * BLOCK;
         information.resize(padded, false);
         if let Some(rates) = upstream_rates {
-            // "188+P : 203+P", then 45 333, 46 667 and 48 000, then thirteen
-            // bits "Reserved for ITU: sent 0".
+            // Sixteen bits at 188+P:203+P, "bit 188+P: 24 000 ... bit 203+P:
+            // 44 000"; then, past the start bit `frame` adds, three more:
+            // "bit 205+P: 45 333; bit 206+P: 46 666; bit 207+P: 48 000".
+            // Then "bits 208+P to 220+P: Reserved for the ITU. (These bits
+            // are set to 0 by the analogue modem...)" (Table 20/V.92).
             put(&mut information, rates & 0xffff, BLOCK);
             put(&mut information, rates >> 16 & 0x7, 3);
             put(&mut information, 0, BLOCK - 3);
@@ -1290,11 +1299,17 @@ mod tests {
         // With N = 0, beta and P are both 34: the mask words sit at 188 + P
         // and 205 + P, and the CRC at 222 + P.
         assert_eq!(get(&bits, 222, 16), 0xffff, "24 000 up to 44 000");
-        assert_eq!(get(&bits, 239, 3), 0x7, "45 333, 46 667 and 48 000");
+        assert_eq!(get(&bits, 239, 3), 0x7, "45 333, 46 666 and 48 000");
         assert_eq!(get(&bits, 242, 13), 0, "and thirteen bits reserved above them");
         assert_eq!(get(&bits, 256, 16), 0xB71C, "the CRC the digest derived");
         assert_eq!(Descriptor::from_bits_in(Layout::V92, &bits), Some((d, Some(ALL_PCM_UPSTREAM_RATES))));
+        // The four rungs Table 20 prints, as it prints them: the ladder is
+        // truncated, not rounded, so bit 206+P is 46 666 and not 46 667.
         assert_eq!(pcm_upstream_rate(0), Some(24_000));
+        assert_eq!(pcm_upstream_rate(1), Some(25_333));
+        assert_eq!(pcm_upstream_rate(15), Some(44_000));
+        assert_eq!(pcm_upstream_rate(16), Some(45_333));
+        assert_eq!(pcm_upstream_rate(17), Some(46_666));
         assert_eq!(pcm_upstream_rate(18), Some(48_000));
         assert_eq!(pcm_upstream_rate(PCM_UPSTREAM_RATES), None);
         // V.90's own descriptor ends after the CRC with a fill bit and, if it
@@ -1302,9 +1317,9 @@ mod tests {
         assert_eq!(Descriptor::none().to_bits().len(), 240);
     }
 
-    /// "Ja shall be a whole number of 12 bit units in length" (8.5.4), and
-    /// each descriptor is padded to that unit. The lengths are P3S 4.4's
-    /// table of 290 -> 300, 817 -> 828 and 2687 -> 2688.
+    /// "Ja shall be an integer multiple of 12 bits long" (8.5.4), and each
+    /// descriptor is padded to that unit. The lengths are P3S 4.4's table of
+    /// 290 -> 300, 817 -> 828 and 2687 -> 2688.
     #[test]
     fn v92_descriptor_lengths_pad_to_12_bits() {
         for (n, lsp, ltp, want) in [(1usize, 16usize, 16usize, 300usize), (64, 16, 16, 828), (255, 128, 128, 2688)] {
@@ -1363,7 +1378,7 @@ mod tests {
             }
         }
         assert_eq!(found, vec![(d.clone(), Some(masks[0])), (d.clone(), Some(masks[1]))]);
-        assert_eq!(stream.len() % JA_UNIT_BITS, 0, "and Ja is a whole number of twelve-bit units");
+        assert_eq!(stream.len() % JA_UNIT_BITS, 0, "and Ja is an integer multiple of twelve bits long");
         // The same descriptor in V.90's layout ends differently and carries
         // no mask at all.
         let mut v90 = DescriptorFinder::default();
