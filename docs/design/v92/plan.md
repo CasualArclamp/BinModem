@@ -278,7 +278,7 @@ not listed must not be touched.
 
 ### Wave 1: independent foundations
 
-#### V92-01: Scaffold the `v92` module, its shared numbers, `Parameters` and `Deadlines` (S)
+#### V92-01: Scaffold the `v92` module, its shared numbers, `Parameters` and `Deadlines` (L)
 
 - **Depends on:** none.
 - **Clauses:** 1 (items c, e); 3.5; 3.6; 3.8; 5; 6.1; 6.2; 6.4 (Figure 1); clause 8 preamble (bit order);
@@ -304,8 +304,13 @@ not listed must not be touched.
   - the start-up watchdog, 20 s + 6 RTD;
   - signed and unsigned `Qa.b` helpers with the section 4 reading;
   - `Parameters` (AD-3), with `Debug`, `Clone` and a `fits()` self-check;
-  - `Deadlines`: named `Option<(u64, &'static str)>` slots with `arm`, `clear` and `expired(now)`, which
-    reports the earliest slot that has passed;
+  - `Deadlines`: slots of `pub type Deadline = (u64, &'static str)` held by name, with `arm`, `clear`,
+    `clear_all`, `armed` and `expired(now)`, which reports the earliest slot that has passed. The name is
+    a `&'static str`, not an enum variant, because a later package must be able to arm a timer this module
+    has never heard of without editing `mod.rs`, which its own file list forbids - the same reason
+    `PeerSuv`, `PeerCp` and `SequenceKind` are declared here. The cost is that a name is checked at run
+    time, so a package that arms `"TR3"` and clears `"Tr3"` leaves the timer running; whoever writes the
+    second of a pair asserts with `armed()`;
   - the plain flag structs and the sequence-kind enum that the side-agnostic `Exchange` of V92-14 is driven
     by, declared **here** because `exchange.rs` may not edit `mod.rs` and the plan's own rule forbids
     touching a file outside a package's list: `PeerSuv { ack, silence, wait_for_cp }`, `PeerCp { ack }` and
@@ -317,7 +322,10 @@ not listed must not be touched.
   - `the_upstream_ladder_runs_from_24000_to_48000_in_steps_of_8000_over_6` - 19 rungs, drn 1 is 24 000,
     drn 19 is 48 000.
   - `a_data_frame_holds_2_drn_plus_34_bits` - K runs 36..=72, always even, and
-    `up_bits(drn) * 8000 == up_rate(drn) * 12` for every drn.
+    `up_bits(drn) * 8000 / 12 == up_rate(drn)` for every drn, plus the exact
+    `up_bits(drn) * 8000 == up_rate(drn) * 12` at the seven rungs where 3 divides drn + 17. The exact form
+    does not hold at the other twelve, because `up_rate` floors as `v90::rate_for` does: at drn 2,
+    38 x 8000 is 304 000 and 25 333 x 12 is 303 996.
   - `a_twelve_symbol_frame_holds_two_constellation_frames_and_three_trellis_frames` - j = i mod 6,
     k = i mod 4.
   - `the_q_formats_read_as_the_printed_digit_patterns` - 4G = 0x4000 gives G = 1/16; signed Q1.6 0x80 is
@@ -2717,3 +2725,14 @@ Two further judgements worth recording, both accepted from the review but resolv
   The analogue mirror was already in V92-39, the existing V.90 modems already carry the data-holdback
   semantics, and a Phase 4 in which only one side's circuits exist would make the FPE circuit tests of
   V92-53 untestable on the digital side.
+
+**V92-01, after implementation review.** Three lines of its entry were corrected against what the package
+had to be. The sizing was wrong: `v92/mod.rs` came to 979 lines, and 1165 once the review's findings were
+answered, a third of it the clause quotations the house rule asks for. So the package is **L** and not
+**S**; the description lists thirteen groups of content and seven tests and was never an S. The `Deadlines` slots are keyed by `&'static str` rather than
+by an enum variant, because a package that has to arm a new timer cannot add a variant without editing
+`mod.rs`, which its own file list forbids - the entry now says so, and says what it costs. And
+the named test's `up_bits(drn) * 8000 == up_rate(drn) * 12` is false at twelve of the nineteen rungs,
+because `up_rate` floors 8000/6 exactly as `v90::rate_for` does; the entry now asks for the floor-
+consistent identity everywhere and the exact one at the seven rungs where it holds, so that a later reader
+does not restore a broken assertion.
