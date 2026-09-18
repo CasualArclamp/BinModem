@@ -41,7 +41,7 @@ pub mod sign;
 pub mod startup;
 pub mod ucode;
 
-use crate::v34::info::Info0d;
+use crate::v34::info::{Info0d, UINFO_HIGHEST, UINFO_LOWEST};
 
 /// Table 15/V.90: the root of the average power a constellation set may have,
 /// in Table 1's units, for each maximum transmit power INFO0d can name --
@@ -56,6 +56,29 @@ pub fn power_limit(far: &Info0d) -> u32 {
     POWER_LIMITS[usize::from(far.max_power).min(POWER_LIMITS.len() - 1)]
 }
 
+/// The highest UINFO a V.92 INFO1a may name.
+///
+/// Tables 18 and 19/V.92 print only the lower bound, "U_INFO shall be greater
+/// than 66". The upper one comes from the signal that uses it: 8.6.7/V.92
+/// defers to 8.4.4/V.90, where Sd is built from "the PCM codeword whose Ucode
+/// is 16 + U_INFO", and there are only 128 Ucodes. A U_INFO above this names a
+/// codeword the digital modem could not send at all, so the end that *chooses*
+/// one stays inside (P3S 5.7, Sd-5).
+///
+/// It is [`crate::v34::info::UINFO_HIGHEST`] rather than a second 111: the
+/// INFO codec owns the range a sequence may carry, and this is that range's
+/// ceiling under the name the PCM side of the modem asks for it by.
+pub const V92_MAX_UINFO: u8 = UINFO_HIGHEST;
+
+/// The loudest Ucode at or below `highest` whose amplitude stays inside
+/// `limit`, and never below [`UINFO_LOWEST`].
+///
+/// The whole of UINFO's choice, with the one thing V.92 changes -- the
+/// ceiling -- as an argument, so that the two callers differ in nothing else.
+fn loudest_codeword(law: ucode::Law, limit: i32, highest: u8) -> u8 {
+    (UINFO_LOWEST..=highest).rev().find(|&u| ucode::linear(law, u) <= limit).unwrap_or(UINFO_LOWEST)
+}
+
 /// UINFO for a digital modem: the loudest codeword whose power stays inside
 /// the digital modem's maximum (Table 10/V.90: "The power of this point shall
 /// not exceed the maximum digital modem transmit power. UINFO shall be
@@ -66,8 +89,22 @@ pub fn power_limit(far: &Info0d) -> u32 {
 /// ceiling is -12 dBm0 asked for 78, one under the 79 this picks.
 pub fn training_codeword(far: &Info0d) -> u8 {
     let law = if far.a_law { ucode::Law::A } else { ucode::Law::Mu };
-    let limit = power_limit(far) as i32;
-    (67..ucode::UCODES as u8).rev().find(|&u| ucode::linear(law, u) <= limit).unwrap_or(67)
+    loudest_codeword(law, power_limit(far) as i32, (ucode::UCODES - 1) as u8)
+}
+
+/// The same choice for a V.92 INFO1a, stopped at [`V92_MAX_UINFO`].
+///
+/// Table 15's loudest limit is (15124)^2, which no Ucode above 109 stays
+/// inside under either companding law, so today this returns exactly what
+/// [`training_codeword`] returns for every one of the thirty-two maximum
+/// powers an INFO0d can name. The ceiling is here because Table 18's own rule
+/// stops at "greater than 66" and says nothing about the top: it is Sd that
+/// cannot be built above 111, and a modem that ever reads Table 15's limits
+/// differently -- a wider table, a law with louder codes -- must not be able
+/// to ask for a codeword the far end could not send.
+pub fn training_codeword_v92(far: &Info0d) -> u8 {
+    let law = if far.a_law { ucode::Law::A } else { ucode::Law::Mu };
+    loudest_codeword(law, power_limit(far) as i32, V92_MAX_UINFO)
 }
 
 /// Data frame intervals per data frame (5.4): "data frames in the digital
@@ -241,6 +278,39 @@ mod tests {
         assert!(training_codeword(&far) > 66);
         far.a_law = true;
         assert!(ucode::linear(ucode::Law::A, training_codeword(&far)) <= 2540);
+    }
+
+    /// Sd is 16 + UINFO (8.4.4/V.90, kept by 8.6.7/V.92), so a V.92 INFO1a's
+    /// UINFO has to leave that codeword inside the 128 there are.
+    ///
+    /// Table 15/V.90's loudest limit is (15124)^2, and no Ucode above 109
+    /// stays inside it under either law, so the V.92 ceiling costs nothing
+    /// against a conforming INFO0d: every one of the thirty-two maximum
+    /// powers gives the same answer as V.90's own choice, which is what says
+    /// the cap has not quietly changed V.90. What the cap is for is the
+    /// search itself, tested here with the limit taken away.
+    #[test]
+    fn uinfo_never_exceeds_111_so_sd_s_codeword_exists() {
+        for a_law in [false, true] {
+            let law = if a_law { ucode::Law::A } else { ucode::Law::Mu };
+            for max_power in 0..32u8 {
+                let far = Info0d { max_power, a_law, ..Info0d::default() };
+                let v92 = training_codeword_v92(&far);
+                assert!((UINFO_LOWEST..=V92_MAX_UINFO).contains(&v92), "{max_power}, a-law {a_law}: {v92}");
+                assert!(usize::from(16 + v92) < ucode::UCODES, "Sd's codeword 16 + {v92} does not exist");
+                assert_eq!(v92, training_codeword(&far), "{max_power}, a-law {a_law}: V.90's own choice moved");
+                assert!(ucode::linear(law, v92) <= power_limit(&far) as i32);
+            }
+            // And with every limit removed, which is the case the ceiling is
+            // there for: V.90 goes to the loudest codeword there is, V.92
+            // stops where Sd runs out.
+            assert_eq!(loudest_codeword(law, i32::MAX, (ucode::UCODES - 1) as u8), 127);
+            assert_eq!(loudest_codeword(law, i32::MAX, V92_MAX_UINFO), 111);
+            // A limit under even the quietest allowed codeword still names a
+            // sendable one.
+            assert_eq!(loudest_codeword(law, 0, V92_MAX_UINFO), UINFO_LOWEST);
+        }
+        assert_eq!(V92_MAX_UINFO, 111);
     }
 
     /// One bit a data frame is one step, which is the arithmetic that makes a
