@@ -296,10 +296,22 @@ impl AnspcmLevel {
     ///
     /// The two laws get their own method rather than one taking a law,
     /// because the type that names a companding law lives in `datapump` and
-    /// this crate is underneath it. 8.3.1 generates the sequence as
-    /// `x = floor(scl * sqrt(2) * cos(2*pi*k*79/301 + theta) + 0.5)`, so scl
-    /// is the RMS amplitude on Table 1/V.90's linear scale, and the two laws
-    /// differ by a factor of two because their scales do.
+    /// this crate is underneath it.
+    ///
+    /// 8.3.1 generates the sequence as
+    /// `x = floor(scl * sqrt(2) * cos(2*pi*k*79/301 + theta) + 0.5)` and then
+    /// quantises x "to a linear PCM value according to ITU-T G.711", so scl
+    /// is the RMS amplitude on *G.711's own* linear scale -- magnitudes to
+    /// 8159 on mu-law and to 4096 on A-law -- and that is why Table 6 prints
+    /// one law at exactly twice the other.
+    ///
+    /// It is not the 16-bit scale Table 1/V.90 prints, which is four times
+    /// G.711's on mu-law and eight times it on A-law. On that scale the two
+    /// laws are within half a percent of each other -- Ucode 127 is 32124 and
+    /// 32256 -- so a 2:1 ratio could not arise there at all. Generating
+    /// ANSpcm against Table 1/V.90's column would send it 12 dB too quiet on
+    /// mu-law and 18 dB too quiet on A-law, and the octets would not be the
+    /// ones Tables 7 to 10 print.
     pub fn scl_mu_law(self) -> u16 {
         match self {
             Self::Minus9_5 => 1334,
@@ -673,12 +685,39 @@ mod tests {
             assert_eq!(level.dbm0(), dbm0);
             assert_eq!(level.scl_mu_law(), mu, "Table 6 mu-law scl");
             assert_eq!(level.scl_a_law(), a, "Table 6 A-law scl");
-            // The two laws print different numbers for the same level
-            // because their linear scales differ by a factor of two; one is
-            // within a count of half the other throughout.
-            assert!(mu.abs_diff(2 * a) <= 1, "{mu} against twice {a}");
+            // Table 6 prints the A-law column at exactly half the mu-law one,
+            // which is the ratio of the two G.711 scales 8.3.1 quantises to
+            // (magnitudes to 8159 and to 4096). It is not the ratio of Table
+            // 1/V.90's linear columns, which print 32124 and 32256 at Ucode
+            // 127 -- within half a percent of each other, where no 2:1 ratio
+            // could come from. A generator that read scl against that column
+            // would send ANSpcm 12 dB and 18 dB too quiet.
+            assert_eq!(mu, 2 * a, "Table 6: {mu} is twice {a}");
         }
         assert_eq!(AnspcmLevel::from_pattern(0b100), None, "there are only four");
+
+        // And scl is an RMS amplitude on one linear scale, so the ratio
+        // between two rows is the gap between the levels they name: 2.5 dB
+        // from -9.5 to -12, then 3 dB, then 3 dB, on both laws. Within
+        // 0.05 dB, which is all the rounding in four printed integers leaves.
+        let steps = [
+            (AnspcmLevel::Minus9_5, AnspcmLevel::Minus12),
+            (AnspcmLevel::Minus12, AnspcmLevel::Minus15),
+            (AnspcmLevel::Minus15, AnspcmLevel::Minus18),
+        ];
+        for (louder, quieter) in steps {
+            let printed = louder.dbm0() - quieter.dbm0();
+            for (l, q) in [
+                (louder.scl_mu_law(), quieter.scl_mu_law()),
+                (louder.scl_a_law(), quieter.scl_a_law()),
+            ] {
+                let measured = 20.0 * (f64::from(l) / f64::from(q)).log10();
+                assert!(
+                    (measured - printed).abs() < 0.05,
+                    "{l} over {q} is {measured} dB, not the printed {printed}"
+                );
+            }
+        }
     }
 
     #[test]
