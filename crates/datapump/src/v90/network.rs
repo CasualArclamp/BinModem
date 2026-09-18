@@ -878,6 +878,22 @@ mod tests {
         // And the downstream kept its own phase.
         assert!(moved_down[1] > 40, "{moved_down:?}");
         assert_eq!(moved_down.iter().sum::<usize>(), moved_down[1]);
+
+        // Through the public path as well, or nothing says the A/D reaches
+        // the robbing at all. A steady odd Ucode's mu-law octet has its
+        // bottom bit clear, so the robbed octet of six comes back one Ucode
+        // lower and every other one comes back as itself.
+        let mut net = Network::new(Law::Mu, FS).with_upstream_gain(1.0).with_upstream_robbed_bit(3);
+        let level = ucode::level(Law::Mu, 45);
+        for n in 0..600usize {
+            net.up(&[level, level]);
+            if n >= 200 {
+                // The upstream octets are counted from the A/D's first
+                // codeword, so the phase is the call number.
+                let want = if n % 6 == 3 { 44 } else { 45 };
+                assert_eq!(net.up_code(), (want, true), "call {n}");
+            }
+        }
     }
 
     /// A pad in the network is a digital one: it scales the codeword and the
@@ -898,6 +914,18 @@ mod tests {
         let mut clean = Network::new(Law::Mu, FS).with_pads(6.0, 0.0);
         let level = ucode::level(Law::Mu, 90);
         assert_eq!(clean.carry_up(level).to_bits(), level.to_bits());
+
+        // Through the public path as well, or nothing says the A/D reaches
+        // the pad at all.
+        let mut net = Network::new(Law::Mu, FS).with_upstream_gain(1.0).with_pads(0.0, 6.0);
+        let mut out = 0.0;
+        for _ in 0..400 {
+            out = net.up(&[level, level]);
+        }
+        let halved = net.quantise(level * 10f64.powf(-6.0 / 20.0));
+        assert_eq!(out.to_bits(), halved.to_bits(), "{out} against {halved}");
+        assert_eq!(ucode::level(Law::Mu, net.up_code().0).to_bits(), halved.to_bits());
+        assert!(net.up_code().1, "the level sent was positive");
     }
 
     /// The far end's buffer slips our upstream as ours slips the downstream:
