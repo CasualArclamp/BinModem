@@ -194,12 +194,28 @@ impl JdReader {
 /// same frame over and over, shows by how many. R-bar is R moved by half its
 /// pattern, which no slip of whole milliseconds does.
 ///
-/// The pattern's period is the caller's: 6 for R, Ri, Rd and Rt, whose signs
-/// are `+ + + - - -` (8.6.4), and 4 for V.92's Rf, whose signs are `+ + - -`
-/// (V.92 8.8.4).
+/// The pattern's period is the caller's, and so is where it starts. 6 for R,
+/// Ri, Rd and Rt, whose signs are `+ + + - - -` (8.6.4); 4 for V.92's Rf,
+/// which 8.8.4/V.92 prints as the 12-symbol sequence
+/// `+ + - - + + - - + + - -`, four symbols of sign repeated three times.
+///
+/// The start matters because the two are not the same length. R's period is
+/// the data frame's own, so R begins wherever a frame does and
+/// [`pcm::Symbol::index`], which is frame-aligned, is phase enough. Rf
+/// "shall begin on the boundary of a data frame" (9.9.1.1.1/V.92) as well,
+/// but a data frame is six symbols and its pattern is four, so Rf's first
+/// symbol falls as often two symbols into the pattern as none. A watch that
+/// took the index alone for its phase would read every group of such an Rf
+/// as the pattern already rotated by half -- R-bar's rotation -- and, never
+/// having heard Rf, would refuse that and reset: it would hear nothing for
+/// the whole 384T of Rf and the 24T of R-bar-f. Hence `origin`, the index of
+/// the pattern's first symbol.
 #[derive(Debug, Clone)]
 pub(crate) struct RWatch {
     period: usize,
+    /// Where the pattern's first symbol falls in the symbol count, reduced
+    /// to the pattern.
+    phase: u64,
     frame: Vec<f64>,
     /// Frames in a row of R moved by `moved` symbols.
     run: usize,
@@ -215,17 +231,23 @@ pub(crate) enum RSeen {
     Nothing,
     /// R has turned into R-bar: what follows it begins at this symbol.
     Turned(u64),
-    /// R is arriving this many symbols late: the frames have moved.
+    /// R is arriving this many symbols late: the frames have moved. Only a
+    /// watch whose pattern is a data frame long reports it, because only
+    /// then is a rotation of the pattern a rotation of the frame.
     Moved(usize),
 }
 
 impl RWatch {
-    /// A watch for a sign pattern `period` symbols long. An even number: the
-    /// pattern is half positive then half negative, and its turn is itself
-    /// rotated by half.
-    pub(crate) fn new(period: usize) -> Self {
+    /// A watch for a sign pattern `period` symbols long whose first symbol
+    /// is at `origin`. The period is an even number: the pattern is half
+    /// positive then half negative, and its turn is itself rotated by half.
+    /// Only `origin` modulo the period matters, so V.90 passes 0 -- R, Ri,
+    /// Rd and Rt all begin on a data frame boundary and their period is the
+    /// data frame's own, which makes every boundary the same phase.
+    pub(crate) fn new(period: usize, origin: u64) -> Self {
         debug_assert!(period >= 2 && period.is_multiple_of(2), "a sign pattern has two halves");
-        Self { period, frame: vec![0.0; period], run: 0, moved: 0, heard: false, looked: false }
+        let phase = origin % period as u64;
+        Self { period, phase, frame: vec![0.0; period], run: 0, moved: 0, heard: false, looked: false }
     }
 
     /// Whether R itself has been heard for long enough to believe.
@@ -241,7 +263,7 @@ impl RWatch {
     /// One symbol, and the level R has in each interval of the pattern.
     pub(crate) fn feed(&mut self, symbol: &pcm::Symbol, levels: &[f64]) -> RSeen {
         let period = self.period;
-        let i = (symbol.index % period as u64) as usize;
+        let i = ((symbol.index + period as u64 - self.phase) % period as u64) as usize;
         self.frame[i] = symbol.value;
         if i != period - 1 {
             return RSeen::Nothing;
@@ -279,7 +301,11 @@ impl RWatch {
                 }
                 self.run = 0;
                 self.moved = 0;
-                RSeen::Moved(m)
+                // A rotation of the pattern is a move of the data frames
+                // only where the pattern is a data frame long. Rf's four
+                // symbols would say the slip was m of four, which no caller
+                // can turn into the move of six `Modem::move_frames` wants.
+                if period == INTERVALS { RSeen::Moved(m) } else { RSeen::Nothing }
             }
             _ => {
                 if !self.heard {
@@ -925,12 +951,13 @@ mod tests {
         assert_eq!(open.last().map(|(_, jd)| jd), Some(looks_like_jp));
     }
 
-    /// Symbols of a repeating sign pattern at `level`, from index `from`.
+    /// Symbols of a repeating sign pattern at `level`, whose first symbol is
+    /// at index `from`: the pattern's own phase, not the symbol count's.
     fn pattern(from: u64, n: usize, level: f64, signs: &[bool]) -> Vec<pcm::Symbol> {
         (0..n as u64)
             .map(|k| {
                 let index = from + k;
-                let positive = signs[(index as usize) % signs.len()];
+                let positive = signs[(k as usize) % signs.len()];
                 pcm::Symbol { index, raw: index, value: if positive { level } else { -level }, decided: None }
             })
             .collect()
@@ -941,7 +968,7 @@ mod tests {
     /// turn says TRN2d begins 24 symbols on.
     #[test]
     fn an_r_watch_hears_the_six_symbol_pattern_and_its_turn() {
-        let mut watch = RWatch::new(INTERVALS);
+        let mut watch = RWatch::new(INTERVALS, 0);
         let levels = [0.2; INTERVALS];
         let r = [true, true, true, false, false, false];
         for s in pattern(0, 8 * INTERVALS, 0.2, &r) {
@@ -974,7 +1001,7 @@ mod tests {
         let plus = [true, true, false, false];
         let minus = [false, false, true, true];
         for signs in [plus, minus] {
-            let mut watch = RWatch::new(4);
+            let mut watch = RWatch::new(4, 0);
             for s in pattern(0, 8 * 4, 0.15, &signs) {
                 assert_eq!(watch.feed(&s, &levels), RSeen::Nothing, "{signs:?}");
             }
@@ -983,7 +1010,7 @@ mod tests {
         }
         // Rf heard, then its turn: R-bar-f runs 24T (8.8.4), so what follows
         // begins 24 symbols after R-bar-f's first.
-        let mut watch = RWatch::new(4);
+        let mut watch = RWatch::new(4, 0);
         for s in pattern(0, 8 * 4, 0.15, &plus) {
             watch.feed(&s, &levels);
         }
@@ -995,11 +1022,49 @@ mod tests {
         }
         assert_eq!(turned, Some(32 + R_BAR_SYMBOLS));
         // And a six-symbol watch reads the same stream as nothing at all.
-        let mut six = RWatch::new(INTERVALS);
+        let mut six = RWatch::new(INTERVALS, 0);
         for s in pattern(0, 16 * INTERVALS, 0.15, &plus) {
             assert_eq!(six.feed(&s, &[0.15; INTERVALS]), RSeen::Nothing);
         }
         assert!(!six.looked() && !six.heard(), "a four-symbol pattern was read as R");
+    }
+
+    /// 9.9.1.1.1/V.92: "The signal Rf shall begin on the boundary of a data
+    /// frame." A data frame is six symbols and Rf's signs repeat every four,
+    /// so every other boundary starts Rf two symbols into its pattern -- and
+    /// two of four is exactly the rotation that turns Rf into R-bar-f. A
+    /// watch told where the pattern began hears it anyway; one left to read
+    /// its phase off the symbol count finds that rotation in every group,
+    /// refuses it as a turn it never heard the start of, and hears nothing
+    /// at all.
+    #[test]
+    fn an_r_watch_hears_a_four_symbol_pattern_that_began_on_an_odd_frame() {
+        let levels = [0.15; 4];
+        let plus = [true, true, false, false];
+        let minus = [false, false, true, true];
+        // A data frame boundary two symbols into the four-symbol pattern.
+        let start = INTERVALS as u64;
+        let mut watch = RWatch::new(4, start);
+        for s in pattern(start, 8 * 4, 0.15, &plus) {
+            assert_eq!(watch.feed(&s, &levels), RSeen::Nothing);
+        }
+        assert!(watch.heard(), "an Rf beginning two symbols into its pattern was not heard");
+        let mut turned = None;
+        for s in pattern(start + 32, 4, 0.15, &minus) {
+            if let RSeen::Turned(at) = watch.feed(&s, &levels) {
+                turned = Some(at);
+            }
+        }
+        assert_eq!(turned, Some(start + 32 + R_BAR_SYMBOLS));
+        // The same symbols, to a watch told the pattern began where the
+        // count did: every group is found, every group is the turn, and Rf
+        // is never heard.
+        let mut blind = RWatch::new(4, 0);
+        for s in pattern(start, 8 * 4, 0.15, &plus) {
+            assert_eq!(blind.feed(&s, &levels), RSeen::Nothing);
+        }
+        assert!(blind.looked(), "the rotated pattern was not found at all");
+        assert!(!blind.heard(), "Rf was heard against an origin it does not have");
     }
 
     /// The levels are the caller's: R is "PCM codewords" the CP named
@@ -1011,20 +1076,20 @@ mod tests {
     fn an_r_watch_takes_its_levels_from_the_caller() {
         let r = [true, true, true, false, false, false];
         let symbols = pattern(0, 8 * INTERVALS, 0.2, &r);
-        let mut told = RWatch::new(INTERVALS);
+        let mut told = RWatch::new(INTERVALS, 0);
         for s in &symbols {
             assert_eq!(told.feed(s, &[0.2; INTERVALS]), RSeen::Nothing);
         }
         assert!(told.heard());
         // Three times too loud a level, and the same symbols say nothing.
-        let mut wrong = RWatch::new(INTERVALS);
+        let mut wrong = RWatch::new(INTERVALS, 0);
         for s in &symbols {
             assert_eq!(wrong.feed(s, &[0.6; INTERVALS]), RSeen::Nothing);
         }
         assert!(!wrong.heard(), "R was heard against levels it does not have");
         // And a level per interval, as Rd has: the watch tests each on its
         // own, so one interval told wrong is enough to refuse the frame.
-        let mut mixed = RWatch::new(INTERVALS);
+        let mut mixed = RWatch::new(INTERVALS, 0);
         let mut levels = [0.2; INTERVALS];
         levels[4] = 0.02;
         for s in &symbols {

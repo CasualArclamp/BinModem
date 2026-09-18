@@ -481,7 +481,7 @@ impl Modem {
             r_moved: 0,
             route: None,
             choice: None,
-            r_watch: RWatch::new(INTERVALS),
+            r_watch: RWatch::new(INTERVALS, 0),
             trn2d_from: None,
             frames: None,
             received: Vec::new(),
@@ -495,7 +495,7 @@ impl Modem {
             wants_retrain: false,
             lost_since: None,
             in_use: None,
-            rd_watch: RWatch::new(INTERVALS),
+            rd_watch: RWatch::new(INTERVALS, 0),
             far_end: super::carrier::Watch::new(fs),
             far_end_went: false,
             renegotiating: false,
@@ -704,7 +704,7 @@ impl Modem {
         self.status = Status::Running;
         if initiating {
             // The digital modem's data is data until its Rd.
-            self.rd_watch = RWatch::new(INTERVALS);
+            self.rd_watch = RWatch::new(INTERVALS, 0);
             self.send_s_then_cp();
         } else {
             self.clamp();
@@ -1180,7 +1180,7 @@ impl Modem {
                 frames.data = true;
                 self.stage = Stage::Data;
                 self.renegotiating = false;
-                self.rd_watch = RWatch::new(INTERVALS);
+                self.rd_watch = RWatch::new(INTERVALS, 0);
             }
             return;
         }
