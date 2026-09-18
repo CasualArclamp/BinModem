@@ -1001,8 +1001,18 @@ mod tests {
             }
         }
         assert_eq!(loudest, 0.0, "the downstream was asked for no noise");
-        // The anti-alias filter keeps about the band it passes, so a tenth of
-        // the noise's power is still there.
-        assert!((power / 2000.0).sqrt() > 5e-3, "{power}");
+        // The anti-alias filter has unit gain at DC, but noise is not DC:
+        // what gets through is the sum of the squares of its taps, which for
+        // 3700 Hz at 16 kHz is 0.459 -- a little under half the power, and
+        // 0.68 of the level. Worked out here rather than written down, so
+        // that a different cutoff moves the expectation with it.
+        let reach = UP_REACH * FS;
+        let power_gain: f64 =
+            (-(reach as i64)..=reach as i64).map(|d| kernel(d as f64, UP_CUTOFF / FS, reach + 1.0).powi(2)).sum();
+        let want = 1e-2 * power_gain.sqrt();
+        let rms = (power / 2000.0).sqrt();
+        // A tenth either way: the samples at the start have only part of a
+        // window to fill it, and 2000 of them is not an infinity of them.
+        assert!((rms - want).abs() < 0.1 * want, "{rms} against {want}");
     }
 }
