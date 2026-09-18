@@ -627,6 +627,26 @@ impl Answerer {
         self.outcome != Outcome::Pending && self.out.is_empty() && self.said_enough()
     }
 
+    /// Whether the answering pattern still has bits to put on the line.
+    ///
+    /// [`Self::transmit`] cannot say so itself: what it gives back when there
+    /// is nothing left to send is a mark, and a mark is a perfectly good bit
+    /// that a caller cannot tell from a pattern's own. That does not matter to
+    /// a caller with nothing else to say, which is what the detection phase
+    /// is -- but it matters to one that is already framing LAPM and is only
+    /// answering an ODP that should never have arrived ([`crate::Stack`] after
+    /// V.92 9.2.5), because there the choice on every bit is between this
+    /// pattern and a frame.
+    ///
+    /// The queue on its own is not the answer either. [`Self::transmit`] fills
+    /// it a repetition at a time, so it runs empty between them, and a caller
+    /// that stopped there would cut Table 3's pattern into pieces with flags
+    /// in the gaps -- and 7.2.1.2 wants "at least two adjacent ADPs".
+    pub fn sending(&self) -> bool {
+        !self.out.is_empty()
+            || (self.outcome == Outcome::OriginatorDetected && !self.said_enough())
+    }
+
     /// Whether the originator has started the protocol phase.
     pub fn heard_flags(&self) -> bool {
         self.flags
@@ -834,6 +854,51 @@ mod tests {
         assert!(a.heard_flags());
         for _ in 0..2000 {
             a.transmit();
+        }
+        assert!(a.finished_sending());
+        for _ in 0..200 {
+            assert!(a.transmit(), "mark once the pattern is done");
+        }
+    }
+
+    /// V.42 7.2.1.3 and 7.2.1.2: an answerer with nothing to say transmits
+    /// marks, and a caller that has something else for the line has to be able
+    /// to tell the two apart -- and to be told across the gap between one
+    /// repetition and the next, because "at least two adjacent ADPs" is what
+    /// the originator is waiting for.
+    #[test]
+    fn an_answerer_says_whether_its_pattern_still_has_bits_to_go() {
+        let mut a = Answerer::default();
+        assert!(!a.sending(), "nothing has been asked yet");
+
+        let mut o = Originator::default();
+        for _ in 0..400 {
+            a.receive(o.transmit());
+        }
+        assert_eq!(a.outcome(), Outcome::OriginatorDetected);
+        assert!(a.sending(), "the ODP was heard and nothing has gone back");
+
+        // Every bit of it is claimed, including the joins between repetitions:
+        // `transmit` fills its queue one repetition at a time, so a caller
+        // that read an empty queue as "done" would put a flag in a gap that
+        // Table 3 fills with ones.
+        for bits in 0..20_000 {
+            assert!(a.sending(), "the pattern let go after {bits} bits");
+            a.transmit();
+        }
+
+        // The originator's flags end it, and then the line is the caller's
+        // again.
+        for byte in [FLAG; 4] {
+            for i in (0..8).rev() {
+                a.receive(byte & (1 << i) != 0);
+            }
+        }
+        let mut tail = 0;
+        while a.sending() {
+            a.transmit();
+            tail += 1;
+            assert!(tail < 1000, "the last repetition never finished");
         }
         assert!(a.finished_sending());
         for _ in 0..200 {

@@ -254,6 +254,15 @@ pub struct Stack {
     /// bits once it has failed, and every bit after, for the terminal
     /// (Appendix I.3's second option).
     unclaimed: Vec<bool>,
+    /// A detector kept running beside the protocol phase, for the answerer
+    /// that skipped the detection phase and met an ODP anyway.
+    ///
+    /// [`Stack::bypassing_detection`] builds it; nothing else does, and it is
+    /// dropped the moment the far end proves it is past the detection phase
+    /// too.
+    watch: Option<Box<Answerer>>,
+    /// Whether the error correction procedure is suspended (V.42 7.10).
+    suspended: bool,
 }
 
 /// One end of the detection phase (7.2.1). Which one depends on the role.
@@ -422,6 +431,8 @@ impl Stack {
             round_trip_ms: 0,
             heard_text: false,
             unclaimed: Vec::new(),
+            watch: None,
+            suspended: false,
         }
     }
 
@@ -454,11 +465,66 @@ impl Stack {
     /// question already answered is not worth three quarters of a second to
     /// ask again.
     ///
+    /// This is the **originator's** half of the bypass, and it is only half of
+    /// it. V.42 Appendix VI.2's NOTE reads the requirement as being on both
+    /// ends at once -- "Clause 9.3.1/V.9.2 requires that both the originating
+    /// and answering modems skip the V.42 detection phase if they both
+    /// indicate that V.42 is supported in the V.8 protocol octet or in the
+    /// V.92 short phase 1 signals" -- and an answerer that did not skip it
+    /// would sit in its detection phase swallowing this end's opening frames
+    /// until T400 ran out. [`Self::bypassing_detection`] is the other half.
+    ///
     /// It is a real cost if the far end turns out not to do V.42, though, so
     /// the patience is the same as for a detection phase that heard nothing.
     pub fn without_detection(mut self) -> Self {
         self.enter_negotiating();
         self.lapm.set_retransmissions(crate::lapm::UNCONFIRMED_N400);
+        self
+    }
+
+    /// The same for the answerer: no wait for an ODP, and no ADP
+    /// (V.92 9.2.5, 9.3.1).
+    ///
+    /// 9.2.5 is one sentence -- "If both modems have indicated LAPM
+    /// capability, the V.42 ODP/ADP exchange shall be bypassed" -- and 9.3.1
+    /// is the same sentence with V.92 capability added to it. What is bypassed
+    /// on this side, by 7.2.1.3, is the wait: the answerer would otherwise
+    /// send marks "until termination of the detection phase, receipt of the
+    /// ODP, or detection of the start of the protocol phase". Only the last of
+    /// those three is left, and it is already true, so the protocol phase
+    /// starts here and now.
+    ///
+    /// **An ODP that arrives anyway is still answered.** V.8 7.3 and 7.4 both
+    /// print the warning: "some existing implementations of V.8 may indicate
+    /// LAPM in prot0, but still require the ODP/ADP exchange to successfully
+    /// negotiate LAPM", and Appendix VI.2 says plainly that many answering
+    /// modems run the detection phase whatever V.8 said. A far end like that
+    /// hears this end's flags as nothing at all -- its detector is reading
+    /// characters, not frames -- and decides at T400 that there is no V.42
+    /// here. So a detector goes on running beside the protocol phase, and if
+    /// an ODP does turn up it gets Table 3's answer spliced between two
+    /// frames. It costs about 440 bits on the one call in a hundred that needs
+    /// it, and the call that needs it is the one that would otherwise have no
+    /// error control at all.
+    ///
+    /// The detector is dropped as soon as the far end proves it is past the
+    /// detection phase -- continuous flags or any LAPM frame, which is
+    /// 7.2.1.3's own list -- so nothing is scanning the line once a link is
+    /// up, and a stray DC1 in compressed data cannot start a pattern.
+    ///
+    /// This presumes LAPM was agreed, since that is the only thing that
+    /// licenses the bypass; it is not for an end that means to decline
+    /// ([`Self::declining`]).
+    ///
+    /// Patience is left alone, unlike [`Self::without_detection`]. The
+    /// originator cuts its N400 because it is about to send SABMEs into a
+    /// silence that may go on for ever; an answerer sends no SABME at all, so
+    /// the only thing a smaller N400 would shorten here is an established
+    /// link's own recovery (8.5.3), and this end has more reason to believe in
+    /// the far one than a detection phase would have given it.
+    pub fn bypassing_detection(mut self) -> Self {
+        self.enter_negotiating();
+        self.watch = Some(Box::new(Answerer::new(self.t400_ms(), Answer::ErrorControl)));
         self
     }
 
@@ -494,6 +560,13 @@ impl Stack {
         self.round_trip_ms = round_trip_ms;
         if !matches!(self.detect, Detect::Done) {
             self.detect = Detect::start(self.role, self.t400_ms(), self.declining);
+        }
+        // And the detector a bypass leaves running, which has the same T400
+        // and is on the same line. Rebuilt rather than adjusted because
+        // nothing can have reached it yet: these are builders, and the call
+        // has not started.
+        if self.watch.is_some() {
+            self.watch = Some(Box::new(Answerer::new(self.t400_ms(), Answer::ErrorControl)));
         }
         self
     }
@@ -751,8 +824,73 @@ impl Stack {
         self.lapm.disconnect();
     }
 
+    /// Suspend error correction: freeze the timers and change nothing else
+    /// (V.42 7.10).
+    ///
+    /// "The control function may instruct its error control function to
+    /// suspend the error correction procedure by issuing an L-SUSPEND request
+    /// primitive", and the NOTE says what for: "typically used to suspend the
+    /// error correction procedure during a retrain or the modem on hold
+    /// procedures defined in ITU-T Rec. V.92". Which is the whole point of it
+    /// here. A V.92 hold takes the line away for as long as the far end's
+    /// other call lasts, and a retrain takes it away for a second or two; in
+    /// both, every timer in this stack is counting a silence that means
+    /// nothing.
+    ///
+    /// What freezes is what 7.10.1 and 7.10.2 name: T400 while the detection
+    /// phase is running, and T401 once it is not. T402 and T403 are not
+    /// implemented (see [`crate::lapm`]), so they are not frozen either. The
+    /// XID exchange's own clock goes with T401, because 8.10.2 and 8.10.3 say
+    /// its timer *is* T401.
+    ///
+    /// Nothing is released, so there is nothing to establish again: the
+    /// sequence variables, the window, the unacknowledged frames and the
+    /// V.42bis or V.44 dictionaries are all exactly where they were. That is
+    /// the difference between a hold and a dropped call, and it is why this
+    /// exists rather than the caller simply dropping the stack. The
+    /// dictionaries especially: 5.6 re-initialises them on an establishment,
+    /// and an establishment is what a caller who rebuilt the stack would get.
+    ///
+    /// The line is the caller's business, not this one's. During a hold or a
+    /// retrain nothing is pulling bits out of [`Self::next_bit`], so nothing
+    /// goes out; a caller that keeps pulling while the carrier is gone is
+    /// throwing frames away, and freezing T401 means nothing will ask for them
+    /// again.
+    pub fn suspend(&mut self) {
+        self.suspended = true;
+        self.lapm.suspend();
+    }
+
+    /// Resume it (V.42 7.11): "unfreeze previously frozen timers".
+    ///
+    /// Each timer picks up with whatever it had left, so the far end has as
+    /// long to answer as it had before the line went away. T401 recovery
+    /// (8.5.3) then does the rest: if the far end moved on while this end was
+    /// away, the poll finds out what it is missing.
+    pub fn resume(&mut self) {
+        self.suspended = false;
+        self.lapm.resume();
+    }
+
+    /// Whether error correction is suspended.
+    pub fn suspended(&self) -> bool {
+        self.suspended
+    }
+
     /// Time passing, which is what drives every timer here.
+    ///
+    /// Suspension (7.10) is the absence of it.
     pub fn tick(&mut self, dt_ms: u32) {
+        if self.suspended {
+            // Each layer stops its own clocks: T400 and the XID exchange's are
+            // this one's, T401 is `lapm`'s, so `lapm.tick` is still called and
+            // still does nothing with the time it is given. What is not a
+            // timer carries on -- `drain` hands over what has already arrived
+            // -- because timers are all 7.10 freezes.
+            self.lapm.tick(dt_ms);
+            self.drain();
+            return;
+        }
         match self.phase {
             Phase::Detecting => {
                 let outcome = match &mut self.detect {
@@ -805,6 +943,15 @@ impl Stack {
             }
             Phase::Protocol | Phase::Transparent => {}
         }
+        // 7.2.1.3's own T400, still running behind a bypass. What it bounds is
+        // no longer the wait for an ODP -- this end stopped waiting before the
+        // call began -- but the far end's chance to show it is doing V.42 at
+        // all.
+        if let Some(watch) = self.watch.as_mut()
+            && watch.tick(dt_ms) == Outcome::TimedOut
+        {
+            self.bypass_failed();
+        }
         self.lapm.tick(dt_ms);
         self.drain();
     }
@@ -852,6 +999,17 @@ impl Stack {
             return true;
         }
         if self.encoder.is_empty() {
+            // Table 3's answer to an ODP that should never have arrived, put
+            // on the line between frames rather than through them. Between,
+            // because it is async characters and not HDLC: cutting into a
+            // frame would give the far end a check sequence failure instead of
+            // an answer, and cutting between two repetitions would break the
+            // adjacency 7.2.1.2 needs.
+            if let Some(watch) = self.watch.as_mut()
+                && watch.sending()
+            {
+                return watch.transmit();
+            }
             let mut queued = false;
             if !self.opened {
                 self.opened = true;
@@ -917,6 +1075,13 @@ impl Stack {
             self.unclaimed.push(bit);
             return;
         }
+        // The detector a bypass leaves running (7.2.1.3), which may put this
+        // stack into the transparent phase on this very bit -- and has then
+        // kept the bit itself, along with everything before it.
+        self.watch_bit(bit);
+        if self.phase == Phase::Transparent {
+            return;
+        }
         let Some(result) = self.decoder.feed(bit) else {
             return;
         };
@@ -935,7 +1100,61 @@ impl Stack {
             self.damaged += 1;
             return;
         };
+        // 7.2.1.3 ends the detection phase on "receipt of continuous flags, or
+        // of an LAPM or alternative procedure protocol frame". This is the
+        // second of those, and it is the stronger one: a far end that is
+        // sending frames is not about to send an ODP.
+        self.watch = None;
         self.dispatch(address, frame);
+    }
+
+    /// Feed the detector a bypass left running, and act on what it makes of
+    /// the line.
+    fn watch_bit(&mut self, bit: bool) {
+        let Some(watch) = self.watch.as_mut() else {
+            return;
+        };
+        let outcome = watch.receive(bit);
+        let sending = watch.sending();
+        match outcome {
+            // The far end skipped the detection phase as well, which is what
+            // 9.2.5 asked of it. There is nothing left to detect.
+            Outcome::ProtocolStarted => self.watch = None,
+            // It did not, and has now been answered. Once the last repetition
+            // is out the detector has done its one job.
+            Outcome::OriginatorDetected if !sending => self.watch = None,
+            // The far end's terminal is typing, so whatever V.8 said, there is
+            // no V.42 at the other end of this line.
+            Outcome::Text => {
+                self.heard_text = true;
+                self.bypass_failed();
+            }
+            _ => {}
+        }
+    }
+
+    /// The far end never showed any sign of V.42, so the bypass was taken on
+    /// the strength of something that was not true.
+    ///
+    /// 7.2.1.3's ending, which the bypass changes the start of and not the
+    /// finish: "If, after establishment of the physical connection, the ODP is
+    /// not observed within the period of T400 and the start of the protocol
+    /// establishment phase is not observed within the same period, then the
+    /// answerer shall decide that the originator is not capable of V.42
+    /// error-correcting operation and shall fall back to non-error-correcting
+    /// operation."
+    ///
+    /// Without this an answerer that bypassed would have no ending at all. It
+    /// never sends a SABME -- the originator does that -- so nothing here ever
+    /// gives up, [`Self::settled`] never comes true, and the terminal waits
+    /// for a CONNECT that is not coming.
+    fn bypass_failed(&mut self) {
+        if let Some(watch) = self.watch.as_mut() {
+            let heard = watch.take_heard();
+            self.unclaimed.extend(heard);
+        }
+        self.watch = None;
+        self.phase = Phase::Transparent;
     }
 
     fn dispatch(&mut self, address: Address, frame: Frame) {
@@ -2114,5 +2333,293 @@ mod tests {
         stack.take_received();
         send(&mut stack, b"password: ");
         assert_eq!(stack.take_received(), b"password: ");
+    }
+
+    /// Run two ends against each other, keeping every bit that crossed.
+    ///
+    /// The same channel as [`settle`], with the wire itself written down, for
+    /// the tests whose subject is what was *not* on it.
+    fn settle_recording(a: &mut Stack, b: &mut Stack, bits: usize) -> (Vec<bool>, Vec<bool>) {
+        let (mut from_a, mut from_b) = (Vec::new(), Vec::new());
+        for i in 0..bits {
+            let to_b = a.next_bit();
+            let to_a = b.next_bit();
+            from_a.push(to_b);
+            from_b.push(to_a);
+            b.feed_bit(to_b);
+            a.feed_bit(to_a);
+            if i % 160 == 0 {
+                a.tick(16);
+                b.tick(16);
+            }
+        }
+        (from_a, from_b)
+    }
+
+    /// The longest run of ONEs anywhere in a stream.
+    fn longest_run_of_ones(bits: &[bool]) -> usize {
+        let (mut best, mut run) = (0, 0);
+        for &bit in bits {
+            run = if bit { run + 1 } else { 0 };
+            best = best.max(run);
+        }
+        best
+    }
+
+    /// V.92 9.2.5: "If both modems have indicated LAPM capability, the V.42
+    /// ODP/ADP exchange shall be bypassed", and 9.3.1 says the same of a full
+    /// Phase 1 that settled both V.92 capability and LAPM. V.42 Appendix VI.2
+    /// reads that as binding on both ends at once, which is what this is: the
+    /// originator disables its detection phase (7.2.1.2) and the answerer
+    /// skips the wait (7.2.1.3), and the line carries HDLC from its first bit.
+    #[test]
+    fn two_ends_that_both_skip_detection_reach_lapm_with_no_odp_or_adp_on_the_wire() {
+        let mut a = Stack::new(Role::Originator, Params::default()).without_detection();
+        let mut b = Stack::new(Role::Answerer, Params::default()).bypassing_detection();
+        assert_eq!(a.phase(), Phase::Negotiating, "the originator waited");
+        assert_eq!(b.phase(), Phase::Negotiating, "the answerer waited");
+
+        let (from_a, from_b) = settle_recording(&mut a, &mut b, 20_000);
+        assert!(a.is_connected(), "the originator is {:?}", a.state());
+        assert!(b.is_connected(), "the answerer is {:?}", b.state());
+
+        // Every character of an ODP and of an ADP sits behind ONEs: 7.2.1.2
+        // separates the two DC1s by "8 to 16 ones" and Table 3 does the same
+        // for `E` and its type character. HDLC cannot produce eight in a row
+        // -- a flag holds six and zero insertion stops a frame at five -- so
+        // a run of eight is the mark of a detection pattern, and there is not
+        // one in either direction.
+        assert!(
+            longest_run_of_ones(&from_a) < 8,
+            "{} ONEs in a row from the originator: an ODP crossed",
+            longest_run_of_ones(&from_a)
+        );
+        assert!(
+            longest_run_of_ones(&from_b) < 8,
+            "{} ONEs in a row from the answerer: an ADP crossed",
+            longest_run_of_ones(&from_b)
+        );
+        assert_eq!(a.far_answer(), None, "the originator was answered by something");
+
+        a.send(b"login: cactus\r\n");
+        settle(&mut a, &mut b, 20_000, |_, bit| bit);
+        assert_eq!(b.take_received(), b"login: cactus\r\n");
+    }
+
+    /// V.8 7.3 and 7.4, both in the same words: "some existing implementations
+    /// of V.8 may indicate LAPM in prot0, but still require the ODP/ADP
+    /// exchange to successfully negotiate LAPM". V.42 Appendix VI.2 adds that
+    /// many answering modems run the detection phase whatever V.8 said.
+    ///
+    /// Such a far end hears this end's opening flags as nothing at all, since
+    /// its detector is reading characters and not frames, and at T400 decides
+    /// there is no V.42 here. Answering its ODP is the only thing that stops
+    /// that, and it costs one burst of pattern.
+    #[test]
+    fn an_answerer_that_skips_detection_still_answers_an_odp() {
+        let mut a = Stack::new(Role::Originator, Params::default());
+        let mut b = Stack::new(Role::Answerer, Params::default()).bypassing_detection();
+        assert_eq!(a.phase(), Phase::Detecting, "the far end is the one that asks");
+
+        let (_, from_b) = settle_recording(&mut a, &mut b, 40_000);
+        assert_eq!(
+            a.far_answer(),
+            Some(Answer::ErrorControl),
+            "the ODP went unanswered, so the far end fell back to no error control"
+        );
+        assert!(a.is_connected(), "the originator is {:?}", a.state());
+        assert!(b.is_connected(), "the answerer is {:?}", b.state());
+
+        // The answer really was async characters on the line, and not HDLC
+        // that happened to satisfy the detector.
+        assert!(longest_run_of_ones(&from_b) >= 8, "Table 3's fill never went out");
+
+        a.send(b"login: cactus\r\n");
+        settle(&mut a, &mut b, 20_000, |_, bit| bit);
+        assert_eq!(b.take_received(), b"login: cactus\r\n");
+    }
+
+    /// V.42 7.2.1.3's own ending, which the bypass changes the start of and
+    /// not the finish: an answerer that sees neither an ODP nor the start of
+    /// the protocol phase within T400 "shall decide that the originator is not
+    /// capable of V.42 error-correcting operation and shall fall back to
+    /// non-error-correcting operation".
+    ///
+    /// Without that a bypassed answerer would have no ending at all. It never
+    /// sends a SABME, so nothing in it ever gives up, and the terminal would
+    /// wait for a CONNECT that is not coming.
+    #[test]
+    fn a_bypassed_answerer_still_falls_back_when_the_far_end_does_no_v42() {
+        let mut b = Stack::new(Role::Answerer, Params::default()).bypassing_detection();
+        // A far end that took the line and said nothing on it.
+        for _ in 0..100 {
+            for _ in 0..4_000 {
+                b.next_bit();
+                b.feed_bit(true);
+            }
+            b.tick(100);
+        }
+        assert_eq!(b.phase(), Phase::Transparent);
+        assert!(b.settled(), "the terminal would still be waiting for a CONNECT");
+    }
+
+    /// V.42 7.10: "the error control function shall freeze the appropriate
+    /// timers", which is T401 here (7.10.2; T402 and T403 are not
+    /// implemented). The NOTE says what for: "typically used to suspend the
+    /// error correction procedure during a retrain or the modem on hold
+    /// procedures defined in ITU-T Rec. V.92".
+    ///
+    /// A V.92 hold can take the line away for minutes. With T401 running, the
+    /// first frame outstanding when it went would be polled for, N400 times,
+    /// and then the link would be released -- so the call would come back from
+    /// its hold to no error control and no dictionaries.
+    #[test]
+    fn a_suspended_link_keeps_its_timers_still_through_sixty_seconds_of_nothing() {
+        let (mut a, mut b) = pair();
+        settle(&mut a, &mut b, 20_000, |_, bit| bit);
+        assert!(a.is_connected() && b.is_connected(), "the link never came up");
+
+        // One frame on the line with nothing at the far end to acknowledge it,
+        // which is exactly the state a hold interrupts.
+        a.send(b"are you still there\r\n");
+        for _ in 0..4_000 {
+            a.next_bit();
+        }
+        assert!(!a.take_log().is_empty(), "nothing went out, so nothing is outstanding");
+
+        a.suspend();
+        assert!(a.suspended());
+        for _ in 0..600 {
+            a.tick(100);
+        }
+        assert!(a.is_connected(), "the link was released while suspended: {:?}", a.state());
+        for _ in 0..4_000 {
+            a.next_bit();
+        }
+        assert!(
+            a.take_log().is_empty(),
+            "T401 fired while suspended, so something was sent to a line that was not there"
+        );
+
+        // Frozen and not cancelled: what was left of T401 is still there, and
+        // it fires once time starts again (8.5.3's poll).
+        a.resume();
+        assert!(!a.suspended());
+        for _ in 0..80 {
+            a.tick(100);
+        }
+        for _ in 0..4_000 {
+            a.next_bit();
+        }
+        assert!(!a.take_log().is_empty(), "T401 never came back");
+    }
+
+    /// V.42 7.11 unfreezes the timers and nothing else: the link was never
+    /// released, so 8.2.4.3 discarded nothing, V(S) and V(R) are where they
+    /// were, and 5.6's C-INIT -- which fires on an establishment -- never
+    /// happened. That last is the one that cannot be recovered from: a
+    /// dictionary built from the data that went past only agrees with the far
+    /// end's because both saw the same data, and an end that started again on
+    /// its own would read every codeword after it as something else.
+    #[test]
+    fn after_resume_the_link_carries_on_with_the_same_sequence_numbers_and_dictionary() {
+        use crate::frame::Address;
+
+        let (mut a, mut b) = negotiated_pair();
+        settle(&mut a, &mut b, 40_000, |_, bit| bit);
+        assert!(a.is_connected() && b.is_connected(), "the link never came up");
+        assert!(a.compressing() && b.compressing(), "compression was not negotiated");
+
+        // Enough of the same phrases for both dictionaries to be full of them.
+        let block = |from: usize| {
+            let mut out = Vec::new();
+            for i in from..from + 200 {
+                out.extend_from_slice(format!("the same words over and over, line {i}\r\n").as_bytes());
+            }
+            out
+        };
+        let before = block(0);
+        a.send(&before);
+        settle(&mut a, &mut b, 200_000, |_, bit| bit);
+        assert_eq!(b.take_received(), before, "what arrived before the hold was wrong");
+        assert_eq!(b.undecodable_streams(), 0, "a compressed stream would not decode");
+
+        /// The N(S) of every I frame this end has put on the line since the
+        /// log was last taken, in order.
+        fn outbound_ns(stack: &mut Stack, from: Role) -> Vec<u8> {
+            let receiver = match from {
+                Role::Originator => Role::Answerer,
+                Role::Answerer => Role::Originator,
+            };
+            stack
+                .take_log()
+                .iter()
+                .filter(|c| c.outbound)
+                .filter_map(|c| Frame::decode(&c.body, receiver).ok())
+                .filter_map(|(_, frame): (Address, Frame)| match frame {
+                    Frame::I { ns, .. } => Some(ns),
+                    _ => None,
+                })
+                .collect()
+        }
+        let last = *outbound_ns(&mut a, Role::Originator).last().expect("no I frame went out");
+        assert!(last + 1 < crate::frame::MODULUS, "V(S) wrapped, and the check below cannot tell");
+
+        // A second lot, cut off partway: a hold falls where it falls, and
+        // where it usually falls is with frames on the line that nothing has
+        // acknowledged. That is the case the freeze is for -- with T401
+        // running, this end polls into a line that is not there, N400 times,
+        // and releases the link that the hold was supposed to preserve.
+        let during = block(1_000);
+        a.send(&during);
+        settle(&mut a, &mut b, 4_000, |_, bit| bit);
+        let partial = b.take_received().len();
+        assert!(partial < during.len(), "all {partial} of it crossed, so nothing was outstanding");
+
+        // The line goes away for ten minutes, which is a modem-on-hold: V.92
+        // Table 34's T1 runs to a quarter of an hour, and the whole point of
+        // the feature is that the DTE's other call is a real telephone call.
+        // Longer than N400 attempts at a growing T401 add up to, so without
+        // 7.10 the link is released somewhere in the middle of it.
+        a.suspend();
+        b.suspend();
+        for _ in 0..6_000 {
+            a.tick(100);
+            b.tick(100);
+        }
+        a.resume();
+        b.resume();
+        assert!(
+            a.is_connected() && b.is_connected(),
+            "the link did not survive the hold: {:?} and {:?}",
+            a.state(),
+            b.state()
+        );
+
+        let after = block(2_000);
+        a.send(&after);
+        settle(&mut a, &mut b, 400_000, |_, bit| bit);
+        let mut expected = during[partial..].to_vec();
+        expected.extend_from_slice(&after);
+        assert_eq!(
+            b.take_received(),
+            expected,
+            "what arrived after the hold was not what was sent, so the dictionaries came apart"
+        );
+        assert_eq!(b.undecodable_streams(), 0, "a compressed stream would not decode");
+
+        // Counting on from where it left off. An establishment would have put
+        // V(S) back to 0 (8.3.1) and discarded what was unacknowledged
+        // (8.2.4.3), and 5.6 would have emptied both dictionaries with it.
+        let sent = outbound_ns(&mut a, Role::Originator);
+        assert_ne!(
+            sent.first().copied(),
+            Some(0),
+            "V(S) went back to the beginning, so the link re-established"
+        );
+        assert!(
+            sent.contains(&(last + 1)),
+            "the sequence never carried on past {last}: {sent:?}"
+        );
     }
 }

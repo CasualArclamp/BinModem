@@ -602,7 +602,7 @@ not listed must not be touched.
   - `a_cm_carrying_0x55_as_an_extension_octet_is_not_a_qc`.
   - `a_qc_whose_two_copies_differ_is_not_accepted`.
 
-#### V92-08: V.42: skipping the detection phase at both ends, and suspend and resume (S)
+#### V92-08: V.42: skipping the detection phase at both ends, and suspend and resume (M)
 
 - **Depends on:** none.
 - **Clauses:** V.92 9.2.5, 9.3.1; V.42 7.2.1.2, 7.2.1.3, 7.10, 7.11, Appendix VI.2; V.8 7.3/7.4 NOTE.
@@ -613,14 +613,28 @@ not listed must not be touched.
     the start of the protocol phase; an ODP that does arrive anyway is still answered with an ADP, because
     V.8 itself warns that some equipment declares LAPM and still needs the detection phase. Document
     `without_detection()` as the originator form.
+  - The ADP is answered by a whole `detect::Answerer` kept running beside the protocol phase, whose
+    pattern `next_bit` splices in **between** frames -- never into one, and never cut between two
+    repetitions, which 7.2.1.2's "two adjacent ADPs" forbids. `Answerer::sending()` is what tells a caller
+    with frames of its own which of the two the next bit is. The detector is dropped on continuous flags or
+    on any decoded LAPM frame, so nothing scans an established link.
+  - 7.2.1.3's own T400 keeps running behind the bypass, and on expiry the stack falls to
+    `Phase::Transparent` with the heard bits kept for the terminal. A bypassed answerer otherwise has no
+    ending at all: it sends no SABME, so nothing in it ever gives up and `settled()` never comes true.
   - `suspend()` and `resume()`: freeze T400 during detection and T401 once connected (T402 and T403 are not
     implemented), without releasing the link, so sequence numbers, windows and the V.42 bis and V.44
-    dictionaries survive a hold or a long retrain.
-- **Tests** (inline in `stack.rs`):
-  - `two_ends_that_both_skip_detection_reach_lapm_with_no_odp_or_adp_on_the_wire`.
+    dictionaries survive a hold or a long retrain. Each layer freezes its own clocks, as 7.10.1 and 7.10.2
+    split them: T400 and the XID exchange's in `stack.rs`, T401 in `Lapm::suspend`.
+- **Tests** (inline in `stack.rs`, except the last two):
+  - `two_ends_that_both_skip_detection_reach_lapm_with_no_odp_or_adp_on_the_wire` - proved by the wire, as
+    the longest run of ONEs in each direction: every ODP and ADP character sits behind "8 to 16 ones", and
+    HDLC cannot produce eight.
   - `an_answerer_that_skips_detection_still_answers_an_odp`.
+  - `a_bypassed_answerer_still_falls_back_when_the_far_end_does_no_v42`.
   - `a_suspended_link_keeps_its_timers_still_through_sixty_seconds_of_nothing`.
-  - `after_resume_the_link_carries_on_with_the_same_sequence_numbers_and_dictionary`.
+  - `after_resume_the_link_carries_on_with_the_same_sequence_numbers_and_dictionary` - across a ten-minute
+    hold with frames outstanding, which is longer than N400 attempts at a growing T401 add up to.
+  - `an_answerer_says_whether_its_pattern_still_has_bits_to_go`, in `detect.rs`.
   - `ec/tests/loopback.rs` and the modem-crate call tests pass unchanged.
 
 ### Wave 2: codecs, signal blocks and the Phase 2 flags
@@ -2857,3 +2871,16 @@ bounded separately by named constants carrying their measured values. The median
 convention for a statistic a jitter buffer disturbs (memory `voip-jitter-slips`). The entry also gained
 the untrained-clock behaviour, which the review found the doc promising and the code not delivering, and
 the three tests the package had added beyond the two the plan named.
+
+**V92-08: a bypassed answerer needs an ending, and the entry did not give it one.** The description named
+the three ways into the protocol phase and none of the ways out. That is fine for the originator, which
+sends the SABME and therefore gives up on its own N400; an answerer sends nothing, so with the detection
+phase skipped there is no clock in it at all, `settled()` never comes true and `Modem::announce_connect`
+waits for ever on a far end that indicated LAPM and does not do it - which V.8 7.3 says exists. The
+answer was already in the clause the package was implementing: 7.2.1.3's T400 ends the answerer's wait
+whether or not an ODP came, and the bypass changes when that wait starts, not that it ends. So the
+detector the entry asks for anyway - the one that answers a stray ODP - carries the timer too, and its
+expiry drops the stack to `Phase::Transparent` with the heard bits kept for the terminal, exactly as a
+detection phase that timed out does. The entry now says so and names the test. The package is **M** and
+not **S**: 604 lines across the three files, over half of them the clause quotations the house rule asks
+for and the tests.
