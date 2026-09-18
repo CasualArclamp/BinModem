@@ -991,6 +991,45 @@ mod tests {
             }
         }
         assert_eq!(heard(&stream), vec![], "no quick connect anywhere in a CM");
+
+        // That stream is easy, because its two 0x55s are eighty bits apart
+        // and the window needs thirty. The hard one is a CM carrying 0x55
+        // twice, three octets apart, with the same octet behind each: that
+        // puts two framed synchronisations exactly thirty bits apart with a
+        // well-formed information frame after each, which is everything bits
+        // 10:59 of a QC1a hold. All that is left to tell them apart is bits
+        // 0:9 and 30:39, and in a CM those hold framed octets, because 5/V.8
+        // puts the preamble in front of a sequence and nowhere inside it.
+        let category = octets[1];
+        let body = Qc::qc1a(Uqts::from_ucode(70).unwrap(), true).octet();
+        let mut stream = Vec::new();
+        for _ in 0..3 {
+            for &octet in &[category, SYNC_QC, body, category, SYNC_QC, body] {
+                stream.extend(frame(octet));
+            }
+        }
+        assert_eq!(
+            text(&stream[..10]),
+            text(&frame(category)),
+            "a framed octet where a QC has its ten ONEs"
+        );
+        assert_eq!(text(&stream[10..20]), text(&frame(SYNC_QC)), "and the synchronisation behind it");
+        assert_eq!(heard(&stream), vec![], "ten ONEs, and nothing else, is what marks a QC");
+    }
+
+    #[test]
+    fn every_bit_of_the_preamble_and_both_synchronisations_is_required() {
+        // The other half of the anchor, swept rather than argued. Tables 2, 4,
+        // 11 and 13 print bits 0:9 and 30:39 as ten ONEs and bits 10:19 and
+        // 40:49 as 0101010101, and a receiver that let any one of those forty
+        // bits go would be back to hunting for 0x55 octets in a stream that is
+        // full of them.
+        let qc = Qc::qc1a(Uqts::from_ucode(70).unwrap(), true);
+        for position in (0..20).chain(30..50) {
+            let mut bits = qc.bits();
+            bits[position] = !bits[position];
+            assert_eq!(heard(&bits), vec![], "bit {position} of the preamble or synchronisation");
+        }
     }
 
     #[test]
