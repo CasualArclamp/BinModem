@@ -201,7 +201,9 @@ impl Network {
         }
     }
 
-    /// Each way's delay, in seconds of line.
+    /// Each way's delay, in seconds of line: the older spelling of
+    /// `with_delays`, which sets both legs at once and so replaces whatever
+    /// that gave either of them.
     pub fn with_delay(self, seconds: f64, _fs: f64) -> Self {
         self.with_delays(seconds, seconds)
     }
@@ -257,7 +259,9 @@ impl Network {
         self
     }
 
-    /// A digital pad of `db` on the downstream.
+    /// A digital pad of `db` on the downstream, and none on the upstream: the
+    /// older spelling of `with_pads`, so it takes an upstream pad off again
+    /// rather than leaving it where it was.
     pub fn with_pad(self, db: f64) -> Self {
         self.with_pads(db, 0.0)
     }
@@ -311,8 +315,9 @@ impl Network {
         self
     }
 
-    /// A downstream slip every `seconds`: twenty milliseconds made up if
-    /// `inserted`, lost otherwise.
+    /// A downstream slip every `seconds`: a slip's worth of audio made up if
+    /// `inserted`, lost otherwise. The upstream keeps whatever `with_slips_in`
+    /// gave it.
     pub fn with_slips(self, seconds: f64, inserted: bool) -> Self {
         self.with_slips_in(Direction::Down, seconds, inserted)
     }
@@ -338,7 +343,8 @@ impl Network {
         self
     }
 
-    /// One downstream slip, `seconds` into the call.
+    /// One downstream slip, `seconds` into the call, leaving the upstream's
+    /// own schedule where it was.
     pub fn with_slip_at(self, seconds: f64, inserted: bool) -> Self {
         self.with_slip_at_in(Direction::Down, seconds, inserted)
     }
