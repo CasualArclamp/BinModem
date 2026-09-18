@@ -415,7 +415,8 @@ pub struct Qc {
     pub lapm: bool,
     /// Bits 24:28. The kind decides which of the two layouts belongs here;
     /// the constructors pair them, and [`Qc::from_octet`] never returns a
-    /// mismatched pair.
+    /// mismatched pair. A struct literal can still cross the two, which
+    /// [`Qc::consistent`] is for.
     pub field: Field,
 }
 
@@ -440,6 +441,26 @@ impl Qc {
         Self { kind: Kind::Qca1d, lapm, field: Field::Level(level) }
     }
 
+    /// Whether the field is the one this kind's table defines.
+    ///
+    /// The four constructors above pair them and [`Qc::from_octet`] never
+    /// returns a crossed pair, but the fields are public -- as the plan has
+    /// them, and as `crate::Menu`'s are -- so a struct literal can cross
+    /// them. That is worth a name because a crossed pair is not a malformed
+    /// sequence but a well-formed one saying something else: Tables 2 and 4
+    /// put W at `b3` and X at `b5` where Tables 11 and 13 have zeros, so
+    /// `Qc { kind: Kind::Qc1a, lapm: true, field: Field::Level(Minus18) }`
+    /// encodes as `0xC0 | 0x04` = `0xC4`, which reads back as QC1a asking for
+    /// QTS at Ucode 66. Nothing on the line can tell the two apart, so a
+    /// caller that builds one by hand checks this first; [`Qc::octet`]
+    /// asserts it in debug builds.
+    pub fn consistent(&self) -> bool {
+        matches!(
+            (self.kind.digital(), self.field),
+            (false, Field::Uqts(_)) | (true, Field::Level(_))
+        )
+    }
+
     /// The information octet, bits 21 to 28, as V.8 frames one.
     ///
     /// 5.1/V.8 lays a framed octet out as `start-bit (0) b0 b1 b2 b3 0 b5 b6
@@ -448,6 +469,7 @@ impl Qc {
     /// from `lapm` and bits 24 to 28 from the field -- and `b4`, which is bit
     /// 25, is zero in both field layouts.
     pub fn octet(&self) -> u8 {
+        debug_assert!(self.consistent(), "the field is not the one this kind's table defines");
         self.kind.octet_bits() | (u8::from(self.lapm) << 2) | self.field.octet_bits()
     }
 
@@ -1123,6 +1145,32 @@ mod tests {
         for pattern in 0..16u8 {
             let qc = Qc::qc1a(Uqts::from_pattern(pattern).unwrap(), false);
             assert_eq!(Qc::from_octet(qc.octet()), Some(qc));
+        }
+    }
+
+    #[test]
+    fn a_kind_and_a_field_from_different_tables_are_not_a_sequence() {
+        // Every way into this module pairs the two: the four constructors by
+        // construction, from_octet by reading bit 21 before it reads bits
+        // 24:28.
+        for qc in all_sequences() {
+            assert!(qc.consistent(), "{qc:?}");
+            let read_back = Qc::from_octet(qc.octet()).expect("reads back");
+            assert!(read_back.consistent(), "{read_back:?} came out of from_octet");
+        }
+        // A struct literal is the one way that does not, and what it makes is
+        // not a malformed sequence but a well-formed one saying something
+        // else -- which is why it is worth a predicate rather than a comment.
+        // Their octets are deliberately not taken here: octet() asserts on
+        // them in debug builds, which is the point.
+        let crossed = [
+            Qc { kind: Kind::Qc1a, lapm: true, field: Field::Level(AnspcmLevel::Minus18) },
+            Qc { kind: Kind::Qca1a, lapm: false, field: Field::Level(AnspcmLevel::Minus9_5) },
+            Qc { kind: Kind::Qc1d, lapm: true, field: Field::Uqts(Uqts::Cleardown) },
+            Qc { kind: Kind::Qca1d, lapm: false, field: Field::Uqts(Uqts::from_ucode(61).unwrap()) },
+        ];
+        for qc in crossed {
+            assert!(!qc.consistent(), "{qc:?} pairs one table's kind with the other's field");
         }
     }
 
