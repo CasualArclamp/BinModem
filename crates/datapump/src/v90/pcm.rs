@@ -256,7 +256,10 @@ pub struct SymbolClock {
     /// since the receiver's first. Only a symbol once [`Self::trained`]:
     /// before that it is where the next half-symbol sample is due.
     pub at: f64,
-    /// The receiver's count of that symbol.
+    /// The receiver's count of that symbol, as [`Symbol::raw`] counts it and
+    /// not as [`Symbol::index`] does: the frame offset is not added. Pair it
+    /// with `raw`, or a slip that has moved the frames puts the two out by up
+    /// to [`INTERVALS`] - 1 symbols.
     pub index: u64,
     /// Whether the receiver has trained. Until it has, nothing has been read
     /// off the line that an upstream may follow: [`Self::period`] is held at
