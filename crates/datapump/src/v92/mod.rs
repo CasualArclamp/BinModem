@@ -274,13 +274,22 @@ pub const B1U_FRAMES: usize = 48;
 /// with one symbol more when CPd bit 29 asks for it.
 pub const E2U_FRAMES: usize = 1;
 
-/// Rf is "384T" and Rf-bar "24T" (9.9.1.1.1, 9.9.1.2.2), a twelve-symbol block
-/// of data-mode codewords whose signs run "+ + - - + + - - + + - -" (8.8.4).
+/// Rf is "384T" and Rf-bar "24T" (9.9.1.1.1, 9.9.1.2.2). Both repeat one
+/// twelve-symbol sequence of "the PCM codewords with the sign pattern
+/// + + - - + + - - + + - -", left-most sign first (8.8.4).
+///
+/// Rf is the *digital* modem's signal, so it counts in downstream data frames:
+/// the block is two whole [`crate::v90::INTERVALS`] frames, and 9.9.1.1.1 has
+/// it "begin on the boundary of a data frame", which 384 keeps.
 pub const RF_SYMBOLS: usize = 384;
-/// Rf's sign period, four symbols, which is not commensurate with the
-/// six-symbol frame: only the reversal tells Rf from Rf-bar.
+/// Rf's sign pattern repeats every four symbols. Four and the downstream
+/// frame's six meet at twelve, which is why the block is twelve symbols and
+/// not six.
 pub const RF_SIGN_PERIOD: usize = 4;
-/// Rf-bar, "exactly 2 repetitions" of the twelve-symbol block.
+/// Rf-bar, "2 repetitions of the 12-symbol sequence" carrying the same
+/// codewords with the pattern inverted to "- - + + - - + + - - + +" (8.8.4).
+/// Inverting a pattern of period four is the same as shifting it by two, so
+/// what marks the reversal is the run of four equal signs at the join.
 pub const RF_BAR_SYMBOLS: usize = 24;
 
 /// TR5 and TR6, the watchdog over everything from Phase 2 to data mode: B1u
@@ -1048,13 +1057,44 @@ mod tests {
         assert_eq!((B1U_FRAMES, E2U_FRAMES), (48, 1));
         // 8.5.6 and 8.5.7: Su and TRN1u are whole numbers of twelve symbols,
         // and so are Ru and its bar, which are six-symbol blocks.
-        for symbols in [RU_SYMBOLS, RU_BAR_SYMBOLS, SU_SYMBOLS, TRN1U_MINIMUM, RF_SYMBOLS, RF_BAR_SYMBOLS] {
+        for symbols in [RU_SYMBOLS, RU_BAR_SYMBOLS, SU_SYMBOLS, TRN1U_MINIMUM] {
             assert!(symbols.is_multiple_of(UP_INTERVALS), "{symbols} symbols");
         }
         // B1u is 48 x 12 = 576 symbols, against B1d's 48 x 6 = 288.
         assert_eq!(B1U_FRAMES * UP_INTERVALS, 576);
-        // Rf's four-symbol sign cycle and the six-symbol downstream frame are
-        // not commensurate, which is why only the reversal identifies Rf-bar.
-        assert_ne!(RF_SIGN_PERIOD.max(CONSTELLATION_FRAME) % RF_SIGN_PERIOD.min(CONSTELLATION_FRAME), 0);
+
+        // Rf is the digital modem's, so it counts in downstream data frames:
+        // 8.8.4's block is two of them, and 9.9.1.1.1 has Rf begin on a data
+        // frame boundary, which both lengths keep.
+        let block = 2 * crate::v90::INTERVALS;
+        assert_eq!(block, 12);
+        for symbols in [RF_SYMBOLS, RF_BAR_SYMBOLS] {
+            assert!(symbols.is_multiple_of(block), "{symbols} symbols");
+        }
+        assert_eq!(RF_BAR_SYMBOLS / block, 2, "Rf-bar is 2 repetitions of the block");
+        // The two sign patterns 8.8.4 prints, left-most sign first. Rf-bar's
+        // is Rf's inverted, which for a pattern of period four is the same as
+        // a shift by two -- so nothing inside either one tells them apart, and
+        // it is the run of four equal signs at the join that marks the
+        // reversal.
+        let rf: [i8; 12] = [1, 1, -1, -1, 1, 1, -1, -1, 1, 1, -1, -1];
+        let rf_bar: [i8; 12] = [-1, -1, 1, 1, -1, -1, 1, 1, -1, -1, 1, 1];
+        for i in 0..block {
+            assert_eq!(rf_bar[i], -rf[i], "symbol {i} is inverted");
+            assert_eq!(rf[(i + RF_SIGN_PERIOD) % block], rf[i], "symbol {i} repeats at four");
+            assert_eq!(rf_bar[i], rf[(i + 2) % block], "symbol {i} is a two-symbol shift");
+        }
+        let longest_run = |signs: &[i8]| {
+            signs
+                .windows(2)
+                .fold((1usize, 1usize), |(best, run), pair| {
+                    let run = if pair[0] == pair[1] { run + 1 } else { 1 };
+                    (best.max(run), run)
+                })
+                .0
+        };
+        assert_eq!(longest_run(&rf), 2, "no more than two alike inside Rf");
+        let join: Vec<i8> = rf.iter().chain(&rf_bar).copied().collect();
+        assert_eq!(longest_run(&join), 4, "four alike where Rf turns into Rf-bar");
     }
 }
