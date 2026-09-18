@@ -221,6 +221,18 @@ impl Jd {
 
 /// The DIL descriptor (Table 12/V.90): what the analogue modem asks the
 /// digital modem to send so that it can learn the route (8.4.1).
+///
+/// Table 20/V.92 adds an upstream rate mask to the same descriptor, and that
+/// mask is deliberately **not** a field here. It travels as an argument to
+/// [`Descriptor::to_bits_in`], as the second half of what
+/// [`Descriptor::from_bits_in`] returns, and out of a finder through
+/// [`DescriptorFinder::upstream_rates`]. A field would have been the tidier
+/// reading, but `Descriptor` derives no `Default` and is built by struct
+/// literal in `v90::dil::design` and in `tests/dil_sounds.rs`, neither of
+/// which V92-03 may edit; the mask is a property of the descriptor's
+/// *carriage* rather than of the DIL it describes, so a parameter says the
+/// same thing. Anything that reads a V.92 descriptor must therefore take the
+/// mask from beside it, not from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Descriptor {
     /// SP, 1 to 128 bits: which sign each symbol of a segment has, the first
@@ -780,6 +792,12 @@ fn cp_length(shape: Shape, bits: &[bool]) -> usize {
 }
 
 /// Finds Ja's DIL descriptors.
+///
+/// Under [`Layout::V92`] each descriptor brings an upstream rate mask, which
+/// is no part of [`Descriptor`] (see its doc): [`Self::feed`] reports the
+/// descriptor and puts the mask where [`Self::upstream_rates`] can be asked
+/// for it. Read it after the feed that reported the descriptor it belongs
+/// to; the next descriptor found replaces it.
 #[derive(Debug, Clone)]
 pub struct DescriptorFinder {
     finder: Finder<(Descriptor, Option<u32>)>,
@@ -1319,13 +1337,16 @@ mod tests {
     }
 
     /// Ja is "24 binary ones followed by repetitions of the DIL descriptor"
-    /// (8.5.4), and the rate mask rides along with each one.
+    /// (8.5.4), and the rate mask rides along with each one. The mask is no
+    /// field of [`Descriptor`], so the accessor beside `feed` is the only way
+    /// to it, and it must name the descriptor just reported rather than the
+    /// first one seen: the Ja of a later training carries a mask of its own.
     #[test]
     fn a_ja_descriptor_behind_its_preamble_brings_its_upstream_rate_mask() {
         let d = conexant();
-        let rates = 0x7_ffff & !(1 << 7);
+        let masks = [0x7_ffff & !(1 << 7), 0x5_0003];
         let mut stream = vec![true; 24];
-        for _ in 0..2 {
+        for rates in masks {
             stream.extend(d.to_bits_in(Some(rates)));
         }
         let mut finder = DescriptorFinder::v92();
@@ -1335,7 +1356,7 @@ mod tests {
                 found.push((got, finder.upstream_rates()));
             }
         }
-        assert_eq!(found, vec![(d.clone(), Some(rates)); 2]);
+        assert_eq!(found, vec![(d.clone(), Some(masks[0])), (d.clone(), Some(masks[1]))]);
         assert_eq!(stream.len() % JA_UNIT_BITS, 0, "and Ja is a whole number of twelve-bit units");
         // The same descriptor in V.90's layout ends differently and carries
         // no mask at all.
