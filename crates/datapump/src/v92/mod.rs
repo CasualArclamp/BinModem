@@ -333,6 +333,14 @@ pub fn to_signed_q(value: f64, width: u32, fraction: u32) -> u32 {
 /// printed range (see [`unsigned_q`]) it would be raw / 131 072.
 pub const GAIN_SCALE: f64 = 262_144.0;
 
+/// The largest G a CPd can carry. The field is sixteen bits wide, so 4G stops
+/// just short of 1 and the top value 0xFFFF is 65 535 / [`GAIN_SCALE`] --
+/// 0.249 996 under the reading fixed here, half of what an unwary reader of
+/// "4 x G" might assume the range to be (Table 30, bits 35:50). It is derived
+/// from `GAIN_SCALE` so that flipping the [`unsigned_q`] reading moves this
+/// too.
+pub const GAIN_LARGEST: f64 = u16::MAX as f64 / GAIN_SCALE;
+
 /// G from CPd bits 35:50.
 pub fn gain_from_4g(raw: u16) -> f64 {
     f64::from(raw) / GAIN_SCALE
@@ -340,6 +348,11 @@ pub fn gain_from_4g(raw: u16) -> f64 {
 
 /// CPd bits 35:50 from G. Table 30 requires 4 x G > 0, so a gain that rounds
 /// to nothing is sent as the smallest step instead of as zero.
+///
+/// A gain above [`GAIN_LARGEST`] has no field to go in and is clamped to
+/// 0xFFFF, which would put a quieter modem on the wire than the design asked
+/// for. [`Parameters::fits`] refuses that before it reaches here, so the clamp
+/// only ever catches rounding at the very top of the range.
 pub fn four_g_from_gain(gain: f64) -> u16 {
     (gain * GAIN_SCALE).round().clamp(1.0, f64::from(u16::MAX)) as u16
 }
@@ -519,6 +532,9 @@ impl Parameters {
         }
         if !self.gain.is_finite() || self.gain <= 0.0 {
             return Err("the gain is not above zero");
+        }
+        if self.gain > GAIN_LARGEST {
+            return Err("the gain is larger than cpd can carry");
         }
         if self.moduli.contains(&0) {
             return Err("an interval has no modulus");
@@ -769,6 +785,12 @@ mod tests {
         assert_eq!(to_signed_q(-9.0, 5, 2), 0x10);
         assert_eq!(four_g_from_gain(0.0), 1);
         assert_eq!(four_g_from_gain(1.0), u16::MAX);
+        // Sixteen bits of 4G put the top of the range just under a quarter,
+        // and it round-trips there.
+        assert_eq!(gain_from_4g(u16::MAX), GAIN_LARGEST);
+        assert_eq!(four_g_from_gain(GAIN_LARGEST), u16::MAX);
+        assert!((gain_from_4g(u16::MAX) - 0.25).abs() < 1e-5, "4G stops just short of one");
+        assert!(gain_from_4g(u16::MAX) < 0.25);
     }
 
     /// Table 18 bits 18:24: the MD the analogue modem sends, "in steps of
@@ -926,6 +948,15 @@ mod tests {
         broken = params.clone();
         broken.gain = 0.0;
         assert!(broken.fits().is_err(), "4G > 0");
+        // And the other end of that field: 4G is sixteen bits, so a design
+        // asking for a third of a volt has nowhere to put it and would be
+        // clamped down to 0.249 996 without a word.
+        broken = params.clone();
+        broken.gain = 0.30;
+        assert_eq!(broken.fits(), Err("the gain is larger than cpd can carry"));
+        assert_eq!(four_g_from_gain(0.30), u16::MAX, "what the clamp would have done");
+        broken.gain = GAIN_LARGEST;
+        assert_eq!(broken.fits(), Ok(()), "the top of the field is still legal");
         broken = params.clone();
         broken.moduli[5] = 0;
         assert!(broken.fits().is_err());
