@@ -334,27 +334,34 @@ not listed must not be touched.
   - `the_filter_limits_decode_from_info1a` - codes 0..3 give the tabled Ltot and Lmax.
   - `deadlines_report_the_earliest_that_has_passed`.
 
-#### V92-02: The V.92 INFO sequences and the MH frame (M)
+#### V92-02: The V.92 INFO sequences and the MH frame (L)
 
 - **Depends on:** none.
 - **Clauses:** 8.4, 8.4.1 (Tables 15-19); 8.9.2 (Tables 32, 33); 9.3; 9.4; V.34 10.1.2.3.1-10.1.2.3.2;
   V.90 8.2.3.2 (Tables 7-11).
 - **Files:** `crates/datapump/src/v34/info.rs`; `crates/datapump/src/v34/dpsk.rs`;
-  `crates/datapump/src/v34/phase2.rs` (new match arms only); `crates/datapump/tests/v90_vector.rs` and
-  `crates/datapump/tests/v34_vector.rs` (new match arms only).
+  `crates/datapump/src/v34/phase2.rs` (new match arms only - reserved, but as built none were needed);
+  `crates/datapump/tests/v90_vector.rs` and `crates/datapump/tests/v34_vector.rs` (new match arms only).
 - **Digests:** P2S (5-10, 15, 16.2); P2P (2, 3); MOH (1.2); CD (6); CT (6, 9.1).
 - **Description:**
-  - **INFO0d** gains `v92` (bit 27) and `short_phase2` (bit 26). With both false the encoding is
-    bit-identical to today's, which is the regression test.
+  - **INFO0d** gains `v92` (bit 27) and `short_phase2` (bit 26), reached through `Info0d::pcm_flags()` and
+    `set_pcm_flags` rather than as new fields on `Info0d` (section 14, "V92-02 as built"). With both false
+    the encoding is bit-identical to today's, which is the regression test.
   - **INFO0a** gains a V.92 view with the two bits **the other way round** (bit 26 = V.92, bit 27 = short
-    request), exposed as `Info0::pcm_flags()` and kept off `Info0.clock`, which is V.34's transmit-clock
-    field. Only PCM roles read it (P2S N-3).
+    request), exposed as `Info0::pcm_flags()`. Those two bits *are* V.34's transmit-clock field, which
+    Table 16/V.92 has no room for beside them, so they travel in `Info0.clock` and only PCM roles read them
+    (P2S N-3). INFO0d's pair travels above them in the same field, because V.90's Table 7 gives that
+    sequence no clock at all and a clock value must never go out as a V.92 capability.
   - **INFO1d**: `Info1c::pcm_upstream()` for bit 70, a way to write it on purpose, and the 3429 result read
     as 8 bits (71:74 pre-emphasis, 75:78 rate) (N-4).
   - **Table 18**: new `Info1aPcmUp { sections, ltot_code, lmax_code, md_length, uinfo }` with bits
     34:36 = 6 and 37:39 = 6, sending bits 32:33 = 0 and 40:49 all ones; UINFO must be 67..111 (N-24); the
-    receiver ignores 32:33 and 40:49. Today `Info1aPcm::from_bits` rejects exactly this frame.
-  - **Table 19**: `Info1aPcm.high_carrier` (bit 33), written only for Table 19; Table 10 writes 0.
+    receiver ignores 32:33 and 40:49. Today `Info1aPcm::from_bits` rejects exactly this frame. The end that
+    *chooses* U_INFO is held to 67..111; a received value is taken whatever it names.
+  - **Table 19**: its own `Info1aV34Up { v90: Info1aPcm, high_carrier }` for bit 33, read only by
+    `Receiver::in_short_phase2()`. Table 10/V.90 reserves bit 33 - "not interpreted by the digital modem" -
+    and Table 19 is used "during short Phase 2" alone (8.4.1), so the phase decides which reading applies
+    and the frame never does (section 14, "V92-02 as built").
   - **Classification**: the 70-bit INFO1a is classified by (37:39, 34:36) as in P2S 10.4; invalid
     combinations are dropped rather than guessed.
   - **MH**: new `Mh { indication, information }` on Table 32 (indication and information nibbles as
@@ -364,7 +371,8 @@ not listed must not be touched.
     `T1::Reserved(code)`, never as a duration**, so nothing downstream can mistake it for a grant. The
     Recommendation says nothing about reserved T1 codes (MOH Q11); section 4 fixes the reading and V92-25
     acts on it by treating such an MHack as a refusal.
-  - **dpsk**: `Receiver::with_mh()` opts either side in to 40-bit frames; the default is unchanged.
+  - **dpsk**: `Receiver::with_mh()` opts either side in to 40-bit frames and `Receiver::in_short_phase2()`
+    into Table 19's reading of bit 33; the default is unchanged.
 - **Tests:**
   - `a_v92_info0d_says_so_in_bit_27_and_asks_for_short_phase_2_in_bit_26` - the P2S vector (CRC 0xDB49) and
     the P2P vector (0xA8A9) round-trip bit-exact.
@@ -384,6 +392,11 @@ not listed must not be touched.
     `T1::Reserved`, the thirteen defined codes decode as their printed durations (10 s through "no limit"),
     and no reserved code yields a duration or an unbounded hold.
   - `mh_frames_are_heard_back_to_back_only_when_asked_for`.
+  - `bit_33_is_read_only_where_short_phase_2_gives_it_a_meaning` - a Table 10 INFO1a that arrives with the
+    reserved bit 33 set is still a Table 10 INFO1a to every receiver but a short phase 2's.
+  - `the_u_info_we_choose_is_one_table_18_allows` - 67..111 on the sending side, anything on the receiving.
+  - `an_info0d_never_claims_v92_because_of_a_v34_transmit_clock`.
+  - `a_timeout_table_33_cannot_name_is_granted_short_rather_than_reserved`.
   - Existing `info.rs` and `dpsk.rs` tests, `v90_vector` and `v34_vector` pass.
 
 #### V92-03: V.92 CP and descriptor layouts, and the V.92 finders, in `v90/sequences.rs` (M)
@@ -2736,3 +2749,19 @@ the named test's `up_bits(drn) * 8000 == up_rate(drn) * 12` is false at twelve o
 because `up_rate` floors 8000/6 exactly as `v90::rate_for` does; the entry now asks for the floor-
 consistent identity everywhere and the exact one at the seven rungs where it holds, so that a later reader
 does not restore a broken assertion.
+
+**V92-02 as built: two departures from its entry, both forced by section 9.1.** The entry asked for new
+fields - `v92` and `short_phase2` on `Info0d`, `high_carrier` on `Info1aPcm`. Neither can be added: the
+exhaustive struct literals in `v90/server.rs`, `datapump/tests/v90_call.rs` and `modem/tests/v90_call.rs`
+would stop compiling, and all three are outside the package's file list and promised unedited. So the two
+INFO0 bits travel inside `Info0::clock` - INFO0a's pair in V.34's own two bits, which Table 16/V.92
+overloads, and INFO0d's above them, because V.90's Table 7 gives an INFO0d no clock at all and an
+external-clock value must never go out as "V.92 capability: 1" - and Table 19 is a separate `Info1aV34Up`
+wrapping `Info1aPcm`. The wire bits are the tables' either way. Bit 33 then raised a second point, which
+the review of the package was right about: it must not be a *dispatch* field, because Table 10/V.90
+reserves it and "not interpreted by the digital modem" means a Table 10 frame that carries it set is still
+a Table 10 frame. Dispatching on it dropped such a frame in `v34/phase2.rs` and stalled a V.90 start-up
+that used to finish. The reading is chosen by the phase instead, through `Receiver::in_short_phase2()`,
+never by the frame - which is also why AD-5's "V92-02 makes the new match arms, once" ended up needing no
+arm in `v34/phase2.rs`: no new `Info` variant reaches a receiver that has not asked for it. The package is
+L, not M.
