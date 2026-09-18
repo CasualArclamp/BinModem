@@ -1219,6 +1219,19 @@ mod tests {
     /// modulation. The drift test above uses 120, so this does too.
     const PPM: f64 = 120.0;
 
+    /// How far one reading of the period may sit from the truth, in parts per
+    /// million, once the timing loop has settled -- and how far in the first
+    /// second after training, while it is still settling.
+    ///
+    /// The rate itself is good to a fraction of either: what is left in a
+    /// single reading is the loop's own dither, and the upstream is timed by
+    /// the rate. Measured over ten seconds of a network 120 ppm fast, worst
+    /// reading of each second: 3.19 in the first, then 1.04, 1.03, 1.01,
+    /// 1.01, 1.00, 0.98, 0.99, 0.96, 0.97 -- against per-second medians of
+    /// 0.19 and under.
+    const READING_WITHIN: f64 = 1.25;
+    const SETTLING_WITHIN: f64 = 4.0;
+
     /// Line samples the reported symbol period may move from one line sample
     /// to the next, and the least the timing loop has to have stepped the
     /// sampling by for the comparison between the two to say anything.
@@ -1443,20 +1456,31 @@ mod tests {
     /// network's clock is the downstream it has trained on. Over ten seconds
     /// of a sound card 120 ppm fast the reported period is the network's
     /// within a part per million.
+    ///
+    /// Within a part per million on the rate, which is what an upstream is
+    /// timed by and which is read here as the median of each of the ten
+    /// seconds. A single reading carries the timing loop's dither on top of
+    /// the rate, and is bounded separately by [`READING_WITHIN`], or by
+    /// [`SETTLING_WITHIN`] in the first second while the loop settles.
     #[test]
     fn the_symbol_clock_follows_a_network_120_ppm_fast() {
         let (clocks, _) = slaved(PPM, 10.0, 0.0);
         let truth = true_period(PPM);
-        // The last second of it, as parts per million from the truth.
-        let last = clocks.len().saturating_sub(FS as usize);
-        let mut errors: Vec<f64> = clocks[last..].iter().map(|c| (c.period / truth - 1.0) * 1e6).collect();
-        errors.sort_by(f64::total_cmp);
-        let median = errors[errors.len() / 2];
-        let worst = errors.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
-        println!("the clock came out {median:+.3} ppm from the truth, with no reading in the last second more than {worst:.3} ppm off");
         assert!(clocks.last().is_some_and(|c| c.trained), "the clock never said it had trained");
-        assert!(median.abs() < 1.0, "{median:+.3} ppm off over the last second");
-        assert!(worst < 2.0, "one reading was {worst:.3} ppm off");
+        assert!(clocks.len() > 9 * FS as usize, "only {} readings, so ten seconds were not covered", clocks.len());
+        // Every second of the ten, not only the last: the rate is settled
+        // long before the end, and a regression that spoiled the middle of a
+        // call would not show at the end of one.
+        for (second, chunk) in clocks.chunks(FS as usize).enumerate() {
+            let mut errors: Vec<f64> = chunk.iter().map(|c| (c.period / truth - 1.0) * 1e6).collect();
+            errors.sort_by(f64::total_cmp);
+            let median = errors[errors.len() / 2];
+            let worst = errors.iter().fold(0.0f64, |a, &b| a.max(b.abs()));
+            let bound = if second == 0 { SETTLING_WITHIN } else { READING_WITHIN };
+            println!("second {second}: the clock came out {median:+.3} ppm from the truth, with no reading more than {worst:.3} ppm off");
+            assert!(median.abs() < 1.0, "the rate in second {second} was {median:+.3} ppm off");
+            assert!(worst < bound, "one reading in second {second} was {worst:.3} ppm off");
+        }
     }
 
     /// The rate has to come from the timing loop's settled drift and not from
