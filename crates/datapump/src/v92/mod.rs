@@ -246,8 +246,15 @@ pub const RU_BAR_SYMBOLS: usize = 24;
 /// a lasting delay rather than a length, so it is not a constant here.
 pub const SU_SYMBOLS: usize = 144;
 
-/// TRN1u before Ja is "a minimum of 2040T" and "a multiple of 12 symbols"
-/// (9.5.2.1.9, 8.5.7).
+/// The TRN1u before Ja: "Signal TRN1u shall be transmitted for at least 2040T"
+/// (9.5.2.1.2). "TRN1u segments shall be an integer multiple of 12 symbols in
+/// length" (8.5.7) holds for every segment, this one included.
+///
+/// The *second* TRN1u, sent while the DIL or SCR is received, has a floor of
+/// its own and it is conditional: 9.5.2.1.9 asks for "at least 2040T long if a
+/// non-zero DIL was requested". Section 4's policy is always to request a
+/// non-zero N, so today the two coincide, but a package that ever asks for a
+/// zero-length DIL must not hold the second segment to this.
 pub const TRN1U_MINIMUM: usize = 2040;
 
 /// B1u is "48 data frames" (8.7.1), which at twelve symbols a frame is 576
