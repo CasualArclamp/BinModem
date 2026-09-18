@@ -59,9 +59,10 @@ use crate::v90::RATE_STEP;
 // The upstream frame (6.4, Figure 1)
 // ---------------------------------------------------------------------------
 
-/// Data frame intervals in an upstream data frame (6.4): "a data frame is 12
-/// symbols". Downstream keeps V.90's six, which is why this is not
-/// `v90::INTERVALS`.
+/// Data frame intervals in an upstream data frame. Figure 1 (6.4) runs the
+/// data frame row from i = 0 to 11, and 8.7.1 says it in words: "A data frame
+/// in the upstream direction is 12 symbols long." Downstream keeps V.90's six,
+/// which is why this is not `v90::INTERVALS`.
 pub const UP_INTERVALS: usize = 12;
 
 /// The constellation frame, "6 symbols" (Figure 1). The constellation set in
@@ -116,8 +117,11 @@ pub fn up_rate(drn: u8) -> u32 {
 }
 
 /// How many data bits an upstream data frame carries at `drn`:
-/// K = 12 x rate/8000 = 2 x (drn + 17), so 36 bits at 24 000 and 72 at 48 000
-/// (6.1).
+/// K = 12 x rate/8000 = 2 x (drn + 17), so 36 bits at 24 000 and 72 at 48 000.
+///
+/// Derived, not printed: 6.1 gives the rate, Figure 1 and 8.7.1 give the twelve
+/// symbols, and 6.4.1 calls the result K -- "For each data frame, K scrambled
+/// bits ... enter the modulus encoder."
 pub fn up_bits(drn: u8) -> u32 {
     2 * (u32::from(drn) + UP_DRN_OFFSET)
 }
@@ -720,7 +724,10 @@ mod tests {
             let step = pair[1] - pair[0];
             assert!(step == 1333 || step == 1334, "{pair:?} was a step of {step}");
         }
-        // The table printed under 6.1, spot-checked where the fraction bites.
+        // 6.1 prints no table -- it is three lines of prose giving the range
+        // and the step -- so the rungs below are derived from that step, and
+        // spot-checked here where the fraction bites. The two Table 20 prints,
+        // 45 333 and 46 666, are checked against the table in the Ja test.
         assert_eq!(up_rate(2), 25_333, "25 1/3 rounded down");
         assert_eq!(up_rate(3), 26_666, "26 2/3 rounded down");
         assert_eq!(up_rate(13), 40_000);
@@ -729,8 +736,8 @@ mod tests {
         assert_eq!(up_rate(1), crate::v90::rate_for(up_bits(1) / 2));
     }
 
-    /// 6.1: an upstream data frame is twelve symbols, so it carries
-    /// K = 12 x rate/8000 = 2 x (drn + 17) bits.
+    /// 6.1's rate over Figure 1's twelve-symbol frame: K = 12 x rate/8000 =
+    /// 2 x (drn + 17) bits, the K that 6.4.1 feeds to the modulus encoder.
     #[test]
     fn a_data_frame_holds_2_drn_plus_34_bits() {
         assert_eq!(up_bits(1), 36);
