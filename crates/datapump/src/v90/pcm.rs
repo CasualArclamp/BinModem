@@ -574,10 +574,18 @@ impl Receiver {
     /// The far end's symbol clock, for an upstream that has to be sent on it
     /// (6.2/V.92).
     ///
-    /// The rate comes from `drift`, which the timing loop moves by at most a
-    /// millionth a symbol; the phase comes from where the next symbol's
-    /// samples were actually taken, which the same loop steps. See
-    /// [`SymbolClock`] for which of the two an upstream may follow.
+    /// The rate comes from `drift`; the phase from where the next symbol's
+    /// samples were actually taken, which the timing loop steps every symbol.
+    /// See [`SymbolClock`] for which of the two an upstream may follow.
+    ///
+    /// `drift` is smoothed but it is not slew-limited. The timing loop moves
+    /// it by at most a millionth a symbol, but `hold_centre` writes it as
+    /// well, by `CENTRE_DRIFT_GAIN` of how far the tap centre walked over
+    /// twice `CENTRE_EVERY`: with that walk clamped to a quarter symbol, up
+    /// to 2.3e-3 of drift in a single call. A settled line stays far below
+    /// that -- 2.7e-6 of a line sample, measured -- but a caller driving a
+    /// transmitter off this wants to know that the floor is empirical and
+    /// not a bound the code enforces.
     pub fn symbol_clock(&self) -> SymbolClock {
         let nominal = 2.0 * self.half;
         let trained = matches!(self.stage, Stage::Trained);
@@ -1209,11 +1217,16 @@ mod tests {
     /// to the next, and the least the timing loop has to have stepped the
     /// sampling by for the comparison between the two to say anything.
     ///
-    /// The period moves only with `drift`, which the timing loop changes by
-    /// at most half of [`DRIFT_GAIN`] a symbol: two millionths of a line
-    /// sample. The sampling itself is stepped by [`TIMING_GAIN`] of how late
-    /// every symbol was, and by `hold_centre` every [`CENTRE_EVERY`]
-    /// symbols. Measured on a noisy line 120 ppm off: 2.7e-6 against 1.6e-3.
+    /// The period moves only with `drift`. The timing loop changes that by at
+    /// most half of [`DRIFT_GAIN`] a symbol -- two millionths of a line
+    /// sample -- but `hold_centre` writes it too, by [`CENTRE_DRIFT_GAIN`] of
+    /// the tap centre's walk over twice [`CENTRE_EVERY`]. With that walk
+    /// clamped to a quarter symbol its worst call is 2.3e-3 of drift, or
+    /// 4.7e-3 of a line sample, so the bound below is what a settled line
+    /// does and not what the code guarantees. The sampling itself is stepped
+    /// by [`TIMING_GAIN`] of how late every symbol was, and by `hold_centre`
+    /// every [`CENTRE_EVERY`] symbols. Measured on a noisy line 120 ppm off:
+    /// 2.7e-6 against 1.6e-3.
     const CLOCK_JUMP: f64 = 1e-5;
     const LOOP_STEP: f64 = 1e-4;
 
