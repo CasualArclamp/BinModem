@@ -254,6 +254,8 @@ pub struct Stack {
     /// bits once it has failed, and every bit after, for the terminal
     /// (Appendix I.3's second option).
     unclaimed: Vec<bool>,
+    /// Whether the error correction procedure is suspended (V.42 7.10).
+    suspended: bool,
 }
 
 /// One end of the detection phase (7.2.1). Which one depends on the role.
@@ -422,6 +424,7 @@ impl Stack {
             round_trip_ms: 0,
             heard_text: false,
             unclaimed: Vec::new(),
+            suspended: false,
         }
     }
 
@@ -751,8 +754,73 @@ impl Stack {
         self.lapm.disconnect();
     }
 
+    /// Suspend error correction: freeze the timers and change nothing else
+    /// (V.42 7.10).
+    ///
+    /// "The control function may instruct its error control function to
+    /// suspend the error correction procedure by issuing an L-SUSPEND request
+    /// primitive", and the NOTE says what for: "typically used to suspend the
+    /// error correction procedure during a retrain or the modem on hold
+    /// procedures defined in ITU-T Rec. V.92". Which is the whole point of it
+    /// here. A V.92 hold takes the line away for as long as the far end's
+    /// other call lasts, and a retrain takes it away for a second or two; in
+    /// both, every timer in this stack is counting a silence that means
+    /// nothing.
+    ///
+    /// What freezes is what 7.10.1 and 7.10.2 name: T400 while the detection
+    /// phase is running, and T401 once it is not. T402 and T403 are not
+    /// implemented (see [`crate::lapm`]), so they are not frozen either. The
+    /// XID exchange's own clock goes with T401, because 8.10.2 and 8.10.3 say
+    /// its timer *is* T401.
+    ///
+    /// Nothing is released, so there is nothing to establish again: the
+    /// sequence variables, the window, the unacknowledged frames and the
+    /// V.42bis or V.44 dictionaries are all exactly where they were. That is
+    /// the difference between a hold and a dropped call, and it is why this
+    /// exists rather than the caller simply dropping the stack. The
+    /// dictionaries especially: 5.6 re-initialises them on an establishment,
+    /// and an establishment is what a caller who rebuilt the stack would get.
+    ///
+    /// The line is the caller's business, not this one's. During a hold or a
+    /// retrain nothing is pulling bits out of [`Self::next_bit`], so nothing
+    /// goes out; a caller that keeps pulling while the carrier is gone is
+    /// throwing frames away, and freezing T401 means nothing will ask for them
+    /// again.
+    pub fn suspend(&mut self) {
+        self.suspended = true;
+        self.lapm.suspend();
+    }
+
+    /// Resume it (V.42 7.11): "unfreeze previously frozen timers".
+    ///
+    /// Each timer picks up with whatever it had left, so the far end has as
+    /// long to answer as it had before the line went away. T401 recovery
+    /// (8.5.3) then does the rest: if the far end moved on while this end was
+    /// away, the poll finds out what it is missing.
+    pub fn resume(&mut self) {
+        self.suspended = false;
+        self.lapm.resume();
+    }
+
+    /// Whether error correction is suspended.
+    pub fn suspended(&self) -> bool {
+        self.suspended
+    }
+
     /// Time passing, which is what drives every timer here.
+    ///
+    /// Suspension (7.10) is the absence of it.
     pub fn tick(&mut self, dt_ms: u32) {
+        if self.suspended {
+            // Each layer stops its own clocks: T400 and the XID exchange's are
+            // this one's, T401 is `lapm`'s, so `lapm.tick` is still called and
+            // still does nothing with the time it is given. What is not a
+            // timer carries on -- `drain` hands over what has already arrived
+            // -- because timers are all 7.10 freezes.
+            self.lapm.tick(dt_ms);
+            self.drain();
+            return;
+        }
         match self.phase {
             Phase::Detecting => {
                 let outcome = match &mut self.detect {
@@ -2114,5 +2182,165 @@ mod tests {
         stack.take_received();
         send(&mut stack, b"password: ");
         assert_eq!(stack.take_received(), b"password: ");
+    }
+
+    /// V.42 7.10: "the error control function shall freeze the appropriate
+    /// timers", which is T401 here (7.10.2; T402 and T403 are not
+    /// implemented). The NOTE says what for: "typically used to suspend the
+    /// error correction procedure during a retrain or the modem on hold
+    /// procedures defined in ITU-T Rec. V.92".
+    ///
+    /// A V.92 hold can take the line away for minutes. With T401 running, the
+    /// first frame outstanding when it went would be polled for, N400 times,
+    /// and then the link would be released -- so the call would come back from
+    /// its hold to no error control and no dictionaries.
+    #[test]
+    fn a_suspended_link_keeps_its_timers_still_through_sixty_seconds_of_nothing() {
+        let (mut a, mut b) = pair();
+        settle(&mut a, &mut b, 20_000, |_, bit| bit);
+        assert!(a.is_connected() && b.is_connected(), "the link never came up");
+
+        // One frame on the line with nothing at the far end to acknowledge it,
+        // which is exactly the state a hold interrupts.
+        a.send(b"are you still there\r\n");
+        for _ in 0..4_000 {
+            a.next_bit();
+        }
+        assert!(!a.take_log().is_empty(), "nothing went out, so nothing is outstanding");
+
+        a.suspend();
+        assert!(a.suspended());
+        for _ in 0..600 {
+            a.tick(100);
+        }
+        assert!(a.is_connected(), "the link was released while suspended: {:?}", a.state());
+        for _ in 0..4_000 {
+            a.next_bit();
+        }
+        assert!(
+            a.take_log().is_empty(),
+            "T401 fired while suspended, so something was sent to a line that was not there"
+        );
+
+        // Frozen and not cancelled: what was left of T401 is still there, and
+        // it fires once time starts again (8.5.3's poll).
+        a.resume();
+        assert!(!a.suspended());
+        for _ in 0..80 {
+            a.tick(100);
+        }
+        for _ in 0..4_000 {
+            a.next_bit();
+        }
+        assert!(!a.take_log().is_empty(), "T401 never came back");
+    }
+
+    /// V.42 7.11 unfreezes the timers and nothing else: the link was never
+    /// released, so 8.2.4.3 discarded nothing, V(S) and V(R) are where they
+    /// were, and 5.6's C-INIT -- which fires on an establishment -- never
+    /// happened. That last is the one that cannot be recovered from: a
+    /// dictionary built from the data that went past only agrees with the far
+    /// end's because both saw the same data, and an end that started again on
+    /// its own would read every codeword after it as something else.
+    #[test]
+    fn after_resume_the_link_carries_on_with_the_same_sequence_numbers_and_dictionary() {
+        use crate::frame::Address;
+
+        let (mut a, mut b) = negotiated_pair();
+        settle(&mut a, &mut b, 40_000, |_, bit| bit);
+        assert!(a.is_connected() && b.is_connected(), "the link never came up");
+        assert!(a.compressing() && b.compressing(), "compression was not negotiated");
+
+        // Enough of the same phrases for both dictionaries to be full of them.
+        let block = |from: usize| {
+            let mut out = Vec::new();
+            for i in from..from + 200 {
+                out.extend_from_slice(format!("the same words over and over, line {i}\r\n").as_bytes());
+            }
+            out
+        };
+        let before = block(0);
+        a.send(&before);
+        settle(&mut a, &mut b, 200_000, |_, bit| bit);
+        assert_eq!(b.take_received(), before, "what arrived before the hold was wrong");
+        assert_eq!(b.undecodable_streams(), 0, "a compressed stream would not decode");
+
+        /// The N(S) of every I frame this end has put on the line since the
+        /// log was last taken, in order.
+        fn outbound_ns(stack: &mut Stack, from: Role) -> Vec<u8> {
+            let receiver = match from {
+                Role::Originator => Role::Answerer,
+                Role::Answerer => Role::Originator,
+            };
+            stack
+                .take_log()
+                .iter()
+                .filter(|c| c.outbound)
+                .filter_map(|c| Frame::decode(&c.body, receiver).ok())
+                .filter_map(|(_, frame): (Address, Frame)| match frame {
+                    Frame::I { ns, .. } => Some(ns),
+                    _ => None,
+                })
+                .collect()
+        }
+        let last = *outbound_ns(&mut a, Role::Originator).last().expect("no I frame went out");
+        assert!(last + 1 < crate::frame::MODULUS, "V(S) wrapped, and the check below cannot tell");
+
+        // A second lot, cut off partway: a hold falls where it falls, and
+        // where it usually falls is with frames on the line that nothing has
+        // acknowledged. That is the case the freeze is for -- with T401
+        // running, this end polls into a line that is not there, N400 times,
+        // and releases the link that the hold was supposed to preserve.
+        let during = block(1_000);
+        a.send(&during);
+        settle(&mut a, &mut b, 4_000, |_, bit| bit);
+        let partial = b.take_received().len();
+        assert!(partial < during.len(), "all {partial} of it crossed, so nothing was outstanding");
+
+        // The line goes away for ten minutes, which is a modem-on-hold: V.92
+        // Table 34's T1 runs to a quarter of an hour, and the whole point of
+        // the feature is that the DTE's other call is a real telephone call.
+        // Longer than N400 attempts at a growing T401 add up to, so without
+        // 7.10 the link is released somewhere in the middle of it.
+        a.suspend();
+        b.suspend();
+        for _ in 0..6_000 {
+            a.tick(100);
+            b.tick(100);
+        }
+        a.resume();
+        b.resume();
+        assert!(
+            a.is_connected() && b.is_connected(),
+            "the link did not survive the hold: {:?} and {:?}",
+            a.state(),
+            b.state()
+        );
+
+        let after = block(2_000);
+        a.send(&after);
+        settle(&mut a, &mut b, 400_000, |_, bit| bit);
+        let mut expected = during[partial..].to_vec();
+        expected.extend_from_slice(&after);
+        assert_eq!(
+            b.take_received(),
+            expected,
+            "what arrived after the hold was not what was sent, so the dictionaries came apart"
+        );
+        assert_eq!(b.undecodable_streams(), 0, "a compressed stream would not decode");
+
+        // Counting on from where it left off. An establishment would have put
+        // V(S) back to 0 (8.3.1) and discarded what was unacknowledged
+        // (8.2.4.3), and 5.6 would have emptied both dictionaries with it.
+        let sent = outbound_ns(&mut a, Role::Originator);
+        assert_ne!(
+            sent.first().copied(),
+            Some(0),
+            "V(S) went back to the beginning, so the link re-established"
+        );
+        assert!(
+            sent.contains(&(last + 1)),
+            "the sequence never carried on past {last}: {sent:?}"
+        );
     }
 }
