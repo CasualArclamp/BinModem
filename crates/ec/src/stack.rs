@@ -41,10 +41,28 @@ const LEADING_FLAGS: usize = 16;
 /// N400 for the XID exchange: how many times the command is sent again.
 ///
 /// 8.10.3 bounds the retransmissions by N400 and 9.2.2 sets no default for it,
-/// only "a minimum value of 1"; Appendix III.2's large figure is argued for
-/// the *establishment* phase, where detection has already shown the far end
-/// does LAPM and every retry is spent on a connection worth having. Nothing
-/// has shown the far end negotiates, so this one is the minimum.
+/// only "a minimum value of 1". Appendix III.2 asks for more than that, and
+/// asks twice. Its first paragraph asks unconditionally: "for increase
+/// robustness under adverse channel conditions, this parameter should be set
+/// to a relatively large value (e.g. 16), such that repeated attempts of a
+/// procedure requiring a response shall be made over a span of several
+/// seconds". Its second adds a reason that applies only after the detection
+/// phase, where "the originator possesses a high degree of confidence that
+/// the answerer is indeed capable of LAPM operation", and a caveat for where
+/// the detection phase is omitted.
+///
+/// So the appendix wants sixteen here too, and this is one. What it is buying
+/// with the other fifteen is the case where a response *is* coming and noise
+/// spoils it, and that case is worth much less to this procedure than to the
+/// one the appendix has in mind. An establishment that fails leaves no link at
+/// all; this failing leaves a link without compression, and the far end's XID
+/// is still read and still answered if it turns up afterwards
+/// ([`Stack::receive_xid`] runs in [`Phase::Protocol`] too), so a spoiled
+/// response costs a feature and not a call. Against that, every retry is paid
+/// for on each call whose far end simply does not negotiate -- a far end the
+/// detection phase has shown does LAPM has shown nothing about XID -- and it
+/// is paid in dead time before the terminal's CONNECT ([`XID_LAST_WAIT_MS`]).
+/// 9.2.2 leaves the value to each end, so this is that choice.
 ///
 /// It decides how long a call spends negotiating, because the wait is exactly
 /// the retransmissions: one XID, T401, one more, and then a round trip before

@@ -458,12 +458,15 @@ impl Xid {
                     // octets hold it, so a shorter mask is read with the rest
                     // as zero.
                     //
-                    // And a longer one for its first four, because everything
-                    // past them is bits the note defines no meaning for, and
-                    // 12.2.2 says what to do with those: "fields that are not
-                    // recognized are ignored". Refusing the parameter instead
-                    // put the whole XID beyond reading, which is the same
-                    // whole-frame rejection a three-octet mask used to get.
+                    // And a longer one for its first four, on the same note.
+                    // A fifth octet is not an unrecognized field -- the note
+                    // recognises this parameter and fixes it at PL = 4 -- it
+                    // is an over-long copy of a recognized one, and the note
+                    // names no bit past 24, so the octets past the mask carry
+                    // nothing it has given a meaning to. Refusing the
+                    // parameter instead put the whole XID beyond reading,
+                    // which is the same whole-frame rejection a three-octet
+                    // mask used to get.
                     //
                     // No octets at all is nothing to read, and by 12.2.2 an
                     // item nothing can be read from is one to ignore, which
@@ -1097,10 +1100,11 @@ mod tests {
 
     /// And a longer one for the four octets Table 11a Note 1 defines.
     ///
-    /// The note names bit positions up to 24 and no further, so a fifth octet
-    /// is a field 12.2.2 has an answer for -- "fields that are not recognized
-    /// are ignored" -- and not a reason to refuse the XID it came in. Refusing
-    /// it made the whole frame damaged and went unanswered, which is the
+    /// The note fixes this parameter at PL = 4 and names bit positions up to
+    /// 24 and no further, so a fifth octet is an over-long copy of a parameter
+    /// this end recognises perfectly well, carrying bits the note has given no
+    /// meaning -- and not a reason to refuse the XID it came in. Refusing it
+    /// made the whole frame damaged and went unanswered, which is the
     /// rejection a three-octet mask was rescued from a few changes ago.
     #[test]
     fn an_option_mask_longer_than_four_octets_is_read_for_the_four() {

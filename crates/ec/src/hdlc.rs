@@ -417,9 +417,21 @@ impl Decoder {
                     // and 8.1.3 c) has a frame "consist of an integral number
                     // of octets ... following zero-bit extraction". Between
                     // them there is at most one reading of the buffer that
-                    // comes to whole octets, and where there is one it is the
-                    // frame. Where there is none the abort landed mid-octet
-                    // and only what is certainly the frame's is kept.
+                    // comes to whole octets, and where the frame was whole
+                    // octets that reading is the frame.
+                    //
+                    // Where it was not, the reading is a guess and can be
+                    // generous. 8.1.3 c) calls a frame that is not whole
+                    // octets invalid, but the line still carries them, and
+                    // the search reaches four bits past what is certainly the
+                    // frame's, so up to four of the abort's own ones can be
+                    // kept as content: thirteen content bits with no trailing
+                    // ones of their own come out as two octets rather than
+                    // one, three of the abort's counted in. The figure goes
+                    // only to the record of what the line spoiled, so guessing
+                    // long on a frame that was invalid anyway is the cheaper
+                    // error -- dropping a flat five loses a whole octet of
+                    // frames that were perfectly well formed.
                     let len = self.bits.len();
                     let certain = len.saturating_sub(5);
                     let content =

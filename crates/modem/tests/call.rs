@@ -632,10 +632,17 @@ fn error_control_is_asked_for_once_over_a_line_with_a_long_round_trip() {
     // And the XID exchange of V.42 8.10.2 was the one command, an answer to
     // the far end's, and at most 8.10.3's retransmission of each -- not the
     // fifty to two hundred copies that used to go out for as long as the
-    // encoder had nothing else to send. The exchange still settled on a line
-    // this long, which is what the repetition was doing by accident.
+    // encoder had nothing else to send.
+    //
+    // Four is that ceiling and nothing finer. It is the most 8.10.2 and 8.10.3
+    // can put on the line between them, a command and its one retransmission
+    // plus a response to each of the far end's two, so what it catches is the
+    // repetition -- not a retransmission that stopped happening, which is the
+    // ec crate's own timing test, and not the exchange failing outright, which
+    // is the compression below: that needs an XID response to have arrived and
+    // been read, so it is also what says any XID went out at all.
     for (who, sent) in [("caller", caller_xids), ("host", host_xids)] {
-        assert!((1..=4).contains(&sent), "the {who} put {sent} XID frames on the line");
+        assert!(sent <= 4, "the {who} put {sent} XID frames on the line");
     }
     for (who, modem) in [("caller", &caller), ("host", &host)] {
         assert!(modem.compression_name().is_some(), "the {who} negotiated no compression");
