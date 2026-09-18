@@ -798,7 +798,11 @@ not listed must not be touched.
   - `Trn2uSender { size, first_bit_is_lsb }`: scrambler reset at the start, only the **sign** bit
     differential from a caller seed, magnitudes (2m+1)/sqrt(5) for 4 points or (2m+1)/sqrt(21) for 8, and
     the bit order behind the named constant of section 4. `Trn2uReader` matches it.
-  - Segment-length constants 384, 24, 144, 2040, and `UP_SEQUENCE_UNIT = 12`.
+  - `UP_SEQUENCE_UNIT = 12`, plus the readings of section 4 whose Owner column names this module:
+    `TRN2U_SIGN_LAST`, "only the sign bit of TRN2u is differential", "CPt's 24 ones" and "TRN1u scrambler
+    reset". The segment lengths 384, 24, 144 and 2040 are **not** here: V92-01 already owns them in
+    `v92/mod.rs` as `RU_SYMBOLS`, `RU_BAR_SYMBOLS`, `SU_SYMBOLS` and `TRN1U_MINIMUM`, and section 4's "one
+    reading, one home" rule forbids a second copy (section 14).
 - **Tests:**
   - `trn1u_starts_with_the_gpa_signs_the_digest_lists` - the first 48 signs equal the P3S vector.
   - `ru_and_its_bar_are_the_printed_patterns`, and `su_has_the_same_power_as_trn1u` with lines at
@@ -2963,3 +2967,14 @@ V92-20, since the decoder needs exactly this arithmetic read backwards. Measured
 p1 = [0.6, -0.2, 0.1] over 100 000 symbols the precoder output peaks at 15.9998 against a top level of 31,
 which is half the widest class spacing to six figures - the bound the minimum-|x(n)| rule predicts, and
 the reason the long-run test can assert a multiple as tight as 0.6 of the top level.
+
+**V92-12: the four segment lengths were already V92-01's, so the entry asked for a duplicate.** The
+description's last bullet asked this package for "segment-length constants 384, 24, 144, 2040, and
+`UP_SEQUENCE_UNIT = 12`", but V92-01's own entry had already put all four in `v92/mod.rs` -
+`RU_SYMBOLS`, `RU_BAR_SYMBOLS`, `SU_SYMBOLS` and `TRN1U_MINIMUM` - and they are there in the merged code.
+Writing them again in `up_signals.rs` would have broken section 4's "one reading, one home" rule and left
+two numbers to change whenever one moved, which is risk R12. The bullet now says so, and names instead
+what this package really does own: `UP_SEQUENCE_UNIT`, which is the *padding and segment* unit rather than
+a length and which is `UP_INTERVALS` under another name, and the four section 4 readings whose Owner
+column says `v92::up_signals`. The module uses V92-01's lengths and its tests assert against them, so the
+package still proves that 384T and 24T are whole Ru periods and that 144T and 2040T are whole frames.
