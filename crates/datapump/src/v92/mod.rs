@@ -828,19 +828,42 @@ mod tests {
         assert_eq!(FilterSections::from_code(1), FilterSections { z1: true, p2: false });
         assert_eq!(FilterSections::from_code(2), FilterSections { z1: false, p2: true });
         assert_eq!(FilterSections::from_code(3), FilterSections { z1: true, p2: true });
-        // And a CPd is held to what was announced (8.8.3).
+        // And a CPd is held to what was announced (8.8.3). Code 0 offers
+        // neither optional section, so those two refusals are what a z1 or a
+        // p2 meets first.
         let announced = FilterLimits::from_info1a(0, 0, 0);
         let mut filters = Filters { z2: vec![1.0; 128], p1: vec![0.0; 64], ..Filters::default() };
         assert_eq!(filters.fits(&announced), Ok(()));
         filters.z1.push(0.5);
-        assert!(filters.fits(&announced).is_err(), "z1 was not offered");
+        assert_eq!(
+            filters.fits(&announced),
+            Err("the precoder has a feed-forward section this end did not offer")
+        );
         filters.z1.clear();
-        filters.p1 = vec![0.0; 129];
-        assert!(filters.fits(&announced).is_err(), "L_max is 128");
-        filters.p1 = vec![0.0; 128];
-        filters.z2 = vec![1.0; 128];
-        filters.p2 = vec![0.0; 1];
-        assert!(filters.fits(&announced).is_err(), "p2 was not offered");
+        filters.p2.push(0.5);
+        assert_eq!(
+            filters.fits(&announced),
+            Err("the prefilter has a feedback section this end did not offer")
+        );
+
+        // L_tot and L_max are separate refusals and each case below can only
+        // be caught by its own, so deleting either branch fails this test:
+        // 128 + 128 sits exactly on L_max but over L_tot, and one 129-tap
+        // section sits well inside L_tot but over L_max. Both sections are
+        // offered here, so neither case can trip on bits 12:13 instead.
+        let both = FilterLimits::from_info1a(3, 0, 0);
+        let over_total = Filters { z2: vec![1.0; 128], p1: vec![0.0; 128], ..Filters::default() };
+        assert_eq!(over_total.most(), usize::from(both.most), "L_max is not what catches this");
+        assert_eq!(
+            over_total.fits(&both),
+            Err("the filters have more coefficients than this end offered")
+        );
+        let over_section = Filters { z2: vec![1.0; 129], ..Filters::default() };
+        assert!(over_section.total() < usize::from(both.total), "L_tot is not what catches this");
+        assert_eq!(
+            over_section.fits(&both),
+            Err("a filter section is longer than this end offered")
+        );
     }
 
     /// AD-10: five Phase 3 timers run at once, so the one that says what went
