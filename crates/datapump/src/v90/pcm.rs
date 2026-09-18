@@ -258,9 +258,15 @@ pub struct SymbolClock {
     pub at: f64,
     /// The receiver's count of that symbol.
     pub index: u64,
-    /// Whether the receiver has trained. Until it has, the period is the
-    /// nominal one, nothing has been read off the line, and an upstream has
-    /// to free-run.
+    /// Whether the receiver has trained. Until it has, nothing has been read
+    /// off the line that an upstream may follow: [`Self::period`] is held at
+    /// [`Self::nominal`] and an upstream free-runs at its own 8000 symbol/s.
+    ///
+    /// Held, rather than simply being nominal: a receiver carries the rate it
+    /// learnt through a retrain, and a training that failed leaves behind the
+    /// rate it had fitted to the stretch it then gave up on. Both would read
+    /// as a network clock here and neither has been checked against anything.
+    /// [`Receiver::drift_ppm`] still gives the raw figure, for looking at.
     pub trained: bool,
 }
 
@@ -581,7 +587,12 @@ impl Receiver {
             .and_then(|k| self.times.get(k as usize).copied())
             .filter(|_| trained)
             .unwrap_or(self.due);
-        SymbolClock { period: nominal * (1.0 + self.drift), nominal, at, index: self.next_symbol, trained }
+        // Untrained, `drift` is whatever the last attempt left behind: the
+        // rate a previous training learnt, or one `resample` fitted to a
+        // stretch that `solve` then gave up on. Neither is a rate to put on
+        // the line, so the reported one waits for the training to stand.
+        let drift = if trained { self.drift } else { 0.0 };
+        SymbolClock { period: nominal * (1.0 + drift), nominal, at, index: self.next_symbol, trained }
     }
 
     /// The equaliser, for looking at.
@@ -1474,6 +1485,37 @@ mod tests {
         }
         assert!(!rx.is_trained());
         assert!(!rx.symbol_clock().trained);
+    }
+
+    /// The same, for the receiver `v90::analogue` really has: one that has
+    /// trained once and is hunted again for a retrain. It carries the rate it
+    /// learnt, which is right for the receiver -- the network clock did not
+    /// change -- but it is not a rate this end has checked against anything
+    /// on the line yet, and 6.2 asks the upstream for the network's clock as
+    /// the downstream has it now. An upstream reading the period straight out
+    /// would free-run over a hundred parts per million off instead of at its
+    /// own 8000 symbol/s.
+    #[test]
+    fn the_symbol_clock_goes_back_to_nominal_when_a_trained_receiver_hunts_again() {
+        let mut network = Network::new(Law::Mu, FS).with_clock(PPM);
+        let mut rx = Receiver::new(Law::Mu, FS);
+        rx.hunt(UINFO);
+        for &level in &phase3_levels(Law::Mu, 3000, &Jd::default(), 0) {
+            for sample in network.down(level * 0.3) {
+                rx.feed(sample);
+                while rx.heard().is_some() {}
+            }
+        }
+        assert!(rx.is_trained(), "nothing trained, so there was no rate to carry over");
+        assert!(rx.drift_ppm() > 100.0, "the timing loop never picked the network's rate up");
+        // The retrain: `v90::analogue` hunts the same receiver again.
+        rx.hunt(UINFO);
+        let clock = rx.symbol_clock();
+        assert!(!clock.trained, "a hunting receiver said it had trained");
+        assert_eq!(clock.period, clock.nominal, "an upstream would have free-run {:.1} ppm off", clock.drift_ppm());
+        // Withheld, not forgotten: the receiver still trains from where it
+        // had got to.
+        assert!(rx.drift_ppm() > 100.0, "the receiver threw away the rate it had learnt");
     }
 
     /// What the clock is for: the digital modem's A/D samples on the
