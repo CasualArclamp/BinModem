@@ -368,11 +368,12 @@ pub fn to_signed_q(value: f64, width: u32, fraction: u32) -> u32 {
 pub const GAIN_SCALE: f64 = 262_144.0;
 
 /// The largest G a CPd can carry. The field is sixteen bits wide, so 4G stops
-/// just short of 1 and the top value 0xFFFF is 65 535 / [`GAIN_SCALE`] --
-/// 0.249 996 under the reading fixed here, half of what an unwary reader of
-/// "4 x G" might assume the range to be (Table 30, bits 35:50). It is derived
-/// from `GAIN_SCALE` so that flipping the [`unsigned_q`] reading moves this
-/// too.
+/// just short of 1 and the top value 0xFFFF is 65 535 / [`GAIN_SCALE`], which
+/// is 0.249 996 (Table 30, bits 35:50).
+///
+/// It is written in terms of `GAIN_SCALE` rather than as a number, so that
+/// taking the alternative reading of 3.5's printed range (see [`unsigned_q`])
+/// moves this bound with it, to 0.499 99.
 pub const GAIN_LARGEST: f64 = u16::MAX as f64 / GAIN_SCALE;
 
 /// G from CPd bits 35:50.
