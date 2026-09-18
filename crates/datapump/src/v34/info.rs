@@ -685,7 +685,7 @@ impl Info1aPcm {
 /// "The analogue modem shall not use this sequence if bit 70 of INFO1d is
 /// clear" (8.4.1), and 9.3 allows it only when both modems have shown V.92
 /// capability. Neither is a property of these bits, so neither is checked here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Info1aPcmUp {
     /// Bits 12:13: "Number of filter sections in precoder and prefilter". 0 is
     /// p1 and z2, 1 adds z1, 2 adds p2, 3 has all four -- so bit 12 says z1 is
@@ -707,8 +707,35 @@ pub struct Info1aPcmUp {
     pub uinfo: u8,
 }
 
+/// Nothing asked for, except the one field that has no harmless value.
+///
+/// Zero is the natural default everywhere else in these layouts and is not a
+/// U_INFO at all -- Table 18 says "U_INFO shall be greater than 66" -- so the
+/// default names the quietest codeword the Recommendation allows instead, and a
+/// sequence built up from `..Info1aPcmUp::default()` is sendable before anyone
+/// has thought about it.
+impl Default for Info1aPcmUp {
+    fn default() -> Self {
+        Self { sections: 0, ltot_code: 0, lmax_code: 0, md_length: 0, uinfo: UINFO_LOWEST }
+    }
+}
+
 impl Info1aPcmUp {
+    /// Whether the U_INFO this names is one we may send.
+    ///
+    /// "U_INFO shall be greater than 66" (Table 18/V.92), and no more than
+    /// `UINFO_HIGHEST`, because the digital modem trains Sd on Ucode
+    /// 16 + U_INFO and there are only 128 of them (8.4.4/V.90).
+    ///
+    /// Only the end that *chooses* U_INFO is held to this. `from_bits` takes
+    /// any value, because refusing a far end over a number we could merely not
+    /// use would cost the whole call.
+    pub fn uinfo_is_sendable(&self) -> bool {
+        (UINFO_LOWEST..=UINFO_HIGHEST).contains(&self.uinfo)
+    }
+
     pub fn to_bits(&self) -> Vec<bool> {
+        debug_assert!(self.uinfo_is_sendable(), "a table 18 u_info outside 67 to 111");
         let mut info = Vec::with_capacity(38);
         put(&mut info, u32::from(self.sections), 2);
         put(&mut info, u32::from(self.ltot_code), 2);
@@ -1454,10 +1481,47 @@ mod tests {
             }
         }
 
-        // "U_INFO shall be greater than 66", and Sd trains on 16 + U_INFO.
+    }
+
+    /// Table 18/V.92: "U_INFO shall be greater than 66", and 8.4.4/V.90 trains
+    /// Sd on the codeword whose Ucode is 16 + U_INFO, of which there are 128.
+    ///
+    /// The end that *chooses* the value is held to both ends of that range,
+    /// because a sequence naming a codeword outside it goes out asking for
+    /// something the Recommendation does not allow. The end that receives one
+    /// is not: a number we could merely not use is no reason to lose the call.
+    #[test]
+    fn the_u_info_we_choose_is_one_table_18_allows() {
         assert_eq!(UINFO_LOWEST, 67);
         assert_eq!(UINFO_HIGHEST, 111);
-        assert!(u32::from(UINFO_HIGHEST) + 16 < 128);
+        assert!(u32::from(UINFO_HIGHEST) + 16 < 128, "Sd would train past Ucode 127");
+        for uinfo in 0..=127u8 {
+            let asked = Info1aPcmUp { uinfo, ..Info1aPcmUp::default() };
+            assert_eq!(asked.uinfo_is_sendable(), (67..=111).contains(&uinfo), "U_INFO {uinfo}");
+        }
+        // A sequence built up from the default is sendable before anyone has
+        // chosen anything, which a zero -- the one value Table 18 names as
+        // forbidden -- would not have been.
+        assert_eq!(Info1aPcmUp::default().uinfo, UINFO_LOWEST);
+        assert!(Info1aPcmUp::default().uinfo_is_sendable());
+
+        // A Table 18 frame with any U_INFO in it, built without `to_bits`,
+        // which is the side the rule binds.
+        let raw = |uinfo: u32| {
+            let mut info = Vec::with_capacity(38);
+            put(&mut info, 0, 13);
+            put(&mut info, uinfo, 7);
+            put(&mut info, 0, 2);
+            put(&mut info, PCM_SYMBOL_RATE, 3);
+            put(&mut info, PCM_SYMBOL_RATE, 3);
+            put(&mut info, 0x3ff, 10);
+            frame(&info)
+        };
+        for uinfo in [0, 66, 112, 127] {
+            let heard = Info1aPcmUp::from_bits(&raw(uinfo)).expect("the CRC checks");
+            assert_eq!(heard.uinfo, uinfo as u8, "a far end's U_INFO was refused");
+            assert!(!heard.uinfo_is_sendable(), "and it is not one we would send");
+        }
     }
 
     /// Table 19/V.92: V.90's Table 10 with bit 33, reserved there, saying
