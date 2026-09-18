@@ -166,7 +166,12 @@ fn get(bits: &[bool], from: usize, width: usize) -> u32 {
 /// pattern, so `0011` means bit 12 = 0, 13 = 0, 14 = 1, 15 = 1. The nibble is
 /// carried here with its leftmost bit in bit 3, so that `0011` is 3 and Table
 /// 33's codes count 1 to 13 as its rows do.
+///
+/// A pattern is four bits and no more. Anything wider is a caller that has lost
+/// count, and quietly sending the low four would put a different code on the
+/// wire from the one it meant.
 fn put_pattern(bits: &mut Vec<bool>, nibble: u8) {
+    debug_assert!(nibble < 16, "a bit pattern wider than the four bits it is sent in");
     for i in (0..4).rev() {
         bits.push(nibble >> i & 1 == 1);
     }
@@ -907,6 +912,7 @@ pub enum T1 {
     /// `1101`: "no limit".
     NoLimit,
     /// `0000`, `1110` or `1111`: "Reserved for the ITU", kept as it arrived.
+    /// The four-bit code itself, which is all `from_code` ever puts here.
     Reserved(u8),
 }
 
@@ -923,13 +929,20 @@ impl T1 {
         }
     }
 
-    /// The pattern this T1 is sent as. A `Limit` whose length is none of the
-    /// twelve has no code of its own and takes `0000`, which is reserved; a
-    /// `T1` built through `from_code` cannot be one.
+    /// The pattern this T1 is sent as.
+    ///
+    /// Table 33 codes twelve periods and nothing between them, so a `Limit`
+    /// that is none of the twelve has no pattern of its own and goes out as the
+    /// longest tabled period that does not exceed it: five minutes is granted
+    /// as four. A grant is then never longer than the one intended, which
+    /// falling back to `0000` would not guarantee either way -- that pattern is
+    /// "Reserved for the ITU", and section 4's reading makes it no grant at all.
+    /// Below ten seconds there is no period to name and `0000` is what goes
+    /// out, which is the honest answer: Table 33 cannot express it.
     pub fn code(self) -> u8 {
         match self {
             Self::Limit(seconds) => {
-                Self::PERIODS.iter().position(|&p| p == seconds).map_or(0, |i| i as u8 + 1)
+                Self::PERIODS.iter().rposition(|&p| p <= seconds).map_or(0, |i| i as u8 + 1)
             }
             Self::NoLimit => 13,
             Self::Reserved(code) => code,
@@ -940,8 +953,12 @@ impl T1 {
     ///
     /// `None` for "no limit" and `None` for a reserved code, which are not the
     /// same thing and must not be told apart by this.
+    ///
+    /// Read from the pattern that will actually be sent, never from the length
+    /// asked for, so that the end granting a hold cannot believe it granted
+    /// longer than the wire says.
     pub fn seconds(self) -> Option<u32> {
-        match self {
+        match Self::from_code(self.code()) {
             Self::Limit(seconds) => Some(seconds),
             Self::NoLimit | Self::Reserved(_) => None,
         }
@@ -960,7 +977,8 @@ pub enum Cleardown {
     /// Anything else. "Bit combinations not defined in bits 16-19 for MHclrd
     /// are reserved for the ITU and should not be interpreted by the receiving
     /// modem" -- the sequence is still a good MHclrd and still wants its MHcda;
-    /// only the reason is unknown.
+    /// only the reason is unknown. The four-bit code itself, which is all
+    /// `from_code` ever puts here.
     Unknown(u8),
 }
 
@@ -1824,5 +1842,39 @@ mod tests {
         // Thirteen codes name a period and three do not; no code does both.
         let granted = (0..16u8).filter(|&c| T1::from_code(c) != T1::Reserved(c)).count();
         assert_eq!(granted, 13);
+    }
+
+    /// Table 33 codes twelve periods and nothing between them, so a timeout
+    /// that is not one of the twelve has no pattern of its own.
+    ///
+    /// What goes out is the longest tabled period that does not exceed the one
+    /// asked for -- five minutes is granted as four -- so a grant is never
+    /// longer than intended and never falls back to `0000`, which is reserved
+    /// and, by section 4's reading, no grant at all. `seconds` reports what the
+    /// wire will carry, not what was asked for, so the granting end and the
+    /// held end agree on how long the hold may run.
+    #[test]
+    fn a_timeout_table_33_cannot_name_is_granted_short_rather_than_reserved() {
+        for (asked, sent, granted) in [
+            (10, 1, Some(10)),
+            (59, 4, Some(40)),
+            (300, 8, Some(240)),
+            (1000, 12, Some(960)),
+            // Shorter than anything Table 33 names: there is no period to send.
+            (9, 0, None),
+            (0, 0, None),
+        ] {
+            let t1 = T1::Limit(asked);
+            assert_eq!(t1.code(), sent, "{asked} s went out as {:04b}", t1.code());
+            assert_eq!(t1.seconds(), granted, "{asked} s");
+            // And what the far end will make of it, which is what settles it.
+            let heard = Mh::from_bits(&Mh::ack(t1).to_bits()).expect("a good MHack");
+            assert_eq!(heard.information, MhInformation::Timeout(T1::from_code(sent)), "{asked} s");
+        }
+        // Every pattern the wire can carry goes back out as itself, so nothing
+        // is turned into something else on the way through.
+        for code in 0..16u8 {
+            assert_eq!(T1::from_code(code).code(), code, "code {code:04b}");
+        }
     }
 }
