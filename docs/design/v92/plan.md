@@ -770,7 +770,7 @@ not listed must not be touched.
     and the two settings differ, so flipping it after a capture is a one-line change.
   - `e1u_is_twelve_zeros_and_is_told_from_another_cpt`.
 
-#### V92-13: ANSpcm, QTS and TONEq (M)
+#### V92-13: ANSpcm, QTS and TONEq (L)
 
 - **Depends on:** V92-01.
 - **Clauses:** 8.3.1 (Tables 6-10); 8.3.6; 8.2.5; 9.2.1.3, 9.2.2.3, 9.2.3.3, 9.2.4.3; 9.8.1.1.3;
@@ -789,7 +789,14 @@ not listed must not be touched.
   - `ToneqGenerator`, exactly 980 Hz, and `ToneqDetector`: a steady 980 Hz for at least 60 ms with no
     1180 Hz energy, so V.21(L) marking cannot trigger it.
   - `AnspcmWatch` for the analogue side: 2100 Hz **without** the 15 Hz AM (using `v8::ansam`), told from
-    V.25 ANS by the QTS burst that precedes it, and reporting the QTS reversal time.
+    V.25 ANS by the QTS burst that precedes it, and reporting the QTS reversal time. It is `Debug` but
+    **not `Clone`**, because `v8::ansam::AnswerTone` is not, and none of `AnswerTone`'s state can be
+    rebuilt from outside it. A later package that wants one inside a `Clone` type - `v90::startup::Analogue`
+    is `Clone` today - needs that one derive added in `crates/v8/src/ansam.rs`, which is on no package's
+    Files line; it should be added to whichever package first needs it rather than guessed at here.
+  - `zero_dbm0(law)` and the two G.711 overload points it is built from, because a dBm0 figure needs a
+    reference and `ucode::linear(127)` is not it: that is the middle of the loudest interval, 0.14 dB
+    below the overload point, and using it reports every ANSpcm level loud by that much.
 - **Tests:**
   - `the_generator_reproduces_all_2408_tabled_octets`, and `table_7_k82_a_law_is_08` (the page prints "8").
   - `a_reversal_flips_only_the_polarity_bit_every_3612_symbols_and_lands_on_a_frame_boundary`.
@@ -2828,6 +2835,19 @@ Amendments made while a package was being built are recorded here too, one parag
   read the mask from the accessor, not from the descriptor. For the same reason `Cp::upstream_rates` stays
   V.90's `u16` and reads back as 0 under `Layout::V92`, rather than becoming the `Option` the entry names:
   `v90/analogue.rs` and `v90/digital.rs` both use that field and are outside the Files line as well.
+
+- **V92-13 is L, and the reason is 170 lines of printed table.** The entry's first bullet asks for Tables 7
+  to 10 as constants, which is 2408 octets - about 170 lines before a line of code is written - and
+  `v92/anspcm.rs` came to 1558 with them, its five other bullets and nine tests. Nothing about the package
+  grew; the sizing simply did not count the data. The entry now says L and has gained two things the build
+  found. `AnspcmWatch` cannot be `Clone` while `v8::ansam::AnswerTone` is not, which matters because
+  `v90::startup::Analogue` is `Clone` and V92-49 is the package that will want one there; the fix is one
+  derive in a file no package owns, and the entry says to add it to whichever package first needs it rather
+  than to guess a home for it now. And a dBm0 figure needs a reference: it is G.711's overload point, 8159
+  on mu-law, **not** `ucode::linear(127)`, which is the middle of the loudest interval and 0.14 dB quieter.
+  Taking the second reports every ANSpcm level loud by that much - more than the whole tolerance of
+  `anspcm_power_is_the_level_lm_names` - so the two overload constants are named in `v92::anspcm` and a test
+  pins the difference between them.
 
 ### From the work-package reviews
 
