@@ -883,13 +883,22 @@ not listed must not be touched.
     the ack state cleared when the silence ends.
   - A peer SUV with `wait_for_cp` set (Table 27 bit 26) holds our own CP back until the peer's CP has
     arrived **or** the CP repeat window expires, whichever comes first, and never holds back an SUV, an E
-    or a B1. The bound is what makes complying free, which is the condition 9.6.1.1.2 attaches to its
-    [MAY].
+    or a B1. The [MAY] is **Table 27 bit 26's own sentence**, "the digital modem is not required to comply
+    with this request", and not 9.6.1.1.2, which says nothing about bit 26 at all (section 14). The bound
+    is what makes complying free: the wait can never outlast the time the peer would have had to wait for
+    a repeat anyway.
+  - The CP also waits until one SUV of **our own** has been sent, which is 9.8.2.1.3's "after having
+    transmitted an SUVu and received an SUVd". In the `Training` context the owner is already sending SUVs
+    when it enters, so this changes nothing there.
 - **Tests:**
   - `figure_12_crossing_cps_end_in_ed_and_e2u` - a scripted trace reproduces SUVd SUVd CPd SUVd' SUVd' Ed
     against SUVu SUVu CPu SUVu SUVu' SUVu' E2u.
-  - `figure_13_a_cpu_heard_first_makes_the_single_cpd_a_cpd_prime`.
-  - `figure_14_a_lost_cpu_is_repeated_after_100_ms_and_a_round_trip`.
+  - `figure_13_a_cpu_heard_first_makes_the_single_cpd_a_cpd_prime` - which is the bit-26 case: the
+    analogue modem asks, and the CPd that follows the CPu is already CPd'.
+  - `figure_14_a_lost_cpu_is_repeated_after_100_ms_and_a_round_trip` - the figure's **shape**, not its box
+    count. Figure 14 draws "RTD + 100 ms" across four SUVu, which at 12 symbols each is 6 ms and not 106,
+    so the runs of unacknowledged sequences come out far longer than the one box the figure prints; the
+    test asserts the run lengths the printed window gives, and the instant the repeat starts (section 14).
   - `the_sequence_that_completes_after_the_deadline_still_counts`.
   - `no_second_cp_is_sent_while_acks_arrive`, and `an_e_counts_as_an_acknowledgement`.
   - `a_cpus_counts_as_a_cpu`.
@@ -2998,3 +3007,25 @@ what this package really does own: `UP_SEQUENCE_UNIT`, which is the *padding and
 a length and which is `UP_INTERVALS` under another name, and the four section 4 readings whose Owner
 column says `v92::up_signals`. The module uses V92-01's lengths and its tests assert against them, so the
 package still proves that 384T and 24T are whole Ru periods and that 144T and 2040T are whole frames.
+
+**V92-14: the "wait for my CPu" [MAY] is Table 27's sentence, not 9.6.1.1.2's, and Figure 14 is not to
+scale.** Two corrections made while the package was being built, both read off the rendered pages.
+9.6.1.1.2 (PDF page 58) is two sentences long and mentions neither bit 26 nor an option of any kind; the
+[MAY] is Table 27 bit 26 itself (PDF page 37), "The digital modem is not required to comply with this
+request", which is also where P4A 3.6 and P4D 12.2 put it. V92-14's entry now cites the table. **V92-39
+and V92-40 carry the same slip** - "9.6.1.1.2 makes complying a [MAY] in any case" and "which 9.6.1.1.2
+allows [MAY]" - and their entries are not this package's to edit, so whoever builds them should quote
+Table 27 bit 26 in the code and correct the entry then. Second: Figure 14 (PDF page 58) draws its
+"RTD + 100 ms" bracket across four SUVu, and an SUVu is 12 or 24 symbols, so the bracket as drawn is 6 to
+12 ms where the clause asks for 106 ms and up. The figure's box counts therefore cannot be reproduced by a
+machine that obeys 9.6.2.1.3; its *shape* can, and is - SUVu SUVu CPu, SUVu x4, SUVu', CPu' x3, E2u
+against SUVd x5, CPd, SUVd, SUVd', Ed - with the runs of unacknowledged sequences coming out 68 and 76
+instead of 1 and 4, and the instant the repeat starts asserted against the window. Figures 12 and 13 do
+come out box for box, Figure 13 with the digital modem's CPd held back one boundary past the CPu's arrival
+because it is still being designed, which is the same drawing slack P4P reads into Figure 14's late switch
+to SUVu'.
+
+One thing that entry did not name and the package needed: the single CP waits for one SUV of **our own**
+as well as one of the peer's, because 9.8.2.1.3 releases it only "after having transmitted an SUVu and
+received an SUVd". Without it, an SUVd that arrived while TRN2u was still running would put a CPu before
+the first SUVu in a renegotiation. The entry now says so.
