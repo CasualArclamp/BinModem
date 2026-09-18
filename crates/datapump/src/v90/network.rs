@@ -14,6 +14,11 @@
 //! the softphone now and then plays twenty milliseconds of made-up audio, or
 //! drops twenty, which shifts everything after it by 160 codewords.
 //!
+//! And a path can take the top of the band away: something between the
+//! network and the sound card -- a transcoder's filter, a resampler -- that
+//! passes everything to 3.6 kHz and next to nothing at 4. See
+//! [`Network::with_band_edge_cut`].
+//!
 //! Nothing here is a claim about any real network, only about what V.90 has
 //! to get through.
 
@@ -23,6 +28,13 @@ use super::ucode::{self, Law};
 
 /// The network's rate.
 const NETWORK_FS: f64 = 8000.0;
+
+/// The band-edge cut: a windowed sinc at this frequency, reaching this far
+/// either side, in seconds of line. With the codec's own reconstruction in
+/// front of it the whole path is flat to 3.5 kHz, 1 dB down at 3.6 kHz, 10 dB
+/// at 3.8, 26 at 3.9 and 48 at 3.975.
+const CUT_HZ: f64 = 3830.0;
+const CUT_REACH: f64 = 0.006;
 
 /// Codewords either side of an instant the codec's reconstruction reaches:
 /// short, since a reconstruction filter that rings on for longer than an
@@ -87,6 +99,9 @@ pub struct Network {
     /// through, how fast it recovers, in seconds, and where it has got to.
     gain_control: Option<(f64, f64)>,
     gain: f64,
+    /// The band-edge cut's taps, and the line samples they reach over,
+    /// newest first.
+    cut: Option<(Vec<f64>, VecDeque<f64>)>,
 }
 
 impl Network {
@@ -118,6 +133,7 @@ impl Network {
             slip_count: 0,
             gain_control: None,
             gain: 1.0,
+            cut: None,
         }
     }
 
@@ -185,6 +201,30 @@ impl Network {
     /// scale.
     pub fn with_gain_control(mut self, ceiling: f64, release: f64) -> Self {
         self.gain_control = Some((ceiling, release));
+        self
+    }
+
+    /// The top of the downstream's band taken away, as the analogue modem
+    /// hears it: flat to 3.6 kHz, about 10 dB down at 3.8 and 48 dB down just
+    /// short of 4.
+    ///
+    /// What a live call over a VoIP provider did to our own digital modem's
+    /// TRN1d and Jd (live-1789732858, 16.3 to 17.5 s): flat to 3.5 kHz, 2 dB
+    /// down at 3.6 to 3.7, 6 at 3.75, 11 at 3.8, 22 at 3.9 and 36 at 4.0.
+    /// TRN1d is as good as white, so that is the path's own shape. The cut
+    /// here, with the codec's reconstruction in front of it, is that path and
+    /// a little deeper at the very top. It is linear in phase, as a
+    /// resampler's filter is, and delays everything by [`CUT_REACH`].
+    pub fn with_band_edge_cut(mut self) -> Self {
+        let reach = (CUT_REACH * self.fs).round() as i64;
+        let mut taps: Vec<f64> = (-reach + 1..reach).map(|n| kernel(n as f64, CUT_HZ / self.fs, reach as f64)).collect();
+        // Unit gain at DC, which the taps come to only approximately.
+        let sum: f64 = taps.iter().sum();
+        for tap in &mut taps {
+            *tap /= sum;
+        }
+        let kept = VecDeque::from(vec![0.0; taps.len()]);
+        self.cut = Some((taps, kept));
         self
     }
 
@@ -280,6 +320,11 @@ impl Network {
                 }
                 let Some(&v) = self.down_levels.get(index as usize) else { continue };
                 sum += v * kernel(t - j as f64, 3800.0 / NETWORK_FS, DOWN_REACH as f64 + 1.0);
+            }
+            if let Some((taps, kept)) = self.cut.as_mut() {
+                kept.pop_back();
+                kept.push_front(sum);
+                sum = taps.iter().zip(kept.iter()).map(|(h, x)| h * x).sum();
             }
             let mut heard = sum;
             if let Some((ceiling, release)) = self.gain_control {
@@ -393,6 +438,43 @@ mod tests {
             let expected = 24_000i64 + if inserted { 320 } else { -320 };
             assert!((heard as i64 - expected).abs() < 60, "{inserted}: {heard}");
         }
+    }
+
+    /// A tone's level as the analogue modem hears it, against the level it
+    /// was sent at, in decibels.
+    fn heard_db(mut net: Network, hz: f64) -> f64 {
+        let amplitude = 0.3;
+        let mut heard = Vec::new();
+        for n in 0..24_000 {
+            heard.extend(net.down(amplitude * (2.0 * std::f64::consts::PI * hz * n as f64 / NETWORK_FS).sin()));
+        }
+        // A second's worth from the middle, correlated against the tone:
+        // quantising's noise is spread across the band, and falls away.
+        let (mut i, mut q) = (0.0, 0.0);
+        let from = heard.len() / 3;
+        for (k, x) in heard[from..from + 16_000].iter().enumerate() {
+            let phase = 2.0 * std::f64::consts::PI * hz * k as f64 / 16_000.0;
+            i += x * phase.cos();
+            q += x * phase.sin();
+        }
+        let level = 2.0 * (i * i + q * q).sqrt() / 16_000.0;
+        20.0 * (level / amplitude).log10()
+    }
+
+    /// The live path's shape (live-1789732858): next to nothing lost to 3.6
+    /// kHz, about ten decibels at 3.8, and next to everything just short of 4.
+    #[test]
+    fn a_band_edge_cut_keeps_the_band_and_takes_its_top() {
+        let cut = || Network::new(Law::Mu, 16_000.0).with_band_edge_cut();
+        let at = |hz: f64| heard_db(cut(), hz);
+        let (low, mid, edge, top) = (at(1000.0), at(3600.0), at(3800.0), at(3975.0));
+        println!("1000 Hz {low:.1} dB, 3600 Hz {mid:.1}, 3800 Hz {edge:.1}, 3975 Hz {top:.1}");
+        assert!(low.abs() < 0.2, "1000 Hz {low:.1} dB");
+        assert!(mid > -2.0, "3600 Hz {mid:.1} dB");
+        assert!((-12.0..-8.0).contains(&edge), "3800 Hz {edge:.1} dB");
+        assert!(top < -45.0, "3975 Hz {top:.1} dB");
+        // And without it, the reconstruction's own edge is gentler.
+        assert!(heard_db(Network::new(Law::Mu, 16_000.0), 3975.0) > -20.0);
     }
 
     #[test]

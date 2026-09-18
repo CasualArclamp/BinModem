@@ -655,3 +655,21 @@ fn a_softphone_line_keeps_its_carrier_through_data_and_renegotiations() {
     watch(&mut call, 8.0);
     assert!(call.analogue.is_v90());
 }
+
+fn plain_line() -> Network {
+    Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5)
+}
+
+/// A path that takes the top of the downstream's band away, as a live call
+/// over a VoIP provider's did (live-1789732858): flat to 3.6 kHz and next to
+/// nothing at 4. No equaliser gives back a band that is not there, and what
+/// the equaliser cannot undo rings on in every decision. The DIL reads the
+/// route as more than twice as noisy as a clean one, and the downstream comes
+/// up rungs short of a clean line's.
+#[test]
+fn a_band_edge_cut_costs_the_downstream_rungs() {
+    let clean = connects(plain_line(), server(), 30.0).rates().0;
+    let cut = connects(plain_line().with_band_edge_cut(), server(), 30.0).rates().0;
+    println!("{clean} clean, {cut} over the cut");
+    assert!(cut + 4 * 1333 < clean, "{cut} against {clean}");
+}
