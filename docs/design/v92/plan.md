@@ -670,7 +670,7 @@ not listed must not be touched.
   - `the_sign_splits_the_frame_at_the_middle`, `the_first_bit_in_time_is_the_lowest_in_value` and
     `the_moduli_come_out_of_the_parameters` - steps 1 and 2 on their own, and AD-3's boundary.
 
-#### V92-10: Precoder, prefilter, constellations, the inverse map and the 4T trellis (M)
+#### V92-10: Precoder, prefilter, constellations, the inverse map and the 4T trellis (L)
 
 - **Depends on:** V92-01.
 - **Clauses:** 6.4.2; 6.4.3; 6.4.4; 8.8.3 NOTE; V.34 9.6.3.1 (Figure 9, Table 13).
@@ -691,6 +691,15 @@ not listed must not be touched.
     `v34::trellis::Code` clocked once per 4-symbol trellis frame with its inputs masked to the code, 16, 32
     or 64 state chosen by `Parameters::trellis`.
   - `reset()` zeroes every memory.
+  - Two named readings, because section 4 gives this module one and P-12 forces the other:
+    `TIE_TO_SMALLER_INDEX` (the tie 6.4.2 leaves open, which nothing on the wire depends on) and
+    `OUTPUT_LIMIT` (the bound on G·v(n) alone, in the units 8.8.3 fixes; the filter state is never
+    saturated).
+  - The four map helpers are public and have their one home here, because V92-20's decoder needs the same
+    arithmetic backwards: `code_for`, `label_of`, `inverse_map` and `index_to_ki`.
+  - `Chain::new` checks less than `Parameters::fits` on purpose, and says so: V92-62 runs the chain with a
+    *trial* gain to find G, and a trial gain is not one Table 30's Q0.16 field could carry. The class
+    feasibility, the constellation index and the empty-z2 case are checked here with `fits`'s own wording.
 - **Tests:**
   - `with_no_filters_the_output_is_the_chosen_level` - z1 = p1 = [], z2 = [1], p2 = [], G = 1.
   - `the_prefilter_feed_forward_starts_at_kappa_0_and_the_precoder_s_at_1` - the one-tap indexing
@@ -700,9 +709,13 @@ not listed must not be touched.
   - `the_precoder_output_stays_bounded_over_a_long_run` - with a real feedback section, max |x| over
     100 000 symbols is under a stated multiple of the top level.
   - `a_class_with_no_member_is_reported` - N < Mi, and N < 2·Mi at k = 3.
-  - `an_inverse_channel_gives_back_every_k_as_eta_mod_m`.
-  - `the_memories_are_zero_before_b1u` - the first 12 outputs after a reset are a fixed vector.
+  - `an_inverse_channel_gives_back_every_k_as_eta_mod_m` - both filters run backwards from v(n), so an
+    off-by-one in either feed-forward section cannot find the levels again.
+  - `the_memories_are_zero_before_b1u` - the first 12 prefilter outputs after a reset are a fixed vector.
   - `the_state_is_never_saturated_only_the_output`.
+  - Four more the package needed: `the_fourth_symbol_s_class_steps_by_twice_the_modulus`,
+    `a_tie_goes_to_the_smaller_index`, `the_levels_rise_with_the_index_across_the_mirror` and
+    `the_code_is_the_one_cpd_bits_27_and_28_named`.
 
 #### V92-11: The V.92 framed sequences (M)
 
@@ -2906,3 +2919,25 @@ this switch is the wrong way up. The module says so, `Decoder::decode` refuses r
 `the_alternative_reading_of_step_4_is_not_one_to_one` is the proof. Q-1's "both readings decode" is the
 one line of INTRO 9.4 this contradicts. The sizing was also wrong: the file came to 750 lines, a third of
 it the clause quotations the house rule asks for, so the package is **M** and not **S**.
+
+**V92-10 is L, and its `Chain::new` is narrower than `Parameters::fits` on purpose.** Two corrections to
+its entry, both made while the package was built. The sizing was wrong for the same reason V92-01's was:
+`v92/precoder.rs` came to 1128 lines, half of it the clause quotations the house rule asks for and the
+inverse-channel test that proves the two feed-forward indexings of P-5 apart, so the package is **L** and
+not M. And the entry's "an infeasible parameter set is reported" could not be met by calling
+`Parameters::fits`, which V92-01 already owns: `fits` refuses a gain above `GAIN_LARGEST`, and the plan's
+own `with_no_filters_the_output_is_the_chosen_level` names G = 1, while V92-62 has to run this very chain
+with a trial gain to *find* the G that makes the mean square of G·v(n) equal to 1. A chain that demanded a
+Table 30 gain could not be used to choose one. So `Chain::new` checks the three things the chain itself
+needs - a constellation per interval, a prefilter feed-forward section, and a class with a member - in
+`fits`'s own wording, and the doc says why it stops there.
+
+The entry also gained what the package had to add beyond its description. `TIE_TO_SMALLER_INDEX` is
+section 4's point-selection reading given the named-constant home that section demands, and `OUTPUT_LIMIT`
+is the bound P-12 asks for, set at eight in the units 8.8.3 fixes: it is a bound in *those* units and in
+no others, so anything measuring power before G is settled reads `Symbol::v`, which the constant's doc
+says. `code_for`, `label_of`, `inverse_map` and `index_to_ki` are public here rather than repeated in
+V92-20, since the decoder needs exactly this arithmetic read backwards. Measured while building it: with
+p1 = [0.6, -0.2, 0.1] over 100 000 symbols the precoder output peaks at 15.9998 against a top level of 31,
+which is half the widest class spacing to six figures - the bound the minimum-|x(n)| rule predicts, and
+the reason the long-run test can assert a multiple as tight as 0.6 of the top level.
