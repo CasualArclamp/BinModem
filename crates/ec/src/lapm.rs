@@ -91,7 +91,7 @@ pub fn t401_for_line(bits_per_second: u32, round_trip_ms: u32) -> u32 {
 /// Ta + Tb + Te + Tf where nothing has measured them: the propagation each way
 /// and the processing at each end, which is the part that does not depend on
 /// the line rate.
-const PROPAGATION_MS: u32 = 1000;
+pub const PROPAGATION_MS: u32 = 1000;
 
 /// Tc + Td: the longest frame that could already be going out -- information
 /// field plus address, control and check sequence -- and the supervisory frame
