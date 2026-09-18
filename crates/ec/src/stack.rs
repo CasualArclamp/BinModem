@@ -254,6 +254,13 @@ pub struct Stack {
     /// bits once it has failed, and every bit after, for the terminal
     /// (Appendix I.3's second option).
     unclaimed: Vec<bool>,
+    /// A detector kept running beside the protocol phase, for the answerer
+    /// that skipped the detection phase and met an ODP anyway.
+    ///
+    /// [`Stack::bypassing_detection`] builds it; nothing else does, and it is
+    /// dropped the moment the far end proves it is past the detection phase
+    /// too.
+    watch: Option<Box<Answerer>>,
     /// Whether the error correction procedure is suspended (V.42 7.10).
     suspended: bool,
 }
@@ -424,6 +431,7 @@ impl Stack {
             round_trip_ms: 0,
             heard_text: false,
             unclaimed: Vec::new(),
+            watch: None,
             suspended: false,
         }
     }
@@ -457,11 +465,66 @@ impl Stack {
     /// question already answered is not worth three quarters of a second to
     /// ask again.
     ///
+    /// This is the **originator's** half of the bypass, and it is only half of
+    /// it. V.42 Appendix VI.2's NOTE reads the requirement as being on both
+    /// ends at once -- "Clause 9.3.1/V.9.2 requires that both the originating
+    /// and answering modems skip the V.42 detection phase if they both
+    /// indicate that V.42 is supported in the V.8 protocol octet or in the
+    /// V.92 short phase 1 signals" -- and an answerer that did not skip it
+    /// would sit in its detection phase swallowing this end's opening frames
+    /// until T400 ran out. [`Self::bypassing_detection`] is the other half.
+    ///
     /// It is a real cost if the far end turns out not to do V.42, though, so
     /// the patience is the same as for a detection phase that heard nothing.
     pub fn without_detection(mut self) -> Self {
         self.enter_negotiating();
         self.lapm.set_retransmissions(crate::lapm::UNCONFIRMED_N400);
+        self
+    }
+
+    /// The same for the answerer: no wait for an ODP, and no ADP
+    /// (V.92 9.2.5, 9.3.1).
+    ///
+    /// 9.2.5 is one sentence -- "If both modems have indicated LAPM
+    /// capability, the V.42 ODP/ADP exchange shall be bypassed" -- and 9.3.1
+    /// is the same sentence with V.92 capability added to it. What is bypassed
+    /// on this side, by 7.2.1.3, is the wait: the answerer would otherwise
+    /// send marks "until termination of the detection phase, receipt of the
+    /// ODP, or detection of the start of the protocol phase". Only the last of
+    /// those three is left, and it is already true, so the protocol phase
+    /// starts here and now.
+    ///
+    /// **An ODP that arrives anyway is still answered.** V.8 7.3 and 7.4 both
+    /// print the warning: "some existing implementations of V.8 may indicate
+    /// LAPM in prot0, but still require the ODP/ADP exchange to successfully
+    /// negotiate LAPM", and Appendix VI.2 says plainly that many answering
+    /// modems run the detection phase whatever V.8 said. A far end like that
+    /// hears this end's flags as nothing at all -- its detector is reading
+    /// characters, not frames -- and decides at T400 that there is no V.42
+    /// here. So a detector goes on running beside the protocol phase, and if
+    /// an ODP does turn up it gets Table 3's answer spliced between two
+    /// frames. It costs about 440 bits on the one call in a hundred that needs
+    /// it, and the call that needs it is the one that would otherwise have no
+    /// error control at all.
+    ///
+    /// The detector is dropped as soon as the far end proves it is past the
+    /// detection phase -- continuous flags or any LAPM frame, which is
+    /// 7.2.1.3's own list -- so nothing is scanning the line once a link is
+    /// up, and a stray DC1 in compressed data cannot start a pattern.
+    ///
+    /// This presumes LAPM was agreed, since that is the only thing that
+    /// licenses the bypass; it is not for an end that means to decline
+    /// ([`Self::declining`]).
+    ///
+    /// Patience is left alone, unlike [`Self::without_detection`]. The
+    /// originator cuts its N400 because it is about to send SABMEs into a
+    /// silence that may go on for ever; an answerer sends no SABME at all, so
+    /// the only thing a smaller N400 would shorten here is an established
+    /// link's own recovery (8.5.3), and this end has more reason to believe in
+    /// the far one than a detection phase would have given it.
+    pub fn bypassing_detection(mut self) -> Self {
+        self.enter_negotiating();
+        self.watch = Some(Box::new(Answerer::new(self.t400_ms(), Answer::ErrorControl)));
         self
     }
 
@@ -497,6 +560,13 @@ impl Stack {
         self.round_trip_ms = round_trip_ms;
         if !matches!(self.detect, Detect::Done) {
             self.detect = Detect::start(self.role, self.t400_ms(), self.declining);
+        }
+        // And the detector a bypass leaves running, which has the same T400
+        // and is on the same line. Rebuilt rather than adjusted because
+        // nothing can have reached it yet: these are builders, and the call
+        // has not started.
+        if self.watch.is_some() {
+            self.watch = Some(Box::new(Answerer::new(self.t400_ms(), Answer::ErrorControl)));
         }
         self
     }
@@ -873,6 +943,15 @@ impl Stack {
             }
             Phase::Protocol | Phase::Transparent => {}
         }
+        // 7.2.1.3's own T400, still running behind a bypass. What it bounds is
+        // no longer the wait for an ODP -- this end stopped waiting before the
+        // call began -- but the far end's chance to show it is doing V.42 at
+        // all.
+        if let Some(watch) = self.watch.as_mut()
+            && watch.tick(dt_ms) == Outcome::TimedOut
+        {
+            self.bypass_failed();
+        }
         self.lapm.tick(dt_ms);
         self.drain();
     }
@@ -920,6 +999,17 @@ impl Stack {
             return true;
         }
         if self.encoder.is_empty() {
+            // Table 3's answer to an ODP that should never have arrived, put
+            // on the line between frames rather than through them. Between,
+            // because it is async characters and not HDLC: cutting into a
+            // frame would give the far end a check sequence failure instead of
+            // an answer, and cutting between two repetitions would break the
+            // adjacency 7.2.1.2 needs.
+            if let Some(watch) = self.watch.as_mut()
+                && watch.sending()
+            {
+                return watch.transmit();
+            }
             let mut queued = false;
             if !self.opened {
                 self.opened = true;
@@ -985,6 +1075,13 @@ impl Stack {
             self.unclaimed.push(bit);
             return;
         }
+        // The detector a bypass leaves running (7.2.1.3), which may put this
+        // stack into the transparent phase on this very bit -- and has then
+        // kept the bit itself, along with everything before it.
+        self.watch_bit(bit);
+        if self.phase == Phase::Transparent {
+            return;
+        }
         let Some(result) = self.decoder.feed(bit) else {
             return;
         };
@@ -1003,7 +1100,61 @@ impl Stack {
             self.damaged += 1;
             return;
         };
+        // 7.2.1.3 ends the detection phase on "receipt of continuous flags, or
+        // of an LAPM or alternative procedure protocol frame". This is the
+        // second of those, and it is the stronger one: a far end that is
+        // sending frames is not about to send an ODP.
+        self.watch = None;
         self.dispatch(address, frame);
+    }
+
+    /// Feed the detector a bypass left running, and act on what it makes of
+    /// the line.
+    fn watch_bit(&mut self, bit: bool) {
+        let Some(watch) = self.watch.as_mut() else {
+            return;
+        };
+        let outcome = watch.receive(bit);
+        let sending = watch.sending();
+        match outcome {
+            // The far end skipped the detection phase as well, which is what
+            // 9.2.5 asked of it. There is nothing left to detect.
+            Outcome::ProtocolStarted => self.watch = None,
+            // It did not, and has now been answered. Once the last repetition
+            // is out the detector has done its one job.
+            Outcome::OriginatorDetected if !sending => self.watch = None,
+            // The far end's terminal is typing, so whatever V.8 said, there is
+            // no V.42 at the other end of this line.
+            Outcome::Text => {
+                self.heard_text = true;
+                self.bypass_failed();
+            }
+            _ => {}
+        }
+    }
+
+    /// The far end never showed any sign of V.42, so the bypass was taken on
+    /// the strength of something that was not true.
+    ///
+    /// 7.2.1.3's ending, which the bypass changes the start of and not the
+    /// finish: "If, after establishment of the physical connection, the ODP is
+    /// not observed within the period of T400 and the start of the protocol
+    /// establishment phase is not observed within the same period, then the
+    /// answerer shall decide that the originator is not capable of V.42
+    /// error-correcting operation and shall fall back to non-error-correcting
+    /// operation."
+    ///
+    /// Without this an answerer that bypassed would have no ending at all. It
+    /// never sends a SABME -- the originator does that -- so nothing here ever
+    /// gives up, [`Self::settled`] never comes true, and the terminal waits
+    /// for a CONNECT that is not coming.
+    fn bypass_failed(&mut self) {
+        if let Some(watch) = self.watch.as_mut() {
+            let heard = watch.take_heard();
+            self.unclaimed.extend(heard);
+        }
+        self.watch = None;
+        self.phase = Phase::Transparent;
     }
 
     fn dispatch(&mut self, address: Address, frame: Frame) {
@@ -2182,6 +2333,134 @@ mod tests {
         stack.take_received();
         send(&mut stack, b"password: ");
         assert_eq!(stack.take_received(), b"password: ");
+    }
+
+    /// Run two ends against each other, keeping every bit that crossed.
+    ///
+    /// The same channel as [`settle`], with the wire itself written down, for
+    /// the tests whose subject is what was *not* on it.
+    fn settle_recording(a: &mut Stack, b: &mut Stack, bits: usize) -> (Vec<bool>, Vec<bool>) {
+        let (mut from_a, mut from_b) = (Vec::new(), Vec::new());
+        for i in 0..bits {
+            let to_b = a.next_bit();
+            let to_a = b.next_bit();
+            from_a.push(to_b);
+            from_b.push(to_a);
+            b.feed_bit(to_b);
+            a.feed_bit(to_a);
+            if i % 160 == 0 {
+                a.tick(16);
+                b.tick(16);
+            }
+        }
+        (from_a, from_b)
+    }
+
+    /// The longest run of ONEs anywhere in a stream.
+    fn longest_run_of_ones(bits: &[bool]) -> usize {
+        let (mut best, mut run) = (0, 0);
+        for &bit in bits {
+            run = if bit { run + 1 } else { 0 };
+            best = best.max(run);
+        }
+        best
+    }
+
+    /// V.92 9.2.5: "If both modems have indicated LAPM capability, the V.42
+    /// ODP/ADP exchange shall be bypassed", and 9.3.1 says the same of a full
+    /// Phase 1 that settled both V.92 capability and LAPM. V.42 Appendix VI.2
+    /// reads that as binding on both ends at once, which is what this is: the
+    /// originator disables its detection phase (7.2.1.2) and the answerer
+    /// skips the wait (7.2.1.3), and the line carries HDLC from its first bit.
+    #[test]
+    fn two_ends_that_both_skip_detection_reach_lapm_with_no_odp_or_adp_on_the_wire() {
+        let mut a = Stack::new(Role::Originator, Params::default()).without_detection();
+        let mut b = Stack::new(Role::Answerer, Params::default()).bypassing_detection();
+        assert_eq!(a.phase(), Phase::Negotiating, "the originator waited");
+        assert_eq!(b.phase(), Phase::Negotiating, "the answerer waited");
+
+        let (from_a, from_b) = settle_recording(&mut a, &mut b, 20_000);
+        assert!(a.is_connected(), "the originator is {:?}", a.state());
+        assert!(b.is_connected(), "the answerer is {:?}", b.state());
+
+        // Every character of an ODP and of an ADP sits behind ONEs: 7.2.1.2
+        // separates the two DC1s by "8 to 16 ones" and Table 3 does the same
+        // for `E` and its type character. HDLC cannot produce eight in a row
+        // -- a flag holds six and zero insertion stops a frame at five -- so
+        // a run of eight is the mark of a detection pattern, and there is not
+        // one in either direction.
+        assert!(
+            longest_run_of_ones(&from_a) < 8,
+            "{} ONEs in a row from the originator: an ODP crossed",
+            longest_run_of_ones(&from_a)
+        );
+        assert!(
+            longest_run_of_ones(&from_b) < 8,
+            "{} ONEs in a row from the answerer: an ADP crossed",
+            longest_run_of_ones(&from_b)
+        );
+        assert_eq!(a.far_answer(), None, "the originator was answered by something");
+
+        a.send(b"login: cactus\r\n");
+        settle(&mut a, &mut b, 20_000, |_, bit| bit);
+        assert_eq!(b.take_received(), b"login: cactus\r\n");
+    }
+
+    /// V.8 7.3 and 7.4, both in the same words: "some existing implementations
+    /// of V.8 may indicate LAPM in prot0, but still require the ODP/ADP
+    /// exchange to successfully negotiate LAPM". V.42 Appendix VI.2 adds that
+    /// many answering modems run the detection phase whatever V.8 said.
+    ///
+    /// Such a far end hears this end's opening flags as nothing at all, since
+    /// its detector is reading characters and not frames, and at T400 decides
+    /// there is no V.42 here. Answering its ODP is the only thing that stops
+    /// that, and it costs one burst of pattern.
+    #[test]
+    fn an_answerer_that_skips_detection_still_answers_an_odp() {
+        let mut a = Stack::new(Role::Originator, Params::default());
+        let mut b = Stack::new(Role::Answerer, Params::default()).bypassing_detection();
+        assert_eq!(a.phase(), Phase::Detecting, "the far end is the one that asks");
+
+        let (_, from_b) = settle_recording(&mut a, &mut b, 40_000);
+        assert_eq!(
+            a.far_answer(),
+            Some(Answer::ErrorControl),
+            "the ODP went unanswered, so the far end fell back to no error control"
+        );
+        assert!(a.is_connected(), "the originator is {:?}", a.state());
+        assert!(b.is_connected(), "the answerer is {:?}", b.state());
+
+        // The answer really was async characters on the line, and not HDLC
+        // that happened to satisfy the detector.
+        assert!(longest_run_of_ones(&from_b) >= 8, "Table 3's fill never went out");
+
+        a.send(b"login: cactus\r\n");
+        settle(&mut a, &mut b, 20_000, |_, bit| bit);
+        assert_eq!(b.take_received(), b"login: cactus\r\n");
+    }
+
+    /// V.42 7.2.1.3's own ending, which the bypass changes the start of and
+    /// not the finish: an answerer that sees neither an ODP nor the start of
+    /// the protocol phase within T400 "shall decide that the originator is not
+    /// capable of V.42 error-correcting operation and shall fall back to
+    /// non-error-correcting operation".
+    ///
+    /// Without that a bypassed answerer would have no ending at all. It never
+    /// sends a SABME, so nothing in it ever gives up, and the terminal would
+    /// wait for a CONNECT that is not coming.
+    #[test]
+    fn a_bypassed_answerer_still_falls_back_when_the_far_end_does_no_v42() {
+        let mut b = Stack::new(Role::Answerer, Params::default()).bypassing_detection();
+        // A far end that took the line and said nothing on it.
+        for _ in 0..100 {
+            for _ in 0..4_000 {
+                b.next_bit();
+                b.feed_bit(true);
+            }
+            b.tick(100);
+        }
+        assert_eq!(b.phase(), Phase::Transparent);
+        assert!(b.settled(), "the terminal would still be waiting for a CONNECT");
     }
 
     /// V.42 7.10: "the error control function shall freeze the appropriate
