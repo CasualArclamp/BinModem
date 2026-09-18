@@ -979,38 +979,58 @@ not listed must not be touched.
 - **Digests:** P2P (2, 4, 5, 7, 11); P2S (10, 11, 16); P3S (5.7 Sd-5); CA (2, 11.2); CD (2, 5.1, 8.4).
 - **Description:** full Phase 2 learns V.92; the procedure itself is unchanged, because 9.3 says it is
   V.90's.
-  - `V92Wish { capable, short_phase2, pcm_upstream, up_caps }`, carried by the `Pcm` roles. The existing
-    constructors mean "not V.92", so a V.90 pair is byte-identical to today.
+  - `V92Wish { capable, short_phase2, pcm_upstream, up_caps }`, carried by the `Pcm` roles as **two more
+    variants**, `AnalogueV92(V92Wish)` and `DigitalV92(Info0d, V92Wish)`, rather than folded into the two
+    that are there. `v90/startup.rs` builds `Pcm::Analogue` and `Pcm::Digital(info0d)` and is outside this
+    package's file list, so neither may change shape. The existing constructors mean "not V.92", and mean
+    it on the wire: a V.90 pair is byte-identical to today, which a test asserts against the V.92 variants
+    carrying an empty wish.
   - INFO0 is written with the bits at the swapped positions per role; the far flags are recorded **only**
     in PCM roles and survive a retrain, because a retrain never repeats INFO0. Add `both_v92()`.
   - Digital INFO1d: bit 70 is "PCM upstream allowed", set from the digital modem's own verdict, when both
     modems are V.92; otherwise it is the V.90 carrier flag, unchanged.
   - Analogue INFO1a: Table 18 when all of - both V.92, bit 70 set, `pcm_upstream` wanted, PCM upstream not
     declined; otherwise today's Table 10 or Table 11.
-  - **UINFO is capped for V.92.** `v90::training_codeword` (`v90/mod.rs:63`) searches Ucodes 67..127
-    downwards against the INFO0d power limit and can return a Ucode above 111. Table 18 cannot carry one
-    (bits 25:31), and Sd could not use one anyway, because Sd's codeword is Ucode 16 + U_INFO and must stay
-    <= 127 (8.6.7 with V.90 8.4.4; P3S 5.7 Sd-5). Against a digital modem with a high maximum transmit
-    power a conforming Table 18 INFO1a could therefore not be built at all. Add `V92_MAX_UINFO: u8 = 111`
-    in `v90/mod.rs`, whose doc quotes Sd-5, and a `training_codeword_v92(far)` that starts the same search
-    at 111. V.90's own `training_codeword` is left exactly as it is, so no V.90 behaviour changes.
+  - **UINFO is capped for V.92, as a guard rather than as a fix.** `v90::training_codeword` searches
+    Ucodes 67..127 downwards against the INFO0d power limit. Sd's codeword is Ucode 16 + U_INFO and must
+    stay <= 127 (8.6.7 with V.90 8.4.4; P3S 5.7 Sd-5), so a U_INFO above 111 names a codeword the digital
+    modem could not send. Add `V92_MAX_UINFO` in `v90/mod.rs`, whose doc quotes Sd-5, and a
+    `training_codeword_v92(far)` that stops the same search there. **This entry's original premise was
+    wrong** and is corrected here: Table 15/V.90's loudest limit is (15124)^2, which admits no Ucode above
+    **109** under either companding law, so the V.90 search cannot reach 111 for any of the thirty-two
+    maximum transmit powers an INFO0d can name, and the cap costs nothing today. It is there so that a
+    later reading of those limits cannot ask for a codeword the far end could not build Sd from. The
+    constant is `v34::info::UINFO_HIGHEST` rather than a second 111, because V92-02 created that constant
+    after this entry was written and one reading has one home. The two searches share one private helper
+    whose only argument is the ceiling, and V.90's own `training_codeword` returns exactly what it always
+    did, which the test below proves for every INFO0d.
   - `decline_pcm_upstream()`, with a pass-through in `v34::startup`, and an `info1a_pcm_up()` accessor.
   - Digital acceptance: a Table 18 INFO1a is accepted only if this modem set bit 70 and both are V.92;
     otherwise the frame counts as not received (P2P P15).
-  - `again()` keeps the flags and always runs full Phase 2.
-  - `lapm_bypass_allowed()` means both modems are V.92 (9.3.1); the error-control layer consumes it later.
-- **Tests** (the `phase2.rs` `Line` harness):
+  - `again()` keeps the flags and always runs full Phase 2, through a `full_phase2_only` latch that
+    `short_phase2_agreed()` reads: 9.7's four re-entry points are all in the full procedure.
+  - `lapm_bypass_allowed(both_lapm)` is both modems V.92 (9.3.1) **and** the caller's half of the rule.
+    9.3.1 wants LAPM in V.8 or V.8 *bis* as well, which phase 2 cannot see, so the V.8 answer is an
+    argument rather than a second accessor - and the named test below needs both halves visible here.
+- **Tests** (the `phase2.rs` `Line` harness, except where the code is elsewhere):
   - `a_v92_pair_settles_on_pcm_upstream` - a Table 18 INFO1a, both ends reporting PCM upstream.
-  - `uinfo_never_exceeds_111_so_sd_s_codeword_exists` - against a digital modem whose INFO0d maximum
-    transmit power would otherwise admit Ucode 120: the Table 18 INFO1a is still built, its UINFO is
-    67..=111, and Ucode 16 + UINFO is <= 127. The V.90 `training_codeword` for the same INFO0d still
-    returns its old value, and the existing `v90/mod.rs` tests pass.
+  - `uinfo_never_exceeds_111_so_sd_s_codeword_exists`, **in `v90/mod.rs`**, where the code is. For both
+    laws and all thirty-two maximum transmit powers: `training_codeword_v92` is 67..=111, Ucode 16 + it
+    exists, and it equals `training_codeword` for the same INFO0d, so V.90's own choice provably did not
+    move. The search's ceiling is then tested with the power limit taken away, which is the only way to
+    reach it: 127 against V.90's ceiling and 111 against V.92's.
   - `a_v92_analogue_modem_meets_a_v90_digital_modem_with_table_10`, and the mirror image.
   - `bit_70_clear_means_no_table_18`, and `pig_off_means_no_table_18`.
   - `declining_pcm_upstream_gives_table_10_next_time`.
   - `a_retrain_between_v92_modems_keeps_the_flags_and_runs_full_phase_2`.
-  - `a_v34_info0_with_a_clock_of_1_is_not_taken_for_v92`.
+  - `a_v34_info0_with_a_clock_of_1_is_not_taken_for_v92` - and it also pins what cannot be defended: a
+    V.92 digital modem *does* read a V.34 modem's clock bits as V.92 flags, because no frame bit can say
+    otherwise, and the call still lands on V.34.
+  - `a_table_18_info1a_this_end_did_not_invite_is_counted_as_not_received` - both halves of the digital
+    acceptance rule, each refused on its own, and the frame taken when both hold.
   - `the_lapm_bypass_needs_both_v92_and_both_prot0`.
+  - `the_info0_flags_go_out_where_each_table_puts_them` - Tables 15 and 16, the swap and all.
+  - `the_v90_constructors_still_send_what_they_always_sent` - byte for byte against an empty wish.
   - `a_v90_pair_settles_on_v90` passes unchanged, as does every existing Phase 2 test.
 
 #### V92-17: Network, part B: echo, transcoder, gain control and softphone paths (M)
@@ -3076,3 +3096,30 @@ One thing that entry did not name and the package needed: the single CP waits fo
 as well as one of the peer's, because 9.8.2.1.3 releases it only "after having transmitted an SUVu and
 received an SUVd". Without it, an SUVd that arrived while TRN2u was still running would put a CPu before
 the first SUVu in a renegotiation. The entry now says so.
+
+**V92-16: the UINFO cap is a guard, not a fix, and Table 15/V.90 says so.** The entry claimed
+`training_codeword` "can return a Ucode above 111", and built a named test around a digital modem whose
+maximum transmit power "would otherwise admit Ucode 120". Neither is true. Table 15/V.90, read from the
+rendered page, has its loudest limit at (15124)^2 for -0.5 dBm0, and no Ucode above 109 stays inside that
+under either companding law - Ucode 120 is 24956 in Table 1's units, half as loud again as the loudest
+limit there is. So the V.90 search can never reach 111 for any INFO0d, the conforming-Table-18 problem the
+entry describes does not exist, and the test as written could not be built. `V92_MAX_UINFO` is kept all
+the same, because Sd-5 is a real bound on a real signal and a cap that costs nothing is the cheapest place
+to hold it; the entry now says what it is for, and the test proves both that the ceiling is where it
+should be and that V.90's own choice did not move for any of the sixty-four cases. Two smaller departures
+are recorded in the entry too: `V92Wish` rides on two *additional* `Pcm` variants, because the two that
+exist are built in `v90/startup.rs` and cannot change shape, and `lapm_bypass_allowed` takes V.8's half of
+9.3.1 as an argument.
+
+One reading the package could not settle is worth naming here, because a later package inherits it.
+**A V.92 digital modem cannot tell INFO0a bit 26 from V.34's transmit clock source.** V.90 reserves bits
+26:27 of INFO0a and a V.90 analogue modem sends zeros, so V.90 peers are safe; but a plain V.34 modem
+answering a V.92 digital modem's phase 2 puts its clock source in those bits, and "synchronized to the
+receive timing" reads as "V.92 capability: 1". 9.3 gives no second signal, and phase 2 cannot see the V.8
+menus that would. What it costs in this package is one bit: INFO1d bit 70 carries the PCM-upstream verdict
+where V.90 would have put the 3429 high-carrier flag, and the call still lands on V.34, because a V.34
+modem answers with Table 11 whatever bit 70 said. V92-24 inherits a sharper version of the same thing: a
+V.34 modem naming an external clock (the value 3) sets *both* flags, so if our own end also requests a
+short phase 2 the four bits of 9.4 agree with a modem that has never heard of it, and the two ends reverse
+in opposite orders. The remedy is not in phase 2 - it is to make the short-phase-2 request conditional on
+V.8 having offered PCM, which AD-12's memo already gates it on (P2S N-21).

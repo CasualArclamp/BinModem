@@ -179,6 +179,15 @@ impl Modem {
         self.phase2.decline_pcm();
     }
 
+    /// Ask for V.90 data mode rather than PCM upstream in phase 2's INFO1a
+    /// from now on, even of a V.92 server that has offered it.
+    ///
+    /// The rung above [`Self::decline_pcm`]: PCM downstream is kept and only
+    /// the upstream falls back to V.34 modulation.
+    pub fn decline_pcm_upstream(&mut self) {
+        self.phase2.decline_pcm_upstream();
+    }
+
     /// Start phase 2 again as a retrain, from wherever this start-up is.
     pub fn restart_phase2(&mut self) {
         self.phase2 = self.phase2.again();
