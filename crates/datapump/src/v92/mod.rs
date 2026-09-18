@@ -175,8 +175,17 @@ pub fn ja_mask_drns(mask: u32) -> Vec<u8> {
 /// upstream data frames. 280 symbols, which is what 35 ms would be, is not.
 pub const MD_STEP_SYMBOLS: usize = 276;
 
+/// The longest MD INFO1a can ask for. Bits 18:24 are seven bits and Table 18
+/// reads "An integer between 0 and 127 gives the length of this sequence in 276
+/// symbol (34.5 ms) increments", so the field stops here and at 35 052 symbols.
+pub const MD_LONGEST: u8 = 127;
+
 /// How many symbols an INFO1a MD length of `length` asks for (Table 18 bits
-/// 18:24, "integer 0 to 127").
+/// 18:24).
+///
+/// `length` is the field's own value, so anything above [`MD_LONGEST`] has no
+/// seven-bit field to go in and cannot be sent; the INFO1a encoder is where
+/// that is refused, because this is arithmetic on a number already read.
 pub fn md_symbols(length: u8) -> usize {
     usize::from(length) * MD_STEP_SYMBOLS
 }
@@ -482,6 +491,20 @@ impl Filters {
     }
 }
 
+/// How many constellation sets a CPd has room for: it carries LC1 to LC6 and
+/// six index fields, each "an integer between 0 and 5" (Table 30). Sets past
+/// the sixth have no length field, and an index past 5 does not exist.
+pub const CONSTELLATION_SETS: usize = 6;
+
+/// The most positive points one constellation set may hold: "The number of
+/// points in a constellation set shall not exceed 128" (Table 30's preamble).
+///
+/// Read as 128 positive points, so N = 2 x 128 levels, because LCi is printed
+/// as "Number of positive points in the ... constellation set" and that is what
+/// the sentence beside it counts. If a capture ever shows a CPd refused at 65
+/// points, the sentence meant the 2 x LC levels and this becomes 64.
+pub const CONSTELLATION_POINTS: usize = 128;
+
 /// Everything CPd settles about the upstream, with the bit layout left behind
 /// (AD-3).
 ///
@@ -547,6 +570,14 @@ impl Parameters {
     /// 6.4 require of a set of parameters on their own, before INFO1a's limits
     /// are brought in ([`Filters::fits`] does those).
     ///
+    /// It also refuses what Table 30 has no room for -- a gain above
+    /// [`GAIN_LARGEST`], a seventh constellation set, a set over
+    /// [`CONSTELLATION_POINTS`], an index past 5 -- because a parameter set
+    /// that cannot be encoded is not one the design may hand on, and the
+    /// encoders in `v92::sequences` would otherwise have to fail late or clamp.
+    /// Every set here is non-empty, which is how Table 30's "constellation sets
+    /// with non-zero size shall be listed first" is met.
+    ///
     /// The class-feasibility rules are the two the Recommendation never
     /// states: an equivalence class E(Ki) is non-empty for every Ki only if
     /// N >= Mi, and at k = 3, where the class steps by 2 x Mi, only if
@@ -570,9 +601,15 @@ impl Parameters {
         if self.filters.z2.is_empty() {
             return Err("the prefilter has no feed-forward section");
         }
+        if self.sets.len() > CONSTELLATION_SETS {
+            return Err("cpd has room for six constellation sets");
+        }
         for points in &self.sets {
             if points.is_empty() {
                 return Err("a constellation set is empty");
+            }
+            if points.len() > CONSTELLATION_POINTS {
+                return Err("a constellation set has more points than cpd allows");
             }
             if points[0] == 0 {
                 return Err("a constellation set contains the zero point");
@@ -580,6 +617,9 @@ impl Parameters {
             if points.windows(2).any(|pair| pair[0] >= pair[1]) {
                 return Err("a constellation set is not in ascending magnitude");
             }
+        }
+        if self.indices.iter().any(|&index| usize::from(index) >= CONSTELLATION_SETS) {
+            return Err("a constellation index is outside the printed 0 to 5");
         }
         for i in 0..UP_INTERVALS {
             let Some(points) = self.set_for(i) else {
@@ -828,6 +868,10 @@ mod tests {
         assert_eq!(md_symbols(0), 0);
         assert_eq!(md_symbols(1), 276);
         assert_eq!(md_symbols(127), 35_052);
+        // Seven bits, so the field stops at 127 and there is no longer MD.
+        assert_eq!(MD_LONGEST, 127);
+        assert_eq!(md_symbols(MD_LONGEST), 35_052);
+        assert_eq!(u32::from(MD_LONGEST), (1u32 << 7) - 1, "bits 18:24 are seven");
         // 276 = 23 x 12, so an MD is always a whole number of data frames --
         // which 35 ms, or 280 symbols, would not be.
         assert!(MD_STEP_SYMBOLS.is_multiple_of(UP_INTERVALS));
@@ -1027,6 +1071,21 @@ mod tests {
         broken = params.clone();
         broken.indices[2] = 1;
         assert!(broken.fits().is_err(), "there is no set 1");
+
+        // And what Table 30 has no room for. A seventh set has no LC field, an
+        // index of 6 is outside the printed 0 to 5 even with sets to spare,
+        // and a set of 129 points passes the 128 the preamble allows.
+        broken = params.clone();
+        broken.sets = vec![params.sets[0].clone(); CONSTELLATION_SETS];
+        assert_eq!(broken.fits(), Ok(()), "six sets is what CPd carries");
+        broken.sets.push(params.sets[0].clone());
+        assert_eq!(broken.fits(), Err("cpd has room for six constellation sets"));
+        broken.sets.pop();
+        broken.indices[0] = 6;
+        assert_eq!(broken.fits(), Err("a constellation index is outside the printed 0 to 5"));
+        broken = params.clone();
+        broken.sets[0] = (1..=CONSTELLATION_POINTS as u16 + 1).map(|p| p * 8).collect();
+        assert_eq!(broken.fits(), Err("a constellation set has more points than cpd allows"));
 
         // 255^12 is about 2^96, which is why the product is a u128.
         let widest = Parameters { drn: 19, moduli: [255; UP_INTERVALS], ..params };
