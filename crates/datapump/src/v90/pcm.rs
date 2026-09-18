@@ -1208,9 +1208,12 @@ mod tests {
     const FS: f64 = 16_000.0;
     const UINFO: u8 = 78;
 
-    /// The sound card's clock against the network's, in parts per million: a
-    /// live VoIP call measured 70 to 115 (memory `v90-live-test-pending`),
-    /// and the drift test above uses 120.
+    /// The sound card's clock against the network's, in parts per million.
+    /// Live VoIP calls measured "+69.9 ppm clock" (memory
+    /// `v34-phase2-tone-deadline`) and "a steady ~114 ppm" (memory
+    /// `voip-jitter-slips`); both were read off V.34 captures, but the offset
+    /// is the sound card against the far clock and does not depend on the
+    /// modulation. The drift test above uses 120, so this does too.
     const PPM: f64 = 120.0;
 
     /// Line samples the reported symbol period may move from one line sample
