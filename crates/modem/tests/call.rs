@@ -574,9 +574,12 @@ fn error_control_is_asked_for_once_over_a_line_with_a_long_round_trip() {
     let mut saw = Vec::new();
     let mut host_saw = Vec::new();
     // A SABME is control field 0x6f, 0x7f with the P bit (V.42 Table 7),
-    // whichever address it went out on; a UA is 0x63, 0x73 with the F bit.
+    // whichever address it went out on; a UA is 0x63, 0x73 with the F bit; an
+    // XID is 0xaf, command and response alike.
     let sabme = |body: &[u8]| body.get(1).is_some_and(|c| c & 0xef == 0x6f);
     let ua = |body: &[u8]| body.get(1).is_some_and(|c| c & 0xef == 0x63);
+    let xid = |body: &[u8]| body.get(1).is_some_and(|c| c & 0xef == 0xaf);
+    let (mut caller_xids, mut host_xids) = (0, 0);
     // Past the connection by a few round trips, so that a second SABME has
     // had every chance to go out and to be answered.
     let mut settled_at = None;
@@ -587,8 +590,12 @@ fn error_control_is_asked_for_once_over_a_line_with_a_long_round_trip() {
         from_host = host.step(to_host.pop_back().unwrap_or(0.0));
         saw.extend(caller.take_dte());
         host_saw.extend(host.take_dte());
-        asked += caller.take_frame_log().iter().filter(|f| f.outbound && sabme(&f.body)).count();
-        answered += host.take_frame_log().iter().filter(|f| f.outbound && ua(&f.body)).count();
+        let caller_log = caller.take_frame_log();
+        let host_log = host.take_frame_log();
+        asked += caller_log.iter().filter(|f| f.outbound && sabme(&f.body)).count();
+        answered += host_log.iter().filter(|f| f.outbound && ua(&f.body)).count();
+        caller_xids += caller_log.iter().filter(|f| f.outbound && xid(&f.body)).count();
+        host_xids += host_log.iter().filter(|f| f.outbound && xid(&f.body)).count();
         if settled_at.is_none() && caller.state() == State::Data && host.state() == State::Data {
             settled_at = Some(i);
         }
@@ -622,6 +629,24 @@ fn error_control_is_asked_for_once_over_a_line_with_a_long_round_trip() {
     );
     assert_eq!(asked, 1, "error control was asked for {asked} times");
     assert_eq!(answered, 1, "and answered {answered} times");
+    // And the XID exchange of V.42 8.10.2 was the one command, an answer to
+    // the far end's, and at most 8.10.3's retransmission of each -- not the
+    // fifty to two hundred copies that used to go out for as long as the
+    // encoder had nothing else to send.
+    //
+    // Four is that ceiling and nothing finer. It is the most 8.10.2 and 8.10.3
+    // can put on the line between them, a command and its one retransmission
+    // plus a response to each of the far end's two, so what it catches is the
+    // repetition -- not a retransmission that stopped happening, which is the
+    // ec crate's own timing test, and not the exchange failing outright, which
+    // is the compression below: that needs an XID response to have arrived and
+    // been read, so it is also what says any XID went out at all.
+    for (who, sent) in [("caller", caller_xids), ("host", host_xids)] {
+        assert!(sent <= 4, "the {who} put {sent} XID frames on the line");
+    }
+    for (who, modem) in [("caller", &caller), ("host", &host)] {
+        assert!(modem.compression_name().is_some(), "the {who} negotiated no compression");
+    }
 }
 
 #[test]

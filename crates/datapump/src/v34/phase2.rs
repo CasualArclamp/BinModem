@@ -788,6 +788,24 @@ impl Modem {
             }
             Stage::CallFirstReversal => {
                 // 11.2.2.1.2: tone B until the reversal comes, however long.
+                //
+                // Silent here means 11.2.2.1.3 sent us back, and that clause
+                // says how to come back from it: "the call modem shall
+                // transmit silence and condition its receiver to detect Tone
+                // A. After detecting Tone A, the call modem shall transmit
+                // Tone B." Without the second half of that sentence this end
+                // says nothing for the rest of phase 2, while the answer modem
+                // waits in 11.2.1.2.3 for the tone B that would start it.
+                //
+                // Not while a tone is already due: a retrain opens with a
+                // deliberate silence before its own tone (11.5.1.2), and tone
+                // A is on the line all through it.
+                if matches!(self.speaking, Speaking::Silent)
+                    && self.tone_at.is_none()
+                    && self.presence.held >= self.ms(TONE_HELD)
+                {
+                    self.start_tone();
+                }
             }
             Stage::CallRanging => {
                 if self.deadline.is_some_and(|d| now > d) {
@@ -1240,6 +1258,41 @@ mod tests {
             assert!(for_answer > 0.25, "{one_way} s each way: the answer modem has {for_answer:.3} s to hear tone B");
             assert!(for_call > 0.30, "{one_way} s each way: the call modem has {for_call:.3} s to hear tone A");
         }
+    }
+
+    /// 11.2.2.1.3: a call modem sent back to the beginning speaks again.
+    ///
+    /// "The call modem shall transmit silence and condition its receiver to
+    /// detect Tone A. After detecting Tone A, the call modem shall transmit
+    /// Tone B." Only the first half of that sentence was here, so a call modem
+    /// whose ranging reversal went unanswered fell silent for the rest of
+    /// phase 2 -- and the answer modem, waiting in 11.2.1.2.3 for the tone B
+    /// that would set it going, waited with it. Both ends listening and
+    /// neither speaking until phase 2 gave up twenty seconds later, which on a
+    /// V.90 retrain took the call down with it.
+    #[test]
+    fn a_call_modem_whose_ranging_went_unanswered_sends_tone_b_again() {
+        let mut m = Modem::new(Role::Call, FS);
+        // Ranging, with this end's reversal made and nothing answering it. The
+        // ten milliseconds after that reversal have already left the line
+        // silent (11.2.1.1.3).
+        m.stage = Stage::CallRanging;
+        m.since = m.now;
+        m.deadline = Some(m.ms(REVERSAL_WAIT));
+        m.reversed_at = Some(m.now);
+        m.tx.stop();
+        m.speaking = Speaking::Silent;
+
+        // Tone A all the while, which is what an answer modem waiting in
+        // 11.2.1.2.3 is sending.
+        let mut tone_a = dsp::Nco::new(Side::Answer.carrier(), FS);
+        let out: Vec<f64> = (0..((REVERSAL_WAIT + 1.0) * FS) as usize)
+            .map(|_| m.step(0.9 * tone_a.step().1))
+            .collect();
+        assert_eq!(m.stage, Stage::CallFirstReversal, "11.2.2.1.3 never ran");
+        let after = &out[((REVERSAL_WAIT + 0.5) * FS) as usize..];
+        let loudest = after.iter().fold(0.0f64, |m, s| m.max(s.abs()));
+        assert!(loudest > 0.1, "the call modem is still silent half a second later: {loudest}");
     }
 
     #[test]
