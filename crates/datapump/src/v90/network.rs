@@ -372,7 +372,9 @@ impl Network {
         self
     }
 
-    /// Downstream slips so far.
+    /// Downstream slips so far: the older spelling of `slips_down`, which the
+    /// V.90 tests count with and which stays downstream-only, so that adding
+    /// an upstream slip to one of them cannot change what it already asserts.
     pub fn slips(&self) -> u32 {
         self.slip_count
     }
