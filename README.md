@@ -18,7 +18,12 @@ gateways, reached over a VoIP trunk — have crossed it at V.22bis 2400 and at
 V.32 4800, with V.42 error control and V.42bis compression, byte for byte
 correct including the ANSI. Where a far end answers no XID at all and simply
 announces compression in band, that is followed too, and 1957 octets of one
-board's screen are kept as a test vector.
+board's screen are kept as a test vector. No far end ever has answered one, in
+any of twelve recorded calls, and reading those calls back through the whole
+modem said why: our XID broke four of the Recommendation's rules at once, and
+the worst of them put a length in front of the V.44 offer where 12.2.1.3 says
+there is none, so no far end could read the offer and no conformant answer to
+it would have been read here either. All four are fixed.
 
 V.32bis runs to 14 400. One trellis code serves 7200, 9600, 12 000 and
 14 400 — Figure 1/V.32bis draws it once, with four parallel lines each
@@ -210,6 +215,24 @@ holding loud codewords down. Both are now simulated, and followed.
 Next, V.17 for fax at 14 400, and V.33 beside it -- the same trellis code as
 V.32bis again, on a fax call and a leased line respectively -- and more than
 one page to send from the fax window.
+
+V.92, on a branch. Eighteen agents read the Recommendation clause by clause off
+the rendered pages, with V.8, V.8 bis and V.250's `+P` commands beside it, and
+four more read what the V.90 code here already does; the notes they wrote and
+the plan built from them are in [docs/design/v92](docs/design/v92) -- 62 work
+packages in 18 waves, each with the files it may touch and the tests that will
+prove it. The first milestone is a spike that has to show PCM upstream can
+carry data at all before any of the state machines are written, because sending
+codewords *up* the line is the one thing V.90 never does. Two waves are built
+and merged so far: the shared numbers, the V.92 sequences, the upstream
+encoder, precoder and transmitter, the quick-connect signals and the
+impairments a softphone puts on the upstream. Every package is written by one
+agent and then read by another against the pages again, which is how the
+project's own capture turned out to be worth more than expected: it is a quick
+connect, with no V.8 in it at all, and one of its frames decodes byte for byte
+into what the reading of the Recommendation had predicted. That modem declined
+PCM upstream, so no recording here contains the upstream signals, and the tests
+that would want one say so rather than pretending.
 
 Alongside them: MNP as an alternative to LAPM, since it is what a modem without
 V.42 will offer.
