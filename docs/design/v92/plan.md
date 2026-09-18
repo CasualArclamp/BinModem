@@ -435,7 +435,11 @@ not listed must not be touched.
 - **Digests:** CD (9, 9.2 N1-N11); CT (2.4, 5.2, 7).
 - **Description:** every default stays exactly as it is, so the V.90 tests are bit-identical.
   - Tabulate the upstream windowed-sinc kernel per fractional phase instead of recomputing sin/cos per tap
-    per tick. This is the CI-runtime lever.
+    per tick. This is the CI-runtime lever **while the two clocks agree**, which is every test but the
+    skewed ones: the table is keyed on the exact fraction, so it is built once for a call at zero skew
+    (39 ms of a ten-second call against 268 ms per tap) and rebuilt every sample under a skew, where it
+    costs what it replaced. Rounding the fraction to a grid to get the lever back there is **refused**;
+    see section 14, note 7.
   - `with_upstream_phase(fraction_of_t)`: a fractional A/D sampling instant, with a fractional lag. Today,
     at fs = 16 000 with no skew, every A/D instant lands on an analogue sample, so epsilon would always be
     zero and Su and Jp would never be exercised.
@@ -2717,3 +2721,18 @@ Two further judgements worth recording, both accepted from the review but resolv
   The analogue mirror was already in V92-39, the existing V.90 modems already carry the data-holdback
   semantics, and a Phase 4 in which only one side's circuits exist would make the FPE circuit tests of
   V92-53 untestable on the digital side.
+
+### From the work-package reviews
+
+**7. V92-04's kernel table stays keyed on the exact fractional phase, so the lever is a zero-skew one.**
+The review of the built package was right that the table is rebuilt on every network sample as soon as the
+two clocks differ, and that CD 9.2 N11 asks for a V.92 upstream test at plus or minus 120 ppm. Its remedy,
+rounding the phase to a grid, is declined, and V92-04's entry now says so rather than promising a lever
+that cannot be had. Measured in the worktree: at 120 ppm the sampling instant moves 2.4e-4 of a line
+sample per network sample, so a grid of 1/1024 would be reused about four times over - and it moves 248 of
+19 600 upstream codewords, one symbol in eighty, where 1/256 moves 902 of them. A route that invents its
+own symbol errors cannot measure a modem's, and the point of the package is that the A/D hands back the
+codeword the analogue modem meant. What it costs to leave alone is bounded and small: 305 ms per ten
+seconds of skewed line against 39 ms unskewed, and one integration test in twenty sets `with_clock`. What
+was added instead is proof - the bit-exact test now runs off phase zero and at plus and minus 120 ppm as
+well, so anyone who does round the phase breaks it at once.
