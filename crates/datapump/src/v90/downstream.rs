@@ -993,7 +993,10 @@ mod tests {
                 turned = Some(at);
             }
         }
-        assert_eq!(turned, Some(8 * INTERVALS as u64 + R_BAR_SYMBOLS));
+        // 8.6.4: R-bar is "4 repetitions of the 6-symbol sequence", so TRN2d
+        // begins 24 symbols after R-bar's first. Counted out here -- 48 and
+        // 24 -- rather than taken from the constant this is meant to hold.
+        assert_eq!(turned, Some(72));
     }
 
     /// V.92 8.8.4: Rf repeats "+ + - -", a pattern four symbols long, and
@@ -1019,8 +1022,10 @@ mod tests {
             assert!(watch.looked(), "{signs:?} was not found at all");
             assert_eq!(watch.heard(), signs == plus, "{signs:?}");
         }
-        // Rf heard, then its turn: R-bar-f runs 24T (8.8.4), so what follows
-        // begins 24 symbols after R-bar-f's first.
+        // Rf heard, then its turn: 8.8.4/V.92 makes R-bar-f "2 repetitions of
+        // the 12-symbol sequence", which is the 24T 9.9.1.1.1/V.92 prints, so
+        // what follows begins 24 symbols after R-bar-f's first -- 32 and 24
+        // counted out, not taken from the constant this is meant to hold.
         let mut watch = RWatch::new(4, 0);
         for s in pattern(0, 8 * 4, 0.15, &plus) {
             watch.feed(&s, &levels);
@@ -1031,7 +1036,7 @@ mod tests {
                 turned = Some(at);
             }
         }
-        assert_eq!(turned, Some(32 + R_BAR_SYMBOLS));
+        assert_eq!(turned, Some(56));
         // And a six-symbol watch reads the same stream as nothing at all.
         let mut six = RWatch::new(INTERVALS, 0);
         for s in pattern(0, 16 * INTERVALS, 0.15, &plus) {
@@ -1066,7 +1071,8 @@ mod tests {
                 turned = Some(at);
             }
         }
-        assert_eq!(turned, Some(start + 32 + R_BAR_SYMBOLS));
+        // 6 symbols in, 32 of Rf, then R-bar-f's 24.
+        assert_eq!(turned, Some(62));
         // The same symbols, to a watch told the pattern began where the
         // count did: every group is found, every group is the turn, and Rf
         // is never heard.
