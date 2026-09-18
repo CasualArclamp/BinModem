@@ -236,8 +236,15 @@ impl Symbol {
 ///
 /// [`Self::at`] is a phase to take once and then leave: V.92's analogue modem
 /// may start its upstream where it likes, because the digital modem measures
-/// the phase on S-bar-u and sends back how far to shift it as Jp's epsilon
-/// (8.6.3/V.92).
+/// the phase off Su -- "It should use signal Su to measure the phase
+/// information" (9.5.1.1.6/V.92, and again on the Su that follows the
+/// reversal, 9.5.1.1.7) -- and then asks for the shift it wants in Jp. What
+/// Jp carries is not a shift of Su but the fraction of a symbol by which the
+/// S-bar-u at the Jp-to-J'p transition is to be lengthened: bits 18:33, "a
+/// 16-bit unsigned integer covering the range [0, 1) symbol or [0, T)
+/// seconds" (Table 22, in 8.6.3), the epsilon of Figure 10. The analogue
+/// modem applies it once, by sending that S-bar-u for 24T plus the fraction
+/// (9.5.2.1.8), and the upstream is never re-stepped afterwards.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SymbolClock {
     /// Line samples one far-end symbol takes.
