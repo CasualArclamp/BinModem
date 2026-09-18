@@ -590,7 +590,7 @@ impl Parameters {
             return Err("the gain is not above zero");
         }
         if self.gain > GAIN_LARGEST {
-            return Err("the gain is larger than cpd can carry");
+            return Err("the gain is larger than CPd can carry");
         }
         if self.moduli.contains(&0) {
             return Err("an interval has no modulus");
@@ -602,14 +602,14 @@ impl Parameters {
             return Err("the prefilter has no feed-forward section");
         }
         if self.sets.len() > CONSTELLATION_SETS {
-            return Err("cpd has room for six constellation sets");
+            return Err("there are more constellation sets than CPd carries");
         }
         for points in &self.sets {
             if points.is_empty() {
                 return Err("a constellation set is empty");
             }
             if points.len() > CONSTELLATION_POINTS {
-                return Err("a constellation set has more points than cpd allows");
+                return Err("a constellation set has more points than CPd allows");
             }
             if points[0] == 0 {
                 return Err("a constellation set contains the zero point");
@@ -1058,7 +1058,7 @@ mod tests {
         // clamped down to 0.249 996 without a word.
         broken = params.clone();
         broken.gain = 0.30;
-        assert_eq!(broken.fits(), Err("the gain is larger than cpd can carry"));
+        assert_eq!(broken.fits(), Err("the gain is larger than CPd can carry"));
         assert_eq!(four_g_from_gain(0.30), u16::MAX, "what the clamp would have done");
         broken.gain = GAIN_LARGEST;
         assert_eq!(broken.fits(), Ok(()), "the top of the field is still legal");
@@ -1085,13 +1085,13 @@ mod tests {
         broken.sets = vec![params.sets[0].clone(); CONSTELLATION_SETS];
         assert_eq!(broken.fits(), Ok(()), "six sets is what CPd carries");
         broken.sets.push(params.sets[0].clone());
-        assert_eq!(broken.fits(), Err("cpd has room for six constellation sets"));
+        assert_eq!(broken.fits(), Err("there are more constellation sets than CPd carries"));
         broken.sets.pop();
         broken.indices[0] = 6;
         assert_eq!(broken.fits(), Err("a constellation index is outside the printed 0 to 5"));
         broken = params.clone();
         broken.sets[0] = (1..=CONSTELLATION_POINTS as u16 + 1).map(|p| p * 8).collect();
-        assert_eq!(broken.fits(), Err("a constellation set has more points than cpd allows"));
+        assert_eq!(broken.fits(), Err("a constellation set has more points than CPd allows"));
 
         // 255^12 is about 2^96, which is why the product is a u128.
         let widest = Parameters { drn: 19, moduli: [255; UP_INTERVALS], ..params };
