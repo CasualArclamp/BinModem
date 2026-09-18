@@ -952,13 +952,34 @@ mod tests {
         assert_eq!(menu.octet(), SYNC_MENU, "the CM and JM synchronisation, 0000001111");
         assert_eq!(heard(&menu.bits()), vec![menu]);
 
-        // And three of the first in a row are not CJ either, which is what
-        // Decoder's zero counter would make of them.
         let mut stream = Vec::new();
         for _ in 0..3 {
             stream.extend(ci.bits());
         }
         assert_eq!(heard(&stream), vec![ci; 3]);
+
+        // And this is what Decoder makes of the same three. A framer hands it
+        // 0x55, 0x00, 0x55, 0x00 and so on: the 0x00 is the CI
+        // synchronisation as far as Decoder is concerned, and the 0x55 behind
+        // it is then taken for the one-octet CI body, whose b5 b6 b7 are
+        // 0 1 0 -- a call function, and a textphone one. Not CJ, which is the
+        // other guess an octet-hunting parser might be expected to make:
+        // Decoder clears its zero counter on every octet that is not zero, so
+        // it never reaches the three consecutive ZERO octets of 3.5/V.8.
+        let mut decoder = crate::Decoder::new();
+        let mut misread = Vec::new();
+        for _ in 0..6 {
+            for octet in [SYNC_QC, ci.octet()] {
+                if let Some(heard) = decoder.feed(octet) {
+                    misread.push(heard);
+                }
+            }
+        }
+        assert!(!misread.is_empty(), "Decoder reads something out of a QC1a");
+        assert!(
+            misread.iter().all(|h| *h == crate::Heard::Ci(crate::CallFunction::Textphone)),
+            "a bogus CI, and nothing else: {misread:?}"
+        );
     }
 
     #[test]
