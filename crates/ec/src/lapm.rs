@@ -275,17 +275,16 @@ impl Lapm {
     ///
     /// How much patience is warranted is not known when the entity is built:
     /// it depends on how the detection phase came out, which happens later.
+    ///
+    /// This is the limit on the procedures this entity runs, and not the one
+    /// the XID exchange above it uses: 9.2.2 lets "the two error-correcting
+    /// entities associated with an error-corrected connection ... operate with
+    /// a different value of N400", and by the same token the two questions are
+    /// separate. Establishment is retried at a far end the detection phase has
+    /// shown does LAPM; the XID exchange is asking a far end that has shown
+    /// nothing of the sort whether it negotiates at all.
     pub fn set_retransmissions(&mut self, n400: u32) {
         self.params.n400 = n400;
-    }
-
-    /// The retransmission limit as it now stands.
-    ///
-    /// N400 counts retransmissions of any command awaiting a reply, and the
-    /// XID exchange above this is one of them (8.10.3), so it is asked for
-    /// here rather than kept twice.
-    pub fn retransmissions(&self) -> u32 {
-        self.params.n400
     }
 
     /// Use the selective retransmission procedure (V.42 8.4.5.1).
