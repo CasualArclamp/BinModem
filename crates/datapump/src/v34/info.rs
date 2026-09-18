@@ -247,10 +247,19 @@ pub struct Info0 {
     /// timing, 2 external.
     ///
     /// The two bits themselves, whatever the sequence carrying them means by
-    /// them. V.34 means the clock source; V.90 reserved both and sent zeros;
-    /// V.92 gave each a meaning, and a different one in each direction. A PCM
-    /// role reads them through `pcm_flags` and never as a clock, and a V.34
-    /// role the other way about (N-3, `spec-phase2-signals.md`).
+    /// them. V.34 means the clock source; V.92's INFO0a overloads the same two
+    /// bits with the V.92 capability and the short phase 2 request, read
+    /// through `pcm_flags` (N-3, `spec-phase2-signals.md`), because Table
+    /// 16/V.92 has no clock field at all.
+    ///
+    /// An INFO0d's pair is **not** here. V.90's Table 7 reserves its bits 26:27
+    /// and sets both to 0, so that sequence carries no clock, and V.92's Table
+    /// 15 gives the pair to the same two flags the other way round. They travel
+    /// in bits 2 and 3 of this field instead -- `Info0d::pcm_flags` and
+    /// `Info0d::set_pcm_flags` -- so that an `Info0` naming an external
+    /// transmit clock can never go out inside an INFO0d as "V.92 capability:
+    /// 1". Nothing in the low two bits reaches an INFO0d's wire bits, and
+    /// nothing in the high two reaches an INFO0a's.
     pub clock: u8,
     /// Bit 28: an INFO0 from the far end has been received correctly -- set
     /// only during error recovery.
@@ -511,10 +520,12 @@ pub struct Info0d {
     ///
     /// Bits 26:27 are "Reserved for the ITU" in V.90, where V.34 has its
     /// transmit clock, and V.92 gave them to the short phase 2 request and the
-    /// V.92 capability -- in the opposite order to INFO0a. They travel in
-    /// `Info0::clock`, because that is the one place this layout has for them,
-    /// and they are read and written through `pcm_flags` and `set_pcm_flags`,
-    /// never as a clock.
+    /// V.92 capability -- in the opposite order to INFO0a. They travel above
+    /// V.34's own two bits inside `Info0::clock`, because that is the one place
+    /// this layout has for them, and they are read and written through
+    /// `pcm_flags` and `set_pcm_flags`, never as a clock. A transmit clock left
+    /// in this `Info0` goes nowhere: V.90 sets both bits to 0 in an INFO0d, and
+    /// so does this.
     pub v34: Info0,
     /// Bits 29:32: "Digital modem nominal transmit power for Phase 2 ... in
     /// -1 dBm0 steps where 0 represents -6 dBm0 and 15 represents -21 dBm0".
@@ -532,13 +543,25 @@ pub struct Info0d {
 }
 
 impl Info0d {
+    /// Where this layout's two V.92 bits sit inside `Info0::clock`: above
+    /// V.34's own two, never in them.
+    ///
+    /// V.90's Table 7 reserves bits 26:27 of INFO0d and sets both to 0, so an
+    /// INFO0d carries no transmit clock; Table 15/V.92 gives the pair to the
+    /// short phase 2 request and the V.92 capability. Keeping the two readings
+    /// apart is what stops an `Info0` naming V.34's external transmit clock
+    /// (the value 2) from going out inside an INFO0d as "V.92 capability: 1",
+    /// which by 9.3 would take both ends to the Table 17 INFO1d.
+    const FLAGS_SHIFT: u32 = 2;
+
     /// Bits 26:27 as **INFO0d** lays them out (Table 15/V.92): bit 26 is the
     /// short phase 2 request and bit 27 the V.92 capability.
     ///
     /// The other way round from INFO0a, which is not a slip of the pen: the
     /// procedure text names them separately in both directions (9.3, 9.4).
     pub fn pcm_flags(&self) -> PcmFlags {
-        PcmFlags { short_phase2: self.v34.clock & 1 == 1, v92: self.v34.clock & 2 == 2 }
+        let flags = self.v34.clock >> Self::FLAGS_SHIFT;
+        PcmFlags { short_phase2: flags & 1 == 1, v92: flags & 2 == 2 }
     }
 
     /// Write bits 26:27 as INFO0d lays them out.
@@ -547,7 +570,9 @@ impl Info0d {
     /// `Info0` capabilities carries the two bits in *that* `Info0`, so this is
     /// the call to make on the sequence that actually goes out.
     pub fn set_pcm_flags(&mut self, flags: PcmFlags) {
-        self.v34.clock = u8::from(flags.short_phase2) | u8::from(flags.v92) << 1;
+        let pair = u8::from(flags.short_phase2) | u8::from(flags.v92) << 1;
+        let v34 = self.v34.clock & ((1 << Self::FLAGS_SHIFT) - 1);
+        self.v34.clock = v34 | pair << Self::FLAGS_SHIFT;
     }
 
     /// Bits 29:32 as a level.
@@ -562,14 +587,18 @@ impl Info0d {
     }
 
     pub fn to_bits(&self) -> Vec<bool> {
-        let info0 = self.v34.to_bits();
         // The first seventeen information bits are INFO0a's; take them from
-        // its own encoding so the two layouts cannot drift apart. That
-        // includes information bits 14 and 15, absolute bits 26 and 27, which
-        // V.90 reserves and V.92 gives a meaning to: a V.90 modem's `clock` is
-        // zero, so they go out as zeros unless `set_pcm_flags` has put V.92's
-        // meaning in them.
+        // its own encoding so the two layouts cannot drift apart -- all but
+        // information bits 14 and 15, absolute 26 and 27, which this layout
+        // does not share. V.90 reserves them and "set[s] to 0" both, so V.34's
+        // clock is left behind here, and V.92's two flags are written in over
+        // the zeros. A modem that never asks for V.92 sends what it always
+        // sent, whatever clock its `Info0` names.
+        let info0 = Info0 { clock: 0, ..self.v34 }.to_bits();
         let mut info: Vec<bool> = unframe(&info0, INFO0_BITS).expect("an INFO0 unframes").to_vec();
+        let flags = self.pcm_flags();
+        info[14] = flags.short_phase2;
+        info[15] = flags.v92;
         put(&mut info, u32::from(self.nominal_power), 4);
         put(&mut info, u32::from(self.max_power), 5);
         info.push(self.power_at_codec);
@@ -598,8 +627,9 @@ impl Info0d {
             // Bits 26:27, which are not a clock in this layout: V.90 reserves
             // them and a V.90 digital modem sends zeros, V.92 puts the short
             // phase 2 request and the V.92 capability there. Kept as they
-            // arrived, for `pcm_flags` to read.
-            clock: get(info, 14, 2) as u8,
+            // arrived but above V.34's two bits, so that `pcm_flags` reads
+            // them and nothing reads them as a clock.
+            clock: (get(info, 14, 2) as u8) << Self::FLAGS_SHIFT,
             acknowledge: info[16],
         };
         Some(Self {
@@ -1331,19 +1361,54 @@ mod tests {
         assert_eq!(sent_crc(&acknowledging.to_bits()), 0x2B52);
 
         // The two orders are genuinely opposite: the same pair of flags gives
-        // different bits in the two layouts, and reading either through the
-        // other's accessor turns them round.
+        // different bits in the two layouts, and one layout's pair read as the
+        // other's would be its own mirror image.
         let mut info0d = Info0d::default();
         info0d.set_pcm_flags(PcmFlags { v92: true, short_phase2: false });
         let mut only_v92 = Info0::default();
         only_v92.set_pcm_flags(PcmFlags { v92: true, short_phase2: false });
-        assert!(info0d.to_bits()[27] && !info0d.to_bits()[26]);
-        assert!(only_v92.to_bits()[26] && !only_v92.to_bits()[27]);
-        assert_eq!(
-            info0d.v34.pcm_flags(),
-            PcmFlags { v92: false, short_phase2: true },
-            "INFO0a's reading of INFO0d's bits is the mirror image"
-        );
+        let (d, a) = (info0d.to_bits(), only_v92.to_bits());
+        assert!(d[27] && !d[26]);
+        assert!(a[26] && !a[27]);
+        assert_eq!((d[26], d[27]), (a[27], a[26]), "one layout's pair is the other's, swapped");
+        // Which is why INFO0d's pair is kept out of the two bits INFO0a reads:
+        // there is no reading of `clock` that is right for both.
+        assert_eq!(info0d.v34.pcm_flags(), PcmFlags::default(), "INFO0d's pair is not V.34's");
+    }
+
+    /// V.90's Table 7 reserves bits 26:27 of INFO0d and "set[s] to 0" both, so
+    /// that sequence carries no transmit clock -- while V.92's Table 15 reads
+    /// bit 27 as "V.92 capability: 1", which by 9.3 takes both ends to the
+    /// Table 17 INFO1d.
+    ///
+    /// So an `Info0` that names V.34's external transmit clock, reused for an
+    /// INFO0d as phase 2 reuses it, must not thereby claim V.92.
+    #[test]
+    fn an_info0d_never_claims_v92_because_of_a_v34_transmit_clock() {
+        for clock in 0..4u8 {
+            let v90 = Info0d {
+                v34: Info0 { clock, ..every_v34_capability() },
+                nominal_power: 4,
+                max_power: 23,
+                power_at_codec: true,
+                a_law: false,
+                upstream_3429: false,
+            };
+            let bits = v90.to_bits();
+            assert!(!bits[26] && !bits[27], "clock {clock} reached bits 26:27");
+            assert_eq!(v90.pcm_flags(), PcmFlags::default(), "clock {clock} read as V.92");
+            // Every V.90 INFO0d is the same sixty-two bits whatever clock it
+            // was built around, which is the encoding V.90 tests are pinned to.
+            assert_eq!(bits, Info0d { v34: Info0 { clock: 0, ..v90.v34 }, ..v90 }.to_bits());
+
+            // And the V.92 flags still go out, above whatever clock is beneath
+            // them, without disturbing it.
+            let mut v92 = v90;
+            v92.set_pcm_flags(PcmFlags { v92: true, short_phase2: false });
+            let bits = v92.to_bits();
+            assert!(!bits[26] && bits[27], "clock {clock} swallowed the V.92 bit");
+            assert_eq!(v92.v34.clock & 3, clock, "the V.34 clock was overwritten");
+        }
     }
 
     /// V.90 reserves bits 26 and 27 of INFO0d and "set[s] to 0" both, so a
