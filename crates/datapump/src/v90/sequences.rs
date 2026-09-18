@@ -416,6 +416,22 @@ impl Descriptor {
     }
 }
 
+/// How many bits twelve symbols carry, checked.
+///
+/// Every V.92 sequence here fills "to the next multiple of 12 symbols", and
+/// how many bits that is depends on the modulation carrying it: twelve for
+/// Ja and CPt at one bit per symbol (8.5.1, 8.5.4), twenty-four or thirty-six
+/// for a CPu on four- or eight-point TRN2u (8.7.3 with Jp bits 48:49). The
+/// caller works that out, and a caller that asks before Jp has arrived could
+/// work out nothing at all. A zero unit would send a CPu 290 bits long
+/// instead of 312 or 324 and cost Phase 4 its upstream frame boundary with
+/// no complaint, so it is an assertion here rather than a silent one: the
+/// `max` is only so that a shipped build limps instead of dividing by zero.
+fn pad_unit(bits: usize) -> usize {
+    debug_assert!(bits > 0, "a V.92 sequence fills to a whole number of symbols, not to none");
+    bits.max(1)
+}
+
 /// A constellation mask: bit u set when the constellation includes Ucode u
 /// (8.5.2).
 pub type Mask = u128;
@@ -597,7 +613,7 @@ impl Cp {
             Layout::V90 => put(&mut bits, 0, 3), // "Fill bits: 000"
             Layout::V92 => {
                 bits.push(false); // "Fill bit: 0"
-                let unit = pad_unit_bits.max(1);
+                let unit = pad_unit(pad_unit_bits);
                 bits.resize(bits.len().div_ceil(unit) * unit, false);
             }
         }
@@ -800,7 +816,7 @@ fn cp_length(shape: Shape, bits: &[bool]) -> usize {
     match shape.layout {
         Layout::V90 => through_crc,
         Layout::V92 => {
-            let unit = shape.pad_unit.max(1);
+            let unit = pad_unit(shape.pad_unit);
             (through_crc + 1).div_ceil(unit) * unit
         }
     }
@@ -870,7 +886,7 @@ impl CpFinder {
     /// [`Cp::to_bits_in`] takes it. CPus (type 2, Table 24/V.92) is a
     /// different table and is not found here.
     pub fn v92(pad_unit_bits: usize) -> Self {
-        Self(Self::finder(Shape { layout: Layout::V92, pad_unit: pad_unit_bits }))
+        Self(Self::finder(Shape { layout: Layout::V92, pad_unit: pad_unit(pad_unit_bits) }))
     }
 
     fn finder(shape: Shape) -> Finder<Cp> {
@@ -1355,6 +1371,31 @@ mod tests {
 
         let mut v90 = CpFinder::default();
         assert_eq!(stream.iter().filter_map(|&b| v90.feed(b)).count(), 1, "V.90 still skips the first");
+    }
+
+    /// A CPu fills to twelve symbols of whatever TRN2u is carrying it, so the
+    /// unit is twenty-four bits on four points and thirty-six on eight (8.7.3
+    /// with Jp bits 48:49), and the transmitter and the finder are told it
+    /// separately. "When multiple CPu and CPu' sequences are transmitted as a
+    /// group, they shall all contain identical information" -- so if the two
+    /// ever read the unit differently, the second of a group would start
+    /// inside the first one's fill.
+    #[test]
+    fn a_group_of_cpu_is_found_whole_on_every_pad_unit() {
+        let cpu = Cp { data_mode: true, drn: 22, ..a_cpt() };
+        for unit in [JA_UNIT_BITS, 24, 36] {
+            let mut stream = vec![true; 24];
+            for acknowledge in [false, false, true] {
+                let bits = Cp { acknowledge, ..cpu.clone() }.to_bits_in(Layout::V92, unit);
+                assert_eq!(bits.len() % unit, 0, "a CPu is whole units long at unit {unit}");
+                stream.extend(bits);
+            }
+            let mut finder = CpFinder::v92(unit);
+            let found: Vec<Cp> = stream.iter().filter_map(|&b| finder.feed(b)).collect();
+            assert_eq!(found.len(), 3, "three CPu at unit {unit}");
+            assert_eq!(found.iter().map(|c| c.acknowledge).collect::<Vec<_>>(), vec![false, false, true]);
+            assert!(found.iter().all(|c| c.drn == 22 && c.data_mode), "identical information at unit {unit}");
+        }
     }
 
     /// Ja is "24 binary ones followed by repetitions of the DIL descriptor"
