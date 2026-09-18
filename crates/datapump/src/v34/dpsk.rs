@@ -17,7 +17,7 @@ use std::collections::VecDeque;
 
 use dsp::{ComplexFir, Nco, fir_lowpass, rrc_at, rrc_taps};
 
-use super::info::{self, Info, Info0, Info0d, Info1a, Info1aPcmUp, Info1aV34Up, Info1c, Mh};
+use super::info::{self, Info, Info0, Info0d, Info1a, Info1aPcm, Info1aPcmUp, Info1aV34Up, Info1c, Mh};
 
 /// "600 bit/s ± 0.01%", one bit a symbol.
 pub const BAUD: f64 = 600.0;
@@ -282,8 +282,24 @@ pub struct Receiver {
     /// Smoothed magnitude of the selected channel.
     level: f64,
     level_step: f64,
-    /// Whether forty-bit MH sequences are looked for as well.
+    /// What is looked for beyond a full V.34 or V.90 phase 2.
+    expecting: Expecting,
+}
+
+/// What a receiver listens for beyond the sequences of a full V.34 or V.90
+/// phase 2.
+///
+/// Both are off by default, so every V.34 and V.90 path hears exactly what it
+/// always heard. Neither is a property of the bits: an MH sequence is only
+/// looked for where a hold could be under way, and a Table 19 INFO1a only
+/// where short phase 2 gives its bit 33 a meaning.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Expecting {
+    /// Forty-bit MH sequences (Table 32/V.92).
     mh: bool,
+    /// Short phase 2, where the seventy bits of a V.90-shaped INFO1a are
+    /// Table 19/V.92 rather than Table 10/V.90.
+    short_phase2: bool,
 }
 
 impl Receiver {
@@ -312,7 +328,7 @@ impl Receiver {
                 .collect(),
             level: 0.0,
             level_step: 1.0 - (-1.0 / (0.020 * fs)).exp(),
-            mh: false,
+            expecting: Expecting::default(),
         }
     }
 
@@ -326,7 +342,26 @@ impl Receiver {
     /// every symbol -- and because a hold request starts exactly as a retrain
     /// does, so only the stages that could be hearing one ask for them.
     pub fn with_mh(mut self) -> Self {
-        self.mh = true;
+        self.expecting.mh = true;
+        self
+    }
+
+    /// The same receiver, reading a V.90-shaped INFO1a as Table 19/V.92
+    /// rather than as Table 10/V.90.
+    ///
+    /// The two layouts are the same seventy bits and differ only in bit 33,
+    /// which Table 19 gives to the upstream carrier and Table 10 reserves:
+    /// "set to 0 by the analogue modem and ... not interpreted by the digital
+    /// modem" (Table 10/V.90). Nothing in the frame says which table it is, so
+    /// nothing in the frame may decide -- only the phase it arrived in can,
+    /// and Table 19 is used "during short Phase 2" alone (8.4.1). A full phase
+    /// 2 therefore never reads bit 33, and a far end that leaves it set, out
+    /// of staleness or a future extension, still gets through phase 3.
+    ///
+    /// Table 18 needs no such switch: eight thousand in both 34:36 and 37:39
+    /// is a layout no other INFO1a can be, in either phase.
+    pub fn in_short_phase2(mut self) -> Self {
+        self.expecting.short_phase2 = true;
         self
     }
 
@@ -356,7 +391,7 @@ impl Receiver {
                 );
                 branch.next += self.sps;
                 if found.is_none() {
-                    found = decide(branch, at, self.side, self.mh);
+                    found = decide(branch, at, self.side, self.expecting);
                 }
             }
         }
@@ -372,7 +407,7 @@ impl Receiver {
 }
 
 /// One branch's decision on a symbol, and the sequence it completes if any.
-fn decide(branch: &mut Branch, symbol: (f64, f64), side: Side, mh: bool) -> Option<Info> {
+fn decide(branch: &mut Branch, symbol: (f64, f64), side: Side, expecting: Expecting) -> Option<Info> {
     // The differential decision: a point turned half way round from the last
     // one is a 1. Nothing about the carrier's absolute phase matters, which is
     // why there is no carrier loop here at all -- a few hertz of offset turns
@@ -387,7 +422,7 @@ fn decide(branch: &mut Branch, symbol: (f64, f64), side: Side, mh: bool) -> Opti
     branch.bits.push_back(turned < 0.0);
 
     let bits = branch.bits.make_contiguous();
-    for &length in side.lengths(mh) {
+    for &length in side.lengths(expecting.mh) {
         // Checked the moment the CRC is in: the trailing fill says nothing,
         // and whatever follows a sequence may not be ones at all.
         let without_fill = length - info::FILL.len();
@@ -403,22 +438,22 @@ fn decide(branch: &mut Branch, symbol: (f64, f64), side: Side, mh: bool) -> Opti
             // The same length whichever layout it is; bits 37:39 and 34:36
             // between them say which (10.4 of `spec-phase2-signals.md`). Six
             // in 37:39 and six in 34:36 is V.92's Table 18, asking for PCM
-            // upstream; six and one of V.34's rates is V.90's Table 10, or
-            // V.92's Table 19, which is the same bits with the reserved bit 33
-            // given to the upstream carrier -- so a set bit 33 is handed over
-            // as a Table 19 frame and a clear one as the Table 10 it is
-            // identical to.
+            // upstream; six and one of V.34's rates is V.90's Table 10 in a
+            // full phase 2 and V.92's Table 19 in a short one, which are the
+            // same seventy bits and differ only in what bit 33 is allowed to
+            // mean. Table 10 reserves it and the digital modem may not
+            // interpret it, so only a receiver told it is in short phase 2
+            // reads it -- nothing in the frame decides, because nothing in the
+            // frame can.
             (Side::Answer, _) => Info1a::from_bits(candidate)
                 .map(Info::Info1a)
                 .or_else(|| Info1aPcmUp::from_bits(candidate).map(Info::Info1aPcmUp))
                 .or_else(|| {
-                    Info1aV34Up::from_bits(candidate).map(|table19| {
-                        if table19.high_carrier {
-                            Info::Info1aV34Up(table19)
-                        } else {
-                            Info::Info1aPcm(table19.v90)
-                        }
-                    })
+                    if expecting.short_phase2 {
+                        Info1aV34Up::from_bits(candidate).map(Info::Info1aV34Up)
+                    } else {
+                        Info1aPcm::from_bits(candidate).map(Info::Info1aPcm)
+                    }
                 }),
         };
         if found.is_some() {
@@ -430,7 +465,7 @@ fn decide(branch: &mut Branch, symbol: (f64, f64), side: Side, mh: bool) -> Opti
 
 #[cfg(test)]
 mod tests {
-    use super::super::info::{Cleardown, Info1aPcm, Probed, SymbolRate, T1};
+    use super::super::info::{Cleardown, Probed, SymbolRate, T1};
     use super::*;
 
     const FS: f64 = 16_000.0;
@@ -680,29 +715,58 @@ mod tests {
             upstream: SymbolRate::S3200,
             frequency_offset: Some(-0.5),
         };
-        let table19 = Info1aV34Up {
-            v90: Info1aPcm { uinfo: 77, upstream: SymbolRate::S3429, ..table10 },
-            high_carrier: true,
-        };
-        let sequences =
-            [results().to_bits(), table18.to_bits(), table10.to_bits(), table19.to_bits()];
+        let sequences = [results().to_bits(), table18.to_bits(), table10.to_bits()];
         let found = heard_by(Side::Answer, &sequences, Receiver::new(Side::Answer, FS));
         assert_eq!(
             found,
-            vec![
-                Info::Info1a(results()),
-                Info::Info1aPcmUp(table18),
-                Info::Info1aPcm(table10),
-                Info::Info1aV34Up(table19),
-            ]
+            vec![Info::Info1a(results()), Info::Info1aPcmUp(table18), Info::Info1aPcm(table10)]
         );
 
-        // A Table 19 asking for the low carrier is a Table 10 frame bit for
-        // bit, and there is nothing to tell them apart with, so it arrives as
-        // the Table 10 it is -- which says the low carrier just the same.
+        // Table 18 is the one V.92 layout no phase can be in doubt about, so
+        // it arrives as itself in a short phase 2 too.
+        let short = Receiver::new(Side::Answer, FS).in_short_phase2();
+        assert_eq!(heard_by(Side::Answer, &sequences[1..2], short), vec![
+            Info::Info1aPcmUp(table18)
+        ]);
+    }
+
+    /// Table 10/V.90 sets bits 32:33 to zero and says they "are not
+    /// interpreted by the digital modem"; Table 19/V.92 gives bit 33 to the
+    /// upstream carrier and is used "during short Phase 2" alone (8.4.1).
+    ///
+    /// The two layouts are otherwise the same seventy bits, so the bit cannot
+    /// say which table it is in -- the phase says. A full phase 2 hands the
+    /// frame over as the Table 10 it is whatever bit 33 holds, which is what
+    /// keeps a stale or future bit 33 from stopping a V.90 start-up dead: the
+    /// caller's `heard` has no arm for a Table 19 frame, and one dropped
+    /// INFO1a is one call lost.
+    #[test]
+    fn bit_33_is_read_only_where_short_phase_2_gives_it_a_meaning() {
+        let table19 = Info1aV34Up {
+            v90: Info1aPcm {
+                md_length: 20,
+                uinfo: 77,
+                upstream: SymbolRate::S3429,
+                frequency_offset: Some(-0.5),
+            },
+            high_carrier: true,
+        };
         let low = Info1aV34Up { high_carrier: false, ..table19 };
-        let found = heard_by(Side::Answer, &[low.to_bits()], Receiver::new(Side::Answer, FS));
-        assert_eq!(found, vec![Info::Info1aPcm(low.v90)]);
+        for asked in [table19, low] {
+            let bits = [asked.to_bits()];
+            let full = Receiver::new(Side::Answer, FS);
+            assert_eq!(
+                heard_by(Side::Answer, &bits, full),
+                vec![Info::Info1aPcm(asked.v90)],
+                "a full phase 2 read bit 33: {asked:?}"
+            );
+            let short = Receiver::new(Side::Answer, FS).in_short_phase2();
+            assert_eq!(
+                heard_by(Side::Answer, &bits, short),
+                vec![Info::Info1aV34Up(asked)],
+                "a short phase 2 lost bit 33: {asked:?}"
+            );
+        }
     }
 
     /// 9.10.1: MH sequences are sent back to back, and 8.9.2 puts them on this

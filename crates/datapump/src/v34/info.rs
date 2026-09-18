@@ -755,11 +755,13 @@ impl Info1aPcmUp {
 /// 33, reserved and zero in Table 10, to the upstream carrier. The pre-emphasis
 /// filter is not signalled at all.
 ///
-/// Because Table 10 sets bit 33 to zero, a Table 19 frame asking for the low
-/// carrier is indistinguishable from a Table 10 frame -- and means the same
-/// thing, since low is what Table 10 would have meant by a zero there. So a
-/// receiver hands over `Info1aPcm` for a clear bit 33 and this for a set one,
-/// and the rest of the sequence reads the same either way.
+/// Nothing in the seventy bits says which of the two tables they are, and bit
+/// 33 cannot say: Table 10 reserves it, "set to 0 by the analogue modem and ...
+/// not interpreted by the digital modem", so a Table 10 frame that arrives with
+/// it set -- stale, or a future ITU extension -- is still a Table 10 frame and
+/// still has to get through phase 3. Only the phase decides, and Table 19 is
+/// used "during short Phase 2" alone, which is why it is read only by a
+/// receiver told it is in one (`dpsk::Receiver::in_short_phase2`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Info1aV34Up {
     /// Bits 18:24, 25:31, 34:36 and 40:49, exactly as V.90's Table 10 has
@@ -1025,13 +1027,15 @@ pub enum Info {
     Info1a(Info1a),
     /// V.90's digital modem's INFO0.
     Info0d(Info0d),
-    /// V.90's INFO1a, asking for phase 3 of V.90 -- and V.92's Table 19 with
-    /// the low carrier, which is the same seventy bits saying the same thing.
+    /// V.90's INFO1a, asking for phase 3 of V.90. Every seventy-bit INFO1a
+    /// that names 8000 downstream and a V.34 rate upstream arrives as this,
+    /// unless the receiver was told it is in a short phase 2.
     Info1aPcm(Info1aPcm),
     /// V.92's Table 18 INFO1a, asking for PCM upstream.
     Info1aPcmUp(Info1aPcmUp),
-    /// V.92's Table 19 INFO1a with bit 33 set, asking for V.90 data mode on
-    /// the high upstream carrier after a short phase 2.
+    /// V.92's Table 19 INFO1a, asking for V.90 data mode on a named upstream
+    /// carrier. Heard only by a receiver in a short phase 2, which is the only
+    /// phase that may read bit 33.
     Info1aV34Up(Info1aV34Up),
     /// A modem-on-hold sequence, heard only by a receiver asked for them.
     Mh(Mh),
@@ -1487,7 +1491,8 @@ mod tests {
         assert_eq!(sent_crc(&other.to_bits()), 0x7A52);
 
         // Clear bit 33 and the seventy bits are V.90's Table 10 exactly, which
-        // is why a low-carrier Table 19 needs no layout of its own.
+        // is why neither layout can be told from the other by its bits, and
+        // why the phase and not the frame decides which reading applies.
         let low = Info1aV34Up { high_carrier: false, ..high };
         assert_eq!(low.to_bits(), high.v90.to_bits());
         assert_eq!(Info1aPcm::from_bits(&high.to_bits()), Some(high.v90));
