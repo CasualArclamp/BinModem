@@ -32,6 +32,28 @@ through untouched changes, from one to four. The redundant bit buys nine
 decibels at every one of them, which is why 14 400 fits in the channel 4800
 does.
 
+V.34 works on real calls. Through a VoIP trunk to real modems it has come up
+at 28 800 to 33 600 and carried login banners and PPP without an error. The
+recordings of those calls replay through the modem to the same banners, and in
+them it answers the far end's rate renegotiation and follows the jitter
+buffer's slips, both in the start-up and once connected. Phase 2 reads the far end's probe for 300 ms rather than the
+full 500 V.34 allows, because a real modem that needed the difference to hear
+our reply stalled three times running without it.
+
+V.90 works both ways round. The analogue modem, the half that dials a
+provider, reads a real server's start-up the way the Recommendation writes
+it -- CM and JM, INFO0d and INFO1d, Ja, TRN1d, Jd and the DIL -- and has got
+through training and the DIL against real servers over the VoIP trunk. The
+digital modem, the half a provider runs, answers too, so two of these connect
+at full PCM rates over a virtual cable. Against a simulated G.711 network --
+A-law and μ-law, a robbed bit, a pad, noise, a second's round trip, a sound
+card 120 ppm out, a jitter buffer slipping every few seconds and a softphone's
+gain control -- it connects at 52 000 to 56 000, renegotiates and retrains from
+either end, notices a far end that has hung up, and falls back to V.34 on a
+route that would carry less as PCM. Where the top of the band is cut, as a
+codec or a VoIP path cuts it, the analogue modem asks for spectral shaping the
+way a real one does, so the server sends next to nothing where the cut is.
+
 Every constellation was read off the figures by position rather than out of
 extracted text, which loses the sign of each coordinate and shuffles the axis
 labels through the rows. [tools/read_constellation.py](tools/read_constellation.py)
@@ -116,105 +138,28 @@ OS-specific code — but only built and run on Windows so far.
 
 ## Work in progress
 
-- **V.32 at 9600** connects to a real modem, agrees on the trellis code and
-  passes data, but not reliably. The receiver reaches 30 dB about half a
-  second after connecting and then loses the carrier: the error while it goes
-  is all across the radius and none along it, and the equaliser — frozen at
-  the peak to check — leaves the radial part untouched. So it is the carrier
-  loop, not the line and not the equaliser. Two calls now say the same thing.
-  The rates above it are more crowded still and will want the same fix.
-- **14 400 to a real modem, and it cannot be read.** Reached over the VoIP
-  trunk once the two start-up faults below were fixed: both ends offered every
-  rate, agreed on 14 400 and came up. The receiver locked for a second at a
-  fifth of the distance between neighbouring points, then let go and settled at
-  two fifths, which is where a symbol lands when the decisions are random. It
-  stayed there for thirty-seven seconds. On one virtual cable, where it works,
-  both ends carry V.42 and V.42bis at 14 400 with 0.76 of everything each modem
-  says coming back a sixth of a second later, so what the trunk adds is the
-  difference.
-- **A rate that cannot be read is given up now.** 7 begins a retrain on
-  "detection of unsatisfactory signal reception" and leaves the definition
-  open. Ours was a distance, which cannot work: normalised the same way,
-  neighbouring points are 1.41 apart at 4800 and 0.22 at 14 400, so one number
-  was a quarter of the gap at one end of the range and one and a half gaps at
-  the other — further than a symbol can land from the nearest point. The test
-  was unreachable exactly where it was needed, which is why that call sat there
-  for thirty-seven seconds. It is a fraction of the gap now, a quarter, which
-  is what the old number was at the rate it was tuned on. The retrain that
-  follows offers less than it did, since the rate exchange has no memory and
-  would otherwise arrive back where it started; 5.4.1 and 5.4.2 both ask the
-  rate signals to "take account of the likely receiver performance with the
-  particular GSTN connection", and a rate this receiver has just spent a second
-  failing to read is the strongest evidence about the connection there is.
-  Tried on the line: 14 400 came up, was unreadable, and the modem retrained
-  and agreed 12 000 with the far end — the first rate renegotiated with a real
-  modem. 12 000 was unreadable too, so the step is chosen from the measurement
-  now rather than taken one rate at a time; on a line with a second's delay a
-  retrain costs fifteen seconds and the far end hung up during the third.
-- **The rate signal gets misread, and it costs the rate.** One recorded call
-  to a real V.32bis modem: the far end offered 4800 through 14 400 and sent
-  that same sixteen bits 201 times; this end read one corrupted copy of it,
-  answered with an E calling for 4800, and connected there. 5.3.1 asks for two
-  consecutive identical sequences and two is what a systematic misread
-  produces — counted at the locked phase, the true sequence ran 53 consecutive
-  and every wrong one ran once, except the one that was acted on, which ran
-  twice. Waiting for a third was tried and is worse: on a line returning the
-  transmitter at unity a correct reading never happens three times running, so
-  a modem that holds out never connects. The reading wants a better receiver
-  under it, not a stricter test above it.
-  [tools/read_rate_signals.py](tools/read_rate_signals.py) reads them off a
-  recording.
-- **The round trip is a second and a quarter, and V.32's start-up has no room
-  for it.** MicroSIP to a real modem measures 2947 symbols there and back. Two
-  faults that only show up at that length have been found and fixed. 5.4.1's NT
-  and 5.4.2's MT are counter readings the two ends compare, and this end was
-  handing the pre-roll a trimmed version of one: the far end heard the S, ceased
-  transmitting as 5.4.2 tells it to, looked again MT later and found the S had
-  ended 30 ms earlier. It waited five seconds for another and then started the
-  call from the answer tone, twice. And 5.4.1's "transmission of R2 shall
-  continue until an incoming rate signal R3 is detected" was read as written,
-  so this end talked at a modem that had gone back to the beginning for
-  twenty-three seconds and let it hang up. Both are guarded by tests now;
-  neither has been tried on the line again yet.
-- **Two of these on one virtual cable** fail in one direction only. The
-  answering end reads a clean thirty-two point constellation and brings up
-  V.42 and V.42bis; the originating end sees noise. Measured off a recording,
-  the originating end's own signal comes back at 121 ms and is 0.57 correlated
-  with everything it hears, which is the asymmetry: only the calling modem has
-  to receive the far end's second training segment while transmitting.
+- **V.32 to a real modem.** At 9600 it connects, agrees on the trellis code
+  and passes data, then loses the carrier about half a second in: the error is
+  all across the radius and none along it, so it is the carrier loop. 14 400
+  comes up and cannot be read. `AT+MS=V32B,1,4800,14400` is what has stayed
+  up.
+- **V.32bis between two of these on one virtual cable** fails in the calling
+  direction only: the calling modem hears its own signal back while it has to
+  read the far end's second training segment.
+- **V.90 between two of these through softphones** falls back to V.34. The
+  server's codewords are resampled on their way into its softphone and
+  requantised, which leaves noise at about 1.7% of every codeword; a real
+  provider's server puts exact codewords on the network, which is why a real
+  modem gets 56k on the same line.
+- **A jitter-buffer slip in the V.90 DIL** is still misplaced at 17 of 260
+  positions across a pass, where the DIL's own 36-symbol repetition lets a
+  neighbouring chord stand in for the true move. Such a call drops to V.34.
 
 ## Next
 
-V.34 on a real call. A live call has reached data mode with a real modem at
-31 200 towards this end: its login banner came through without an error, and the
-far end heard this end's 33 600 well enough to ask, six seconds in, for a rate
-renegotiation down to 28 800. That renegotiation is now answered -- two of
-these renegotiate from either end and carry V.42 on through it, and the capture
-replays through the modem to the banner on the terminal and the far end's new
-MP read. A second call lost the far end's E to a VoIP slip; that capture now
-connects in replay, the receiver re-timing itself to the slip and finding the
-frames again from the superframe's bit inversions, and doing the same for
-another slip once connected. And a full retrain: a far end that gives up on a
-renegotiation, or meets a line that changed too much for one, falls back to
-sending its tone and starting phase 2 again, and two of these now go back
-through it together and come up at whatever the line will carry, without
-exchanging their capabilities a second time.
-
-V.90 on a real call. The analogue half is written from the Recommendation and
-checked against a recording of a real server: its CM and JM, INFO0d, INFO1d,
-Ja, TRN1d, Jd and the DIL all read back as they should, and the DIL fits what
-the analogue modem asked for. Against a simulated server over a simulated
-G.711 network -- A-law and μ-law, a robbed bit, a pad, noise, a VoIP round
-trip, a sound card 120 ppm out, and a jitter buffer slipping every few seconds
--- it connects at 52 000 to 56 000, renegotiates and retrains from either end,
-and carries V.42 at `AT+MS=V90`. The first live call reached the DIL against a
-real server and showed two things the simulation did not have: a jitter buffer
-cutting ten milliseconds out of the DIL on every pass, and a gain control
-holding loud codewords down. Both are now simulated, and followed.
-
-Next, V.17 for fax at 14 400, and V.33 beside it -- the same trellis code as
-V.32bis again, on a fax call and a leased line respectively -- and more than
-one page to send from the fax window.
+V.17 for fax at 14 400, and V.33 beside it -- the same trellis code as V.32bis
+again, on a fax call and a leased line respectively -- and more than one page
+to send from the fax window.
 
 V.92, on a branch. Eighteen agents read the Recommendation clause by clause off
 the rendered pages, with V.8, V.8 bis and V.250's `+P` commands beside it, and
@@ -233,9 +178,6 @@ connect, with no V.8 in it at all, and one of its frames decodes byte for byte
 into what the reading of the Recommendation had predicted. That modem declined
 PCM upstream, so no recording here contains the upstream signals, and the tests
 that would want one say so rather than pretending.
-
-Alongside them: MNP as an alternative to LAPM, since it is what a modem without
-V.42 will offer.
 
 ## Running it
 
