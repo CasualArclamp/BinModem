@@ -139,9 +139,6 @@ OS-specific code — but only built and run on Windows so far.
 
 ## Work in progress
 
-- **V.32bis between two of these on one virtual cable** fails in the calling
-  direction only: the calling modem hears its own signal back while it has to
-  read the far end's second training segment.
 - **V.90 between two of these through softphones** falls back to V.34. The
   server's codewords are resampled on their way into its softphone and
   requantised, which leaves noise at about 1.7% of every codeword; a real
