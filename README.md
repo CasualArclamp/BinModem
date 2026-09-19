@@ -42,8 +42,8 @@ our reply stalled three times running without it.
 
 V.90 works both ways round. The analogue modem, the half that dials a
 provider, reads a real server's start-up the way the Recommendation writes
-it -- CM and JM, INFO0d and INFO1d, Ja, TRN1d, Jd and the DIL -- and has got
-through training and the DIL against real servers over the VoIP trunk. The
+it -- CM and JM, INFO0d and INFO1d, Ja, TRN1d, Jd and the DIL -- and connects
+in PCM to real providers' servers over the VoIP trunk. The
 digital modem, the half a provider runs, answers too, so two of these connect
 at full PCM rates over a virtual cable. Against a simulated G.711 network --
 A-law and μ-law, a robbed bit, a pad, noise, a second's round trip, a sound
