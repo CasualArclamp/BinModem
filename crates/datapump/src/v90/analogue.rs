@@ -132,16 +132,51 @@ const RENEGOTIATION_ED: f64 = 5.0;
 /// Whole CPs asking for nothing sent before a cleardown is over.
 const CLEARDOWN_CPS: usize = 4;
 
-/// Data mode's levels closer than this many of the receiver's RMS errors
-/// make errors often enough to be worth a slower rate: a frame in some
-/// hundreds at six, none in a quarter of a million bits at eight.
-const MARGIN: f64 = 7.0;
-
-/// How often the margin is looked at, how many looks in a row it must be
-/// short for, and how long data mode runs before the first.
+/// How often data mode's margin is looked at, and how long data mode runs
+/// before the watch begins: its loops settle on a new constellation first.
 const MARGIN_EVERY: f64 = 0.25;
-const MARGIN_SHORT: u32 = 4;
 const MARGIN_SETTLE: f64 = 2.0;
+
+/// A decision whose error went more than this share of the way to where the
+/// next level's decisions begin is a miss.
+///
+/// Errors are what cost a call, and are what is counted, as near as a
+/// receiver that does not know what was sent can count them: a symbol read
+/// wrongly lands just past the boundary, measured from the level it was taken
+/// for, and so does one that nearly was. Gaussian noise that reads one symbol
+/// in a hundred thousand wrongly takes one in two and a half thousand past
+/// four-fifths of the way, so misses come often enough to count long before
+/// errors do, and a disturbance that makes errors makes misses by the dozen.
+const MISSED: f64 = 0.8;
+
+/// Misses in a look that say nothing, and the most one look can count for.
+///
+/// A line at its rate's margin misses now and then, from the noise's own
+/// tail: over a simulated VoIP call's round trip at 54 666, whose errors were
+/// half a minute apart, a look had a miss in one in five and three at worst.
+/// What a slower rate is for is misses that come together -- a disturbance --
+/// or so steadily that a look often has more than a couple. And one look is
+/// one look, however bad: a click is not a line.
+const MISSES_ALLOWED: f64 = 2.0;
+const LOOK_AT_MOST: f64 = 5.0;
+
+/// How long the evidence is remembered, as a time constant in seconds, and
+/// how much of it is enough for a slower rate.
+///
+/// Not "so many looks in a row", which a disturbance that comes and goes
+/// never is: every look adds what it has, and what has been added fades.
+/// Fifteen seconds, so that bursts a few seconds apart add up and a line
+/// that was disturbed a minute ago is not held against the rate now; and
+/// three looks at their most, so that no one look ever is enough. Noise every
+/// second or two is then a slower rate within a few bursts, and a step in the
+/// floor within a second; a floor that only just makes errors, every few
+/// seconds, takes ten or so.
+const REMEMBERED: f64 = 15.0;
+const ENOUGH: f64 = 12.5;
+
+/// Symbols over which the error's power is taken when looking for the worst
+/// of a disturbance: 32 ms, about the shortest burst worth a slower rate.
+const BLOCK: usize = 256;
 
 /// Frames over which a read of impossible numbers is counted, how many make
 /// it a lost place, and symbols kept for finding the place again.
@@ -587,6 +622,148 @@ fn least_gap(cp: &Cp, route: &Route) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
+/// What a look saw of data mode's decisions.
+#[derive(Debug, Clone, Copy, Default)]
+struct Look {
+    symbols: usize,
+    misses: usize,
+    /// The error's power, summed.
+    power: f64,
+    /// The mean power of the error over its worst block.
+    worst: f64,
+    /// Whether something that is not the line happened while it ran.
+    spoiled: bool,
+}
+
+/// Data mode's decisions, as the watch on the margin sees them.
+#[derive(Debug, Clone, Default)]
+struct Decisions {
+    /// Each interval's levels, both signs, in order.
+    levels: [Vec<f64>; INTERVALS],
+    /// Whether the watch has begun.
+    started: bool,
+    /// The look under way, and the block under way in it: symbols and power.
+    look: Look,
+    block: (usize, f64),
+    /// The look before, held back until this one is over (see [`Self::look`]).
+    held: Option<Look>,
+    /// Times the frames had moved when the look under way began.
+    moved: u32,
+    /// The evidence so far, and the looks it was gathered from.
+    evidence: f64,
+    recent: VecDeque<Look>,
+}
+
+impl Decisions {
+    /// A watch on decisions against data mode's levels, not yet begun.
+    fn new(levels: &Levels) -> Self {
+        let levels = std::array::from_fn(|i| {
+            let mut sorted: Vec<f64> = levels[i].iter().map(|l| l.0).collect();
+            sorted.sort_by(f64::total_cmp);
+            sorted
+        });
+        Self { levels, ..Self::default() }
+    }
+
+    /// One symbol of data mode, as the equaliser gave it, in interval `i`.
+    ///
+    /// Judged against the two levels either side of it, of that interval and
+    /// either sign: the error is its distance from the nearer, and the miss
+    /// is in how far it went towards the boundary between them. Levels stand
+    /// further apart the louder they are, and a symbol at a loud level can
+    /// wander further without being misread; beyond the outermost there is
+    /// no other level to take it for at all.
+    fn symbol(&mut self, i: usize, value: f64) {
+        if !self.started {
+            return;
+        }
+        let levels = &self.levels[i];
+        let k = levels.partition_point(|&l| l <= value);
+        let (error, share) = match (k.checked_sub(1).map(|b| levels[b]), levels.get(k)) {
+            (Some(below), Some(&above)) => {
+                let error = (value - below).min(above - value);
+                (error, error / (0.5 * (above - below)))
+            }
+            (Some(outermost), None) => (value - outermost, 0.0),
+            (None, Some(&outermost)) => (outermost - value, 0.0),
+            (None, None) => return,
+        };
+        let look = &mut self.look;
+        look.symbols += 1;
+        look.power += error * error;
+        if share > MISSED {
+            look.misses += 1;
+        }
+        self.block.0 += 1;
+        self.block.1 += error * error;
+        if self.block.0 == BLOCK {
+            look.worst = look.worst.max(self.block.1 / BLOCK as f64);
+            self.block = (0, 0.0);
+        }
+    }
+
+    /// Something that is not the line happened in the look under way.
+    fn spoil(&mut self) {
+        self.look.spoiled = true;
+    }
+
+    /// End the look under way, whose end finds the frames moved `moved`
+    /// times so far; and the look before it, if it stands.
+    ///
+    /// A look is held back until the next is over, and thrown away if either
+    /// was spoiled. A jitter buffer's slip is twenty milliseconds of made-up
+    /// audio or none, and every symbol after it moved by 160: a burst of
+    /// garbage no slower rate reads any better, and the frames found
+    /// somewhere else a few frames later -- 160 codewords are never a whole
+    /// number of frames. The receiver holding its loops says nothing: it
+    /// holds them through any sudden rise in error, a burst of noise as much
+    /// as a slip. The frames moving says it was a slip, and the move comes
+    /// within a look of the slip, if not in the same one. A far end going
+    /// quiet is not a disturbance a slower rate cures either.
+    fn look(&mut self, moved: u32) -> Option<Look> {
+        if !self.started {
+            // The first look only begins the watch.
+            self.started = true;
+            self.moved = moved;
+            return None;
+        }
+        if self.block.0 >= BLOCK / 2 {
+            self.look.worst = self.look.worst.max(self.block.1 / self.block.0 as f64);
+        }
+        self.block = (0, 0.0);
+        if moved != self.moved {
+            self.look.spoiled = true;
+        }
+        self.moved = moved;
+        let look = std::mem::take(&mut self.look);
+        let before = self.held.replace(look)?;
+        (!before.spoiled && !look.spoiled).then_some(before)
+    }
+
+    /// Weigh a look that stands. True once there is evidence enough for a
+    /// slower rate.
+    fn weigh(&mut self, look: Look) -> bool {
+        let counted = (look.misses as f64 - MISSES_ALLOWED).clamp(0.0, LOOK_AT_MOST);
+        self.evidence = self.evidence * (-MARGIN_EVERY / REMEMBERED).exp() + counted;
+        self.recent.push_back(look);
+        if self.recent.len() as f64 > REMEMBERED / MARGIN_EVERY {
+            self.recent.pop_front();
+        }
+        self.evidence >= ENOUGH
+    }
+
+    /// The error's RMS over the worst block the recent looks saw.
+    fn worst(&self) -> f64 {
+        self.recent.iter().map(|l| l.worst).fold(0.0, f64::max).sqrt()
+    }
+
+    /// The error's RMS over all the recent looks.
+    fn rms(&self) -> f64 {
+        let (power, symbols) = self.recent.iter().fold((0.0, 0), |(p, n), l| (p + l.power, n + l.symbols));
+        (power / symbols.max(1) as f64).sqrt()
+    }
+}
+
 /// Which of a DIL's symbols can be learned from and judged by (see
 /// `Modem::dil_trusted`).
 fn trusted_symbols(descriptor: &Descriptor, law: Law) -> Vec<Trust> {
@@ -814,11 +991,11 @@ pub struct Modem {
     clearing: bool,
     renegotiations: u32,
     /// The least distance between data mode's levels as the route delivers
-    /// them, when the margin is next looked at, and looks in a row it was
-    /// short.
+    /// them, when the margin is next looked at, and how data mode's
+    /// decisions are going.
     least_gap: f64,
     margin_at: u64,
-    short: u32,
+    decisions: Decisions,
     /// How much worse than the DIL showed data mode has found the line.
     worse: f64,
     /// The spectral shaping asked for, and the share of the DIL's error
@@ -897,7 +1074,7 @@ impl Modem {
             renegotiations: 0,
             least_gap: f64::INFINITY,
             margin_at: 0,
-            short: 0,
+            decisions: Decisions::default(),
             worse: 1.0,
             shaping: (Shaping::NONE, 1.0),
         };
@@ -1215,6 +1392,9 @@ impl Modem {
         match self.watching() {
             Some(learn) => {
                 self.far_end.feed(line, learn);
+                if self.far_end.quiet() {
+                    self.decisions.spoil();
+                }
                 if self.far_end.gone() {
                     // A far end that has hung up says nothing first. Nothing
                     // more goes to it, and the call is over, as if it had
@@ -1293,7 +1473,9 @@ impl Modem {
                     self.status = Status::Connected { downstream: self.downstream_rate, upstream: self.upstream_rate };
                     self.deadline = None;
                     self.margin_at = self.samples(MARGIN_SETTLE);
-                    self.short = 0;
+                    if let Some(frames) = self.frames.as_ref() {
+                        self.decisions = Decisions::new(&frames.levels);
+                    }
                 }
                 if self.in_data_mode() && self.now >= self.margin_at {
                     self.margin_at = self.samples(MARGIN_EVERY);
@@ -1729,6 +1911,9 @@ impl Modem {
         }
         let i = symbol.interval();
         frames.frame[i] = nearest(&frames.levels[i], symbol.value);
+        if frames.data && self.stage == Stage::Data && !self.renegotiating {
+            self.decisions.symbol(i, symbol.value);
+        }
         if frames.history.len() == PLACE_KEPT {
             frames.history.pop_front();
         }
@@ -1818,30 +2003,40 @@ impl Modem {
         }
     }
 
-    /// Whether data mode's levels still stand far enough apart for the error
-    /// the receiver is making, and a slower rate if they have not for a while.
+    /// Whether data mode is reading its levels cleanly enough for the rate,
+    /// and a slower rate (9.6.2.1) if the evidence says it is not. When is
+    /// this end's to say: "The rate renegotiation procedure can be initiated
+    /// at any time during data mode" (9.6).
+    ///
+    /// The evidence is the decisions themselves, symbol by symbol, and not
+    /// the receiver's averaged error. A tenth of a second of noise spoils
+    /// several blocks of data, and an average looked at a few times a second
+    /// sees it only if a look falls inside it -- and the receiver holds its
+    /// loops through a burst like that as it would through a slip, so its
+    /// average barely takes the burst in at all.
     fn watch_margin(&mut self) {
-        let law = self.settings.law;
-        let rms = ucode::level(law, self.settings.uinfo) / 10f64.powf(self.rx.snr_db() / 20.0);
-        // A slip's burst is not the line.
-        if self.rx.is_lost() {
+        let Some(look) = self.decisions.look(self.frames_moved()) else { return };
+        if !self.decisions.weigh(look) {
             return;
         }
-        self.short = if self.least_gap < MARGIN * rms { self.short + 1 } else { 0 };
-        if self.short < MARGIN_SHORT {
-            return;
-        }
-        self.short = 0;
-        if self.least_gap < 2.0 * rms {
+        if self.least_gap < 2.0 * self.decisions.rms() {
             // Nothing is being read at all: that is a receiver to train again.
             self.wants_retrain = true;
             return;
         }
-        // The next rate is chosen for the line as data mode finds it.
+        // The next rate is chosen for the line as the worst of the recent
+        // looks found it, not as they found it on average: the average of a
+        // line that is clean but for a burst every second or two is nearly a
+        // clean line's, and a rate chosen for it goes on making errors in
+        // every burst -- and asks again, and again. Chosen for the worst, one
+        // renegotiation lands where the bursts are read cleanly, and that is
+        // also what stops the next: the same bursts at the new rate come
+        // nowhere near its levels' boundaries.
         if let Some(route) = self.route.as_ref() {
+            let law = self.settings.law;
             let limit = f64::from(super::power_limit(&self.settings.server)) / 32768.0;
             let expected = route.noise_at(law, limit) * self.shaping.1.sqrt();
-            self.worse = self.worse.max(rms / expected);
+            self.worse = self.worse.max(self.decisions.worst() / expected);
         }
         let most = self.downstream_rate.saturating_sub(1);
         if !self.renegotiate(most) {
@@ -1946,5 +2141,108 @@ mod tests {
         let last = end - JD_PRIME_BITS - JD_BITS;
         signs.drain(last - 60..last + 20);
         assert_eq!(jd_prime_at(&signs), Some(end - 80));
+    }
+
+    /// A watch on decisions against levels at 1 and 3, either sign, in every
+    /// interval, begun.
+    fn watching() -> Decisions {
+        let levels: Levels = std::array::from_fn(|_| vec![(1.0, 1, true), (-1.0, 1, false), (3.0, 3, true), (-3.0, 3, false)]);
+        let mut decisions = Decisions::new(&levels);
+        assert!(decisions.look(0).is_none(), "the first look only begins the watch");
+        decisions
+    }
+
+    /// A look's worth of symbols, `misses` of them misses.
+    fn symbols(decisions: &mut Decisions, misses: usize) {
+        for n in 0..2000 {
+            decisions.symbol(n % INTERVALS, if n < misses { 1.95 } else { 1.05 });
+        }
+    }
+
+    /// A decision is judged by how far it went towards the boundary with the
+    /// level on the side it went, as a share of the way: a miss past
+    /// four-fifths of it, whichever level it was nearer, and never beyond
+    /// the outermost level, where there is no other level to take it for.
+    #[test]
+    fn a_decision_is_judged_by_how_far_it_went_towards_the_next_level() {
+        let mut decisions = watching();
+        let cases = [
+            (1.1, false),
+            (1.75, false),
+            (1.95, true),
+            (2.1, true),
+            (2.5, false),
+            (0.15, true),
+            (-0.1, true),
+            (-2.9, false),
+            (-5.0, false),
+            (9.0, false),
+        ];
+        for (value, missed) in cases {
+            let before = decisions.look.misses;
+            decisions.symbol(0, value);
+            assert_eq!(decisions.look.misses > before, missed, "{value}");
+        }
+        // The error is the distance from the nearer level, outermost or not.
+        let errors = [0.1, 0.75, 0.95, 0.9, 0.5, 0.85, 0.9, 0.1, 2.0, 6.0];
+        let power: f64 = errors.iter().map(|e| e * e).sum();
+        assert!((decisions.look.power - power).abs() < 1e-9, "{} against {power}", decisions.look.power);
+    }
+
+    /// A look stands only once the look after it is over, and only if the
+    /// frames moved in neither and the far end went quiet in neither: a
+    /// slip's garbage, and the look before it that may hold its start, are
+    /// not the line's.
+    #[test]
+    fn a_look_stands_only_if_no_slip_or_silence_touched_it_or_the_next() {
+        let mut decisions = watching();
+        let mut look = |misses: usize, moved: u32, quiet: bool| {
+            symbols(&mut decisions, misses);
+            if quiet {
+                decisions.spoil();
+            }
+            decisions.look(moved).map(|l| l.misses)
+        };
+        assert_eq!(look(7, 0, false), None, "held until the next is over");
+        assert_eq!(look(1, 0, false), Some(7));
+        // The frames move while the third runs: the second and third go.
+        assert_eq!(look(30, 1, false), None);
+        assert_eq!(look(2, 1, false), None);
+        assert_eq!(look(3, 1, false), Some(2));
+        // The far end goes quiet in the sixth: the fifth and sixth go.
+        assert_eq!(look(40, 1, true), None);
+        assert_eq!(look(5, 1, false), None);
+        assert_eq!(look(0, 1, false), Some(5));
+    }
+
+    /// No one look is ever enough, however bad, nor a line that misses once
+    /// or twice a look for ever; three bad looks close together are, and so
+    /// are bursts every second and a half by the third, while bursts ten
+    /// seconds apart never add up to enough. A slower rate is then chosen
+    /// for the worst block the recent looks saw.
+    #[test]
+    fn evidence_is_enough_after_bad_looks_close_together_and_never_after_one() {
+        let bad = Look { symbols: 2000, misses: 40, power: 2000.0 * 0.04, worst: 0.09, spoiled: false };
+        let margin = Look { symbols: 2000, misses: 2, power: 2000.0 * 0.01, worst: 0.012, spoiled: false };
+        let mut decisions = watching();
+        assert!(!decisions.weigh(bad));
+        assert!(!decisions.weigh(bad));
+        assert!(decisions.weigh(bad));
+        assert!((decisions.worst() - 0.3).abs() < 1e-9);
+        let mut decisions = watching();
+        assert!((0..4000).all(|_| !decisions.weigh(margin)));
+        // Bursts `apart` seconds apart: which of them was enough, if any.
+        let bursts = |apart: f64| {
+            let mut decisions = watching();
+            (0..40).position(|_| {
+                let enough = decisions.weigh(bad);
+                for _ in 1..(apart / MARGIN_EVERY) as usize {
+                    decisions.weigh(margin);
+                }
+                enough
+            })
+        };
+        assert_eq!(bursts(1.5), Some(2));
+        assert_eq!(bursts(10.0), None);
     }
 }

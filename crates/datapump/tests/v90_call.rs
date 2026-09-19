@@ -938,53 +938,122 @@ fn judged(call: &mut FullCall, data: &mut Downstream) -> (u64, u64) {
     data.checked.since(&before)
 }
 
-/// A slower rate, asked for by hand, and what the disturbance costs there:
-/// the rate, errored blocks and blocks.
-fn by_hand(call: &mut FullCall, data: &mut Downstream, most: u32) -> (u32, u64, u64) {
-    assert!(call.analogue.renegotiate(most));
-    assert!(call.comes_back_up_with(10.0, data), "{} / {}", call.analogue.phase(), call.digital.phase());
+/// A disturbed call left to the analogue modem: it renegotiates (9.6.2.1) of
+/// its own accord, within `JUDGED` seconds of the disturbance beginning, and
+/// is then judged on known data at the rate it settled on. The rate before,
+/// the seconds it took, the rate after, and errored blocks and blocks there.
+fn falls_back(call: &mut FullCall, data: &mut Downstream) -> (u32, f64, u32, u64, u64) {
+    let (fast, _) = call.rates();
+    let began = call.seconds();
+    assert!(call.comes_back_up_with(JUDGED, data), "never renegotiated: {} / {}", call.analogue.phase(), call.digital.phase());
+    let took = call.seconds() - began;
     // What the renegotiation dropped is not the line's doing.
     call.known_data(1.0, data);
     let (errored, blocks) = judged(call, data);
-    (call.rates().0, errored, blocks)
+    (fast, took, call.rates().0, errored, blocks)
 }
 
-/// Noise that comes and goes costs data in every burst at the rate the call
-/// came up at, and the analogue modem does not see it. The receiver holds
-/// its loops through each burst, as it would through a slip, and the watch
-/// on the margin takes it for one and looks away; the average error it looks
-/// at between bursts is a clean line's. A slower rate reads the same bursts
-/// cleanly.
+/// Noise that comes and goes -- a tenth of a second of it every second and a
+/// half -- is seen: each burst's misses add to the evidence, and within a few
+/// bursts the analogue modem renegotiates, once, to a rate chosen for the
+/// worst of them, where the same bursts spoil nothing and ask for nothing
+/// more. At the rate the call came up at, fifteen seconds of them spoiled 35
+/// of 742 blocks of known data, and no renegotiation came.
 #[test]
-fn noise_that_comes_and_goes_costs_data_at_a_rate_nothing_lowers() {
+fn noise_that_comes_and_goes_is_renegotiated_down_to_a_rate_that_reads_it() {
     let (mut call, mut data) = disturbed(bursty_line());
-    let (fast, _) = call.rates();
-    let (errored, blocks) = judged(&mut call, &mut data);
-    println!("{fast} through the bursts: {errored} of {blocks} blocks errored, {} renegotiations", call.analogue.renegotiations());
-    assert_eq!(call.analogue.renegotiations(), 0);
-    assert!(errored >= 5, "{errored} of {blocks} blocks errored");
-    let (slower, errored, blocks) = by_hand(&mut call, &mut data, 40_000);
-    println!("{slower} asked for by hand: {errored} of {blocks} blocks errored");
-    assert!(slower < fast);
+    let (fast, took, slower, errored, blocks) = falls_back(&mut call, &mut data);
+    println!("{fast} became {slower} after {took:.1} s of bursts; then {errored} of {blocks} blocks errored");
+    assert!(slower < fast, "{slower} against {fast}");
     assert_eq!(errored, 0, "{errored} of {blocks} blocks errored at {slower}");
+    assert_eq!(call.analogue.renegotiations(), 1);
+    assert_eq!(call.analogue.retrains(), 0);
+    assert_eq!(call.rates().0, slower);
 }
 
-/// A floor that steps up a few decibels costs data every few seconds at the
-/// rate the call came up at, and the analogue modem does not see it: its
-/// levels now stand about seven of the averaged error apart, which is where
-/// the watch on the margin draws its line, and any look a little over it
-/// starts the count of looks in a row again. A slower rate reads the line
-/// cleanly.
+/// A floor that steps up to where the levels stand only about seven RMS
+/// errors apart -- right on the line the old watch on the averaged error drew,
+/// so that it never saw it -- makes a miss or two in every look, and errors
+/// every few seconds. The misses add up, and the analogue modem renegotiates
+/// once, to a rate that reads the new floor cleanly. At the rate the call
+/// came up at, fifteen seconds of it spoiled 5 of 742 blocks.
 #[test]
-fn a_floor_that_steps_up_costs_data_at_a_rate_nothing_lowers() {
+fn a_floor_that_steps_up_is_renegotiated_down_to_a_rate_that_reads_it() {
     let (mut call, mut data) = disturbed(stepped_line());
-    let (fast, _) = call.rates();
-    let (errored, blocks) = judged(&mut call, &mut data);
-    println!("{fast} after the step: {errored} of {blocks} blocks errored, {} renegotiations", call.analogue.renegotiations());
-    assert_eq!(call.analogue.renegotiations(), 0);
-    assert!(errored >= 2, "{errored} of {blocks} blocks errored");
-    let (slower, errored, blocks) = by_hand(&mut call, &mut data, 44_000);
-    println!("{slower} asked for by hand: {errored} of {blocks} blocks errored");
-    assert!(slower < fast);
+    let (fast, took, slower, errored, blocks) = falls_back(&mut call, &mut data);
+    println!("{fast} became {slower} {took:.1} s after the step; then {errored} of {blocks} blocks errored");
+    assert!(slower < fast, "{slower} against {fast}");
     assert_eq!(errored, 0, "{errored} of {blocks} blocks errored at {slower}");
+    assert_eq!(call.analogue.renegotiations(), 1);
+    assert_eq!(call.analogue.retrains(), 0);
+    assert_eq!(call.rates().0, slower);
+}
+
+/// Seconds of data mode an undisturbed call is watched for.
+const WATCHED: f64 = 30.0;
+
+/// Run `seconds` of data mode with known data, and say how many
+/// renegotiations and retrains there were.
+fn left_alone(net: Network, seconds: f64) -> (u32, u32) {
+    let mut call = connects(net, server(), 40.0);
+    let (rate, _) = call.rates();
+    let mut data = Downstream::new();
+    // What arrived before the known data did is not the line's doing.
+    call.known_data(1.0, &mut data);
+    let before = data.checked;
+    call.known_data(seconds, &mut data);
+    let (errored, blocks) = data.checked.since(&before);
+    let (renegotiations, retrains) = (call.analogue.renegotiations(), call.analogue.retrains());
+    println!("{rate}: {renegotiations} renegotiations, {retrains} retrains in {seconds} s; {errored} of {blocks} blocks errored, {} slips", call.net.slips());
+    (renegotiations, retrains)
+}
+
+/// A clean line, and one whose sound card runs 120 ppm off the network's
+/// clock, give the watch on the margin nothing: no renegotiation, as none
+/// before the watch counted misses.
+#[test]
+fn a_clean_line_and_a_drifting_clock_are_left_at_their_rates() {
+    assert_eq!(left_alone(plain_line(), WATCHED), (0, 0));
+    assert_eq!(left_alone(plain_line().with_clock(120.0), WATCHED), (0, 0));
+}
+
+/// A softphone's jitter buffer slips twenty milliseconds every few seconds,
+/// made up or dropped, and each slip is a burst of garbage no slower rate
+/// reads any better; the frames moving after it say it was a slip, and it is
+/// not held against the rate. Nor is the softphone's gain control, or the
+/// margin a call over a VoIP round trip comes up with, whose errors are half
+/// a minute apart. No renegotiation, as none before.
+#[test]
+fn a_softphone_s_slips_and_gain_control_are_left_at_their_rates() {
+    for (period, inserted) in [(2.9, true), (3.1, false)] {
+        let net = Network::new(Law::Mu, FS)
+            .with_delay(0.6, FS)
+            .with_noise(1e-5)
+            .with_gain_control(0.8, 0.3)
+            .with_slips(period, inserted);
+        assert_eq!(left_alone(net, WATCHED), (0, 0), "slips every {period} s, inserted {inserted}");
+    }
+}
+
+/// Bursts of noise between a softphone's slips: the slips are still not
+/// held against the rate, and the bursts still are -- one renegotiation.
+#[test]
+fn bursts_of_noise_between_slips_are_still_seen() {
+    let net = Network::new(Law::Mu, FS)
+        .with_delay(0.6, FS)
+        .with_noise(1e-5)
+        .with_slips(2.9, true)
+        .with_bursts(20.0, 1.5, 0.1, 1e-3);
+    let mut call = connects(net, server(), 40.0);
+    assert!(call.seconds() < 19.0, "connected at {:.1} s", call.seconds());
+    let (fast, _) = call.rates();
+    let mut data = Downstream::new();
+    call.known_data(20.0 - call.seconds(), &mut data);
+    assert!(call.comes_back_up_with(20.0, &mut data), "never renegotiated: {} / {}", call.analogue.phase(), call.digital.phase());
+    let (slower, _) = call.rates();
+    call.known_data(JUDGED, &mut data);
+    println!("{fast} became {slower}; {} slips", call.net.slips());
+    assert!(slower < fast, "{slower} against {fast}");
+    assert_eq!(call.analogue.renegotiations(), 1);
+    assert_eq!(call.analogue.retrains(), 0);
 }

@@ -100,6 +100,11 @@ impl Watch {
     pub(crate) fn gone(&self) -> bool {
         self.quiet_for >= self.gone_after
     }
+
+    /// Whether the far end is quiet now, gone or not.
+    pub(crate) fn quiet(&self) -> bool {
+        self.quiet_for > 0
+    }
 }
 
 #[cfg(test)]
