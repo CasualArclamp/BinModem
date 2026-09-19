@@ -147,9 +147,6 @@ OS-specific code — but only built and run on Windows so far.
   requantised, which leaves noise at about 1.7% of every codeword; a real
   provider's server puts exact codewords on the network, which is why a real
   modem gets 56k on the same line.
-- **A jitter-buffer slip in the V.90 DIL** is still misplaced at 17 of 260
-  positions across a pass, where the DIL's own 36-symbol repetition lets a
-  neighbouring chord stand in for the true move. Such a call drops to V.34.
 
 ## Next
 
