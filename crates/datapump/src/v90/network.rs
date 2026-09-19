@@ -19,6 +19,10 @@
 //! passes everything to 3.6 kHz and next to nothing at 4. See
 //! [`Network::with_band_edge_cut`].
 //!
+//! And a line can be disturbed in the middle of a call: noise that comes and
+//! goes ([`Network::with_bursts`]), and a floor that steps up or creeps up
+//! ([`Network::with_rising_noise`]).
+//!
 //! Nothing here is a claim about any real network, only about what V.90 has
 //! to get through.
 
@@ -102,6 +106,53 @@ pub struct Network {
     /// The band-edge cut's taps, and the line samples they reach over,
     /// newest first.
     cut: Option<(Vec<f64>, VecDeque<f64>)>,
+    /// Bursts of noise on the downstream, and a floor that rises.
+    bursts: Option<Bursts>,
+    rising: Option<Rising>,
+}
+
+/// Noise that comes and goes: from codeword `from` on, `length` codewords of
+/// it at `level` every `every` codewords.
+#[derive(Debug, Clone, Copy)]
+struct Bursts {
+    from: u64,
+    every: u64,
+    length: u64,
+    level: f64,
+}
+
+impl Bursts {
+    /// The burst's level at network time `now`: nothing between bursts.
+    fn level(&self, now: u64) -> f64 {
+        match now.checked_sub(self.from) {
+            Some(since) if since % self.every < self.length => self.level,
+            _ => 0.0,
+        }
+    }
+}
+
+/// A floor that rises: from codeword `from` on, from wherever it was then to
+/// `end` over `over` codewords, by as many decibels each codeword.
+#[derive(Debug, Clone, Copy)]
+struct Rising {
+    from: u64,
+    over: u64,
+    end: f64,
+    /// The floor when the rise began.
+    start: Option<f64>,
+}
+
+impl Rising {
+    /// The floor at network time `now`, if the rise has begun, from a floor
+    /// that was `floor` before it.
+    fn level(&mut self, now: u64, floor: f64) -> Option<f64> {
+        let since = now.checked_sub(self.from)?;
+        let start = *self.start.get_or_insert(floor);
+        if since >= self.over || start <= 0.0 {
+            return Some(self.end);
+        }
+        Some(start * (self.end / start).powf(since as f64 / self.over as f64))
+    }
 }
 
 impl Network {
@@ -134,6 +185,8 @@ impl Network {
             gain_control: None,
             gain: 1.0,
             cut: None,
+            bursts: None,
+            rising: None,
         }
     }
 
@@ -160,6 +213,31 @@ impl Network {
     /// call.
     pub fn set_noise(&mut self, level: f64) {
         self.noise = level;
+    }
+
+    /// The loop's noise rising to `level` from `from` seconds into the call,
+    /// over `over` seconds -- at once, if that is nothing -- by as many
+    /// decibels each second: a line that goes bad in the middle of a call,
+    /// all at once or a little at a time.
+    pub fn with_rising_noise(mut self, from: f64, over: f64, level: f64) -> Self {
+        let codewords = |seconds: f64| (seconds * NETWORK_FS) as u64;
+        self.rising = Some(Rising { from: codewords(from), over: codewords(over), end: level, start: None });
+        self
+    }
+
+    /// Bursts of noise on the downstream as the analogue modem hears it, from
+    /// `from` seconds into the call: `length` seconds at `level` on top of the
+    /// floor, every `every` seconds.
+    ///
+    /// A disturbance that comes and goes -- a crackle on the loop, a noisy
+    /// neighbour in the cable -- in the downstream only, as the rest of what
+    /// this route does to what the analogue modem hears is: the upstream is
+    /// V.34's, with margins and a receiver of its own, and what is asked of
+    /// these is what the downstream's receiver makes of them.
+    pub fn with_bursts(mut self, from: f64, every: f64, length: f64, level: f64) -> Self {
+        let codewords = |seconds: f64| (seconds * NETWORK_FS) as u64;
+        self.bursts = Some(Bursts { from: codewords(from), every: codewords(every).max(1), length: codewords(length), level });
+        self
     }
 
     /// A robbed bit on every sixth downstream octet, starting at `phase`.
@@ -273,6 +351,13 @@ impl Network {
     /// hears by then out.
     pub fn down(&mut self, level: f64) -> Vec<f64> {
         let carried = self.carry(level);
+        // The disturbances as they stand for this codeword, the first being
+        // codeword 0.
+        let floor = self.noise;
+        if let Some(level) = self.rising.as_mut().and_then(|r| r.level(self.now, floor)) {
+            self.noise = level;
+        }
+        let burst = self.bursts.map_or(0.0, |b| b.level(self.now));
         self.now += 1;
         // The jitter buffer, between the network and the sound card.
         let periodic = self.slips.filter(|(every, _)| self.now.is_multiple_of(*every));
@@ -334,7 +419,9 @@ impl Network {
                 heard = sum * self.gain;
                 self.gain += (1.0 - self.gain) / (release * self.fs);
             }
-            let noise = self.noise * self.gaussian();
+            // A burst is noise of its own on top of the floor's.
+            let level = if burst > 0.0 { self.noise.hypot(burst) } else { self.noise };
+            let noise = level * self.gaussian();
             out.push(heard + noise);
             self.down_next += step;
         }
@@ -475,6 +562,55 @@ mod tests {
         assert!(top < -45.0, "3975 Hz {top:.1} dB");
         // And without it, the reconstruction's own edge is gentler.
         assert!(heard_db(Network::new(Law::Mu, 16_000.0), 3975.0) > -20.0);
+    }
+
+    /// What the analogue modem hears of a silent downstream, as the RMS over
+    /// each tenth of a second, for `seconds`.
+    fn noise_heard(mut net: Network, seconds: f64) -> Vec<f64> {
+        let tenth = (NETWORK_FS / 10.0) as usize;
+        (0..(seconds * 10.0) as usize)
+            .map(|_| {
+                let heard: Vec<f64> = (0..tenth).flat_map(|_| net.down(0.0)).collect();
+                (heard.iter().map(|x| x * x).sum::<f64>() / heard.len() as f64).sqrt()
+            })
+            .collect()
+    }
+
+    /// Bursts are there for as long as they were asked to be and at the level
+    /// asked for, on top of the floor, and the floor alone between them.
+    #[test]
+    fn noise_bursts_come_and_go_on_top_of_the_floor() {
+        let net = Network::new(Law::Mu, 16_000.0).with_noise(1e-4).with_bursts(0.5, 1.0, 0.2, 1e-3);
+        let heard = noise_heard(net, 3.0);
+        let with_burst = 1e-4f64.hypot(1e-3);
+        for (tenth, rms) in heard.iter().enumerate() {
+            // The noise goes on after the codec's reconstruction, so a burst
+            // begins and ends where it was asked to, on tenths here.
+            let bursting = tenth >= 5 && (tenth - 5) % 10 < 2;
+            let expected = if bursting { with_burst } else { 1e-4 };
+            assert!((rms / expected - 1.0).abs() < 0.1, "tenth {tenth}: {rms:.2e} against {expected:.2e}");
+        }
+    }
+
+    /// A floor that rises goes from where it was to where it was asked to,
+    /// by as many decibels each second, and stays there.
+    #[test]
+    fn a_rising_floor_rises_by_the_same_decibels_each_second() {
+        let net = Network::new(Law::Mu, 16_000.0).with_noise(1e-5).with_rising_noise(1.0, 2.0, 1e-3);
+        let heard = noise_heard(net, 4.0);
+        // Tenths 0 to 9 before the rise, 10 to 29 during it, 30 on after.
+        let db = |rms: f64| 20.0 * rms.log10();
+        assert!((db(heard[5]) - db(1e-5)).abs() < 1.0, "before: {:.2e}", heard[5]);
+        // Half way through, half way in decibels: the middle of the tenth
+        // that starts it is 2.05 s, a fortieth of the way on from 2.0.
+        let middle = db(1e-5) + (db(1e-3) - db(1e-5)) * 0.525;
+        assert!((db(heard[20]) - middle).abs() < 1.0, "half way: {:.1} dB against {middle:.1}", db(heard[20]));
+        assert!((db(heard[35]) - db(1e-3)).abs() < 1.0, "after: {:.2e}", heard[35]);
+        // It is the loop's floor, as `set_noise` sets it: the upstream hears
+        // it too.
+        let mut net = Network::new(Law::Mu, 16_000.0).with_noise(1e-5).with_rising_noise(0.0, 0.0, 1e-3);
+        let _ = net.down(0.0);
+        assert_eq!(net.noise, 1e-3);
     }
 
     #[test]

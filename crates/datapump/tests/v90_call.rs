@@ -778,3 +778,213 @@ fn a_clean_line_asks_for_no_shaping() {
     assert_eq!(digital.cpt().map(Shaping::of), Some(Shaping::NONE));
     assert_eq!(call.rates().0, 50_666);
 }
+
+/// Known data for the downstream: a sequence in which every bit is the
+/// exclusive or of the bits 28 and 31 before it, so that what arrives is
+/// checked against itself, bit by bit. Nothing has to be lined up, and a
+/// stretch a renegotiation drops spoils only the blocks either side of it.
+#[derive(Debug, Clone)]
+struct Known(u32);
+
+impl Known {
+    fn next(&mut self) -> bool {
+        let bit = ((self.0 >> 27) ^ (self.0 >> 30)) & 1 == 1;
+        self.0 = ((self.0 << 1) | u32::from(bit)) & 0x7fff_ffff;
+        bit
+    }
+}
+
+/// Bits the known data is checked in, 128 octets' worth: a block with any
+/// bit wrong is errored, as a frame carrying it would be lost.
+const BLOCK_BITS: u64 = 1024;
+
+/// What has arrived of the known data.
+#[derive(Debug, Clone, Copy, Default)]
+struct Checked {
+    /// The last 31 bits, newest lowest, and how many there have been.
+    last: u32,
+    have: u32,
+    /// Bits checked, blocks of them, blocks with a bit the bits before it
+    /// said should have been otherwise, and whether the block under way has
+    /// one.
+    bits: u64,
+    blocks: u64,
+    errored: u64,
+    wrong: bool,
+}
+
+impl Checked {
+    fn feed(&mut self, bit: bool) {
+        if self.have == 31 {
+            let expected = ((self.last >> 27) ^ (self.last >> 30)) & 1 == 1;
+            self.wrong |= bit != expected;
+            self.bits += 1;
+            if self.bits.is_multiple_of(BLOCK_BITS) {
+                self.blocks += 1;
+                self.errored += u64::from(self.wrong);
+                self.wrong = false;
+            }
+        } else {
+            self.have += 1;
+        }
+        self.last = ((self.last << 1) | u32::from(bit)) & 0x7fff_ffff;
+    }
+
+    /// Errored blocks, and blocks, since `before`.
+    fn since(&self, before: &Self) -> (u64, u64) {
+        (self.errored - before.errored, self.blocks - before.blocks)
+    }
+}
+
+/// The downstream's known data: what goes, and what has arrived of it.
+#[derive(Debug, Clone)]
+struct Downstream {
+    known: Known,
+    checked: Checked,
+}
+
+impl Downstream {
+    fn new() -> Self {
+        Self { known: Known(0x1234_5678), checked: Checked::default() }
+    }
+}
+
+impl FullCall {
+    fn seconds(&self) -> f64 {
+        self.ticks as f64 / 8000.0
+    }
+
+    /// Carry on until `done`, or for `seconds`, with known data going down
+    /// all the while and what arrives of it checked. Whether `done` came.
+    fn known_data_until(&mut self, seconds: f64, data: &mut Downstream, mut done: impl FnMut(&Self) -> bool) -> bool {
+        let end = self.ticks + (seconds * 8000.0) as u64;
+        while self.ticks < end {
+            // Kept topped up: a digital modem with nothing to send sends ones.
+            while self.digital.accepts_bits() && self.digital.pending_bits() < 4 * BLOCK_BITS as usize {
+                let bits: Vec<bool> = (0..BLOCK_BITS).map(|_| data.known.next()).collect();
+                self.digital.send_bits(&bits);
+            }
+            let to_digital = self.net.up(&self.up);
+            self.up.clear();
+            let from_digital = self.digital.step(to_digital);
+            for x in self.net.down(from_digital) {
+                self.up.push(self.analogue.step(x));
+            }
+            self.ticks += 1;
+            for bit in self.analogue.take_bits() {
+                data.checked.feed(bit);
+            }
+            self.digital.take_bits();
+            if done(self) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn known_data(&mut self, seconds: f64, data: &mut Downstream) {
+        self.known_data_until(seconds, data, |_| false);
+    }
+
+    /// Carry on with known data until both ends are back in data mode,
+    /// having left it; false if that takes more than `seconds`.
+    fn comes_back_up_with(&mut self, seconds: f64, data: &mut Downstream) -> bool {
+        use datapump::v90::startup::Status;
+        let up = |s: Status| matches!(s, Status::Connected { .. });
+        let mut went_down = false;
+        self.known_data_until(seconds, data, |call| {
+            let both = up(call.analogue.status()) && up(call.digital.status());
+            went_down |= !both;
+            went_down && both
+        })
+    }
+}
+
+/// When the disturbances below begin: well into data mode, which a line
+/// 20 ms each way reaches in under six seconds.
+const DISTURBED_FROM: f64 = 8.0;
+
+/// Seconds of known data a disturbed call is judged on.
+const JUDGED: f64 = 15.0;
+
+/// Noise that comes and goes: a tenth of a second of it every second and a
+/// half, about ten decibels over the error a clean line leaves in the
+/// decisions.
+fn bursty_line() -> Network {
+    plain_line().with_bursts(DISTURBED_FROM, 1.5, 0.1, 1e-3)
+}
+
+/// A floor that steps up, to about twice the error a clean line leaves in
+/// the decisions: where it makes errors every few seconds at the rate a clean
+/// line came up at.
+fn stepped_line() -> Network {
+    plain_line().with_rising_noise(DISTURBED_FROM, 0.0, 6e-4)
+}
+
+/// A disturbed call: connected, and carrying known data clean until the
+/// disturbance begins.
+fn disturbed(net: Network) -> (FullCall, Downstream) {
+    let mut call = connects(net, server(), 30.0);
+    assert!(call.seconds() < DISTURBED_FROM - 1.0, "connected at {:.1} s", call.seconds());
+    let mut data = Downstream::new();
+    call.known_data(DISTURBED_FROM - call.seconds(), &mut data);
+    (call, data)
+}
+
+/// Known data over `JUDGED` seconds: errored blocks, and blocks.
+fn judged(call: &mut FullCall, data: &mut Downstream) -> (u64, u64) {
+    let before = data.checked;
+    call.known_data(JUDGED, data);
+    data.checked.since(&before)
+}
+
+/// A slower rate, asked for by hand, and what the disturbance costs there:
+/// the rate, errored blocks and blocks.
+fn by_hand(call: &mut FullCall, data: &mut Downstream, most: u32) -> (u32, u64, u64) {
+    assert!(call.analogue.renegotiate(most));
+    assert!(call.comes_back_up_with(10.0, data), "{} / {}", call.analogue.phase(), call.digital.phase());
+    // What the renegotiation dropped is not the line's doing.
+    call.known_data(1.0, data);
+    let (errored, blocks) = judged(call, data);
+    (call.rates().0, errored, blocks)
+}
+
+/// Noise that comes and goes costs data in every burst at the rate the call
+/// came up at, and the analogue modem does not see it. The receiver holds
+/// its loops through each burst, as it would through a slip, and the watch
+/// on the margin takes it for one and looks away; the average error it looks
+/// at between bursts is a clean line's. A slower rate reads the same bursts
+/// cleanly.
+#[test]
+fn noise_that_comes_and_goes_costs_data_at_a_rate_nothing_lowers() {
+    let (mut call, mut data) = disturbed(bursty_line());
+    let (fast, _) = call.rates();
+    let (errored, blocks) = judged(&mut call, &mut data);
+    println!("{fast} through the bursts: {errored} of {blocks} blocks errored, {} renegotiations", call.analogue.renegotiations());
+    assert_eq!(call.analogue.renegotiations(), 0);
+    assert!(errored >= 5, "{errored} of {blocks} blocks errored");
+    let (slower, errored, blocks) = by_hand(&mut call, &mut data, 40_000);
+    println!("{slower} asked for by hand: {errored} of {blocks} blocks errored");
+    assert!(slower < fast);
+    assert_eq!(errored, 0, "{errored} of {blocks} blocks errored at {slower}");
+}
+
+/// A floor that steps up a few decibels costs data every few seconds at the
+/// rate the call came up at, and the analogue modem does not see it: its
+/// levels now stand about seven of the averaged error apart, which is where
+/// the watch on the margin draws its line, and any look a little over it
+/// starts the count of looks in a row again. A slower rate reads the line
+/// cleanly.
+#[test]
+fn a_floor_that_steps_up_costs_data_at_a_rate_nothing_lowers() {
+    let (mut call, mut data) = disturbed(stepped_line());
+    let (fast, _) = call.rates();
+    let (errored, blocks) = judged(&mut call, &mut data);
+    println!("{fast} after the step: {errored} of {blocks} blocks errored, {} renegotiations", call.analogue.renegotiations());
+    assert_eq!(call.analogue.renegotiations(), 0);
+    assert!(errored >= 2, "{errored} of {blocks} blocks errored");
+    let (slower, errored, blocks) = by_hand(&mut call, &mut data, 44_000);
+    println!("{slower} asked for by hand: {errored} of {blocks} blocks errored");
+    assert!(slower < fast);
+    assert_eq!(errored, 0, "{errored} of {blocks} blocks errored at {slower}");
+}
