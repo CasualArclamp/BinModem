@@ -13,10 +13,11 @@ carried over the top of them. 1580 tests.
 
 ## What works
 
-It places and answers real calls. Full interactive sessions — public dial-up
-gateways, reached over a VoIP trunk — have crossed it at V.22bis 2400 and at
-V.32 4800, with V.42 error control and V.42bis compression, byte for byte
-correct including the ANSI. Where a far end answers no XID at all and simply
+It places and answers real calls. Every modulation in the table below has
+connected to real modems and providers' servers over a VoIP trunk, from Bell 103
+to V.90, and full interactive sessions on public dial-up gateways have crossed
+it with V.42 error control and V.42bis compression, byte for byte correct
+including the ANSI. Where a far end answers no XID at all and simply
 announces compression in band, that is followed too, and 1957 octets of one
 board's screen are kept as a test vector. No far end ever has answered one, in
 any of twelve recorded calls, and reading those calls back through the whole
@@ -138,11 +139,6 @@ OS-specific code — but only built and run on Windows so far.
 
 ## Work in progress
 
-- **V.32 to a real modem.** At 9600 it connects, agrees on the trellis code
-  and passes data, then loses the carrier about half a second in: the error is
-  all across the radius and none along it, so it is the carrier loop. 14 400
-  comes up and cannot be read. `AT+MS=V32B,1,4800,14400` is what has stayed
-  up.
 - **V.32bis between two of these on one virtual cable** fails in the calling
   direction only: the calling modem hears its own signal back while it has to
   read the far end's second training segment.
