@@ -144,6 +144,8 @@ OS-specific code — but only built and run on Windows so far.
   requantised, which leaves noise at about 1.7% of every codeword; a real
   provider's server puts exact codewords on the network, which is why a real
   modem gets 56k on the same line.
+- **Compression between two of these in V.90** is not offered correctly. Seen
+  on live calls between two BinModems; not yet looked into.
 
 ## Next
 
