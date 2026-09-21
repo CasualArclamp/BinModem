@@ -178,6 +178,59 @@ const ENOUGH: f64 = 12.5;
 /// of a disturbance: 32 ms, about the shortest burst worth a slower rate.
 const BLOCK: usize = 256;
 
+/// Clean decisions that end a stretch of misses: sixteen milliseconds.
+///
+/// A disturbance does not miss every decision it touches, nor nearly. A
+/// tenth of a second of noise ten decibels over what a clean line leaves
+/// misses about one decision in ten, and 32 clean ones in a row turn up
+/// inside one several times over (0.9^32 is one in thirty); 128 in a row do
+/// not (one in a million), so the whole hundred milliseconds stays one
+/// stretch. Nothing here puts two disturbances within sixteen milliseconds of
+/// each other, and a line at its own margin goes thousands of decisions
+/// between misses, so neither joins two stretches into one.
+const STORM_GAP: usize = 128;
+
+/// Misses in a stretch before it is a disturbance at all, rather than the
+/// line's own tail.
+///
+/// A look of 2000 decisions over a simulated VoIP round trip at 54 666 had
+/// three misses at worst, and a floor stepped up to where errors come every
+/// few seconds leaves a miss or two in a look: neither can put sixteen of
+/// them within sixteen milliseconds of each other. A concealed packet has
+/// dozens, and so does a burst of noise.
+const STORM_MISSES: usize = 16;
+
+/// The longest a stretch of misses can be and still be one packet, in
+/// symbols: sixty-four milliseconds.
+///
+/// This is what tells a jitter buffer from the line. A softphone's packets
+/// hold ten, twenty or thirty milliseconds of G.711, and what the buffer
+/// makes up, plays twice or drops is one of them: the garbage lasts exactly
+/// that long, and the line either side of it is the line it always was. No
+/// slower rate reads made-up audio any better, so falling back for it costs
+/// the call its throughput and buys nothing -- and neither the frames moving
+/// nor the far end going quiet says it happened, since a packet concealed
+/// where it was moves nothing and a gap of milliseconds is far too short for
+/// [`carrier::Watch::quiet`] to see. Only the garbage itself says so.
+///
+/// Longer than a packet, the disturbance is the line's own -- a crackle, a
+/// neighbour in the cable, a floor that has stepped -- and a slower rate does
+/// read it better: the bursts this watch was written for are a hundred
+/// milliseconds. Measured over this route: a twenty-millisecond packet
+/// concealed in place made stretches of 144 to 415 decisions, its own 160 and
+/// the loops coming back after them; a hundred milliseconds of noise made
+/// stretches of 619 to 752. 512 lies between, and leaves a thirty-millisecond
+/// packet the same room again. Nothing tells a click on the line shorter than
+/// a packet from a packet, and neither is held against the rate: a click is
+/// not a line.
+const STORM_SHORT: usize = 512;
+
+/// Looks held after a stretch of garbage that was not the line's: what the
+/// receiver reads while its loops come back in is not the line either. Half a
+/// second, which is how long it holds them still before deciding the errors
+/// are the line's after all ([`pcm`]'s `HELD_AT_MOST`).
+const HOLD_AFTER: u32 = 1;
+
 /// Frames over which a read of impossible numbers is counted, how many make
 /// it a lost place, and symbols kept for finding the place again.
 const PLACE_WINDOW: usize = 24;
@@ -635,6 +688,16 @@ struct Look {
     spoiled: bool,
 }
 
+/// A stretch of decisions with misses in it, bounded by clean ones either
+/// side (see [`Decisions::storm`]).
+#[derive(Debug, Clone, Copy, Default)]
+struct Storm {
+    /// Decisions since the first miss in it, and since the first to the last.
+    spanned: usize,
+    ended: usize,
+    misses: usize,
+}
+
 /// Data mode's decisions, as the watch on the margin sees them.
 #[derive(Debug, Clone, Default)]
 struct Decisions {
@@ -645,6 +708,10 @@ struct Decisions {
     /// The look under way, and the block under way in it: symbols and power.
     look: Look,
     block: (usize, f64),
+    /// The stretch of misses under way, and looks still to be held after one
+    /// that was garbage.
+    storm: Option<Storm>,
+    holding: u32,
     /// The look before, held back until this one is over (see [`Self::look`]).
     held: Option<Look>,
     /// Times the frames had moved when the look under way began.
@@ -691,7 +758,8 @@ impl Decisions {
         let look = &mut self.look;
         look.symbols += 1;
         look.power += error * error;
-        if share > MISSED {
+        let missed = share > MISSED;
+        if missed {
             look.misses += 1;
         }
         self.block.0 += 1;
@@ -700,6 +768,37 @@ impl Decisions {
             look.worst = look.worst.max(self.block.1 / BLOCK as f64);
             self.block = (0, 0.0);
         }
+        self.storm(missed);
+    }
+
+    /// One decision, a miss or not, through the stretch of misses under way.
+    ///
+    /// A stretch begins at a miss and runs to the last miss within
+    /// [`STORM_GAP`] decisions of it. When it ends, a stretch with misses
+    /// enough to be garbage rather than the line's own tail is judged by how
+    /// long it lasted: a packet's worth or less and it is a jitter buffer's
+    /// doing, not the line's, and the look it happened in -- and so the look
+    /// before it, which a look always waits for -- go. So do the next
+    /// [`HOLD_AFTER`], for the loops to come back in.
+    fn storm(&mut self, missed: bool) {
+        let Some(mut storm) = self.storm else {
+            self.storm = missed.then_some(Storm { spanned: 0, ended: 0, misses: 1 });
+            return;
+        };
+        storm.spanned += 1;
+        if missed {
+            storm.ended = storm.spanned;
+            storm.misses += 1;
+        }
+        if storm.spanned - storm.ended <= STORM_GAP {
+            self.storm = Some(storm);
+            return;
+        }
+        self.storm = None;
+        if storm.misses >= STORM_MISSES && storm.ended < STORM_SHORT {
+            self.look.spoiled = true;
+            self.holding = HOLD_AFTER;
+        }
     }
 
     /// Something that is not the line happened in the look under way.
@@ -707,19 +806,29 @@ impl Decisions {
         self.look.spoiled = true;
     }
 
+
     /// End the look under way, whose end finds the frames moved `moved`
     /// times so far; and the look before it, if it stands.
     ///
     /// A look is held back until the next is over, and thrown away if either
-    /// was spoiled. A jitter buffer's slip is twenty milliseconds of made-up
-    /// audio or none, and every symbol after it moved by 160: a burst of
-    /// garbage no slower rate reads any better, and the frames found
-    /// somewhere else a few frames later -- 160 codewords are never a whole
-    /// number of frames. The receiver holding its loops says nothing: it
-    /// holds them through any sudden rise in error, a burst of noise as much
-    /// as a slip. The frames moving says it was a slip, and the move comes
-    /// within a look of the slip, if not in the same one. A far end going
-    /// quiet is not a disturbance a slower rate cures either.
+    /// was spoiled. What spoils one is a jitter buffer, in one shape or
+    /// another.
+    ///
+    /// A slip inserts a packet of made-up audio or drops one, and moves every
+    /// symbol after it by a packet's length. The garbage itself is a stretch
+    /// of misses a packet long, which [`Self::storm`] catches; and the frames
+    /// turn up somewhere else a few frames later, since 160 codewords are
+    /// never a whole number of frames, which says it was a slip too. The
+    /// receiver holding its loops says nothing: it holds them through any
+    /// sudden rise in error, a burst of noise as much as a slip.
+    ///
+    /// A packet lost and concealed where it was moves nothing at all: the
+    /// frames stay where they were and the clock does not shift, so nothing
+    /// but the garbage marks it, and the garbage is what is judged.
+    ///
+    /// And a far end going quiet is not a disturbance a slower rate cures
+    /// either; but that takes a fifth of a second of silence to show (see
+    /// [`carrier::Watch::quiet`]), so it is a hang-up it catches, not a gap.
     fn look(&mut self, moved: u32) -> Option<Look> {
         if !self.started {
             // The first look only begins the watch.
@@ -736,6 +845,10 @@ impl Decisions {
         }
         self.moved = moved;
         let look = std::mem::take(&mut self.look);
+        if self.holding > 0 {
+            self.holding -= 1;
+            self.look.spoiled = true;
+        }
         let before = self.held.replace(look)?;
         (!before.spoiled && !look.spoiled).then_some(before)
     }
@@ -2152,10 +2265,18 @@ mod tests {
         decisions
     }
 
-    /// A look's worth of symbols, `misses` of them misses.
+    /// A look's worth of symbols, `misses` of them misses, spread evenly
+    /// through it as a line at its own margin misses.
     fn symbols(decisions: &mut Decisions, misses: usize) {
+        stretch(decisions, misses, 2000);
+    }
+
+    /// A look's worth of symbols with `misses` misses spread evenly over the
+    /// first `over` of them, and nothing missed after.
+    fn stretch(decisions: &mut Decisions, misses: usize, over: usize) {
         for n in 0..2000 {
-            decisions.symbol(n % INTERVALS, if n < misses { 1.95 } else { 1.05 });
+            let missed = n < over && n * misses / over != (n + 1) * misses / over;
+            decisions.symbol(n % INTERVALS, if missed { 1.95 } else { 1.05 });
         }
     }
 
@@ -2187,6 +2308,31 @@ mod tests {
         let errors = [0.1, 0.75, 0.95, 0.9, 0.5, 0.85, 0.9, 0.1, 2.0, 6.0];
         let power: f64 = errors.iter().map(|e| e * e).sum();
         assert!((decisions.look.power - power).abs() < 1e-9, "{} against {power}", decisions.look.power);
+    }
+
+    /// A stretch of misses dense enough to be garbage and short enough to be
+    /// one packet of it is a jitter buffer's, not the line's: the look it fell
+    /// in goes, and with it the look before -- which every look waits for --
+    /// and the look after, while the loops come back. A stretch as long as a
+    /// burst of noise on the line is weighed like any other.
+    #[test]
+    fn a_packet_s_worth_of_garbage_is_not_the_line_and_a_hundred_milliseconds_of_noise_is() {
+        let mut decisions = watching();
+        // One twenty-millisecond packet: 160 decisions, a fifth of them missed.
+        stretch(&mut decisions, 32, 160);
+        assert!(decisions.look(0).is_none(), "held until the next is over");
+        symbols(&mut decisions, 0);
+        assert!(decisions.look(0).is_none(), "the packet's look goes, and the one before it");
+        symbols(&mut decisions, 0);
+        assert!(decisions.look(0).is_none(), "and the look after it, while the loops come back");
+        symbols(&mut decisions, 0);
+        assert!(decisions.look(0).is_some(), "and then the line is the line again");
+        // A hundred milliseconds of noise: 800 decisions, a tenth missed.
+        let mut decisions = watching();
+        stretch(&mut decisions, 80, 800);
+        assert!(decisions.look(0).is_none(), "held until the next is over");
+        symbols(&mut decisions, 0);
+        assert_eq!(decisions.look(0).map(|l| l.misses), Some(80), "a burst of noise is the line's");
     }
 
     /// A look stands only once the look after it is over, and only if the

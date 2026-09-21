@@ -1035,6 +1035,71 @@ fn a_softphone_s_slips_and_gain_control_are_left_at_their_rates() {
     }
 }
 
+/// A packet of the downstream lost and concealed where it was, every three
+/// seconds: the buffer plays the last packet over again, fading, or nothing
+/// at all, in the place the lost one would have filled.
+fn dropped_line(every: f64, repeat: bool) -> Network {
+    voip_line().with_dropout(VOIP_DISTURBED_FROM, every, 0.02, repeat)
+}
+
+/// A VoIP call's round trip: 0.6 s each way, which comes up at 54 666 -- the
+/// rate Rory's own line comes up at, and the one with least margin to spare.
+fn voip_line() -> Network {
+    Network::new(Law::Mu, FS).with_delay(0.6, FS).with_noise(1e-5)
+}
+
+/// When a disturbance over that round trip begins: a start-up 0.6 s each way
+/// takes a dozen seconds, and what lands in one is the start-up's business,
+/// not data mode's.
+const VOIP_DISTURBED_FROM: f64 = 20.0;
+
+
+/// A packet lost and concealed where it was is not held against the rate.
+/// Twenty milliseconds of made-up audio is twenty milliseconds of garbage,
+/// and a slower rate reads it no better: the same bits are lost at 28 000 as
+/// at 54 666, and the rest of the call pays for it. Nothing moves and nothing
+/// goes quiet, so neither of the things that used to mark a look as not the
+/// line's happens here -- the garbage itself has to say so.
+#[test]
+fn a_packet_lost_and_concealed_in_place_is_left_at_its_rate() {
+    for (every, repeat) in [(1.5, true), (3.0, true), (1.5, false), (3.0, false)] {
+        assert_eq!(left_alone(dropped_line(every, repeat), WATCHED), (0, 0), "every {every} s, repeat {repeat}");
+    }
+}
+
+
+/// A call over the round trip, disturbed from [`VOIP_DISTURBED_FROM`]: it
+/// renegotiates once, to a slower rate, with no retrain. The rate before and
+/// the rate after.
+fn falls_back_over_the_round_trip(net: Network) -> (u32, u32) {
+    let mut call = connects(net, server(), 40.0);
+    assert!(call.seconds() < VOIP_DISTURBED_FROM - 1.0, "connected at {:.1} s", call.seconds());
+    let (fast, _) = call.rates();
+    let mut data = Downstream::new();
+    call.known_data(VOIP_DISTURBED_FROM - call.seconds(), &mut data);
+    assert!(call.comes_back_up_with(20.0, &mut data), "never renegotiated: {} / {}", call.analogue.phase(), call.digital.phase());
+    let (slower, _) = call.rates();
+    // What the renegotiation dropped is not the line's doing.
+    call.known_data(1.0, &mut data);
+    let before = data.checked;
+    call.known_data(JUDGED, &mut data);
+    let (errored, blocks) = data.checked.since(&before);
+    println!("{fast} became {slower}; then {errored} of {blocks} blocks errored, {} slips", call.net.slips());
+    assert!(slower < fast, "{slower} against {fast}");
+    assert_eq!(call.analogue.renegotiations(), 1);
+    assert_eq!(call.analogue.retrains(), 0);
+    (fast, slower)
+}
+
+/// And noise that comes and goes between the lost packets is still seen: a
+/// hundred milliseconds of it every second and a half is the line's own, is
+/// nothing like a packet, and the analogue modem renegotiates once for it.
+#[test]
+fn noise_between_lost_packets_is_still_seen() {
+    falls_back_over_the_round_trip(dropped_line(3.0, true).with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.1, 1e-3));
+}
+
+
 /// Bursts of noise between a softphone's slips: the slips are still not
 /// held against the rate, and the bursts still are -- one renegotiation.
 #[test]

@@ -14,6 +14,11 @@
 //! the softphone now and then plays twenty milliseconds of made-up audio, or
 //! drops twenty, which shifts everything after it by 160 codewords.
 //!
+//! A packet can also be lost and concealed where it was, with nothing moved
+//! at all ([`Network::with_dropout`]): the buffer plays what it made up in
+//! the place the lost packet would have filled, and everything after it stays
+//! exactly where it was.
+//!
 //! And a path can take the top of the band away: something between the
 //! network and the sound card -- a transcoder's filter, a resampler -- that
 //! passes everything to 3.6 kHz and next to nothing at 4. See
@@ -96,8 +101,11 @@ pub struct Network {
     slip_at: Option<(u64, bool)>,
     /// Codewords of a lost stretch still to drop.
     dropping: usize,
-    /// The last slip's worth of codewords, for concealment to repeat.
+    /// Codewords kept for concealment to repeat, and how many of them.
     recent: VecDeque<f64>,
+    kept: usize,
+    /// The level the comfort noise of the dropout under way is made at.
+    comfort: f64,
     slip_count: u32,
     /// A softphone's gain control on what it plays: the loudest it lets
     /// through, how fast it recovers, in seconds, and where it has got to.
@@ -109,6 +117,28 @@ pub struct Network {
     /// Bursts of noise on the downstream, and a floor that rises.
     bursts: Option<Bursts>,
     rising: Option<Rising>,
+    /// Packets lost and concealed where they were.
+    dropout: Option<Dropout>,
+}
+
+/// A packet lost and concealed in place: from codeword `from` on, `length`
+/// codewords of what the buffer makes up every `every` codewords, either a
+/// fading repeat of the last packet or nothing at all.
+#[derive(Debug, Clone, Copy)]
+struct Dropout {
+    from: u64,
+    every: u64,
+    length: u64,
+    repeat: bool,
+}
+
+impl Dropout {
+    /// How far into a dropout network time `now` is, if it is in one.
+    fn within(&self, now: u64) -> Option<u64> {
+        let since = now.checked_sub(self.from)?;
+        let k = since % self.every;
+        (k < self.length).then_some(k)
+    }
 }
 
 /// Noise that comes and goes: from codeword `from` on, `length` codewords of
@@ -181,12 +211,15 @@ impl Network {
             slip_at: None,
             dropping: 0,
             recent: VecDeque::with_capacity(SLIP),
+            kept: SLIP,
+            comfort: 0.0,
             slip_count: 0,
             gain_control: None,
             gain: 1.0,
             cut: None,
             bursts: None,
             rising: None,
+            dropout: None,
         }
     }
 
@@ -272,6 +305,28 @@ impl Network {
         self
     }
 
+
+    /// A packet of the downstream lost and concealed where it was: from
+    /// `from` seconds on, `length` seconds of it every `every` seconds,
+    /// replaced by what the buffer makes up -- the last packet over again,
+    /// fading, if `repeat`, as a concealer that repeats a pitch period does,
+    /// and noise at the level of the packet that was lost if not, as a buffer
+    /// with comfort noise does. Garbage to a modem either way.
+    ///
+    /// Nothing is inserted and nothing is dropped, so everything after it is
+    /// exactly where it always was: the clock does not shift, the frames do
+    /// not move, and only the made-up audio itself says anything happened.
+    /// This is what a packet lost on a VoIP leg looks like whenever the
+    /// buffer has time to conceal it rather than resynchronise -- the usual
+    /// case for a single loss, and the one Rory's line gives.
+    pub fn with_dropout(mut self, from: f64, every: f64, length: f64, repeat: bool) -> Self {
+        let codewords = |seconds: f64| (seconds * NETWORK_FS) as u64;
+        let length = codewords(length);
+        self.kept = self.kept.max(length as usize);
+        self.dropout = Some(Dropout { from: codewords(from), every: codewords(every).max(1), length, repeat });
+        self
+    }
+
     /// A gain control on the downstream as the analogue modem hears it:
     /// anything louder than `ceiling` of full scale is turned down to it at
     /// once, and the gain comes back up over `release` seconds -- what a live
@@ -328,6 +383,14 @@ impl Network {
         sum * 3f64.sqrt()
     }
 
+    /// The `k`th codeword of what a buffer makes up in place of a packet
+    /// `length` codewords long: the last packet that arrived, over again,
+    /// and silence if none has.
+    fn made_up(&self, length: usize, k: usize) -> f64 {
+        let from = self.recent.len().saturating_sub(length);
+        self.recent.get(from + k).copied().unwrap_or(0.0)
+    }
+
     fn quantise(&self, level: f64) -> f64 {
         let (u, negative) = ucode::nearest(self.law, (level * 32768.0).round() as i32);
         ucode::level(self.law, u) * if negative { -1.0 } else { 1.0 }
@@ -358,6 +421,7 @@ impl Network {
             self.noise = level;
         }
         let burst = self.bursts.map_or(0.0, |b| b.level(self.now));
+        let concealed = self.dropout.and_then(|d| d.within(self.now).map(|k| (d, k)));
         self.now += 1;
         // The jitter buffer, between the network and the sound card.
         let periodic = self.slips.filter(|(every, _)| self.now.is_multiple_of(*every));
@@ -365,11 +429,11 @@ impl Network {
         if let Some((_, inserted)) = periodic.or(once) {
             self.slip_count += 1;
             if inserted {
-                // Twenty milliseconds of the last twenty, fading: what packet
+                // A packet's worth of the last packet, fading: what packet
                 // loss concealment makes up.
-                let tail: Vec<f64> = self.recent.iter().copied().collect();
-                for (k, v) in tail.iter().enumerate() {
-                    self.down_levels.push_back(v * (1.0 - k as f64 / tail.len() as f64));
+                for k in 0..SLIP {
+                    let made_up = self.made_up(SLIP, k);
+                    self.down_levels.push_back(made_up * (1.0 - k as f64 / SLIP as f64));
                 }
             } else {
                 self.dropping = SLIP;
@@ -377,9 +441,25 @@ impl Network {
         }
         if self.dropping > 0 {
             self.dropping -= 1;
+        } else if let Some((dropout, k)) = concealed {
+            // A packet that never came, concealed in the place it would have
+            // filled: the same made-up audio as a slip's, but instead of the
+            // codewords rather than as well as them. Nothing goes into
+            // `recent`, so what is repeated is the last packet that arrived.
+            let length = dropout.length as usize;
+            if k == 0 && !dropout.repeat {
+                let power: f64 = (0..length).map(|j| self.made_up(length, j)).map(|v| v * v).sum();
+                self.comfort = (power / length as f64).sqrt();
+            }
+            let made_up = if dropout.repeat {
+                self.made_up(length, k as usize) * (1.0 - k as f64 / dropout.length as f64)
+            } else {
+                self.comfort * self.gaussian()
+            };
+            self.down_levels.push_back(made_up);
         } else {
             self.down_levels.push_back(carried);
-            if self.recent.len() == SLIP {
+            if self.recent.len() == self.kept {
                 self.recent.pop_front();
             }
             self.recent.push_back(carried);
@@ -524,6 +604,42 @@ mod tests {
             assert_eq!(net.slips(), 1);
             let expected = 24_000i64 + if inserted { 320 } else { -320 };
             assert!((heard as i64 - expected).abs() < 60, "{inserted}: {heard}");
+        }
+    }
+
+
+    /// What the analogue modem hears of a downstream whose codewords change
+    /// every time, over `seconds`.
+    fn heard_codewords(mut net: Network, seconds: f64) -> Vec<f64> {
+        let mut out = Vec::new();
+        let mut u = 0u8;
+        for _ in 0..(seconds * NETWORK_FS) as usize {
+            u = u.wrapping_add(37);
+            out.extend(net.down(ucode::level(Law::Mu, u % 128) * if u.is_multiple_of(2) { 1.0 } else { -1.0 }));
+        }
+        out
+    }
+
+    /// A packet lost and concealed in place changes the audio where it was
+    /// lost and nowhere else: the same number of samples come out, at the
+    /// same instants, and everything outside the lost packet is sample for
+    /// sample what it would have been.
+    #[test]
+    fn a_concealed_dropout_changes_the_audio_where_it_was_and_moves_nothing() {
+        let plain = heard_codewords(Network::new(Law::Mu, 16_000.0), 1.0);
+        for repeat in [true, false] {
+            let net = Network::new(Law::Mu, 16_000.0).with_dropout(0.5, 1.0, 0.02, repeat);
+            let dropped = heard_codewords(net, 1.0);
+            assert_eq!(dropped.len(), plain.len(), "repeat {repeat}: the dropout moved what came after it");
+            let differs: Vec<usize> =
+                plain.iter().zip(&dropped).enumerate().filter(|(_, (a, b))| (*a - *b).abs() > 1e-9).map(|(k, _)| k).collect();
+            // Codewords 4000 to 4160 are line samples 8000 to 8320 at 16 kHz,
+            // and the codec's reconstruction reaches DOWN_REACH either side.
+            let reach = 2 * DOWN_REACH as usize;
+            let (first, last) = (differs[0], differs[differs.len() - 1]);
+            println!("repeat {repeat}: {} samples differ, {first} to {last}", differs.len());
+            assert!(differs.len() > 300, "repeat {repeat}: only {} samples differ", differs.len());
+            assert!(first > 8000 - reach && last < 8320 + reach, "repeat {repeat}: {first} to {last}");
         }
     }
 
