@@ -995,7 +995,12 @@ const WATCHED: f64 = 30.0;
 /// Run `seconds` of data mode with known data, and say how many
 /// renegotiations and retrains there were.
 fn left_alone(net: Network, seconds: f64) -> (u32, u32) {
-    let mut call = connects(net, server(), 40.0);
+    left_alone_with(net, server(), seconds)
+}
+
+/// The same, against a server of one's own choosing.
+fn left_alone_with(net: Network, server: Info0d, seconds: f64) -> (u32, u32) {
+    let mut call = connects(net, server, 40.0);
     let (rate, _) = call.rates();
     let mut data = Downstream::new();
     // What arrived before the known data did is not the line's doing.
@@ -1099,6 +1104,70 @@ fn a_packet_lost_and_concealed_in_place_is_left_at_its_rate() {
     }
 }
 
+
+/// A packet lost and filled with digital silence is not held against the
+/// rate either. Several softphones play zeroes rather than conceal, and a
+/// hole is no more the line's than made-up audio is: no rate reads a codeword
+/// that never arrived. Nothing is made up, so the sound the misses carry
+/// cannot say so -- silence carries none -- and the silence itself has to.
+///
+/// Over the 20 ms round trip, and over A-law's 0.6 s one, the hole costs the
+/// call only the packets it lost: no renegotiation, no retrain, and 39 to 41
+/// blocks of about 1500 errored in thirty seconds, which is what main errors
+/// over the same audio.
+#[test]
+fn a_packet_lost_and_filled_with_silence_is_left_at_its_rate() {
+    let short = plain_line().with_silent_dropout(DISTURBED_FROM, 1.5, 0.02);
+    assert_eq!(left_alone(short, WATCHED), (0, 0), "20 ms each way");
+    let long = Network::new(Law::A, FS).with_delay(0.6, FS).with_noise(1e-5).with_silent_dropout(VOIP_DISTURBED_FROM, 1.5, 0.02);
+    assert_eq!(left_alone_with(long, a_law_server(), WATCHED), (0, 0), "A-law, 0.6 s each way");
+}
+
+/// A hole does more than lose its own packet on one route: mu-law at 54 666
+/// over the 0.6 s round trip, where the levels stand closest together, the
+/// receiver loses the constellation on the first hole and does not get it
+/// back. That is a receiver to train again and not a rate to drop -- a
+/// slower rate does not hand back a lost constellation -- and the watch on
+/// the decisions has nothing to say about it either way, since a receiver
+/// that is not reading the constellation is no judge of what the line would
+/// carry.
+///
+/// So it retrains, once, and comes back slower: 54 666 to 44 000, with no
+/// renegotiation, and then reads the same holes at 44 000 with 24 of 644
+/// blocks errored. Over thirty seconds of it main errors 140 of 619 and 65
+/// of 378 in the last ten, and this errors the same; before the hole was
+/// judged at all, the branch renegotiated as well, never came back up, and
+/// errored 432 of 598 with every one of the last 96 gone. What the receiver
+/// does with a hole is worth mending, and that it is not mended here is not
+/// this watch's doing.
+#[test]
+fn a_hole_that_costs_the_receiver_its_constellation_is_retrained_and_not_slowed() {
+    let net = voip_line().with_silent_dropout(VOIP_DISTURBED_FROM, 1.5, 0.02);
+    let mut call = connects(net, server(), 40.0);
+    let (fast, _) = call.rates();
+    let mut data = Downstream::new();
+    call.known_data(VOIP_DISTURBED_FROM - call.seconds(), &mut data);
+    let before = data.checked;
+    assert!(call.comes_back_up_with(WATCHED, &mut data), "never came back: {} / {}", call.analogue.phase(), call.digital.phase());
+    let (slower, _) = call.rates();
+    let (renegotiations, retrains) = (call.analogue.renegotiations(), call.analogue.retrains());
+    let (through, whole) = data.checked.since(&before);
+    // And then, at the slower rate, with the holes still coming.
+    let after = data.checked;
+    call.known_data(JUDGED, &mut data);
+    let (errored, blocks) = data.checked.since(&after);
+    println!("{fast} became {slower}; {through} of {whole} blocks errored getting there, then {errored} of {blocks}");
+    assert!(slower < fast, "{slower} against {fast}");
+    assert_eq!((renegotiations, retrains), (0, 1));
+    assert!(errored * 10 < blocks, "{errored} of {blocks} blocks errored at {slower}");
+}
+
+/// The same server, A-law.
+fn a_law_server() -> Info0d {
+    let mut server = server();
+    server.a_law = true;
+    server
+}
 
 /// And a slip of a whole number of frames is not held against it either.
 /// 240 codewords is 40 of V.90's six-codeword frames (7.1), so the frames are

@@ -18,7 +18,9 @@
 //! A packet can also be lost and concealed where it was, with nothing moved
 //! at all ([`Network::with_dropout`]): the buffer plays what it made up in
 //! the place the lost packet would have filled, and everything after it stays
-//! exactly where it was.
+//! exactly where it was. Or it can be lost and not concealed at all, the hole
+//! filled with digital silence ([`Network::with_silent_dropout`]), which is
+//! what several softphones play when they give up concealing.
 //!
 //! And a path can take the top of the band away: something between the
 //! network and the sound card -- a transcoder's filter, a resampler -- that
@@ -126,14 +128,27 @@ pub struct Network {
 }
 
 /// A packet lost and concealed in place: from codeword `from` on, `length`
-/// codewords of what the buffer makes up every `every` codewords, either a
-/// fading repeat of the last packet or nothing at all.
+/// codewords of what the buffer makes up every `every` codewords.
 #[derive(Debug, Clone, Copy)]
 struct Dropout {
     from: u64,
     every: u64,
     length: u64,
-    repeat: bool,
+    fill: Fill,
+}
+
+/// What a jitter buffer puts in the hole a lost packet left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fill {
+    /// The last packet over again, fading, as a concealer that repeats a
+    /// pitch period does.
+    Repeat,
+    /// Noise at the level of the packet that was lost, as a buffer with
+    /// comfort noise does.
+    Comfort,
+    /// Nothing at all: digital silence, as a buffer that has given up
+    /// concealing does.
+    Silence,
 }
 
 impl Dropout {
@@ -340,11 +355,27 @@ impl Network {
     /// This is what a packet lost on a VoIP leg looks like whenever the
     /// buffer has time to conceal it rather than resynchronise -- the usual
     /// case for a single loss, and the one Rory's line gives.
-    pub fn with_dropout(mut self, from: f64, every: f64, length: f64, repeat: bool) -> Self {
+    pub fn with_dropout(self, from: f64, every: f64, length: f64, repeat: bool) -> Self {
+        self.dropping_into(from, every, length, if repeat { Fill::Repeat } else { Fill::Comfort })
+    }
+
+    /// The same, with digital silence in the hole: nothing inserted, nothing
+    /// dropped, and nothing made up either.
+    ///
+    /// Several softphones do this rather than conceal -- a buffer that has
+    /// run out of audio to repeat, or one that never had a concealer, plays
+    /// zeroes. It is the same shape of event as [`Self::with_dropout`]: the
+    /// clock does not shift, the frames do not move, and the codewords after
+    /// the hole are exactly where they always were.
+    pub fn with_silent_dropout(self, from: f64, every: f64, length: f64) -> Self {
+        self.dropping_into(from, every, length, Fill::Silence)
+    }
+
+    fn dropping_into(mut self, from: f64, every: f64, length: f64, fill: Fill) -> Self {
         let codewords = |seconds: f64| (seconds * NETWORK_FS) as u64;
         let length = codewords(length);
         self.kept = self.kept.max(length as usize);
-        self.dropout = Some(Dropout { from: codewords(from), every: codewords(every).max(1), length, repeat });
+        self.dropout = Some(Dropout { from: codewords(from), every: codewords(every).max(1), length, fill });
         self
     }
 
@@ -474,14 +505,14 @@ impl Network {
             // codewords rather than as well as them. Nothing goes into
             // `recent`, so what is repeated is the last packet that arrived.
             let length = dropout.length as usize;
-            if k == 0 && !dropout.repeat {
+            if k == 0 && dropout.fill == Fill::Comfort {
                 let power: f64 = (0..length).map(|j| self.made_up(length, j)).map(|v| v * v).sum();
                 self.comfort = (power / length as f64).sqrt();
             }
-            let made_up = if dropout.repeat {
-                self.made_up(length, k as usize) * (1.0 - k as f64 / dropout.length as f64)
-            } else {
-                self.comfort * self.gaussian()
+            let made_up = match dropout.fill {
+                Fill::Repeat => self.made_up(length, k as usize) * (1.0 - k as f64 / dropout.length as f64),
+                Fill::Comfort => self.comfort * self.gaussian(),
+                Fill::Silence => 0.0,
             };
             self.down_levels.push_back(made_up);
         } else {
@@ -664,6 +695,35 @@ mod tests {
             out.extend(net.down(ucode::level(Law::Mu, u % 128) * if u.is_multiple_of(2) { 1.0 } else { -1.0 }));
         }
         out
+    }
+
+    /// A packet lost and filled with digital silence leaves a hole where it
+    /// was and moves nothing: the same number of samples come out, at the
+    /// same instants, and the hole itself is silent -- not a repeat, not
+    /// comfort noise, nothing at all, as a softphone that has given up
+    /// concealing plays.
+    #[test]
+    fn a_silent_dropout_leaves_a_hole_where_the_packet_was_and_moves_nothing() {
+        let plain = heard_codewords(Network::new(Law::Mu, 16_000.0), 1.0);
+        let silent = heard_codewords(Network::new(Law::Mu, 16_000.0).with_silent_dropout(0.5, 1.0, 0.02), 1.0);
+        assert_eq!(silent.len(), plain.len(), "the hole moved what came after it");
+        // Codewords 4000 to 4160 are line samples 8000 to 8320 at 16 kHz,
+        // and the codec's reconstruction reaches DOWN_REACH either side.
+        let reach = 2 * DOWN_REACH as usize;
+        let differs: Vec<usize> =
+            plain.iter().zip(&silent).enumerate().filter(|(_, (a, b))| (*a - *b).abs() > 1e-9).map(|(k, _)| k).collect();
+        let (first, last) = (differs[0], differs[differs.len() - 1]);
+        println!("{} samples differ, {first} to {last}", differs.len());
+        assert!(first > 8000 - reach && last < 8320 + reach, "{first} to {last}");
+        // Well inside the hole, past the reconstruction's reach, there is
+        // nothing at all -- where a concealed one has audio at the level of
+        // the packet that was lost.
+        let inside = &silent[8000 + reach..8320 - reach];
+        let loudest = inside.iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        let level = plain[8000 + reach..8320 - reach].iter().fold(0.0f64, |m, x| m.max(x.abs()));
+        println!("the hole reaches {loudest}, where the line reaches {level}");
+        assert!(loudest < 1e-9, "the hole is not silent: {loudest}");
+        assert!(level > 0.01, "the line was quiet there anyway: {level}");
     }
 
     /// A packet lost and concealed in place changes the audio where it was

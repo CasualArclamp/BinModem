@@ -289,6 +289,49 @@ const STORM_GARBLED: f64 = 0.03;
 /// not a line.
 const STORM_SHORT: usize = 512;
 
+/// A hole in the audio: decisions at under a hundredth of the line's own
+/// level, that many in a row, and how long the line's own level is taken
+/// over -- half a second of decisions.
+///
+/// Some softphones do not conceal a lost packet at all: they play zeroes.
+/// Nothing is made up, so [`STORM_GARBLED`] has nothing to weigh -- silence
+/// misses hardly anything, since a decision at nothing is nearer the quietest
+/// level than the boundary in most intervals -- and nothing moves either, so
+/// a hole leaves no mark but its own silence. Measured over a 0.6 s round
+/// trip, twenty milliseconds of it left the decisions under a hundredth of
+/// the line's level for 8 to 159 in a row, and a fading repeat's tail -- the
+/// quietest thing that is not a hole -- for three to five. Eight, a
+/// millisecond, lies between; a hole shorter than that costs nothing worth
+/// dropping a look for.
+///
+/// A far end that has genuinely stopped is not this, and is not this end's to
+/// cure by a slower rate either. It shows in the line itself rather than in
+/// the decisions, and [`carrier::Watch::quiet`] is what sees it: a 50 ms time
+/// constant and 20 dB under the reference, which measured takes 0.237 s of
+/// silence to reach. A buffer's hole is over in twenty milliseconds and never
+/// reaches it; a far end on its way out holds the line quiet until it does,
+/// and then the looks go for that reason instead.
+const HOLE: usize = 8;
+const HOLE_LEVEL: f64 = 0.01;
+const LEVEL_OVER: f64 = 4000.0;
+
+/// Looks in a row leaving data mode's levels fewer than two of the
+/// receiver's averaged errors apart before it is trained again rather than
+/// slowed down: four, a second of them.
+///
+/// Whether the receiver is reading anything at all is a question about the
+/// receiver, not about the line, so it is asked of the receiver's own
+/// averaged error and not of the decisions. That average holds its loops
+/// through a burst of noise or a packet of made-up audio and barely takes
+/// either in, which is what makes it a poor judge of the line and a good
+/// judge of itself. And it is asked whatever the decisions said: a look
+/// dropped for not being the line's says nothing about whether the receiver
+/// still has the constellation, and a receiver that has lost it is not
+/// handed it back by a slower rate. Four looks in a row, so that the one
+/// look a disturbance lands in is never enough.
+const UNREADABLE: u32 = 4;
+const UNREADABLE_GAP: f64 = 2.0;
+
 /// Looks held after a stretch of garbage that was not the line's: what the
 /// receiver reads while its loops come back in is not the line either. Half a
 /// second, which is how long it holds them still before deciding the errors
@@ -789,6 +832,11 @@ struct Decisions {
     /// The evidence so far, and the looks it was gathered from.
     evidence: f64,
     recent: VecDeque<Look>,
+    /// The line's own level, as a slow mean of the decisions' power, and the
+    /// decisions since the last one that reached a hundredth of it (see
+    /// [`HOLE`]).
+    level: f64,
+    hole: usize,
 }
 
 impl Decisions {
@@ -839,6 +887,29 @@ impl Decisions {
             self.block = (0, 0.0);
         }
         self.storm(missed, value);
+        self.hole(value);
+    }
+
+    /// One decision through the hole in the audio under way, if there is one.
+    ///
+    /// The line's own level is a slow mean of the decisions' power, slow
+    /// enough that a packet's worth of nothing moves it by a few per cent
+    /// and no more. A decision at under a hundredth of it is a codeword that
+    /// is not there; [`HOLE`] of them in a row is a buffer playing zeroes,
+    /// and the looks go as they do for made-up audio -- silence in the
+    /// codewords' place is no more the line's than noise in their place is,
+    /// and no slower rate reads a codeword that never arrived.
+    fn hole(&mut self, value: f64) {
+        if value * value < HOLE_LEVEL * HOLE_LEVEL * self.level {
+            self.hole += 1;
+            if self.hole == HOLE {
+                self.look.spoiled = true;
+                self.holding = HOLD_AFTER;
+            }
+        } else {
+            self.hole = 0;
+        }
+        self.level += (value * value - self.level) / LEVEL_OVER;
     }
 
     /// One decision, a miss or not, through the stretch of misses under way.
@@ -873,7 +944,8 @@ impl Decisions {
         }
         self.storm = None;
         // Strictly more, so that a stretch with no sound under it at all is
-        // not garbage by default: silence carries nothing for this to weigh.
+        // not garbage by default: silence carries nothing for this to weigh,
+        // and is [`HOLE`]'s to catch.
         let garbled = storm.garbled > STORM_GARBLED * storm.at_last;
         if storm.misses >= STORM_MISSES && garbled && storm.ended < STORM_SHORT {
             self.look.spoiled = true;
@@ -1197,6 +1269,8 @@ pub struct Modem {
     least_gap: f64,
     margin_at: u64,
     decisions: Decisions,
+    /// Looks in a row whose error was as big as the gaps (see [`UNREADABLE`]).
+    unreadable: u32,
     /// How much worse than the DIL showed data mode has found the line.
     worse: f64,
     /// The spectral shaping asked for, and the share of the DIL's error
@@ -1276,6 +1350,7 @@ impl Modem {
             least_gap: f64::INFINITY,
             margin_at: 0,
             decisions: Decisions::default(),
+            unreadable: 0,
             worse: 1.0,
             shaping: (Shaping::NONE, 1.0),
         };
@@ -1688,6 +1763,7 @@ impl Modem {
                     self.status = Status::Connected { downstream: self.downstream_rate, upstream: self.upstream_rate };
                     self.deadline = None;
                     self.margin_at = self.samples(MARGIN_SETTLE);
+                    self.unreadable = 0;
                     if let Some(frames) = self.frames.as_ref() {
                         self.decisions = Decisions::new(&frames.levels);
                     }
@@ -2230,7 +2306,28 @@ impl Modem {
     /// loops through a burst like that as it would through a slip, so its
     /// average barely takes the burst in at all.
     fn watch_margin(&mut self) {
-        let Some(look) = self.decisions.look(self.frames_moved()) else { return };
+        // What the receiver itself is making of the line, as the margin was
+        // watched before the decisions were counted: its averaged error
+        // holds through a burst or a packet and barely takes either in, so
+        // it says nothing about a disturbance -- and everything about
+        // whether the receiver still has the constellation (see
+        // [`UNREADABLE`]).
+        let law = self.settings.law;
+        let receiver = ucode::level(law, self.settings.uinfo) / 10f64.powf(self.rx.snr_db() / 20.0);
+        let losing_it = self.least_gap < UNREADABLE_GAP * receiver;
+        if losing_it {
+            // A receiver that is not reading the constellation is no judge
+            // of what rate the line would carry.
+            self.decisions.spoil();
+        }
+        let stands = self.decisions.look(self.frames_moved());
+        self.unreadable = if losing_it { self.unreadable + 1 } else { 0 };
+        if self.unreadable >= UNREADABLE {
+            self.unreadable = 0;
+            self.wants_retrain = true;
+            return;
+        }
+        let Some(look) = stands else { return };
         if !self.decisions.weigh(look) {
             return;
         }
@@ -2248,7 +2345,6 @@ impl Modem {
         // also what stops the next: the same bursts at the new rate come
         // nowhere near its levels' boundaries.
         if let Some(route) = self.route.as_ref() {
-            let law = self.settings.law;
             let limit = f64::from(super::power_limit(&self.settings.server)) / 32768.0;
             let expected = route.noise_at(law, limit) * self.shaping.1.sqrt();
             self.worse = self.worse.max(self.decisions.worst() / expected);
@@ -2484,6 +2580,28 @@ mod tests {
                 decisions.symbol(n % INTERVALS, 8.3);
             }
             assert_eq!(decisions.look(0).is_some(), stands, "{what}");
+        }
+    }
+
+    /// Silence in the codewords' place is not the line either, and the sound
+    /// its misses carry cannot say so, because silence carries none: a
+    /// decision at nothing sits between the quietest levels and misses,
+    /// while adding nothing at all to what [`STORM_GARBLED`] weighs. What
+    /// says so is the silence itself, [`HOLE`] decisions of it; a shorter
+    /// gap -- the tail of a concealer's fading repeat is three to five -- is
+    /// left where it fell.
+    #[test]
+    fn a_hole_in_the_audio_is_not_the_line_and_a_shorter_gap_is_left_alone() {
+        for (gap, stands) in [(HOLE - 1, true), (HOLE, false)] {
+            let mut decisions = watching_uneven();
+            for n in 0..2000 {
+                decisions.symbol(n % INTERVALS, if (100..100 + gap).contains(&n) { 0.0 } else { 8.3 });
+            }
+            assert!(decisions.look(0).is_none(), "gap {gap}: held until the next is over");
+            for n in 0..2000 {
+                decisions.symbol(n % INTERVALS, 8.3);
+            }
+            assert_eq!(decisions.look(0).is_some(), stands, "a gap of {gap} decisions");
         }
     }
 
