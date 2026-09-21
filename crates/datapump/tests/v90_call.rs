@@ -1019,19 +1019,45 @@ fn a_clean_line_and_a_drifting_clock_are_left_at_their_rates() {
 
 /// A softphone's jitter buffer slips twenty milliseconds every few seconds,
 /// made up or dropped, and each slip is a burst of garbage no slower rate
-/// reads any better; the frames moving after it say it was a slip, and it is
-/// not held against the rate. Nor is the softphone's gain control, or the
-/// margin a call over a VoIP round trip comes up with, whose errors are half
-/// a minute apart. No renegotiation, as none before.
+/// reads any better; the stretch of misses says a packet did it, and it is
+/// not held against the rate. Nor is the margin a call over a VoIP round trip
+/// comes up with, whose errors are half a minute apart. No renegotiation, as
+/// none before.
+///
+/// The softphone's gain control is in the route and takes no part in it, and
+/// the name no longer says it does. Data mode never gets near the ceiling one
+/// sets: at 0.8 of full scale, which is where a live call's sat, the gain
+/// never leaves 1 at all, and at 0.5 it moves only in the start-up -- where
+/// the DIL sweeps every codeword, louder than anything data mode sends -- and
+/// then not once in thirty seconds of data mode. So that is what is asserted,
+/// rather than that a gain control which never engaged was not held against
+/// the rate.
 #[test]
-fn a_softphone_s_slips_and_gain_control_are_left_at_their_rates() {
-    for (period, inserted) in [(2.9, true), (3.1, false)] {
+fn a_softphone_s_slips_are_left_at_their_rates_and_its_gain_control_never_engages() {
+    for (period, inserted, ceiling, in_the_start_up) in [(2.9, true, 0.8, false), (3.1, false, 0.8, false), (2.9, true, 0.5, true)] {
         let net = Network::new(Law::Mu, FS)
             .with_delay(0.6, FS)
             .with_noise(1e-5)
-            .with_gain_control(0.8, 0.3)
+            .with_gain_control(ceiling, 0.3)
             .with_slips(period, inserted);
-        assert_eq!(left_alone(net, WATCHED), (0, 0), "slips every {period} s, inserted {inserted}");
+        let mut call = connects(net, server(), 40.0);
+        let (rate, _) = call.rates();
+        let started = call.net.quietest_gain();
+        let mut data = Downstream::new();
+        // What arrived before the known data did is not the line's doing.
+        call.known_data(1.0, &mut data);
+        let before = data.checked;
+        call.known_data(WATCHED, &mut data);
+        let (errored, blocks) = data.checked.since(&before);
+        let (renegotiations, retrains) = (call.analogue.renegotiations(), call.analogue.retrains());
+        println!(
+            "{rate}, ceiling {ceiling}, slips every {period} s: {renegotiations} renegotiations, {retrains} retrains in {WATCHED} s; {errored} of {blocks} blocks errored; the gain control went to {started} in the start-up and to {} in data mode",
+            call.net.quietest_gain()
+        );
+        let case = format!("ceiling {ceiling}, slips every {period} s, inserted {inserted}");
+        assert_eq!((renegotiations, retrains), (0, 0), "{case}");
+        assert_eq!(call.net.quietest_gain(), started, "{case}: the gain control engaged in data mode");
+        assert_eq!(started < 1.0, in_the_start_up, "{case}: the start-up left the gain at {started}");
     }
 }
 

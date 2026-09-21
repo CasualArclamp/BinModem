@@ -113,6 +113,8 @@ pub struct Network {
     /// through, how fast it recovers, in seconds, and where it has got to.
     gain_control: Option<(f64, f64)>,
     gain: f64,
+    /// The lowest that gain has been.
+    quietest: f64,
     /// The band-edge cut's taps, and the line samples they reach over,
     /// newest first.
     cut: Option<(Vec<f64>, VecDeque<f64>)>,
@@ -219,6 +221,7 @@ impl Network {
             slip_count: 0,
             gain_control: None,
             gain: 1.0,
+            quietest: 1.0,
             cut: None,
             bursts: None,
             rising: None,
@@ -390,6 +393,12 @@ impl Network {
         self.slip_count
     }
 
+    /// The lowest the gain control has turned the downstream down to, as a
+    /// gain: one if it has never had to, or if there is no gain control.
+    pub fn quietest_gain(&self) -> f64 {
+        self.quietest
+    }
+
     fn gaussian(&mut self) -> f64 {
         let mut sum = 0.0;
         for _ in 0..4 {
@@ -515,6 +524,7 @@ impl Network {
                     self.gain = ceiling / sum.abs();
                 }
                 heard = sum * self.gain;
+                self.quietest = self.quietest.min(self.gain);
                 self.gain += (1.0 - self.gain) / (release * self.fs);
             }
             // A burst is noise of its own on top of the floor's.
