@@ -1300,11 +1300,16 @@ fn bursts_of_noise_between_slips_are_still_seen() {
 /// worse than the DIL found it is stepped down that far, measured again at
 /// the new rate, and stepped again if it really is that bad, rather than
 /// falling as far as one 32 ms block said in a single renegotiation.
+///
+/// Two thousandths of full scale, which is about a hundred times the noise
+/// the call came up on: enough that one step cannot reach the rate it wants
+/// and a second follows, and not so much that the receiver loses the
+/// constellation, which is a retrain and no business of this rule's.
 #[test]
 fn a_renegotiation_steps_the_rate_down_by_no_more_than_eight_bits_a_frame() {
     let mut call = connects(plain_line(), server(), 30.0);
     let (down, _) = call.rates();
-    call.net.set_noise(3e-3);
+    call.net.set_noise(2e-3);
     assert!(call.comes_back_up(10.0), "{} / {}", call.analogue.phase(), call.digital.phase());
     let (stepped, _) = call.rates();
     println!("{down} became {stepped} in one renegotiation");

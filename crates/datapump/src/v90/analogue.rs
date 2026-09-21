@@ -393,21 +393,44 @@ const HOLE: usize = 16;
 const HOLE_LEVEL: f64 = 1e-5;
 const LEVEL_OVER: f64 = 4000.0;
 
-/// Looks in a row leaving data mode's levels fewer than two of the
-/// receiver's averaged errors apart before it is trained again rather than
-/// slowed down: four, a second of them.
+/// Data mode's levels closer than this many of the receiver's own averaged
+/// errors, this many looks running, are a line steadily short of margin: the
+/// rule the watch on the averaged error kept before any of this counted
+/// misses, and the rule this keeps for that kind of trouble still.
 ///
-/// Whether the receiver is reading anything at all is a question about the
-/// receiver, not about the line, so it is asked of the receiver's own
-/// averaged error and not of the decisions. That average holds its loops
-/// through a burst of noise or a packet of made-up audio and barely takes
-/// either in, which is what makes it a poor judge of the line and a good
-/// judge of itself. And it is asked whatever the decisions said: a look
-/// dropped for not being the line's says nothing about whether the receiver
-/// still has the constellation, and a receiver that has lost it is not
-/// handed it back by a slower rate. Four looks in a row, so that the one
-/// look a disturbance lands in is never enough.
-const UNREADABLE: u32 = 4;
+/// A line that is steadily short of margin is the one thing the receiver's
+/// average does read honestly. It holds its loops through a burst of noise or
+/// a packet of made-up audio and barely takes either in -- which is what
+/// makes it a poor judge of a disturbance, and is why the decisions are
+/// counted at all -- but a floor that has risen it follows exactly, and
+/// unlike a decision's error it is not compressed by the levels it is
+/// measured against. So that line is left where it was drawn: seven averaged
+/// errors, four looks running.
+///
+/// Seven, measured here as well as there. Over 130 s of call in ten-second
+/// stretches, a rung was worth taking where the levels stood 3.7 and 6.3
+/// averaged errors apart -- a floor stepped to 6e-4 over the 0.6 s round
+/// trip, and the same floor reached over twenty seconds -- and not where they
+/// stood 7.2, 7.4, 7.8 or 8.0, where holding the rate left 11 to 17 of about
+/// 2470 blocks errored in every later stretch and a rung would have cost ten
+/// per cent of them to take that to nothing. The measurements straddle seven
+/// and do not pin it closer than between 6.3 and 7.2; the old note's own
+/// measurement -- "a frame in some hundreds at six, none in a quarter of a
+/// million bits at eight" -- puts it in the same place, and it stays at
+/// seven.
+const MARGIN: f64 = 7.0;
+const MARGIN_SHORT: u32 = 4;
+
+/// Levels fewer than this many of the receiver's averaged errors apart are a
+/// receiver that is reading nothing at all: two.
+///
+/// Whether the receiver is reading anything is a question about the receiver,
+/// not about the line, so it is asked of the receiver's own averaged error;
+/// and a receiver that has lost the constellation is not handed it back by a
+/// slower rate, so it is trained again instead. It is asked only where
+/// [`MARGIN`] has already found four looks running short of margin, which is
+/// what keeps a hole in the audio from asking for one: through a hole the
+/// average is a mean of nothing at all and climbs for that reason alone.
 const UNREADABLE_GAP: f64 = 2.0;
 
 /// Looks held after a stretch of garbage that was not the line's: what the
@@ -1354,8 +1377,8 @@ pub struct Modem {
     least_gap: f64,
     margin_at: u64,
     decisions: Decisions,
-    /// Looks in a row whose error was as big as the gaps (see [`UNREADABLE`]).
-    unreadable: u32,
+    /// Looks in a row leaving the levels short of margin (see [`MARGIN`]).
+    short: u32,
     /// How much worse than the DIL showed data mode has found the line.
     worse: f64,
     /// The spectral shaping asked for, and the share of the DIL's error
@@ -1436,7 +1459,7 @@ impl Modem {
             least_gap: f64::INFINITY,
             margin_at: 0,
             decisions: Decisions::default(),
-            unreadable: 0,
+            short: 0,
             worse: 1.0,
             shaping: (Shaping::NONE, 1.0),
         };
@@ -1854,7 +1877,7 @@ impl Modem {
                     self.status = Status::Connected { downstream: self.downstream_rate, upstream: self.upstream_rate };
                     self.deadline = None;
                     self.margin_at = self.samples(MARGIN_SETTLE);
-                    self.unreadable = 0;
+                    self.short = 0;
                     if let Some(frames) = self.frames.as_ref() {
                         self.decisions = Decisions::new(&frames.levels);
                     }
@@ -2387,43 +2410,39 @@ impl Modem {
     }
 
     /// Whether data mode is reading its levels cleanly enough for the rate,
-    /// and a slower rate (9.6.2.1) if the evidence says it is not. When is
-    /// this end's to say: "The rate renegotiation procedure can be initiated
-    /// at any time during data mode" (9.6).
+    /// and a slower rate (9.6.2.1) if it is not. When is this end's to say:
+    /// "The rate renegotiation procedure can be initiated at any time during
+    /// data mode" (9.6).
     ///
-    /// The evidence is the decisions themselves, symbol by symbol, and not
-    /// the receiver's averaged error. A tenth of a second of noise spoils
-    /// several blocks of data, and an average looked at a few times a second
-    /// sees it only if a look falls inside it -- and the receiver holds its
-    /// loops through a burst like that as it would through a slip, so its
-    /// average barely takes the burst in at all.
+    /// Two things are watched, because a line goes wrong in two ways.
+    ///
+    /// One is a line steadily short of margin -- a floor that has risen --
+    /// and that is the receiver's own averaged error to judge, on the rule it
+    /// was judged on before any of this counted misses: levels closer than
+    /// [`MARGIN`] of that error, four looks running. The average follows a
+    /// risen floor exactly, and is not compressed by the levels the way a
+    /// decision's error is, so nothing here reads such a line better than it
+    /// is.
+    ///
+    /// The other is a disturbance, and that same average is blind to it. A
+    /// tenth of a second of noise spoils several blocks of data, and an
+    /// average looked at a few times a second sees it only if a look falls
+    /// inside one -- and the receiver holds its loops through a burst as it
+    /// would through a slip, so its average barely takes the burst in at all.
+    /// That is what the decisions are counted for, symbol by symbol.
     fn watch_margin(&mut self) {
         // What the receiver itself is making of the line, as the margin was
-        // watched before the decisions were counted: its averaged error
-        // holds through a burst or a packet and barely takes either in, so
-        // it says nothing about a disturbance -- and everything about
-        // whether the receiver still has the constellation (see
-        // [`UNREADABLE`]).
+        // watched before the decisions were counted (see [`MARGIN`]).
         let law = self.settings.law;
         let receiver = ucode::level(law, self.settings.uinfo) / 10f64.powf(self.rx.snr_db() / 20.0);
-        // A receiver holding its loops is already on its way either back or
-        // out, and neither way is a retrain this watch's to ask for. Back,
-        // and it was a burst that it rode out on what it last knew, and
-        // there was never anything to retrain for. Out, and it holds until
-        // [`pcm`]'s `HELD_AT_MOST` gives up on it, and a receiver that has
-        // then held still for three seconds is retrained where
-        // [`Self::step`] watches for it. Asking for one here as well only
-        // starts a second retrain in the middle of the first one's recovery:
-        // measured over two minutes of forty milliseconds of digital silence
-        // every three seconds -- a storm of retrains that both this and main
-        // fall into, and neither is this watch's doing -- main takes five
-        // and is back at 52 000 by about 105 s, and this took a sixth on top
-        // of them, landing on the recovery from the fifth, and never came
-        // back at all. Held rather than cleared, since a receiver that comes
-        // back for a moment and goes again has not answered the question:
-        // clearing it here left the same storm at 26 400.
+        // A receiver holding its loops says nothing about the margin either
+        // way: it holds them through any sudden rise in error, a burst of
+        // noise as much as a slip, and the average it is holding is the
+        // average from before the trouble. The count of looks short of margin
+        // stands still while it does, as it did before this watch counted
+        // anything.
         //
-        // Only the counting stands down. The looks, the evidence and the
+        // Only that count stands down. The looks, the evidence and the
         // stretches of misses go on being gathered, because a long burst of
         // real noise makes the receiver hold its loops too, and what is
         // gathered through one is exactly what says the line is bad. Standing
@@ -2438,16 +2457,32 @@ impl Modem {
             self.decisions.spoil();
         }
         let stands = self.decisions.look(self.frames_moved());
-        self.unreadable = if holding_loops {
-            self.unreadable
-        } else if losing_it {
-            self.unreadable + 1
+        // A line steadily short of margin, on the rule that judged one before
+        // any of this: levels closer than [`MARGIN`] of the receiver's own
+        // averaged error, four looks running. Measured over the A-law 0.6 s
+        // round trip with ten milliseconds of digital silence every second
+        // and a half, where a count of looks that found the receiver
+        // unreadable used to ask for a retrain instead: this asks for the
+        // renegotiation main asks for, at the moment main asks for it, and
+        // ends the two minutes at 46 666 with 5877 clean blocks of 6097,
+        // where the retrains left it at 44 000 with 3834 of 4533.
+        let steady = self.least_gap < MARGIN * receiver;
+        self.short = if holding_loops {
+            self.short
+        } else if steady {
+            self.short + 1
         } else {
             0
         };
-        if self.unreadable >= UNREADABLE {
-            self.unreadable = 0;
-            self.wants_retrain = true;
+        if self.short >= MARGIN_SHORT {
+            self.short = 0;
+            if losing_it {
+                // Nothing is being read at all: that is a receiver to train
+                // again.
+                self.wants_retrain = true;
+            } else {
+                self.fall_back(0.0, receiver);
+            }
             return;
         }
         let Some(look) = stands else { return };
@@ -2485,10 +2520,17 @@ impl Modem {
         // be asked again, ending at 44 000, a rung below where main settles
         // in one go. The larger of the two lands at 45 333 first time, where
         // nothing errors at all afterwards.
+        self.fall_back(self.decisions.worst(), receiver);
+    }
+
+    /// Renegotiate for a line whose error is `measured`, never read better
+    /// than the receiver's own averaged error `receiver`.
+    fn fall_back(&mut self, measured: f64, receiver: f64) {
         if let Some(route) = self.route.as_ref() {
+            let law = self.settings.law;
             let limit = f64::from(super::power_limit(&self.settings.server)) / 32768.0;
             let expected = route.noise_at(law, limit) * self.shaping.1.sqrt();
-            self.worse = self.worse.max(self.decisions.worst().max(receiver) / expected);
+            self.worse = self.worse.max(measured.max(receiver) / expected);
         }
         let most = self.downstream_rate.saturating_sub(1);
         // And no further down than [`MOST_DROPPED`] bits a frame in one go.
