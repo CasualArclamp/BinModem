@@ -125,6 +125,24 @@ const DIL_START_WINDOW: usize = 480;
 /// B1d: "48 data frames" (8.6.1).
 const B1D_FRAMES: usize = 48;
 
+/// How far from phase 4's own line level a symbol's line can be and still be
+/// the far end's signal: a hundredth of it, 20 dB down, and ten times it,
+/// 10 dB up.
+///
+/// Ed is "mapped using the same constellation parameters used to send
+/// TRN2d" (8.6.2), and B1d goes on data mode's, which 8.5.2 holds to no more
+/// than 3 dB above phase 4's: a far end sending either arrives at the level
+/// TRN2d and MP did, give or take what a window of 31 symbols of one
+/// constellation wanders. Digital silence leaves that window with the
+/// codec's ringing and nothing else, 4e-9 of the level (see [`HOLE`]), and a
+/// hundredth is far from both, as the far-end watch's quiet is in data mode.
+/// Above, what arrives louder than any constellation phase 4 has used is not
+/// a constellation at all: the click and the -2 dBFS of DC that
+/// live-1789986037's server left between its last block and the silence
+/// were 17 dB over the level its TRN2d and MP had carried, and read as Ed.
+const PRESENT: f64 = 0.01;
+const LOUDER: f64 = 10.0;
+
 /// A renegotiation's Ed: "within 5000 ms plus 2 round-trip delays after
 /// sending the S-bar-to-S transition" (9.6.2).
 const RENEGOTIATION_ED: f64 = 5.0;
@@ -1312,11 +1330,23 @@ struct Frames {
     descrambler: Scrambler,
     finder: Finder,
     mp: Option<Mp>,
+    /// Every different MP told of so far, so that each is told once.
+    told_mps: Vec<Mp>,
     far_acknowledged: bool,
     zero_frames: usize,
     ed: bool,
     b1d_left: usize,
     data: bool,
+    /// The level of the line under the symbols, as a mean of what the far
+    /// end's signal has carried since TRN2d began, and how many symbols it
+    /// is taken over; and whether the frame under way was carried all
+    /// through (see [`PRESENT`]).
+    level: f64,
+    levelled: u32,
+    carried: bool,
+    /// The last whole frame read, for telling a line that has stopped
+    /// changing from Ed and B1d, which are scrambled.
+    last_frame: Option<Frame>,
     /// The last symbols, as (index, value), and whether each of the last
     /// frames was one the digital modem could have sent.
     history: VecDeque<(u64, f64)>,
@@ -1340,16 +1370,35 @@ impl Frames {
             descrambler: Scrambler::new(Mode::Call),
             finder: Finder::new(),
             mp: None,
+            told_mps: Vec::new(),
             far_acknowledged: false,
             zero_frames: 0,
             ed: false,
             b1d_left: 0,
             data: false,
+            level: 0.0,
+            levelled: 0,
+            carried: true,
+            last_frame: None,
             history: VecDeque::with_capacity(PLACE_KEPT),
             impossible: VecDeque::with_capacity(PLACE_WINDOW),
             moved,
             held: VecDeque::new(),
         }
+    }
+
+    /// Whether the far end's signal was there under a symbol whose line
+    /// carried `line`: between [`PRESENT`] and [`LOUDER`] times the level so
+    /// far, which it is then taken into. What was not is held out of the
+    /// level, so that a far end that has stopped cannot drag the level after
+    /// it.
+    fn heard(&mut self, line: f64) -> bool {
+        if self.levelled > 0 && !(PRESENT * self.level..=LOUDER * self.level).contains(&line) {
+            return false;
+        }
+        self.levelled = (self.levelled + 1).min(LEVEL_OVER as u32);
+        self.level += (line - self.level) / f64::from(self.levelled);
+        true
     }
 }
 
@@ -1441,6 +1490,9 @@ pub struct Modem {
     rd_watch: RWatch,
     /// Whether the digital modem is still sending, in data mode.
     far_end: super::carrier::Watch,
+    /// Whether it has stopped in phase 4, where there is no data mode level
+    /// to judge that by.
+    stopped: super::carrier::Stopped,
     far_end_went: bool,
     renegotiating: bool,
     /// Whether this end began the renegotiation, and whether R-bar-d is
@@ -1530,6 +1582,7 @@ impl Modem {
             in_use: None,
             rd_watch: RWatch::default(),
             far_end: super::carrier::Watch::new(fs),
+            stopped: super::carrier::Stopped::new(fs),
             far_end_went: false,
             renegotiating: false,
             initiated: false,
@@ -1887,6 +1940,17 @@ impl Modem {
     pub fn step(&mut self, line: f64) -> f64 {
         self.now += 1;
         self.rx.feed(line);
+        if self.stage == Stage::Phase4 {
+            // 9.4.2: "The analogue modem may initiate a retrain at any time
+            // during Phase 4". A far end whose line has held still or played
+            // the same block over and over for a second has stopped, and
+            // waiting out B1d's fifteen seconds for it is waiting for nothing
+            // -- or worse, reading its silence as Ed.
+            self.stopped.feed(line);
+            if self.stopped.stopped() {
+                self.fail("the far end stopped in phase 4");
+            }
+        }
         match self.watching() {
             Some(learn) => {
                 self.far_end.feed(line, learn);
@@ -2355,6 +2419,7 @@ impl Modem {
         // until R is sure.
         self.rx.set_slicer(Slicer::Free);
         self.stage = Stage::Phase4;
+        self.stopped.reset();
     }
 
     fn phase4_symbol(&mut self, symbol: pcm::Symbol) {
@@ -2424,6 +2489,14 @@ impl Modem {
         }
         let i = symbol.interval();
         frames.frame[i] = nearest(&frames.levels[i], symbol.value);
+        // Whether the far end's signal was there under this symbol: a line
+        // at its level, not holding still or replaying itself. Ed and B1d are
+        // only believed of frames it carried all through.
+        if i == 0 {
+            frames.carried = true;
+        }
+        let present = frames.heard(symbol.line) && !(self.stage == Stage::Phase4 && self.stopped.replaying());
+        frames.carried &= present;
         if frames.data && self.stage == Stage::Data && !self.renegotiating {
             self.decisions.symbol(i, symbol.value);
             self.holes += u32::from(self.decisions.line(symbol.line));
@@ -2456,6 +2529,12 @@ impl Modem {
             self.rx.set_frame_offset(offset);
             return;
         }
+        // Ed and B1d are scrambled, zeros and ones, and a scrambler does not
+        // give the same frame twice running but once in 2^D; a line that has
+        // stopped changing -- silence, DC, a far end stuck on one frame --
+        // gives nothing else.
+        let repeated = frames.last_frame.replace(frame) == Some(frame);
+        let carried = frames.carried && !repeated;
         let bits: Vec<bool> = frames.decoder.frame(frame).into_iter().map(|b| frames.descrambler.descramble(b)).collect();
         if frames.data {
             if looked {
@@ -2469,7 +2548,12 @@ impl Modem {
             return;
         }
         if frames.ed {
-            // B1d: 48 frames of scrambled ones.
+            // B1d: 48 frames of scrambled ones -- and only frames the far
+            // end's signal carried, so that a far end that stops in the middle
+            // of it does not leave this end in data mode on its silence.
+            if !carried {
+                return;
+            }
             frames.b1d_left -= 1;
             if frames.b1d_left == 0 {
                 self.notes.push(format!("found B1d: data mode, down at {} bit/s", self.downstream_rate));
@@ -2477,11 +2561,18 @@ impl Modem {
                 self.stage = Stage::Data;
                 self.renegotiating = false;
                 self.rd_watch = RWatch::default();
+                // Phase 4 is over, and so is watching it.
+                self.stopped.reset();
             }
             return;
         }
+        // Ed is two frames of scrambled zeros (8.6.2). A line with nothing on
+        // it can be too: the digital silence after the server froze in
+        // live-1789986037 read as two of them, and B1d's 48 frames after
+        // that took this end into data mode on a dead line. Only frames the
+        // far end's signal carried are Ed.
         let zeros = bits.iter().all(|b| !*b);
-        frames.zero_frames = if zeros && frames.mp.is_some() { frames.zero_frames + 1 } else { 0 };
+        frames.zero_frames = if zeros && carried && frames.mp.is_some() { frames.zero_frames + 1 } else { 0 };
         if frames.zero_frames == 2 {
             // Ed: B1d next, at data mode's constellation, with the coding
             // started afresh (8.6.1).
@@ -2501,8 +2592,9 @@ impl Modem {
         }
         for bit in bits {
             if let Some(Found::Mp(mp)) = frames.finder.feed(bit) {
-                if frames.mp != Some(mp) {
+                if !frames.told_mps.contains(&mp) {
                     // Once for each different MP, and not for every repetition.
+                    frames.told_mps.push(mp);
                     self.notes.push(format!("found {}", describe_mp(&mp)));
                 }
                 if mp.answer_to_call == 0 {

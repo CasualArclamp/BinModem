@@ -654,6 +654,74 @@ fn a_far_end_that_stops_sending_is_noticed_at_either_end() {
     }
 }
 
+/// What a far end that has stopped in phase 4 leaves on the line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stopped {
+    /// Digital silence, as live-1789986037's server left it.
+    Silence,
+    /// Its last 162 codewords, 20.25 ms, over and over, as the retrain in
+    /// live-1789986211 left it.
+    LastBlock,
+    /// One loud codeword for ever: a line that is DC.
+    Dc,
+}
+
+/// A far end that stops in phase 4, just after its MP', as the GlobalPOPs /
+/// NetZero server did twice. Nothing it leaves on the line is Ed, however it
+/// decodes -- silence read as Ed and took the analogue modem into data mode
+/// on a dead line -- and a second of it ends phase 4 with the reason said,
+/// which 9.4.2 allows: "The analogue modem may initiate a retrain at any time
+/// during Phase 4".
+#[test]
+fn a_far_end_that_stops_in_phase_4_ends_the_phase_and_is_never_taken_for_ed() {
+    for stopped in [Stopped::Silence, Stopped::LastBlock, Stopped::Dc] {
+        let mut call = Call::new(Network::new(Law::Mu, FS).with_delay(0.010, FS));
+        let mut last: std::collections::VecDeque<f64> = std::collections::VecDeque::with_capacity(162);
+        let mut froze: Option<u64> = None;
+        let mut notes: Vec<(f64, String)> = Vec::new();
+        while call.ticks < 30 * 8000 {
+            let to_digital = call.net.up(&call.up);
+            call.up.clear();
+            let sent = call.digital.step(to_digital);
+            let out = match (froze, stopped) {
+                (None, _) => {
+                    if last.len() == 162 {
+                        last.pop_front();
+                    }
+                    last.push_back(sent);
+                    sent
+                }
+                (Some(_), Stopped::Silence) => 0.0,
+                (Some(at), Stopped::LastBlock) => last[((call.ticks - at) % 162) as usize],
+                (Some(_), Stopped::Dc) => 0.25,
+            };
+            for x in call.net.down(out) {
+                call.up.push(call.analogue.step(x));
+                let at = call.ticks as f64 / 8000.0;
+                notes.extend(call.analogue.take_notes().into_iter().map(|n| (at, n)));
+            }
+            call.ticks += 1;
+            if froze.is_none() && call.analogue.far_mp().is_some_and(|mp| mp.acknowledge) {
+                froze = Some(call.ticks);
+            }
+            if !matches!(call.analogue.status(), analogue::Status::Running) {
+                break;
+            }
+        }
+        for (at, note) in &notes {
+            println!("{stopped:?}: {at:7.3}  {note}");
+        }
+        let froze = froze.unwrap_or_else(|| panic!("{stopped:?}: no MP' before the far end stopped"));
+        assert_eq!(call.analogue.status(), analogue::Status::Failed("the far end stopped in phase 4"), "{stopped:?}");
+        let after = (call.ticks - froze) as f64 / 8000.0;
+        assert!((1.0..1.1).contains(&after), "{stopped:?}: the phase ended {after} s after the far end stopped");
+        let froze = froze as f64 / 8000.0;
+        let ed = |n: &str| n.starts_with("found Ed") || n.starts_with("found B1d");
+        assert!(!notes.iter().any(|(at, n)| *at > froze && ed(n)), "{stopped:?}: {notes:#?}");
+        assert_eq!(notes.last().map(|n| n.1.as_str()), Some("failed: the far end stopped in phase 4"), "{stopped:?}");
+    }
+}
+
 /// And a far end that is still there is never taken for one that has gone:
 /// a softphone's gain control and jitter buffer, a VoIP round trip, a
 /// renegotiation from each end, and data all the while.
