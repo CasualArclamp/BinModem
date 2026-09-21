@@ -859,8 +859,10 @@ impl Decisions {
     /// what is judged.
     ///
     /// And a far end going quiet is not a disturbance a slower rate cures
-    /// either; but that takes a fifth of a second of silence to show (see
-    /// [`carrier::Watch::quiet`]), so it is a hang-up it catches, not a gap.
+    /// either -- though that is a far end on its way out and not a jitter
+    /// buffer at all: it wants about a quarter of a second of silence before
+    /// it shows (see [`carrier::Watch::quiet`]), where a buffer's gap is
+    /// twenty milliseconds.
     fn look(&mut self, moved: u32) -> Option<Look> {
         if !self.started {
             // The first look only begins the watch.
