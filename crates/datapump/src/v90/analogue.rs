@@ -310,30 +310,69 @@ const STORM_GARBLED: f64 = 0.03;
 /// from being excused as a packet.
 const STORM_SHORT: usize = 512;
 
-/// A hole in the audio: decisions at under a hundredth of the line's own
-/// level, that many in a row, and how long the line's own level is taken
-/// over -- half a second of decisions.
+/// A hole in the audio: the line in front of the equaliser at under a
+/// thousandth of its own level, that many symbols in a row, and how long
+/// that level is taken over -- half a second of symbols.
 ///
 /// Some softphones do not conceal a lost packet at all: they play zeroes.
 /// Nothing is made up, so [`STORM_GARBLED`] has nothing to weigh -- silence
-/// misses hardly anything, since a decision at nothing is nearer the quietest
-/// level than the boundary in most intervals -- and nothing moves either, so
-/// a hole leaves no mark but its own silence. Measured over a 0.6 s round
-/// trip, twenty milliseconds of it left the decisions under a hundredth of
-/// the line's level for 8 to 159 in a row, and a fading repeat's tail -- the
-/// quietest thing that is not a hole -- for three to five. Eight, a
-/// millisecond, lies between; a hole shorter than that costs nothing worth
-/// dropping a look for.
+/// misses hardly anything, since a decision at nothing is nearer the
+/// quietest level than the boundary in most intervals -- and nothing moves
+/// either, so a hole leaves no mark but its own silence.
 ///
-/// A far end that has genuinely stopped is not this, and is not this end's to
-/// cure by a slower rate either. It shows in the line itself rather than in
-/// the decisions, and [`carrier::Watch::quiet`] is what sees it: a 50 ms time
-/// constant and 20 dB under the reference, which measured takes 0.237 s of
-/// silence to reach. A buffer's hole is over in twenty milliseconds and never
-/// reaches it; a far end on its way out holds the line quiet until it does,
-/// and then the looks go for that reason instead.
-const HOLE: usize = 8;
-const HOLE_LEVEL: f64 = 0.01;
+/// The decisions cannot see that silence. The equaliser is 63 half symbols
+/// of line and a feedback filter of its own past decisions, so it goes on
+/// putting out codeword-sized numbers through a hole with nothing at all
+/// behind it. Measured over thirty seconds of twenty-millisecond holes every
+/// second and a half on the mu-law 0.6 s route, the longest run of decisions
+/// under a ten-thousandth of the decisions' own level was 2 -- against 1 on
+/// a clean line, 2 under a concealer's comfort noise and 7 under its fading
+/// repeat. There is nothing in the decisions to tell a hole by, and a rule
+/// written on them fires on the wrong things or not at all.
+///
+/// The line the equaliser drew the symbol from ([`pcm::Symbol::line`]) tells
+/// it at once. That window is 63 half symbols, 3.94 ms, so a hole longer
+/// than the window empties it. Measured the same way -- the quietest the
+/// window reached, against the line's own level, and the longest run of
+/// symbols under a thousandth of it:
+///
+/// | what happened | quietest | longest run |
+/// |---|---|---|
+/// | nothing: a clean line | -5.8 dB | none |
+/// | 20 and 60 ms concealed with comfort noise | -5.8 dB | none |
+/// | 30 and 300 ms of noise at 1e-3 | -4.4, -4.3 dB | none |
+/// | the floor stepped to 6e-4 | -4.0 dB | none |
+/// | 20 and 60 ms concealed with a fading repeat | -20.6, -28.9 dB | none |
+/// | 10 to 60 ms of digital silence | -84 dB | 45 to 449 |
+///
+/// Nothing that is not a hole reaches a thousandth at all, and the fading
+/// repeat -- the quietest thing that is not a hole -- stops at a
+/// hundredth-and-a-half. A hole reaches a ten-thousandth and stays there for
+/// as long as it lasts less the window: 4 ms of silence leaves a run of 1,
+/// 5 leaves 10, 6 leaves 17, 8 leaves 32, 10 leaves 45 to 49, 20 leaves 129,
+/// 30 leaves 209, 40 leaves 288 and 60 leaves 449. A-law and a 20 ms round
+/// trip give the same runs to within four symbols.
+///
+/// Sixteen symbols is two milliseconds of line gone on top of the window
+/// emptying, so about six milliseconds of silence in all: a third of what
+/// the shortest hole this family comes in leaves, and three times what five
+/// milliseconds leaves. Five milliseconds is left alone, as five
+/// milliseconds of noise is (see [`BLOCK`]), and four never empties the
+/// window at all.
+///
+/// The line's own level is a slow mean of that same window's power, and a
+/// hole is held out of it: a hole cannot be allowed to drag its own
+/// yardstick down after it, which is why [`carrier::Watch`] holds its
+/// reference for exactly as long.
+///
+/// A far end that has genuinely stopped is not this, and is not this end's
+/// to cure by a slower rate either. It differs only in lasting: a buffer's
+/// hole is over in tens of milliseconds, and a far end on its way out holds
+/// the line quiet until [`carrier::Watch::quiet`] sees it -- 20 dB under the
+/// reference on a 50 ms time constant, which measured wants 0.237 s -- and
+/// then the looks go for that reason instead.
+const HOLE: usize = 16;
+const HOLE_LEVEL: f64 = 1e-3;
 const LEVEL_OVER: f64 = 4000.0;
 
 /// Looks in a row leaving data mode's levels fewer than two of the
@@ -853,9 +892,9 @@ struct Decisions {
     /// The evidence so far, and the looks it was gathered from.
     evidence: f64,
     recent: VecDeque<Look>,
-    /// The line's own level, as a slow mean of the decisions' power, and the
-    /// decisions since the last one that reached a hundredth of it (see
-    /// [`HOLE`]).
+    /// The line's own level, as a slow mean of what the equaliser was given,
+    /// and the symbols since the last one whose line reached a thousandth of
+    /// it (see [`HOLE`]).
     level: f64,
     hole: usize,
 }
@@ -908,29 +947,35 @@ impl Decisions {
             self.block = (0, 0.0);
         }
         self.storm(missed, value);
-        self.hole(value);
     }
 
-    /// One decision through the hole in the audio under way, if there is one.
+    /// One symbol's worth of the line in front of the equaliser, through the
+    /// hole in the audio under way, if there is one.
     ///
-    /// The line's own level is a slow mean of the decisions' power, slow
-    /// enough that a packet's worth of nothing moves it by a few per cent
-    /// and no more. A decision at under a hundredth of it is a codeword that
-    /// is not there; [`HOLE`] of them in a row is a buffer playing zeroes,
-    /// and the looks go as they do for made-up audio -- silence in the
-    /// codewords' place is no more the line's than noise in their place is,
-    /// and no slower rate reads a codeword that never arrived.
-    fn hole(&mut self, value: f64) {
-        if value * value < HOLE_LEVEL * HOLE_LEVEL * self.level {
+    /// A hole is judged on the line itself, not on what the equaliser made
+    /// of it: a decision is still a codeword-sized number through a hole
+    /// with nothing behind it, and the line is nothing. [`HOLE`] symbols in
+    /// a row whose line is under a thousandth of the line's own level is a
+    /// buffer playing zeroes, and the looks go as they do for made-up audio
+    /// -- silence in the codewords' place is no more the line's than noise
+    /// in their place is, and no slower rate reads a codeword that never
+    /// arrived.
+    /// True on the one symbol that declares a hole, so that it can be
+    /// counted.
+    fn line(&mut self, power: f64) -> bool {
+        if self.level > 0.0 && power < HOLE_LEVEL * self.level {
             self.hole += 1;
-            if self.hole == HOLE {
-                self.look.spoiled = true;
-                self.holding = HOLD_AFTER;
+            // Held out of the level: see [`HOLE`].
+            if self.hole != HOLE {
+                return false;
             }
-        } else {
-            self.hole = 0;
+            self.look.spoiled = true;
+            self.holding = HOLD_AFTER;
+            return true;
         }
-        self.level += (value * value - self.level) / LEVEL_OVER;
+        self.hole = 0;
+        self.level += (power - self.level) / LEVEL_OVER;
+        false
     }
 
     /// One decision, a miss or not, through the stretch of misses under way.
@@ -978,7 +1023,6 @@ impl Decisions {
     fn spoil(&mut self) {
         self.look.spoiled = true;
     }
-
 
     /// End the look under way, whose end finds the frames moved `moved`
     /// times so far; and the look before it, if it stands.
@@ -1267,6 +1311,8 @@ pub struct Modem {
     /// whether one is wanted.
     retrain_watch: RetrainWatch,
     wants_retrain: bool,
+    /// Holes in the audio seen in data mode (see [`HOLE`]).
+    holes: u32,
     /// Since the receiver last held a place, in samples.
     lost_since: Option<u64>,
     /// The CP data mode is running on, which Rd and a renegotiation's
@@ -1358,6 +1404,7 @@ impl Modem {
             // The digital modem takes V.34's call side, and tone B is its.
             retrain_watch: RetrainWatch::new(Role::Call, fs),
             wants_retrain: false,
+            holes: 0,
             lost_since: None,
             in_use: None,
             rd_watch: RWatch::default(),
@@ -1524,6 +1571,11 @@ impl Modem {
     /// end.
     pub fn renegotiations(&self) -> u32 {
         self.renegotiations
+    }
+
+    /// Holes in the audio seen since data mode began (see [`HOLE`]).
+    pub fn holes(&self) -> u32 {
+        self.holes
     }
 
     /// Start a rate renegotiation from data mode (9.6.2.1), asking for the
@@ -2225,6 +2277,7 @@ impl Modem {
         frames.frame[i] = nearest(&frames.levels[i], symbol.value);
         if frames.data && self.stage == Stage::Data && !self.renegotiating {
             self.decisions.symbol(i, symbol.value);
+            self.holes += u32::from(self.decisions.line(symbol.line));
         }
         if frames.history.len() == PLACE_KEPT {
             frames.history.pop_front();
@@ -2604,26 +2657,59 @@ mod tests {
         }
     }
 
-    /// Silence in the codewords' place is not the line either, and the sound
-    /// its misses carry cannot say so, because silence carries none: a
-    /// decision at nothing sits between the quietest levels and misses,
-    /// while adding nothing at all to what [`STORM_GARBLED`] weighs. What
-    /// says so is the silence itself, [`HOLE`] decisions of it; a shorter
-    /// gap -- the tail of a concealer's fading repeat is three to five -- is
-    /// left where it fell.
+    /// Silence in the codewords' place is not the line either, and neither
+    /// the sound its misses carry nor the decisions themselves can say so:
+    /// silence carries no sound for [`STORM_GARBLED`] to weigh, and the
+    /// equaliser goes on putting out codeword-sized numbers from its own
+    /// feedback while nothing at all arrives. What says so is the line in
+    /// front of the equaliser, [`HOLE`] symbols of it under a thousandth of
+    /// the line's own level; a shorter gap -- what a concealer's fading
+    /// repeat leaves -- is left where it fell.
     #[test]
-    fn a_hole_in_the_audio_is_not_the_line_and_a_shorter_gap_is_left_alone() {
+    fn a_hole_in_the_line_is_not_the_line_and_a_shorter_gap_is_left_alone() {
         for (gap, stands) in [(HOLE - 1, true), (HOLE, false)] {
             let mut decisions = watching_uneven();
             for n in 0..2000 {
-                decisions.symbol(n % INTERVALS, if (100..100 + gap).contains(&n) { 0.0 } else { 8.3 });
+                // The decisions say nothing either way: a hole is judged on
+                // the line alone, and these are what the equaliser puts out
+                // right through one.
+                decisions.symbol(n % INTERVALS, 8.3);
+                decisions.line(if (100..100 + gap).contains(&n) { 0.0 } else { 1.0 });
             }
             assert!(decisions.look(0).is_none(), "gap {gap}: held until the next is over");
             for n in 0..2000 {
                 decisions.symbol(n % INTERVALS, 8.3);
+                decisions.line(1.0);
             }
-            assert_eq!(decisions.look(0).is_some(), stands, "a gap of {gap} decisions");
+            assert_eq!(decisions.look(0).is_some(), stands, "a gap of {gap} symbols");
         }
+    }
+
+    /// The line's own level is a slow mean of what the equaliser was given,
+    /// and a hole is held out of it, so that however long a hole lasts it
+    /// cannot bring the level down to meet itself and stop being a hole.
+    #[test]
+    fn a_long_hole_does_not_drag_its_own_yardstick_down_after_it() {
+        let mut decisions = watching_uneven();
+        for n in 0..2000 {
+            decisions.symbol(n % INTERVALS, 8.3);
+            decisions.line(1.0);
+        }
+        assert!(decisions.look(0).is_none(), "held until the next is over");
+        // Four times [`LEVEL_OVER`] of nothing: were the level taking it in,
+        // it would be under a thousandth of where it started long before the
+        // end of this.
+        for n in 0..4 * LEVEL_OVER as usize {
+            decisions.symbol(n % INTERVALS, 8.3);
+            decisions.line(0.0);
+        }
+        assert!(decisions.look(0).is_none(), "the hole spoiled the look it fell in");
+        for n in 0..2000 {
+            decisions.symbol(n % INTERVALS, 8.3);
+            decisions.line(1.0);
+        }
+        // Still a hole at the end of it, not a line the watch has learnt.
+        assert!(decisions.look(0).is_none(), "and the look after it, held for the loops");
     }
 
     /// A look stands only once the look after it is over, and only if the

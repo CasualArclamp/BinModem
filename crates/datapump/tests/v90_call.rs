@@ -361,6 +361,15 @@ impl FullCall {
         false
     }
 
+    /// The downstream rate, or nothing while the call is between rates.
+    fn rate_now(&self) -> Option<u32> {
+        use datapump::v90::startup::Status;
+        match self.analogue.status() {
+            Status::Connected { receive, .. } => Some(receive),
+            _ => None,
+        }
+    }
+
     fn rates(&self) -> (u32, u32) {
         use datapump::v90::startup::Status;
         match self.analogue.status() {
@@ -1311,3 +1320,110 @@ fn a_renegotiation_steps_the_rate_down_by_no_more_than_eight_bits_a_frame() {
     assert_eq!(call.carries_data(3.0), (true, true));
 }
 
+
+/// How long a hole is watched for when what is being counted is the holes
+/// themselves: two minutes, eight times the shortest stretch a call takes to
+/// settle, so that a rule that only holds at first shows here.
+const SOAKED: f64 = 120.0;
+
+/// A hole shows on the line in front of the equaliser, and nothing else
+/// does.
+///
+/// A hole is the one disturbance that leaves no mark in the decisions: the
+/// equaliser is 63 half symbols of line and a feedback filter of its own
+/// past decisions, so it goes on putting out codeword-sized numbers while
+/// nothing at all arrives. Measured over two minutes of twenty-millisecond
+/// holes, the longest run of decisions under a ten-thousandth of the
+/// decisions' own level was 2, where a clean line's was 1 and a concealer's
+/// fading repeat gave 7 -- there is nothing there to tell a hole by. So the
+/// line itself is what is counted, and this is what makes that worth doing:
+/// every hole the network makes is seen, and nothing that is not a hole is
+/// ever taken for one.
+///
+/// A hole every second and a half for a hundred and twenty seconds is eighty
+/// of them; the count is short of that by the ones that land while the call
+/// is retraining, when there is no data mode to watch.
+#[test]
+fn every_hole_is_seen_on_the_line_and_nothing_else_is_ever_taken_for_one() {
+    for length in [0.010, 0.020, 0.030, 0.040, 0.060] {
+        let net = plain_line().with_silent_dropout(DISTURBED_FROM, 1.5, length);
+        let holes = holes_seen(net, server(), SOAKED);
+        let made = (SOAKED / 1.5) as u32;
+        assert!(holes >= made - 2, "{} ms: {holes} holes of {made}", length * 1000.0);
+    }
+    // And everything else the line does, for as long: made-up audio of both
+    // kinds, noise that comes and goes, a floor that steps up, a slip, and
+    // nothing at all.
+    let quiet: [(&str, Network); 8] = [
+        ("nothing", plain_line()),
+        ("a fading repeat, 20 ms", dropped_line_of(1.5, 0.020, true)),
+        ("a fading repeat, 60 ms", dropped_line_of(1.5, 0.060, true)),
+        ("comfort noise, 20 ms", dropped_line_of(1.5, 0.020, false)),
+        ("comfort noise, 60 ms", dropped_line_of(1.5, 0.060, false)),
+        ("bursts of noise", bursty_line()),
+        ("a floor that steps up", stepped_line()),
+        ("a slip of whole frames", slipped_line(true)),
+    ];
+    for (what, net) in quiet {
+        assert_eq!(holes_seen(net, server(), SOAKED), 0, "{what}");
+    }
+}
+
+/// Holes seen in `seconds` of data mode.
+fn holes_seen(net: Network, server: Info0d, seconds: f64) -> u32 {
+    let mut call = connects(net, server, 40.0);
+    let mut data = Downstream::new();
+    call.known_data(seconds, &mut data);
+    let holes = call.analogue.holes();
+    println!("{holes} holes in {seconds} s at {}", call.rates().0);
+    holes
+}
+
+/// And a call through holes never asks for a slower rate, however long it
+/// goes on.
+///
+/// Thirty seconds was not long enough to show what was wrong here. The rule
+/// that was meant to catch a hole read the decisions, where a hole leaves no
+/// mark, and never fired; the holes built evidence like any other errors,
+/// and the call renegotiated -- not once but twice, the second a good minute
+/// in, ending slower than the same audio leaves a tree without the rule at
+/// all. Two minutes, in ten-second stretches, is what shows it: the rate is
+/// the same in the last stretch as in the first, and the errors are the
+/// holes' own packets and nothing more.
+///
+/// Measured over the mu-law 0.6 s round trip: at twenty milliseconds the
+/// call retrains once -- the receiver loses the constellation, which is its
+/// own business and not the rate's, and is what
+/// [`a_hole_that_costs_the_receiver_its_constellation_is_retrained_and_not_slowed`]
+/// is about -- and settles at 44 000, where main settles too, erring 11 to
+/// 17 of about 430 blocks in every stretch afterwards. At thirty it settles
+/// at 42 666 against main's 42 666, erring 13 to 20 of about 417. Neither
+/// renegotiates at all.
+#[test]
+fn a_call_through_holes_never_renegotiates_however_long_it_goes_on() {
+    for length in [0.020, 0.030] {
+        let net = voip_line().with_silent_dropout(VOIP_DISTURBED_FROM, 1.5, length);
+        let mut call = connects(net, server(), 40.0);
+        let mut data = Downstream::new();
+        call.known_data(VOIP_DISTURBED_FROM - call.seconds(), &mut data);
+        let mut settled = None;
+        let mut worst = (0, 0);
+        for stretch in 0..(SOAKED / 10.0) as u32 {
+            let before = data.checked;
+            call.known_data(10.0, &mut data);
+            let (errored, blocks) = data.checked.since(&before);
+            // Once it has settled, it stays there: the rate never moves
+            // again and the errors never grow.
+            if let Some(rate) = settled {
+                assert_eq!(call.rate_now(), Some(rate), "{} ms, stretch {stretch}", length * 1000.0);
+                assert!(errored * 10 < blocks, "{} ms, stretch {stretch}: {errored} of {blocks}", length * 1000.0);
+                worst = worst.max((errored, blocks));
+            } else if call.analogue.retrains() > 0 && let Some(rate) = call.rate_now() {
+                settled = Some(rate);
+            }
+        }
+        let settled = settled.expect("never settled");
+        println!("{} ms: settled at {settled}, worst stretch {}/{}", length * 1000.0, worst.0, worst.1);
+        assert_eq!(call.analogue.renegotiations(), 0, "{} ms", length * 1000.0);
+    }
+}

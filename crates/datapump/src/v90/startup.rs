@@ -48,6 +48,7 @@ pub struct Analogue {
     last_failure: Option<&'static str>,
     /// Renegotiations in V.90 data modes a retrain has since replaced.
     renegotiations: u32,
+    holes: u32,
 }
 
 impl Analogue {
@@ -61,6 +62,7 @@ impl Analogue {
             connected_once: false,
             last_failure: None,
             renegotiations: 0,
+            holes: 0,
         }
     }
 
@@ -89,6 +91,12 @@ impl Analogue {
         // Every one of them, V.90's included, goes back through V.34's
         // start-up's phase 2.
         self.v34.retrains()
+    }
+
+    /// Holes in the audio seen in data mode since the call began (see
+    /// [`analogue::Modem::holes`]), this start-up's and every one before it.
+    pub fn holes(&self) -> u32 {
+        self.holes + self.v90.as_ref().map_or(0, analogue::Modem::holes)
     }
 
     /// Why the last V.90 start-up failed, if one has.
@@ -124,6 +132,7 @@ impl Analogue {
     fn back_to_phase2(&mut self) {
         if let Some(m) = self.v90.take() {
             self.renegotiations += m.renegotiations();
+            self.holes += m.holes();
         }
         self.v34.restart_phase2();
     }
