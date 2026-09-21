@@ -184,7 +184,8 @@ const ENOUGH: f64 = 12.5;
 /// fills a third of a block reads as a third of its own power, and long
 /// enough that the power in it is a measurement and not a handful of symbols.
 /// 32 ms is a third of the hundred-millisecond bursts this watch was written
-/// for and eight times the shortest burst it now falls back for.
+/// for, and about three times the shortest burst it now falls back for --
+/// ten milliseconds over a 0.6 s round trip, as the measurements below say.
 ///
 /// Measured, with noise ten decibels over the line's own error every second
 /// and a half: over a 20 ms round trip, thirty milliseconds of it takes
