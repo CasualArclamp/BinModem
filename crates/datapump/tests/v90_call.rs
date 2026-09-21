@@ -454,6 +454,31 @@ fn a_line_gone_noisy_is_renegotiated_down() {
     assert_eq!(call.analogue.retrains(), 0);
 }
 
+/// When the watch on the margin asks for a slower rate, the transcript is
+/// told which of its rules asked and every number that rule went on -- the
+/// looks short of margin, the evidence of misses, the worst block, the
+/// decisions' and the receiver's own error, the least gap between the
+/// levels, the error the DIL led it to expect and how much worse the line
+/// was -- and the rate it asked for is the rate the call comes back at.
+#[test]
+fn a_fall_back_tells_the_transcript_why_and_on_what_numbers() {
+    let mut call = connects(plain_line(), server(), 30.0);
+    let (down, _) = call.rates();
+    call.analogue.take_notes();
+    call.net.set_noise(1e-3);
+    assert!(call.comes_back_up(10.0), "{} / {}", call.analogue.phase(), call.digital.phase());
+    let (slower, _) = call.rates();
+    let notes = call.analogue.take_notes();
+    for note in &notes {
+        println!("{note}");
+    }
+    let why = notes.iter().find(|n| n.starts_with("rate watch: ")).unwrap_or_else(|| panic!("no reason given: {notes:#?}"));
+    for word in ["looks short ", "evidence ", "worst block ", "decisions' error ", "receiver's error ", "least gap ", "expected ", "worse "] {
+        assert!(why.contains(word), "{why:?} does not say {word:?}");
+    }
+    assert!(why.ends_with(&format!("asked for {slower} bit/s, from {down}")), "{why:?}, and the call came back at {slower}");
+}
+
 /// 9.7: a cleardown from either end ends the call at both.
 #[test]
 fn a_cleardown_from_either_end_ends_the_call_at_both() {

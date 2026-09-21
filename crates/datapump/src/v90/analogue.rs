@@ -2681,13 +2681,15 @@ impl Modem {
             0
         };
         if self.short >= MARGIN_SHORT {
+            let short = self.short;
             self.short = 0;
             if losing_it {
                 // Nothing is being read at all: that is a receiver to train
                 // again.
                 self.wants_retrain = true;
+                self.tell_why("the levels stand within two of the receiver's own error", short, receiver, "retrain");
             } else {
-                self.fall_back(0.0, receiver);
+                self.fall_back("the levels stand short of margin, look after look", short, 0.0, receiver);
             }
             return;
         }
@@ -2698,6 +2700,7 @@ impl Modem {
         if self.least_gap < 2.0 * self.decisions.rms() {
             // Nothing is being read at all: that is a receiver to train again.
             self.wants_retrain = true;
+            self.tell_why("disturbed, and the levels within two of the decisions' error", self.short, receiver, "retrain");
             return;
         }
         // The next rate is chosen for the line as the worst of the recent
@@ -2726,26 +2729,60 @@ impl Modem {
         // be asked again, ending at 44 000, a rung below where main settles
         // in one go. The larger of the two lands at 45 333 first time, where
         // nothing errors at all afterwards.
-        self.fall_back(self.decisions.worst(), receiver);
+        self.fall_back("disturbed, misses enough to count", self.short, self.decisions.worst(), receiver);
+    }
+
+    /// The error the DIL led this end to expect in data mode: the route's
+    /// spread at data mode's power, less what the shaping asked for was to
+    /// take away. None before there is a route.
+    fn expected(&self) -> Option<f64> {
+        let route = self.route.as_ref()?;
+        let limit = f64::from(super::power_limit(&self.settings.server)) / 32768.0;
+        Some(route.noise_at(self.settings.law, limit) * self.shaping.1.sqrt())
     }
 
     /// Renegotiate for a line whose error is `measured`, never read better
-    /// than the receiver's own averaged error `receiver`.
-    fn fall_back(&mut self, measured: f64, receiver: f64) {
-        if let Some(route) = self.route.as_ref() {
-            let law = self.settings.law;
-            let limit = f64::from(super::power_limit(&self.settings.server)) / 32768.0;
-            let expected = route.noise_at(law, limit) * self.shaping.1.sqrt();
+    /// than the receiver's own averaged error `receiver`, and tell the
+    /// transcript why, as the branch of the watch that asked says it and on
+    /// the numbers it used.
+    fn fall_back(&mut self, why: &str, short: u32, measured: f64, receiver: f64) {
+        if let Some(expected) = self.expected() {
             self.worse = self.worse.max(measured.max(receiver) / expected);
         }
-        let most = self.downstream_rate.saturating_sub(1);
+        let from = self.downstream_rate;
+        let most = from.saturating_sub(1);
         // And no further down than [`MOST_DROPPED`] bits a frame in one go.
         let drn = self.in_use.as_ref().map_or(0, |cp| cp.drn);
         let least = sequences::data_rate(drn.saturating_sub(MOST_DROPPED)).unwrap_or(0);
-        if !self.renegotiate_within(most, least) {
+        let asked = if self.renegotiate_within(most, least) {
+            let rate = self.choice.as_ref().and_then(|c| sequences::data_rate(c.data.drn)).unwrap_or(0);
+            format!("{rate} bit/s, from {from}")
+        } else {
             // Nothing slower the route carries: train again from phase 2.
             self.wants_retrain = true;
-        }
+            format!("retrain, nothing slower than {from} bit/s carrying")
+        };
+        self.tell_why(why, short, receiver, &asked);
+    }
+
+    /// One line for the transcript: why the watch on the margin asked for a
+    /// slower rate or a retrain, and every number it went on -- looks short
+    /// of margin, the evidence of misses, the worst block three looks
+    /// reached, the decisions' error over the recent looks, the receiver's
+    /// own averaged error, the least gap between data mode's levels, the
+    /// error the DIL led this end to expect, how much worse than that data
+    /// mode has found the line -- and what it asked for.
+    fn tell_why(&mut self, why: &str, short: u32, receiver: f64, asked: &str) {
+        let line = format!(
+            "rate watch: {why}; looks short {short}, evidence {:.1}, worst block {:.2e}, decisions' error {:.2e}, receiver's error {receiver:.2e}, least gap {:.2e}, expected {:.2e}, worse {:.2}: asked for {asked}",
+            self.decisions.evidence,
+            self.decisions.worst(),
+            self.decisions.rms(),
+            self.least_gap,
+            self.expected().unwrap_or(f64::NAN),
+            self.worse,
+        );
+        self.notes.push(line);
     }
 
     /// What every CP this end sends says besides its constellations, rate and
