@@ -178,6 +178,35 @@ const ENOUGH: f64 = 12.5;
 /// of a disturbance: 32 ms, about the shortest burst worth a slower rate.
 const BLOCK: usize = 256;
 
+/// How many of the recent looks have to have reached a level before a rate is
+/// chosen for it.
+///
+/// A look's worst block is one window of 32 ms out of hundreds, and the rate
+/// is chosen from it, so taking the worst of them lets any single window
+/// decide how far the call falls -- and a single window can hold anything.
+/// Three looks, each a quarter of a second apart, having reached a level is
+/// the line reaching it. Three is also what the evidence already asks for:
+/// no look counts for more than [`LOOK_AT_MOST`] and [`ENOUGH`] is two and a
+/// half times that, so a renegotiation never comes of fewer.
+const WORST_OF: usize = 3;
+
+/// The most one renegotiation may take off the downstream rate, in bits a
+/// frame.
+///
+/// A V.90 rate is D bits in every six-codeword frame -- "(drn+20)*8000/6 in
+/// CP" (Table 14/V.90) -- so one bit a frame is 1333 bit/s and eight of them
+/// are 10 666. Eight is as far as any line here has honestly needed in one
+/// step: a hundred milliseconds of noise every second and a half took 50 666
+/// to 40 000. Further than that in one go is a measurement to doubt rather
+/// than to act on, and there is no need to act on all of it at once -- the
+/// line is measured again at the new rate, and a renegotiation that stopped
+/// short is followed by another that goes the rest of the way.
+const MOST_DROPPED: u8 = 8;
+
+/// How much less of what data mode found is believed on each try at keeping
+/// a renegotiation inside [`MOST_DROPPED`]: half a decibel of error power.
+const BELIEVED_LESS: f64 = 1.0594;
+
 /// Clean decisions that end a stretch of misses: sixteen milliseconds.
 ///
 /// A disturbance does not miss every decision it touches, nor nearly. A
@@ -868,9 +897,12 @@ impl Decisions {
         self.evidence >= ENOUGH
     }
 
-    /// The error's RMS over the worst block the recent looks saw.
+    /// The error's RMS over the worst 32 ms block that [`WORST_OF`] of the
+    /// recent looks reached: the third worst of them, not the worst.
     fn worst(&self) -> f64 {
-        self.recent.iter().map(|l| l.worst).fold(0.0, f64::max).sqrt()
+        let mut blocks: Vec<f64> = self.recent.iter().map(|l| l.worst).collect();
+        blocks.sort_by(f64::total_cmp);
+        blocks.iter().rev().nth(WORST_OF - 1).copied().unwrap_or_default().sqrt()
     }
 
     /// The error's RMS over all the recent looks.
@@ -1350,6 +1382,12 @@ impl Modem {
     /// False, and nothing done, outside data mode or if the route carries no
     /// rate that slow.
     pub fn renegotiate(&mut self, most: u32) -> bool {
+        self.renegotiate_within(most, 0)
+    }
+
+    /// The same, and not below `least` if believing less of what data mode
+    /// found will keep it there.
+    fn renegotiate_within(&mut self, most: u32, least: u32) -> bool {
         if !self.in_data_mode() {
             return false;
         }
@@ -1359,10 +1397,18 @@ impl Modem {
         let jd = self.far_jd.unwrap_or_default();
         let slow_enough = |drn: u8| jd.enables(drn) && sequences::data_rate(drn).is_some_and(|rate| rate <= most);
         // The shaping asked for at the start, and the errors it was expected
-        // to leave, and then as much worse as data mode has found the line.
+        // to leave, and then as much worse as data mode has found the line --
+        // or as much of that as keeps the step inside the cap.
         let (shaping, left) = self.shaping;
-        let route = shaping::scaled(route, left * self.worse * self.worse);
-        let Some(new) = dil::choose_shaped(&route, law, limit, slow_enough, shaping) else { return false };
+        let mut worse = self.worse;
+        let new = loop {
+            let scaled = shaping::scaled(route, left * worse * worse);
+            let Some(new) = dil::choose_shaped(&scaled, law, limit, slow_enough, shaping) else { return false };
+            if worse <= 1.0 || sequences::data_rate(new.data.drn).is_some_and(|rate| rate >= least) {
+                break new;
+            }
+            worse = (worse / BELIEVED_LESS).max(1.0);
+        };
         let mut data = new.data;
         self.finish_cp(&mut data);
         let training = choice.training.clone();
@@ -2155,7 +2201,10 @@ impl Modem {
             self.worse = self.worse.max(self.decisions.worst() / expected);
         }
         let most = self.downstream_rate.saturating_sub(1);
-        if !self.renegotiate(most) {
+        // And no further down than [`MOST_DROPPED`] bits a frame in one go.
+        let drn = self.in_use.as_ref().map_or(0, |cp| cp.drn);
+        let least = sequences::data_rate(drn.saturating_sub(MOST_DROPPED)).unwrap_or(0);
+        if !self.renegotiate_within(most, least) {
             // Nothing slower the route carries: train again from phase 2.
             self.wants_retrain = true;
         }
@@ -2362,6 +2411,22 @@ mod tests {
         assert_eq!(look(40, 1, true), None);
         assert_eq!(look(5, 1, false), None);
         assert_eq!(look(0, 1, false), Some(5));
+    }
+
+    /// The rate is chosen for the worst 32 ms block that three of the recent
+    /// looks reached, and not for the worst one of them: one window out of
+    /// hundreds can hold anything, and the worst would let one window decide
+    /// how far the call falls.
+    #[test]
+    fn the_rate_is_chosen_for_the_worst_block_three_looks_reached() {
+        let look = |worst: f64| Look { symbols: 2000, misses: 3, power: 2000.0 * 0.01, worst, spoiled: false };
+        let mut decisions = watching();
+        for worst in [0.01, 0.01, 0.04, 0.09, 1.0] {
+            decisions.weigh(look(worst));
+        }
+        // 1.0 and 0.09 are above it, so 0.04 is the block three of them
+        // reached, and its RMS is 0.2.
+        assert!((decisions.worst() - 0.2).abs() < 1e-9, "{}", decisions.worst());
     }
 
     /// No one look is ever enough, however bad, nor a line that misses once

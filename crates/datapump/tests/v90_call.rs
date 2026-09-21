@@ -1148,3 +1148,28 @@ fn bursts_of_noise_between_slips_are_still_seen() {
     assert_eq!(call.analogue.renegotiations(), 1);
     assert_eq!(call.analogue.retrains(), 0);
 }
+
+/// A renegotiation may not take more than eight bits a frame -- 10 666 bit/s
+/// -- off the downstream in one go. A line that has suddenly become far
+/// worse than the DIL found it is stepped down that far, measured again at
+/// the new rate, and stepped again if it really is that bad, rather than
+/// falling as far as one 32 ms block said in a single renegotiation.
+#[test]
+fn a_renegotiation_steps_the_rate_down_by_no_more_than_eight_bits_a_frame() {
+    let mut call = connects(plain_line(), server(), 30.0);
+    let (down, _) = call.rates();
+    call.net.set_noise(3e-3);
+    assert!(call.comes_back_up(10.0), "{} / {}", call.analogue.phase(), call.digital.phase());
+    let (stepped, _) = call.rates();
+    println!("{down} became {stepped} in one renegotiation");
+    assert_eq!(call.analogue.renegotiations(), 1);
+    assert_eq!(down - stepped, 10_666, "{down} to {stepped} in one go");
+    // And the line really is that much worse: the next renegotiation goes
+    // further, with no retrain in between.
+    assert!(call.comes_back_up(10.0), "{} / {}", call.analogue.phase(), call.digital.phase());
+    let (slower, _) = call.rates();
+    println!("and then {slower}, after {} renegotiations", call.analogue.renegotiations());
+    assert!(slower < stepped, "{slower} against {stepped}");
+    assert_eq!(call.analogue.retrains(), 0);
+    assert_eq!(call.carries_data(3.0), (true, true));
+}
