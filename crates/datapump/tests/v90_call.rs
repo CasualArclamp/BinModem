@@ -971,6 +971,32 @@ fn noise_that_comes_and_goes_is_renegotiated_down_to_a_rate_that_reads_it() {
     assert_eq!(call.rates().0, slower);
 }
 
+/// A burst shorter than the 32 ms block the rate is chosen over is still the
+/// line's own, and is still held against the rate: the block only dilutes
+/// what it asks for, since the power of a burst that fills a third of it
+/// reads as a third of the burst's. Thirty milliseconds of noise every second
+/// and a half takes 50 666 to 41 333 over a 20 ms round trip, and ten
+/// milliseconds of it takes 54 666 to 50 666 over a 0.6 s one.
+///
+/// Five milliseconds asks for nothing, at either round trip, and has nothing
+/// to ask for: it errors 6 of 1484 blocks in thirty seconds and 23 of 1602,
+/// where a clean line over the round trip errors 2 of 1602 and the packets a
+/// jitter buffer loses error 16 to 56.
+#[test]
+fn a_burst_shorter_than_the_block_is_still_held_against_the_rate() {
+    let (mut call, mut data) = disturbed(plain_line().with_bursts(DISTURBED_FROM, 1.5, 0.03, 1e-3));
+    let (fast, took, slower, errored, blocks) = falls_back(&mut call, &mut data);
+    println!("{fast} became {slower} {took:.1} s into bursts of 30 ms; then {errored} of {blocks} blocks errored");
+    assert!(slower < fast, "{slower} against {fast}");
+    assert_eq!(call.analogue.renegotiations(), 1);
+    assert_eq!(call.analogue.retrains(), 0);
+    // Ten milliseconds of it over the round trip is seen as well.
+    falls_back_over_the_round_trip(voip_line().with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.01, 1e-3));
+    // Five is not, at either round trip.
+    assert_eq!(left_alone(plain_line().with_bursts(DISTURBED_FROM, 1.5, 0.005, 1e-3), WATCHED), (0, 0), "5 ms, 20 ms each way");
+    assert_eq!(left_alone(voip_line().with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.005, 1e-3), WATCHED), (0, 0), "5 ms, 0.6 s each way");
+}
+
 /// A floor that steps up to where the levels stand only about seven RMS
 /// errors apart -- right on the line the old watch on the averaged error drew,
 /// so that it never saw it -- makes a miss or two in every look, and errors
@@ -1284,3 +1310,4 @@ fn a_renegotiation_steps_the_rate_down_by_no_more_than_eight_bits_a_frame() {
     assert_eq!(call.analogue.retrains(), 0);
     assert_eq!(call.carries_data(3.0), (true, true));
 }
+

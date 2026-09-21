@@ -175,7 +175,26 @@ const REMEMBERED: f64 = 15.0;
 const ENOUGH: f64 = 12.5;
 
 /// Symbols over which the error's power is taken when looking for the worst
-/// of a disturbance: 32 ms, about the shortest burst worth a slower rate.
+/// of a disturbance: 32 ms.
+///
+/// This sizes the fall back and says nothing about what counts as a
+/// disturbance -- [`STORM_GARBLED`] and [`STORM_SHORT`] say that -- so it is
+/// not a shortest anything. It wants to be short enough that a burst fills
+/// it, since the rate is chosen for the block's mean power and a burst that
+/// fills a third of a block reads as a third of its own power, and long
+/// enough that the power in it is a measurement and not a handful of symbols.
+/// 32 ms is a third of the hundred-millisecond bursts this watch was written
+/// for and eight times the shortest burst it now falls back for.
+///
+/// Measured, with noise ten decibels over the line's own error every second
+/// and a half: over a 20 ms round trip, thirty milliseconds of it takes
+/// 50 666 to 41 333 and twenty to 44 000; over a 0.6 s round trip, thirty
+/// takes 54 666 to 44 000, twenty to 46 666 and ten to 50 666. Five
+/// milliseconds asks for nothing at either round trip, and has nothing to ask
+/// for: it errors 6 of 1484 blocks in thirty seconds and 23 of 1602, against
+/// 2 of 1602 on a clean line. So the shortest burst held against the rate is
+/// well under this block, and the block dilutes what such a burst asks for
+/// rather than hiding it.
 const BLOCK: usize = 256;
 
 /// How many of the recent looks have to have reached a level before a rate is
