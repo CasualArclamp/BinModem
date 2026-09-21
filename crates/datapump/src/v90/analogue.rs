@@ -264,29 +264,31 @@ const STORM_MISSES: usize = 6;
 /// [`STORM_MISSES`] at all.
 const STORM_GARBLED: f64 = 0.03;
 
-/// The longest a stretch of misses can be and still be one packet, in
-/// symbols: sixty-four milliseconds.
+/// The longest a stretch of misses can be and still be one packet of
+/// made-up audio, in symbols: sixty-four milliseconds.
 ///
-/// This is what tells a jitter buffer from the line. A softphone's packets
-/// hold ten, twenty or thirty milliseconds of G.711, and what the buffer
-/// makes up, plays twice or drops is one of them: the garbage lasts exactly
-/// that long, and the line either side of it is the line it always was. No
-/// slower rate reads made-up audio any better, so falling back for it costs
-/// the call its throughput and buys nothing -- and neither the frames moving
-/// nor the far end going quiet says it happened, since a packet concealed
-/// where it was moves nothing and a gap of milliseconds is far too short for
-/// [`carrier::Watch::quiet`] to see. Only the garbage itself says so.
+/// A softphone's packets hold ten, twenty or thirty milliseconds of G.711,
+/// and what the buffer makes up, plays twice or drops is one of them: the
+/// garbage lasts exactly that long, and the line either side of it is the
+/// line it always was. Longer than a packet, a disturbance that [`STORM_GARBLED`]
+/// would call made-up audio is something else -- a line that has gone on
+/// being bad, or a receiver losing its way -- and a slower rate is worth
+/// asking for.
 ///
-/// Longer than a packet, the disturbance is the line's own -- a crackle, a
-/// neighbour in the cable, a floor that has stepped -- and a slower rate does
-/// read it better: the bursts this watch was written for are a hundred
-/// milliseconds. Measured over this route: a twenty-millisecond packet
-/// concealed in place made stretches of 144 to 415 decisions, its own 160 and
-/// the loops coming back after them; a hundred milliseconds of noise made
-/// stretches of 619 to 752. 512 lies between, and leaves a thirty-millisecond
-/// packet the same room again. Nothing tells a click on the line shorter than
-/// a packet from a packet, and neither is held against the rate: a click is
-/// not a line.
+/// Measured over eight routes, ten, twenty and thirty milliseconds concealed
+/// in place, by a fading repeat and by comfort noise, mu-law and A-law, round
+/// trips of 0.6 s and 20 ms: a ten-millisecond packet made stretches of 45 to
+/// 380 decisions, a twenty-millisecond one 144 to 415, and a thirty of 223 to
+/// 284 -- its own 80, 160 or 240 and the loops coming back after them. A
+/// hundred milliseconds of noise made 619 to 876. 512 lies between the
+/// longest packet and the shortest hundred-millisecond burst.
+///
+/// The length alone tells nothing else, and this constant no longer pretends
+/// to: thirty milliseconds of noise ten decibels over the line's own error
+/// made stretches of 177 to 237, inside a thirty-millisecond packet's own
+/// range, and is held against the rate all the same. What tells them apart is
+/// [`STORM_GARBLED`]; all this does is stop a stretch that goes on and on
+/// from being excused as a packet.
 const STORM_SHORT: usize = 512;
 
 /// A hole in the audio: decisions at under a hundredth of the line's own
