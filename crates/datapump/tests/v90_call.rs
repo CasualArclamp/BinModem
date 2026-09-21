@@ -815,6 +815,48 @@ fn plain_line() -> Network {
     Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5)
 }
 
+/// The rate chosen at the end of the DIL leaves room, and on a clean line
+/// that costs at most a rung: the levels stand `dil::SLACK` times
+/// `dil::SPACING` of the error the DIL leads the modem to expect, where the
+/// best the route carries would have them only `dil::SPACING` apart and then
+/// as far as the power allows. At 20 ms and 0.6 s each way, both laws,
+/// that power leaves room enough and nothing is lost; at 10 ms, whose room
+/// comes out 11.1 of the expected error, one rung is.
+#[test]
+fn the_dil_choice_leaves_room_and_a_clean_line_loses_at_most_a_rung_for_it() {
+    use datapump::v90::{dil, shaping};
+    let mut a_law = server();
+    a_law.a_law = true;
+    let lines = [
+        ("20 ms", plain_line(), server()),
+        ("10 ms", Network::new(Law::Mu, FS).with_delay(0.010, FS).with_noise(1e-5), server()),
+        ("0.6 s", voip_line(), server()),
+        ("A-law", Network::new(Law::A, FS).with_delay(0.020, FS).with_noise(1e-5), a_law),
+    ];
+    let mut lost = Vec::new();
+    for (name, net, server) in lines {
+        let mut call = FullCall::new(net, server);
+        while call.analogue.v90().is_none_or(|v| v.choice().is_none()) {
+            assert!(call.ticks < 40 * 8000, "{name}: no choice at the end of the DIL");
+            call.run_until_seconds((call.ticks + 8) as f64 / 8000.0);
+        }
+        let v = call.analogue.v90().unwrap();
+        let (route, law) = (v.route().unwrap(), v.settings().law);
+        let limit = datapump::v90::power_limit(&v.settings().server);
+        let jd = v.far_jd().unwrap_or_default();
+        let best = shaping::choose(route, law, limit, |drn| jd.enables(drn), jd.lookahead, v.receiver().residue().leftover().as_ref()).unwrap();
+        let chosen = v.choice().unwrap();
+        let expected = route.noise_at(law, f64::from(limit) / 32768.0) * v.shaping().1.sqrt();
+        let room = dil::least_gap(&chosen.data, route) / (dil::SPACING * expected);
+        let rungs = best.choice.data.drn - chosen.data.drn;
+        println!("{name}: {} bit/s where the best was {}, room {room:.2} of the spacing", datapump::v90::rate_for(chosen.data.frame_bits() as u32), best.rate());
+        assert!(room >= dil::SLACK, "{name}: room {room:.3}");
+        assert!(rungs <= 1, "{name}: {rungs} rungs lost");
+        lost.push(rungs);
+    }
+    assert_eq!(lost, [0, 1, 0, 0]);
+}
+
 /// A path that takes the top of the downstream's band away, as a live call
 /// over a VoIP provider's did (live-1789732858). No equaliser gives back a
 /// band that is not there, and what the equaliser cannot undo rings on in

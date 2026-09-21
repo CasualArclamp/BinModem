@@ -48,6 +48,46 @@ pub const LOUDEST: f64 = 0.3;
 /// symbols.
 pub const SPACING: f64 = 10.0;
 
+/// How much further apart than [`SPACING`] the levels of the rate chosen at
+/// the end of the DIL have to stand, as a share of it: 1.12, which is room
+/// for data mode's error to come out 1.6 times what the DIL led the modem to
+/// expect.
+///
+/// The DIL is one pass, 0.44 s, and on live-1789986211 it was taken at its
+/// word with next to nothing to spare. Its route, as this build reads it
+/// back, carries 56 000 only on 66 or 67 of the 67 rungs its ladders have at
+/// [`SPACING`], at a power of 3931 against Table 15's 4024, with the levels
+/// 10.7 of the expected error apart. The call itself went further: it asked
+/// for 56 000 shaped, counting on the shaping to take half the error's power
+/// away, and so built for an error of 0.94e-4. Replayed with the CPs it
+/// really sent, data mode found the receiver's own error at 1.50e-4, 1.6
+/// times that; and the watch on data mode's margin, which keeps a rate only
+/// while its levels stand seven of the receiver's error apart, found 56 000
+/// short of it three seconds in. A rate chosen to survive that has to stand
+/// 7 times 1.6, 11.2, of the error the DIL expects, where [`SPACING`] stands
+/// 10.
+///
+/// The clean simulated lines come up with room of their own, since the power
+/// ceiling binds before the ladder does -- 11.1 to 13.0 of the expected error
+/// -- and data mode's error on them runs 0.7 to 1.45 times what the DIL
+/// expects. So this costs them little. Measured on sixteen routes: the clean
+/// ones at 20 ms, 0.1 s, 0.3 s and 0.6 s each way, both laws, a drifting
+/// clock and a softphone keep their rates; the two clean ones at 10 ms each
+/// way, whose room was 11.1, lose a rung, 50 666 to 49 333; a robbed bit,
+/// at 10.5, loses a rung, 38 666 to 37 333; the band-edge cut, shaped, keeps
+/// 48 000; a floor at 3e-4, at 10.4, loses two, 49 333 to 46 666. And
+/// live-1789986211's route comes out a rung down, at 54 666 unshaped, its
+/// levels 14.3 of the expected error apart.
+///
+/// It is not the margin the analysis of that call argued for, which put the
+/// spread data mode met at about four times what the DIL read and the line
+/// in the middle forty thousands. This replay does not show that -- the
+/// receiver's error was 1.10 times the DIL's spread, and the clean looks
+/// 1.06 of it -- and taking the spread as four times what was read would
+/// cost every clean simulated line ten rungs or more, 50 666 to 37 333, and
+/// still bring that route only to 49 333.
+pub const SLACK: f64 = 1.12;
+
 /// The DIL this modem asks for: every codeword up to [`LOUDEST`] but UINFO,
 /// each in a segment of six frames -- the first all references at UINFO, the
 /// other five the codeword itself -- with signs from a fixed balanced
@@ -452,6 +492,19 @@ pub fn explain(route: &Route, law: Law, limit: u32) -> Vec<String> {
         }
     }
     out
+}
+
+/// The least distance between two of a CP's levels, either sign, as the
+/// route delivers them.
+pub fn least_gap(cp: &Cp, route: &Route) -> f64 {
+    (0..INTERVALS)
+        .map(|i| {
+            let mut levels: Vec<f64> =
+                cp.points(i).iter().flat_map(|&u| [route.levels[i][usize::from(u)], -route.levels[i][usize::from(u)]]).collect();
+            levels.sort_by(f64::total_cmp);
+            levels.windows(2).map(|w| w[1] - w[0]).fold(f64::INFINITY, f64::min)
+        })
+        .fold(f64::INFINITY, f64::min)
 }
 
 /// A CP for these sets: a constellation field for every data frame interval,

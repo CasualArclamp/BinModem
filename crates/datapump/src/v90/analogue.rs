@@ -916,19 +916,6 @@ fn levels_for(cp: &Cp, route: &Route) -> Levels {
     })
 }
 
-/// The least distance between two of a CP's levels, either sign, as the
-/// route delivers them.
-fn least_gap(cp: &Cp, route: &Route) -> f64 {
-    (0..INTERVALS)
-        .map(|i| {
-            let mut levels: Vec<f64> =
-                cp.points(i).iter().flat_map(|&u| [route.levels[i][usize::from(u)], -route.levels[i][usize::from(u)]]).collect();
-            levels.sort_by(f64::total_cmp);
-            levels.windows(2).map(|w| w[1] - w[0]).fold(f64::INFINITY, f64::min)
-        })
-        .fold(f64::INFINITY, f64::min)
-}
-
 /// A CP as the transcript tells it (Table 14): which kind it is, its rate
 /// and drn, K, how many points each interval has and which constellation
 /// field each is on, Sr, the look-ahead and the acknowledge bit.
@@ -2388,7 +2375,7 @@ impl Modem {
         // Shaped or not, whichever carries more (5.4.5): what the equaliser
         // left of TRN1d and Jd says what shaping would take away.
         let leftover = self.rx.residue().leftover();
-        let Some(asked) = shaping::choose(&route, law, limit, |drn| jd.enables(drn), jd.lookahead, leftover.as_ref()) else {
+        let Some(asked) = shaping::choose_with_slack(&route, law, limit, |drn| jd.enables(drn), jd.lookahead, leftover.as_ref()) else {
             self.route = Some(route);
             self.fail("the route cannot carry V.90's slowest rate");
             return;
@@ -2580,7 +2567,7 @@ impl Modem {
             frames.b1d_left = B1D_FRAMES;
             self.deadline = None;
             self.in_use = Some(choice.data.clone());
-            self.least_gap = least_gap(&choice.data, route);
+            self.least_gap = dil::least_gap(&choice.data, route);
             self.downstream_rate = sequences::data_rate(choice.data.drn).unwrap_or(0);
             self.notes.push(format!("found Ed: B1d next, down at {} bit/s", self.downstream_rate));
             let Some(data) = Mapping::from_cp(&choice.data) else { return };
