@@ -2388,6 +2388,31 @@ impl Modem {
         // [`UNREADABLE`]).
         let law = self.settings.law;
         let receiver = ucode::level(law, self.settings.uinfo) / 10f64.powf(self.rx.snr_db() / 20.0);
+        // A receiver holding its loops is already on its way either back or
+        // out, and neither way is a retrain this watch's to ask for. Back,
+        // and it was a burst that it rode out on what it last knew, and
+        // there was never anything to retrain for. Out, and it holds until
+        // [`pcm`]'s `HELD_AT_MOST` gives up on it, and a receiver that has
+        // then held still for three seconds is retrained where
+        // [`Self::step`] watches for it. Asking for one here as well only
+        // starts a second retrain in the middle of the first one's recovery:
+        // measured over two minutes of forty milliseconds of digital silence
+        // every three seconds -- a storm of retrains that both this and main
+        // fall into, and neither is this watch's doing -- main takes five
+        // and is back at 52 000 by about 105 s, and this took a sixth on top
+        // of them, landing on the recovery from the fifth, and never came
+        // back at all. Held rather than cleared, since a receiver that comes
+        // back for a moment and goes again has not answered the question:
+        // clearing it here left the same storm at 26 400.
+        //
+        // Only the counting stands down. The looks, the evidence and the
+        // stretches of misses go on being gathered, because a long burst of
+        // real noise makes the receiver hold its loops too, and what is
+        // gathered through one is exactly what says the line is bad. Standing
+        // those down as well cost three hundred milliseconds of noise every
+        // second and a half its fall back altogether -- 54 666 for ever,
+        // where it should reach 40 000 and error nothing after it.
+        let holding_loops = self.rx.is_lost();
         let losing_it = self.least_gap < UNREADABLE_GAP * receiver;
         if losing_it {
             // A receiver that is not reading the constellation is no judge
@@ -2395,7 +2420,13 @@ impl Modem {
             self.decisions.spoil();
         }
         let stands = self.decisions.look(self.frames_moved());
-        self.unreadable = if losing_it { self.unreadable + 1 } else { 0 };
+        self.unreadable = if holding_loops {
+            self.unreadable
+        } else if losing_it {
+            self.unreadable + 1
+        } else {
+            0
+        };
         if self.unreadable >= UNREADABLE {
             self.unreadable = 0;
             self.wants_retrain = true;

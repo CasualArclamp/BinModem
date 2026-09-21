@@ -1464,3 +1464,112 @@ fn a_floor_that_steps_up_over_the_round_trip_is_read_right_the_first_time() {
     assert_eq!((call.analogue.renegotiations(), call.analogue.retrains()), (1, 0));
     assert_eq!(call.rates().0, slower);
 }
+
+/// A retrain storm is come out of no worse than main comes out of it.
+///
+/// Forty milliseconds of digital silence every three seconds over the
+/// mu-law 0.6 s round trip costs the receiver its constellation again and
+/// again, and both this and a tree without any of this watch fall into a
+/// storm of retrains for it. That is the receiver's to mend and not the
+/// watch's, and nothing here pretends to mend it. What the watch must not do
+/// is make it worse.
+///
+/// It did. A receiver holding its loops is already on its way either back or
+/// out -- back, and it was a burst it rode out on what it last knew; out,
+/// and it is retrained three seconds later anyway -- so a retrain asked for
+/// from the looks that made it hold is a second retrain landing in the
+/// middle of the first one's recovery. Main takes five retrains here and is
+/// back at 52 000 by about 105 seconds; this took a sixth on top of them and
+/// never came back at all. With the count held while the receiver holds, the
+/// two agree stretch for stretch: five retrains, back at 52 000 by 105 s,
+/// then 9 to 14 of about 508 blocks errored in every ten-second stretch
+/// after.
+///
+/// Only the count stands down, and that matters: a long burst of real noise
+/// makes the receiver hold its loops as well, and the looks gathered through
+/// one are exactly what say the line is bad. Standing those down too cost
+/// three hundred milliseconds of noise every second and a half its fall back
+/// altogether, leaving it at 54 666 for ever where it should reach 40 000
+/// and error nothing after (see
+/// [`noise_that_comes_and_goes_is_renegotiated_down_to_a_rate_that_reads_it`]).
+#[test]
+fn a_retrain_storm_is_come_out_of_and_the_watch_stands_down_inside_it() {
+    let net = voip_line().with_silent_dropout(VOIP_DISTURBED_FROM, 3.0, 0.040);
+    let mut call = connects(net, server(), 40.0);
+    let mut data = Downstream::new();
+    call.known_data(VOIP_DISTURBED_FROM - call.seconds(), &mut data);
+    let mut last = (0, 0);
+    let mut back_at = None;
+    for _ in 0..(SOAKED / 10.0) as u32 {
+        let before = data.checked;
+        call.known_data(10.0, &mut data);
+        last = data.checked.since(&before);
+        if back_at.is_none() && call.rate_now().is_some() && call.analogue.retrains() >= 5 {
+            back_at = Some(call.seconds());
+        }
+    }
+    let rate = call.rate_now().expect("never came back out of the storm");
+    let back_at = back_at.expect("never came back out of the storm");
+    println!("out of the storm at {back_at:.0} s and {rate}, {} retrains; last stretch {}/{}", call.analogue.retrains(), last.0, last.1);
+    assert!(back_at < VOIP_DISTURBED_FROM + 100.0, "came back only at {back_at:.0} s");
+    assert!(last.0 * 10 < last.1, "{} of {} blocks errored at {rate}", last.0, last.1);
+    assert_eq!(call.analogue.renegotiations(), 0);
+}
+
+/// A burst long enough that the receiver holds its loops through it is still
+/// the line's, and is still fallen back for.
+///
+/// Three hundred milliseconds of noise every second and a half leaves the
+/// receiver holding its loops about a fifth of the time. That is the case
+/// that says what may stand down while it holds and what may not: the looks
+/// gathered through such a burst are exactly what say the line is bad, and a
+/// watch that threw them away because the receiver was holding never fell
+/// back at all, sitting at 54 666 for ever with 107 to 145 of 534 blocks
+/// errored in every stretch. Only the counting towards a retrain stands down
+/// (see [`a_retrain_storm_is_come_out_of_and_the_watch_stands_down_inside_it`]).
+///
+/// Over the 0.6 s round trip it settles at 40 000, which is further than
+/// [`MOST_DROPPED`] lets one renegotiation go, so it takes two: 54 666 to
+/// 50 666, which still errors, and then to 40 000, where nothing errors in
+/// any ten-second stretch of the two minutes after the one the last
+/// renegotiation itself fell in. A robbed bit settles at
+/// 40 000 too and A-law at 44 000, and no retrain comes of any of it.
+#[test]
+fn a_burst_the_receiver_holds_its_loops_through_is_still_fallen_back_for() {
+    let cases: [(&str, Network, Info0d); 3] = [
+        ("0.6 s each way", voip_line().with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.3, 1e-3), server()),
+        ("0.6 s each way, a robbed bit", voip_line().with_robbed_bit(0).with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.3, 1e-3), server()),
+        (
+            "A-law, 0.6 s each way",
+            Network::new(Law::A, FS).with_delay(0.6, FS).with_noise(1e-5).with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.3, 1e-3),
+            a_law_server(),
+        ),
+    ];
+    for (what, net, server) in cases {
+        let mut call = connects(net, server, 40.0);
+        let fast = call.rates().0;
+        let mut data = Downstream::new();
+        call.known_data(VOIP_DISTURBED_FROM - call.seconds(), &mut data);
+        // Two minutes of it in ten-second stretches, from where the bursts
+        // begin: the rate it reached in each, and what errored there.
+        let mut stretches = Vec::new();
+        for _ in 0..(SOAKED / 10.0) as u32 {
+            let before = data.checked;
+            call.known_data(10.0, &mut data);
+            stretches.push((call.rate_now(), data.checked.since(&before)));
+        }
+        // Once it has settled it stays there, and nothing errors again.
+        let settled = stretches.last().expect("stretches").0.expect("never came back up");
+        // The stretch the last renegotiation itself fell in still carries
+        // what it dropped, which is not the line's doing.
+        let after: Vec<_> = stretches.iter().skip_while(|(rate, _)| *rate != Some(settled)).skip(1).collect();
+        println!("{what}: {fast} became {settled}, settled for the last {} stretches of {SOAKED} s", after.len());
+        assert!(after.len() >= 8, "{what}: settled at {settled} only for {} stretches", after.len());
+        for (n, (rate, (errored, blocks))) in after.iter().enumerate() {
+            assert_eq!(*rate, Some(settled), "{what}, stretch {n} after settling");
+            assert_eq!(*errored, 0, "{what}, stretch {n}: {errored} of {blocks} at {settled}");
+        }
+        assert!(settled < fast, "{what}: {settled} against {fast}");
+        assert_eq!(call.analogue.retrains(), 0, "{what}");
+    }
+}
