@@ -49,6 +49,8 @@ pub struct Analogue {
     /// Renegotiations in V.90 data modes a retrain has since replaced.
     renegotiations: u32,
     holes: u32,
+    /// Lines for the transcript not yet taken (see [`Self::take_notes`]).
+    notes: Vec<String>,
 }
 
 impl Analogue {
@@ -63,6 +65,7 @@ impl Analogue {
             last_failure: None,
             renegotiations: 0,
             holes: 0,
+            notes: Vec::new(),
         }
     }
 
@@ -97,6 +100,14 @@ impl Analogue {
     /// [`analogue::Modem::holes`]), this start-up's and every one before it.
     pub fn holes(&self) -> u32 {
         self.holes + self.v90.as_ref().map_or(0, analogue::Modem::holes)
+    }
+
+    /// What V.90's phases 3 and 4 have done since this was last asked, a line
+    /// each for the transcript (see [`analogue::Modem::take_notes`]), kept
+    /// here so that a start-up that fails and is put away still gets its
+    /// last lines told.
+    pub fn take_notes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notes)
     }
 
     /// Why the last V.90 start-up failed, if one has.
@@ -225,6 +236,7 @@ impl Analogue {
     pub fn step(&mut self, line: f64) -> f64 {
         if let Some(m) = self.v90.as_mut() {
             let out = m.step(line);
+            self.notes.extend(m.take_notes());
             if m.take_retrain() {
                 // 9.5.2: tone A and phase 2, whichever end began it; the
                 // capabilities are not exchanged again.
@@ -244,6 +256,7 @@ impl Analogue {
                     self.back_to_phase2();
                     if hopeless || self.failed_starts > V90_RETRAINS {
                         // 9.2.2.1.9: this time, V.34's INFO1a.
+                        self.notes.push("V.34 next time round, not V.90".into());
                         self.v34.decline_pcm();
                     }
                 }

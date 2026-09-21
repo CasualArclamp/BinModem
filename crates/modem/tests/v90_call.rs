@@ -128,6 +128,23 @@ impl Call {
     fn saw(&self) -> String {
         String::from_utf8_lossy(&self.said).into_owned()
     }
+
+    /// The same as [`Self::run`], taking the caller's line notes after every
+    /// sample, as the window does, each with how far into the call it came.
+    fn run_noting(&mut self, seconds: f64, notes: &mut Vec<(f64, String)>) {
+        for _ in 0..(seconds * NETWORK_FS) as usize {
+            let to_server = self.net.up(&self.up);
+            self.up.clear();
+            let from_server = self.server.step(to_server);
+            for x in self.net.down(from_server) {
+                self.up.push(self.caller.step(x));
+                self.said.extend(self.caller.take_dte());
+                for text in self.caller.take_line_notes() {
+                    notes.push((self.caller.call_seconds(), text));
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -177,6 +194,63 @@ fn dialling_a_v90_server_connects_at_pcm_rates_and_carries_text() {
     call.run(3.0);
     let got = String::from_utf8_lossy(&call.server.received).into_owned();
     assert!(got.contains("after the retrain"), "the server got {got:?}");
+}
+
+/// Phase 4 reaches the transcript as it happens, a line for each different
+/// thing and not one for every repetition of it: the CPt and CP this end
+/// sends, with the rate and drn, K, each interval's size and field, Sr, the
+/// look-ahead and the acknowledge bit (Table 14); the MP and MP' the server
+/// sends, with the type, the upstream drn, the acknowledge bit and whether it
+/// precodes (Table 16); E going up; and Ed and B1d coming down (8.6.1,
+/// 8.6.2). In the order 9.4.2 has them: CP after CPt (9.4.2.2), CP' after MP
+/// (9.4.2.3), E after CP' and after MP' or Ed (9.4.2.4), and B1d after Ed
+/// (9.4.2.6). MP' says the server has "received CP from far end", any CP,
+/// so it can come before this end's CP' as well as after.
+#[test]
+fn the_phase_4_exchange_reaches_the_transcript_a_line_for_each_step() {
+    let mut call = Call::new();
+    call.type_at("AT+MS=V90");
+    call.run(0.05);
+    call.type_at("ATD5551234");
+    let mut notes = Vec::new();
+    call.run_noting(20.0, &mut notes);
+    for (at, text) in &notes {
+        println!("{at:8.3}  {text}");
+    }
+    assert_eq!(call.caller.state(), State::Data, "not online: {:?}", call.saw());
+    let only = |start: &str| {
+        let found: Vec<&(f64, String)> = notes.iter().filter(|n| n.1.starts_with(start)).collect();
+        assert_eq!(found.len(), 1, "{start:?} told {} times", found.len());
+        found[0].clone()
+    };
+    let (cpt, cp, mp, cp_ack, mp_ack, e, ed, b1d) = (
+        only("sent CPt:"),
+        only("sent CP:"),
+        only("found MP:"),
+        only("sent CP':"),
+        only("found MP':"),
+        only("sent E:"),
+        only("found Ed:"),
+        only("found B1d:"),
+    );
+    assert!(cpt.0 < cp.0 && mp.0 < cp_ack.0 && mp.0 < mp_ack.0, "{notes:#?}");
+    assert!(cp_ack.0 < e.0 && mp_ack.0.min(ed.0) < e.0 && ed.0 < b1d.0, "{notes:#?}");
+    // Each says what it is asked to say.
+    for (line, words) in [
+        (&cpt.1, &["bit/s (drn", "K ", "sizes [", "on fields [0, 1, 2, 3, 4, 5]", "Sr ", "look-ahead ", "acknowledge 0"][..]),
+        (&cp.1, &["bit/s (drn", "K ", "sizes [", "on fields [0, 1, 2, 3, 4, 5]", "Sr ", "look-ahead ", "acknowledge 0"]),
+        (&cp_ack.1, &["acknowledge 1"]),
+        (&mp.1, &["type ", "upstream at most", "(drn ", "acknowledge 0", "precoding "]),
+        (&mp_ack.1, &["acknowledge 1"]),
+    ] {
+        for word in words {
+            assert!(line.contains(word), "{line:?} does not say {word:?}");
+        }
+    }
+    // And the rate CP asked for is the rate the terminal was told.
+    let down = call.caller.rate().expect("no rate");
+    assert!(cp.1.contains(&format!("CP: {down} bit/s")), "{} against {down}", cp.1);
+    assert!(notes.len() <= 10, "{} lines for one start-up", notes.len());
 }
 
 /// Both ends of a V.90 call are these modems: one dials, the other answers

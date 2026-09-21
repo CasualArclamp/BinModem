@@ -698,6 +698,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // of it, and neither says what the far end sent -- which on a link that
     // establishes and then carries nothing is the only question there is.
     let mut frames: Vec<String> = Vec::new();
+    // What the line's start-up did in this block, with where in the block it
+    // did it and how far into the call that was: the phase 4 exchange of a
+    // V.90 call, told a line at a time as it happens.
+    let mut noted: Vec<(usize, f64, String)> = Vec::new();
     let mut was_recording = false;
     let mut tx_peak = 0.0f32;
     let (mut tx_rms, mut rx_rms) = (0.0f32, 0.0f32);
@@ -1107,13 +1111,16 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         // The PCM scope is every sample against the next, and a dense grid
         // of levels wants the full depth whatever the count of them.
         let depth = if modem.shape() == "PCM" { PCM_DEPTH } else { scope_depth(modem.states()) };
-        for &s in &from_line {
+        for (n, &s) in from_line.iter().enumerate() {
             let heard = f64::from(s);
             // A V.90 server's samples are codewords, and the far encoder
             // only turns them back into the same ones at the level they left:
             // no drive of any other size will do.
             let drive = if modem.exact_levels() { 1.0 } else { drive };
             to_line.push(modem.step(heard) as f32 * drive);
+            for text in modem.take_line_notes() {
+                noted.push((n, modem.call_seconds(), text));
+            }
 
             if modem.shape() != drawing {
                 drawing = modem.shape();
@@ -1145,6 +1152,8 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         owed_ms += from_line.len() as f64 / FS * 1000.0;
 
         let recording_now = session.recording();
+        // Where this block starts in the recording, if it is going into one.
+        let block_at = if was_recording { recording.len() / 2 } else { 0 };
         if recording_now {
             if !was_recording {
                 recording.clear();
@@ -1171,6 +1180,19 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             frames = Vec::new();
         }
         was_recording = recording_now;
+        // Timed by the recording where there is one, so that each line can be
+        // found in the capture, and written beside its frames; by the call
+        // otherwise.
+        for (n, into_call, text) in noted.drain(..) {
+            let line = format!("{}: {text}", modem.standard());
+            if recording_now {
+                let at = (block_at + n) as f64 / FS;
+                frames.push(format!("{at:9.3}  --  {line}"));
+                tx.log(Direction::Note, format!("{line} ({at:.3} s into the recording)"));
+            } else {
+                tx.log(Direction::Note, format!("{line} ({into_call:.3} s into the call)"));
+            }
+        }
 
         // Decays rather than resets, so a peak stays up long enough to read
         // instead of flickering past between repaints.

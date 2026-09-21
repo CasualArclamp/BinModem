@@ -17,7 +17,8 @@
 //!
 //! What the choice at the end of the DIL comes to is shown whatever became of
 //! it: the rate unshaped and the rate with the spectral shaping asked for, and
-//! what they went on.
+//! what they went on. And every line the transcript would have had of phase
+//! 4 -- each CP sent and MP found, E, Ed and B1d -- at the time it came.
 
 use datapump::v90::startup::Analogue;
 
@@ -47,6 +48,10 @@ fn probe_replay_v90() {
             before = (read > 0 && read + 64 >= of).then(|| v.clone());
         }
         modem.step(f64::from(s));
+        // What phase 4 did, as the transcript tells it.
+        for text in modem.take_notes() {
+            println!("{:8.3}  {text}", i as f64 / FS);
+        }
         if let Some(mut v) = before.take_if(|_| modem.v90().is_none_or(|v| v.route().is_some())) {
             let took = std::time::Instant::now();
             v.step(f64::from(s));
