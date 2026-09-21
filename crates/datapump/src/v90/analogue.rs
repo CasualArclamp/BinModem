@@ -132,16 +132,312 @@ const RENEGOTIATION_ED: f64 = 5.0;
 /// Whole CPs asking for nothing sent before a cleardown is over.
 const CLEARDOWN_CPS: usize = 4;
 
-/// Data mode's levels closer than this many of the receiver's RMS errors
-/// make errors often enough to be worth a slower rate: a frame in some
-/// hundreds at six, none in a quarter of a million bits at eight.
-const MARGIN: f64 = 7.0;
-
-/// How often the margin is looked at, how many looks in a row it must be
-/// short for, and how long data mode runs before the first.
+/// How often data mode's margin is looked at, and how long data mode runs
+/// before the watch begins: its loops settle on a new constellation first.
 const MARGIN_EVERY: f64 = 0.25;
-const MARGIN_SHORT: u32 = 4;
 const MARGIN_SETTLE: f64 = 2.0;
+
+/// A decision whose error went more than this share of the way to where the
+/// next level's decisions begin is a miss.
+///
+/// Errors are what cost a call, and are what is counted, as near as a
+/// receiver that does not know what was sent can count them: a symbol read
+/// wrongly lands just past the boundary, measured from the level it was taken
+/// for, and so does one that nearly was. Gaussian noise that reads one symbol
+/// in a hundred thousand wrongly takes one in two and a half thousand past
+/// four-fifths of the way, so misses come often enough to count long before
+/// errors do, and a disturbance that makes errors makes misses by the dozen.
+const MISSED: f64 = 0.8;
+
+/// Misses in a look that say nothing, and the most one look can count for.
+///
+/// A line at its rate's margin misses now and then, from the noise's own
+/// tail: over a simulated VoIP call's round trip at 54 666, whose errors were
+/// half a minute apart, a look had a miss in one in five and three at worst.
+/// What a slower rate is for is misses that come together -- a disturbance --
+/// or so steadily that a look often has more than a couple. And one look is
+/// one look, however bad: a click is not a line.
+const MISSES_ALLOWED: f64 = 2.0;
+const LOOK_AT_MOST: f64 = 5.0;
+
+/// How long the evidence is remembered, as a time constant in seconds, and
+/// how much of it is enough for a slower rate.
+///
+/// Not "so many looks in a row", which a disturbance that comes and goes
+/// never is: every look adds what it has, and what has been added fades.
+/// Fifteen seconds, so that bursts a few seconds apart add up and a line
+/// that was disturbed a minute ago is not held against the rate now; and
+/// three looks at their most, so that no one look ever is enough. Noise every
+/// second or two is then a slower rate within a few bursts, and a step in the
+/// floor within a second; a floor that only just makes errors, every few
+/// seconds, takes ten or so.
+const REMEMBERED: f64 = 15.0;
+const ENOUGH: f64 = 12.5;
+
+/// Symbols over which the error's power is taken when looking for the worst
+/// of a disturbance: 32 ms.
+///
+/// This sizes the fall back and says nothing about what counts as a
+/// disturbance -- [`STORM_GARBLED`] and [`STORM_SHORT`] say that -- so it is
+/// not a shortest anything. It wants to be short enough that a burst fills
+/// it, since the rate is chosen for the block's mean power and a burst that
+/// fills a third of a block reads as a third of its own power, and long
+/// enough that the power in it is a measurement and not a handful of symbols.
+/// 32 ms is a third of the hundred-millisecond bursts this watch was written
+/// for, and about three times the shortest burst it now falls back for --
+/// ten milliseconds over a 0.6 s round trip, as the measurements below say.
+///
+/// Measured, with noise ten decibels over the line's own error every second
+/// and a half: over a 20 ms round trip, thirty milliseconds of it takes
+/// 50 666 to 41 333 and twenty to 44 000; over a 0.6 s round trip, thirty
+/// takes 54 666 to 44 000, twenty to 46 666 and ten to 50 666. Five
+/// milliseconds asks for nothing at either round trip, and has nothing to ask
+/// for: it errors 6 of 1484 blocks in thirty seconds and 23 of 1602, against
+/// 2 of 1602 on a clean line. So the shortest burst held against the rate is
+/// well under this block, and the block dilutes what such a burst asks for
+/// rather than hiding it.
+const BLOCK: usize = 256;
+
+/// How many of the recent looks have to have reached a level before a rate is
+/// chosen for it.
+///
+/// A look's worst block is one window of 32 ms out of hundreds, and the rate
+/// is chosen from it, so taking the worst of them lets any single window
+/// decide how far the call falls -- and a single window can hold anything.
+/// Three looks, each a quarter of a second apart, having reached a level is
+/// the line reaching it. Three is also what the evidence already asks for:
+/// no look counts for more than [`LOOK_AT_MOST`] and [`ENOUGH`] is two and a
+/// half times that, so a renegotiation never comes of fewer.
+const WORST_OF: usize = 3;
+
+/// The most one renegotiation may take off the downstream rate, in bits a
+/// frame.
+///
+/// A V.90 rate is D bits in every six-codeword frame -- "(drn+20)*8000/6 in
+/// CP" (Table 14/V.90) -- so one bit a frame is 1333 bit/s and eight of them
+/// are 10 666. Eight is as far as any line here has honestly needed in one
+/// step: a hundred milliseconds of noise every second and a half took 50 666
+/// to 40 000. Further than that in one go is a measurement to doubt rather
+/// than to act on, and there is no need to act on all of it at once -- the
+/// line is measured again at the new rate, and a renegotiation that stopped
+/// short is followed by another that goes the rest of the way.
+const MOST_DROPPED: u8 = 8;
+
+/// How much less of what data mode found is believed on each try at keeping
+/// a renegotiation inside [`MOST_DROPPED`]: half a decibel of error power.
+const BELIEVED_LESS: f64 = 1.0594;
+
+/// Clean decisions that end a stretch of misses: sixteen milliseconds.
+///
+/// A disturbance does not miss every decision it touches, nor nearly. A
+/// tenth of a second of noise ten decibels over what a clean line leaves
+/// misses about one decision in ten, and 32 clean ones in a row turn up
+/// inside one several times over (0.9^32 is one in thirty); 128 in a row do
+/// not (one in a million), so the whole hundred milliseconds stays one
+/// stretch. Nothing here puts two disturbances within sixteen milliseconds of
+/// each other, and a line at its own margin goes thousands of decisions
+/// between misses, so neither joins two stretches into one.
+const STORM_GAP: usize = 128;
+
+/// Misses in a stretch before it is a disturbance at all, rather than the
+/// line's own tail.
+///
+/// A look of 2000 decisions over a simulated VoIP round trip at 54 666 had
+/// three misses at worst, and a floor stepped up to where errors come every
+/// few seconds leaves a miss or two in a look: neither puts six of them
+/// within sixteen milliseconds of each other. It was sixteen, which is how
+/// many a twenty-millisecond packet leaves, and a ten-millisecond one leaves
+/// half of that: measured over the round trip, six to fifty-one, so sixteen
+/// sat inside the distribution and half the packets were weighed as the line.
+/// A count cannot be the test, because a count is the length of the garbage;
+/// what tells garbage from the line is [`STORM_GARBLED`], and all this floor
+/// does now is keep the one-decision stretch out, where a single miss carries
+/// all its own sound and would pass that outright.
+const STORM_MISSES: usize = 6;
+
+/// The share of the sound under a stretch that the decisions which missed
+/// have to carry before the stretch is made-up audio rather than the line.
+///
+/// This is what tells a jitter buffer's garbage from a disturbance on the
+/// line, and it has to be this rather than how long the stretch lasted,
+/// because a packet holds ten, twenty or thirty milliseconds of G.711 and a
+/// crackle can last exactly as long. What differs is which decisions miss.
+/// Noise adds to a codeword that is still there, so it can only push one
+/// four-fifths of the way to the boundary where the boundary is near -- at
+/// the quiet levels, a mu-law segment apart -- while the loud codewords,
+/// which carry nearly all the sound there is, are read as cleanly as before.
+/// Made-up audio is in the codewords' place rather than on top of them, so it
+/// misses at every level alike and its misses carry their share of the sound.
+/// That is also why no slower rate reads it: wider levels shrink what noise
+/// does and leave made-up audio where it was.
+///
+/// Measured as the power of the missed decisions over the power of all of
+/// them, from the first miss in a stretch to the last, over eight routes --
+/// packets of ten, twenty and thirty milliseconds, concealed by a fading
+/// repeat and by comfort noise, mu-law and A-law, round trips of 0.6 s and
+/// 20 ms, with and without a softphone's slips running as well: 126 stretches
+/// of made-up audio carried 0.033 to 0.56 of it, and 40 stretches of noise
+/// ten decibels over the line's own error -- thirty milliseconds of it and a
+/// hundred, over the same routes -- carried 0.005 to 0.027. Nothing of either
+/// kind fell on the wrong side of a thirtieth. A clean line and a floor
+/// stepped up to where errors come every few seconds make no stretch of
+/// [`STORM_MISSES`] at all.
+const STORM_GARBLED: f64 = 0.03;
+
+/// The longest a stretch of misses can be and still be one packet of
+/// made-up audio, in symbols: sixty-four milliseconds.
+///
+/// A softphone's packets hold ten, twenty or thirty milliseconds of G.711,
+/// and what the buffer makes up, plays twice or drops is one of them: the
+/// garbage lasts exactly that long, and the line either side of it is the
+/// line it always was. Longer than a packet, a disturbance that [`STORM_GARBLED`]
+/// would call made-up audio is something else -- a line that has gone on
+/// being bad, or a receiver losing its way -- and a slower rate is worth
+/// asking for.
+///
+/// Measured over eight routes, ten, twenty and thirty milliseconds concealed
+/// in place, by a fading repeat and by comfort noise, mu-law and A-law, round
+/// trips of 0.6 s and 20 ms: a ten-millisecond packet made stretches of 45 to
+/// 380 decisions, a twenty-millisecond one 144 to 415, and a thirty of 223 to
+/// 284 -- its own 80, 160 or 240 and the loops coming back after them. A
+/// hundred milliseconds of noise made 619 to 876. 512 lies between the
+/// longest packet and the shortest hundred-millisecond burst.
+///
+/// The length alone tells nothing else, and this constant no longer pretends
+/// to: thirty milliseconds of noise ten decibels over the line's own error
+/// made stretches of 177 to 237, inside a thirty-millisecond packet's own
+/// range, and is held against the rate all the same. What tells them apart is
+/// [`STORM_GARBLED`]; all this does is stop a stretch that goes on and on
+/// from being excused as a packet.
+const STORM_SHORT: usize = 512;
+
+/// A hole in the audio: the line in front of the equaliser at under a
+/// hundred-thousandth of its own level, that many symbols in a row, and how
+/// long that level is taken over -- half a second of symbols.
+///
+/// Some softphones do not conceal a lost packet at all: they play zeroes.
+/// Nothing is made up, so [`STORM_GARBLED`] has nothing to weigh -- silence
+/// misses hardly anything, since a decision at nothing is nearer the
+/// quietest level than the boundary in most intervals -- and nothing moves
+/// either, so a hole leaves no mark but its own silence.
+///
+/// The decisions cannot see that silence. The equaliser is 63 half symbols
+/// of line and a feedback filter of its own past decisions, so it goes on
+/// putting out codeword-sized numbers through a hole with nothing at all
+/// behind it. Measured over thirty seconds of twenty-millisecond holes every
+/// second and a half on the mu-law 0.6 s route, the longest run of decisions
+/// under a ten-thousandth of the decisions' own level was 2 -- against 1 on
+/// a clean line, 2 under a concealer's comfort noise and 7 under its fading
+/// repeat. There is nothing in the decisions to tell a hole by, and a rule
+/// written on them fires on the wrong things or not at all.
+///
+/// The line the equaliser drew the symbol from ([`pcm::Symbol::line`]) tells
+/// it at once. That window is 63 half symbols, 3.94 ms, so a hole longer
+/// than the window empties it, and once it is empty there is nothing in it
+/// but the codec's own ringing from either side of the hole. Measured over
+/// 130 s of the same known data on each of eighty routes -- both laws, round
+/// trips of 0.6 s and 20 ms, judging exactly as [`Decisions::line`] judges,
+/// with a hole held out of the level as it holds one out -- the quietest the
+/// window reached against that level, and the longest run of symbols under
+/// each threshold:
+///
+/// | what happened | quietest | run under 1e-3 | under 1e-4 | under 1e-5 |
+/// |---|---|---|---|---|
+/// | nothing: a clean line | -5.8 to -5.2 dB | none | none | none |
+/// | 5 to 300 ms of noise at 1e-3 | -5.8 to -4.0 dB | none | none | none |
+/// | the floor stepped or ramped to 6e-4 | -4.8 to -4.2 dB | none | none | none |
+/// | a slip, and a softphone's gain control | -23.8 to -21.6 dB | none | none | none |
+/// | 10 to 60 ms concealed with comfort noise | -6.8 to -6.4 dB | none | none | none |
+/// | 10 to 60 ms concealed with a fading repeat | -32.1 to -15.1 dB | 0 to 3 | none | none |
+/// | 100 ms concealed with a fading repeat | -34.8 to -33.2 dB | 12 to 17 | none | none |
+/// | 200 ms concealed with a fading repeat | -39.0 to -37.6 dB | 43 to 49 | none | none |
+/// | 5 ms of digital silence | -59.4 dB | 10 | 9 | 6 |
+/// | 10 to 30 ms of digital silence | -86 to -84 dB | 49 to 211 | 47 to 209 | 41 to 203 |
+///
+/// So the thousandth this once used was not a line at all. A concealer that
+/// repeats the last packet fades it out linearly, and the end of the fade is
+/// silence: the longer the packet it is repeating, the longer the window
+/// spends under any given level. At a thousandth, sixty milliseconds of
+/// fading repeat already leaves a run of 3 and a hundred leaves 12 to 17 --
+/// which, against [`HOLE`]'s sixteen, is a hundred milliseconds of made-up
+/// audio counted as a hole on A-law and not on mu-law. There was no margin
+/// there to speak of and the note claimed a wide one.
+///
+/// There is a wide one a hundred times further down. A hole empties the
+/// window altogether and reaches 4e-9 of the level -- the codec's ringing
+/// and nothing else -- while the quietest thing that is not a hole, two
+/// hundred milliseconds of fading repeat, stops at 1.26e-4. A
+/// hundred-thousandth sits 11 dB under everything that is not a hole and
+/// 34 dB over every hole, and nothing that is not a hole leaves a run of one
+/// symbol under it anywhere in the eighty routes.
+///
+/// Sixteen symbols under that level is two milliseconds of line gone on top
+/// of the window emptying, so about seven milliseconds of silence in all:
+/// ten milliseconds leaves a run of 41 to 42, twenty leaves 119 to 121 and
+/// thirty leaves 203, while five leaves 6 and is left alone, as five
+/// milliseconds of noise is (see [`BLOCK`]), and four never empties the
+/// window at all.
+///
+/// The line's own level is a slow mean of that same window's power, and a
+/// hole is held out of it: a hole cannot be allowed to drag its own
+/// yardstick down after it, which is why [`carrier::Watch`] holds its
+/// reference for exactly as long.
+///
+/// A far end that has genuinely stopped is not this, and is not this end's
+/// to cure by a slower rate either. It differs only in lasting: a buffer's
+/// hole is over in tens of milliseconds, and a far end on its way out holds
+/// the line quiet until [`carrier::Watch::quiet`] sees it -- 20 dB under the
+/// reference on a 50 ms time constant, which measured wants 0.237 s -- and
+/// then the looks go for that reason instead.
+const HOLE: usize = 16;
+const HOLE_LEVEL: f64 = 1e-5;
+const LEVEL_OVER: f64 = 4000.0;
+
+/// Data mode's levels closer than this many of the receiver's own averaged
+/// errors, this many looks running, are a line steadily short of margin: the
+/// rule the watch on the averaged error kept before any of this counted
+/// misses, and the rule this keeps for that kind of trouble still.
+///
+/// A line that is steadily short of margin is the one thing the receiver's
+/// average does read honestly. It holds its loops through a burst of noise or
+/// a packet of made-up audio and barely takes either in -- which is what
+/// makes it a poor judge of a disturbance, and is why the decisions are
+/// counted at all -- but a floor that has risen it follows exactly, and
+/// unlike a decision's error it is not compressed by the levels it is
+/// measured against. So that line is left where it was drawn: seven averaged
+/// errors, four looks running.
+///
+/// Seven, measured here as well as there. Over 130 s of call in ten-second
+/// stretches, a rung was worth taking where the levels stood 3.7 and 6.3
+/// averaged errors apart -- a floor stepped to 6e-4 over the 0.6 s round
+/// trip, and the same floor reached over twenty seconds -- and not where they
+/// stood 7.2, 7.4, 7.8 or 8.0, where holding the rate left 11 to 17 of about
+/// 2470 blocks errored in every later stretch and a rung would have cost ten
+/// per cent of them to take that to nothing. The measurements straddle seven
+/// and do not pin it closer than between 6.3 and 7.2; the old note's own
+/// measurement -- "a frame in some hundreds at six, none in a quarter of a
+/// million bits at eight" -- puts it in the same place, and it stays at
+/// seven.
+const MARGIN: f64 = 7.0;
+const MARGIN_SHORT: u32 = 4;
+
+/// Levels fewer than this many of the receiver's averaged errors apart are a
+/// receiver that is reading nothing at all: two.
+///
+/// Whether the receiver is reading anything is a question about the receiver,
+/// not about the line, so it is asked of the receiver's own averaged error;
+/// and a receiver that has lost the constellation is not handed it back by a
+/// slower rate, so it is trained again instead. It is asked only where
+/// [`MARGIN`] has already found four looks running short of margin, which is
+/// what keeps a hole in the audio from asking for one: through a hole the
+/// average is a mean of nothing at all and climbs for that reason alone.
+const UNREADABLE_GAP: f64 = 2.0;
+
+/// Looks held after a stretch of garbage that was not the line's: what the
+/// receiver reads while its loops come back in is not the line either. Half a
+/// second, which is how long it holds them still before deciding the errors
+/// are the line's after all ([`pcm`]'s `HELD_AT_MOST`).
+const HOLD_AFTER: u32 = 1;
 
 /// Frames over which a read of impossible numbers is counted, how many make
 /// it a lost place, and symbols kept for finding the place again.
@@ -587,6 +883,266 @@ fn least_gap(cp: &Cp, route: &Route) -> f64 {
         .fold(f64::INFINITY, f64::min)
 }
 
+/// What a look saw of data mode's decisions.
+#[derive(Debug, Clone, Copy, Default)]
+struct Look {
+    symbols: usize,
+    misses: usize,
+    /// The error's power, summed.
+    power: f64,
+    /// The mean power of the error over its worst block.
+    worst: f64,
+    /// Whether something that is not the line happened while it ran.
+    spoiled: bool,
+}
+
+/// A stretch of decisions with misses in it, bounded by clean ones either
+/// side (see [`Decisions::storm`]).
+#[derive(Debug, Clone, Copy, Default)]
+struct Storm {
+    /// Decisions since the first miss in it, and since the first to the last.
+    spanned: usize,
+    ended: usize,
+    misses: usize,
+    /// The sound under it: the decisions' power since the first miss, the
+    /// same as it stood at the last miss, and the power of the decisions
+    /// that missed (see [`STORM_GARBLED`]).
+    sound: f64,
+    at_last: f64,
+    garbled: f64,
+}
+
+/// Data mode's decisions, as the watch on the margin sees them.
+#[derive(Debug, Clone, Default)]
+struct Decisions {
+    /// Each interval's levels, both signs, in order.
+    levels: [Vec<f64>; INTERVALS],
+    /// Whether the watch has begun.
+    started: bool,
+    /// The look under way, and the block under way in it: symbols and power.
+    look: Look,
+    block: (usize, f64),
+    /// The stretch of misses under way, and looks still to be held after one
+    /// that was garbage.
+    storm: Option<Storm>,
+    holding: u32,
+    /// The look before, held back until this one is over (see [`Self::look`]).
+    held: Option<Look>,
+    /// Times the frames had moved when the look under way began.
+    moved: u32,
+    /// The evidence so far, and the looks it was gathered from.
+    evidence: f64,
+    recent: VecDeque<Look>,
+    /// The line's own level, as a slow mean of what the equaliser was given,
+    /// and the symbols since the last one whose line reached a thousandth of
+    /// it (see [`HOLE`]).
+    level: f64,
+    hole: usize,
+}
+
+impl Decisions {
+    /// A watch on decisions against data mode's levels, not yet begun.
+    fn new(levels: &Levels) -> Self {
+        let levels = std::array::from_fn(|i| {
+            let mut sorted: Vec<f64> = levels[i].iter().map(|l| l.0).collect();
+            sorted.sort_by(f64::total_cmp);
+            sorted
+        });
+        Self { levels, ..Self::default() }
+    }
+
+    /// One symbol of data mode, as the equaliser gave it, in interval `i`.
+    ///
+    /// Judged against the two levels either side of it, of that interval and
+    /// either sign: the error is its distance from the nearer, and the miss
+    /// is in how far it went towards the boundary between them. Levels stand
+    /// further apart the louder they are, and a symbol at a loud level can
+    /// wander further without being misread; beyond the outermost there is
+    /// no other level to take it for at all.
+    fn symbol(&mut self, i: usize, value: f64) {
+        if !self.started {
+            return;
+        }
+        let levels = &self.levels[i];
+        let k = levels.partition_point(|&l| l <= value);
+        let (error, share) = match (k.checked_sub(1).map(|b| levels[b]), levels.get(k)) {
+            (Some(below), Some(&above)) => {
+                let error = (value - below).min(above - value);
+                (error, error / (0.5 * (above - below)))
+            }
+            (Some(outermost), None) => (value - outermost, 0.0),
+            (None, Some(&outermost)) => (outermost - value, 0.0),
+            (None, None) => return,
+        };
+        let look = &mut self.look;
+        look.symbols += 1;
+        look.power += error * error;
+        let missed = share > MISSED;
+        if missed {
+            look.misses += 1;
+        }
+        self.block.0 += 1;
+        self.block.1 += error * error;
+        if self.block.0 == BLOCK {
+            look.worst = look.worst.max(self.block.1 / BLOCK as f64);
+            self.block = (0, 0.0);
+        }
+        self.storm(missed, value);
+    }
+
+    /// One symbol's worth of the line in front of the equaliser, through the
+    /// hole in the audio under way, if there is one.
+    ///
+    /// A hole is judged on the line itself, not on what the equaliser made
+    /// of it: a decision is still a codeword-sized number through a hole
+    /// with nothing behind it, and the line is nothing. [`HOLE`] symbols in
+    /// a row whose line is under a thousandth of the line's own level is a
+    /// buffer playing zeroes, and the looks go as they do for made-up audio
+    /// -- silence in the codewords' place is no more the line's than noise
+    /// in their place is, and no slower rate reads a codeword that never
+    /// arrived.
+    /// True on the one symbol that declares a hole, so that it can be
+    /// counted.
+    fn line(&mut self, power: f64) -> bool {
+        if self.level > 0.0 && power < HOLE_LEVEL * self.level {
+            self.hole += 1;
+            // Held out of the level: see [`HOLE`].
+            if self.hole != HOLE {
+                return false;
+            }
+            self.look.spoiled = true;
+            self.holding = HOLD_AFTER;
+            return true;
+        }
+        self.hole = 0;
+        self.level += (power - self.level) / LEVEL_OVER;
+        false
+    }
+
+    /// One decision, a miss or not, through the stretch of misses under way.
+    ///
+    /// A stretch begins at a miss and runs to the last miss within
+    /// [`STORM_GAP`] decisions of it. When it ends, a stretch of more than
+    /// the line's own tail ([`STORM_MISSES`]) is judged on two counts: how
+    /// much of the sound under it its misses carried, which says the audio
+    /// was made up rather than disturbed ([`STORM_GARBLED`]), and how long it
+    /// lasted, which says it was one packet of made-up audio and not a line
+    /// that has gone on being bad ([`STORM_SHORT`]). Both, and it is a jitter
+    /// buffer's doing rather than the line's: the look it happened in -- and
+    /// so the look before it, which a look always waits for -- go, and so do
+    /// the next [`HOLD_AFTER`], for the loops to come back in.
+    fn storm(&mut self, missed: bool, value: f64) {
+        let sound = value * value;
+        let Some(mut storm) = self.storm else {
+            self.storm = missed.then_some(Storm { spanned: 0, ended: 0, misses: 1, sound, at_last: sound, garbled: sound });
+            return;
+        };
+        storm.spanned += 1;
+        storm.sound += sound;
+        if missed {
+            storm.ended = storm.spanned;
+            storm.misses += 1;
+            storm.at_last = storm.sound;
+            storm.garbled += sound;
+        }
+        if storm.spanned - storm.ended <= STORM_GAP {
+            self.storm = Some(storm);
+            return;
+        }
+        self.storm = None;
+        // Strictly more, so that a stretch with no sound under it at all is
+        // not garbage by default: silence carries nothing for this to weigh,
+        // and is [`HOLE`]'s to catch.
+        let garbled = storm.garbled > STORM_GARBLED * storm.at_last;
+        if storm.misses >= STORM_MISSES && garbled && storm.ended < STORM_SHORT {
+            self.look.spoiled = true;
+            self.holding = HOLD_AFTER;
+        }
+    }
+
+    /// Something that is not the line happened in the look under way.
+    fn spoil(&mut self) {
+        self.look.spoiled = true;
+    }
+
+    /// End the look under way, whose end finds the frames moved `moved`
+    /// times so far; and the look before it, if it stands.
+    ///
+    /// A look is held back until the next is over, and thrown away if either
+    /// was spoiled. What spoils one is a jitter buffer, in any of the three
+    /// shapes it comes in.
+    ///
+    /// A slip inserts a packet of made-up audio or drops one, and moves every
+    /// symbol after it by a packet's length. The garbage itself is a stretch
+    /// of misses a packet long, which [`Self::storm`] catches whatever the
+    /// length; and when the length is not a whole number of frames -- 160
+    /// codewords never is -- the frames turn up somewhere else a few frames
+    /// later, which says it was a slip too. The receiver holding its loops
+    /// says nothing: it holds them through any sudden rise in error, a burst
+    /// of noise as much as a slip.
+    ///
+    /// A packet lost and concealed where it was moves nothing at all, and a
+    /// slip of a whole number of frames -- 240 codewords is 40 of them --
+    /// leaves the frame place where it was as well, so `moved` never changes
+    /// for either. Nothing but the garbage marks them, and the garbage is
+    /// what is judged.
+    ///
+    /// And a far end going quiet is not a disturbance a slower rate cures
+    /// either -- though that is a far end on its way out and not a jitter
+    /// buffer at all: it wants about a quarter of a second of silence before
+    /// it shows (see [`carrier::Watch::quiet`]), where a buffer's gap is
+    /// twenty milliseconds.
+    fn look(&mut self, moved: u32) -> Option<Look> {
+        if !self.started {
+            // The first look only begins the watch.
+            self.started = true;
+            self.moved = moved;
+            return None;
+        }
+        if self.block.0 >= BLOCK / 2 {
+            self.look.worst = self.look.worst.max(self.block.1 / self.block.0 as f64);
+        }
+        self.block = (0, 0.0);
+        if moved != self.moved {
+            self.look.spoiled = true;
+        }
+        self.moved = moved;
+        let look = std::mem::take(&mut self.look);
+        if self.holding > 0 {
+            self.holding -= 1;
+            self.look.spoiled = true;
+        }
+        let before = self.held.replace(look)?;
+        (!before.spoiled && !look.spoiled).then_some(before)
+    }
+
+    /// Weigh a look that stands. True once there is evidence enough for a
+    /// slower rate.
+    fn weigh(&mut self, look: Look) -> bool {
+        let counted = (look.misses as f64 - MISSES_ALLOWED).clamp(0.0, LOOK_AT_MOST);
+        self.evidence = self.evidence * (-MARGIN_EVERY / REMEMBERED).exp() + counted;
+        self.recent.push_back(look);
+        if self.recent.len() as f64 > REMEMBERED / MARGIN_EVERY {
+            self.recent.pop_front();
+        }
+        self.evidence >= ENOUGH
+    }
+
+    /// The error's RMS over the worst 32 ms block that [`WORST_OF`] of the
+    /// recent looks reached: the third worst of them, not the worst.
+    fn worst(&self) -> f64 {
+        let mut blocks: Vec<f64> = self.recent.iter().map(|l| l.worst).collect();
+        blocks.sort_by(f64::total_cmp);
+        blocks.iter().rev().nth(WORST_OF - 1).copied().unwrap_or_default().sqrt()
+    }
+
+    /// The error's RMS over all the recent looks.
+    fn rms(&self) -> f64 {
+        let (power, symbols) = self.recent.iter().fold((0.0, 0), |(p, n), l| (p + l.power, n + l.symbols));
+        (power / symbols.max(1) as f64).sqrt()
+    }
+}
+
 /// Which of a DIL's symbols can be learned from and judged by (see
 /// `Modem::dil_trusted`).
 fn trusted_symbols(descriptor: &Descriptor, law: Law) -> Vec<Trust> {
@@ -796,6 +1352,8 @@ pub struct Modem {
     /// whether one is wanted.
     retrain_watch: RetrainWatch,
     wants_retrain: bool,
+    /// Holes in the audio seen in data mode (see [`HOLE`]).
+    holes: u32,
     /// Since the receiver last held a place, in samples.
     lost_since: Option<u64>,
     /// The CP data mode is running on, which Rd and a renegotiation's
@@ -814,10 +1372,12 @@ pub struct Modem {
     clearing: bool,
     renegotiations: u32,
     /// The least distance between data mode's levels as the route delivers
-    /// them, when the margin is next looked at, and looks in a row it was
-    /// short.
+    /// them, when the margin is next looked at, and how data mode's
+    /// decisions are going.
     least_gap: f64,
     margin_at: u64,
+    decisions: Decisions,
+    /// Looks in a row leaving the levels short of margin (see [`MARGIN`]).
     short: u32,
     /// How much worse than the DIL showed data mode has found the line.
     worse: f64,
@@ -885,6 +1445,7 @@ impl Modem {
             // The digital modem takes V.34's call side, and tone B is its.
             retrain_watch: RetrainWatch::new(Role::Call, fs),
             wants_retrain: false,
+            holes: 0,
             lost_since: None,
             in_use: None,
             rd_watch: RWatch::default(),
@@ -897,6 +1458,7 @@ impl Modem {
             renegotiations: 0,
             least_gap: f64::INFINITY,
             margin_at: 0,
+            decisions: Decisions::default(),
             short: 0,
             worse: 1.0,
             shaping: (Shaping::NONE, 1.0),
@@ -1052,11 +1614,22 @@ impl Modem {
         self.renegotiations
     }
 
+    /// Holes in the audio seen since data mode began (see [`HOLE`]).
+    pub fn holes(&self) -> u32 {
+        self.holes
+    }
+
     /// Start a rate renegotiation from data mode (9.6.2.1), asking for the
     /// fastest downstream the route carries at no more than `most` bit/s.
     /// False, and nothing done, outside data mode or if the route carries no
     /// rate that slow.
     pub fn renegotiate(&mut self, most: u32) -> bool {
+        self.renegotiate_within(most, 0)
+    }
+
+    /// The same, and not below `least` if believing less of what data mode
+    /// found will keep it there.
+    fn renegotiate_within(&mut self, most: u32, least: u32) -> bool {
         if !self.in_data_mode() {
             return false;
         }
@@ -1066,10 +1639,18 @@ impl Modem {
         let jd = self.far_jd.unwrap_or_default();
         let slow_enough = |drn: u8| jd.enables(drn) && sequences::data_rate(drn).is_some_and(|rate| rate <= most);
         // The shaping asked for at the start, and the errors it was expected
-        // to leave, and then as much worse as data mode has found the line.
+        // to leave, and then as much worse as data mode has found the line --
+        // or as much of that as keeps the step inside the cap.
         let (shaping, left) = self.shaping;
-        let route = shaping::scaled(route, left * self.worse * self.worse);
-        let Some(new) = dil::choose_shaped(&route, law, limit, slow_enough, shaping) else { return false };
+        let mut worse = self.worse;
+        let new = loop {
+            let scaled = shaping::scaled(route, left * worse * worse);
+            let Some(new) = dil::choose_shaped(&scaled, law, limit, slow_enough, shaping) else { return false };
+            if worse <= 1.0 || sequences::data_rate(new.data.drn).is_some_and(|rate| rate >= least) {
+                break new;
+            }
+            worse = (worse / BELIEVED_LESS).max(1.0);
+        };
         let mut data = new.data;
         self.finish_cp(&mut data);
         let training = choice.training.clone();
@@ -1215,6 +1796,9 @@ impl Modem {
         match self.watching() {
             Some(learn) => {
                 self.far_end.feed(line, learn);
+                if self.far_end.quiet() {
+                    self.decisions.spoil();
+                }
                 if self.far_end.gone() {
                     // A far end that has hung up says nothing first. Nothing
                     // more goes to it, and the call is over, as if it had
@@ -1294,6 +1878,9 @@ impl Modem {
                     self.deadline = None;
                     self.margin_at = self.samples(MARGIN_SETTLE);
                     self.short = 0;
+                    if let Some(frames) = self.frames.as_ref() {
+                        self.decisions = Decisions::new(&frames.levels);
+                    }
                 }
                 if self.in_data_mode() && self.now >= self.margin_at {
                     self.margin_at = self.samples(MARGIN_EVERY);
@@ -1729,6 +2316,10 @@ impl Modem {
         }
         let i = symbol.interval();
         frames.frame[i] = nearest(&frames.levels[i], symbol.value);
+        if frames.data && self.stage == Stage::Data && !self.renegotiating {
+            self.decisions.symbol(i, symbol.value);
+            self.holes += u32::from(self.decisions.line(symbol.line));
+        }
         if frames.history.len() == PLACE_KEPT {
             frames.history.pop_front();
         }
@@ -1818,33 +2409,134 @@ impl Modem {
         }
     }
 
-    /// Whether data mode's levels still stand far enough apart for the error
-    /// the receiver is making, and a slower rate if they have not for a while.
+    /// Whether data mode is reading its levels cleanly enough for the rate,
+    /// and a slower rate (9.6.2.1) if it is not. When is this end's to say:
+    /// "The rate renegotiation procedure can be initiated at any time during
+    /// data mode" (9.6).
+    ///
+    /// Two things are watched, because a line goes wrong in two ways.
+    ///
+    /// One is a line steadily short of margin -- a floor that has risen --
+    /// and that is the receiver's own averaged error to judge, on the rule it
+    /// was judged on before any of this counted misses: levels closer than
+    /// [`MARGIN`] of that error, four looks running. The average follows a
+    /// risen floor exactly, and is not compressed by the levels the way a
+    /// decision's error is, so nothing here reads such a line better than it
+    /// is.
+    ///
+    /// The other is a disturbance, and that same average is blind to it. A
+    /// tenth of a second of noise spoils several blocks of data, and an
+    /// average looked at a few times a second sees it only if a look falls
+    /// inside one -- and the receiver holds its loops through a burst as it
+    /// would through a slip, so its average barely takes the burst in at all.
+    /// That is what the decisions are counted for, symbol by symbol.
     fn watch_margin(&mut self) {
+        // What the receiver itself is making of the line, as the margin was
+        // watched before the decisions were counted (see [`MARGIN`]).
         let law = self.settings.law;
-        let rms = ucode::level(law, self.settings.uinfo) / 10f64.powf(self.rx.snr_db() / 20.0);
-        // A slip's burst is not the line.
-        if self.rx.is_lost() {
+        let receiver = ucode::level(law, self.settings.uinfo) / 10f64.powf(self.rx.snr_db() / 20.0);
+        // A receiver holding its loops says nothing about the margin either
+        // way: it holds them through any sudden rise in error, a burst of
+        // noise as much as a slip, and the average it is holding is the
+        // average from before the trouble. The count of looks short of margin
+        // stands still while it does, as it did before this watch counted
+        // anything.
+        //
+        // Only that count stands down. The looks, the evidence and the
+        // stretches of misses go on being gathered, because a long burst of
+        // real noise makes the receiver hold its loops too, and what is
+        // gathered through one is exactly what says the line is bad. Standing
+        // those down as well cost three hundred milliseconds of noise every
+        // second and a half its fall back altogether -- 54 666 for ever,
+        // where it should reach 40 000 and error nothing after it.
+        let holding_loops = self.rx.is_lost();
+        let losing_it = self.least_gap < UNREADABLE_GAP * receiver;
+        if losing_it {
+            // A receiver that is not reading the constellation is no judge
+            // of what rate the line would carry.
+            self.decisions.spoil();
+        }
+        let stands = self.decisions.look(self.frames_moved());
+        // A line steadily short of margin, on the rule that judged one before
+        // any of this: levels closer than [`MARGIN`] of the receiver's own
+        // averaged error, four looks running. Measured over the A-law 0.6 s
+        // round trip with ten milliseconds of digital silence every second
+        // and a half, where a count of looks that found the receiver
+        // unreadable used to ask for a retrain instead: this asks for the
+        // renegotiation main asks for, at the moment main asks for it, and
+        // ends the two minutes at 46 666 with 5877 clean blocks of 6097,
+        // where the retrains left it at 44 000 with 3834 of 4533.
+        let steady = self.least_gap < MARGIN * receiver;
+        self.short = if holding_loops {
+            self.short
+        } else if steady {
+            self.short + 1
+        } else {
+            0
+        };
+        if self.short >= MARGIN_SHORT {
+            self.short = 0;
+            if losing_it {
+                // Nothing is being read at all: that is a receiver to train
+                // again.
+                self.wants_retrain = true;
+            } else {
+                self.fall_back(0.0, receiver);
+            }
             return;
         }
-        self.short = if self.least_gap < MARGIN * rms { self.short + 1 } else { 0 };
-        if self.short < MARGIN_SHORT {
+        let Some(look) = stands else { return };
+        if !self.decisions.weigh(look) {
             return;
         }
-        self.short = 0;
-        if self.least_gap < 2.0 * rms {
+        if self.least_gap < 2.0 * self.decisions.rms() {
             // Nothing is being read at all: that is a receiver to train again.
             self.wants_retrain = true;
             return;
         }
-        // The next rate is chosen for the line as data mode finds it.
+        // The next rate is chosen for the line as the worst of the recent
+        // looks found it, not as they found it on average: the average of a
+        // line that is clean but for a burst every second or two is nearly a
+        // clean line's, and a rate chosen for it goes on making errors in
+        // every burst -- and asks again, and again. Chosen for the worst, one
+        // renegotiation lands where the bursts are read cleanly, and that is
+        // also what stops the next: the same bursts at the new rate come
+        // nowhere near its levels' boundaries.
+        //
+        // And never under the receiver's own averaged error, which is the
+        // same measurement read a second way and is not compressed as this
+        // one is. A decision's error here is its distance from the nearer of
+        // the two levels either side of it, so a decision that has crossed a
+        // boundary is measured to the wrong one and can never be out by more
+        // than half a gap, however far out it really was. On a line that is
+        // clean but for bursts that hardly moves the answer, because the
+        // worst block is a burst and a burst is read against the gaps it
+        // crosses; on a floor stepped up until it errors every few seconds
+        // it reads the line better than it is. Measured over the 0.6 s round
+        // trip with the floor stepped to 6e-4, the worst block came to
+        // 0.000325 where the receiver's own error was 0.000518 -- the same
+        // number main reads -- and the rate chosen from the first was 50 666,
+        // which still errored 4 of 495 blocks and then 4 of 357 and had to
+        // be asked again, ending at 44 000, a rung below where main settles
+        // in one go. The larger of the two lands at 45 333 first time, where
+        // nothing errors at all afterwards.
+        self.fall_back(self.decisions.worst(), receiver);
+    }
+
+    /// Renegotiate for a line whose error is `measured`, never read better
+    /// than the receiver's own averaged error `receiver`.
+    fn fall_back(&mut self, measured: f64, receiver: f64) {
         if let Some(route) = self.route.as_ref() {
+            let law = self.settings.law;
             let limit = f64::from(super::power_limit(&self.settings.server)) / 32768.0;
             let expected = route.noise_at(law, limit) * self.shaping.1.sqrt();
-            self.worse = self.worse.max(rms / expected);
+            self.worse = self.worse.max(measured.max(receiver) / expected);
         }
         let most = self.downstream_rate.saturating_sub(1);
-        if !self.renegotiate(most) {
+        // And no further down than [`MOST_DROPPED`] bits a frame in one go.
+        let drn = self.in_use.as_ref().map_or(0, |cp| cp.drn);
+        let least = sequences::data_rate(drn.saturating_sub(MOST_DROPPED)).unwrap_or(0);
+        if !self.renegotiate_within(most, least) {
             // Nothing slower the route carries: train again from phase 2.
             self.wants_retrain = true;
         }
@@ -1946,5 +2638,259 @@ mod tests {
         let last = end - JD_PRIME_BITS - JD_BITS;
         signs.drain(last - 60..last + 20);
         assert_eq!(jd_prime_at(&signs), Some(end - 80));
+    }
+
+    /// A watch on decisions against levels at 1 and 3, either sign, in every
+    /// interval, begun.
+    fn watching() -> Decisions {
+        let levels: Levels = std::array::from_fn(|_| vec![(1.0, 1, true), (-1.0, 1, false), (3.0, 3, true), (-3.0, 3, false)]);
+        let mut decisions = Decisions::new(&levels);
+        assert!(decisions.look(0).is_none(), "the first look only begins the watch");
+        decisions
+    }
+
+    /// A look's worth of symbols, `misses` of them misses, spread evenly
+    /// through it as a line at its own margin misses.
+    fn symbols(decisions: &mut Decisions, misses: usize) {
+        stretch(decisions, misses, 2000);
+    }
+
+    /// A look's worth of symbols with `misses` misses spread evenly over the
+    /// first `over` of them, and nothing missed after.
+    fn stretch(decisions: &mut Decisions, misses: usize, over: usize) {
+        for n in 0..2000 {
+            let missed = n < over && n * misses / over != (n + 1) * misses / over;
+            decisions.symbol(n % INTERVALS, if missed { 1.95 } else { 1.05 });
+        }
+    }
+
+    /// A decision is judged by how far it went towards the boundary with the
+    /// level on the side it went, as a share of the way: a miss past
+    /// four-fifths of it, whichever level it was nearer, and never beyond
+    /// the outermost level, where there is no other level to take it for.
+    #[test]
+    fn a_decision_is_judged_by_how_far_it_went_towards_the_next_level() {
+        let mut decisions = watching();
+        let cases = [
+            (1.1, false),
+            (1.75, false),
+            (1.95, true),
+            (2.1, true),
+            (2.5, false),
+            (0.15, true),
+            (-0.1, true),
+            (-2.9, false),
+            (-5.0, false),
+            (9.0, false),
+        ];
+        for (value, missed) in cases {
+            let before = decisions.look.misses;
+            decisions.symbol(0, value);
+            assert_eq!(decisions.look.misses > before, missed, "{value}");
+        }
+        // The error is the distance from the nearer level, outermost or not.
+        let errors = [0.1, 0.75, 0.95, 0.9, 0.5, 0.85, 0.9, 0.1, 2.0, 6.0];
+        let power: f64 = errors.iter().map(|e| e * e).sum();
+        assert!((decisions.look.power - power).abs() < 1e-9, "{} against {power}", decisions.look.power);
+    }
+
+    /// A stretch of misses dense enough to be garbage and short enough to be
+    /// one packet of it is a jitter buffer's, not the line's: the look it fell
+    /// in goes, and with it the look before -- which every look waits for --
+    /// and the look after, while the loops come back. A stretch as long as a
+    /// burst of noise on the line is weighed like any other.
+    #[test]
+    fn a_packet_s_worth_of_garbage_is_not_the_line_and_a_hundred_milliseconds_of_noise_is() {
+        let mut decisions = watching();
+        // One twenty-millisecond packet: 160 decisions, a fifth of them missed.
+        stretch(&mut decisions, 32, 160);
+        assert!(decisions.look(0).is_none(), "held until the next is over");
+        symbols(&mut decisions, 0);
+        assert!(decisions.look(0).is_none(), "the packet's look goes, and the one before it");
+        symbols(&mut decisions, 0);
+        assert!(decisions.look(0).is_none(), "and the look after it, while the loops come back");
+        symbols(&mut decisions, 0);
+        assert!(decisions.look(0).is_some(), "and then the line is the line again");
+        // A hundred milliseconds of noise: 800 decisions, a tenth missed.
+        let mut decisions = watching();
+        stretch(&mut decisions, 80, 800);
+        assert!(decisions.look(0).is_none(), "held until the next is over");
+        symbols(&mut decisions, 0);
+        assert_eq!(decisions.look(0).map(|l| l.misses), Some(80), "a burst of noise is the line's");
+    }
+
+    /// Levels a route's are like, rather than evenly spaced: a quiet pair a
+    /// quarter of a unit apart and a loud pair two apart, either sign, in
+    /// every interval.
+    fn watching_uneven() -> Decisions {
+        let levels: Levels =
+            std::array::from_fn(|_| vec![(1.0, 1, true), (1.5, 2, true), (8.0, 3, true), (12.0, 4, true), (-1.0, 1, false), (-1.5, 2, false), (-8.0, 3, false), (-12.0, 4, false)]);
+        let mut decisions = Decisions::new(&levels);
+        assert!(decisions.look(0).is_none(), "the first look only begins the watch");
+        decisions
+    }
+
+    /// What tells a packet of made-up audio from a burst of noise on the
+    /// line is not how long the stretch lasted -- both can be thirty
+    /// milliseconds of it -- but which decisions missed. Noise reaches a
+    /// boundary only where the boundary is near, at the quiet codewords,
+    /// which carry next to none of the sound; made-up audio is in the
+    /// codewords' place and misses at every level alike, so its misses carry
+    /// their share of the sound ([`STORM_GARBLED`]).
+    ///
+    /// Both stretches here are 160 decisions with 32 misses or more, which
+    /// the count this used to be judged on could not tell apart at all.
+    #[test]
+    fn a_stretch_is_made_up_audio_only_if_its_misses_carry_the_sound() {
+        // Every fifth decision is a quiet codeword, and in the noisy stretch
+        // every one of those has been pushed to the boundary between the
+        // quiet levels. Nothing else has moved: the loud codewords, which
+        // are nearly all the sound there is, are read as cleanly as ever.
+        let noise = |n: usize| if n.is_multiple_of(5) { 1.25 } else { 8.3 };
+        // Made-up audio misses at the loud levels as well.
+        let made_up = |n: usize| match n % 5 {
+            0 => 1.25,
+            1 => 10.0,
+            _ => 8.3,
+        };
+        for (what, value, stands) in [("noise", &noise as &dyn Fn(usize) -> f64, true), ("made-up audio", &made_up, false)] {
+            let mut decisions = watching_uneven();
+            for n in 0..2000 {
+                decisions.symbol(n % INTERVALS, if n < 160 { value(n) } else { 8.3 });
+            }
+            assert!(decisions.look(0).is_none(), "{what}: held until the next is over");
+            for n in 0..2000 {
+                decisions.symbol(n % INTERVALS, 8.3);
+            }
+            assert_eq!(decisions.look(0).is_some(), stands, "{what}");
+        }
+    }
+
+    /// Silence in the codewords' place is not the line either, and neither
+    /// the sound its misses carry nor the decisions themselves can say so:
+    /// silence carries no sound for [`STORM_GARBLED`] to weigh, and the
+    /// equaliser goes on putting out codeword-sized numbers from its own
+    /// feedback while nothing at all arrives. What says so is the line in
+    /// front of the equaliser, [`HOLE`] symbols of it under a thousandth of
+    /// the line's own level; a shorter gap -- what a concealer's fading
+    /// repeat leaves -- is left where it fell.
+    #[test]
+    fn a_hole_in_the_line_is_not_the_line_and_a_shorter_gap_is_left_alone() {
+        for (gap, stands) in [(HOLE - 1, true), (HOLE, false)] {
+            let mut decisions = watching_uneven();
+            for n in 0..2000 {
+                // The decisions say nothing either way: a hole is judged on
+                // the line alone, and these are what the equaliser puts out
+                // right through one.
+                decisions.symbol(n % INTERVALS, 8.3);
+                decisions.line(if (100..100 + gap).contains(&n) { 0.0 } else { 1.0 });
+            }
+            assert!(decisions.look(0).is_none(), "gap {gap}: held until the next is over");
+            for n in 0..2000 {
+                decisions.symbol(n % INTERVALS, 8.3);
+                decisions.line(1.0);
+            }
+            assert_eq!(decisions.look(0).is_some(), stands, "a gap of {gap} symbols");
+        }
+    }
+
+    /// The line's own level is a slow mean of what the equaliser was given,
+    /// and a hole is held out of it, so that however long a hole lasts it
+    /// cannot bring the level down to meet itself and stop being a hole.
+    #[test]
+    fn a_long_hole_does_not_drag_its_own_yardstick_down_after_it() {
+        let mut decisions = watching_uneven();
+        for n in 0..2000 {
+            decisions.symbol(n % INTERVALS, 8.3);
+            decisions.line(1.0);
+        }
+        assert!(decisions.look(0).is_none(), "held until the next is over");
+        // Four times [`LEVEL_OVER`] of nothing: were the level taking it in,
+        // it would be under a thousandth of where it started long before the
+        // end of this.
+        for n in 0..4 * LEVEL_OVER as usize {
+            decisions.symbol(n % INTERVALS, 8.3);
+            decisions.line(0.0);
+        }
+        assert!(decisions.look(0).is_none(), "the hole spoiled the look it fell in");
+        for n in 0..2000 {
+            decisions.symbol(n % INTERVALS, 8.3);
+            decisions.line(1.0);
+        }
+        // Still a hole at the end of it, not a line the watch has learnt.
+        assert!(decisions.look(0).is_none(), "and the look after it, held for the loops");
+    }
+
+    /// A look stands only once the look after it is over, and only if the
+    /// frames moved in neither and the far end went quiet in neither: a
+    /// slip's garbage, and the look before it that may hold its start, are
+    /// not the line's.
+    #[test]
+    fn a_look_stands_only_if_no_slip_or_silence_touched_it_or_the_next() {
+        let mut decisions = watching();
+        let mut look = |misses: usize, moved: u32, quiet: bool| {
+            symbols(&mut decisions, misses);
+            if quiet {
+                decisions.spoil();
+            }
+            decisions.look(moved).map(|l| l.misses)
+        };
+        assert_eq!(look(7, 0, false), None, "held until the next is over");
+        assert_eq!(look(1, 0, false), Some(7));
+        // The frames move while the third runs: the second and third go.
+        assert_eq!(look(30, 1, false), None);
+        assert_eq!(look(2, 1, false), None);
+        assert_eq!(look(3, 1, false), Some(2));
+        // The far end goes quiet in the sixth: the fifth and sixth go.
+        assert_eq!(look(40, 1, true), None);
+        assert_eq!(look(5, 1, false), None);
+        assert_eq!(look(0, 1, false), Some(5));
+    }
+
+    /// The rate is chosen for the worst 32 ms block that three of the recent
+    /// looks reached, and not for the worst one of them: one window out of
+    /// hundreds can hold anything, and the worst would let one window decide
+    /// how far the call falls.
+    #[test]
+    fn the_rate_is_chosen_for_the_worst_block_three_looks_reached() {
+        let look = |worst: f64| Look { symbols: 2000, misses: 3, power: 2000.0 * 0.01, worst, spoiled: false };
+        let mut decisions = watching();
+        for worst in [0.01, 0.01, 0.04, 0.09, 1.0] {
+            decisions.weigh(look(worst));
+        }
+        // 1.0 and 0.09 are above it, so 0.04 is the block three of them
+        // reached, and its RMS is 0.2.
+        assert!((decisions.worst() - 0.2).abs() < 1e-9, "{}", decisions.worst());
+    }
+
+    /// No one look is ever enough, however bad, nor a line that misses once
+    /// or twice a look for ever; three bad looks close together are, and so
+    /// are bursts every second and a half by the third, while bursts ten
+    /// seconds apart never add up to enough. A slower rate is then chosen
+    /// for the worst block the recent looks saw.
+    #[test]
+    fn evidence_is_enough_after_bad_looks_close_together_and_never_after_one() {
+        let bad = Look { symbols: 2000, misses: 40, power: 2000.0 * 0.04, worst: 0.09, spoiled: false };
+        let margin = Look { symbols: 2000, misses: 2, power: 2000.0 * 0.01, worst: 0.012, spoiled: false };
+        let mut decisions = watching();
+        assert!(!decisions.weigh(bad));
+        assert!(!decisions.weigh(bad));
+        assert!(decisions.weigh(bad));
+        assert!((decisions.worst() - 0.3).abs() < 1e-9);
+        let mut decisions = watching();
+        assert!((0..4000).all(|_| !decisions.weigh(margin)));
+        // Bursts `apart` seconds apart: which of them was enough, if any.
+        let bursts = |apart: f64| {
+            let mut decisions = watching();
+            (0..40).position(|_| {
+                let enough = decisions.weigh(bad);
+                for _ in 1..(apart / MARGIN_EVERY) as usize {
+                    decisions.weigh(margin);
+                }
+                enough
+            })
+        };
+        assert_eq!(bursts(1.5), Some(2));
+        assert_eq!(bursts(10.0), None);
     }
 }

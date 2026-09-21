@@ -361,6 +361,15 @@ impl FullCall {
         false
     }
 
+    /// The downstream rate, or nothing while the call is between rates.
+    fn rate_now(&self) -> Option<u32> {
+        use datapump::v90::startup::Status;
+        match self.analogue.status() {
+            Status::Connected { receive, .. } => Some(receive),
+            _ => None,
+        }
+    }
+
     fn rates(&self) -> (u32, u32) {
         use datapump::v90::startup::Status;
         match self.analogue.status() {
@@ -777,4 +786,795 @@ fn a_clean_line_asks_for_no_shaping() {
     assert_eq!(digital.cp().map(Shaping::of), Some(Shaping::NONE));
     assert_eq!(digital.cpt().map(Shaping::of), Some(Shaping::NONE));
     assert_eq!(call.rates().0, 50_666);
+}
+
+/// Known data for the downstream: a sequence in which every bit is the
+/// exclusive or of the bits 28 and 31 before it, so that what arrives is
+/// checked against itself, bit by bit. Nothing has to be lined up, and a
+/// stretch a renegotiation drops spoils only the blocks either side of it.
+#[derive(Debug, Clone)]
+struct Known(u32);
+
+impl Known {
+    fn next(&mut self) -> bool {
+        let bit = ((self.0 >> 27) ^ (self.0 >> 30)) & 1 == 1;
+        self.0 = ((self.0 << 1) | u32::from(bit)) & 0x7fff_ffff;
+        bit
+    }
+}
+
+/// Bits the known data is checked in, 128 octets' worth: a block with any
+/// bit wrong is errored, as a frame carrying it would be lost.
+const BLOCK_BITS: u64 = 1024;
+
+/// What has arrived of the known data.
+#[derive(Debug, Clone, Copy, Default)]
+struct Checked {
+    /// The last 31 bits, newest lowest, and how many there have been.
+    last: u32,
+    have: u32,
+    /// Bits checked, blocks of them, blocks with a bit the bits before it
+    /// said should have been otherwise, and whether the block under way has
+    /// one.
+    bits: u64,
+    blocks: u64,
+    errored: u64,
+    wrong: bool,
+}
+
+impl Checked {
+    fn feed(&mut self, bit: bool) {
+        if self.have == 31 {
+            let expected = ((self.last >> 27) ^ (self.last >> 30)) & 1 == 1;
+            self.wrong |= bit != expected;
+            self.bits += 1;
+            if self.bits.is_multiple_of(BLOCK_BITS) {
+                self.blocks += 1;
+                self.errored += u64::from(self.wrong);
+                self.wrong = false;
+            }
+        } else {
+            self.have += 1;
+        }
+        self.last = ((self.last << 1) | u32::from(bit)) & 0x7fff_ffff;
+    }
+
+    /// Errored blocks, and blocks, since `before`.
+    fn since(&self, before: &Self) -> (u64, u64) {
+        (self.errored - before.errored, self.blocks - before.blocks)
+    }
+}
+
+/// The downstream's known data: what goes, and what has arrived of it.
+#[derive(Debug, Clone)]
+struct Downstream {
+    known: Known,
+    checked: Checked,
+}
+
+impl Downstream {
+    fn new() -> Self {
+        Self { known: Known(0x1234_5678), checked: Checked::default() }
+    }
+}
+
+impl FullCall {
+    fn seconds(&self) -> f64 {
+        self.ticks as f64 / 8000.0
+    }
+
+    /// Carry on until `done`, or for `seconds`, with known data going down
+    /// all the while and what arrives of it checked. Whether `done` came.
+    fn known_data_until(&mut self, seconds: f64, data: &mut Downstream, mut done: impl FnMut(&Self) -> bool) -> bool {
+        let end = self.ticks + (seconds * 8000.0) as u64;
+        while self.ticks < end {
+            // Kept topped up: a digital modem with nothing to send sends ones.
+            while self.digital.accepts_bits() && self.digital.pending_bits() < 4 * BLOCK_BITS as usize {
+                let bits: Vec<bool> = (0..BLOCK_BITS).map(|_| data.known.next()).collect();
+                self.digital.send_bits(&bits);
+            }
+            let to_digital = self.net.up(&self.up);
+            self.up.clear();
+            let from_digital = self.digital.step(to_digital);
+            for x in self.net.down(from_digital) {
+                self.up.push(self.analogue.step(x));
+            }
+            self.ticks += 1;
+            for bit in self.analogue.take_bits() {
+                data.checked.feed(bit);
+            }
+            self.digital.take_bits();
+            if done(self) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn known_data(&mut self, seconds: f64, data: &mut Downstream) {
+        self.known_data_until(seconds, data, |_| false);
+    }
+
+    /// Carry on with known data until both ends are back in data mode,
+    /// having left it; false if that takes more than `seconds`.
+    fn comes_back_up_with(&mut self, seconds: f64, data: &mut Downstream) -> bool {
+        use datapump::v90::startup::Status;
+        let up = |s: Status| matches!(s, Status::Connected { .. });
+        let mut went_down = false;
+        self.known_data_until(seconds, data, |call| {
+            let both = up(call.analogue.status()) && up(call.digital.status());
+            went_down |= !both;
+            went_down && both
+        })
+    }
+}
+
+/// When the disturbances below begin: well into data mode, which a line
+/// 20 ms each way reaches in under six seconds.
+const DISTURBED_FROM: f64 = 8.0;
+
+/// Seconds of known data a disturbed call is judged on.
+const JUDGED: f64 = 15.0;
+
+/// Noise that comes and goes: a tenth of a second of it every second and a
+/// half, about ten decibels over the error a clean line leaves in the
+/// decisions.
+fn bursty_line() -> Network {
+    plain_line().with_bursts(DISTURBED_FROM, 1.5, 0.1, 1e-3)
+}
+
+/// A floor that steps up, to about twice the error a clean line leaves in
+/// the decisions: where it makes errors every few seconds at the rate a clean
+/// line came up at.
+fn stepped_line() -> Network {
+    plain_line().with_rising_noise(DISTURBED_FROM, 0.0, 6e-4)
+}
+
+/// A disturbed call: connected, and carrying known data clean until the
+/// disturbance begins.
+fn disturbed(net: Network) -> (FullCall, Downstream) {
+    let mut call = connects(net, server(), 30.0);
+    assert!(call.seconds() < DISTURBED_FROM - 1.0, "connected at {:.1} s", call.seconds());
+    let mut data = Downstream::new();
+    call.known_data(DISTURBED_FROM - call.seconds(), &mut data);
+    (call, data)
+}
+
+/// Known data over `JUDGED` seconds: errored blocks, and blocks.
+fn judged(call: &mut FullCall, data: &mut Downstream) -> (u64, u64) {
+    let before = data.checked;
+    call.known_data(JUDGED, data);
+    data.checked.since(&before)
+}
+
+/// A disturbed call left to the analogue modem: it renegotiates (9.6.2.1) of
+/// its own accord, within `JUDGED` seconds of the disturbance beginning, and
+/// is then judged on known data at the rate it settled on. The rate before,
+/// the seconds it took, the rate after, and errored blocks and blocks there.
+fn falls_back(call: &mut FullCall, data: &mut Downstream) -> (u32, f64, u32, u64, u64) {
+    let (fast, _) = call.rates();
+    let began = call.seconds();
+    assert!(call.comes_back_up_with(JUDGED, data), "never renegotiated: {} / {}", call.analogue.phase(), call.digital.phase());
+    let took = call.seconds() - began;
+    // What the renegotiation dropped is not the line's doing.
+    call.known_data(1.0, data);
+    let (errored, blocks) = judged(call, data);
+    (fast, took, call.rates().0, errored, blocks)
+}
+
+/// Noise that comes and goes -- a tenth of a second of it every second and a
+/// half -- is seen: each burst's misses add to the evidence, and within a few
+/// bursts the analogue modem renegotiates, once, to a rate chosen for the
+/// worst of them, where the same bursts spoil nothing and ask for nothing
+/// more. At the rate the call came up at, fifteen seconds of them spoiled 35
+/// of 742 blocks of known data, and no renegotiation came.
+#[test]
+fn noise_that_comes_and_goes_is_renegotiated_down_to_a_rate_that_reads_it() {
+    let (mut call, mut data) = disturbed(bursty_line());
+    let (fast, took, slower, errored, blocks) = falls_back(&mut call, &mut data);
+    println!("{fast} became {slower} after {took:.1} s of bursts; then {errored} of {blocks} blocks errored");
+    assert!(slower < fast, "{slower} against {fast}");
+    assert_eq!(errored, 0, "{errored} of {blocks} blocks errored at {slower}");
+    assert_eq!(call.analogue.renegotiations(), 1);
+    assert_eq!(call.analogue.retrains(), 0);
+    assert_eq!(call.rates().0, slower);
+}
+
+/// A burst shorter than the 32 ms block the rate is chosen over is still the
+/// line's own, and is still held against the rate: the block only dilutes
+/// what it asks for, since the power of a burst that fills a third of it
+/// reads as a third of the burst's. Thirty milliseconds of noise every second
+/// and a half takes 50 666 to 41 333 over a 20 ms round trip, and ten
+/// milliseconds of it takes 54 666 to 50 666 over a 0.6 s one.
+///
+/// Five milliseconds asks for nothing, at either round trip, and has nothing
+/// to ask for: it errors 6 of 1484 blocks in thirty seconds and 23 of 1602,
+/// where a clean line over the round trip errors 2 of 1602 and the packets a
+/// jitter buffer loses error 16 to 56.
+#[test]
+fn a_burst_shorter_than_the_block_is_still_held_against_the_rate() {
+    let (mut call, mut data) = disturbed(plain_line().with_bursts(DISTURBED_FROM, 1.5, 0.03, 1e-3));
+    let (fast, took, slower, errored, blocks) = falls_back(&mut call, &mut data);
+    println!("{fast} became {slower} {took:.1} s into bursts of 30 ms; then {errored} of {blocks} blocks errored");
+    assert!(slower < fast, "{slower} against {fast}");
+    assert_eq!(call.analogue.renegotiations(), 1);
+    assert_eq!(call.analogue.retrains(), 0);
+    // Ten milliseconds of it over the round trip is seen as well.
+    falls_back_over_the_round_trip(voip_line().with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.01, 1e-3));
+    // Five is not, at either round trip.
+    assert_eq!(left_alone(plain_line().with_bursts(DISTURBED_FROM, 1.5, 0.005, 1e-3), WATCHED), (0, 0), "5 ms, 20 ms each way");
+    assert_eq!(left_alone(voip_line().with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.005, 1e-3), WATCHED), (0, 0), "5 ms, 0.6 s each way");
+}
+
+/// A floor that steps up to where the levels stand only about seven RMS
+/// errors apart -- right on the line the old watch on the averaged error drew,
+/// so that it never saw it -- makes a miss or two in every look, and errors
+/// every few seconds. The misses add up, and the analogue modem renegotiates
+/// once, to a rate that reads the new floor cleanly. At the rate the call
+/// came up at, fifteen seconds of it spoiled 5 of 742 blocks.
+#[test]
+fn a_floor_that_steps_up_is_renegotiated_down_to_a_rate_that_reads_it() {
+    let (mut call, mut data) = disturbed(stepped_line());
+    let (fast, took, slower, errored, blocks) = falls_back(&mut call, &mut data);
+    println!("{fast} became {slower} {took:.1} s after the step; then {errored} of {blocks} blocks errored");
+    assert!(slower < fast, "{slower} against {fast}");
+    assert_eq!(errored, 0, "{errored} of {blocks} blocks errored at {slower}");
+    assert_eq!(call.analogue.renegotiations(), 1);
+    assert_eq!(call.analogue.retrains(), 0);
+    assert_eq!(call.rates().0, slower);
+}
+
+/// Seconds of data mode an undisturbed call is watched for.
+const WATCHED: f64 = 30.0;
+
+/// Run `seconds` of data mode with known data, and say how many
+/// renegotiations and retrains there were.
+fn left_alone(net: Network, seconds: f64) -> (u32, u32) {
+    left_alone_with(net, server(), seconds)
+}
+
+/// The same, against a server of one's own choosing.
+fn left_alone_with(net: Network, server: Info0d, seconds: f64) -> (u32, u32) {
+    let mut call = connects(net, server, 40.0);
+    let (rate, _) = call.rates();
+    let mut data = Downstream::new();
+    // What arrived before the known data did is not the line's doing.
+    call.known_data(1.0, &mut data);
+    let before = data.checked;
+    call.known_data(seconds, &mut data);
+    let (errored, blocks) = data.checked.since(&before);
+    let (renegotiations, retrains) = (call.analogue.renegotiations(), call.analogue.retrains());
+    println!("{rate}: {renegotiations} renegotiations, {retrains} retrains in {seconds} s; {errored} of {blocks} blocks errored, {} slips", call.net.slips());
+    (renegotiations, retrains)
+}
+
+/// A clean line, and one whose sound card runs 120 ppm off the network's
+/// clock, give the watch on the margin nothing: no renegotiation, as none
+/// before the watch counted misses.
+#[test]
+fn a_clean_line_and_a_drifting_clock_are_left_at_their_rates() {
+    assert_eq!(left_alone(plain_line(), WATCHED), (0, 0));
+    assert_eq!(left_alone(plain_line().with_clock(120.0), WATCHED), (0, 0));
+}
+
+/// A softphone's jitter buffer slips twenty milliseconds every few seconds,
+/// made up or dropped, and each slip is a burst of garbage no slower rate
+/// reads any better; the stretch of misses says a packet did it, and it is
+/// not held against the rate. Nor is the margin a call over a VoIP round trip
+/// comes up with, whose errors are half a minute apart. No renegotiation, as
+/// none before.
+///
+/// The softphone's gain control is in the route and takes no part in it, and
+/// the name no longer says it does. Data mode never gets near the ceiling one
+/// sets: at 0.8 of full scale, which is where a live call's sat, the gain
+/// never leaves 1 at all, and at 0.5 it moves only in the start-up -- where
+/// the DIL sweeps every codeword, louder than anything data mode sends -- and
+/// then not once in thirty seconds of data mode. So that is what is asserted,
+/// rather than that a gain control which never engaged was not held against
+/// the rate.
+#[test]
+fn a_softphone_s_slips_are_left_at_their_rates_and_its_gain_control_never_engages() {
+    for (period, inserted, ceiling, in_the_start_up) in [(2.9, true, 0.8, false), (3.1, false, 0.8, false), (2.9, true, 0.5, true)] {
+        let net = Network::new(Law::Mu, FS)
+            .with_delay(0.6, FS)
+            .with_noise(1e-5)
+            .with_gain_control(ceiling, 0.3)
+            .with_slips(period, inserted);
+        let mut call = connects(net, server(), 40.0);
+        let (rate, _) = call.rates();
+        let started = call.net.quietest_gain();
+        let mut data = Downstream::new();
+        // What arrived before the known data did is not the line's doing.
+        call.known_data(1.0, &mut data);
+        let before = data.checked;
+        call.known_data(WATCHED, &mut data);
+        let (errored, blocks) = data.checked.since(&before);
+        let (renegotiations, retrains) = (call.analogue.renegotiations(), call.analogue.retrains());
+        println!(
+            "{rate}, ceiling {ceiling}, slips every {period} s: {renegotiations} renegotiations, {retrains} retrains in {WATCHED} s; {errored} of {blocks} blocks errored; the gain control went to {started} in the start-up and to {} in data mode",
+            call.net.quietest_gain()
+        );
+        let case = format!("ceiling {ceiling}, slips every {period} s, inserted {inserted}");
+        assert_eq!((renegotiations, retrains), (0, 0), "{case}");
+        assert_eq!(call.net.quietest_gain(), started, "{case}: the gain control engaged in data mode");
+        assert_eq!(started < 1.0, in_the_start_up, "{case}: the start-up left the gain at {started}");
+    }
+}
+
+/// A packet of the downstream lost and concealed where it was, every three
+/// seconds: the buffer plays the last packet over again, fading, or nothing
+/// at all, in the place the lost one would have filled.
+fn dropped_line(every: f64, repeat: bool) -> Network {
+    dropped_line_of(every, 0.02, repeat)
+}
+
+/// The same, of a packet of any length: a softphone carries ten, twenty or
+/// thirty milliseconds of G.711 in one.
+fn dropped_line_of(every: f64, length: f64, repeat: bool) -> Network {
+    voip_line().with_dropout(VOIP_DISTURBED_FROM, every, length, repeat)
+}
+
+/// A VoIP call's round trip: 0.6 s each way, which comes up at 54 666 -- the
+/// rate Rory's own line comes up at, and the one with least margin to spare.
+fn voip_line() -> Network {
+    Network::new(Law::Mu, FS).with_delay(0.6, FS).with_noise(1e-5)
+}
+
+/// When a disturbance over that round trip begins: a start-up 0.6 s each way
+/// takes a dozen seconds, and what lands in one is the start-up's business,
+/// not data mode's.
+const VOIP_DISTURBED_FROM: f64 = 20.0;
+
+
+/// A packet of the downstream slipped every three seconds, thirty
+/// milliseconds of it: 240 codewords, which is 40 whole frames.
+fn slipped_line(inserted: bool) -> Network {
+    voip_line().with_slips_of(3.0, 240, inserted)
+}
+
+/// A packet lost and concealed where it was is not held against the rate.
+/// Made-up audio is garbage however much of it there is, and a slower rate
+/// reads it no better: the same bits are lost at 28 000 as at 54 666, and the
+/// rest of the call pays for it. Nothing moves and nothing goes quiet, so
+/// neither of the things that used to mark a look as not the line's happens
+/// here -- the garbage itself has to say so.
+///
+/// Every length a softphone carries in a packet, since the length is the one
+/// thing the rule may not depend on: ten, twenty and thirty milliseconds,
+/// concealed by a fading repeat and by comfort noise, every second and a half
+/// and every three seconds. At ten milliseconds and a fading repeat this cost
+/// a renegotiation before the garbage was weighed by what its misses carry --
+/// 54 666 to 50 666, which the packets were no better read at.
+#[test]
+fn a_packet_lost_and_concealed_in_place_is_left_at_its_rate() {
+    for length in [0.010, 0.020, 0.030] {
+        for (every, repeat) in [(1.5, true), (3.0, true), (1.5, false), (3.0, false)] {
+            let case = format!("{} ms every {every} s, repeat {repeat}", length * 1000.0);
+            assert_eq!(left_alone(dropped_line_of(every, length, repeat), WATCHED), (0, 0), "{case}");
+        }
+    }
+}
+
+
+/// A packet lost and filled with digital silence is not held against the
+/// rate either. Several softphones play zeroes rather than conceal, and a
+/// hole is no more the line's than made-up audio is: no rate reads a codeword
+/// that never arrived. Nothing is made up, so the sound the misses carry
+/// cannot say so -- silence carries none -- and the silence itself has to.
+///
+/// Over the 20 ms round trip, and over A-law's 0.6 s one, the hole costs the
+/// call only the packets it lost: no renegotiation, no retrain, and 39 to 41
+/// blocks of about 1500 errored in thirty seconds, which is what main errors
+/// over the same audio.
+#[test]
+fn a_packet_lost_and_filled_with_silence_is_left_at_its_rate() {
+    let short = plain_line().with_silent_dropout(DISTURBED_FROM, 1.5, 0.02);
+    assert_eq!(left_alone(short, WATCHED), (0, 0), "20 ms each way");
+    let long = Network::new(Law::A, FS).with_delay(0.6, FS).with_noise(1e-5).with_silent_dropout(VOIP_DISTURBED_FROM, 1.5, 0.02);
+    assert_eq!(left_alone_with(long, a_law_server(), WATCHED), (0, 0), "A-law, 0.6 s each way");
+}
+
+/// A hole does more than lose its own packet on one route: mu-law at 54 666
+/// over the 0.6 s round trip, where the levels stand closest together, the
+/// receiver loses the constellation on the first hole and does not get it
+/// back. That is a receiver to train again and not a rate to drop -- a
+/// slower rate does not hand back a lost constellation -- and the watch on
+/// the decisions has nothing to say about it either way, since a receiver
+/// that is not reading the constellation is no judge of what the line would
+/// carry.
+///
+/// So it retrains, once, and comes back slower: 54 666 to 44 000, with no
+/// renegotiation, and then reads the same holes at 44 000 with 24 of 644
+/// blocks errored. Over thirty seconds of it main errors 140 of 619 and 65
+/// of 378 in the last ten, and this errors the same; before the hole was
+/// judged at all, the branch renegotiated as well, never came back up, and
+/// errored 432 of 598 with every one of the last 96 gone. What the receiver
+/// does with a hole is worth mending, and that it is not mended here is not
+/// this watch's doing.
+#[test]
+fn a_hole_that_costs_the_receiver_its_constellation_is_retrained_and_not_slowed() {
+    let net = voip_line().with_silent_dropout(VOIP_DISTURBED_FROM, 1.5, 0.02);
+    let mut call = connects(net, server(), 40.0);
+    let (fast, _) = call.rates();
+    let mut data = Downstream::new();
+    call.known_data(VOIP_DISTURBED_FROM - call.seconds(), &mut data);
+    let before = data.checked;
+    assert!(call.comes_back_up_with(WATCHED, &mut data), "never came back: {} / {}", call.analogue.phase(), call.digital.phase());
+    let (slower, _) = call.rates();
+    let (renegotiations, retrains) = (call.analogue.renegotiations(), call.analogue.retrains());
+    let (through, whole) = data.checked.since(&before);
+    // And then, at the slower rate, with the holes still coming.
+    let after = data.checked;
+    call.known_data(JUDGED, &mut data);
+    let (errored, blocks) = data.checked.since(&after);
+    println!("{fast} became {slower}; {through} of {whole} blocks errored getting there, then {errored} of {blocks}");
+    assert!(slower < fast, "{slower} against {fast}");
+    assert_eq!((renegotiations, retrains), (0, 1));
+    assert!(errored * 10 < blocks, "{errored} of {blocks} blocks errored at {slower}");
+}
+
+/// The same server, A-law.
+fn a_law_server() -> Info0d {
+    let mut server = server();
+    server.a_law = true;
+    server
+}
+
+/// And a slip of a whole number of frames is not held against it either.
+/// 240 codewords is 40 of V.90's six-codeword frames (7.1), so the frames are
+/// found exactly where they were left and `frames_moved` never changes: as
+/// with a packet concealed in place, only the garbage says it happened.
+/// Before the garbage was judged, a 30 ms slip every three seconds cost the
+/// call one renegotiation and one retrain in thirty seconds, and 22 of 1119
+/// blocks of known data.
+#[test]
+fn a_slip_of_a_whole_number_of_frames_is_left_at_its_rate() {
+    for inserted in [true, false] {
+        assert_eq!(left_alone(slipped_line(inserted), WATCHED), (0, 0), "inserted {inserted}");
+    }
+}
+
+/// A call over the round trip, disturbed from [`VOIP_DISTURBED_FROM`]: it
+/// renegotiates once, to a slower rate, with no retrain. The rate before and
+/// the rate after.
+fn falls_back_over_the_round_trip(net: Network) -> (u32, u32) {
+    let mut call = connects(net, server(), 40.0);
+    assert!(call.seconds() < VOIP_DISTURBED_FROM - 1.0, "connected at {:.1} s", call.seconds());
+    let (fast, _) = call.rates();
+    let mut data = Downstream::new();
+    call.known_data(VOIP_DISTURBED_FROM - call.seconds(), &mut data);
+    assert!(call.comes_back_up_with(20.0, &mut data), "never renegotiated: {} / {}", call.analogue.phase(), call.digital.phase());
+    let (slower, _) = call.rates();
+    // What the renegotiation dropped is not the line's doing.
+    call.known_data(1.0, &mut data);
+    let before = data.checked;
+    call.known_data(JUDGED, &mut data);
+    let (errored, blocks) = data.checked.since(&before);
+    println!("{fast} became {slower}; then {errored} of {blocks} blocks errored, {} slips", call.net.slips());
+    assert!(slower < fast, "{slower} against {fast}");
+    assert_eq!(call.analogue.renegotiations(), 1);
+    assert_eq!(call.analogue.retrains(), 0);
+    (fast, slower)
+}
+
+/// And noise that comes and goes between the lost packets is still seen: a
+/// hundred milliseconds of it every second and a half is the line's own, is
+/// nothing like a packet, and the analogue modem renegotiates once for it.
+#[test]
+fn noise_between_lost_packets_is_still_seen() {
+    falls_back_over_the_round_trip(dropped_line(3.0, true).with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.1, 1e-3));
+}
+
+
+/// The same between slipped frames.
+#[test]
+fn noise_between_slipped_frames_is_still_seen() {
+    falls_back_over_the_round_trip(slipped_line(true).with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.1, 1e-3));
+}
+
+/// Bursts of noise between a softphone's slips: the slips are still not
+/// held against the rate, and the bursts still are -- one renegotiation.
+#[test]
+fn bursts_of_noise_between_slips_are_still_seen() {
+    let net = Network::new(Law::Mu, FS)
+        .with_delay(0.6, FS)
+        .with_noise(1e-5)
+        .with_slips(2.9, true)
+        .with_bursts(20.0, 1.5, 0.1, 1e-3);
+    let mut call = connects(net, server(), 40.0);
+    assert!(call.seconds() < 19.0, "connected at {:.1} s", call.seconds());
+    let (fast, _) = call.rates();
+    let mut data = Downstream::new();
+    call.known_data(20.0 - call.seconds(), &mut data);
+    assert!(call.comes_back_up_with(20.0, &mut data), "never renegotiated: {} / {}", call.analogue.phase(), call.digital.phase());
+    let (slower, _) = call.rates();
+    call.known_data(JUDGED, &mut data);
+    println!("{fast} became {slower}; {} slips", call.net.slips());
+    assert!(slower < fast, "{slower} against {fast}");
+    assert_eq!(call.analogue.renegotiations(), 1);
+    assert_eq!(call.analogue.retrains(), 0);
+}
+
+/// A renegotiation may not take more than eight bits a frame -- 10 666 bit/s
+/// -- off the downstream in one go. A line that has suddenly become far
+/// worse than the DIL found it is stepped down that far, measured again at
+/// the new rate, and stepped again if it really is that bad, rather than
+/// falling as far as one 32 ms block said in a single renegotiation.
+///
+/// Two thousandths of full scale, which is about a hundred times the noise
+/// the call came up on: enough that one step cannot reach the rate it wants
+/// and a second follows, and not so much that the receiver loses the
+/// constellation, which is a retrain and no business of this rule's.
+#[test]
+fn a_renegotiation_steps_the_rate_down_by_no_more_than_eight_bits_a_frame() {
+    let mut call = connects(plain_line(), server(), 30.0);
+    let (down, _) = call.rates();
+    call.net.set_noise(2e-3);
+    assert!(call.comes_back_up(10.0), "{} / {}", call.analogue.phase(), call.digital.phase());
+    let (stepped, _) = call.rates();
+    println!("{down} became {stepped} in one renegotiation");
+    assert_eq!(call.analogue.renegotiations(), 1);
+    assert_eq!(down - stepped, 10_666, "{down} to {stepped} in one go");
+    // And the line really is that much worse: the next renegotiation goes
+    // further, with no retrain in between.
+    assert!(call.comes_back_up(10.0), "{} / {}", call.analogue.phase(), call.digital.phase());
+    let (slower, _) = call.rates();
+    println!("and then {slower}, after {} renegotiations", call.analogue.renegotiations());
+    assert!(slower < stepped, "{slower} against {stepped}");
+    assert_eq!(call.analogue.retrains(), 0);
+    assert_eq!(call.carries_data(3.0), (true, true));
+}
+
+
+/// How long a hole is watched for when what is being counted is the holes
+/// themselves: two minutes, eight times the shortest stretch a call takes to
+/// settle, so that a rule that only holds at first shows here.
+const SOAKED: f64 = 120.0;
+
+/// A hole shows on the line in front of the equaliser, and nothing else
+/// does.
+///
+/// A hole is the one disturbance that leaves no mark in the decisions: the
+/// equaliser is 63 half symbols of line and a feedback filter of its own
+/// past decisions, so it goes on putting out codeword-sized numbers while
+/// nothing at all arrives. Measured over two minutes of twenty-millisecond
+/// holes, the longest run of decisions under a ten-thousandth of the
+/// decisions' own level was 2, where a clean line's was 1 and a concealer's
+/// fading repeat gave 7 -- there is nothing there to tell a hole by. So the
+/// line itself is what is counted, and this is what makes that worth doing:
+/// every hole the network makes is seen, and nothing that is not a hole is
+/// ever taken for one.
+///
+/// A hole every second and a half for a hundred and twenty seconds is eighty
+/// of them; the count is short of that by the ones that land while the call
+/// is retraining, when there is no data mode to watch.
+#[test]
+fn every_hole_is_seen_on_the_line_and_nothing_else_is_ever_taken_for_one() {
+    for length in [0.010, 0.020, 0.030, 0.040, 0.060] {
+        let net = plain_line().with_silent_dropout(DISTURBED_FROM, 1.5, length);
+        let holes = holes_seen(net, server(), SOAKED);
+        let made = (SOAKED / 1.5) as u32;
+        assert!(holes >= made - 2, "{} ms: {holes} holes of {made}", length * 1000.0);
+    }
+    // And everything else the line does, for as long: made-up audio of both
+    // kinds, noise that comes and goes, a floor that steps up, a slip, and
+    // nothing at all.
+    let quiet: [(&str, Network); 8] = [
+        ("nothing", plain_line()),
+        ("a fading repeat, 20 ms", dropped_line_of(1.5, 0.020, true)),
+        ("a fading repeat, 60 ms", dropped_line_of(1.5, 0.060, true)),
+        ("comfort noise, 20 ms", dropped_line_of(1.5, 0.020, false)),
+        ("comfort noise, 60 ms", dropped_line_of(1.5, 0.060, false)),
+        ("bursts of noise", bursty_line()),
+        ("a floor that steps up", stepped_line()),
+        ("a slip of whole frames", slipped_line(true)),
+    ];
+    for (what, net) in quiet {
+        assert_eq!(holes_seen(net, server(), SOAKED), 0, "{what}");
+    }
+}
+
+/// Holes seen in `seconds` of data mode.
+fn holes_seen(net: Network, server: Info0d, seconds: f64) -> u32 {
+    let mut call = connects(net, server, 40.0);
+    let mut data = Downstream::new();
+    call.known_data(seconds, &mut data);
+    let holes = call.analogue.holes();
+    println!("{holes} holes in {seconds} s at {}", call.rates().0);
+    holes
+}
+
+/// And a call through holes never asks for a slower rate, however long it
+/// goes on.
+///
+/// Thirty seconds was not long enough to show what was wrong here. The rule
+/// that was meant to catch a hole read the decisions, where a hole leaves no
+/// mark, and never fired; the holes built evidence like any other errors,
+/// and the call renegotiated -- not once but twice, the second a good minute
+/// in, ending slower than the same audio leaves a tree without the rule at
+/// all. Two minutes, in ten-second stretches, is what shows it: the rate is
+/// the same in the last stretch as in the first, and the errors are the
+/// holes' own packets and nothing more.
+///
+/// Measured over the mu-law 0.6 s round trip: at twenty milliseconds the
+/// call retrains once -- the receiver loses the constellation, which is its
+/// own business and not the rate's, and is what
+/// [`a_hole_that_costs_the_receiver_its_constellation_is_retrained_and_not_slowed`]
+/// is about -- and settles at 44 000, where main settles too, erring 11 to
+/// 17 of about 430 blocks in every stretch afterwards. At thirty it settles
+/// at 42 666 against main's 42 666, erring 13 to 20 of about 417. Neither
+/// renegotiates at all.
+#[test]
+fn a_call_through_holes_never_renegotiates_however_long_it_goes_on() {
+    for length in [0.020, 0.030] {
+        let net = voip_line().with_silent_dropout(VOIP_DISTURBED_FROM, 1.5, length);
+        let mut call = connects(net, server(), 40.0);
+        let mut data = Downstream::new();
+        call.known_data(VOIP_DISTURBED_FROM - call.seconds(), &mut data);
+        let mut settled = None;
+        let mut worst = (0, 0);
+        for stretch in 0..(SOAKED / 10.0) as u32 {
+            let before = data.checked;
+            call.known_data(10.0, &mut data);
+            let (errored, blocks) = data.checked.since(&before);
+            // Once it has settled, it stays there: the rate never moves
+            // again and the errors never grow.
+            if let Some(rate) = settled {
+                assert_eq!(call.rate_now(), Some(rate), "{} ms, stretch {stretch}", length * 1000.0);
+                assert!(errored * 10 < blocks, "{} ms, stretch {stretch}: {errored} of {blocks}", length * 1000.0);
+                worst = worst.max((errored, blocks));
+            } else if call.analogue.retrains() > 0 && let Some(rate) = call.rate_now() {
+                settled = Some(rate);
+            }
+        }
+        let settled = settled.expect("never settled");
+        println!("{} ms: settled at {settled}, worst stretch {}/{}", length * 1000.0, worst.0, worst.1);
+        assert_eq!(call.analogue.renegotiations(), 0, "{} ms", length * 1000.0);
+    }
+}
+
+/// A floor that steps up is read right the first time, over the round trip
+/// as well.
+///
+/// The rate is chosen from the worst 32 ms block the recent looks reached,
+/// which is what a burst wants; but a decision's error there is its distance
+/// from the nearer of the two levels either side of it, so one that has
+/// crossed a boundary is measured to the wrong level and can never be out by
+/// more than half a gap. On a floor stepped up until it errors every few
+/// seconds that reads the line better than it is: the worst block came to
+/// 0.000325 where the receiver's own averaged error -- the same measurement
+/// read a second way, and the one main uses -- came to 0.000518. The rate
+/// chosen from the first was 50 666, which still errored 4 of 495 blocks and
+/// then 4 of 357, and had to be asked again; it ended at 44 000, a rung
+/// below the 45 333 main reaches in one go, for nothing.
+///
+/// Taking the larger of the two lands at 45 333 first time, and nothing
+/// errors at all in any ten-second stretch of the two minutes after it.
+#[test]
+fn a_floor_that_steps_up_over_the_round_trip_is_read_right_the_first_time() {
+    let mut call = connects(voip_line().with_rising_noise(VOIP_DISTURBED_FROM, 0.0, 6e-4), server(), 40.0);
+    let mut data = Downstream::new();
+    call.known_data(VOIP_DISTURBED_FROM - call.seconds(), &mut data);
+    assert!(call.comes_back_up_with(20.0, &mut data), "never renegotiated: {}", call.analogue.phase());
+    let slower = call.rates().0;
+    // What the renegotiation itself dropped is not the line's doing.
+    call.known_data(1.0, &mut data);
+    for stretch in 0..(SOAKED / 10.0) as u32 {
+        let before = data.checked;
+        call.known_data(10.0, &mut data);
+        let (errored, blocks) = data.checked.since(&before);
+        assert_eq!(errored, 0, "stretch {stretch}: {errored} of {blocks} blocks errored at {slower}");
+    }
+    println!("stepped to 6e-4 over the round trip: 54666 became {slower}, nothing errored in {SOAKED} s");
+    assert_eq!((call.analogue.renegotiations(), call.analogue.retrains()), (1, 0));
+    assert_eq!(call.rates().0, slower);
+}
+
+/// A retrain storm is come out of no worse than main comes out of it.
+///
+/// Forty milliseconds of digital silence every three seconds over the
+/// mu-law 0.6 s round trip costs the receiver its constellation again and
+/// again, and both this and a tree without any of this watch fall into a
+/// storm of retrains for it. That is the receiver's to mend and not the
+/// watch's, and nothing here pretends to mend it. What the watch must not do
+/// is make it worse.
+///
+/// It did. A receiver holding its loops is already on its way either back or
+/// out -- back, and it was a burst it rode out on what it last knew; out,
+/// and it is retrained three seconds later anyway -- so a retrain asked for
+/// from the looks that made it hold is a second retrain landing in the
+/// middle of the first one's recovery. Main takes five retrains here and is
+/// back at 52 000 by about 105 seconds; this took a sixth on top of them and
+/// never came back at all. With the count held while the receiver holds, the
+/// two agree stretch for stretch: five retrains, back at 52 000 by 105 s,
+/// then 9 to 14 of about 508 blocks errored in every ten-second stretch
+/// after.
+///
+/// Only the count stands down, and that matters: a long burst of real noise
+/// makes the receiver hold its loops as well, and the looks gathered through
+/// one are exactly what say the line is bad. Standing those down too cost
+/// three hundred milliseconds of noise every second and a half its fall back
+/// altogether, leaving it at 54 666 for ever where it should reach 40 000
+/// and error nothing after (see
+/// [`noise_that_comes_and_goes_is_renegotiated_down_to_a_rate_that_reads_it`]).
+#[test]
+fn a_retrain_storm_is_come_out_of_and_the_watch_stands_down_inside_it() {
+    let net = voip_line().with_silent_dropout(VOIP_DISTURBED_FROM, 3.0, 0.040);
+    let mut call = connects(net, server(), 40.0);
+    let mut data = Downstream::new();
+    call.known_data(VOIP_DISTURBED_FROM - call.seconds(), &mut data);
+    let mut last = (0, 0);
+    let mut back_at = None;
+    for _ in 0..(SOAKED / 10.0) as u32 {
+        let before = data.checked;
+        call.known_data(10.0, &mut data);
+        last = data.checked.since(&before);
+        if back_at.is_none() && call.rate_now().is_some() && call.analogue.retrains() >= 5 {
+            back_at = Some(call.seconds());
+        }
+    }
+    let rate = call.rate_now().expect("never came back out of the storm");
+    let back_at = back_at.expect("never came back out of the storm");
+    println!("out of the storm at {back_at:.0} s and {rate}, {} retrains; last stretch {}/{}", call.analogue.retrains(), last.0, last.1);
+    assert!(back_at < VOIP_DISTURBED_FROM + 100.0, "came back only at {back_at:.0} s");
+    assert!(last.0 * 10 < last.1, "{} of {} blocks errored at {rate}", last.0, last.1);
+    assert_eq!(call.analogue.renegotiations(), 0);
+}
+
+/// A burst long enough that the receiver holds its loops through it is still
+/// the line's, and is still fallen back for.
+///
+/// Three hundred milliseconds of noise every second and a half leaves the
+/// receiver holding its loops about a fifth of the time. That is the case
+/// that says what may stand down while it holds and what may not: the looks
+/// gathered through such a burst are exactly what say the line is bad, and a
+/// watch that threw them away because the receiver was holding never fell
+/// back at all, sitting at 54 666 for ever with 107 to 145 of 534 blocks
+/// errored in every stretch. Only the counting towards a retrain stands down
+/// (see [`a_retrain_storm_is_come_out_of_and_the_watch_stands_down_inside_it`]).
+///
+/// Over the 0.6 s round trip it settles at 40 000, which is further than
+/// [`MOST_DROPPED`] lets one renegotiation go, so it takes two: 54 666 to
+/// 50 666, which still errors, and then to 40 000, where nothing errors in
+/// any ten-second stretch of the two minutes after the one the last
+/// renegotiation itself fell in. A robbed bit settles at
+/// 40 000 too and A-law at 44 000, and no retrain comes of any of it.
+#[test]
+fn a_burst_the_receiver_holds_its_loops_through_is_still_fallen_back_for() {
+    let cases: [(&str, Network, Info0d); 3] = [
+        ("0.6 s each way", voip_line().with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.3, 1e-3), server()),
+        ("0.6 s each way, a robbed bit", voip_line().with_robbed_bit(0).with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.3, 1e-3), server()),
+        (
+            "A-law, 0.6 s each way",
+            Network::new(Law::A, FS).with_delay(0.6, FS).with_noise(1e-5).with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.3, 1e-3),
+            a_law_server(),
+        ),
+    ];
+    for (what, net, server) in cases {
+        let mut call = connects(net, server, 40.0);
+        let fast = call.rates().0;
+        let mut data = Downstream::new();
+        call.known_data(VOIP_DISTURBED_FROM - call.seconds(), &mut data);
+        // Two minutes of it in ten-second stretches, from where the bursts
+        // begin: the rate it reached in each, and what errored there.
+        let mut stretches = Vec::new();
+        for _ in 0..(SOAKED / 10.0) as u32 {
+            let before = data.checked;
+            call.known_data(10.0, &mut data);
+            stretches.push((call.rate_now(), data.checked.since(&before)));
+        }
+        // Once it has settled it stays there, and nothing errors again.
+        let settled = stretches.last().expect("stretches").0.expect("never came back up");
+        // The stretch the last renegotiation itself fell in still carries
+        // what it dropped, which is not the line's doing.
+        let after: Vec<_> = stretches.iter().skip_while(|(rate, _)| *rate != Some(settled)).skip(1).collect();
+        println!("{what}: {fast} became {settled}, settled for the last {} stretches of {SOAKED} s", after.len());
+        assert!(after.len() >= 8, "{what}: settled at {settled} only for {} stretches", after.len());
+        for (n, (rate, (errored, blocks))) in after.iter().enumerate() {
+            assert_eq!(*rate, Some(settled), "{what}, stretch {n} after settling");
+            assert_eq!(*errored, 0, "{what}, stretch {n}: {errored} of {blocks} at {settled}");
+        }
+        assert!(settled < fast, "{what}: {settled} against {fast}");
+        assert_eq!(call.analogue.retrains(), 0, "{what}");
+    }
 }

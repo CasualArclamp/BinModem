@@ -214,6 +214,10 @@ pub struct Symbol {
     pub value: f64,
     /// What the slicer decided it was, if it decided.
     pub decided: Option<f64>,
+    /// Mean square of the line this symbol was equalised from: the
+    /// equaliser's own input window, 2 * [`REACH`] + 1 half symbols, 3.94 ms
+    /// of it. What the line carried, before any decision was made of it.
+    pub line: f64,
 }
 
 impl Symbol {
@@ -1031,6 +1035,7 @@ impl Receiver {
         self.next_half += 2;
         self.next_symbol += 1;
         let row = &wide[1..wide.len() - 1];
+        let line = row.iter().map(|x| x * x).sum::<f64>() / row.len() as f64;
         let y = apply(&self.taps, row) - apply(&self.feedback, self.past.make_contiguous());
         let rate: f64 = self.taps.iter().enumerate().map(|(i, w)| w * 0.5 * (wide[i + 2] - wide[i])).sum();
         let interval = ((index + self.frame_offset) % INTERVALS as u64) as usize;
@@ -1071,7 +1076,7 @@ impl Receiver {
                 self.past.pop_back();
                 self.past.push_front(fed);
                 self.residue.gap();
-                return Symbol { index: index + self.frame_offset, raw: index, value: y, decided };
+                return Symbol { index: index + self.frame_offset, raw: index, value: y, decided, line };
             }
             if let Slicer::Binary(level) = self.slicer {
                 // One codeword either sign: a decision is sure unless the
@@ -1112,7 +1117,7 @@ impl Receiver {
             (None, _) => y,
         };
         self.past.push_front(fed);
-        Symbol { index: index + self.frame_offset, raw: index, value: y, decided }
+        Symbol { index: index + self.frame_offset, raw: index, value: y, decided, line }
     }
 
     /// Whether two levels are codewords one step apart, on the same side of

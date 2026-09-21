@@ -100,6 +100,19 @@ impl Watch {
     pub(crate) fn gone(&self) -> bool {
         self.quiet_for >= self.gone_after
     }
+
+    /// Whether the far end is quiet now, gone or not.
+    ///
+    /// Quiet, not silent. The level this is read from has a 50 ms time
+    /// constant ([`FAST`]) and [`QUIET`] is 20 dB under the reference, so it
+    /// takes about a quarter of a second of nothing before this is ever true:
+    /// the twenty milliseconds a jitter buffer leaves when it drops a packet
+    /// move the level 1.7 dB and never show here at all. What this catches is
+    /// a far end that has stopped -- on its way to [`Self::gone`], which
+    /// wants two seconds more of it -- and not a gap in the audio.
+    pub(crate) fn quiet(&self) -> bool {
+        self.quiet_for > 0
+    }
 }
 
 #[cfg(test)]
@@ -139,6 +152,30 @@ mod tests {
             (0..480).for_each(|_| w.feed(0.0, true));
             assert!(!w.gone());
         }
+    }
+
+    /// What `quiet` can see and what it cannot: a far end that has stopped,
+    /// within a quarter of a second, and never a packet's worth of gap
+    /// however many of them there are.
+    #[test]
+    fn a_packet_s_gap_is_never_quiet_and_a_far_end_that_stopped_is_within_a_quarter_of_a_second() {
+        let mut w = Watch::new(FS);
+        tone(8000, 0.3).for_each(|s| w.feed(s, true));
+        for _ in 0..20 {
+            (0..(0.020 * FS) as usize).for_each(|_| w.feed(0.0, true));
+            assert!(!w.quiet(), "twenty milliseconds of nothing read as quiet");
+            tone(4000, 0.3).for_each(|s| w.feed(s, true));
+        }
+        // And then silence that does not stop.
+        let mut after = 0;
+        while !w.quiet() {
+            w.feed(0.0, true);
+            after += 1;
+            assert!(after < 8000, "never quiet");
+        }
+        let seconds = after as f64 / FS;
+        println!("quiet after {seconds:.3} s of silence");
+        assert!((0.2..0.3).contains(&seconds), "quiet after {seconds} s");
     }
 
     #[test]
