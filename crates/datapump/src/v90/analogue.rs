@@ -224,10 +224,45 @@ const STORM_GAP: usize = 128;
 ///
 /// A look of 2000 decisions over a simulated VoIP round trip at 54 666 had
 /// three misses at worst, and a floor stepped up to where errors come every
-/// few seconds leaves a miss or two in a look: neither can put sixteen of
-/// them within sixteen milliseconds of each other. A concealed packet has
-/// dozens, and so does a burst of noise.
-const STORM_MISSES: usize = 16;
+/// few seconds leaves a miss or two in a look: neither puts six of them
+/// within sixteen milliseconds of each other. It was sixteen, which is how
+/// many a twenty-millisecond packet leaves, and a ten-millisecond one leaves
+/// half of that: measured over the round trip, six to fifty-one, so sixteen
+/// sat inside the distribution and half the packets were weighed as the line.
+/// A count cannot be the test, because a count is the length of the garbage;
+/// what tells garbage from the line is [`STORM_GARBLED`], and all this floor
+/// does now is keep the one-decision stretch out, where a single miss carries
+/// all its own sound and would pass that outright.
+const STORM_MISSES: usize = 6;
+
+/// The share of the sound under a stretch that the decisions which missed
+/// have to carry before the stretch is made-up audio rather than the line.
+///
+/// This is what tells a jitter buffer's garbage from a disturbance on the
+/// line, and it has to be this rather than how long the stretch lasted,
+/// because a packet holds ten, twenty or thirty milliseconds of G.711 and a
+/// crackle can last exactly as long. What differs is which decisions miss.
+/// Noise adds to a codeword that is still there, so it can only push one
+/// four-fifths of the way to the boundary where the boundary is near -- at
+/// the quiet levels, a mu-law segment apart -- while the loud codewords,
+/// which carry nearly all the sound there is, are read as cleanly as before.
+/// Made-up audio is in the codewords' place rather than on top of them, so it
+/// misses at every level alike and its misses carry their share of the sound.
+/// That is also why no slower rate reads it: wider levels shrink what noise
+/// does and leave made-up audio where it was.
+///
+/// Measured as the power of the missed decisions over the power of all of
+/// them, from the first miss in a stretch to the last, over eight routes --
+/// packets of ten, twenty and thirty milliseconds, concealed by a fading
+/// repeat and by comfort noise, mu-law and A-law, round trips of 0.6 s and
+/// 20 ms, with and without a softphone's slips running as well: 126 stretches
+/// of made-up audio carried 0.033 to 0.56 of it, and 40 stretches of noise
+/// ten decibels over the line's own error -- thirty milliseconds of it and a
+/// hundred, over the same routes -- carried 0.005 to 0.027. Nothing of either
+/// kind fell on the wrong side of a thirtieth. A clean line and a floor
+/// stepped up to where errors come every few seconds make no stretch of
+/// [`STORM_MISSES`] at all.
+const STORM_GARBLED: f64 = 0.03;
 
 /// The longest a stretch of misses can be and still be one packet, in
 /// symbols: sixty-four milliseconds.
@@ -725,6 +760,12 @@ struct Storm {
     spanned: usize,
     ended: usize,
     misses: usize,
+    /// The sound under it: the decisions' power since the first miss, the
+    /// same as it stood at the last miss, and the power of the decisions
+    /// that missed (see [`STORM_GARBLED`]).
+    sound: f64,
+    at_last: f64,
+    garbled: f64,
 }
 
 /// Data mode's decisions, as the watch on the margin sees them.
@@ -797,34 +838,44 @@ impl Decisions {
             look.worst = look.worst.max(self.block.1 / BLOCK as f64);
             self.block = (0, 0.0);
         }
-        self.storm(missed);
+        self.storm(missed, value);
     }
 
     /// One decision, a miss or not, through the stretch of misses under way.
     ///
     /// A stretch begins at a miss and runs to the last miss within
-    /// [`STORM_GAP`] decisions of it. When it ends, a stretch with misses
-    /// enough to be garbage rather than the line's own tail is judged by how
-    /// long it lasted: a packet's worth or less and it is a jitter buffer's
-    /// doing, not the line's, and the look it happened in -- and so the look
-    /// before it, which a look always waits for -- go. So do the next
-    /// [`HOLD_AFTER`], for the loops to come back in.
-    fn storm(&mut self, missed: bool) {
+    /// [`STORM_GAP`] decisions of it. When it ends, a stretch of more than
+    /// the line's own tail ([`STORM_MISSES`]) is judged on two counts: how
+    /// much of the sound under it its misses carried, which says the audio
+    /// was made up rather than disturbed ([`STORM_GARBLED`]), and how long it
+    /// lasted, which says it was one packet of made-up audio and not a line
+    /// that has gone on being bad ([`STORM_SHORT`]). Both, and it is a jitter
+    /// buffer's doing rather than the line's: the look it happened in -- and
+    /// so the look before it, which a look always waits for -- go, and so do
+    /// the next [`HOLD_AFTER`], for the loops to come back in.
+    fn storm(&mut self, missed: bool, value: f64) {
+        let sound = value * value;
         let Some(mut storm) = self.storm else {
-            self.storm = missed.then_some(Storm { spanned: 0, ended: 0, misses: 1 });
+            self.storm = missed.then_some(Storm { spanned: 0, ended: 0, misses: 1, sound, at_last: sound, garbled: sound });
             return;
         };
         storm.spanned += 1;
+        storm.sound += sound;
         if missed {
             storm.ended = storm.spanned;
             storm.misses += 1;
+            storm.at_last = storm.sound;
+            storm.garbled += sound;
         }
         if storm.spanned - storm.ended <= STORM_GAP {
             self.storm = Some(storm);
             return;
         }
         self.storm = None;
-        if storm.misses >= STORM_MISSES && storm.ended < STORM_SHORT {
+        // Strictly more, so that a stretch with no sound under it at all is
+        // not garbage by default: silence carries nothing for this to weigh.
+        let garbled = storm.garbled > STORM_GARBLED * storm.at_last;
+        if storm.misses >= STORM_MISSES && garbled && storm.ended < STORM_SHORT {
             self.look.spoiled = true;
             self.holding = HOLD_AFTER;
         }
@@ -2387,6 +2438,53 @@ mod tests {
         assert!(decisions.look(0).is_none(), "held until the next is over");
         symbols(&mut decisions, 0);
         assert_eq!(decisions.look(0).map(|l| l.misses), Some(80), "a burst of noise is the line's");
+    }
+
+    /// Levels a route's are like, rather than evenly spaced: a quiet pair a
+    /// quarter of a unit apart and a loud pair two apart, either sign, in
+    /// every interval.
+    fn watching_uneven() -> Decisions {
+        let levels: Levels =
+            std::array::from_fn(|_| vec![(1.0, 1, true), (1.5, 2, true), (8.0, 3, true), (12.0, 4, true), (-1.0, 1, false), (-1.5, 2, false), (-8.0, 3, false), (-12.0, 4, false)]);
+        let mut decisions = Decisions::new(&levels);
+        assert!(decisions.look(0).is_none(), "the first look only begins the watch");
+        decisions
+    }
+
+    /// What tells a packet of made-up audio from a burst of noise on the
+    /// line is not how long the stretch lasted -- both can be thirty
+    /// milliseconds of it -- but which decisions missed. Noise reaches a
+    /// boundary only where the boundary is near, at the quiet codewords,
+    /// which carry next to none of the sound; made-up audio is in the
+    /// codewords' place and misses at every level alike, so its misses carry
+    /// their share of the sound ([`STORM_GARBLED`]).
+    ///
+    /// Both stretches here are 160 decisions with 32 misses or more, which
+    /// the count this used to be judged on could not tell apart at all.
+    #[test]
+    fn a_stretch_is_made_up_audio_only_if_its_misses_carry_the_sound() {
+        // Every fifth decision is a quiet codeword, and in the noisy stretch
+        // every one of those has been pushed to the boundary between the
+        // quiet levels. Nothing else has moved: the loud codewords, which
+        // are nearly all the sound there is, are read as cleanly as ever.
+        let noise = |n: usize| if n.is_multiple_of(5) { 1.25 } else { 8.3 };
+        // Made-up audio misses at the loud levels as well.
+        let made_up = |n: usize| match n % 5 {
+            0 => 1.25,
+            1 => 10.0,
+            _ => 8.3,
+        };
+        for (what, value, stands) in [("noise", &noise as &dyn Fn(usize) -> f64, true), ("made-up audio", &made_up, false)] {
+            let mut decisions = watching_uneven();
+            for n in 0..2000 {
+                decisions.symbol(n % INTERVALS, if n < 160 { value(n) } else { 8.3 });
+            }
+            assert!(decisions.look(0).is_none(), "{what}: held until the next is over");
+            for n in 0..2000 {
+                decisions.symbol(n % INTERVALS, 8.3);
+            }
+            assert_eq!(decisions.look(0).is_some(), stands, "{what}");
+        }
     }
 
     /// A look stands only once the look after it is over, and only if the
