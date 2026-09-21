@@ -1070,7 +1070,13 @@ fn a_softphone_s_slips_are_left_at_their_rates_and_its_gain_control_never_engage
 /// seconds: the buffer plays the last packet over again, fading, or nothing
 /// at all, in the place the lost one would have filled.
 fn dropped_line(every: f64, repeat: bool) -> Network {
-    voip_line().with_dropout(VOIP_DISTURBED_FROM, every, 0.02, repeat)
+    dropped_line_of(every, 0.02, repeat)
+}
+
+/// The same, of a packet of any length: a softphone carries ten, twenty or
+/// thirty milliseconds of G.711 in one.
+fn dropped_line_of(every: f64, length: f64, repeat: bool) -> Network {
+    voip_line().with_dropout(VOIP_DISTURBED_FROM, every, length, repeat)
 }
 
 /// A VoIP call's round trip: 0.6 s each way, which comes up at 54 666 -- the
@@ -1092,15 +1098,25 @@ fn slipped_line(inserted: bool) -> Network {
 }
 
 /// A packet lost and concealed where it was is not held against the rate.
-/// Twenty milliseconds of made-up audio is twenty milliseconds of garbage,
-/// and a slower rate reads it no better: the same bits are lost at 28 000 as
-/// at 54 666, and the rest of the call pays for it. Nothing moves and nothing
-/// goes quiet, so neither of the things that used to mark a look as not the
-/// line's happens here -- the garbage itself has to say so.
+/// Made-up audio is garbage however much of it there is, and a slower rate
+/// reads it no better: the same bits are lost at 28 000 as at 54 666, and the
+/// rest of the call pays for it. Nothing moves and nothing goes quiet, so
+/// neither of the things that used to mark a look as not the line's happens
+/// here -- the garbage itself has to say so.
+///
+/// Every length a softphone carries in a packet, since the length is the one
+/// thing the rule may not depend on: ten, twenty and thirty milliseconds,
+/// concealed by a fading repeat and by comfort noise, every second and a half
+/// and every three seconds. At ten milliseconds and a fading repeat this cost
+/// a renegotiation before the garbage was weighed by what its misses carry --
+/// 54 666 to 50 666, which the packets were no better read at.
 #[test]
 fn a_packet_lost_and_concealed_in_place_is_left_at_its_rate() {
-    for (every, repeat) in [(1.5, true), (3.0, true), (1.5, false), (3.0, false)] {
-        assert_eq!(left_alone(dropped_line(every, repeat), WATCHED), (0, 0), "every {every} s, repeat {repeat}");
+    for length in [0.010, 0.020, 0.030] {
+        for (every, repeat) in [(1.5, true), (3.0, true), (1.5, false), (3.0, false)] {
+            let case = format!("{} ms every {every} s, repeat {repeat}", length * 1000.0);
+            assert_eq!(left_alone(dropped_line_of(every, length, repeat), WATCHED), (0, 0), "{case}");
+        }
     }
 }
 
