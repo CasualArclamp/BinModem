@@ -331,35 +331,34 @@ pub fn symbol_scope(
     // thirty-two-point constellation showed twenty-four dots.
     let fit = 1.0 / peak.max(1.0);
     let m = constellation.len().max(1);
-    // Thirty-two clusters need enough dots to show their shape, and enough
-    // dots need smaller dots or the clusters run together into one blob.
-    let dot = if m > 200 { 1.5 } else { 2.4 };
     let at = |re: f32, im: f32| {
         pos2(
             centre.x + (re * fit).clamp(-1.4, 1.4) * radius,
             centre.y - (im * fit).clamp(-1.4, 1.4) * radius,
         )
     };
-    if tones > 128 || pairs {
-        // Hundreds of points and thousands of symbols: colouring each by its
-        // distance from the centre would paint the outer rings green and the
-        // inner ones red, which says nothing. One colour instead, faint
-        // enough that the symbols landing on a point build up into it, and
-        // drawn as one mesh rather than thousands of shapes.
-        let mut mesh = eframe::egui::Mesh::default();
-        let side = (radius / 180.0).clamp(1.0, 2.5);
-        let colour = Color32::from_rgba_unmultiplied(120, 220, 160, 110);
-        for &(re, im) in constellation {
-            mesh.add_colored_rect(Rect::from_center_size(at(re, im), vec2(side, side)), colour);
-        }
-        painter.add(eframe::egui::Shape::mesh(mesh));
-    } else {
-        for (i, &(re, im)) in constellation.iter().enumerate() {
-            let fade = 0.45 + 0.55 * (i as f32 / m as f32);
-            let magnitude = (re * re + im * im).sqrt().min(1.0);
-            painter.circle_filled(at(re, im), dot, margin_colour(magnitude).gamma_multiply(fade));
-        }
+    // Every constellation is drawn the same way, whatever the modulation:
+    // one colour, faint enough that the symbols landing on a point build up
+    // into it, as one mesh rather than thousands of shapes.
+    //
+    // Colouring each symbol by its distance from the centre, which the
+    // smaller constellations used to do, paints the outer ring green and the
+    // inner one red on any modulation whose points are not all the same
+    // distance out -- which says something about the constellation and
+    // nothing about the line. What a reader wants from this scope is the
+    // shape of the clusters, and that is what building up shows.
+    //
+    // The smaller constellations keep 512 symbols against V.34's thousands,
+    // so their squares are larger and less faint; otherwise sixteen clusters
+    // of thirty-two symbols would be almost invisible beside a V.34 cloud.
+    let mut mesh = eframe::egui::Mesh::default();
+    let crowded = m > 200;
+    let side = (radius / 180.0).clamp(1.0, 2.5) * if crowded { 1.0 } else { 1.7 };
+    let colour = Color32::from_rgba_unmultiplied(120, 220, 160, if crowded { 110 } else { 150 });
+    for &(re, im) in constellation {
+        mesh.add_colored_rect(Rect::from_center_size(at(re, im), vec2(side, side)), colour);
     }
+    painter.add(eframe::egui::Shape::mesh(mesh));
 
     // Always say something. A silent, empty scope gives no way to tell a modem
     // that is not decoding from a display that is not being fed.
