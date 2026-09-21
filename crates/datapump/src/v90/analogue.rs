@@ -491,12 +491,50 @@ pub struct Settings {
     /// What V.34 would carry downstream instead, as phase 2's probe put it:
     /// a V.90 slower than that is not worth having.
     pub v34_receive: u32,
-    /// Rungs above (positive) or below (negative) what the DIL would choose
-    /// on its own: the window's rate buttons, pressed outside data mode.
-    /// Above goes no further than the levels at [`dil::SPACING`] with none of
-    /// [`dil::SLACK`]'s room, since a rung the DIL found no levels for cannot
-    /// be asked for at all.
-    pub nudge: i8,
+    /// The downstream rate, as its drn, the window's rate menu has pinned:
+    /// asked for at the end of the DIL whatever the DIL would have chosen
+    /// and whatever it predicts of it. None for the DIL's own choice.
+    pub pinned: Option<u8>,
+}
+
+/// What the rate menu predicts of a downstream rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outlook {
+    /// Levels stand the room [`dil::SLACK`] asks for, on the line as the DIL
+    /// read it and as data mode has found it since: what this modem would
+    /// choose itself, or slower.
+    Good,
+    /// Levels carry it, but closer together than that room.
+    Bad,
+    /// Nothing on this route carries it, however close the levels.
+    Unreachable,
+    /// The digital modem's Jd does not offer it.
+    NotOffered,
+}
+
+/// The rate menu: every downstream rate and what is predicted of it, and
+/// the rate data mode is at.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RateMenu {
+    /// Drn, bit/s and outlook, slowest first.
+    pub rates: Vec<(u8, u32, Outlook)>,
+    /// The drn data mode is at, once it has been reached.
+    pub current: Option<u8>,
+}
+
+impl RateMenu {
+    /// What is predicted of `drn`.
+    pub fn outlook(&self, drn: u8) -> Option<Outlook> {
+        self.rates.iter().find(|r| r.0 == drn).map(|r| r.2)
+    }
+}
+
+/// `choose` on the route as read, and failing that on the route as if its
+/// errors were a quarter, a sixteenth and so on of what they are: the
+/// widest-spaced levels that carry a rate the route has no room for, and
+/// None only if no spacing at all does.
+fn squeezed<T>(route: &Route, choose: impl Fn(&Route) -> Option<T>) -> Option<T> {
+    (0..12).find_map(|i| if i == 0 { choose(route) } else { choose(&shaping::scaled(route, 0.25f64.powi(i))) })
 }
 
 impl Settings {
@@ -513,7 +551,7 @@ impl Settings {
             round_trip,
             wide: ours_wide && server.v34.constellation_1664,
             v34_receive: 0,
-            nudge: 0,
+            pinned: None,
         }
     }
 }
@@ -1505,6 +1543,8 @@ pub struct Modem {
     short: u32,
     /// How much worse than the DIL showed data mode has found the line.
     worse: f64,
+    /// What the rate menu predicts, once worked out (see [`Self::rate_menu`]).
+    menu: Option<Vec<(u8, u32, Outlook)>>,
     /// The spectral shaping asked for, and the share of the DIL's error
     /// power it was expected to leave (5.4.5).
     shaping: (Shaping, f64),
@@ -1588,6 +1628,7 @@ impl Modem {
             decisions: Decisions::default(),
             short: 0,
             worse: 1.0,
+            menu: None,
             shaping: (Shaping::NONE, 1.0),
             notes: Vec::new(),
         };
@@ -1796,63 +1837,100 @@ impl Modem {
         true
     }
 
-    /// The window's rate buttons in data mode: a renegotiation one rung up or
-    /// down (9.6.2.1). Down asks for the rung below, believing less of what
-    /// data mode has found of the line if that is what it takes to stay on
-    /// it. Up asks for the rung above if the DIL's levels have room for it,
-    /// whatever data mode has found -- which is the point of asking by hand;
-    /// the rate watch still has its say afterwards. False, and nothing done,
-    /// outside data mode or where there is no rung to go to.
-    pub fn step_rate(&mut self, up: bool) -> bool {
+    /// The rate menu in data mode: a rate renegotiation to `drn` (9.6.2.1),
+    /// whatever the menu predicts of it -- the widest-spaced levels the
+    /// route has for it as data mode has found the line, which for a rate
+    /// with no room are closer than this modem would ever choose. The rate
+    /// watch still has its say afterwards. False, and nothing done, outside
+    /// data mode, at the rate already in use, or at one the digital modem
+    /// does not offer or nothing carries.
+    pub fn renegotiate_to(&mut self, drn: u8) -> bool {
         if !self.in_data_mode() {
             return false;
         }
-        let Some(drn) = self.in_use.as_ref().map(|cp| cp.drn) else { return false };
-        let from = sequences::data_rate(drn).unwrap_or(0);
-        if !up {
-            let Some(rate) = drn.checked_sub(1).and_then(sequences::data_rate) else {
-                self.notes.push(format!("rate buttons: nothing slower than {from} bit/s to go down to"));
-                return false;
-            };
-            if !self.renegotiate_within(rate, rate) {
-                self.notes.push(format!("rate buttons: the route carries nothing slower than {from} bit/s"));
-                return false;
-            }
-            let asked = self.choice.as_ref().and_then(|c| sequences::data_rate(c.data.drn)).unwrap_or(0);
-            self.notes.push(format!("rate buttons: asked for {asked} bit/s, from {from}"));
-            return true;
+        let from = self.in_use.as_ref().map_or(0, |cp| cp.drn);
+        let jd = self.far_jd.unwrap_or_default();
+        let Some(rate) = sequences::data_rate(drn) else { return false };
+        if drn == from || !jd.enables(drn) {
+            return false;
         }
+        let predicted = match self.rate_menu().and_then(|m| m.outlook(drn)) {
+            Some(Outlook::Good) => ", predicted good",
+            Some(Outlook::Bad) => ", predicted bad",
+            _ => "",
+        };
         let (Some(route), Some(choice)) = (self.route.as_ref(), self.choice.as_ref()) else { return false };
         let law = self.settings.law;
         let limit = super::power_limit(&self.settings.server);
-        let jd = self.far_jd.unwrap_or_default();
-        let top = drn + 1;
         let (shaping, left) = self.shaping;
-        let scaled = shaping::scaled(route, left);
-        let Some(new) = dil::choose_shaped(&scaled, law, limit, |d| jd.enables(d) && d <= top, shaping).filter(|n| n.data.drn > drn) else {
-            self.notes.push(format!("rate buttons: the DIL found no levels for a rung above {from} bit/s"));
+        let believed = shaping::scaled(route, left * self.worse * self.worse);
+        let training = choice.training.clone();
+        let Some(new) = squeezed(&believed, |r| dil::choose_shaped(r, law, limit, |d| d == drn, shaping)) else {
+            self.notes.push(format!("rate menu: nothing on this route carries {rate} bit/s"));
             return false;
         };
         let mut data = new.data;
         self.finish_cp(&mut data);
-        let training = choice.training.clone();
-        let asked = sequences::data_rate(data.drn).unwrap_or(0);
         self.choice = Some(Choice { data, training });
-        self.notes.push(format!("rate buttons: asked for {asked} bit/s, from {from}"));
+        let from = sequences::data_rate(from).unwrap_or(0);
+        self.notes.push(format!("rate menu: asked for {rate} bit/s, from {from}{predicted}"));
         self.begin_renegotiation(true);
         true
     }
 
-    /// Where a V.90 start-up not yet past its DIL is to move the rate it
-    /// chooses (see [`Settings::nudge`]). Too late once the DIL has been read.
-    pub fn set_nudge(&mut self, nudge: i8) {
-        self.settings.nudge = nudge;
+    /// Where a V.90 start-up not yet past its DIL is to ask for a rate of its
+    /// own (see [`Settings::pinned`]). Too late once the DIL has been read.
+    pub fn set_pinned(&mut self, drn: Option<u8>) {
+        self.settings.pinned = drn;
     }
 
-    /// Whether data mode is up with no renegotiation under way: what the
-    /// rate buttons need to renegotiate rather than nudge.
-    pub fn is_in_data_mode(&self) -> bool {
-        self.in_data_mode()
+    /// Whether this start-up has reached data mode: after which the rate
+    /// menu renegotiates rather than pins.
+    pub fn data_mode_reached(&self) -> bool {
+        self.in_use.is_some()
+    }
+
+    /// The rate menu, once the DIL has been read: every downstream rate,
+    /// good if levels stand [`dil::SLACK`]'s room for it on the line as data
+    /// mode has found it -- what this modem would choose itself, or slower --
+    /// bad if levels carry it only closer than that. Worked out when first
+    /// asked after the DIL or a fall-back, and kept.
+    pub fn rate_menu(&mut self) -> Option<RateMenu> {
+        if self.menu.is_none() {
+            self.menu = self.predict();
+        }
+        let rates = self.menu.clone()?;
+        Some(RateMenu { rates, current: self.in_use.as_ref().map(|cp| cp.drn) })
+    }
+
+    fn predict(&self) -> Option<Vec<(u8, u32, Outlook)>> {
+        let route = self.route.as_ref()?;
+        let law = self.settings.law;
+        let limit = super::power_limit(&self.settings.server);
+        let jd = self.far_jd.unwrap_or_default();
+        let leftover = self.rx.residue().leftover();
+        let believed = shaping::scaled(route, self.worse * self.worse);
+        let good = shaping::choose_with_slack(&believed, law, limit, |d| jd.enables(d), jd.lookahead, leftover.as_ref())
+            .map_or(0, |a| a.choice.data.drn);
+        // As close as levels can stand: the fastest anything carries.
+        let any = dil::choose(&shaping::scaled(route, 1e-9), law, limit, |d| jd.enables(d)).map_or(0, |c| c.data.drn);
+        Some(
+            (1..=u8::MAX)
+                .map_while(|drn| sequences::data_rate(drn).map(|rate| (drn, rate)))
+                .map(|(drn, rate)| {
+                    let outlook = if !jd.enables(drn) {
+                        Outlook::NotOffered
+                    } else if drn <= good {
+                        Outlook::Good
+                    } else if drn <= any {
+                        Outlook::Bad
+                    } else {
+                        Outlook::Unreachable
+                    };
+                    (drn, rate, outlook)
+                })
+                .collect(),
+        )
     }
 
     /// End the call from data mode (9.7): a renegotiation whose CP asks for
@@ -2446,7 +2524,7 @@ impl Modem {
             self.fail("the route cannot carry V.90's slowest rate");
             return;
         };
-        if asked.rate() < self.settings.v34_receive {
+        if self.settings.pinned.is_none() && asked.rate() < self.settings.v34_receive {
             // A route that is an ordinary line with G.711's noise on it --
             // a softphone that converted the sample rate on the way to its
             // encoder -- carries V.34 at least as well.
@@ -2454,7 +2532,11 @@ impl Modem {
             self.fail("V.34 carries more than V.90 on this route");
             return;
         }
-        let asked = self.nudged(asked, &route, leftover.as_ref());
+        let asked = match self.settings.pinned {
+            Some(drn) => self.pinned(asked, &route, leftover.as_ref(), drn),
+            None => asked,
+        };
+        self.menu = None;
         self.shaping = (asked.shaping, asked.left);
         let mut choice = asked.choice;
         self.finish_cp(&mut choice.data);
@@ -2475,40 +2557,30 @@ impl Modem {
         self.stopped.reset();
     }
 
-    /// The DIL's choice moved by [`Settings::nudge`] rungs: up as far as the
-    /// levels at the DIL's own spacing reach, down with the same room the
-    /// choice itself was given. The choice as it was where there is no rung
-    /// to move to, and a line for the transcript either way.
-    fn nudged(&mut self, asked: shaping::Asked, route: &Route, leftover: Option<&Leftover>) -> shaping::Asked {
-        let nudge = self.settings.nudge;
-        if nudge == 0 {
+    /// The DIL's choice replaced by the rate the window's menu pinned (see
+    /// [`Settings::pinned`]): the widest-spaced levels the route has for it,
+    /// which for a rate the DIL has no room for are closer than it would
+    /// ever choose. The DIL's own choice where nothing carries it at all,
+    /// and a line for the transcript either way.
+    fn pinned(&mut self, asked: shaping::Asked, route: &Route, leftover: Option<&Leftover>, drn: u8) -> shaping::Asked {
+        let own = asked.rate();
+        let Some(rate) = sequences::data_rate(drn) else { return asked };
+        if asked.choice.data.drn == drn {
+            self.notes.push(format!("the rate menu's {rate} bit/s is what the DIL chose"));
             return asked;
         }
         let law = self.settings.law;
         let limit = super::power_limit(&self.settings.server);
         let jd = self.far_jd.unwrap_or_default();
-        let drn = asked.choice.data.drn;
-        let steps = nudge.unsigned_abs();
-        let moved = if nudge > 0 {
-            let top = drn.saturating_add(steps);
-            shaping::choose(route, law, limit, |d| jd.enables(d) && d <= top, jd.lookahead, leftover).filter(|a| a.choice.data.drn > drn)
-        } else {
-            let top = drn.saturating_sub(steps);
-            shaping::choose_with_slack(route, law, limit, |d| d >= 1 && d <= top && jd.enables(d), jd.lookahead, leftover)
-        };
-        let way = if nudge > 0 { "up" } else { "down" };
-        match moved {
-            Some(moved) => {
-                self.notes.push(format!(
-                    "the rate buttons asked for {steps} rung{} {way}: {} bit/s rather than {}",
-                    if steps == 1 { "" } else { "s" },
-                    moved.rate(),
-                    asked.rate()
-                ));
-                moved
+        let found = squeezed(route, |r| shaping::choose(r, law, limit, |d| d == drn && jd.enables(d), jd.lookahead, leftover));
+        let predicted = if drn < asked.choice.data.drn { "predicted good" } else { "predicted bad" };
+        match found {
+            Some(found) => {
+                self.notes.push(format!("the rate menu asked for {rate} bit/s, {predicted}, where the DIL chose {own}"));
+                found
             }
             None => {
-                self.notes.push(format!("the rate buttons asked to go {way}, and there is no rung to go to from {} bit/s", asked.rate()));
+                self.notes.push(format!("the rate menu asked for {rate} bit/s, and nothing on this route carries it: {own} instead"));
                 asked
             }
         }
@@ -2840,6 +2912,7 @@ impl Modem {
     fn fall_back(&mut self, why: &str, short: u32, measured: f64, receiver: f64) {
         if let Some(expected) = self.expected() {
             self.worse = self.worse.max(measured.max(receiver) / expected);
+            self.menu = None;
         }
         let from = self.downstream_rate;
         let most = from.saturating_sub(1);

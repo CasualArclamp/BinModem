@@ -1730,67 +1730,64 @@ fn a_burst_the_receiver_holds_its_loops_through_is_still_fallen_back_for() {
     }
 }
 
-/// The window's rate buttons pressed before data mode: every start-up moves
-/// the rate its DIL chooses by a rung. Up goes as far as the DIL's own
-/// spacing reaches and no further -- on the 10 ms line, whose room costs a
-/// rung, that rung is had back; on the 20 ms line, which loses nothing to
-/// the room, there is nowhere to go and the transcript says so. Down takes
-/// the rung below, on either. Each call still connects.
+/// The rate menu once the DIL has been read, on the 10 ms line whose room
+/// costs a rung: the rate the start-up chose and everything slower is good,
+/// the rung its room gave up is bad, and the menu calls nothing good that is
+/// faster than the modem would choose itself. Pinned before the call, a good
+/// rate or a bad one is what the start-up asks for, and each connects there.
 #[test]
-fn the_rate_buttons_move_a_start_up_s_rate_a_rung_either_way() {
-    use datapump::v90::startup::Stepped;
+fn the_rate_menu_colours_the_rates_and_pins_a_start_up_to_either() {
+    use datapump::v90::analogue::Outlook;
     let ten_ms = || Network::new(Law::Mu, FS).with_delay(0.010, FS).with_noise(1e-5);
-    let on_its_own = |net: Network| connects(net, server(), 40.0).rates().0;
-    let nudged = |net: Network, up: bool| {
-        let mut call = FullCall::new(net, server());
-        assert_eq!(call.analogue.step_rate(up), Stepped::Nudged(if up { 1 } else { -1 }));
+    let mut call = connects(ten_ms(), server(), 40.0);
+    let (alone, _) = call.rates();
+    let menu = call.analogue.rate_menu().expect("a menu once the DIL has been read");
+    println!("{menu:?}");
+    let drn_of = |rate: u32| menu.rates.iter().find(|r| r.1 == rate).map(|r| r.0).unwrap();
+    let own = drn_of(alone);
+    assert_eq!(menu.current, Some(own));
+    for &(drn, rate, outlook) in &menu.rates {
+        let expected = if drn <= own { Outlook::Good } else { outlook };
+        assert_eq!(outlook, expected, "{rate}");
+        assert_ne!(outlook, Outlook::NotOffered, "{rate}: this Jd offers every rate");
+    }
+    assert_eq!(menu.outlook(own + 1), Some(Outlook::Bad), "the rung the room gave up");
+    for drn in [own - 2, own + 1] {
+        let mut call = FullCall::new(ten_ms(), server());
+        call.analogue.set_pinned(Some(drn));
         let ok = call.run(40.0);
-        let notes = call.analogue.take_notes();
-        assert!(ok, "up {up}: no connection: {}", call.analogue.phase());
-        (call.rates().0, notes.into_iter().filter(|n| n.contains("rate buttons")).collect::<Vec<_>>())
-    };
-    for (name, line, lost) in [("10 ms", &ten_ms as &dyn Fn() -> Network, true), ("20 ms", &plain_line, false)] {
-        let alone = on_its_own(line());
-        let (up, said_up) = nudged(line(), true);
-        let (down, said_down) = nudged(line(), false);
-        println!("{name}: {alone} on its own, {up} a rung up, {down} a rung down; {said_up:?} {said_down:?}");
-        if lost {
-            assert_eq!(up, alone + 1333, "{name}: up");
-            assert!(said_up[0].contains("1 rung up"), "{name}: {said_up:?}");
-        } else {
-            assert_eq!(up, alone, "{name}: up");
-            assert!(said_up[0].contains("no rung to go to"), "{name}: {said_up:?}");
-        }
-        assert_eq!(down, alone - 1333, "{name}: down");
-        assert!(said_down[0].contains("1 rung down"), "{name}: {said_down:?}");
+        let notes: Vec<String> = call.analogue.take_notes().into_iter().filter(|n| n.contains("rate menu")).collect();
+        assert!(ok, "pinned {drn}: no connection: {}", call.analogue.phase());
+        let rate = datapump::v90::sequences::data_rate(drn).unwrap();
+        println!("pinned {rate}: {notes:?}");
+        assert_eq!(call.rates().0, rate);
+        let predicted = if drn < own { "predicted good" } else { "predicted bad" };
+        assert!(notes.iter().any(|n| n.contains(&format!("asked for {rate} bit/s, {predicted}, where the DIL chose {alone}"))), "{notes:?}");
     }
 }
 
-/// The rate buttons in data mode: a rate renegotiation a rung up or down
-/// (9.6.2.1), with no retrain and data after each. On the 10 ms line the
-/// start-up's room leaves one rung above it; up takes it, up again finds no
-/// levels above that and asks for nothing, and down comes back.
+/// The rate menu in data mode: a rate renegotiation to the rate chosen
+/// (9.6.2.1), good or bad, with no retrain and data after each; the rate in
+/// use asks for nothing.
 #[test]
-fn the_rate_buttons_in_data_mode_renegotiate_a_rung_at_a_time() {
-    use datapump::v90::startup::Stepped;
+fn the_rate_menu_in_data_mode_renegotiates_to_the_rate_chosen() {
+    use datapump::v90::sequences::data_rate;
     let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.010, FS).with_noise(1e-5), server(), 40.0);
     let (down, up) = call.rates();
+    let own = call.analogue.rate_menu().and_then(|m| m.current).unwrap();
     call.analogue.take_notes();
-    assert_eq!(call.analogue.step_rate(true), Stepped::Renegotiating);
-    assert!(call.comes_back_up(10.0), "up: {} / {}", call.analogue.phase(), call.digital.phase());
-    assert_eq!(call.rates(), (down + 1333, up), "up");
-    assert_eq!(call.carries_data(3.0), (true, true), "after going up");
-    assert_eq!(call.analogue.step_rate(true), Stepped::Nowhere);
-    assert_eq!(call.analogue.step_rate(false), Stepped::Renegotiating);
-    assert!(call.comes_back_up(10.0), "down: {} / {}", call.analogue.phase(), call.digital.phase());
-    assert_eq!(call.rates(), (down, up), "down");
-    assert_eq!(call.carries_data(3.0), (true, true), "after coming down");
-    let notes: Vec<String> = call.analogue.take_notes().into_iter().filter(|n| n.contains("rate buttons")).collect();
-    println!("{notes:#?}");
-    assert_eq!(notes.len(), 3, "{notes:?}");
-    assert!(notes[0].contains(&format!("asked for {} bit/s, from {down}", down + 1333)), "{notes:?}");
-    assert!(notes[1].contains("no levels for a rung above"), "{notes:?}");
-    assert!(notes[2].contains(&format!("asked for {down} bit/s, from {}", down + 1333)), "{notes:?}");
+    assert!(!call.analogue.renegotiate_to(own), "the rate in use");
+    for (drn, predicted) in [(own + 1, "predicted bad"), (own - 3, "predicted good")] {
+        let rate = data_rate(drn).unwrap();
+        assert!(call.analogue.renegotiate_to(drn), "{rate}");
+        assert!(call.comes_back_up(10.0), "{rate}: {} / {}", call.analogue.phase(), call.digital.phase());
+        assert_eq!(call.rates(), (rate, up), "{rate}");
+        assert_eq!(call.carries_data(3.0), (true, true), "after going to {rate}");
+        let notes: Vec<String> = call.analogue.take_notes().into_iter().filter(|n| n.contains("rate menu")).collect();
+        println!("{notes:?}");
+        assert!(notes.iter().any(|n| n.contains(&format!("asked for {rate} bit/s")) && n.contains(predicted)), "{notes:?}");
+    }
     assert_eq!(call.analogue.retrains(), 0, "a retrain happened");
     assert_eq!(call.analogue.renegotiations(), 2);
+    let _ = down;
 }

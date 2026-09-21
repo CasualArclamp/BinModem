@@ -12,7 +12,7 @@
 //! one step, and what it hands back goes out. Nothing here paces itself against
 //! a wall clock, because the sound card already is one.
 
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -64,22 +64,19 @@ pub fn line_rates(modem: &Modem) -> String {
     }
 }
 
+/// What the rate menu has V.90 start-ups asking for, for the transcript.
+fn pinned_said(drn: Option<u8>) -> String {
+    match drn.and_then(datapump::v90::sequences::data_rate) {
+        Some(rate) => format!("V.90 start-ups will ask for {rate} bit/s, whatever the DIL chooses"),
+        None => "V.90 start-ups will choose their own rate".to_owned(),
+    }
+}
+
 /// Which way a retrain moved the rates, both directions considered.
 ///
 /// A V.34 renegotiation asks the far end to change what it sends, so one
 /// direction can drop while the other holds -- or, on a line that is worse
 /// one way round, one drop and the other climb.
-/// What the rate buttons have V.90 start-ups asking for, for the transcript.
-fn nudge_said(nudge: i8) -> String {
-    let rungs = nudge.unsigned_abs();
-    let plural = if rungs == 1 { "" } else { "s" };
-    match nudge {
-        0 => "V.90 start-ups will ask for the rate the DIL chooses".to_owned(),
-        n if n > 0 => format!("V.90 start-ups will ask for up to {rungs} rung{plural} above the rate the DIL chooses"),
-        _ => format!("V.90 start-ups will ask for {rungs} rung{plural} below the rate the DIL chooses"),
-    }
-}
-
 fn retrain_went(before: (u32, u32), after: (u32, u32)) -> &'static str {
     use std::cmp::Ordering::{Equal, Greater, Less};
     match (after.0.cmp(&before.0), after.1.cmp(&before.1)) {
@@ -247,12 +244,14 @@ pub struct Session {
     /// Set when the window asks for a retrain: V.34 goes back through phase 2
     /// on the same call. The line thread asks the modem and clears it.
     retrain: AtomicBool,
-    /// Presses of the V.90 rate buttons not yet handed to the modem, up as
-    /// true, in the order they came.
-    rate_presses: Mutex<Vec<bool>>,
-    /// Rungs V.90 start-ups move the rate their DIL chooses, as the modem
-    /// last said: the window shows it, and a new modem starts from it.
-    rate_nudge: AtomicI32,
+    /// A choice from the V.90 rate menu not yet handed to the modem: a drn,
+    /// or None for the DIL's own choice.
+    rate_request: Mutex<Option<Option<u8>>>,
+    /// The rate V.90 start-ups ask for, as the modem last said: the window
+    /// shows it, and a new modem starts from it.
+    rate_pinned: Mutex<Option<u8>>,
+    /// What the modem predicts of each V.90 rate, once a DIL has been read.
+    rate_menu: Mutex<Option<datapump::v90::analogue::RateMenu>>,
     /// A transfer the window has asked for, until the line thread takes it.
     transfer_request: Mutex<Option<TransferRequest>>,
     /// What the transfer is doing, for the window to read.
@@ -336,8 +335,9 @@ impl Default for Session {
             recording: AtomicBool::new(false),
             hang_up: AtomicBool::new(false),
             retrain: AtomicBool::new(false),
-            rate_presses: Mutex::default(),
-            rate_nudge: AtomicI32::new(0),
+            rate_request: Mutex::default(),
+            rate_pinned: Mutex::default(),
+            rate_menu: Mutex::default(),
         }
     }
 }
@@ -464,23 +464,27 @@ impl Session {
         self.retrain.swap(false, Ordering::Relaxed)
     }
 
-    /// One of the V.90 rate buttons: in data mode a rate renegotiation one
-    /// rung `up` or down, and otherwise one rung more or less on the rate
-    /// V.90 start-ups ask for.
-    pub fn step_rate(&self, up: bool) {
-        if let Ok(mut presses) = self.rate_presses.lock() {
-            presses.push(up);
+    /// A choice from the V.90 rate menu, a drn or None for the DIL's own: in
+    /// data mode a rate renegotiation to it, and otherwise the rate V.90
+    /// start-ups ask for.
+    pub fn choose_rate(&self, drn: Option<u8>) {
+        if let Ok(mut request) = self.rate_request.lock() {
+            *request = Some(drn);
         }
     }
 
-    fn take_rate_presses(&self) -> Vec<bool> {
-        self.rate_presses.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default()
+    fn take_rate_request(&self) -> Option<Option<u8>> {
+        self.rate_request.lock().ok().and_then(|mut r| r.take())
     }
 
-    /// Rungs V.90 start-ups move the rate their DIL chooses; positive is
-    /// faster.
-    pub fn rate_nudge(&self) -> i8 {
-        self.rate_nudge.load(Ordering::Relaxed) as i8
+    /// The rate V.90 start-ups ask for, as its drn; None for the DIL's own.
+    pub fn rate_pinned(&self) -> Option<u8> {
+        self.rate_pinned.lock().ok().and_then(|p| *p)
+    }
+
+    /// What the modem predicts of each V.90 rate, once a DIL has been read.
+    pub fn rate_menu(&self) -> Option<datapump::v90::analogue::RateMenu> {
+        self.rate_menu.lock().ok().and_then(|m| m.clone())
     }
 
     /// Start or stop keeping it. Stopping writes the file.
@@ -701,7 +705,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // Windows a cpal stream is not Send and has to stay where it was made.
     let mut audio: Option<line::Duplex> = None;
     let mut modem = Modem::new(FS);
-    modem.set_rate_nudge(session.rate_nudge());
+    modem.set_pinned_rate(session.rate_pinned());
+    // The rate menu, looked at a few times a second: working it out after a
+    // DIL or a fall-back is a choice at every rate.
+    let mut menu_looked = Instant::now();
     let mut spectrum = Spectrum::new(FFT_SIZE, FS);
     let mut waveform = Ring::new(SCOPE_LEN);
     let mut bins = vec![0.0f64; SPECTRUM_BINS];
@@ -1087,10 +1094,28 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             tx.log(Direction::Note, "retraining the line");
             modem.retrain();
         }
-        for up in session.take_rate_presses() {
-            if let Some(nudge) = modem.step_rate(up) {
-                session.rate_nudge.store(i32::from(nudge), Ordering::Relaxed);
-                tx.log(Direction::Note, nudge_said(nudge));
+        if let Some(drn) = session.take_rate_request() {
+            match modem.choose_rate(drn) {
+                modem::RateChosen::Pinned(pinned) => {
+                    if let Ok(mut p) = session.rate_pinned.lock() {
+                        *p = pinned;
+                    }
+                    tx.log(Direction::Note, pinned_said(pinned));
+                }
+                modem::RateChosen::NotNow => tx.log(
+                    Direction::Note,
+                    "V.90 rate menu: not now -- a renegotiation is under way, or that rate is in use or not offered",
+                ),
+                modem::RateChosen::Renegotiating => {}
+            }
+        }
+        if menu_looked.elapsed() >= Duration::from_millis(250) {
+            menu_looked = Instant::now();
+            let menu = modem.rate_menu();
+            if let Ok(mut shown) = session.rate_menu.lock()
+                && *shown != menu
+            {
+                *shown = menu;
             }
         }
 

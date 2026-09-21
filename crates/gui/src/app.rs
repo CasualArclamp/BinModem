@@ -2558,9 +2558,9 @@ impl ScopeApp {
         });
     }
 
-    /// The status grid, and above its rates the V.90 rate buttons: which of
-    /// them was pressed, up as true.
-    fn status(&self, ui: &mut egui::Ui) -> Option<bool> {
+    /// The status grid, and above its rates the V.90 rate menu: what was
+    /// chosen from it, a drn or None for the DIL's own choice.
+    fn status(&self, ui: &mut egui::Ui) -> Option<Option<u8>> {
         let f = &self.frame;
         let dim = Color32::from_rgb(140, 150, 165);
         let bright = Color32::from_rgb(220, 225, 235);
@@ -2580,41 +2580,20 @@ impl ScopeApp {
                 // Both directions, because they need not match: V.34 settles
                 // each separately, from what each end's receiver asked for.
                 let bps = |r: Option<u32>| r.map(|r| format!("{r} bps")).unwrap_or_else(|| "-".into());
-                // V.90's rate by hand, above the rate it moves. In data mode a
-                // rate renegotiation a rung up or down (9.6); before it, a
-                // rung more or less on what the next start-up's DIL chooses,
-                // which is the only way to try a rate on a far end that never
-                // lets a call reach data mode at the one it was given.
+                // V.90's rate by hand, above the rate it moves: every rate,
+                // green where the DIL -- and data mode since -- predict it
+                // reads cleanly and red where they predict it will not, and
+                // any of them to be had. In data mode a choice is a rate
+                // renegotiation (9.6); before it, the rate the next start-ups
+                // ask for, which is the only way to try a rate on a far end
+                // that never lets a call reach data mode at the one it was
+                // given.
                 if let Source::Live(session) = &self.source {
                     let v90 = f.modulation == "V.90";
                     let connected = f.state == telemetry::CallState::Connected;
                     if v90 || !connected {
                         ui.label(RichText::new("V.90 rate").monospace().color(dim));
-                        ui.horizontal(|ui| {
-                            let (up, down) = if v90 && connected {
-                                ("renegotiate one rung up (V.90 9.6)", "renegotiate one rung down (V.90 9.6)")
-                            } else {
-                                (
-                                    "ask the next V.90 start-up for one rung more than its DIL chooses, as far as the DIL's levels reach",
-                                    "ask the next V.90 start-up for one rung less than its DIL chooses",
-                                )
-                            };
-                            if ui.small_button("rate up").on_hover_text(up).clicked() {
-                                pressed = Some(true);
-                            }
-                            if ui.small_button("rate down").on_hover_text(down).clicked() {
-                                pressed = Some(false);
-                            }
-                            let nudge = session.rate_nudge();
-                            if nudge != 0 {
-                                ui.label(
-                                    RichText::new(format!("{nudge:+} next start"))
-                                        .monospace()
-                                        .small()
-                                        .color(Color32::from_rgb(240, 200, 120)),
-                                );
-                            }
-                        });
+                        pressed = Self::rate_menu(ui, session, v90 && connected);
                         ui.end_row();
                     }
                 }
@@ -2695,6 +2674,72 @@ impl ScopeApp {
                 }
             });
         pressed
+    }
+
+    /// The V.90 rate menu: the fastest rate first, each coloured and worded
+    /// by what the modem predicts of it -- nothing until a DIL has been read
+    /// -- and the one in use, or the one pinned for start-ups, selected.
+    /// Rates nothing carries, or the digital modem does not offer, cannot be
+    /// chosen; every other can, predicted bad or not.
+    fn rate_menu(ui: &mut egui::Ui, session: &live::Session, in_data: bool) -> Option<Option<u8>> {
+        use datapump::v90::analogue::Outlook;
+        use datapump::v90::sequences::data_rate;
+        let good = Color32::from_rgb(90, 220, 130);
+        let bad = Color32::from_rgb(235, 105, 95);
+        let grey = Color32::from_rgb(110, 115, 130);
+        let plain = Color32::from_rgb(220, 225, 235);
+        let menu = session.rate_menu();
+        let pinned = session.rate_pinned();
+        let current = menu.as_ref().and_then(|m| m.current).filter(|_| in_data);
+        let shown = match (current, pinned) {
+            (Some(drn), _) => format!("{} bit/s", data_rate(drn).unwrap_or(0)),
+            (None, Some(drn)) => format!("{} pinned", data_rate(drn).unwrap_or(0)),
+            (None, None) => "auto".to_owned(),
+        };
+        let mut chosen = None;
+        egui::ComboBox::from_id_salt("v90_rate")
+            .selected_text(RichText::new(shown).monospace())
+            .width(150.0)
+            .height(420.0)
+            .show_ui(ui, |ui| {
+                if !in_data
+                    && ui
+                        .selectable_label(pinned.is_none(), RichText::new("auto: the DIL chooses").monospace())
+                        .clicked()
+                {
+                    chosen = Some(None);
+                }
+                for drn in (1..=u8::MAX).map_while(|d| data_rate(d).map(|_| d)).collect::<Vec<_>>().into_iter().rev() {
+                    let rate = data_rate(drn).unwrap_or(0);
+                    let outlook = menu.as_ref().and_then(|m| m.outlook(drn));
+                    let (colour, word) = match outlook {
+                        Some(Outlook::Good) => (good, "good"),
+                        Some(Outlook::Bad) => (bad, "bad"),
+                        Some(Outlook::Unreachable) => (grey, "no levels"),
+                        Some(Outlook::NotOffered) => (grey, "not offered"),
+                        None => (plain, ""),
+                    };
+                    let now = current == Some(drn);
+                    let text = format!("{rate:>5} {word:<11}{}", if now { " now" } else { "" });
+                    let selected = if in_data { now } else { pinned == Some(drn) };
+                    let can = !matches!(outlook, Some(Outlook::Unreachable | Outlook::NotOffered)) && !(in_data && now);
+                    let item = egui::Button::selectable(selected, RichText::new(text).monospace().color(colour));
+                    if ui.add_enabled(can, item).clicked() {
+                        chosen = Some(Some(drn));
+                    }
+                }
+            })
+            .response
+            .on_hover_text(if in_data {
+                "Renegotiate to another rate now (V.90 9.6). Green: the line probe, and data mode \
+                 since, predict it reads cleanly. Red: predicted to make errors -- it can still be \
+                 tried, and the rate watch may then fall back from it"
+            } else {
+                "The rate the next V.90 start-ups ask for, whatever the line probe chooses. Colours \
+                 appear once a call has read its DIL: green predicted clean, red predicted to make \
+                 errors, and either can be tried"
+            });
+        chosen
     }
 
     fn transcript(&mut self, ui: &mut egui::Ui) {
@@ -3051,10 +3096,10 @@ impl eframe::App for ScopeApp {
                 scopes::level_meter(ui, self.frame.rx_level_db);
 
                 ui.add_space(10.0);
-                if let Some(up) = self.status(ui)
+                if let Some(drn) = self.status(ui)
                     && let Source::Live(session) = &self.source
                 {
-                    session.step_rate(up);
+                    session.choose_rate(drn);
                 }
 
                 // A retrain by hand, under the rate it would change. V.34's is

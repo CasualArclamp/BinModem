@@ -755,6 +755,18 @@ impl Progress {
 /// the command line termination character)".
 const ABORT_GUARD_MS: u32 = 125;
 
+/// What a choice from the V.90 rate menu did (see [`Modem::choose_rate`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateChosen {
+    /// Data mode was up: a rate renegotiation to it has begun.
+    Renegotiating,
+    /// Data mode was up, but a renegotiation could not begin: one is under
+    /// way, the rate is the one in use, or the digital modem does not offer it.
+    NotNow,
+    /// Start-ups from now on ask for this rate, or choose their own.
+    Pinned(Option<u8>),
+}
+
 /// One modem.
 #[derive(Debug)]
 pub struct Modem {
@@ -792,10 +804,10 @@ pub struct Modem {
     /// What the line's start-up has done that the transcript is told, a line
     /// each, not yet taken (see [`Self::take_line_notes`]).
     line_notes: Vec<String>,
-    /// Rungs V.90 start-ups move the rate their DIL chooses, from the
-    /// window's rate buttons (see [`Self::step_rate`]). Kept from call to
-    /// call.
-    rate_nudge: i8,
+    /// The rate V.90 start-ups ask for, as its drn, from the window's rate
+    /// menu (see [`Self::choose_rate`]); None for the DIL's own choice. Kept
+    /// from call to call.
+    pinned_rate: Option<u8>,
     /// The V.8 negotiation, while one is running.
     ///
     /// It comes before the data pump and instead of it. Every modem
@@ -887,7 +899,7 @@ impl Modem {
             since_dial_ms: 0,
             call_samples: 0,
             line_notes: Vec::new(),
-            rate_nudge: 0,
+            pinned_rate: None,
             negotiation: None,
             fax: None,
             fax_result: None,
@@ -1895,37 +1907,43 @@ impl Modem {
         }
     }
 
-    /// One of the window's V.90 rate buttons, `up` or down. In V.90's data
-    /// mode, a rate renegotiation one rung that way (V.90 9.6.2.1), which the
-    /// line's notes then tell; None. Anywhere else, one rung more or less on
-    /// the rate every V.90 start-up from now on asks for -- this call's too,
-    /// if its DIL has not yet been read -- and what that now is.
-    pub fn step_rate(&mut self, up: bool) -> Option<i8> {
-        if let Some(Pump::V90(m)) = self.pump.as_mut() {
-            return match m.step_rate(up) {
-                v90::startup::Stepped::Nudged(nudge) => {
-                    self.rate_nudge = nudge;
-                    Some(nudge)
-                }
-                v90::startup::Stepped::Renegotiating | v90::startup::Stepped::Nowhere => None,
-            };
+    /// A choice from the window's V.90 rate menu: a downstream rate as its
+    /// drn, or None for the DIL's own. Once this call's V.90 has reached
+    /// data mode, a rate renegotiation to it (V.90 9.6.2.1), which the line's
+    /// notes then tell. Before that, or with no V.90 call up, the rate every
+    /// V.90 start-up from now on asks for -- this call's too, if its DIL has
+    /// not yet been read.
+    pub fn choose_rate(&mut self, drn: Option<u8>) -> RateChosen {
+        if let (Some(drn), Some(Pump::V90(m))) = (drn, self.pump.as_mut())
+            && m.data_mode_reached()
+        {
+            return if m.renegotiate_to(drn) { RateChosen::Renegotiating } else { RateChosen::NotNow };
         }
-        self.set_rate_nudge(self.rate_nudge + if up { 1 } else { -1 });
-        Some(self.rate_nudge)
+        self.set_pinned_rate(drn);
+        RateChosen::Pinned(drn)
     }
 
-    /// Rungs V.90 start-ups are to move the rate their DIL chooses: above it
-    /// for positive, below for negative (see [`Self::step_rate`]).
-    pub fn set_rate_nudge(&mut self, nudge: i8) {
-        self.rate_nudge = nudge.clamp(-v90::startup::MOST_NUDGE, v90::startup::MOST_NUDGE);
+    /// The rate V.90 start-ups are to ask for (see [`Self::choose_rate`]).
+    pub fn set_pinned_rate(&mut self, drn: Option<u8>) {
+        self.pinned_rate = drn;
         if let Some(Pump::V90(m)) = self.pump.as_mut() {
-            m.set_nudge(self.rate_nudge);
+            m.set_pinned(drn);
         }
     }
 
-    /// See [`Self::set_rate_nudge`].
-    pub fn rate_nudge(&self) -> i8 {
-        self.rate_nudge
+    /// See [`Self::set_pinned_rate`].
+    pub fn pinned_rate(&self) -> Option<u8> {
+        self.pinned_rate
+    }
+
+    /// The V.90 rate menu: every downstream rate and what this call's DIL,
+    /// and data mode since, predict of it. None until a V.90 start-up has
+    /// read its DIL.
+    pub fn rate_menu(&mut self) -> Option<v90::analogue::RateMenu> {
+        match self.pump.as_mut() {
+            Some(Pump::V90(m)) => m.rate_menu(),
+            _ => None,
+        }
     }
 
     /// Retrain the line the whole way (V.34 11.5): back through phase 2 and
@@ -2354,7 +2372,7 @@ impl Modem {
         self.pump = Some(match carrier.as_str() {
             "V90" => {
                 let mut analogue = v90::startup::Analogue::new(self.fs);
-                analogue.set_nudge(self.rate_nudge);
+                analogue.set_pinned(self.pinned_rate);
                 Pump::V90(Box::new(analogue))
             }
             "V90S" => Pump::V90Server(Box::new(v90::server::Line::new(self.fs, v90::server::ours()))),

@@ -51,25 +51,10 @@ pub struct Analogue {
     holes: u32,
     /// Lines for the transcript not yet taken (see [`Self::take_notes`]).
     notes: Vec<String>,
-    /// What every V.90 start-up on this call moves the DIL's choice by (see
-    /// [`analogue::Settings::nudge`]).
-    nudge: i8,
+    /// The rate every V.90 start-up on this call asks for, as its drn, or
+    /// None for the DIL's own choice (see [`analogue::Settings::pinned`]).
+    pinned: Option<u8>,
 }
-
-/// What a press of one of the rate buttons did.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Stepped {
-    /// Data mode was up: a rate renegotiation has begun.
-    Renegotiating,
-    /// Data mode was up, and there was no rung to go to.
-    Nowhere,
-    /// Not in data mode: start-ups from now on move their rate this many
-    /// rungs, this one too if its DIL has not yet been read.
-    Nudged(i8),
-}
-
-/// How far the rate buttons will move a start-up's rate either way.
-pub const MOST_NUDGE: i8 = 8;
 
 impl Analogue {
     /// From the 75 ms of silence that end phase 1.
@@ -84,30 +69,36 @@ impl Analogue {
             renegotiations: 0,
             holes: 0,
             notes: Vec::new(),
-            nudge: 0,
+            pinned: None,
         }
     }
 
-    /// Where V.90 start-ups are to move the rate their DIL chooses: from the
-    /// window, before the call.
-    pub fn set_nudge(&mut self, nudge: i8) {
-        self.nudge = nudge.clamp(-MOST_NUDGE, MOST_NUDGE);
+    /// The rate V.90 start-ups are to ask for, as its drn, or None for the
+    /// DIL's own choice: from the window, before the call. This start-up's
+    /// too, if its DIL has not yet been read.
+    pub fn set_pinned(&mut self, drn: Option<u8>) {
+        self.pinned = drn;
         if let Some(m) = self.v90.as_mut() {
-            m.set_nudge(self.nudge);
+            m.set_pinned(drn);
         }
     }
 
-    /// A rate button: in V.90's data mode a renegotiation one rung `up` or
-    /// down; anywhere else, one rung more or less on the rate start-ups
-    /// choose.
-    pub fn step_rate(&mut self, up: bool) -> Stepped {
-        if let Some(m) = self.v90.as_mut()
-            && m.is_in_data_mode()
-        {
-            return if m.step_rate(up) { Stepped::Renegotiating } else { Stepped::Nowhere };
-        }
-        self.set_nudge(self.nudge + if up { 1 } else { -1 });
-        Stepped::Nudged(self.nudge)
+    /// Whether V.90's data mode has been reached on this start-up, so that
+    /// the rate menu renegotiates rather than pins.
+    pub fn data_mode_reached(&self) -> bool {
+        self.v90.as_ref().is_some_and(analogue::Modem::data_mode_reached)
+    }
+
+    /// The rate menu in data mode: a rate renegotiation to `drn` (see
+    /// [`analogue::Modem::renegotiate_to`]).
+    pub fn renegotiate_to(&mut self, drn: u8) -> bool {
+        self.v90.as_mut().is_some_and(|m| m.renegotiate_to(drn))
+    }
+
+    /// The rate menu, once a V.90 start-up has read its DIL (see
+    /// [`analogue::Modem::rate_menu`]).
+    pub fn rate_menu(&mut self) -> Option<analogue::RateMenu> {
+        self.v90.as_mut()?.rate_menu()
     }
 
     /// Whether V.90 is what the call came to.
@@ -317,7 +308,7 @@ impl Analogue {
             let ours_wide = true;
             let mut settings = analogue::Settings::new(&server, &info1d, &asked, p2.round_trip().unwrap_or(0.0), ours_wide);
             settings.v34_receive = p2.v34_receive_rate().unwrap_or(0);
-            settings.nudge = self.nudge;
+            settings.pinned = self.pinned;
             self.v90 = Some(analogue::Modem::new(settings, self.fs));
         }
         out
