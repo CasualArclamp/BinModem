@@ -454,18 +454,29 @@ pub fn explain(route: &Route, law: Law, limit: u32) -> Vec<String> {
     out
 }
 
-/// A CP for these sets: one mask for each different set.
+/// A CP for these sets: a constellation field for every data frame interval,
+/// interval i on field i, whether or not two of them are the same.
+///
+/// 8.5.2 lets a CP send fewer -- "Only the number of different constellations
+/// need to be sent" -- but never asks it to: Table 14 gives each interval "An
+/// integer between 0 and 5 denoting the index of the constellation", nothing
+/// in it says two indices must name different masks, and 8.5.2 counts the
+/// fields sent "from 0 (in bits 136:271) to a maximum of 5 (in bits
+/// 816:951)". Six fields, one to an interval, is that maximum, and always
+/// legal.
+///
+/// Sharing is what a real server did not cope with. Over the GlobalPOPs /
+/// NetZero pool, the calls whose phase 4 froze -- live-1789986037, and the
+/// retrain in live-1789986211, the server's last few milliseconds played over
+/// and over and then nothing -- had sent a data mode CP that shared three
+/// fields among the six intervals, [0, 1, 0, 2, 1, 1] and the like, and the
+/// calls that reached data mode had sent six. That is a lead and not a proof,
+/// but a CP of six costs only its length: 136 bits a field more (Table 14's
+/// gamma), which on four points is 68 symbols, 28 ms at 2400 baud and less at
+/// any faster symbol rate.
 fn cp_for(sets: &[Vec<u8>; INTERVALS], drn: u8, data_mode: bool) -> Cp {
-    let mut constellations: Vec<Mask> = Vec::new();
-    let mut intervals = [0u8; INTERVALS];
-    for (i, set) in sets.iter().enumerate() {
-        let mask = set.iter().fold(0 as Mask, |m, &u| m | 1 << u);
-        let index = constellations.iter().position(|&c| c == mask).unwrap_or_else(|| {
-            constellations.push(mask);
-            constellations.len() - 1
-        });
-        intervals[i] = index as u8;
-    }
+    let constellations: Vec<Mask> = sets.iter().map(|set| set.iter().fold(0 as Mask, |m, &u| m | 1 << u)).collect();
+    let intervals = std::array::from_fn(|i| i as u8);
     Cp { data_mode, drn, intervals, constellations, ..Cp::default() }
 }
 
@@ -642,6 +653,31 @@ mod tests {
         // And only enabled rates are asked for.
         let odd = choose(&Route::clean(Law::Mu, 0.00005), Law::Mu, 15124, |drn| drn % 2 == 1).unwrap();
         assert_eq!(odd.data.drn % 2, 1);
+    }
+
+    /// 8.5.2 and Table 14: every CP and CPt this end builds sends a
+    /// constellation field for each data frame interval, interval i on field
+    /// i, however many of the six are alike -- and a clean route makes most
+    /// of them alike, which is where a CP that shared sent two or three. What
+    /// goes on the line reads back as the same CP.
+    #[test]
+    fn every_cp_sends_six_constellation_fields_one_to_an_interval() {
+        let clean = Route::clean(Law::Mu, 0.0002);
+        let robbed = analyse(0.0003, true);
+        for (what, route) in [("clean", &clean), ("robbed", &robbed)] {
+            let choice = choose(route, Law::Mu, 4024, |_| true).expect(what);
+            for cp in [&choice.data, &choice.training] {
+                assert_eq!(cp.intervals, [0, 1, 2, 3, 4, 5], "{what}");
+                assert_eq!(cp.constellations.len(), INTERVALS, "{what}");
+                let bits = cp.to_bits();
+                // Six fields: gamma is 136 times the largest index, 5.
+                assert_eq!(bits.len(), 292 + 5 * 136, "{what}");
+                assert_eq!(Cp::from_bits(&bits).as_ref(), Some(cp), "{what}");
+            }
+        }
+        let alike = |cp: &Cp| (0..INTERVALS).any(|i| (i + 1..INTERVALS).any(|j| cp.constellations[i] == cp.constellations[j]));
+        let choice = choose(&clean, Law::Mu, 4024, |_| true).unwrap();
+        assert!(alike(&choice.data) && alike(&choice.training), "a clean route's intervals are alike, and are sent six times");
     }
 
     #[test]

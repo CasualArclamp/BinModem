@@ -104,6 +104,22 @@ fn phases_3_and_4_connect_over_a_clean_network() {
     assert_eq!(call.digital.status(), digital::Status::Connected { downstream, upstream });
 }
 
+/// The CPt and CP that go out send a constellation field for every data frame
+/// interval, interval i on field i (8.5.2, Table 14: "An integer between 0 and
+/// 5 denoting the index of the constellation to be used in data frame
+/// interval i"), and the digital modem here reads them and connects on them.
+#[test]
+fn the_cp_that_goes_out_has_six_fields_and_the_digital_modem_connects_on_it() {
+    let call = check_connects(Network::new(Law::Mu, FS).with_delay(0.010, FS).with_noise(1e-5));
+    let choice = call.analogue.choice().expect("nothing was asked for");
+    for (what, read, asked) in [("CPt", call.digital.cpt(), &choice.training), ("CP", call.digital.cp(), &choice.data)] {
+        let read = read.unwrap_or_else(|| panic!("the digital modem read no {what}"));
+        assert_eq!(read.intervals, [0, 1, 2, 3, 4, 5], "{what}");
+        assert_eq!(read.constellations.len(), 6, "{what}");
+        assert_eq!(read.constellations, asked.constellations, "{what} as read is not {what} as sent");
+    }
+}
+
 fn pattern(n: usize, seed: u64) -> Vec<bool> {
     let mut x = seed | 1;
     (0..n)
