@@ -125,6 +125,24 @@ const DIL_START_WINDOW: usize = 480;
 /// B1d: "48 data frames" (8.6.1).
 const B1D_FRAMES: usize = 48;
 
+/// How far from phase 4's own line level a symbol's line can be and still be
+/// the far end's signal: a hundredth of it, 20 dB down, and ten times it,
+/// 10 dB up.
+///
+/// Ed is "mapped using the same constellation parameters used to send
+/// TRN2d" (8.6.2), and B1d goes on data mode's, which 8.5.2 holds to no more
+/// than 3 dB above phase 4's: a far end sending either arrives at the level
+/// TRN2d and MP did, give or take what a window of 31 symbols of one
+/// constellation wanders. Digital silence leaves that window with the
+/// codec's ringing and nothing else, 4e-9 of the level (see [`HOLE`]), and a
+/// hundredth is far from both, as the far-end watch's quiet is in data mode.
+/// Above, what arrives louder than any constellation phase 4 has used is not
+/// a constellation at all: the click and the -2 dBFS of DC that
+/// live-1789986037's server left between its last block and the silence
+/// were 17 dB over the level its TRN2d and MP had carried, and read as Ed.
+const PRESENT: f64 = 0.01;
+const LOUDER: f64 = 10.0;
+
 /// A renegotiation's Ed: "within 5000 ms plus 2 round-trip delays after
 /// sending the S-bar-to-S transition" (9.6.2).
 const RENEGOTIATION_ED: f64 = 5.0;
@@ -511,6 +529,15 @@ fn grid(point: Point, size: Size) -> Complex {
     Complex::new(f64::from(point.0), f64::from(point.1)).scale(receiver::unit(size))
 }
 
+/// Something the upstream has just begun sending that the transcript is
+/// told of.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Began {
+    /// A CP sequence unlike the last one this phase 4 sent, as bits.
+    Cp(Vec<bool>),
+    E,
+}
+
 /// The upstream, one symbol at a time.
 #[derive(Debug, Clone)]
 struct Source {
@@ -536,6 +563,11 @@ struct Source {
     data: VecDeque<bool>,
     hold: usize,
     silent: usize,
+    /// What has just begun going out, for the transcript, and the last CP
+    /// told of since phase 4 began: each different CP is told once, and not
+    /// each repetition of it.
+    began: Option<Began>,
+    told: Vec<bool>,
 }
 
 impl Source {
@@ -562,6 +594,8 @@ impl Source {
             data: VecDeque::new(),
             hold: 0,
             silent: 0,
+            began: None,
+            told: Vec::new(),
         }
     }
 
@@ -570,6 +604,11 @@ impl Source {
         self.count = 0;
         self.silent = 0;
         self.queue.clear();
+        if up == Up::Cp {
+            // A phase 4 of its own, from the start or from data mode: every
+            // CP in it is news.
+            self.told.clear();
+        }
         match up {
             Up::Trn => self.sender.restart(),
             // "The scrambler and differential encoder are initialized to zero
@@ -578,7 +617,10 @@ impl Source {
                 self.restarted = true;
                 self.sender.restart();
             }
-            Up::E => self.queue.extend(std::iter::repeat_n(true, signals::E_BITS)),
+            Up::E => {
+                self.queue.extend(std::iter::repeat_n(true, signals::E_BITS));
+                self.began = Some(Began::E);
+            }
             _ => {}
         }
     }
@@ -674,6 +716,10 @@ impl Source {
                         if let Some((cp, ack)) = self.next_cp.take() {
                             self.cp = cp;
                             self.cp_is_ack = ack;
+                        }
+                        if self.cp != self.told {
+                            self.told = self.cp.clone();
+                            self.began = Some(Began::Cp(self.cp.clone()));
                         }
                         self.queue.extend(self.cp.iter().copied());
                     }
@@ -870,17 +916,54 @@ fn levels_for(cp: &Cp, route: &Route) -> Levels {
     })
 }
 
-/// The least distance between two of a CP's levels, either sign, as the
-/// route delivers them.
-fn least_gap(cp: &Cp, route: &Route) -> f64 {
-    (0..INTERVALS)
-        .map(|i| {
-            let mut levels: Vec<f64> =
-                cp.points(i).iter().flat_map(|&u| [route.levels[i][usize::from(u)], -route.levels[i][usize::from(u)]]).collect();
-            levels.sort_by(f64::total_cmp);
-            levels.windows(2).map(|w| w[1] - w[0]).fold(f64::INFINITY, f64::min)
-        })
-        .fold(f64::INFINITY, f64::min)
+/// A CP as the transcript tells it (Table 14): which kind it is, its rate
+/// and drn, K, how many points each interval has and which constellation
+/// field each is on, Sr, the look-ahead and the acknowledge bit.
+fn describe_cp(cp: &Cp) -> String {
+    // Bit 19 and bit 33: "0 indicates CPt; 1 indicates CP", and "received MP
+    // from far end".
+    let name = match (cp.data_mode, cp.acknowledge) {
+        (false, false) => "CPt",
+        (false, true) => "CPt'",
+        (true, false) => "CP",
+        (true, true) => "CP'",
+    };
+    if cp.drn == 0 {
+        // "drn = 0 indicates cleardown".
+        return format!("{name} asking for a cleardown (drn 0)");
+    }
+    let d = cp.frame_bits();
+    let sizes: Vec<usize> = (0..INTERVALS).map(|i| cp.points(i).len()).collect();
+    format!(
+        "{name}: {} bit/s (drn {}), K {}, sizes {sizes:?} on fields {:?}, Sr {}, look-ahead {}, acknowledge {}",
+        super::rate_for(d as u32),
+        cp.drn,
+        d.saturating_sub(cp.redundancy.data_bits()),
+        cp.intervals,
+        cp.redundancy.spent(),
+        cp.lookahead,
+        u8::from(cp.acknowledge),
+    )
+}
+
+/// An MP as the transcript tells it (Table 16): its type, the fastest
+/// upstream it allows, its acknowledge bit, and whether its precoder does
+/// anything.
+fn describe_mp(mp: &Mp) -> String {
+    // Bit 18: "1 = Type 1 with precoder coefficients". A type 1 MP whose
+    // coefficients are all zero asks for no precoding at all.
+    let precoding = mp.precoding.is_some_and(|h| h.iter().any(|&c| c != (0, 0)));
+    // V.90's bits 24:27 are where V.34 reads its answer-to-call rate:
+    // "Data rate = drn*2400".
+    format!(
+        "{}: type {}, upstream at most {} bit/s (drn {}), acknowledge {}, precoding {}",
+        if mp.acknowledge { "MP'" } else { "MP" },
+        u8::from(mp.precoding.is_some()),
+        2400 * u32::from(mp.answer_to_call),
+        mp.answer_to_call,
+        u8::from(mp.acknowledge),
+        if precoding { "on" } else { "off" },
+    )
 }
 
 /// What a look saw of data mode's decisions.
@@ -1234,11 +1317,23 @@ struct Frames {
     descrambler: Scrambler,
     finder: Finder,
     mp: Option<Mp>,
+    /// Every different MP told of so far, so that each is told once.
+    told_mps: Vec<Mp>,
     far_acknowledged: bool,
     zero_frames: usize,
     ed: bool,
     b1d_left: usize,
     data: bool,
+    /// The level of the line under the symbols, as a mean of what the far
+    /// end's signal has carried since TRN2d began, and how many symbols it
+    /// is taken over; and whether the frame under way was carried all
+    /// through (see [`PRESENT`]).
+    level: f64,
+    levelled: u32,
+    carried: bool,
+    /// The last whole frame read, for telling a line that has stopped
+    /// changing from Ed and B1d, which are scrambled.
+    last_frame: Option<Frame>,
     /// The last symbols, as (index, value), and whether each of the last
     /// frames was one the digital modem could have sent.
     history: VecDeque<(u64, f64)>,
@@ -1262,16 +1357,35 @@ impl Frames {
             descrambler: Scrambler::new(Mode::Call),
             finder: Finder::new(),
             mp: None,
+            told_mps: Vec::new(),
             far_acknowledged: false,
             zero_frames: 0,
             ed: false,
             b1d_left: 0,
             data: false,
+            level: 0.0,
+            levelled: 0,
+            carried: true,
+            last_frame: None,
             history: VecDeque::with_capacity(PLACE_KEPT),
             impossible: VecDeque::with_capacity(PLACE_WINDOW),
             moved,
             held: VecDeque::new(),
         }
+    }
+
+    /// Whether the far end's signal was there under a symbol whose line
+    /// carried `line`: between [`PRESENT`] and [`LOUDER`] times the level so
+    /// far, which it is then taken into. What was not is held out of the
+    /// level, so that a far end that has stopped cannot drag the level after
+    /// it.
+    fn heard(&mut self, line: f64) -> bool {
+        if self.levelled > 0 && !(PRESENT * self.level..=LOUDER * self.level).contains(&line) {
+            return false;
+        }
+        self.levelled = (self.levelled + 1).min(LEVEL_OVER as u32);
+        self.level += (line - self.level) / f64::from(self.levelled);
+        true
     }
 }
 
@@ -1363,6 +1477,9 @@ pub struct Modem {
     rd_watch: RWatch,
     /// Whether the digital modem is still sending, in data mode.
     far_end: super::carrier::Watch,
+    /// Whether it has stopped in phase 4, where there is no data mode level
+    /// to judge that by.
+    stopped: super::carrier::Stopped,
     far_end_went: bool,
     renegotiating: bool,
     /// Whether this end began the renegotiation, and whether R-bar-d is
@@ -1384,6 +1501,8 @@ pub struct Modem {
     /// The spectral shaping asked for, and the share of the DIL's error
     /// power it was expected to leave (5.4.5).
     shaping: (Shaping, f64),
+    /// What the transcript is to be told, a line each, not yet taken.
+    notes: Vec<String>,
 }
 
 impl Modem {
@@ -1450,6 +1569,7 @@ impl Modem {
             in_use: None,
             rd_watch: RWatch::default(),
             far_end: super::carrier::Watch::new(fs),
+            stopped: super::carrier::Stopped::new(fs),
             far_end_went: false,
             renegotiating: false,
             initiated: false,
@@ -1462,6 +1582,7 @@ impl Modem {
             short: 0,
             worse: 1.0,
             shaping: (Shaping::NONE, 1.0),
+            notes: Vec::new(),
         };
         // 9.4.2: B1d "within 15 s plus 5 round-trip delays after sending
         // INFO1a".
@@ -1598,6 +1719,15 @@ impl Modem {
         std::mem::take(&mut self.received)
     }
 
+    /// What phase 4 has done since this was last asked, a line each for the
+    /// transcript: every different CP sent and MP found, E sent, Ed and B1d
+    /// found, and why the start-up or the rate stopped being what it was. The
+    /// time is the caller's to put on them; each is made on the sample that
+    /// did it.
+    pub fn take_notes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notes)
+    }
+
     /// Whether V.90's phase 2 should be run again: read once, and cleared.
     pub fn take_retrain(&mut self) -> bool {
         std::mem::take(&mut self.wants_retrain)
@@ -1678,6 +1808,9 @@ impl Modem {
 
     /// Back from data mode to phase 4 (9.6.2.1.1, 9.6.2.2.1).
     fn begin_renegotiation(&mut self, initiating: bool) {
+        self.notes.push(
+            if initiating { "rate renegotiation, begun by this end" } else { "rate renegotiation, begun by the digital modem's Rd" }.into(),
+        );
         self.renegotiations += 1;
         self.renegotiating = true;
         self.initiated = initiating;
@@ -1782,6 +1915,7 @@ impl Modem {
     }
 
     fn fail(&mut self, why: &'static str) {
+        self.notes.push(format!("failed: {why}"));
         self.status = Status::Failed(why);
         self.stage = Stage::Finished;
         self.source.pending = None;
@@ -1793,6 +1927,17 @@ impl Modem {
     pub fn step(&mut self, line: f64) -> f64 {
         self.now += 1;
         self.rx.feed(line);
+        if self.stage == Stage::Phase4 {
+            // 9.4.2: "The analogue modem may initiate a retrain at any time
+            // during Phase 4". A far end whose line has held still or played
+            // the same block over and over for a second has stopped, and
+            // waiting out B1d's fifteen seconds for it is waiting for nothing
+            // -- or worse, reading its silence as Ed.
+            self.stopped.feed(line);
+            if self.stopped.stopped() {
+                self.fail("the far end stopped in phase 4");
+            }
+        }
         match self.watching() {
             Some(learn) => {
                 self.far_end.feed(line, learn);
@@ -1804,6 +1949,7 @@ impl Modem {
                     // more goes to it, and the call is over, as if it had
                     // cleared down: a retrain would only call into silence.
                     self.far_end_went = true;
+                    self.notes.push("the digital modem stopped sending: the call is over".into());
                     self.cleared_down();
                 }
             }
@@ -1812,6 +1958,9 @@ impl Modem {
         // 9.3.2, 9.4.2 and 9.6.2: tone B, in phase 3, phase 4 or data mode, is
         // the digital modem retraining.
         if self.stage != Stage::Finished && self.retrain_watch.feed(line, self.fs) {
+            if !self.wants_retrain {
+                self.notes.push("tone B: the digital modem is retraining".into());
+            }
             self.wants_retrain = true;
         }
         // A receiver that has held still for three seconds is not going to
@@ -1847,7 +1996,17 @@ impl Modem {
         }
         self.stage_step();
         let source = &mut self.source;
-        self.tx.next_sample(|| source.next())
+        let out = self.tx.next_sample(|| source.next());
+        match self.source.began.take() {
+            Some(Began::Cp(bits)) => {
+                if let Some(cp) = Cp::from_bits(&bits) {
+                    self.notes.push(format!("sent {}", describe_cp(&cp)));
+                }
+            }
+            Some(Began::E) => self.notes.push(format!("sent E: B1 and data next, up at {} bit/s", self.upstream_rate)),
+            None => {}
+        }
+        out
     }
 
     fn stage_step(&mut self) {
@@ -2216,7 +2375,7 @@ impl Modem {
         // Shaped or not, whichever carries more (5.4.5): what the equaliser
         // left of TRN1d and Jd says what shaping would take away.
         let leftover = self.rx.residue().leftover();
-        let Some(asked) = shaping::choose(&route, law, limit, |drn| jd.enables(drn), jd.lookahead, leftover.as_ref()) else {
+        let Some(asked) = shaping::choose_with_slack(&route, law, limit, |drn| jd.enables(drn), jd.lookahead, leftover.as_ref()) else {
             self.route = Some(route);
             self.fail("the route cannot carry V.90's slowest rate");
             return;
@@ -2247,6 +2406,7 @@ impl Modem {
         // until R is sure.
         self.rx.set_slicer(Slicer::Free);
         self.stage = Stage::Phase4;
+        self.stopped.reset();
     }
 
     fn phase4_symbol(&mut self, symbol: pcm::Symbol) {
@@ -2316,6 +2476,14 @@ impl Modem {
         }
         let i = symbol.interval();
         frames.frame[i] = nearest(&frames.levels[i], symbol.value);
+        // Whether the far end's signal was there under this symbol: a line
+        // at its level, not holding still or replaying itself. Ed and B1d are
+        // only believed of frames it carried all through.
+        if i == 0 {
+            frames.carried = true;
+        }
+        let present = frames.heard(symbol.line) && !(self.stage == Stage::Phase4 && self.stopped.replaying());
+        frames.carried &= present;
         if frames.data && self.stage == Stage::Data && !self.renegotiating {
             self.decisions.symbol(i, symbol.value);
             self.holes += u32::from(self.decisions.line(symbol.line));
@@ -2348,6 +2516,12 @@ impl Modem {
             self.rx.set_frame_offset(offset);
             return;
         }
+        // Ed and B1d are scrambled, zeros and ones, and a scrambler does not
+        // give the same frame twice running but once in 2^D; a line that has
+        // stopped changing -- silence, DC, a far end stuck on one frame --
+        // gives nothing else.
+        let repeated = frames.last_frame.replace(frame) == Some(frame);
+        let carried = frames.carried && !repeated;
         let bits: Vec<bool> = frames.decoder.frame(frame).into_iter().map(|b| frames.descrambler.descramble(b)).collect();
         if frames.data {
             if looked {
@@ -2361,18 +2535,31 @@ impl Modem {
             return;
         }
         if frames.ed {
-            // B1d: 48 frames of scrambled ones.
+            // B1d: 48 frames of scrambled ones -- and only frames the far
+            // end's signal carried, so that a far end that stops in the middle
+            // of it does not leave this end in data mode on its silence.
+            if !carried {
+                return;
+            }
             frames.b1d_left -= 1;
             if frames.b1d_left == 0 {
+                self.notes.push(format!("found B1d: data mode, down at {} bit/s", self.downstream_rate));
                 frames.data = true;
                 self.stage = Stage::Data;
                 self.renegotiating = false;
                 self.rd_watch = RWatch::default();
+                // Phase 4 is over, and so is watching it.
+                self.stopped.reset();
             }
             return;
         }
+        // Ed is two frames of scrambled zeros (8.6.2). A line with nothing on
+        // it can be too: the digital silence after the server froze in
+        // live-1789986037 read as two of them, and B1d's 48 frames after
+        // that took this end into data mode on a dead line. Only frames the
+        // far end's signal carried are Ed.
         let zeros = bits.iter().all(|b| !*b);
-        frames.zero_frames = if zeros && frames.mp.is_some() { frames.zero_frames + 1 } else { 0 };
+        frames.zero_frames = if zeros && carried && frames.mp.is_some() { frames.zero_frames + 1 } else { 0 };
         if frames.zero_frames == 2 {
             // Ed: B1d next, at data mode's constellation, with the coding
             // started afresh (8.6.1).
@@ -2380,8 +2567,9 @@ impl Modem {
             frames.b1d_left = B1D_FRAMES;
             self.deadline = None;
             self.in_use = Some(choice.data.clone());
-            self.least_gap = least_gap(&choice.data, route);
+            self.least_gap = dil::least_gap(&choice.data, route);
             self.downstream_rate = sequences::data_rate(choice.data.drn).unwrap_or(0);
+            self.notes.push(format!("found Ed: B1d next, down at {} bit/s", self.downstream_rate));
             let Some(data) = Mapping::from_cp(&choice.data) else { return };
             frames.decoder = Decoder::new(data);
             frames.levels = levels_for(&choice.data, route);
@@ -2391,6 +2579,11 @@ impl Modem {
         }
         for bit in bits {
             if let Some(Found::Mp(mp)) = frames.finder.feed(bit) {
+                if !frames.told_mps.contains(&mp) {
+                    // Once for each different MP, and not for every repetition.
+                    frames.told_mps.push(mp);
+                    self.notes.push(format!("found {}", describe_mp(&mp)));
+                }
                 if mp.answer_to_call == 0 {
                     // 9.7: the digital modem has cleared down.
                     self.cleared_down();
@@ -2475,13 +2668,15 @@ impl Modem {
             0
         };
         if self.short >= MARGIN_SHORT {
+            let short = self.short;
             self.short = 0;
             if losing_it {
                 // Nothing is being read at all: that is a receiver to train
                 // again.
                 self.wants_retrain = true;
+                self.tell_why("the levels stand within two of the receiver's own error", short, receiver, "retrain");
             } else {
-                self.fall_back(0.0, receiver);
+                self.fall_back("the levels stand short of margin, look after look", short, 0.0, receiver);
             }
             return;
         }
@@ -2492,6 +2687,7 @@ impl Modem {
         if self.least_gap < 2.0 * self.decisions.rms() {
             // Nothing is being read at all: that is a receiver to train again.
             self.wants_retrain = true;
+            self.tell_why("disturbed, and the levels within two of the decisions' error", self.short, receiver, "retrain");
             return;
         }
         // The next rate is chosen for the line as the worst of the recent
@@ -2520,26 +2716,60 @@ impl Modem {
         // be asked again, ending at 44 000, a rung below where main settles
         // in one go. The larger of the two lands at 45 333 first time, where
         // nothing errors at all afterwards.
-        self.fall_back(self.decisions.worst(), receiver);
+        self.fall_back("disturbed, misses enough to count", self.short, self.decisions.worst(), receiver);
+    }
+
+    /// The error the DIL led this end to expect in data mode: the route's
+    /// spread at data mode's power, less what the shaping asked for was to
+    /// take away. None before there is a route.
+    fn expected(&self) -> Option<f64> {
+        let route = self.route.as_ref()?;
+        let limit = f64::from(super::power_limit(&self.settings.server)) / 32768.0;
+        Some(route.noise_at(self.settings.law, limit) * self.shaping.1.sqrt())
     }
 
     /// Renegotiate for a line whose error is `measured`, never read better
-    /// than the receiver's own averaged error `receiver`.
-    fn fall_back(&mut self, measured: f64, receiver: f64) {
-        if let Some(route) = self.route.as_ref() {
-            let law = self.settings.law;
-            let limit = f64::from(super::power_limit(&self.settings.server)) / 32768.0;
-            let expected = route.noise_at(law, limit) * self.shaping.1.sqrt();
+    /// than the receiver's own averaged error `receiver`, and tell the
+    /// transcript why, as the branch of the watch that asked says it and on
+    /// the numbers it used.
+    fn fall_back(&mut self, why: &str, short: u32, measured: f64, receiver: f64) {
+        if let Some(expected) = self.expected() {
             self.worse = self.worse.max(measured.max(receiver) / expected);
         }
-        let most = self.downstream_rate.saturating_sub(1);
+        let from = self.downstream_rate;
+        let most = from.saturating_sub(1);
         // And no further down than [`MOST_DROPPED`] bits a frame in one go.
         let drn = self.in_use.as_ref().map_or(0, |cp| cp.drn);
         let least = sequences::data_rate(drn.saturating_sub(MOST_DROPPED)).unwrap_or(0);
-        if !self.renegotiate_within(most, least) {
+        let asked = if self.renegotiate_within(most, least) {
+            let rate = self.choice.as_ref().and_then(|c| sequences::data_rate(c.data.drn)).unwrap_or(0);
+            format!("{rate} bit/s, from {from}")
+        } else {
             // Nothing slower the route carries: train again from phase 2.
             self.wants_retrain = true;
-        }
+            format!("retrain, nothing slower than {from} bit/s carrying")
+        };
+        self.tell_why(why, short, receiver, &asked);
+    }
+
+    /// One line for the transcript: why the watch on the margin asked for a
+    /// slower rate or a retrain, and every number it went on -- looks short
+    /// of margin, the evidence of misses, the worst block three looks
+    /// reached, the decisions' error over the recent looks, the receiver's
+    /// own averaged error, the least gap between data mode's levels, the
+    /// error the DIL led this end to expect, how much worse than that data
+    /// mode has found the line -- and what it asked for.
+    fn tell_why(&mut self, why: &str, short: u32, receiver: f64, asked: &str) {
+        let line = format!(
+            "rate watch: {why}; looks short {short}, evidence {:.1}, worst block {:.2e}, decisions' error {:.2e}, receiver's error {receiver:.2e}, least gap {:.2e}, expected {:.2e}, worse {:.2}: asked for {asked}",
+            self.decisions.evidence,
+            self.decisions.worst(),
+            self.decisions.rms(),
+            self.least_gap,
+            self.expected().unwrap_or(f64::NAN),
+            self.worse,
+        );
+        self.notes.push(line);
     }
 
     /// What every CP this end sends says besides its constellations, rate and

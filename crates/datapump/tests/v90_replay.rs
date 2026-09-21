@@ -16,8 +16,9 @@
 //! the recording cannot answer.
 //!
 //! What the choice at the end of the DIL comes to is shown whatever became of
-//! it: the rate unshaped and the rate with the spectral shaping asked for, and
-//! what they went on.
+//! it: the rate unshaped, the best with the spectral shaping asked for, the
+//! rate chosen with the room `dil::SLACK` asks for, and what they went on. And every line the transcript would have had of phase
+//! 4 -- each CP sent and MP found, E, Ed and B1d -- at the time it came.
 
 use datapump::v90::startup::Analogue;
 
@@ -47,6 +48,10 @@ fn probe_replay_v90() {
             before = (read > 0 && read + 64 >= of).then(|| v.clone());
         }
         modem.step(f64::from(s));
+        // What phase 4 did, as the transcript tells it.
+        for text in modem.take_notes() {
+            println!("{:8.3}  {text}", i as f64 / FS);
+        }
         if let Some(mut v) = before.take_if(|_| modem.v90().is_none_or(|v| v.route().is_some())) {
             let took = std::time::Instant::now();
             v.step(f64::from(s));
@@ -98,12 +103,20 @@ fn chosen(v: &datapump::v90::analogue::Modem, at: f64) {
     let rate = |c: &dil::Choice| sequences::data_rate(c.data.drn);
     let unshaped = dil::choose(route, law, limit, |drn| jd.enables(drn));
     let asked = shaping::choose(route, law, limit, |drn| jd.enables(drn), jd.lookahead, leftover.as_ref());
+    let slack = shaping::choose_with_slack(route, law, limit, |drn| jd.enables(drn), jd.lookahead, leftover.as_ref());
+    // How far apart the levels stand, in the error the DIL leads the modem to
+    // expect, over SPACING: what SLACK asks of the choice.
+    let noise = route.noise_at(law, f64::from(limit) / 32768.0);
+    let room = |a: &shaping::Asked| dil::least_gap(&a.choice.data, route) / (dil::SPACING * noise * a.left.sqrt());
     println!(
-        "{at:8.3}  unshaped {:?}; chosen {:?} with {:?}, leaving {:.2} of the error; V.34 would carry {}",
+        "{at:8.3}  unshaped {:?}; best {:?} with {:?}, leaving {:.2} of the error, room {:.2}; chosen with room {:?}, room {:.2}; V.34 would carry {}",
         unshaped.as_ref().and_then(rate),
         asked.as_ref().map(shaping::Asked::rate),
         asked.as_ref().map(|a| a.shaping),
         asked.as_ref().map_or(1.0, |a| a.left),
+        asked.as_ref().map_or(0.0, room),
+        slack.as_ref().map(shaping::Asked::rate),
+        slack.as_ref().map_or(0.0, room),
         v.settings().v34_receive
     );
     match leftover {

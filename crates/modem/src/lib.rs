@@ -786,6 +786,12 @@ pub struct Modem {
     elapsed_samples: f64,
     /// Milliseconds since the call was placed, for the guard in V.250 5.6.1.
     since_dial_ms: u32,
+    /// Samples since the call was placed, which is what the line's notes
+    /// are timed by.
+    call_samples: u64,
+    /// What the line's start-up has done that the transcript is told, a line
+    /// each, not yet taken (see [`Self::take_line_notes`]).
+    line_notes: Vec<String>,
     /// The V.8 negotiation, while one is running.
     ///
     /// It comes before the data pump and instead of it. Every modem
@@ -875,6 +881,8 @@ impl Modem {
             async_bits: AsyncBits::new(8),
             elapsed_samples: 0.0,
             since_dial_ms: 0,
+            call_samples: 0,
+            line_notes: Vec::new(),
             negotiation: None,
             fax: None,
             fax_result: None,
@@ -948,6 +956,24 @@ impl Modem {
             return negotiation.phase();
         }
         self.pump.as_ref().map_or("on hook", Pump::phase)
+    }
+
+    /// What the line's start-up has done since this was last called, a line
+    /// each: for V.90, every different CP sent and MP found in phase 4, E
+    /// sent, Ed and B1d found, and why a start-up or a rate stopped being
+    /// what it was. Each is made on the sample that did it, so a caller that
+    /// asks after every sample can time it exactly -- by
+    /// [`Self::call_seconds`], or by a recording's own clock.
+    ///
+    /// None of it is visible from the terminal, and a call that stalls in
+    /// phase 4 leaves nothing else to say which end stopped answering.
+    pub fn take_line_notes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.line_notes)
+    }
+
+    /// Seconds since the call was placed.
+    pub fn call_seconds(&self) -> f64 {
+        self.call_samples as f64 / self.fs
     }
 
     /// Every LAPM frame that has crossed since this was last called.
@@ -1467,6 +1493,7 @@ impl Modem {
     /// Advance the line by one sample, returning the sample to transmit.
     pub fn step(&mut self, line: f64) -> f64 {
         self.elapsed_samples += 1.0;
+        self.call_samples += 1;
         let ms = 1000.0 / self.fs;
         if self.elapsed_samples * ms >= 1.0 {
             let whole = (self.elapsed_samples * ms) as u32;
@@ -1486,6 +1513,11 @@ impl Modem {
             return 0.0;
         };
         let out = pump.step(line);
+        if let Pump::V90(m) = pump {
+            // Taken on the sample that made them, and kept here, so that a
+            // pump put away on this same sample still has its last lines told.
+            self.line_notes.extend(m.take_notes());
+        }
 
         match self.state {
             State::Handshaking => self.advance_handshake(),
@@ -2067,6 +2099,8 @@ impl Modem {
             return;
         }
         self.since_dial_ms = 0;
+        self.call_samples = 0;
+        self.line_notes.clear();
         self.rate = 0;
         self.transmit_rate = 0;
         self.ec = None;

@@ -67,6 +67,9 @@ fn probe_replay_call() {
     for (i, s) in line.iter().enumerate() {
         modem.step(f64::from(*s));
         dte.extend(modem.take_dte());
+        for text in modem.take_line_notes() {
+            println!("  {:>7.3}  {text}", i as f64 / FS);
+        }
         let now = (modem.state(), modem.line_phase(), modem.error_control_phase());
         if now != (state, phase, ec) || modem.damaged_frames() != damaged {
             damaged = modem.damaged_frames();

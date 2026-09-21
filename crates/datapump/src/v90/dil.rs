@@ -48,6 +48,46 @@ pub const LOUDEST: f64 = 0.3;
 /// symbols.
 pub const SPACING: f64 = 10.0;
 
+/// How much further apart than [`SPACING`] the levels of the rate chosen at
+/// the end of the DIL have to stand, as a share of it: 1.12, which is room
+/// for data mode's error to come out 1.6 times what the DIL led the modem to
+/// expect.
+///
+/// The DIL is one pass, 0.44 s, and on live-1789986211 it was taken at its
+/// word with next to nothing to spare. Its route, as this build reads it
+/// back, carries 56 000 only on 66 or 67 of the 67 rungs its ladders have at
+/// [`SPACING`], at a power of 3931 against Table 15's 4024, with the levels
+/// 10.7 of the expected error apart. The call itself went further: it asked
+/// for 56 000 shaped, counting on the shaping to take half the error's power
+/// away, and so built for an error of 0.94e-4. Replayed with the CPs it
+/// really sent, data mode found the receiver's own error at 1.50e-4, 1.6
+/// times that; and the watch on data mode's margin, which keeps a rate only
+/// while its levels stand seven of the receiver's error apart, found 56 000
+/// short of it three seconds in. A rate chosen to survive that has to stand
+/// 7 times 1.6, 11.2, of the error the DIL expects, where [`SPACING`] stands
+/// 10.
+///
+/// The clean simulated lines come up with room of their own, since the power
+/// ceiling binds before the ladder does -- 11.1 to 13.0 of the expected error
+/// -- and data mode's error on them runs 0.7 to 1.45 times what the DIL
+/// expects. So this costs them little. Measured on sixteen routes: the clean
+/// ones at 20 ms, 0.1 s, 0.3 s and 0.6 s each way, both laws, a drifting
+/// clock and a softphone keep their rates; the two clean ones at 10 ms each
+/// way, whose room was 11.1, lose a rung, 50 666 to 49 333; a robbed bit,
+/// at 10.5, loses a rung, 38 666 to 37 333; the band-edge cut, shaped, keeps
+/// 48 000; a floor at 3e-4, at 10.4, loses two, 49 333 to 46 666. And
+/// live-1789986211's route comes out a rung down, at 54 666 unshaped, its
+/// levels 14.3 of the expected error apart.
+///
+/// It is not the margin the analysis of that call argued for, which put the
+/// spread data mode met at about four times what the DIL read and the line
+/// in the middle forty thousands. This replay does not show that -- the
+/// receiver's error was 1.10 times the DIL's spread, and the clean looks
+/// 1.06 of it -- and taking the spread as four times what was read would
+/// cost every clean simulated line ten rungs or more, 50 666 to 37 333, and
+/// still bring that route only to 49 333.
+pub const SLACK: f64 = 1.12;
+
 /// The DIL this modem asks for: every codeword up to [`LOUDEST`] but UINFO,
 /// each in a segment of six frames -- the first all references at UINFO, the
 /// other five the codeword itself -- with signs from a fixed balanced
@@ -454,18 +494,42 @@ pub fn explain(route: &Route, law: Law, limit: u32) -> Vec<String> {
     out
 }
 
-/// A CP for these sets: one mask for each different set.
+/// The least distance between two of a CP's levels, either sign, as the
+/// route delivers them.
+pub fn least_gap(cp: &Cp, route: &Route) -> f64 {
+    (0..INTERVALS)
+        .map(|i| {
+            let mut levels: Vec<f64> =
+                cp.points(i).iter().flat_map(|&u| [route.levels[i][usize::from(u)], -route.levels[i][usize::from(u)]]).collect();
+            levels.sort_by(f64::total_cmp);
+            levels.windows(2).map(|w| w[1] - w[0]).fold(f64::INFINITY, f64::min)
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// A CP for these sets: a constellation field for every data frame interval,
+/// interval i on field i, whether or not two of them are the same.
+///
+/// 8.5.2 lets a CP send fewer -- "Only the number of different constellations
+/// need to be sent" -- but never asks it to: Table 14 gives each interval "An
+/// integer between 0 and 5 denoting the index of the constellation", nothing
+/// in it says two indices must name different masks, and 8.5.2 counts the
+/// fields sent "from 0 (in bits 136:271) to a maximum of 5 (in bits
+/// 816:951)". Six fields, one to an interval, is that maximum, and always
+/// legal.
+///
+/// Sharing is what a real server did not cope with. Over the GlobalPOPs /
+/// NetZero pool, the calls whose phase 4 froze -- live-1789986037, and the
+/// retrain in live-1789986211, the server's last few milliseconds played over
+/// and over and then nothing -- had sent a data mode CP that shared three
+/// fields among the six intervals, [0, 1, 0, 2, 1, 1] and the like, and the
+/// calls that reached data mode had sent six. That is a lead and not a proof,
+/// but a CP of six costs only its length: 136 bits a field more (Table 14's
+/// gamma), which on four points is 68 symbols, 28 ms at 2400 baud and less at
+/// any faster symbol rate.
 fn cp_for(sets: &[Vec<u8>; INTERVALS], drn: u8, data_mode: bool) -> Cp {
-    let mut constellations: Vec<Mask> = Vec::new();
-    let mut intervals = [0u8; INTERVALS];
-    for (i, set) in sets.iter().enumerate() {
-        let mask = set.iter().fold(0 as Mask, |m, &u| m | 1 << u);
-        let index = constellations.iter().position(|&c| c == mask).unwrap_or_else(|| {
-            constellations.push(mask);
-            constellations.len() - 1
-        });
-        intervals[i] = index as u8;
-    }
+    let constellations: Vec<Mask> = sets.iter().map(|set| set.iter().fold(0 as Mask, |m, &u| m | 1 << u)).collect();
+    let intervals = std::array::from_fn(|i| i as u8);
     Cp { data_mode, drn, intervals, constellations, ..Cp::default() }
 }
 
@@ -642,6 +706,31 @@ mod tests {
         // And only enabled rates are asked for.
         let odd = choose(&Route::clean(Law::Mu, 0.00005), Law::Mu, 15124, |drn| drn % 2 == 1).unwrap();
         assert_eq!(odd.data.drn % 2, 1);
+    }
+
+    /// 8.5.2 and Table 14: every CP and CPt this end builds sends a
+    /// constellation field for each data frame interval, interval i on field
+    /// i, however many of the six are alike -- and a clean route makes most
+    /// of them alike, which is where a CP that shared sent two or three. What
+    /// goes on the line reads back as the same CP.
+    #[test]
+    fn every_cp_sends_six_constellation_fields_one_to_an_interval() {
+        let clean = Route::clean(Law::Mu, 0.0002);
+        let robbed = analyse(0.0003, true);
+        for (what, route) in [("clean", &clean), ("robbed", &robbed)] {
+            let choice = choose(route, Law::Mu, 4024, |_| true).expect(what);
+            for cp in [&choice.data, &choice.training] {
+                assert_eq!(cp.intervals, [0, 1, 2, 3, 4, 5], "{what}");
+                assert_eq!(cp.constellations.len(), INTERVALS, "{what}");
+                let bits = cp.to_bits();
+                // Six fields: gamma is 136 times the largest index, 5.
+                assert_eq!(bits.len(), 292 + 5 * 136, "{what}");
+                assert_eq!(Cp::from_bits(&bits).as_ref(), Some(cp), "{what}");
+            }
+        }
+        let alike = |cp: &Cp| (0..INTERVALS).any(|i| (i + 1..INTERVALS).any(|j| cp.constellations[i] == cp.constellations[j]));
+        let choice = choose(&clean, Law::Mu, 4024, |_| true).unwrap();
+        assert!(alike(&choice.data) && alike(&choice.training), "a clean route's intervals are alike, and are sent six times");
     }
 
     #[test]

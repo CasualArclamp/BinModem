@@ -104,6 +104,22 @@ fn phases_3_and_4_connect_over_a_clean_network() {
     assert_eq!(call.digital.status(), digital::Status::Connected { downstream, upstream });
 }
 
+/// The CPt and CP that go out send a constellation field for every data frame
+/// interval, interval i on field i (8.5.2, Table 14: "An integer between 0 and
+/// 5 denoting the index of the constellation to be used in data frame
+/// interval i"), and the digital modem here reads them and connects on them.
+#[test]
+fn the_cp_that_goes_out_has_six_fields_and_the_digital_modem_connects_on_it() {
+    let call = check_connects(Network::new(Law::Mu, FS).with_delay(0.010, FS).with_noise(1e-5));
+    let choice = call.analogue.choice().expect("nothing was asked for");
+    for (what, read, asked) in [("CPt", call.digital.cpt(), &choice.training), ("CP", call.digital.cp(), &choice.data)] {
+        let read = read.unwrap_or_else(|| panic!("the digital modem read no {what}"));
+        assert_eq!(read.intervals, [0, 1, 2, 3, 4, 5], "{what}");
+        assert_eq!(read.constellations.len(), 6, "{what}");
+        assert_eq!(read.constellations, asked.constellations, "{what} as read is not {what} as sent");
+    }
+}
+
 fn pattern(n: usize, seed: u64) -> Vec<bool> {
     let mut x = seed | 1;
     (0..n)
@@ -438,6 +454,31 @@ fn a_line_gone_noisy_is_renegotiated_down() {
     assert_eq!(call.analogue.retrains(), 0);
 }
 
+/// When the watch on the margin asks for a slower rate, the transcript is
+/// told which of its rules asked and every number that rule went on -- the
+/// looks short of margin, the evidence of misses, the worst block, the
+/// decisions' and the receiver's own error, the least gap between the
+/// levels, the error the DIL led it to expect and how much worse the line
+/// was -- and the rate it asked for is the rate the call comes back at.
+#[test]
+fn a_fall_back_tells_the_transcript_why_and_on_what_numbers() {
+    let mut call = connects(plain_line(), server(), 30.0);
+    let (down, _) = call.rates();
+    call.analogue.take_notes();
+    call.net.set_noise(1e-3);
+    assert!(call.comes_back_up(10.0), "{} / {}", call.analogue.phase(), call.digital.phase());
+    let (slower, _) = call.rates();
+    let notes = call.analogue.take_notes();
+    for note in &notes {
+        println!("{note}");
+    }
+    let why = notes.iter().find(|n| n.starts_with("rate watch: ")).unwrap_or_else(|| panic!("no reason given: {notes:#?}"));
+    for word in ["looks short ", "evidence ", "worst block ", "decisions' error ", "receiver's error ", "least gap ", "expected ", "worse "] {
+        assert!(why.contains(word), "{why:?} does not say {word:?}");
+    }
+    assert!(why.ends_with(&format!("asked for {slower} bit/s, from {down}")), "{why:?}, and the call came back at {slower}");
+}
+
 /// 9.7: a cleardown from either end ends the call at both.
 #[test]
 fn a_cleardown_from_either_end_ends_the_call_at_both() {
@@ -638,6 +679,74 @@ fn a_far_end_that_stops_sending_is_noticed_at_either_end() {
     }
 }
 
+/// What a far end that has stopped in phase 4 leaves on the line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stopped {
+    /// Digital silence, as live-1789986037's server left it.
+    Silence,
+    /// Its last 162 codewords, 20.25 ms, over and over, as the retrain in
+    /// live-1789986211 left it.
+    LastBlock,
+    /// One loud codeword for ever: a line that is DC.
+    Dc,
+}
+
+/// A far end that stops in phase 4, just after its MP', as the GlobalPOPs /
+/// NetZero server did twice. Nothing it leaves on the line is Ed, however it
+/// decodes -- silence read as Ed and took the analogue modem into data mode
+/// on a dead line -- and a second of it ends phase 4 with the reason said,
+/// which 9.4.2 allows: "The analogue modem may initiate a retrain at any time
+/// during Phase 4".
+#[test]
+fn a_far_end_that_stops_in_phase_4_ends_the_phase_and_is_never_taken_for_ed() {
+    for stopped in [Stopped::Silence, Stopped::LastBlock, Stopped::Dc] {
+        let mut call = Call::new(Network::new(Law::Mu, FS).with_delay(0.010, FS));
+        let mut last: std::collections::VecDeque<f64> = std::collections::VecDeque::with_capacity(162);
+        let mut froze: Option<u64> = None;
+        let mut notes: Vec<(f64, String)> = Vec::new();
+        while call.ticks < 30 * 8000 {
+            let to_digital = call.net.up(&call.up);
+            call.up.clear();
+            let sent = call.digital.step(to_digital);
+            let out = match (froze, stopped) {
+                (None, _) => {
+                    if last.len() == 162 {
+                        last.pop_front();
+                    }
+                    last.push_back(sent);
+                    sent
+                }
+                (Some(_), Stopped::Silence) => 0.0,
+                (Some(at), Stopped::LastBlock) => last[((call.ticks - at) % 162) as usize],
+                (Some(_), Stopped::Dc) => 0.25,
+            };
+            for x in call.net.down(out) {
+                call.up.push(call.analogue.step(x));
+                let at = call.ticks as f64 / 8000.0;
+                notes.extend(call.analogue.take_notes().into_iter().map(|n| (at, n)));
+            }
+            call.ticks += 1;
+            if froze.is_none() && call.analogue.far_mp().is_some_and(|mp| mp.acknowledge) {
+                froze = Some(call.ticks);
+            }
+            if !matches!(call.analogue.status(), analogue::Status::Running) {
+                break;
+            }
+        }
+        for (at, note) in &notes {
+            println!("{stopped:?}: {at:7.3}  {note}");
+        }
+        let froze = froze.unwrap_or_else(|| panic!("{stopped:?}: no MP' before the far end stopped"));
+        assert_eq!(call.analogue.status(), analogue::Status::Failed("the far end stopped in phase 4"), "{stopped:?}");
+        let after = (call.ticks - froze) as f64 / 8000.0;
+        assert!((1.0..1.1).contains(&after), "{stopped:?}: the phase ended {after} s after the far end stopped");
+        let froze = froze as f64 / 8000.0;
+        let ed = |n: &str| n.starts_with("found Ed") || n.starts_with("found B1d");
+        assert!(!notes.iter().any(|(at, n)| *at > froze && ed(n)), "{stopped:?}: {notes:#?}");
+        assert_eq!(notes.last().map(|n| n.1.as_str()), Some("failed: the far end stopped in phase 4"), "{stopped:?}");
+    }
+}
+
 /// And a far end that is still there is never taken for one that has gone:
 /// a softphone's gain control and jitter buffer, a VoIP round trip, a
 /// renegotiation from each end, and data all the while.
@@ -704,6 +813,48 @@ impl FullCall {
 
 fn plain_line() -> Network {
     Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5)
+}
+
+/// The rate chosen at the end of the DIL leaves room, and on a clean line
+/// that costs at most a rung: the levels stand `dil::SLACK` times
+/// `dil::SPACING` of the error the DIL leads the modem to expect, where the
+/// best the route carries would have them only `dil::SPACING` apart and then
+/// as far as the power allows. At 20 ms and 0.6 s each way, both laws,
+/// that power leaves room enough and nothing is lost; at 10 ms, whose room
+/// comes out 11.1 of the expected error, one rung is.
+#[test]
+fn the_dil_choice_leaves_room_and_a_clean_line_loses_at_most_a_rung_for_it() {
+    use datapump::v90::{dil, shaping};
+    let mut a_law = server();
+    a_law.a_law = true;
+    let lines = [
+        ("20 ms", plain_line(), server()),
+        ("10 ms", Network::new(Law::Mu, FS).with_delay(0.010, FS).with_noise(1e-5), server()),
+        ("0.6 s", voip_line(), server()),
+        ("A-law", Network::new(Law::A, FS).with_delay(0.020, FS).with_noise(1e-5), a_law),
+    ];
+    let mut lost = Vec::new();
+    for (name, net, server) in lines {
+        let mut call = FullCall::new(net, server);
+        while call.analogue.v90().is_none_or(|v| v.choice().is_none()) {
+            assert!(call.ticks < 40 * 8000, "{name}: no choice at the end of the DIL");
+            call.run_until_seconds((call.ticks + 8) as f64 / 8000.0);
+        }
+        let v = call.analogue.v90().unwrap();
+        let (route, law) = (v.route().unwrap(), v.settings().law);
+        let limit = datapump::v90::power_limit(&v.settings().server);
+        let jd = v.far_jd().unwrap_or_default();
+        let best = shaping::choose(route, law, limit, |drn| jd.enables(drn), jd.lookahead, v.receiver().residue().leftover().as_ref()).unwrap();
+        let chosen = v.choice().unwrap();
+        let expected = route.noise_at(law, f64::from(limit) / 32768.0) * v.shaping().1.sqrt();
+        let room = dil::least_gap(&chosen.data, route) / (dil::SPACING * expected);
+        let rungs = best.choice.data.drn - chosen.data.drn;
+        println!("{name}: {} bit/s where the best was {}, room {room:.2} of the spacing", datapump::v90::rate_for(chosen.data.frame_bits() as u32), best.rate());
+        assert!(room >= dil::SLACK, "{name}: room {room:.3}");
+        assert!(rungs <= 1, "{name}: {rungs} rungs lost");
+        lost.push(rungs);
+    }
+    assert_eq!(lost, [0, 1, 0, 0]);
 }
 
 /// A path that takes the top of the downstream's band away, as a live call
