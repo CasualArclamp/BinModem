@@ -312,8 +312,8 @@ const STORM_GARBLED: f64 = 0.03;
 const STORM_SHORT: usize = 512;
 
 /// A hole in the audio: the line in front of the equaliser at under a
-/// thousandth of its own level, that many symbols in a row, and how long
-/// that level is taken over -- half a second of symbols.
+/// hundred-thousandth of its own level, that many symbols in a row, and how
+/// long that level is taken over -- half a second of symbols.
 ///
 /// Some softphones do not conceal a lost packet at all: they play zeroes.
 /// Nothing is made up, so [`STORM_GARBLED`] has nothing to weigh -- silence
@@ -333,31 +333,48 @@ const STORM_SHORT: usize = 512;
 ///
 /// The line the equaliser drew the symbol from ([`pcm::Symbol::line`]) tells
 /// it at once. That window is 63 half symbols, 3.94 ms, so a hole longer
-/// than the window empties it. Measured the same way -- the quietest the
-/// window reached, against the line's own level, and the longest run of
-/// symbols under a thousandth of it:
+/// than the window empties it, and once it is empty there is nothing in it
+/// but the codec's own ringing from either side of the hole. Measured over
+/// 130 s of the same known data on each of eighty routes -- both laws, round
+/// trips of 0.6 s and 20 ms, judging exactly as [`Decisions::line`] judges,
+/// with a hole held out of the level as it holds one out -- the quietest the
+/// window reached against that level, and the longest run of symbols under
+/// each threshold:
 ///
-/// | what happened | quietest | longest run |
-/// |---|---|---|
-/// | nothing: a clean line | -5.8 dB | none |
-/// | 20 and 60 ms concealed with comfort noise | -5.8 dB | none |
-/// | 30 and 300 ms of noise at 1e-3 | -4.4, -4.3 dB | none |
-/// | the floor stepped to 6e-4 | -4.0 dB | none |
-/// | 20 and 60 ms concealed with a fading repeat | -20.6, -28.9 dB | none |
-/// | 10 to 60 ms of digital silence | -84 dB | 45 to 449 |
+/// | what happened | quietest | run under 1e-3 | under 1e-4 | under 1e-5 |
+/// |---|---|---|---|---|
+/// | nothing: a clean line | -5.8 to -5.2 dB | none | none | none |
+/// | 5 to 300 ms of noise at 1e-3 | -5.8 to -4.0 dB | none | none | none |
+/// | the floor stepped or ramped to 6e-4 | -4.8 to -4.2 dB | none | none | none |
+/// | a slip, and a softphone's gain control | -23.8 to -21.6 dB | none | none | none |
+/// | 10 to 60 ms concealed with comfort noise | -6.8 to -6.4 dB | none | none | none |
+/// | 10 to 60 ms concealed with a fading repeat | -32.1 to -15.1 dB | 0 to 3 | none | none |
+/// | 100 ms concealed with a fading repeat | -34.8 to -33.2 dB | 12 to 17 | none | none |
+/// | 200 ms concealed with a fading repeat | -39.0 to -37.6 dB | 43 to 49 | none | none |
+/// | 5 ms of digital silence | -59.4 dB | 10 | 9 | 6 |
+/// | 10 to 30 ms of digital silence | -86 to -84 dB | 49 to 211 | 47 to 209 | 41 to 203 |
 ///
-/// Nothing that is not a hole reaches a thousandth at all, and the fading
-/// repeat -- the quietest thing that is not a hole -- stops at a
-/// hundredth-and-a-half. A hole reaches a ten-thousandth and stays there for
-/// as long as it lasts less the window: 4 ms of silence leaves a run of 1,
-/// 5 leaves 10, 6 leaves 17, 8 leaves 32, 10 leaves 45 to 49, 20 leaves 129,
-/// 30 leaves 209, 40 leaves 288 and 60 leaves 449. A-law and a 20 ms round
-/// trip give the same runs to within four symbols.
+/// So the thousandth this once used was not a line at all. A concealer that
+/// repeats the last packet fades it out linearly, and the end of the fade is
+/// silence: the longer the packet it is repeating, the longer the window
+/// spends under any given level. At a thousandth, sixty milliseconds of
+/// fading repeat already leaves a run of 3 and a hundred leaves 12 to 17 --
+/// which, against [`HOLE`]'s sixteen, is a hundred milliseconds of made-up
+/// audio counted as a hole on A-law and not on mu-law. There was no margin
+/// there to speak of and the note claimed a wide one.
 ///
-/// Sixteen symbols is two milliseconds of line gone on top of the window
-/// emptying, so about six milliseconds of silence in all: a third of what
-/// the shortest hole this family comes in leaves, and three times what five
-/// milliseconds leaves. Five milliseconds is left alone, as five
+/// There is a wide one a hundred times further down. A hole empties the
+/// window altogether and reaches 4e-9 of the level -- the codec's ringing
+/// and nothing else -- while the quietest thing that is not a hole, two
+/// hundred milliseconds of fading repeat, stops at 1.26e-4. A
+/// hundred-thousandth sits 11 dB under everything that is not a hole and
+/// 34 dB over every hole, and nothing that is not a hole leaves a run of one
+/// symbol under it anywhere in the eighty routes.
+///
+/// Sixteen symbols under that level is two milliseconds of line gone on top
+/// of the window emptying, so about seven milliseconds of silence in all:
+/// ten milliseconds leaves a run of 41 to 42, twenty leaves 119 to 121 and
+/// thirty leaves 203, while five leaves 6 and is left alone, as five
 /// milliseconds of noise is (see [`BLOCK`]), and four never empties the
 /// window at all.
 ///
@@ -373,7 +390,7 @@ const STORM_SHORT: usize = 512;
 /// reference on a 50 ms time constant, which measured wants 0.237 s -- and
 /// then the looks go for that reason instead.
 const HOLE: usize = 16;
-const HOLE_LEVEL: f64 = 1e-3;
+const HOLE_LEVEL: f64 = 1e-5;
 const LEVEL_OVER: f64 = 4000.0;
 
 /// Looks in a row leaving data mode's levels fewer than two of the
