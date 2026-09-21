@@ -792,6 +792,10 @@ pub struct Modem {
     /// What the line's start-up has done that the transcript is told, a line
     /// each, not yet taken (see [`Self::take_line_notes`]).
     line_notes: Vec<String>,
+    /// Rungs V.90 start-ups move the rate their DIL chooses, from the
+    /// window's rate buttons (see [`Self::step_rate`]). Kept from call to
+    /// call.
+    rate_nudge: i8,
     /// The V.8 negotiation, while one is running.
     ///
     /// It comes before the data pump and instead of it. Every modem
@@ -883,6 +887,7 @@ impl Modem {
             since_dial_ms: 0,
             call_samples: 0,
             line_notes: Vec::new(),
+            rate_nudge: 0,
             negotiation: None,
             fax: None,
             fax_result: None,
@@ -1890,6 +1895,39 @@ impl Modem {
         }
     }
 
+    /// One of the window's V.90 rate buttons, `up` or down. In V.90's data
+    /// mode, a rate renegotiation one rung that way (V.90 9.6.2.1), which the
+    /// line's notes then tell; None. Anywhere else, one rung more or less on
+    /// the rate every V.90 start-up from now on asks for -- this call's too,
+    /// if its DIL has not yet been read -- and what that now is.
+    pub fn step_rate(&mut self, up: bool) -> Option<i8> {
+        if let Some(Pump::V90(m)) = self.pump.as_mut() {
+            return match m.step_rate(up) {
+                v90::startup::Stepped::Nudged(nudge) => {
+                    self.rate_nudge = nudge;
+                    Some(nudge)
+                }
+                v90::startup::Stepped::Renegotiating | v90::startup::Stepped::Nowhere => None,
+            };
+        }
+        self.set_rate_nudge(self.rate_nudge + if up { 1 } else { -1 });
+        Some(self.rate_nudge)
+    }
+
+    /// Rungs V.90 start-ups are to move the rate their DIL chooses: above it
+    /// for positive, below for negative (see [`Self::step_rate`]).
+    pub fn set_rate_nudge(&mut self, nudge: i8) {
+        self.rate_nudge = nudge.clamp(-v90::startup::MOST_NUDGE, v90::startup::MOST_NUDGE);
+        if let Some(Pump::V90(m)) = self.pump.as_mut() {
+            m.set_nudge(self.rate_nudge);
+        }
+    }
+
+    /// See [`Self::set_rate_nudge`].
+    pub fn rate_nudge(&self) -> i8 {
+        self.rate_nudge
+    }
+
     /// Retrain the line the whole way (V.34 11.5): back through phase 2 and
     /// train again, on the same call. For V.34 this is the full retrain, not
     /// the in-band rate renegotiation [`Self::ask_for_retrain`] does; other
@@ -2314,7 +2352,11 @@ impl Modem {
             },
         };
         self.pump = Some(match carrier.as_str() {
-            "V90" => Pump::V90(Box::new(v90::startup::Analogue::new(self.fs))),
+            "V90" => {
+                let mut analogue = v90::startup::Analogue::new(self.fs);
+                analogue.set_nudge(self.rate_nudge);
+                Pump::V90(Box::new(analogue))
+            }
             "V90S" => Pump::V90Server(Box::new(v90::server::Line::new(self.fs, v90::server::ours()))),
             "V34" => {
                 let role = match role {

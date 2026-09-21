@@ -2558,28 +2558,70 @@ impl ScopeApp {
         });
     }
 
-    fn status(&self, ui: &mut egui::Ui) {
+    /// The status grid, and above its rates the V.90 rate buttons: which of
+    /// them was pressed, up as true.
+    fn status(&self, ui: &mut egui::Ui) -> Option<bool> {
         let f = &self.frame;
         let dim = Color32::from_rgb(140, 150, 165);
         let bright = Color32::from_rgb(220, 225, 235);
+        let mut pressed = None;
         egui::Grid::new("status")
             .num_columns(2)
             .spacing([12.0, 4.0])
             .show(ui, |ui| {
-                let mut row = |k: &str, v: String, colour: Color32| {
+                let row = |ui: &mut egui::Ui, k: &str, v: String, colour: Color32| {
                     ui.label(RichText::new(k).monospace().color(dim));
                     ui.label(RichText::new(v).monospace().color(colour));
                     ui.end_row();
                 };
-                row("state", f.state.label().into(), bright);
-                row("modulation", f.modulation.into(), bright);
-                row("phase", f.line_phase.into(), dim);
+                row(ui, "state", f.state.label().into(), bright);
+                row(ui, "modulation", f.modulation.into(), bright);
+                row(ui, "phase", f.line_phase.into(), dim);
                 // Both directions, because they need not match: V.34 settles
                 // each separately, from what each end's receiver asked for.
                 let bps = |r: Option<u32>| r.map(|r| format!("{r} bps")).unwrap_or_else(|| "-".into());
-                row("rx rate", bps(f.bit_rate), bright);
-                row("tx rate", bps(f.tx_bit_rate), bright);
+                // V.90's rate by hand, above the rate it moves. In data mode a
+                // rate renegotiation a rung up or down (9.6); before it, a
+                // rung more or less on what the next start-up's DIL chooses,
+                // which is the only way to try a rate on a far end that never
+                // lets a call reach data mode at the one it was given.
+                if let Source::Live(session) = &self.source {
+                    let v90 = f.modulation == "V.90";
+                    let connected = f.state == telemetry::CallState::Connected;
+                    if v90 || !connected {
+                        ui.label(RichText::new("V.90 rate").monospace().color(dim));
+                        ui.horizontal(|ui| {
+                            let (up, down) = if v90 && connected {
+                                ("renegotiate one rung up (V.90 9.6)", "renegotiate one rung down (V.90 9.6)")
+                            } else {
+                                (
+                                    "ask the next V.90 start-up for one rung more than its DIL chooses, as far as the DIL's levels reach",
+                                    "ask the next V.90 start-up for one rung less than its DIL chooses",
+                                )
+                            };
+                            if ui.small_button("rate up").on_hover_text(up).clicked() {
+                                pressed = Some(true);
+                            }
+                            if ui.small_button("rate down").on_hover_text(down).clicked() {
+                                pressed = Some(false);
+                            }
+                            let nudge = session.rate_nudge();
+                            if nudge != 0 {
+                                ui.label(
+                                    RichText::new(format!("{nudge:+} next start"))
+                                        .monospace()
+                                        .small()
+                                        .color(Color32::from_rgb(240, 200, 120)),
+                                );
+                            }
+                        });
+                        ui.end_row();
+                    }
+                }
+                row(ui, "rx rate", bps(f.bit_rate), bright);
+                row(ui, "tx rate", bps(f.tx_bit_rate), bright);
                 row(
+                    ui,
                     "carrier",
                     if f.carrier { "detected" } else { "none" }.into(),
                     if f.carrier { Color32::from_rgb(90, 220, 130) } else { dim },
@@ -2592,6 +2634,7 @@ impl ScopeApp {
                 // half is a coin flip.
                 if let Some(miss) = f.reception {
                     row(
+                        ui,
                         "reading",
                         format!("{miss:.2} of the gap"),
                         if miss < 0.25 {
@@ -2602,6 +2645,7 @@ impl ScopeApp {
                     );
                 } else {
                     row(
+                        ui,
                         "quality",
                         f.symbol_quality()
                             .map(|q| q.to_string())
@@ -2615,6 +2659,7 @@ impl ScopeApp {
                 // is the line or this modem listening to itself.
                 if let Some(db) = f.echo_loss_db {
                     row(
+                        ui,
                         "echo out",
                         format!("{db:.1} dB"),
                         if db >= 6.0 {
@@ -2624,6 +2669,7 @@ impl ScopeApp {
                         },
                     );
                     row(
+                        ui,
                         "echo at",
                         match f.echo_at {
                             Some((delay, strength)) => format!(
@@ -2636,17 +2682,19 @@ impl ScopeApp {
                         if f.echo_at.is_some() { dim } else { Color32::from_rgb(230, 140, 90) },
                     );
                 }
-                row("rx bytes", f.rx_bytes.to_string(), bright);
-                row("tx bytes", f.tx_bytes.to_string(), bright);
-                row("dropped", self.rx.dropped_frames().to_string(), dim);
+                row(ui, "rx bytes", f.rx_bytes.to_string(), bright);
+                row(ui, "tx bytes", f.tx_bytes.to_string(), bright);
+                row(ui, "dropped", self.rx.dropped_frames().to_string(), dim);
                 if self.monitor.is_some() {
                     row(
+                        ui,
                         "audio u/o",
                         format!("{} / {}", self.sink.underruns(), self.sink.overruns()),
                         dim,
                     );
                 }
             });
+        pressed
     }
 
     fn transcript(&mut self, ui: &mut egui::Ui) {
@@ -3003,7 +3051,11 @@ impl eframe::App for ScopeApp {
                 scopes::level_meter(ui, self.frame.rx_level_db);
 
                 ui.add_space(10.0);
-                self.status(ui);
+                if let Some(up) = self.status(ui)
+                    && let Source::Live(session) = &self.source
+                {
+                    session.step_rate(up);
+                }
 
                 // A retrain by hand, under the rate it would change. V.34's is
                 // the full one (11.5), back through phase 2; the button is

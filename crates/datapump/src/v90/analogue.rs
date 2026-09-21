@@ -41,7 +41,7 @@ use super::INTERVALS;
 use super::dil::{self, Analysis, Choice, Route};
 use super::digital;
 use super::encoder::{Decoder, Frame, Mapping};
-use super::pcm::{self, Heard, Slicer};
+use super::pcm::{self, Heard, Leftover, Slicer};
 use super::sequences::{self, Cp, Descriptor, JD_BITS, JD_PRIME_BITS, Jd};
 use super::shaping::{self, Shaping};
 use super::ucode::{self, Law};
@@ -491,6 +491,12 @@ pub struct Settings {
     /// What V.34 would carry downstream instead, as phase 2's probe put it:
     /// a V.90 slower than that is not worth having.
     pub v34_receive: u32,
+    /// Rungs above (positive) or below (negative) what the DIL would choose
+    /// on its own: the window's rate buttons, pressed outside data mode.
+    /// Above goes no further than the levels at [`dil::SPACING`] with none of
+    /// [`dil::SLACK`]'s room, since a rung the DIL found no levels for cannot
+    /// be asked for at all.
+    pub nudge: i8,
 }
 
 impl Settings {
@@ -507,6 +513,7 @@ impl Settings {
             round_trip,
             wide: ours_wide && server.v34.constellation_1664,
             v34_receive: 0,
+            nudge: 0,
         }
     }
 }
@@ -1789,6 +1796,65 @@ impl Modem {
         true
     }
 
+    /// The window's rate buttons in data mode: a renegotiation one rung up or
+    /// down (9.6.2.1). Down asks for the rung below, believing less of what
+    /// data mode has found of the line if that is what it takes to stay on
+    /// it. Up asks for the rung above if the DIL's levels have room for it,
+    /// whatever data mode has found -- which is the point of asking by hand;
+    /// the rate watch still has its say afterwards. False, and nothing done,
+    /// outside data mode or where there is no rung to go to.
+    pub fn step_rate(&mut self, up: bool) -> bool {
+        if !self.in_data_mode() {
+            return false;
+        }
+        let Some(drn) = self.in_use.as_ref().map(|cp| cp.drn) else { return false };
+        let from = sequences::data_rate(drn).unwrap_or(0);
+        if !up {
+            let Some(rate) = drn.checked_sub(1).and_then(sequences::data_rate) else {
+                self.notes.push(format!("rate buttons: nothing slower than {from} bit/s to go down to"));
+                return false;
+            };
+            if !self.renegotiate_within(rate, rate) {
+                self.notes.push(format!("rate buttons: the route carries nothing slower than {from} bit/s"));
+                return false;
+            }
+            let asked = self.choice.as_ref().and_then(|c| sequences::data_rate(c.data.drn)).unwrap_or(0);
+            self.notes.push(format!("rate buttons: asked for {asked} bit/s, from {from}"));
+            return true;
+        }
+        let (Some(route), Some(choice)) = (self.route.as_ref(), self.choice.as_ref()) else { return false };
+        let law = self.settings.law;
+        let limit = super::power_limit(&self.settings.server);
+        let jd = self.far_jd.unwrap_or_default();
+        let top = drn + 1;
+        let (shaping, left) = self.shaping;
+        let scaled = shaping::scaled(route, left);
+        let Some(new) = dil::choose_shaped(&scaled, law, limit, |d| jd.enables(d) && d <= top, shaping).filter(|n| n.data.drn > drn) else {
+            self.notes.push(format!("rate buttons: the DIL found no levels for a rung above {from} bit/s"));
+            return false;
+        };
+        let mut data = new.data;
+        self.finish_cp(&mut data);
+        let training = choice.training.clone();
+        let asked = sequences::data_rate(data.drn).unwrap_or(0);
+        self.choice = Some(Choice { data, training });
+        self.notes.push(format!("rate buttons: asked for {asked} bit/s, from {from}"));
+        self.begin_renegotiation(true);
+        true
+    }
+
+    /// Where a V.90 start-up not yet past its DIL is to move the rate it
+    /// chooses (see [`Settings::nudge`]). Too late once the DIL has been read.
+    pub fn set_nudge(&mut self, nudge: i8) {
+        self.settings.nudge = nudge;
+    }
+
+    /// Whether data mode is up with no renegotiation under way: what the
+    /// rate buttons need to renegotiate rather than nudge.
+    pub fn is_in_data_mode(&self) -> bool {
+        self.in_data_mode()
+    }
+
     /// End the call from data mode (9.7): a renegotiation whose CP asks for
     /// nothing. False, and nothing done, outside data mode.
     pub fn clear_down(&mut self) -> bool {
@@ -2380,10 +2446,7 @@ impl Modem {
             self.fail("the route cannot carry V.90's slowest rate");
             return;
         };
-        self.shaping = (asked.shaping, asked.left);
-        let mut choice = asked.choice;
-        let rate = sequences::data_rate(choice.data.drn).unwrap_or(0);
-        if rate < self.settings.v34_receive {
+        if asked.rate() < self.settings.v34_receive {
             // A route that is an ordinary line with G.711's noise on it --
             // a softphone that converted the sample rate on the way to its
             // encoder -- carries V.34 at least as well.
@@ -2391,6 +2454,9 @@ impl Modem {
             self.fail("V.34 carries more than V.90 on this route");
             return;
         }
+        let asked = self.nudged(asked, &route, leftover.as_ref());
+        self.shaping = (asked.shaping, asked.left);
+        let mut choice = asked.choice;
         self.finish_cp(&mut choice.data);
         self.finish_cp(&mut choice.training);
         self.downstream_rate = sequences::data_rate(choice.data.drn).unwrap_or(0);
@@ -2407,6 +2473,45 @@ impl Modem {
         self.rx.set_slicer(Slicer::Free);
         self.stage = Stage::Phase4;
         self.stopped.reset();
+    }
+
+    /// The DIL's choice moved by [`Settings::nudge`] rungs: up as far as the
+    /// levels at the DIL's own spacing reach, down with the same room the
+    /// choice itself was given. The choice as it was where there is no rung
+    /// to move to, and a line for the transcript either way.
+    fn nudged(&mut self, asked: shaping::Asked, route: &Route, leftover: Option<&Leftover>) -> shaping::Asked {
+        let nudge = self.settings.nudge;
+        if nudge == 0 {
+            return asked;
+        }
+        let law = self.settings.law;
+        let limit = super::power_limit(&self.settings.server);
+        let jd = self.far_jd.unwrap_or_default();
+        let drn = asked.choice.data.drn;
+        let steps = nudge.unsigned_abs();
+        let moved = if nudge > 0 {
+            let top = drn.saturating_add(steps);
+            shaping::choose(route, law, limit, |d| jd.enables(d) && d <= top, jd.lookahead, leftover).filter(|a| a.choice.data.drn > drn)
+        } else {
+            let top = drn.saturating_sub(steps);
+            shaping::choose_with_slack(route, law, limit, |d| d >= 1 && d <= top && jd.enables(d), jd.lookahead, leftover)
+        };
+        let way = if nudge > 0 { "up" } else { "down" };
+        match moved {
+            Some(moved) => {
+                self.notes.push(format!(
+                    "the rate buttons asked for {steps} rung{} {way}: {} bit/s rather than {}",
+                    if steps == 1 { "" } else { "s" },
+                    moved.rate(),
+                    asked.rate()
+                ));
+                moved
+            }
+            None => {
+                self.notes.push(format!("the rate buttons asked to go {way}, and there is no rung to go to from {} bit/s", asked.rate()));
+                asked
+            }
+        }
     }
 
     fn phase4_symbol(&mut self, symbol: pcm::Symbol) {

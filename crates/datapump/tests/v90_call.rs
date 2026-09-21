@@ -1729,3 +1729,68 @@ fn a_burst_the_receiver_holds_its_loops_through_is_still_fallen_back_for() {
         assert_eq!(call.analogue.retrains(), 0, "{what}");
     }
 }
+
+/// The window's rate buttons pressed before data mode: every start-up moves
+/// the rate its DIL chooses by a rung. Up goes as far as the DIL's own
+/// spacing reaches and no further -- on the 10 ms line, whose room costs a
+/// rung, that rung is had back; on the 20 ms line, which loses nothing to
+/// the room, there is nowhere to go and the transcript says so. Down takes
+/// the rung below, on either. Each call still connects.
+#[test]
+fn the_rate_buttons_move_a_start_up_s_rate_a_rung_either_way() {
+    use datapump::v90::startup::Stepped;
+    let ten_ms = || Network::new(Law::Mu, FS).with_delay(0.010, FS).with_noise(1e-5);
+    let on_its_own = |net: Network| connects(net, server(), 40.0).rates().0;
+    let nudged = |net: Network, up: bool| {
+        let mut call = FullCall::new(net, server());
+        assert_eq!(call.analogue.step_rate(up), Stepped::Nudged(if up { 1 } else { -1 }));
+        let ok = call.run(40.0);
+        let notes = call.analogue.take_notes();
+        assert!(ok, "up {up}: no connection: {}", call.analogue.phase());
+        (call.rates().0, notes.into_iter().filter(|n| n.contains("rate buttons")).collect::<Vec<_>>())
+    };
+    for (name, line, lost) in [("10 ms", &ten_ms as &dyn Fn() -> Network, true), ("20 ms", &plain_line, false)] {
+        let alone = on_its_own(line());
+        let (up, said_up) = nudged(line(), true);
+        let (down, said_down) = nudged(line(), false);
+        println!("{name}: {alone} on its own, {up} a rung up, {down} a rung down; {said_up:?} {said_down:?}");
+        if lost {
+            assert_eq!(up, alone + 1333, "{name}: up");
+            assert!(said_up[0].contains("1 rung up"), "{name}: {said_up:?}");
+        } else {
+            assert_eq!(up, alone, "{name}: up");
+            assert!(said_up[0].contains("no rung to go to"), "{name}: {said_up:?}");
+        }
+        assert_eq!(down, alone - 1333, "{name}: down");
+        assert!(said_down[0].contains("1 rung down"), "{name}: {said_down:?}");
+    }
+}
+
+/// The rate buttons in data mode: a rate renegotiation a rung up or down
+/// (9.6.2.1), with no retrain and data after each. On the 10 ms line the
+/// start-up's room leaves one rung above it; up takes it, up again finds no
+/// levels above that and asks for nothing, and down comes back.
+#[test]
+fn the_rate_buttons_in_data_mode_renegotiate_a_rung_at_a_time() {
+    use datapump::v90::startup::Stepped;
+    let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.010, FS).with_noise(1e-5), server(), 40.0);
+    let (down, up) = call.rates();
+    call.analogue.take_notes();
+    assert_eq!(call.analogue.step_rate(true), Stepped::Renegotiating);
+    assert!(call.comes_back_up(10.0), "up: {} / {}", call.analogue.phase(), call.digital.phase());
+    assert_eq!(call.rates(), (down + 1333, up), "up");
+    assert_eq!(call.carries_data(3.0), (true, true), "after going up");
+    assert_eq!(call.analogue.step_rate(true), Stepped::Nowhere);
+    assert_eq!(call.analogue.step_rate(false), Stepped::Renegotiating);
+    assert!(call.comes_back_up(10.0), "down: {} / {}", call.analogue.phase(), call.digital.phase());
+    assert_eq!(call.rates(), (down, up), "down");
+    assert_eq!(call.carries_data(3.0), (true, true), "after coming down");
+    let notes: Vec<String> = call.analogue.take_notes().into_iter().filter(|n| n.contains("rate buttons")).collect();
+    println!("{notes:#?}");
+    assert_eq!(notes.len(), 3, "{notes:?}");
+    assert!(notes[0].contains(&format!("asked for {} bit/s, from {down}", down + 1333)), "{notes:?}");
+    assert!(notes[1].contains("no levels for a rung above"), "{notes:?}");
+    assert!(notes[2].contains(&format!("asked for {down} bit/s, from {}", down + 1333)), "{notes:?}");
+    assert_eq!(call.analogue.retrains(), 0, "a retrain happened");
+    assert_eq!(call.analogue.renegotiations(), 2);
+}

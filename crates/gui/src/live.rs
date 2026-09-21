@@ -12,7 +12,7 @@
 //! one step, and what it hands back goes out. Nothing here paces itself against
 //! a wall clock, because the sound card already is one.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -69,6 +69,17 @@ pub fn line_rates(modem: &Modem) -> String {
 /// A V.34 renegotiation asks the far end to change what it sends, so one
 /// direction can drop while the other holds -- or, on a line that is worse
 /// one way round, one drop and the other climb.
+/// What the rate buttons have V.90 start-ups asking for, for the transcript.
+fn nudge_said(nudge: i8) -> String {
+    let rungs = nudge.unsigned_abs();
+    let plural = if rungs == 1 { "" } else { "s" };
+    match nudge {
+        0 => "V.90 start-ups will ask for the rate the DIL chooses".to_owned(),
+        n if n > 0 => format!("V.90 start-ups will ask for up to {rungs} rung{plural} above the rate the DIL chooses"),
+        _ => format!("V.90 start-ups will ask for {rungs} rung{plural} below the rate the DIL chooses"),
+    }
+}
+
 fn retrain_went(before: (u32, u32), after: (u32, u32)) -> &'static str {
     use std::cmp::Ordering::{Equal, Greater, Less};
     match (after.0.cmp(&before.0), after.1.cmp(&before.1)) {
@@ -236,6 +247,12 @@ pub struct Session {
     /// Set when the window asks for a retrain: V.34 goes back through phase 2
     /// on the same call. The line thread asks the modem and clears it.
     retrain: AtomicBool,
+    /// Presses of the V.90 rate buttons not yet handed to the modem, up as
+    /// true, in the order they came.
+    rate_presses: Mutex<Vec<bool>>,
+    /// Rungs V.90 start-ups move the rate their DIL chooses, as the modem
+    /// last said: the window shows it, and a new modem starts from it.
+    rate_nudge: AtomicI32,
     /// A transfer the window has asked for, until the line thread takes it.
     transfer_request: Mutex<Option<TransferRequest>>,
     /// What the transfer is doing, for the window to read.
@@ -319,6 +336,8 @@ impl Default for Session {
             recording: AtomicBool::new(false),
             hang_up: AtomicBool::new(false),
             retrain: AtomicBool::new(false),
+            rate_presses: Mutex::default(),
+            rate_nudge: AtomicI32::new(0),
         }
     }
 }
@@ -443,6 +462,25 @@ impl Session {
 
     fn take_retrain(&self) -> bool {
         self.retrain.swap(false, Ordering::Relaxed)
+    }
+
+    /// One of the V.90 rate buttons: in data mode a rate renegotiation one
+    /// rung `up` or down, and otherwise one rung more or less on the rate
+    /// V.90 start-ups ask for.
+    pub fn step_rate(&self, up: bool) {
+        if let Ok(mut presses) = self.rate_presses.lock() {
+            presses.push(up);
+        }
+    }
+
+    fn take_rate_presses(&self) -> Vec<bool> {
+        self.rate_presses.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default()
+    }
+
+    /// Rungs V.90 start-ups move the rate their DIL chooses; positive is
+    /// faster.
+    pub fn rate_nudge(&self) -> i8 {
+        self.rate_nudge.load(Ordering::Relaxed) as i8
     }
 
     /// Start or stop keeping it. Stopping writes the file.
@@ -663,6 +701,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // Windows a cpal stream is not Send and has to stay where it was made.
     let mut audio: Option<line::Duplex> = None;
     let mut modem = Modem::new(FS);
+    modem.set_rate_nudge(session.rate_nudge());
     let mut spectrum = Spectrum::new(FFT_SIZE, FS);
     let mut waveform = Ring::new(SCOPE_LEN);
     let mut bins = vec![0.0f64; SPECTRUM_BINS];
@@ -1047,6 +1086,12 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         if session.take_retrain() {
             tx.log(Direction::Note, "retraining the line");
             modem.retrain();
+        }
+        for up in session.take_rate_presses() {
+            if let Some(nudge) = modem.step_rate(up) {
+                session.rate_nudge.store(i32::from(nudge), Ordering::Relaxed);
+                tx.log(Direction::Note, nudge_said(nudge));
+            }
         }
 
         let typed = session.take_typed();
