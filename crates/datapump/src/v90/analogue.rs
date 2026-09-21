@@ -811,20 +811,23 @@ impl Decisions {
     /// times so far; and the look before it, if it stands.
     ///
     /// A look is held back until the next is over, and thrown away if either
-    /// was spoiled. What spoils one is a jitter buffer, in one shape or
-    /// another.
+    /// was spoiled. What spoils one is a jitter buffer, in any of the three
+    /// shapes it comes in.
     ///
     /// A slip inserts a packet of made-up audio or drops one, and moves every
     /// symbol after it by a packet's length. The garbage itself is a stretch
-    /// of misses a packet long, which [`Self::storm`] catches; and the frames
-    /// turn up somewhere else a few frames later, since 160 codewords are
-    /// never a whole number of frames, which says it was a slip too. The
-    /// receiver holding its loops says nothing: it holds them through any
-    /// sudden rise in error, a burst of noise as much as a slip.
+    /// of misses a packet long, which [`Self::storm`] catches whatever the
+    /// length; and when the length is not a whole number of frames -- 160
+    /// codewords never is -- the frames turn up somewhere else a few frames
+    /// later, which says it was a slip too. The receiver holding its loops
+    /// says nothing: it holds them through any sudden rise in error, a burst
+    /// of noise as much as a slip.
     ///
-    /// A packet lost and concealed where it was moves nothing at all: the
-    /// frames stay where they were and the clock does not shift, so nothing
-    /// but the garbage marks it, and the garbage is what is judged.
+    /// A packet lost and concealed where it was moves nothing at all, and a
+    /// slip of a whole number of frames -- 240 codewords is 40 of them --
+    /// leaves the frame place where it was as well, so `moved` never changes
+    /// for either. Nothing but the garbage marks them, and the garbage is
+    /// what is judged.
     ///
     /// And a far end going quiet is not a disturbance a slower rate cures
     /// either; but that takes a fifth of a second of silence to show (see

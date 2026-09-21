@@ -12,7 +12,8 @@
 //! runs on its own clock, some tens of parts per million off the network's,
 //! so every waveform is resampled between the two. And the jitter buffer in
 //! the softphone now and then plays twenty milliseconds of made-up audio, or
-//! drops twenty, which shifts everything after it by 160 codewords.
+//! drops twenty, which shifts everything after it by 160 codewords -- or by
+//! however many a packet holds ([`Network::with_slips_of`]).
 //!
 //! A packet can also be lost and concealed where it was, with nothing moved
 //! at all ([`Network::with_dropout`]): the buffer plays what it made up in
@@ -96,9 +97,10 @@ pub struct Network {
     /// this is where that happens.
     up_gain: f64,
     /// Downstream slips: how often, and whether audio is made up or lost;
-    /// or one, at a given codeword.
+    /// or one, at a given codeword. `slip_length` codewords go or come.
     slips: Option<(u64, bool)>,
     slip_at: Option<(u64, bool)>,
+    slip_length: usize,
     /// Codewords of a lost stretch still to drop.
     dropping: usize,
     /// Codewords kept for concealment to repeat, and how many of them.
@@ -209,6 +211,7 @@ impl Network {
             up_gain: 0.25,
             slips: None,
             slip_at: None,
+            slip_length: SLIP,
             dropping: 0,
             recent: VecDeque::with_capacity(SLIP),
             kept: SLIP,
@@ -305,6 +308,21 @@ impl Network {
         self
     }
 
+
+    /// The same, of `codewords` in place of a twenty-millisecond packet's
+    /// 160: a buffer moves whole packets, and a packet holds ten, twenty or
+    /// thirty milliseconds of G.711 -- 80, 160 or 240 codewords.
+    ///
+    /// The length matters to more than the length. V.90's frames are six
+    /// codewords (7.1), so a slip of a multiple of six leaves every frame
+    /// where it was in the frame grid and the receiver never has to find its
+    /// place again: 240 codewords move everything on by thirty milliseconds
+    /// and say nothing else about it at all.
+    pub fn with_slips_of(mut self, seconds: f64, codewords: usize, inserted: bool) -> Self {
+        self.slip_length = codewords;
+        self.kept = self.kept.max(codewords);
+        self.with_slips(seconds, inserted)
+    }
 
     /// A packet of the downstream lost and concealed where it was: from
     /// `from` seconds on, `length` seconds of it every `every` seconds,
@@ -431,12 +449,12 @@ impl Network {
             if inserted {
                 // A packet's worth of the last packet, fading: what packet
                 // loss concealment makes up.
-                for k in 0..SLIP {
-                    let made_up = self.made_up(SLIP, k);
-                    self.down_levels.push_back(made_up * (1.0 - k as f64 / SLIP as f64));
+                for k in 0..self.slip_length {
+                    let made_up = self.made_up(self.slip_length, k);
+                    self.down_levels.push_back(made_up * (1.0 - k as f64 / self.slip_length as f64));
                 }
             } else {
-                self.dropping = SLIP;
+                self.dropping = self.slip_length;
             }
         }
         if self.dropping > 0 {
@@ -607,6 +625,24 @@ mod tests {
         }
     }
 
+
+    /// A slip of a chosen length moves everything after it by that length and
+    /// by nothing else: 240 codewords, a thirty-millisecond packet, by thirty
+    /// milliseconds.
+    #[test]
+    fn a_slip_of_a_chosen_length_moves_everything_after_it_by_that_much() {
+        for (codewords, inserted) in [(240, true), (240, false), (80, true), (80, false)] {
+            let mut net = Network::new(Law::Mu, 16_000.0).with_slips_of(1.0, codewords, inserted);
+            let mut heard = 0usize;
+            for _ in 0..12_000 {
+                heard += net.down(0.1).len();
+            }
+            assert_eq!(net.slips(), 1);
+            // Two line samples a codeword at 16 kHz.
+            let moved = 2 * codewords as i64 * if inserted { 1 } else { -1 };
+            assert!((heard as i64 - (24_000 + moved)).abs() < 60, "{codewords}, inserted {inserted}: {heard}");
+        }
+    }
 
     /// What the analogue modem hears of a downstream whose codewords change
     /// every time, over `seconds`.

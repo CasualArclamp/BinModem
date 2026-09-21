@@ -1054,6 +1054,12 @@ fn voip_line() -> Network {
 const VOIP_DISTURBED_FROM: f64 = 20.0;
 
 
+/// A packet of the downstream slipped every three seconds, thirty
+/// milliseconds of it: 240 codewords, which is 40 whole frames.
+fn slipped_line(inserted: bool) -> Network {
+    voip_line().with_slips_of(3.0, 240, inserted)
+}
+
 /// A packet lost and concealed where it was is not held against the rate.
 /// Twenty milliseconds of made-up audio is twenty milliseconds of garbage,
 /// and a slower rate reads it no better: the same bits are lost at 28 000 as
@@ -1067,6 +1073,20 @@ fn a_packet_lost_and_concealed_in_place_is_left_at_its_rate() {
     }
 }
 
+
+/// And a slip of a whole number of frames is not held against it either.
+/// 240 codewords is 40 of V.90's six-codeword frames (7.1), so the frames are
+/// found exactly where they were left and `frames_moved` never changes: as
+/// with a packet concealed in place, only the garbage says it happened.
+/// Before the garbage was judged, a 30 ms slip every three seconds cost the
+/// call one renegotiation and one retrain in thirty seconds, and 22 of 1119
+/// blocks of known data.
+#[test]
+fn a_slip_of_a_whole_number_of_frames_is_left_at_its_rate() {
+    for inserted in [true, false] {
+        assert_eq!(left_alone(slipped_line(inserted), WATCHED), (0, 0), "inserted {inserted}");
+    }
+}
 
 /// A call over the round trip, disturbed from [`VOIP_DISTURBED_FROM`]: it
 /// renegotiates once, to a slower rate, with no retrain. The rate before and
@@ -1099,6 +1119,12 @@ fn noise_between_lost_packets_is_still_seen() {
     falls_back_over_the_round_trip(dropped_line(3.0, true).with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.1, 1e-3));
 }
 
+
+/// The same between slipped frames.
+#[test]
+fn noise_between_slipped_frames_is_still_seen() {
+    falls_back_over_the_round_trip(slipped_line(true).with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.1, 1e-3));
+}
 
 /// Bursts of noise between a softphone's slips: the slips are still not
 /// held against the rate, and the bursts still are -- one renegotiation.
