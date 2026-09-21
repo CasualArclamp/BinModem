@@ -2418,10 +2418,28 @@ impl Modem {
         // renegotiation lands where the bursts are read cleanly, and that is
         // also what stops the next: the same bursts at the new rate come
         // nowhere near its levels' boundaries.
+        //
+        // And never under the receiver's own averaged error, which is the
+        // same measurement read a second way and is not compressed as this
+        // one is. A decision's error here is its distance from the nearer of
+        // the two levels either side of it, so a decision that has crossed a
+        // boundary is measured to the wrong one and can never be out by more
+        // than half a gap, however far out it really was. On a line that is
+        // clean but for bursts that hardly moves the answer, because the
+        // worst block is a burst and a burst is read against the gaps it
+        // crosses; on a floor stepped up until it errors every few seconds
+        // it reads the line better than it is. Measured over the 0.6 s round
+        // trip with the floor stepped to 6e-4, the worst block came to
+        // 0.000325 where the receiver's own error was 0.000518 -- the same
+        // number main reads -- and the rate chosen from the first was 50 666,
+        // which still errored 4 of 495 blocks and then 4 of 357 and had to
+        // be asked again, ending at 44 000, a rung below where main settles
+        // in one go. The larger of the two lands at 45 333 first time, where
+        // nothing errors at all afterwards.
         if let Some(route) = self.route.as_ref() {
             let limit = f64::from(super::power_limit(&self.settings.server)) / 32768.0;
             let expected = route.noise_at(law, limit) * self.shaping.1.sqrt();
-            self.worse = self.worse.max(self.decisions.worst() / expected);
+            self.worse = self.worse.max(self.decisions.worst().max(receiver) / expected);
         }
         let most = self.downstream_rate.saturating_sub(1);
         // And no further down than [`MOST_DROPPED`] bits a frame in one go.

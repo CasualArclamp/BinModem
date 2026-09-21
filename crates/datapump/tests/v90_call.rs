@@ -1427,3 +1427,40 @@ fn a_call_through_holes_never_renegotiates_however_long_it_goes_on() {
         assert_eq!(call.analogue.renegotiations(), 0, "{} ms", length * 1000.0);
     }
 }
+
+/// A floor that steps up is read right the first time, over the round trip
+/// as well.
+///
+/// The rate is chosen from the worst 32 ms block the recent looks reached,
+/// which is what a burst wants; but a decision's error there is its distance
+/// from the nearer of the two levels either side of it, so one that has
+/// crossed a boundary is measured to the wrong level and can never be out by
+/// more than half a gap. On a floor stepped up until it errors every few
+/// seconds that reads the line better than it is: the worst block came to
+/// 0.000325 where the receiver's own averaged error -- the same measurement
+/// read a second way, and the one main uses -- came to 0.000518. The rate
+/// chosen from the first was 50 666, which still errored 4 of 495 blocks and
+/// then 4 of 357, and had to be asked again; it ended at 44 000, a rung
+/// below the 45 333 main reaches in one go, for nothing.
+///
+/// Taking the larger of the two lands at 45 333 first time, and nothing
+/// errors at all in any ten-second stretch of the two minutes after it.
+#[test]
+fn a_floor_that_steps_up_over_the_round_trip_is_read_right_the_first_time() {
+    let mut call = connects(voip_line().with_rising_noise(VOIP_DISTURBED_FROM, 0.0, 6e-4), server(), 40.0);
+    let mut data = Downstream::new();
+    call.known_data(VOIP_DISTURBED_FROM - call.seconds(), &mut data);
+    assert!(call.comes_back_up_with(20.0, &mut data), "never renegotiated: {}", call.analogue.phase());
+    let slower = call.rates().0;
+    // What the renegotiation itself dropped is not the line's doing.
+    call.known_data(1.0, &mut data);
+    for stretch in 0..(SOAKED / 10.0) as u32 {
+        let before = data.checked;
+        call.known_data(10.0, &mut data);
+        let (errored, blocks) = data.checked.since(&before);
+        assert_eq!(errored, 0, "stretch {stretch}: {errored} of {blocks} blocks errored at {slower}");
+    }
+    println!("stepped to 6e-4 over the round trip: 54666 became {slower}, nothing errored in {SOAKED} s");
+    assert_eq!((call.analogue.renegotiations(), call.analogue.retrains()), (1, 0));
+    assert_eq!(call.rates().0, slower);
+}
