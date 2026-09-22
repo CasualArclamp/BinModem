@@ -188,6 +188,10 @@ pub struct Receiver {
     /// last came to be tracking.
     s_offset_hz: Option<f64>,
     via: Option<Via>,
+    /// The training S-bar or a lapse of S calls for, held back while the hunt
+    /// goes on listening: what to train on, and the half-symbol sample by
+    /// which its first window is all in.
+    pending: Option<(Training, u64)>,
 }
 
 impl Receiver {
@@ -225,6 +229,7 @@ impl Receiver {
             held: false,
             s_offset_hz: None,
             via: None,
+            pending: None,
         }
     }
 
@@ -235,6 +240,7 @@ impl Receiver {
     /// conditioning signal, which is all that is on the line then.
     pub fn idle(&mut self) {
         self.core.idle();
+        self.pending = None;
     }
 
     /// Listen for the far end's S and the change to S-bar, and train on the
@@ -246,6 +252,7 @@ impl Receiver {
     /// better still when S can arrive.
     pub fn hunt(&mut self) {
         self.core.hunt();
+        self.pending = None;
     }
 
     /// Change the rate the arriving data is coded at.
@@ -310,6 +317,13 @@ impl Receiver {
         let envelope = self.core.envelope();
         self.carrier = if self.carrier { envelope > CARRIER_OFF } else { envelope > CARRIER_ON };
         self.listen();
+        // A training nothing has overtaken: the window it would have waited
+        // for is in, so train on it now, from the samples the core kept.
+        if self.pending.as_ref().is_some_and(|(_, due)| self.core.halves() >= *due)
+            && let Some((training, _)) = self.pending.take()
+        {
+            self.core.train(training);
+        }
         // Every symbol whose samples are in, now. After a training that is a
         // few hundred at once, from the end of the window it solved over.
         while let Some(point) = self.core.next() {
@@ -330,23 +344,42 @@ impl Receiver {
     fn listen(&mut self) {
         while let Some(heard) = self.core.heard() {
             match heard {
-                Heard::S => {}
+                // S again: what stopped it, or turned it, was a hole in S and
+                // not its end, and S-bar is still to come.
+                Heard::S => self.pending = None,
                 Heard::Reversal { at, turn, drift } => {
                     // 5.2.2: "The transition from segment 1 to segment 2
                     // provides a well-defined event in the signal that may be
                     // used for generating a time reference in the receiver."
                     // TRN symbol 0 is the seventeenth symbol after it, whose
                     // centre is 32 half symbols on from where S-bar began.
+                    //
+                    // Held back like a lapse, below, and for the same reason:
+                    // a concealment that repeats a fragment of S has phase
+                    // jumps in it that read as S turning into S-bar. If S goes
+                    // on afterwards, the hunt hears it and this is dropped.
                     self.s_offset_hz = Some(turn * BAUD / TAU);
                     let training = self.training(at + 32, FIRST, Some(RETRY), Some((turn, drift)));
-                    self.core.train(training);
+                    self.pending = Some((training, due(at + 32, FIRST)));
+                    self.core.hunt();
                 }
+                // Not trained on straight away. A jitter buffer's 20 ms of
+                // silence, comfort noise or a repeated packet in the middle
+                // of S ends it here just as S-bar would, and a training begun
+                // on that spends the next third of a second deaf while the
+                // real S-bar and TRN go by -- the call then waits on a rate
+                // signal it can never read. So the hunt goes on, for exactly
+                // as long as this training would have been collecting its
+                // window anyway: S heard again, or S-bar, overtakes it, and
+                // if neither comes it runs from the kept samples, late by
+                // nothing. The window's far edge is 1990 halves back at most,
+                // well inside the 4096 the core keeps.
                 Heard::Lapsed { at } => {
                     let measured = self.core.s_measured();
                     self.s_offset_hz = measured.map(|(turn, _)| turn * BAUD / TAU);
                     let start = at.saturating_add_signed(LAPSED_OFFSET);
-                    let training = self.training(start, LAPSED, None, measured);
-                    self.core.train(training);
+                    self.pending = Some((self.training(start, LAPSED, None, measured), due(start, LAPSED)));
+                    self.core.hunt();
                 }
                 Heard::Trained { via, .. } => {
                     self.via = Some(via);
@@ -557,6 +590,14 @@ impl Receiver {
     pub fn gain_db(&self) -> f64 {
         self.core.gain_db()
     }
+}
+
+/// The half-symbol sample by which a training from `start` has all of its
+/// first window in: the core's own reckoning, with a little over its
+/// equaliser's reach to spare.
+fn due(start: u64, window: Window) -> u64 {
+    let end = window.solve.1.max(window.align.1) as u64;
+    start + window.search.max(0) as u64 + 2 * end + 32
 }
 
 #[cfg(test)]
