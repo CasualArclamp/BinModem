@@ -566,8 +566,8 @@ struct Step {
     bits: u8,
 }
 
-/// Recovers groups of bits from received points (V.32 clause 8, and 2.3
-/// backwards).
+/// Recovers groups of bits from received points: V.32 2.4.1.2 and V.32bis 2.3
+/// run backwards, since neither Recommendation specifies a decoder.
 ///
 /// A slicer would take the nearest point and be wrong whenever the noise
 /// exceeded half the distance between two of them. This follows the code
@@ -700,6 +700,38 @@ impl Decoder {
             *slot = held & (1 << (uncoded - 1 - i)) != 0;
         }
         Some(group)
+    }
+
+    /// The point the best path so far puts the symbol just offered on, as a
+    /// code for [`Coded::point`]: the decoder's guess at this symbol now,
+    /// rather than its answer [`DEPTH`] symbols later.
+    ///
+    /// What a receiver's loops track. They cannot wait for the answer -- a
+    /// carrier loop of fifty symbols with twenty-four of delay inside it is
+    /// not the loop it was designed as -- and the nearest point of the whole
+    /// constellation is the worst guess there is, wrong ten to seventeen
+    /// times as often as this at each rate's working signal to noise
+    /// (design.md P1). The best path knows Y0 already, since Y0 is the last
+    /// delay element's contents and not this symbol's input, and it has
+    /// chosen Y1 and Y2 against every path that could have led here.
+    ///
+    /// None until a symbol has been offered.
+    pub fn tentative(&self) -> Option<usize> {
+        let steps = self.history.back()?;
+        let best = self
+            .metrics
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1.total_cmp(b.1))
+            .map_or(0, |(s, _)| s);
+        let step = steps[best];
+        // Y0 is where the path came from: the last delay element, which
+        // `pack` puts lowest.
+        let y0 = usize::from(step.from & 1);
+        let (y1, y2) = (usize::from((step.bits >> 7) & 1), usize::from((step.bits >> 6) & 1));
+        let q = usize::from(step.bits) & ((1 << self.coded.uncoded()) - 1);
+        let bits = self.coded.bits;
+        Some(y0 << bits | y1 << (bits - 1) | y2 << (bits - 2) | q)
     }
 }
 
@@ -969,6 +1001,56 @@ mod tests {
             // The first group after a turn is the one that cannot be right --
             // there is no previous symbol to have changed from.
             assert_eq!(a[1..], b[1..], "{rate}: a quarter turn changed the data");
+        }
+    }
+
+    /// The best path's guess at each symbol as it arrives is the point that
+    /// was sent, once the paths have had a few symbols to tell themselves
+    /// apart; and with noise enough to trouble a slicer it is wrong less often
+    /// than the slicer is.
+    #[test]
+    fn the_best_path_knows_this_symbol_better_than_the_nearest_point_does() {
+        for (rate, coded) in EVERY {
+            let mut encoder = Encoder::new();
+            let mut clean = Decoder::new(coded);
+            let mut noisy = Decoder::new(coded);
+            let mut lfsr = 0x0bad_cafeu32;
+            let mut noise = 0x1357_9bdfu32;
+            let random = move |n: &mut u32| {
+                *n = n.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                f64::from(*n >> 8) / f64::from(1u32 << 24) - 0.5
+            };
+            // As the test above: a little past the slicer's boundary at half
+            // the distance between neighbours, so that it is crossed now and
+            // then and never by much.
+            let spread = coded.closest() * 1.1;
+            let (mut slicer_wrong, mut path_wrong) = (0, 0);
+            for n in 0..4000 {
+                let mut group = [false; 6];
+                for slot in group[..coded.bits].iter_mut() {
+                    lfsr = lfsr.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    *slot = lfsr & 0x8000_0000 != 0;
+                }
+                let code = encoder.encode(&coded, &group);
+                let (x, y) = coded.point(code);
+                clean.decode((x, y));
+                if n >= 8 {
+                    assert_eq!(clean.tentative(), Some(code), "{rate}: symbol {n} on a clean line");
+                }
+                let heard = (x + random(&mut noise) * spread, y + random(&mut noise) * spread);
+                noisy.decode(heard);
+                if n >= 8 {
+                    slicer_wrong += usize::from(coded.nearest(heard) != code);
+                    path_wrong += usize::from(noisy.tentative() != Some(code));
+                }
+            }
+            println!("{rate}: of 3992 symbols the slicer decided {slicer_wrong} wrong and the best path {path_wrong}");
+            assert!(slicer_wrong > 50, "{rate}: the noise was too small to trouble a slicer ({slicer_wrong})");
+            // Measured: ten to thirty times fewer.
+            assert!(
+                5 * path_wrong < slicer_wrong,
+                "{rate}: the best path was wrong {path_wrong} times and the slicer {slicer_wrong}"
+            );
         }
     }
 
