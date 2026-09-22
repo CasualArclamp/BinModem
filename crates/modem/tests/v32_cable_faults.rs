@@ -163,7 +163,6 @@ fn moments(start: usize, from: f64, to: f64, count: usize, mut seed: u64) -> Vec
 /// 20 ppm leaves the call not connected at the end), and a single dropped
 /// sample is a retrain and a lower rate.
 #[test]
-#[ignore = "V.32 rebuild: enabled by package D"]
 fn a_v32bis_call_rides_out_the_faults_of_a_real_sound_card() {
     let mut cable = Cable::new();
     for _ in 0..(30.0 * FS) as usize {

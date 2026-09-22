@@ -1561,7 +1561,6 @@ fn every_row() -> Vec<Row> {
 /// arithmetic allows, and everything below is built on it. 9600 without the
 /// trellis code is reached by V.32's own table.
 #[test]
-#[ignore = "V.32 rebuild: enabled by package D"]
 fn every_rate_holds_at_its_working_snr() {
     check("every_rate_holds_at_its_working_snr");
 }
@@ -1574,7 +1573,6 @@ fn every_rate_holds_at_its_working_snr() {
 /// where a carrier loop has 45° to spare, and has to be locked tightly enough
 /// by the time it reaches a hundred and twenty-eight.
 #[test]
-#[ignore = "V.32 rebuild: enabled by package D"]
 fn seven_hertz_either_way() {
     check("seven_hertz_either_way");
 }
@@ -1583,7 +1581,6 @@ fn seven_hertz_either_way() {
 /// conforming modems as far apart as they may be (V.32 2.3: 2400 baud to
 /// within 0.01 %).
 #[test]
-#[ignore = "V.32 rebuild: enabled by package D"]
 fn two_hundred_ppm_either_way() {
     check("two_hundred_ppm_either_way");
 }
@@ -1597,7 +1594,6 @@ fn two_hundred_ppm_either_way() {
 /// did wrong. Each slip may cost at most 200 ms of errored blocks, and 97 % of
 /// blocks must be clean.
 #[test]
-#[ignore = "V.32 rebuild: enabled by package D"]
 fn single_sample_slips() {
     check("single_sample_slips");
 }
@@ -1609,7 +1605,6 @@ fn single_sample_slips() {
 /// a stale repeat, comfort noise or silence, and a dropped one is a jump in
 /// the data. Either way V.42 sends the frame again and the call goes on.
 #[test]
-#[ignore = "V.32 rebuild: enabled by package D"]
 fn concealment_slips() {
     check("concealment_slips");
 }
@@ -1629,7 +1624,6 @@ fn gain_steps_and_ramps() {
 /// ppm is harmless. Contract experiment F: today 5 ppm is four retrains and
 /// 20 ppm a call not connected at the end.
 #[test]
-#[ignore = "V.32 rebuild: enabled by package D"]
 fn cable_with_drift() {
     check("cable_with_drift");
 }
@@ -1646,7 +1640,6 @@ fn cable_with_slips() {
 /// noisy, all at once and from the first sample. It has to hold for a minute
 /// with 95 % of blocks clean.
 #[test]
-#[ignore = "V.32 rebuild: enabled by package D"]
 fn rorys_voip_line() {
     check("rorys_voip_line");
 }
@@ -1654,7 +1647,6 @@ fn rorys_voip_line() {
 /// A hybrid at each end, a reflection off the far one, a trunk that shifts the
 /// carrier, and two clocks apart, together at 9600.
 #[test]
-#[ignore = "V.32 rebuild: enabled by package D"]
 fn hybrid_with_everything() {
     check("hybrid_with_everything");
 }
@@ -1674,7 +1666,6 @@ fn hybrid_with_everything() {
 /// it; both then wait for each other for the start-up's whole minute of
 /// patience, which is the start-up's business and not the receiver's.
 #[test]
-#[ignore = "V.32 rebuild: enabled by package D"]
 fn a_real_loss_still_retrains() {
     check("a_real_loss_still_retrains");
 }
