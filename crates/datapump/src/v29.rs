@@ -17,11 +17,16 @@
 //! off the extracted text, which turns the square root of 2 into "2" and three
 //! times it into "32".
 
-use dsp::filter::OnePole;
-use dsp::{ComplexFir, Equalizer, Gardner, Nco, fir_lowpass, rrc_at, rrc_taps};
+mod hunt;
+
+use std::sync::OnceLock;
+
+use dsp::qam::{Band, Constellation, Core, Heard, Options, Slicer, Training, Via, Window};
+use dsp::{Complex, Nco, rrc_at};
 
 use crate::v27ter::{TRIBIT_TURN, TURN_TRIBIT};
 use crate::v32;
+use hunt::{Found, Hunt, Level};
 
 /// 2.1: "The carrier frequency is to be 1700 +/- 1 Hz."
 pub const CARRIER: f64 = 1700.0;
@@ -525,128 +530,226 @@ impl Transmitter {
     }
 }
 
-/// The quietest thing that may be called a carrier, and the level it has to
-/// fall below. The same floor as every other detector here.
-const CARRIER_ON: f64 = 1.0e-3;
-const CARRIER_OFF: f64 = 5.62e-4;
-
-/// Twelve decibels above the quiet line to begin, twelve below the burst's
-/// own loudest to end. See the V.27 ter receiver for why the end is measured
-/// against the burst rather than against anything fixed.
-const ON_ABOVE_FLOOR: f64 = 4.0;
-const OFF_BELOW_LOUDEST: f64 = 0.25;
-const LOUDEST_DECAY: f64 = 3.1e-5;
-const FLOOR_FALL: f64 = 6.25e-4;
-const FLOOR_RISE: f64 = 1.25e-5;
-
-/// Where the floor goes when a burst ends, as a fraction of the level then.
-const FLOOR_AFTER_BURST: f64 = 0.5;
-
-const MAX_GAIN: f64 = 400.0;
-
-/// Symbols ignored at the start of a burst while the filters fill, before
-/// any of them count towards the power.
-const SETTLING: u32 = 8;
-
-/// Symbols averaged plainly after that, and the equaliser left alone until
-/// they are done. An even number, so it is whole pairs of A and B.
-const AVERAGED: u32 = 32;
-
-/// How much of each later symbol goes into the power, which is a time
-/// constant of about thirty milliseconds at 2400 baud.
-const POWER_TRACKING: f64 = 1.0 / 72.0;
-
-/// Symbols of segment 2 the carrier is measured over, after the settling.
+/// Symbols of the known sequence, counted from segment 3's first, that the
+/// equaliser is solved over: most of segment 3 and half of segment 4, with
+/// the alignment searched four symbols either side of where the join put it.
 ///
-/// Segment 2 is 128 symbols, and the carrier is found within a few of the
-/// start of it. Sixty-four more after the eight of settling ends the
-/// measurement with over fifty of the alternations still to come, which is
-/// the margin for a carrier found late on a quiet or noisy line.
-const ACQUIRING: u32 = 64;
+/// Segment 3 is 384 symbols the receiver knows before they come (Appendix
+/// I), and segment 4 another 48, since its scrambler starts empty and is fed
+/// ONEs (Appendix II): 432 in all, and then the data. The solve ends 24
+/// symbols short of the data, which is time for the training to be done
+/// before the data begins, and 48 bits or more for the descrambler to have
+/// the far end's register before the first data bit reaches it.
+const FIRST: Window = Window { align: (8, 200), solve: (8, 408), search: 8 };
 
-/// The least the carrier loop divides a phase error by, as a fraction of the
-/// mean power.
-///
-/// The error is the cross product of what arrived with what it was decided to
-/// be, over the decision's power -- and the inner diagonal points have a
-/// seventh of the mean, so without a floor they arrive in the loop seven times
-/// as loud as the rest and are the ones a slicer gets wrong most often.
-const MIN_DECISION_POWER: f64 = 0.5;
+/// The second try, when the first fits nothing: the second half of the known
+/// sequence, searched a hundred symbols either way. A slip in the first
+/// half -- twenty milliseconds of a concealment is 48 symbols -- spoils the
+/// first try and moves the second half, which this finds.
+const RETRY: Window = Window { align: (216, 424), solve: (216, 424), search: 200 };
 
-/// V.29 receiver.
+/// The first try when segment 2 ended without turning into segment 3, which
+/// is then only guessed to begin where segment 2 stopped: searched sixty
+/// symbols either way, which a concealment across the join is well inside.
+const LAPSED: Window = Window { align: (8, 200), solve: (8, 408), search: 120 };
+
+/// Symbols of segments 3 and 4 together: everything the far end sends that
+/// the receiver knows in advance, after segment 2.
+const KNOWN: usize = (train::CONDITIONING + train::ONES) as usize;
+
+/// Where segment 4 begins in the known sequence.
+const ONES_FROM: usize = train::CONDITIONING as usize;
+
+/// Signal to noise, in decibels, below which a training's fit is taken to be
+/// the wrong alignment and the second try is made.
 ///
-/// Like the V.27 ter one, it never decides where the synchronizing signal
-/// ended. A training check is found as a run of zeros and a page by its first
-/// end-of-line code, so everything is descrambled from the moment there is a
-/// carrier and whoever is above finds its own place.
+/// A wrong alignment of segment 3 fits nothing but the mean of C and D, which
+/// is a sixth of the power at 9600 and half of it at 4800, so it fits at 3 dB
+/// at best. Well above that, and well below the 12 dB 4800 works at.
+const ACCEPT_DB: f64 = 7.0;
+
+/// Where a fresh [`Core`] centres its first half-symbol sample, in samples
+/// from the first it is fed: the length of its interpolating filter, which it
+/// needs whole before it can make one (`dsp/src/qam/front.rs`).
+const CORE_FIRST_HALF: f64 = 64.0;
+
+/// Half-symbol samples of line read into a new core in front of segment 3's
+/// first symbol: the first try's search and the equaliser's reach, and some
+/// to spare.
+const LEAD_HALVES: f64 = 40.0;
+
+/// How far the burst's signal, as a share of what segment 2 had, has to fall
+/// for the line to be taken to have gone quiet: a quarter, 6 dB down. On top
+/// of the line's own noise, which is there whether the burst is or not.
+const QUIET_BELOW: f64 = 0.25;
+
+/// How long quiet before the carrier is said to have gone. The level takes
+/// 14 ms to fall 6 dB, so the carrier goes about 30 ms after the signal does,
+/// the middle of the 30 +/- 9 ms 5.2.2 asks for -- and all the data is out by
+/// then, since the receiver's own delay is 6 ms and the turn-off ten.
+const QUIET_OFF_SECONDS: f64 = 0.016;
+
+/// How long quiet before the burst is over and forgotten: the gap a fax call
+/// bridges before it takes a burst to have ended (`fax::call`'s
+/// `FAST_CARRIER_GONE`). Anything shorter is a hole in the burst, which the
+/// receiver follows the signal across.
+const QUIET_OVER_SECONDS: f64 = 0.200;
+
+/// Symbols the signal may be lost for in a row before whatever is arriving is
+/// taken not to be the burst at all: half a second.
+const LOST_OVER: usize = 1200;
+
+/// The rate's points at unit power, as the core decides against them,
+/// labelled as [`Rate::constellation`] lists them. Made once: a constellation
+/// works out what garbage reads against it when it is made.
+fn table(rate: Rate) -> Slicer {
+    static TABLES: OnceLock<[Slicer; 3]> = OnceLock::new();
+    let tables = TABLES.get_or_init(|| {
+        [Rate::R9600, Rate::R7200, Rate::R4800].map(|rate| {
+            let rms = rate.rms();
+            let points = rate
+                .constellation()
+                .into_iter()
+                .map(|p| {
+                    let (x, y) = p.xy();
+                    Complex::new(x / rms, y / rms)
+                })
+                .collect();
+            Slicer::table(Constellation::new(points))
+        })
+    });
+    match rate {
+        Rate::R9600 => tables[0].clone(),
+        Rate::R7200 => tables[1].clone(),
+        Rate::R4800 => tables[2].clone(),
+    }
+}
+
+/// Segments 3 and 4 at `rate`, as our own transmitter sends them, which is
+/// as Table 5, 8.2, 8.3 and the appendices have them: the one generator for
+/// both ends, so that they cannot disagree. Symbols, not samples, so the
+/// transmitter's sampling rate does not matter.
+fn known_sequence(rate: Rate) -> Vec<Point> {
+    let mut tx = Transmitter::new(8000.0);
+    tx.start(rate);
+    let skipped = train::SILENCE + train::ALTERNATIONS;
+    (0..skipped + KNOWN as u32).filter_map(|_| tx.next_symbol()).skip(train::ALTERNATIONS as usize).collect()
+}
+
+/// Q1 to Q4 of a symbol, by 2.2 backwards: the change of phase from the one
+/// before is Q2 Q3 Q4 through Table 1, and the ring is Q1. And which of them
+/// are the rate's data bits.
+fn carried(rate: Rate, previous: Point, decided: Point) -> ([bool; 4], std::ops::Range<usize>) {
+    let change = (decided.eighths + 8 - previous.eighths) & 7;
+    let tribit = TURN_TRIBIT[usize::from(change)];
+    let q = [decided.outer, tribit & 0b100 != 0, tribit & 0b010 != 0, tribit & 0b001 != 0];
+    match rate {
+        Rate::R9600 => (q, 0..4),
+        // 2.2.2: Q1 is always a ZERO.
+        Rate::R7200 => (q, 1..4),
+        // Q4 is only the other two inverted and added, so it is not data.
+        Rate::R4800 => (q, 1..3),
+    }
+}
+
+/// A burst being heard.
+#[derive(Debug, Clone, Copy)]
+struct Burst {
+    /// How loud it was as segment 2 had it, and how loud the line's noise.
+    level: Level,
+    /// Samples the line has been quiet for.
+    quiet: usize,
+    /// Whether the carrier is said to be there.
+    heard: bool,
+}
+
+/// V.29 receiver, on the shared QAM core.
+///
+/// Everything that brings the far end's symbols back -- the fixed mixer, the
+/// stored samples, the equaliser at two samples a symbol, the three loops and
+/// their one gate, the gain control, losing the signal and finding it again --
+/// is `dsp::qam`, which V.32bis is built on too. What is here is what is
+/// V.29's own: finding a burst and where its segment 3 begins
+/// (`v29/hunt.rs`), what segments 3 and 4 are, which constellation a symbol
+/// is decided against, how bits come out of the points, and whether there is
+/// a carrier.
+///
+/// The receiver this replaced acquired its carrier from a single measurement
+/// over the front of segment 2, armed by a carrier detector with a fixed
+/// threshold 53 dB under a burst, and never checked or repeated either
+/// (fax-qam.md 3.1, 3.2): on a line with any hiss the detector latched on to
+/// the noise before the burst, the measurement was made on noise, and the page
+/// was lost whole. Its equaliser then had to open a two-radius eye blind.
+///
+/// Here nothing is armed by a level. A burst is heard when segment 2 is, by
+/// what an alternation of two points is and noise is not, and the join into
+/// segment 3 says where the known sequence begins. A new core is made for
+/// each burst and given the line again from just before that, and the known
+/// 432 symbols are solved against outright, by least squares, for the
+/// equaliser, the gain, the carrier's absolute phase and its turn, the turn
+/// having been measured already from segment 2. The hunt goes on the whole
+/// time, so a false start, a slip or a far end starting again is found again,
+/// and nothing is ever decided until it has been trained for.
+///
+/// Like the one before, it never decides where the data begins. A training
+/// check is found as a run of zeros and a page by its first end-of-line
+/// code, so every symbol after the training is decoded and whoever is above
+/// finds its own place.
 #[derive(Debug)]
 pub struct Receiver {
+    fs: f64,
     rate: Rate,
-    /// The constellation divided by its root mean square, for the slicer.
-    points: Vec<(Point, (f64, f64))>,
-    nco: Nco,
-    select: ComplexFir,
-    matched: ComplexFir,
-    gardner: Gardner,
-    countdown: f64,
-    previous_filtered: (f64, f64),
-    phase: f64,
-    frequency: f64,
-    /// The power of what is arriving, and how many symbols of this burst
-    /// have gone into it.
+    /// The rate's points, by label, and the table the core decides against.
+    labels: Vec<Point>,
+    slicer: Slicer,
+    /// Segments 3 and 4, as points and at unit power.
+    known: Vec<Point>,
+    targets: Vec<Complex>,
+    hunt: Hunt,
+    /// The core reading the burst being heard, made at its join.
+    core: Option<Core>,
+    /// The training the join calls for, held back until its first window is
+    /// in while the hunt goes on listening, with the half-symbol sample by
+    /// which it is; and the windows of the first try and the second.
+    pending: Option<(Training, u64)>,
+    windows: (Window, Window),
+    burst: Option<Burst>,
+    /// The power of the burst being heard, as segment 2 measured it, in the
+    /// hunt's baseband units: what the carrier's going is judged against.
     power: f64,
-    burst_symbols: u32,
-    /// Segment 2 as it arrived, before the carrier loop has touched it.
-    alternations: Vec<(f64, f64)>,
-    /// What the timing loop's input is multiplied by.
-    timing_scale: f64,
-    equalizer: Equalizer,
-    level: OnePole,
-    floor: f64,
-    loudest: f64,
-    carrier: bool,
-    symbols: u64,
     /// The point the previous symbol was decided to be.
     previous: Option<Point>,
     descrambler: v32::Scrambler,
     bits: Vec<bool>,
     last_symbol: (f64, f64),
-    track: f64,
+    residual: f64,
+    /// Samples to the next point shown while the burst is heard and not yet
+    /// trained for.
+    showing: f64,
 }
 
 impl Receiver {
     pub fn new(fs: f64) -> Self {
         let rate = Rate::default();
-        let sps = fs / BAUD;
         let mut me = Self {
+            fs,
             rate,
-            points: Vec::new(),
-            nco: Nco::new(CARRIER, fs),
-            // Half the baud rate and the roll-off either side of the carrier
-            // is 1500 Hz at baseband; this only has to keep twice the carrier
-            // out of the loops.
-            select: ComplexFir::new(fir_lowpass(1600.0, 121, fs)),
-            matched: ComplexFir::new(rrc_taps(sps, ROLLOFF, SPAN)),
-            gardner: Gardner::new(sps, 0.1),
-            countdown: sps / 2.0,
-            previous_filtered: (0.0, 0.0),
-            phase: 0.0,
-            frequency: 0.0,
-            power: 1.0,
-            burst_symbols: 0,
-            alternations: Vec::new(),
-            timing_scale: 1.0,
-            equalizer: Equalizer::new(31, 1.0),
-            level: OnePole::new(0.010, fs),
-            floor: 0.0,
-            loudest: 0.0,
-            carrier: false,
-            symbols: 0,
+            labels: Vec::new(),
+            slicer: table(rate),
+            known: Vec::new(),
+            targets: Vec::new(),
+            hunt: Hunt::new(fs),
+            core: None,
+            pending: None,
+            windows: (FIRST, RETRY),
+            burst: None,
+            power: 0.0,
             previous: None,
             descrambler: scrambler(),
             bits: Vec::new(),
             last_symbol: (0.0, 0.0),
-            track: 0.0,
+            residual: 1.0,
+            showing: 0.0,
         };
         me.follow(rate);
         me
@@ -657,45 +760,53 @@ impl Receiver {
     pub fn set_rate(&mut self, rate: Rate) {
         if rate != self.rate {
             self.follow(rate);
+            // A burst being read at the old rate is not one to go on with.
+            self.core = None;
+            self.pending = None;
         }
     }
 
     fn follow(&mut self, rate: Rate) {
         self.rate = rate;
+        self.labels = rate.constellation();
+        self.slicer = table(rate);
+        self.known = known_sequence(rate);
         let rms = rate.rms();
-        self.points = rate
-            .constellation()
-            .into_iter()
+        self.targets = self
+            .known
+            .iter()
             .map(|p| {
                 let (x, y) = p.xy();
-                (p, (x / rms, y / rms))
+                Complex::new(x / rms, y / rms)
             })
             .collect();
-        // The constant-modulus target: the fourth moment of the constellation
-        // over the square of its second, which with the second made one is
-        // the mean of the squared powers.
-        let modulus = self
-            .points
-            .iter()
-            .map(|(_, (x, y))| (x * x + y * y).powi(2))
-            .sum::<f64>()
-            / self.points.len() as f64;
-        self.equalizer = Equalizer::new(31, modulus);
     }
 
     pub fn rate(&self) -> Rate {
         self.rate
     }
 
+    /// Whether the far end's carrier is there: from the moment its segment 2
+    /// has been heard for 24 symbols, until the burst's signal has been 6 dB
+    /// below what segment 2 had, over the line's own noise, for 16 ms. A plain
+    /// carrier, a tone, noise at any level, are none of them segment 2, and
+    /// do not raise it.
     pub fn carrier(&self) -> bool {
-        self.carrier
+        self.burst.is_some_and(|b| b.heard)
     }
 
+    /// The in-band level of what is arriving, as an amplitude after a mixer
+    /// of unit gain, over the last ten milliseconds.
     pub fn level(&self) -> f64 {
-        self.level.value()
+        self.hunt.power().sqrt() / 2.0
     }
 
     /// Where the last symbol landed, scaled so the mean power is one.
+    ///
+    /// The equaliser's output once the burst is trained for. Before that,
+    /// while segments 2 and 3 arrive and the training waits for them, the
+    /// line itself a symbol apart, scaled by segment 2's power and turned by
+    /// nothing: the points as they arrive, before anything has been learned.
     pub fn constellation_point(&self) -> (f64, f64) {
         self.last_symbol
     }
@@ -705,315 +816,227 @@ impl Receiver {
     /// Five over the square root of 13.5 at 9600, which is a third beyond the
     /// unit circle a scope draws its box at.
     pub fn constellation_peak(&self) -> f64 {
-        self.points
-            .iter()
-            .map(|(_, (x, y))| x.abs().max(y.abs()))
-            .fold(0.0, f64::max)
+        let rms = self.rate.rms();
+        self.labels.iter().map(|p| p.xy()).map(|(x, y)| x.abs().max(y.abs()) / rms).fold(0.0, f64::max)
     }
 
+    /// Mean distance of the symbols from the nearest point, in the units
+    /// [`point_spacing`](Self::point_spacing) is measured in, over about a
+    /// hundred symbols. It stops where it is when the line goes quiet, since
+    /// there is then nothing to be near or far from.
     pub fn residual_error(&self) -> f64 {
-        self.equalizer.error()
+        self.residual
     }
 
     /// The distance between the two closest points, in the same units.
     pub fn point_spacing(&self) -> f64 {
-        let mut closest = f64::INFINITY;
-        for (i, (_, a)) in self.points.iter().enumerate() {
-            for (_, b) in self.points.iter().skip(i + 1) {
-                closest = closest.min(((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt());
-            }
+        match &self.slicer {
+            Slicer::Table(table) => table.d2min().sqrt(),
+            Slicer::Grid { .. } => unreachable!("V.29's constellations are tables"),
         }
-        closest
     }
 
-    /// Forget the burst just gone, detector, equaliser and all.
+    /// Forget the burst just gone, and everything learned from it.
+    ///
+    /// Every burst carries a training sequence built to teach a receiver from
+    /// nothing, so nothing is lost by it, and keeping anything turns a
+    /// moment's trouble into a lasting one.
     pub fn restart(&mut self) {
-        self.new_burst();
-        self.carrier = false;
-        self.loudest = 0.0;
-        self.level.reset();
-    }
-
-    fn new_burst(&mut self) {
-        // The equaliser starts again as well. Every burst carries a training
-        // sequence built to teach one from nothing, so nothing is lost by it,
-        // and keeping the old one turns a moment's trouble into a lasting one:
-        // a burst of noise walks its taps off, and a receiver that carries
-        // those taps into the next burst cannot read that one either, or the
-        // retransmission that was meant to put things right.
-        self.equalizer.reset();
+        self.hunt = Hunt::new(self.fs);
+        self.core = None;
+        self.pending = None;
+        self.burst = None;
         self.previous = None;
         self.descrambler.reset();
         self.bits.clear();
-        self.symbols = 0;
-        self.burst_symbols = 0;
-        self.alternations.clear();
     }
 
     pub fn take_bits(&mut self) -> Vec<bool> {
         std::mem::take(&mut self.bits)
     }
 
-    fn nearest(&self, at: (f64, f64)) -> (Point, (f64, f64)) {
-        let mut best = self.points[0];
-        let mut distance = f64::INFINITY;
-        for &(point, (x, y)) in &self.points {
-            let d = (at.0 - x).powi(2) + (at.1 - y).powi(2);
-            if d < distance {
-                distance = d;
-                best = (point, (x, y));
-            }
-        }
-        best
-    }
-
     pub fn feed(&mut self, sample: f64) {
-        let (cos, sin) = self.nco.step();
-        let selected = self.select.process((sample * cos, sample * -sin));
-        let level = self
-            .level
-            .process((selected.0 * selected.0 + selected.1 * selected.1).sqrt());
-        if self.carrier {
-            self.loudest = self.loudest.max(level) * (1.0 - LOUDEST_DECAY);
-        } else {
-            self.loudest = 0.0;
-            let k = if level < self.floor { FLOOR_FALL } else { FLOOR_RISE };
-            self.floor += k * (level - self.floor);
+        match self.hunt.feed(sample) {
+            Some(Found::Alternations { level }) => {
+                // A burst, or the far end starting again in the middle of
+                // one (8, 10): whatever was being read is over either way.
+                self.core = None;
+                self.pending = None;
+                self.burst = Some(Burst { level, quiet: 0, heard: true });
+                self.power = level.power;
+            }
+            Some(Found::Reversal { at, turn, level }) => self.join(at, turn, level, FIRST),
+            Some(Found::Lapsed { at, turn, level }) => self.join(at, turn, level, LAPSED),
+            None => {}
         }
-        let was = self.carrier;
-        self.carrier = if self.carrier {
-            level > (self.loudest * OFF_BELOW_LOUDEST).max(CARRIER_OFF)
-        } else {
-            level > (self.floor * ON_ABOVE_FLOOR).max(CARRIER_ON)
-        };
-        if self.carrier && !was {
-            self.new_burst();
-        }
-        if !self.carrier && was {
-            // The burst just went. Whatever is on the line now is the line
-            // with nothing on it, or on its way there, so the floor starts
-            // from half of where the level is rather than from wherever it was
-            // left. Left at nothing -- which it is, for the first burst of a
-            // call, since this receiver hears nothing between bursts -- the
-            // noise on the line clears the threshold the moment the carrier
-            // drops, the carrier comes straight back, and the burst never
-            // ends. Half puts the way back on at half the burst's own level:
-            // out of reach of the noise, and well within reach of a burst that
-            // stopped for twenty milliseconds on purpose and carried on. It
-            // falls from there to the real noise within a fraction of a second.
-            self.floor = self.floor.max(level * FLOOR_AFTER_BURST);
-        }
-        let filtered = self.matched.process(selected);
-
-        let previous = std::mem::replace(&mut self.previous_filtered, filtered);
-        let before = self.countdown;
-        self.countdown -= 1.0;
-        if self.countdown > 0.0 {
-            return;
-        }
-        let mu = before.clamp(0.0, 1.0);
-        let at = (
-            previous.0 + mu * (filtered.0 - previous.0),
-            previous.1 + mu * (filtered.1 - previous.1),
-        );
-        self.countdown += self.gardner.interval();
-        // The timing loop is handed the signal at a level of about one,
-        // whatever the line delivered. It divides its error by its own running
-        // estimate of the power, which starts at one and moves two per cent a
-        // symbol, so thirty decibels down it spends the whole of segment 2 a
-        // thousand times too timid to move -- and a receiver started half a
-        // symbol out of step stays there. At full level the same start was
-        // found in a few symbols.
-        //
-        // The level meter is what does the scaling because it is the only
-        // estimate that is right from the first symbols of a burst; the gain
-        // control is not settled until forty in. It is held while there is no
-        // carrier, so silence is not scaled up into something to lock onto.
-        if self.carrier {
-            self.timing_scale = 1.0 / self.level.value().max(CARRIER_OFF);
-        }
-        let scale = self.timing_scale;
-        let Some(scaled) = self.gardner.feed((at.0 * scale, at.1 * scale)) else {
-            return;
-        };
-        self.on_symbol((scaled.0 / scale, scaled.1 / scale));
-    }
-
-    /// Follow the power of what is arriving.
-    ///
-    /// A plain average over the first symbols of a burst, then an exponential
-    /// one. The average is there because an exponential one has to start
-    /// somewhere, and starting it at one leaves it crawling towards a line
-    /// that may be forty decibels quieter than that: it was still four times
-    /// too high when the data began, so the equaliser learned the whole
-    /// training at the wrong gain and then had to unlearn it on the page.
-    /// Eight phases on a circle did not mind. Two radii do.
-    ///
-    /// Segment 2 is what the average lands on, and A and B together have
-    /// exactly the mean power of the constellation, so the average over any
-    /// even number of them is not an estimate but the answer.
-    fn follow_power(&mut self, power: f64) {
-        self.burst_symbols += 1;
-        if self.burst_symbols <= SETTLING {
-            return;
-        }
-        let averaged = self.burst_symbols - SETTLING;
-        let k = if averaged <= AVERAGED {
-            1.0 / f64::from(averaged)
-        } else {
-            POWER_TRACKING
-        };
-        self.power += k * (power - self.power);
-    }
-
-    fn gain(&self) -> f64 {
-        (1.0 / self.power.max(1e-12)).sqrt().clamp(0.0, MAX_GAIN)
-    }
-
-    /// Measure the carrier against the points segment 2 is known to send.
-    ///
-    /// A loop that decides each symbol and steers towards the decision can
-    /// only find a carrier it is already close to: turn sixteen points of two
-    /// radii by more than about a sixteenth of a turn and the nearest point is
-    /// the wrong one, the steering goes the wrong way, and the loop settles
-    /// somewhere that is not a lock at all. A tenth of a sample's difference in
-    /// when the two ends started, or a few hertz between their oscillators,
-    /// was enough for that in forty-five of eighty tries.
-    ///
-    /// Segment 2 is there so nothing has to be decided. It alternates A and B,
-    /// and both are known. Each symbol times the conjugate of the point it is
-    /// is the carrier alone; each of those times the conjugate of the one
-    /// before is the carrier's turn per symbol. Which of the two came first is
-    /// not known, but it does not need to be: guessed wrong, at 9600 and 7200
-    /// the second sum cancels to nothing, so the larger one is the right one.
-    /// At 4800 the guesses tie, and there A and B are a quarter turn apart --
-    /// a lock a quarter turn out, which the differential phase coding does not
-    /// notice.
-    fn acquire(&mut self) {
-        let pair = [A, b(self.rate)].map(|p| p.xy());
-        let conj_times = |r: (f64, f64), p: (f64, f64)| {
-            (r.0 * p.0 + r.1 * p.1, r.1 * p.0 - r.0 * p.1)
-        };
-        let mut best = (0.0f64, 0.0f64, Vec::new());
-        for first in 0..2 {
-            let carrier: Vec<(f64, f64)> = self
-                .alternations
-                .iter()
-                .enumerate()
-                .map(|(n, &r)| conj_times(r, pair[(n + first) % 2]))
-                .collect();
-            let turn = carrier
-                .windows(2)
-                .map(|w| conj_times(w[1], w[0]))
-                .fold((0.0, 0.0), |a, z| (a.0 + z.0, a.1 + z.1));
-            let strength = turn.0.hypot(turn.1);
-            if strength > best.0 {
-                best = (strength, turn.1.atan2(turn.0), carrier);
+        if let Some(core) = &mut self.core {
+            core.feed(sample);
+            // The training the join called for, now that its first window is
+            // all in, from the samples the core kept.
+            if self.pending.as_ref().is_some_and(|(_, due)| core.halves() >= *due)
+                && let Some((training, _)) = self.pending.take()
+            {
+                core.train(training);
             }
         }
-        let (_, per_symbol, carrier) = best;
-        if carrier.is_empty() {
+        self.listen();
+        self.symbols();
+        self.follow_level();
+    }
+
+    /// Segment 2 has ended, into segment 3 or not: make a core, read it the
+    /// line from a little before segment 3's first symbol, centred on line
+    /// sample `at`, and train it there once the first window is in.
+    fn join(&mut self, at: f64, turn: f64, level: Level, first: Window) {
+        let half = self.fs / BAUD / 2.0;
+        let now = self.hunt.taken() - 1;
+        let from = (at - CORE_FIRST_HALF - LEAD_HALVES * half).floor().max(self.hunt.first_kept() as f64) as u64;
+        let mut core = Core::new(Band::new(self.fs, BAUD, CARRIER), Options::fixed(), self.slicer.clone());
+        for index in from..now {
+            core.feed(self.hunt.raw(index).unwrap_or(0.0));
+        }
+        let start = ((at - from as f64 - CORE_FIRST_HALF) / half).round().max(0.0) as u64;
+        let training = Training {
+            targets: self.targets.clone(),
+            start,
+            first,
+            retry: Some(RETRY),
+            turn: Some(turn),
+            drift: None,
+            accept_db: ACCEPT_DB,
+            slicer: self.slicer.clone(),
+            fallback: false,
+        };
+        self.pending = Some((training, due(start, first)));
+        self.windows = (first, RETRY);
+        self.core = Some(core);
+        let burst = self.burst.get_or_insert(Burst { level, quiet: 0, heard: true });
+        burst.level = level;
+        self.power = level.power;
+    }
+
+    /// Act on what the core has heard.
+    fn listen(&mut self) {
+        let Some(core) = &mut self.core else { return };
+        let mut heard = Vec::new();
+        while let Some(h) = core.heard() {
+            heard.push(h);
+        }
+        for h in heard {
+            match h {
+                Heard::Trained { via, .. } => {
+                    let end = if via == Via::Retry { self.windows.1.solve.1 } else { self.windows.0.solve.1 };
+                    self.prime(end);
+                }
+                // Nothing fitted: the join was not one, or the burst is too
+                // spoiled to train on. Either way segment 2 was heard, so
+                // the burst is there until the line goes quiet, and the
+                // carrier with it: a fax receiver judges a training check
+                // when its carrier goes, and one that went here would be
+                // judged, and answered, while the far end was still sending
+                // it. The hunt is still listening, for segment 2 again after
+                // a false join or for the next burst.
+                Heard::Untrained => {
+                    self.core = None;
+                    self.pending = None;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Trained, and the first symbol to come is symbol `end` of the known
+    /// sequence: the symbols before it are known, so the phase the first is
+    /// a change from is known, and so is every bit the descrambler has been
+    /// fed with since segment 4 began.
+    fn prime(&mut self, end: usize) {
+        let end = end.clamp(ONES_FROM + 1, KNOWN);
+        self.descrambler.reset();
+        for k in ONES_FROM..end {
+            let (q, data) = carried(self.rate, self.known[k - 1], self.known[k]);
+            for &bit in &q[data] {
+                self.descrambler.descramble(bit);
+            }
+        }
+        self.previous = Some(self.known[end - 1]);
+    }
+
+    /// Every symbol the core can make now: decided as the nearest point,
+    /// which is all an uncoded constellation needs, and read as bits.
+    fn symbols(&mut self) {
+        let quiet = self.burst.is_none_or(|b| b.quiet > 0);
+        let Some(core) = self.core.as_mut() else {
+            self.show_arriving();
+            return;
+        };
+        if !core.is_tracking() {
+            self.show_arriving();
             return;
         }
-        // The phase at the middle of the measurement, with the turn taken out,
-        // carried forward to the last symbol of it -- which is the one about to
-        // be turned by what this sets, since this runs as it arrives.
-        let last = (carrier.len() - 1) as f64;
-        let middle = last / 2.0;
-        let (re, im) = carrier.iter().enumerate().fold((0.0, 0.0), |a, (n, z)| {
-            let back = -per_symbol * (n as f64 - middle);
-            let (c, s) = (back.cos(), back.sin());
-            (a.0 + z.0 * c - z.1 * s, a.1 + z.0 * s + z.1 * c)
-        });
-        let now = im.atan2(re) + per_symbol * (last - middle);
-        let tau = std::f64::consts::TAU;
-        // The loop turns each symbol by the phase and then adds the frequency
-        // to the phase, so both go in with the sign that undoes them.
-        self.frequency = -per_symbol / tau;
-        self.phase = (-now / tau).rem_euclid(1.0);
-        self.track = 0.0;
-    }
-
-    fn acquiring(&self) -> bool {
-        self.burst_symbols > SETTLING && self.burst_symbols <= SETTLING + ACQUIRING
-    }
-
-    fn on_symbol(&mut self, symbol: (f64, f64)) {
-        let power = symbol.0 * symbol.0 + symbol.1 * symbol.1;
-        if self.carrier {
-            self.follow_power(power);
-            if self.acquiring() {
-                self.alternations.push(symbol);
-                if self.burst_symbols == SETTLING + ACQUIRING {
-                    self.acquire();
+        while let Some(point) = core.next() {
+            let Some(symbol) = core.settle(point.nearest) else { break };
+            let decided = self.labels[point.label.unwrap_or(0)];
+            if let Some(previous) = self.previous.replace(decided) {
+                let (q, data) = carried(self.rate, previous, decided);
+                for &bit in &q[data] {
+                    let out = self.descrambler.descramble(bit);
+                    // Nothing once the line has gone quiet: the burst has
+                    // ended, and what is decided now is the noise after it.
+                    if !quiet {
+                        self.bits.push(out);
+                    }
                 }
             }
-        }
-        let gain = self.gain();
-
-        let turn = self.phase * std::f64::consts::TAU;
-        let (c, s) = (turn.cos(), turn.sin());
-        let point = (
-            (symbol.0 * c - symbol.1 * s) * gain,
-            (symbol.0 * s + symbol.1 * c) * gain,
-        );
-
-        // The carrier loop reads the unequalised symbol, so the equaliser's
-        // delay stays outside it. The constellation has four-fold symmetry and
-        // no more -- a point turned an eighth lands between rings rather than
-        // on one -- so the loop can settle a quarter turn out and no other
-        // way, and the phase coding is differential exactly so that a quarter
-        // turn out does not matter.
-        let (_, want) = self.nearest(point);
-        let d2 = (want.0 * want.0 + want.1 * want.1).max(MIN_DECISION_POWER);
-        let raw = (point.1 * want.0 - point.0 * want.1) / d2;
-        self.track += 0.20 * (raw - self.track);
-        // Not while segment 2 is being measured: steering by decisions about
-        // a carrier that has not been found yet is what this replaces.
-        if self.carrier && self.burst_symbols > SETTLING + ACQUIRING {
-            self.frequency = (self.frequency - 1.5e-5 * self.track).clamp(-0.02, 0.02);
-            self.phase -= 0.008 * self.track;
-        }
-        self.phase += self.frequency;
-        self.phase -= self.phase.floor();
-
-        let equalized = self.equalizer.equalize(point);
-        let (decided, decision) = self.nearest(equalized);
-
-        self.symbols += 1;
-        if self.carrier && self.burst_symbols > SETTLING + ACQUIRING {
-            self.equalizer.adapt(equalized, decision);
-        }
-        self.last_symbol = equalized;
-
-        if !self.carrier {
-            return;
-        }
-        let Some(previous) = self.previous.replace(decided) else {
-            return;
-        };
-
-        // 2.2 backwards: the change of phase is Q2 Q3 Q4 through Table 1,
-        // and the ring is Q1.
-        let change = (decided.eighths + 8 - previous.eighths) & 7;
-        let tribit = TURN_TRIBIT[usize::from(change)];
-        let q = [
-            decided.outer,
-            tribit & 0b100 != 0,
-            tribit & 0b010 != 0,
-            tribit & 0b001 != 0,
-        ];
-        let carried: &[bool] = match self.rate {
-            Rate::R9600 => &q,
-            Rate::R7200 => &q[1..],
-            // Q4 is only the other two inverted and added, so it is not data.
-            Rate::R4800 => &q[1..3],
-        };
-        for &bit in carried {
-            let out = self.descrambler.descramble(bit);
-            self.bits.push(out);
+            if !quiet {
+                self.last_symbol = (symbol.point.re, symbol.point.im);
+                self.residual = core.residual_error();
+            }
         }
     }
+
+    /// While the burst is heard and nothing is trained yet, the line as it
+    /// arrives, a symbol apart.
+    fn show_arriving(&mut self) {
+        let Some(burst) = self.burst.filter(|b| b.heard && b.quiet == 0) else { return };
+        self.showing -= 1.0;
+        if self.showing <= 0.0 {
+            self.showing += self.fs / BAUD;
+            let z = self.hunt.newest().scale(1.0 / burst.level.power.max(1e-30).sqrt());
+            self.last_symbol = (z.re, z.im);
+        }
+    }
+
+    /// Whether the burst is still there, and the carrier with it.
+    fn follow_level(&mut self) {
+        let Some(burst) = &mut self.burst else { return };
+        let Level { power, noise } = burst.level;
+        if self.hunt.power() < noise + QUIET_BELOW * (power - noise) {
+            burst.quiet += 1;
+        } else {
+            burst.quiet = 0;
+        }
+        let tracking = self.core.as_ref().is_some_and(|c| c.is_tracking() && !c.is_lost());
+        if burst.quiet as f64 >= QUIET_OFF_SECONDS * self.fs {
+            burst.heard = false;
+        } else if burst.quiet == 0 && !burst.heard && (tracking || self.hunt.is_armed()) {
+            // Back after a hole, and the signal found again across it.
+            burst.heard = true;
+        }
+        let lost = self.core.as_ref().is_some_and(|c| c.lost_for() > LOST_OVER);
+        if burst.quiet as f64 >= QUIET_OVER_SECONDS * self.fs || lost {
+            self.burst = None;
+            self.core = None;
+            self.pending = None;
+        }
+    }
+}
+
+/// The half-symbol sample by which a training from `start` has all of its
+/// first window in: the core's own reckoning, with a little over its
+/// equaliser's reach to spare.
+fn due(start: u64, window: Window) -> u64 {
+    let end = window.solve.1.max(window.align.1) as u64;
+    start + window.search.max(0) as u64 + 2 * end + 32
 }
 
 #[cfg(test)]
@@ -1343,6 +1366,24 @@ mod tests {
             }
         }
         assert!(failed.is_empty(), "{} failed: {failed:?}", failed.len());
+    }
+
+    #[test]
+    fn a_fresh_core_centres_its_first_half_symbol_where_the_receiver_says() {
+        // The receiver hands the core a training whose start is a half-symbol
+        // sample worked out from where the hunt heard the join, which rests on
+        // where a fresh core puts its first one: CORE_FIRST_HALF samples in,
+        // made as soon as the interpolating filter's other half is there too.
+        // If the core changed that, every burst would be trained in the wrong
+        // place, so it is held here.
+        let mut core = Core::new(Band::new(FS, BAUD, CARRIER), Options::fixed(), table(Rate::R9600));
+        let reach = CORE_FIRST_HALF as usize / 2;
+        for _ in 0..CORE_FIRST_HALF as usize + reach {
+            core.feed(0.0);
+        }
+        assert_eq!(core.halves(), 0);
+        core.feed(0.0);
+        assert_eq!(core.halves(), 1);
     }
 
     #[test]
