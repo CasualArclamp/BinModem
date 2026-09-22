@@ -72,8 +72,9 @@ pub(super) enum Hunted {
     /// turns by `turn` radians a symbol against ours, and whose symbols are
     /// `drift` longer than the half-symbol samples' spacing makes them.
     Reversal { at: u64, turn: f64, drift: f64 },
-    /// S stopped at half `at` without turning into S-bar.
-    Lapsed { at: u64 },
+    /// S stopped at half `at` without turning into S-bar, having turned by
+    /// `turn` and drifted by `drift` as a reversal's are measured.
+    Lapsed { at: u64, turn: f64, drift: f64 },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -144,8 +145,12 @@ impl Hunt {
                 self.lapsed += 1;
                 if self.lapsed > 24 {
                     let at = index.saturating_sub(24);
+                    // What S said of the carrier and the clock holds whether
+                    // or not S-bar came after it, and a driver that trains
+                    // anyway wants it.
+                    let (turn, drift) = self.estimate();
                     *self = Self::new(self.discriminate);
-                    return Some(Hunted::Lapsed { at });
+                    return Some(Hunted::Lapsed { at, turn, drift });
                 }
             }
             self.recent.push_back(half);

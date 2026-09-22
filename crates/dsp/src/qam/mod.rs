@@ -419,6 +419,9 @@ pub struct Core {
     /// Symbols made.
     produced: u64,
     pending: Option<Pending>,
+    /// The carrier's turn and the far clock's drift as the last S heard had
+    /// them, whether it ended in S-bar or lapsed.
+    s_measured: Option<(f64, f64)>,
 }
 
 impl Core {
@@ -458,6 +461,7 @@ impl Core {
             earlier: VecDeque::new(),
             produced: 0,
             pending: None,
+            s_measured: None,
         }
     }
 
@@ -501,10 +505,14 @@ impl Core {
                     // S was heard on the grid the timing loop last left, so
                     // what it showed is on top of that.
                     let drift = (1.0 + self.front.drift) * (1.0 + drift) - 1.0;
+                    self.s_measured = Some((turn, drift));
                     self.mode = Mode::Idle;
                     self.heard.push_back(Heard::Reversal { at, turn, drift });
                 }
-                Some(Hunted::Lapsed { at }) => self.heard.push_back(Heard::Lapsed { at }),
+                Some(Hunted::Lapsed { at, turn, drift }) => {
+                    self.s_measured = Some((turn, (1.0 + self.front.drift) * (1.0 + drift) - 1.0));
+                    self.heard.push_back(Heard::Lapsed { at });
+                }
                 None => {}
             },
             Mode::Training(collecting) => {
@@ -667,6 +675,14 @@ impl Core {
     /// The far carrier's offset from ours, as the carrier loop has it.
     pub fn offset_hz(&self) -> f64 {
         self.turn * self.band.baud / std::f64::consts::TAU
+    }
+
+    /// The carrier's turn a symbol, in radians, and the far clock's drift as
+    /// the timing loop counts it, as the last S heard had them: what a
+    /// [`Heard::Reversal`] carries, kept, and kept too for an S that lapsed
+    /// without S-bar, whose [`Heard::Lapsed`] says only where it ended.
+    pub fn s_measured(&self) -> Option<(f64, f64)> {
+        self.s_measured
     }
 
     /// The carrier phase taken out of the next symbol, in radians.
