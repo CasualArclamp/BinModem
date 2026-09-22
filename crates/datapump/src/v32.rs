@@ -1,4 +1,4 @@
-//! V.32 at 4800 bit/s: 2400 baud, four points, one band both ways.
+//! V.32 and V.32bis: 2400 baud, one band both ways, 4800 to 14 400 bit/s.
 //!
 //! The step up from V.22bis is not the speed. V.22bis fits two directions into
 //! one telephone channel by giving each half of it, which is why its receiver
@@ -31,7 +31,8 @@
 //!
 //! Nothing else about the modem changes with the rate: the same scrambler, the
 //! same start-up conducted entirely in the four states, and the same mean
-//! power for the gain control to hold.
+//! power for the gain control to hold -- all but the fifth of a decibel that
+//! V.32bis's figures put 12 000 and 14 400 above the others (`data_lift`).
 
 pub mod startup;
 pub mod trellis;
@@ -293,13 +294,22 @@ const CARRIER_OFF: f64 = 5.62e-4;
 ///
 /// The states are a quarter turn apart, so the decision is which quarter the
 /// point falls in, with the boundaries midway between neighbours rather than
-/// on the axes. Turning the point by half that angle first puts the boundaries
-/// where an ordinary test of signs finds them.
+/// on the axes: forty-five degrees either side of each state, whose angles
+/// are A's 198.43 and its quarter turns. Turning the point by atan(1/2), 26.57
+/// degrees -- forty-five less atan(1/3), which is how far A sits below the
+/// negative real axis -- puts every state on a diagonal, A at (-√5, -√5), and
+/// so every boundary on an axis, where an ordinary test of signs finds it.
+///
+/// This turned by 22.5 degrees once, half a quarter turn, which is right for
+/// states that sit on the axes. These do not, and it left every boundary four
+/// degrees out: a point at 245 degrees was taken for A although it is nearer
+/// B, which biased every decision at 4800 and in the start-up.
 fn nearest_state(p: (f64, f64)) -> usize {
-    // Half of ninety degrees away from state A's own angle.
-    const COS: f64 = 0.923_879_532_511_286_8;
-    const SIN: f64 = 0.382_683_432_365_089_8;
-    // Bring A to just inside the first quadrant, then read the quadrant off.
+    // The cosine and sine of atan(1/2): two and one over the root of five.
+    const COS: f64 = 0.894_427_190_999_915_9;
+    const SIN: f64 = 0.447_213_595_499_957_9;
+    // Bring A onto the diagonal of the third quadrant, then read the quadrant
+    // off.
     let turned = (p.0 * COS - p.1 * SIN, p.0 * SIN + p.1 * COS);
     let from_a = match (turned.0 >= 0.0, turned.1 >= 0.0) {
         (true, true) => 0,
@@ -366,7 +376,7 @@ pub fn coding_for(bits_per_second: u32, coding: Coding) -> Option<trellis::Coded
 pub fn point_spacing_at(bits_per_second: u32, coding: Coding) -> f64 {
     let figure = match coding_for(bits_per_second, coding) {
         Some(coded) => coded.closest(),
-        // Figure 2/V.32, 9600's non-redundant alternative: sixteen points on a
+        // Figure 1/V.32, 9600's non-redundant alternative: sixteen points on a
         // grid of two.
         None if bits_per_second == 9600 => 2.0,
         // A B C D of Figure 1 are a knight's move apart on that grid.
@@ -423,8 +433,90 @@ impl Scrambler {
     }
 }
 
-/// Encoding for the TRN segment after its first 256 symbols (Table 5).
-const TRN_STATES: [usize; 4] = [STATE_A, STATE_B, STATE_C, STATE_D];
+/// Segment 3 of the conditioning signal, TRN (5.2.3), one state at a time.
+///
+/// Binary ones through the sending end's scrambler, started from all zeros,
+/// two bits to the symbol and no differential coding. For the first 256
+/// symbols only the first bit of each pair counts, and chooses between A and
+/// C; from then on both do, by Table 5.
+///
+/// It is the one stretch of the start-up a receiver can know symbol for symbol
+/// before it arrives, which is what makes it the segment an equaliser trains
+/// on (5.2.3: "intended for training the adaptive equalizer in the receiving
+/// modem"). The far receiver runs this same sequence, from the polynomial of
+/// the end that is sending, and measures what arrived against it -- so there
+/// is one generator, and the transmitter sends what it says.
+#[derive(Debug, Clone)]
+pub struct TrnSequence {
+    scrambler: Scrambler,
+    /// Symbols produced so far.
+    sent: u64,
+}
+
+impl TrnSequence {
+    /// TRN as the modem at `mode`'s end sends it. A receiver wants the other
+    /// end's, [`Mode::peer`].
+    pub fn new(mode: Mode) -> Self {
+        // 5.2.3: "The initial state of the scrambler shall be all zeros".
+        Self {
+            scrambler: Scrambler::new(mode),
+            sent: 0,
+        }
+    }
+
+    /// The next state, as an index into the four: [`STATE_A`] to [`STATE_D`].
+    ///
+    /// There is always a next one. TRN has no end of its own: the sender
+    /// decides how long it runs, anything from 1280 symbols to 8192, and the
+    /// far end finds out only when what arrives stops matching. Which is why
+    /// this is not an `Iterator`, whose `next` would have a `None` to give and
+    /// never give it.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> usize {
+        let state = Self::state(self.sent, &mut self.scrambler);
+        self.sent += 1;
+        state
+    }
+
+    /// Symbol `index` of TRN, taking its two bits from `scrambler`.
+    ///
+    /// Shared with [`Transmitter`], which cannot hand the segment a scrambler
+    /// of its own: the rate signal after TRN carries on with the same one, from
+    /// wherever TRN left it (5.3 resets it nowhere).
+    fn state(index: u64, scrambler: &mut Scrambler) -> usize {
+        let first = scrambler.scramble(true);
+        let second = scrambler.scramble(true);
+        if index < u64::from(TRN_BINARY_SYMBOLS) {
+            // "When this bit is ZERO, signal state A is transmitted; when this
+            // bit is ONE, signal state C is transmitted."
+            if first { STATE_C } else { STATE_A }
+        } else {
+            table_5(first, second)
+        }
+    }
+}
+
+/// Encoding for the TRN segment after its first 256 symbols (Table 5, which
+/// is Table 4/V.32bis), the first bit in time written first.
+///
+/// The table's order is not counting order: 00 A, 01 B, 11 C, 10 D. It is
+/// how Figure 1 labels the four states -- A is 0001, B 0101, C 1101 and D
+/// 1001, and the dibit is the first two bits of each label, Y1 Y2.
+///
+/// Written as a match so that it reads the way it is printed. It was an array
+/// indexed by the dibit as a binary number, which takes 10 as the third state
+/// and 11 as the fourth: C sent for D and D for C, every symbol whose first
+/// bit was a one a quarter turn from where a far end trained against Table 5
+/// would look for it. A real modem's TRN, in `tests/v32_trn.rs`, is the table
+/// as printed.
+fn table_5(first: bool, second: bool) -> usize {
+    match (first, second) {
+        (false, false) => STATE_A,
+        (false, true) => STATE_B,
+        (true, true) => STATE_C,
+        (true, false) => STATE_D,
+    }
+}
 
 /// What the transmitter puts on the line.
 ///
@@ -474,7 +566,7 @@ pub const ANSWER_TONE: f64 = 2100.0;
 /// Symbols of TRN sent as A or C before Table 5 takes over (5.2.3).
 pub const TRN_BINARY_SYMBOLS: u32 = 256;
 
-/// V.32 transmitter at 4800 bit/s.
+/// V.32 and V.32bis transmitter, at every rate.
 #[derive(Debug)]
 pub struct Transmitter {
     fs: f64,
@@ -512,12 +604,38 @@ pub struct Transmitter {
     rate: u32,
     /// The trellis coding in use, when the rate and the choice come to one.
     coded: Option<trellis::Coded>,
+    /// What the trellis-coded data points are multiplied by: see
+    /// [`data_lift`].
+    lift: f64,
     /// Which of the two 9600 modulations is in use.
     coding: Coding,
     /// The convolutional encoder, used only by [`Coding::Trellis`].
     trellis: trellis::Encoder,
     /// The sample most recently produced, for the echo canceller.
     last_sample: f64,
+}
+
+/// How much louder than the four training states the data of a coding is.
+///
+/// The only thing either Recommendation says about level, and the figures are
+/// what say it: every one of them draws A, B, C and D among the data points,
+/// in the same units. At 4800, 7200 and 9600 the data averages what the states
+/// are. Figures 2-1 and 2-2/V.32bis put A at (-6, -2), a power of 40, and the
+/// data around it averages 41 at 14 400 and 42 at 12 000 -- a tenth and a fifth
+/// of a decibel above the states.
+///
+/// [`trellis`] brings every constellation to the one mean power instead, and
+/// is not the place to change that: V.17 shares its tables. So the difference
+/// goes back on here, and only here. A far end that sets its gain on TRN and
+/// then slices data against the figures expects it.
+fn data_lift(coded: Option<trellis::Coded>) -> f64 {
+    match coded.map(|c| c.bits) {
+        // 14 400, Figure 2-1/V.32bis.
+        Some(6) => (41.0f64 / 40.0).sqrt(),
+        // 12 000, Figure 2-2/V.32bis.
+        Some(5) => (42.0f64 / 40.0).sqrt(),
+        _ => 1.0,
+    }
 }
 
 impl Transmitter {
@@ -541,6 +659,7 @@ impl Transmitter {
             bits: 2,
             rate: 4800,
             coded: None,
+            lift: 1.0,
             coding: Coding::Uncoded,
             trellis: trellis::Encoder::new(),
             last_sample: 0.0,
@@ -583,6 +702,7 @@ impl Transmitter {
             self.trellis.reset();
         }
         self.coded = coded;
+        self.lift = data_lift(coded);
     }
 
     /// What to send.
@@ -695,19 +815,11 @@ impl Transmitter {
             Signal::AlternateCA => alternate(STATE_C, STATE_A),
             Signal::ConditioningS => alternate(STATE_A, STATE_B),
             Signal::ConditioningSbar => alternate(STATE_C, STATE_D),
-            Signal::Trn => {
-                // 5.2.3: scrambled ones with the differential encoding
-                // disabled. For the first 256 symbols the leading bit of each
-                // dibit chooses between A and C; after that the whole dibit
-                // chooses, by Table 5.
-                let first = self.scrambler.scramble(true);
-                let second = self.scrambler.scramble(true);
-                if since_change < u64::from(TRN_BINARY_SYMBOLS) {
-                    if first { STATE_C } else { STATE_A }
-                } else {
-                    TRN_STATES[usize::from(first) << 1 | usize::from(second)]
-                }
-            }
+            // 5.2.3: scrambled ones with the differential encoding disabled,
+            // by the same generator a far receiver trains against. The
+            // scrambler is this transmitter's own, reset when the segment
+            // began, because the rate signal runs on from it.
+            Signal::Trn => TrnSequence::state(since_change, &mut self.scrambler),
             Signal::Rate(mut sequence) => {
                 // 5.3: the 16 bits repeat, scrambled, and are differentially
                 // encoded as data is.
@@ -785,7 +897,8 @@ impl Transmitter {
             // of a cross sit on an axis and belong to no quadrant, and nothing
             // reads it while this coding is running: the differential state
             // lives inside the encoder instead.
-            return coded.point(code);
+            let (re, im) = coded.point(code);
+            return (re * self.lift, im * self.lift);
         }
         let state = self.next_state();
         signal_point(state, self.within)
@@ -1244,6 +1357,78 @@ mod tests {
                 let probe = (re + (nre - re) * 0.2, im + (nim - im) * 0.2);
                 assert_eq!(nearest_state(probe), i, "state {i} nudged towards a neighbour");
             }
+        }
+    }
+
+    #[test]
+    fn table_5_names_the_states_as_figure_1_labels_them() {
+        // Table 5: 00 A, 01 B, 11 C, 10 D. The first two bits of each state's
+        // label in Figure 1 say the same, which is the check that the table
+        // was not read in counting order.
+        for first in [false, true] {
+            for second in [false, true] {
+                assert_eq!(
+                    table_5(first, second),
+                    quadrant_of(u8::from(first), u8::from(second)),
+                    "dibit {}{}",
+                    u8::from(first),
+                    u8::from(second)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_four_point_boundaries_lie_halfway_between_neighbours() {
+        // Each state owns the ninety degrees centred on it: 44 degrees either
+        // side is still that state, 46 is the neighbour's. The old slicer's
+        // boundaries sat four degrees round from these, which fails this for
+        // every state twice: at 46 degrees one way and 44 the other.
+        for (i, &(re, im)) in STATES.iter().enumerate() {
+            let own = im.atan2(re);
+            for (off, want) in [
+                (44.0, i),
+                (-44.0, i),
+                (46.0, (i + 1) & 3),
+                (-46.0, (i + 3) & 3),
+            ] {
+                let at = own + f64::to_radians(off);
+                let p = (CONSTELLATION_RMS * at.cos(), CONSTELLATION_RMS * at.sin());
+                assert_eq!(nearest_state(p), want, "state {i}, {off:+} degrees round");
+            }
+        }
+    }
+
+    #[test]
+    fn data_goes_out_at_the_level_the_figures_draw_it() {
+        // Against the four states, which every start-up signal is made of
+        // and which sit at the constellation's mean power: level with them at
+        // 4800, 7200 and 9600, and at 12 000 and 14 400 the 42 and 41 that
+        // Figures 2-2 and 2-1/V.32bis give the data against the states' 40.
+        for (rate, coding, figure) in [
+            (4800, Coding::Uncoded, 40.0),
+            (9600, Coding::Uncoded, 40.0),
+            (7200, Coding::Trellis, 40.0),
+            (9600, Coding::Trellis, 40.0),
+            (12_000, Coding::Trellis, 42.0),
+            (14_400, Coding::Trellis, 41.0),
+        ] {
+            let mut tx = Transmitter::new(Mode::Call, 16_000.0);
+            tx.set_data_rate(rate);
+            tx.set_coding(coding);
+            let symbols = 100_000;
+            let power = (0..symbols)
+                .map(|_| {
+                    let (re, im) = tx.next_symbol();
+                    re * re + im * im
+                })
+                .sum::<f64>()
+                / f64::from(symbols);
+            let want = CONSTELLATION_MEAN_POWER * figure / 40.0;
+            assert!(
+                (power / want - 1.0).abs() < 0.01,
+                "{rate} {coding:?}: mean power {power:.3}, the figure says {want:.3}"
+            );
         }
     }
 
