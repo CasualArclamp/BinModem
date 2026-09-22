@@ -21,10 +21,16 @@
 //! 5.1 says which goes where: the long one for a training check and the
 //! first message after CTC/CTR, the short one for everything else.
 //!
-//! The transmitter is [`Transmitter`].
+//! The transmitter is [`Transmitter`]. The receiver, [`Receiver`], is a
+//! driver on the shared QAM core, `dsp::qam`, as V.32's is: segment 1's
+//! quarter-turn alternation turning into segment 2 is the same event to the
+//! core's hunt as V.32's S turning into S-bar, and segment 2 is known symbol
+//! for symbol, as V.32's TRN is, so the equaliser is solved for outright.
 
+mod receiver;
 mod transmitter;
 
+pub use receiver::{Receiver, Stage};
 pub use transmitter::Transmitter;
 
 use super::v32::trellis::{self, Coded};
