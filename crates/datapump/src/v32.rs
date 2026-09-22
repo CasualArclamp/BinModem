@@ -1,4 +1,4 @@
-//! V.32 at 4800 bit/s: 2400 baud, four points, one band both ways.
+//! V.32 and V.32bis: 2400 baud, one band both ways, 4800 to 14 400 bit/s.
 //!
 //! The step up from V.22bis is not the speed. V.22bis fits two directions into
 //! one telephone channel by giving each half of it, which is why its receiver
@@ -31,13 +31,16 @@
 //!
 //! Nothing else about the modem changes with the rate: the same scrambler, the
 //! same start-up conducted entirely in the four states, and the same mean
-//! power for the gain control to hold.
+//! power for the gain control to hold -- all but the fifth of a decibel that
+//! V.32bis's figures put 12 000 and 14 400 above the others (`data_lift`).
 
+mod receiver;
 pub mod startup;
 pub mod trellis;
 
-use dsp::filter::OnePole;
-use dsp::{ComplexFir, Equalizer, Gardner, Nco, fir_lowpass, rrc_at, rrc_taps};
+pub use receiver::Receiver;
+
+use dsp::{Nco, rrc_at};
 
 /// Modulation rate (2.3): 2400 baud, to within a hundredth of a per cent.
 pub const BAUD: f64 = 2400.0;
@@ -206,23 +209,6 @@ const QUADRANT_CHANGE: [u8; 4] = [1, 0, 2, 3];
 /// The inverse, for the receiver.
 const CHANGE_TO_DIBIT: [u8; 4] = [0b01, 0b00, 0b10, 0b11];
 
-/// Ceiling on the receiver's gain, so silence is not amplified to infinity.
-const MAX_GAIN: f64 = 400.0;
-/// The least the carrier loop will divide a symbol's phase error by.
-///
-/// The error is the imaginary part of what arrived divided by what it was
-/// decided to be, and dividing by the decision means a quiet decision shouts.
-/// Four points and sixteen can live with that; the thirty-two of 2.4.1.2
-/// cannot, because its inner ring is a seventeenth of the power of its outer
-/// one -- so those symbols arrive in the estimate seventeen times as loud, and
-/// they are the ones a slicer gets wrong most often.
-///
-/// Half the mean power is a floor low enough to leave the ordinary weighting
-/// alone and high enough to stop the least reliable symbols being the loudest
-/// voices. At 4800 it changes nothing at all: every point there has exactly
-/// the mean power.
-const MIN_DECISION_POWER: f64 = CONSTELLATION_MEAN_POWER / 2.0;
-
 /// How many points a rate and a coding put on the line.
 ///
 /// Four during the whole start-up and at 4800; sixteen for V.32 2.4.1.1; and
@@ -248,58 +234,31 @@ pub fn constellation_peak(bits_per_second: u32, coding: Coding) -> f64 {
     }
 }
 
-/// What the carrier loop's gains are multiplied by at thirty-two points.
-///
-/// The other three trellis constellations scale from this one, by how close
-/// their points are: see [`loop_bandwidth`].
-///
-/// A decision-directed loop is driven by its own decisions, and the noise in
-/// them grows as the points crowd together: at 4800 a symbol has to move 2.24
-/// units before it is taken for another one, and under 2.4.1.2 it takes 0.71.
-/// The loop has to be correspondingly less willing to believe any one symbol,
-/// which is a narrower bandwidth.
-const TRELLIS_LOOP: f64 = 0.5;
-
-/// How much of one symbol's word to take, for whatever is being carried.
-///
-/// A decision-directed loop is driven by its own decisions, and the noise in
-/// them grows as the points crowd together. The number for the thirty-two
-/// points of 2.4.1.2 was found against real hardware; the rest follow it in
-/// proportion to how far a symbol may move before it is taken for another one,
-/// which at 14 400 is half what it is at 9600.
-fn loop_bandwidth(coded: Option<trellis::Coded>) -> f64 {
-    match coded {
-        Some(coded) => TRELLIS_LOOP * coded.closest() / trellis::AT_9600.closest(),
-        // The uncoded constellations are not crowded: 4800's four points and
-        // 2.4.1.1's sixteen are both two units apart.
-        None => 1.0,
-    }
-}
-
-/// How fast that estimate follows what one symbol says.
-///
-/// A tenth per symbol, so ten symbols have a say rather than one. One symbol's
-/// ratio is mostly noise, and a loop driven straight from it hunts -- which is
-/// what this one did, swinging five degrees either way for half a second after
-/// it had reached 30 dB, and then walking off and never coming back.
-const TRACK_SMOOTHING: f64 = 0.1;
-
-/// Level at which a carrier is declared present, and the lower level at which
-/// it is declared gone. Five decibels apart, as V.22bis 6.5.2 asks for.
-const CARRIER_ON: f64 = 1.0e-3;
-const CARRIER_OFF: f64 = 5.62e-4;
-
 /// Which of the four states a received point is nearest.
 ///
 /// The states are a quarter turn apart, so the decision is which quarter the
 /// point falls in, with the boundaries midway between neighbours rather than
-/// on the axes. Turning the point by half that angle first puts the boundaries
-/// where an ordinary test of signs finds them.
+/// on the axes: forty-five degrees either side of each state, whose angles
+/// are A's 198.43 and its quarter turns. Turning the point by atan(1/2), 26.57
+/// degrees -- forty-five less atan(1/3), which is how far A sits below the
+/// negative real axis -- puts every state on a diagonal, A at (-√5, -√5), and
+/// so every boundary on an axis, where an ordinary test of signs finds it.
+///
+/// This turned by 22.5 degrees once, half a quarter turn, which is right for
+/// states that sit on the axes. These do not, and it left every boundary four
+/// degrees out: a point at 245 degrees was taken for A although it is nearer
+/// B, which biased every decision at 4800 and in the start-up.
+///
+/// The receiver no longer slices this way: it decides against a table of the
+/// four, whose boundaries are exact by construction (`receiver.rs`). This
+/// stays for the unit tests, as a statement of where the boundaries are.
+#[cfg(test)]
 fn nearest_state(p: (f64, f64)) -> usize {
-    // Half of ninety degrees away from state A's own angle.
-    const COS: f64 = 0.923_879_532_511_286_8;
-    const SIN: f64 = 0.382_683_432_365_089_8;
-    // Bring A to just inside the first quadrant, then read the quadrant off.
+    // The cosine and sine of atan(1/2): two and one over the root of five.
+    const COS: f64 = 0.894_427_190_999_915_9;
+    const SIN: f64 = 0.447_213_595_499_957_9;
+    // Bring A onto the diagonal of the third quadrant, then read the quadrant
+    // off.
     let turned = (p.0 * COS - p.1 * SIN, p.0 * SIN + p.1 * COS);
     let from_a = match (turned.0 >= 0.0, turned.1 >= 0.0) {
         (true, true) => 0,
@@ -317,6 +276,9 @@ fn nearest_state(p: (f64, f64)) -> usize {
 /// Searched rather than sliced. The points do lie on a grid that could be
 /// quantised coordinate by coordinate, but sixteen distances at 2400 baud is
 /// nothing, and this stays right if the constellation ever stops being one.
+///
+/// For the unit tests, as [`nearest_state`] is.
+#[cfg(test)]
 fn nearest_point(p: (f64, f64)) -> (usize, usize) {
     let mut best = (0, 0);
     let mut nearest = f64::INFINITY;
@@ -366,7 +328,7 @@ pub fn coding_for(bits_per_second: u32, coding: Coding) -> Option<trellis::Coded
 pub fn point_spacing_at(bits_per_second: u32, coding: Coding) -> f64 {
     let figure = match coding_for(bits_per_second, coding) {
         Some(coded) => coded.closest(),
-        // Figure 2/V.32, 9600's non-redundant alternative: sixteen points on a
+        // Figure 1/V.32, 9600's non-redundant alternative: sixteen points on a
         // grid of two.
         None if bits_per_second == 9600 => 2.0,
         // A B C D of Figure 1 are a knight's move apart on that grid.
@@ -423,8 +385,90 @@ impl Scrambler {
     }
 }
 
-/// Encoding for the TRN segment after its first 256 symbols (Table 5).
-const TRN_STATES: [usize; 4] = [STATE_A, STATE_B, STATE_C, STATE_D];
+/// Segment 3 of the conditioning signal, TRN (5.2.3), one state at a time.
+///
+/// Binary ones through the sending end's scrambler, started from all zeros,
+/// two bits to the symbol and no differential coding. For the first 256
+/// symbols only the first bit of each pair counts, and chooses between A and
+/// C; from then on both do, by Table 5.
+///
+/// It is the one stretch of the start-up a receiver can know symbol for symbol
+/// before it arrives, which is what makes it the segment an equaliser trains
+/// on (5.2.3: "intended for training the adaptive equalizer in the receiving
+/// modem"). The far receiver runs this same sequence, from the polynomial of
+/// the end that is sending, and measures what arrived against it -- so there
+/// is one generator, and the transmitter sends what it says.
+#[derive(Debug, Clone)]
+pub struct TrnSequence {
+    scrambler: Scrambler,
+    /// Symbols produced so far.
+    sent: u64,
+}
+
+impl TrnSequence {
+    /// TRN as the modem at `mode`'s end sends it. A receiver wants the other
+    /// end's, [`Mode::peer`].
+    pub fn new(mode: Mode) -> Self {
+        // 5.2.3: "The initial state of the scrambler shall be all zeros".
+        Self {
+            scrambler: Scrambler::new(mode),
+            sent: 0,
+        }
+    }
+
+    /// The next state, as an index into the four: [`STATE_A`] to [`STATE_D`].
+    ///
+    /// There is always a next one. TRN has no end of its own: the sender
+    /// decides how long it runs, anything from 1280 symbols to 8192, and the
+    /// far end finds out only when what arrives stops matching. Which is why
+    /// this is not an `Iterator`, whose `next` would have a `None` to give and
+    /// never give it.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> usize {
+        let state = Self::state(self.sent, &mut self.scrambler);
+        self.sent += 1;
+        state
+    }
+
+    /// Symbol `index` of TRN, taking its two bits from `scrambler`.
+    ///
+    /// Shared with [`Transmitter`], which cannot hand the segment a scrambler
+    /// of its own: the rate signal after TRN carries on with the same one, from
+    /// wherever TRN left it (5.3 resets it nowhere).
+    fn state(index: u64, scrambler: &mut Scrambler) -> usize {
+        let first = scrambler.scramble(true);
+        let second = scrambler.scramble(true);
+        if index < u64::from(TRN_BINARY_SYMBOLS) {
+            // "When this bit is ZERO, signal state A is transmitted; when this
+            // bit is ONE, signal state C is transmitted."
+            if first { STATE_C } else { STATE_A }
+        } else {
+            table_5(first, second)
+        }
+    }
+}
+
+/// Encoding for the TRN segment after its first 256 symbols (Table 5, which
+/// is Table 4/V.32bis), the first bit in time written first.
+///
+/// The table's order is not counting order: 00 A, 01 B, 11 C, 10 D. It is
+/// how Figure 1 labels the four states -- A is 0001, B 0101, C 1101 and D
+/// 1001, and the dibit is the first two bits of each label, Y1 Y2.
+///
+/// Written as a match so that it reads the way it is printed. It was an array
+/// indexed by the dibit as a binary number, which takes 10 as the third state
+/// and 11 as the fourth: C sent for D and D for C, every symbol whose first
+/// bit was a one a quarter turn from where a far end trained against Table 5
+/// would look for it. A real modem's TRN, in `tests/v32_trn.rs`, is the table
+/// as printed.
+fn table_5(first: bool, second: bool) -> usize {
+    match (first, second) {
+        (false, false) => STATE_A,
+        (false, true) => STATE_B,
+        (true, true) => STATE_C,
+        (true, false) => STATE_D,
+    }
+}
 
 /// What the transmitter puts on the line.
 ///
@@ -474,7 +518,7 @@ pub const ANSWER_TONE: f64 = 2100.0;
 /// Symbols of TRN sent as A or C before Table 5 takes over (5.2.3).
 pub const TRN_BINARY_SYMBOLS: u32 = 256;
 
-/// V.32 transmitter at 4800 bit/s.
+/// V.32 and V.32bis transmitter, at every rate.
 #[derive(Debug)]
 pub struct Transmitter {
     fs: f64,
@@ -512,12 +556,38 @@ pub struct Transmitter {
     rate: u32,
     /// The trellis coding in use, when the rate and the choice come to one.
     coded: Option<trellis::Coded>,
+    /// What the trellis-coded data points are multiplied by: see
+    /// [`data_lift`].
+    lift: f64,
     /// Which of the two 9600 modulations is in use.
     coding: Coding,
     /// The convolutional encoder, used only by [`Coding::Trellis`].
     trellis: trellis::Encoder,
     /// The sample most recently produced, for the echo canceller.
     last_sample: f64,
+}
+
+/// How much louder than the four training states the data of a coding is.
+///
+/// The only thing either Recommendation says about level, and the figures are
+/// what say it: every one of them draws A, B, C and D among the data points,
+/// in the same units. At 4800, 7200 and 9600 the data averages what the states
+/// are. Figures 2-1 and 2-2/V.32bis put A at (-6, -2), a power of 40, and the
+/// data around it averages 41 at 14 400 and 42 at 12 000 -- a tenth and a fifth
+/// of a decibel above the states.
+///
+/// [`trellis`] brings every constellation to the one mean power instead, and
+/// is not the place to change that: V.17 shares its tables. So the difference
+/// goes back on here, and only here. A far end that sets its gain on TRN and
+/// then slices data against the figures expects it.
+fn data_lift(coded: Option<trellis::Coded>) -> f64 {
+    match coded.map(|c| c.bits) {
+        // 14 400, Figure 2-1/V.32bis.
+        Some(6) => (41.0f64 / 40.0).sqrt(),
+        // 12 000, Figure 2-2/V.32bis.
+        Some(5) => (42.0f64 / 40.0).sqrt(),
+        _ => 1.0,
+    }
 }
 
 impl Transmitter {
@@ -541,6 +611,7 @@ impl Transmitter {
             bits: 2,
             rate: 4800,
             coded: None,
+            lift: 1.0,
             coding: Coding::Uncoded,
             trellis: trellis::Encoder::new(),
             last_sample: 0.0,
@@ -583,6 +654,7 @@ impl Transmitter {
             self.trellis.reset();
         }
         self.coded = coded;
+        self.lift = data_lift(coded);
     }
 
     /// What to send.
@@ -695,19 +767,11 @@ impl Transmitter {
             Signal::AlternateCA => alternate(STATE_C, STATE_A),
             Signal::ConditioningS => alternate(STATE_A, STATE_B),
             Signal::ConditioningSbar => alternate(STATE_C, STATE_D),
-            Signal::Trn => {
-                // 5.2.3: scrambled ones with the differential encoding
-                // disabled. For the first 256 symbols the leading bit of each
-                // dibit chooses between A and C; after that the whole dibit
-                // chooses, by Table 5.
-                let first = self.scrambler.scramble(true);
-                let second = self.scrambler.scramble(true);
-                if since_change < u64::from(TRN_BINARY_SYMBOLS) {
-                    if first { STATE_C } else { STATE_A }
-                } else {
-                    TRN_STATES[usize::from(first) << 1 | usize::from(second)]
-                }
-            }
+            // 5.2.3: scrambled ones with the differential encoding disabled,
+            // by the same generator a far receiver trains against. The
+            // scrambler is this transmitter's own, reset when the segment
+            // began, because the rate signal runs on from it.
+            Signal::Trn => TrnSequence::state(since_change, &mut self.scrambler),
             Signal::Rate(mut sequence) => {
                 // 5.3: the 16 bits repeat, scrambled, and are differentially
                 // encoded as data is.
@@ -785,7 +849,8 @@ impl Transmitter {
             // of a cross sit on an axis and belong to no quadrant, and nothing
             // reads it while this coding is running: the differential state
             // lives inside the encoder instead.
-            return coded.point(code);
+            let (re, im) = coded.point(code);
+            return (re * self.lift, im * self.lift);
         }
         let state = self.next_state();
         signal_point(state, self.within)
@@ -840,365 +905,6 @@ impl Transmitter {
     }
 }
 
-/// V.32 receiver at 4800 bit/s.
-///
-/// Structurally the V.22bis receiver, with the channel-selecting filter turned
-/// into a plain anti-alias low-pass: there is no neighbouring channel to
-/// select against, because the far end is not in a neighbouring channel. It is
-/// in this one, on top of us.
-#[derive(Debug)]
-pub struct Receiver {
-    nco: Nco,
-    /// Baseband low-pass. Wide, because the signal fills the band.
-    select: ComplexFir,
-    matched: ComplexFir,
-    gardner: Gardner,
-    countdown: f64,
-    previous_filtered: (f64, f64),
-    phase: f64,
-    frequency: f64,
-    agc: OnePole,
-    equalizer: Equalizer,
-    symbols: u64,
-    quadrant: Option<u8>,
-    descrambler: Scrambler,
-    bits: Vec<bool>,
-    last_symbol: (f64, f64),
-    level: OnePole,
-    carrier: bool,
-    /// Whether the equaliser may learn from what is arriving.
-    adapting: bool,
-    /// The averaged phase error.
-    track: f64,
-    /// Bits each arriving symbol carries: two at 4800 and up to six at
-    /// 14 400.
-    carried: u32,
-    /// The rate the arriving data is coded at.
-    rate: u32,
-    /// Which of the two 9600 modulations is in use.
-    coding: Coding,
-    /// The trellis coding the rate and the choice come to, when they come to
-    /// one at all.
-    coded: Option<trellis::Coded>,
-    /// How much of one symbol's word the carrier loop takes, which depends on
-    /// how crowded the constellation is.
-    bandwidth: f64,
-    /// The Viterbi decoder, used only when `coded` is set.
-    trellis: trellis::Decoder,
-}
-
-impl Receiver {
-    /// `mode` is this modem's own end; the descrambler is set to the far
-    /// end's polynomial, since that is what will arrive.
-    pub fn new(mode: Mode, fs: f64) -> Self {
-        let sps = fs / BAUD;
-        Self {
-            nco: Nco::new(CARRIER, fs),
-            // The signal reaches 1200 Hz plus the roll-off either side of the
-            // carrier, so 1500 Hz at baseband. Nothing sits beyond it that a
-            // filter could usefully remove, so this is only keeping the image
-            // at twice the carrier out of the loops.
-            select: ComplexFir::new(fir_lowpass(1600.0, 121, fs)),
-            matched: ComplexFir::new(rrc_taps(sps, ROLLOFF, SPAN)),
-            gardner: Gardner::new(sps, 0.1),
-            countdown: sps / 2.0,
-            previous_filtered: (0.0, 0.0),
-            phase: 0.0,
-            frequency: 0.0,
-            agc: OnePole::starting_at(CONSTELLATION_MEAN_POWER, 0.050, fs / sps),
-            equalizer: Equalizer::new(21, 1.0),
-            symbols: 0,
-            quadrant: None,
-            descrambler: Scrambler::new(mode.peer()),
-            bits: Vec::new(),
-            last_symbol: (0.0, 0.0),
-            level: OnePole::new(0.020, fs),
-            carrier: false,
-            adapting: true,
-            track: 0.0,
-            carried: 2,
-            rate: 4800,
-            coding: Coding::Uncoded,
-            coded: None,
-            bandwidth: 1.0,
-            trellis: trellis::Decoder::new(trellis::AT_9600),
-        }
-    }
-
-    /// Change the rate the arriving data is coded at.
-    ///
-    /// A different moment from the transmitter's, and 5.4 is explicit about
-    /// which: "When the modem detects an incoming 16-bit E sequence ... it
-    /// shall condition itself to receive data at the rate and with the coding
-    /// indicated by the E sequence." The far end changes as it finishes
-    /// sending that E, so the two land on the same place in the stream.
-    pub fn set_data_rate(&mut self, bits_per_second: u32) {
-        self.rate = bits_per_second;
-        self.carried = bits_per_symbol(bits_per_second);
-        self.follow();
-    }
-
-    /// Choose between the two modulations 9600 bit/s has (2.4.1).
-    pub fn set_coding(&mut self, coding: Coding) {
-        self.coding = coding;
-        self.follow();
-    }
-
-    /// Work out the coding from the rate and the choice, whichever was set
-    /// last, and everything that depends on it.
-    fn follow(&mut self) {
-        let coded = coding_for(self.rate, self.coding);
-        if coded.map(|c| c.bits) != self.coded.map(|c| c.bits) {
-            match coded {
-                Some(coded) => self.trellis.set_coding(coded),
-                None => self.trellis.reset(),
-            }
-        }
-        self.coded = coded;
-        self.bandwidth = loop_bandwidth(coded);
-    }
-
-    pub fn feed(&mut self, sample: f64) {
-        let (cos, sin) = self.nco.step();
-        let selected = self.select.process((sample * cos, sample * -sin));
-        let level = self
-            .level
-            .process((selected.0 * selected.0 + selected.1 * selected.1).sqrt());
-        self.carrier = if self.carrier {
-            level > CARRIER_OFF
-        } else {
-            level > CARRIER_ON
-        };
-        let filtered = self.matched.process(selected);
-
-        let previous = std::mem::replace(&mut self.previous_filtered, filtered);
-        let before = self.countdown;
-        self.countdown -= 1.0;
-        if self.countdown > 0.0 {
-            return;
-        }
-        let mu = before.clamp(0.0, 1.0);
-        let at = (
-            previous.0 + mu * (filtered.0 - previous.0),
-            previous.1 + mu * (filtered.1 - previous.1),
-        );
-        self.countdown += self.gardner.interval();
-        let Some(symbol) = self.gardner.feed(at) else { return };
-        self.on_symbol(symbol);
-    }
-
-    fn on_symbol(&mut self, symbol: (f64, f64)) {
-        let power = symbol.0 * symbol.0 + symbol.1 * symbol.1;
-        // Every loop in here is held still together, not just the equaliser.
-        // A receiver that goes on gaining, timing and tracking carrier while
-        // the far end is silent does all three on its own echo, and a carrier
-        // loop wound onto the wrong signal does not unwind: the frequency term
-        // is an integrator, and what it has learned it keeps.
-        let mean_power = if self.adapting {
-            self.agc.process(power)
-        } else {
-            self.agc.value()
-        };
-        let gain = (CONSTELLATION_MEAN_POWER / mean_power.max(1e-9))
-            .sqrt()
-            .clamp(0.0, MAX_GAIN);
-
-        let turn = self.phase * std::f64::consts::TAU;
-        let (c, s) = (turn.cos(), turn.sin());
-        let point = (
-            (symbol.0 * c - symbol.1 * s) * gain,
-            (symbol.0 * s + symbol.1 * c) * gain,
-        );
-
-        // The carrier loop works on the unequalised symbol, so the equaliser's
-        // delay stays outside it. The decision has to be over whichever
-        // constellation is in use: sixteen points read against the four would
-        // put the error at a quarter of a turn for a point sitting exactly
-        // where it belongs.
-        let coarse = match (self.carried, self.coded) {
-            (_, Some(coded)) => coded.point(coded.nearest(point)),
-            (4, None) => {
-                let (state, within) = nearest_point(point);
-                signal_point(state, within)
-            }
-            _ => STATES[nearest_state(point)],
-        };
-        // What arrived divided by what it was decided to be; the imaginary
-        // part of that is the angle between them.
-        let d2 = (coarse.0 * coarse.0 + coarse.1 * coarse.1)
-            .max(MIN_DECISION_POWER);
-        let raw = (point.1 * coarse.0 - point.0 * coarse.1) / d2;
-        if self.adapting {
-            self.track += TRACK_SMOOTHING * (raw - self.track);
-        }
-        let error = self.track;
-        let bw = self.bandwidth;
-        if self.adapting {
-            // Second order, so the seven hertz of offset 2.1 allows for is
-            // removed rather than merely tracked.
-            self.frequency =
-                (self.frequency - 1.5e-5 * bw * bw * error).clamp(-0.02, 0.02);
-            self.phase -= 0.008 * bw * error;
-        }
-        // The offset already found goes on being taken out even while the loop
-        // is held still. It belongs to the far end's oscillator, which does not
-        // stop running when the far end stops talking.
-        self.phase += self.frequency;
-        self.phase -= self.phase.floor();
-
-        let normalized = (point.0 / CONSTELLATION_RMS, point.1 / CONSTELLATION_RMS);
-        let equalized = self.equalizer.equalize(normalized);
-        let scaled = (
-            equalized.0 * CONSTELLATION_RMS,
-            equalized.1 * CONSTELLATION_RMS,
-        );
-        // 2.4.1.2: the decision is a whole sequence rather than a point, so
-        // the trellis decoder is asked for it and the nearest of the
-        // thirty-two serves only to keep the equaliser learning. That is what
-        // a decision-directed equaliser wants anyway -- something to compare
-        // this symbol against now, rather than the right answer two dozen
-        // symbols later.
-        let decision = if let Some(coded) = self.coded {
-            coded.point(coded.nearest(scaled))
-        } else {
-            let (state, within) = if self.carried == 4 {
-                nearest_point(scaled)
-            } else {
-                (nearest_state(scaled), WITHIN_4800)
-            };
-            signal_point(state, within)
-        };
-
-        self.symbols += 1;
-        if self.symbols > 64 && self.carrier && self.adapting {
-            self.equalizer.adapt(
-                equalized,
-                (
-                    decision.0 / CONSTELLATION_RMS,
-                    decision.1 / CONSTELLATION_RMS,
-                ),
-            );
-        }
-        self.last_symbol = scaled;
-
-        if let Some(coded) = self.coded {
-            if let Some(group) = self.trellis.decode(scaled) {
-                for &bit in &group[..coded.bits] {
-                    let out = self.descrambler.descramble(bit);
-                    self.bits.push(out);
-                }
-            }
-            return;
-        }
-
-        // Every state sits in its own quadrant, so the state index is the
-        // quadrant and the turn between two of them is the difference.
-        let (state, within) = if self.carried == 4 {
-            nearest_point(scaled)
-        } else {
-            (nearest_state(scaled), WITHIN_4800)
-        };
-        let quadrant = state as u8;
-        let Some(previous) = self.quadrant.replace(quadrant) else {
-            return;
-        };
-        let change = (quadrant + 4 - previous) & 3;
-        let dibit = CHANGE_TO_DIBIT[change as usize];
-        // 2.4.1 in reverse: the quadrant carries the first two bits of the
-        // group and the point within it the other two, in that order.
-        let group = [
-            dibit & 0b10 != 0,
-            dibit & 0b01 != 0,
-            within & 0b10 != 0,
-            within & 0b01 != 0,
-        ];
-        for &bit in group.iter().take(self.carried as usize) {
-            let out = self.descrambler.descramble(bit);
-            self.bits.push(out);
-        }
-    }
-
-    pub fn take_bits(&mut self) -> Vec<bool> {
-        std::mem::take(&mut self.bits)
-    }
-
-    /// Take whole octets, most significant bit first, leaving any remainder.
-    pub fn take_bytes(&mut self) -> Vec<u8> {
-        let whole = self.bits.len() / 8;
-        let bits: Vec<bool> = self.bits.drain(..whole * 8).collect();
-        bits.as_chunks::<8>().0.iter()
-            .map(|c| c.iter().fold(0u8, |acc, &b| (acc << 1) | u8::from(b)))
-            .collect()
-    }
-
-    pub fn constellation_point(&self) -> (f64, f64) {
-        (
-            self.last_symbol.0 / CONSTELLATION_RMS,
-            self.last_symbol.1 / CONSTELLATION_RMS,
-        )
-    }
-
-    pub fn residual_error(&self) -> f64 {
-        self.equalizer.error()
-    }
-
-    /// How far apart the closest two points of the constellation in use are,
-    /// in the units [`residual_error`](Self::residual_error) is measured in.
-    ///
-    /// The error on its own says nothing. Half this distance is the decision
-    /// boundary, so the same error is a comfortably locked receiver at 4800
-    /// and a receiver reading noise at 14 400, where the points are a sixth as
-    /// far apart. Anything that wants to judge reception has to divide by this
-    /// first.
-    pub fn point_spacing(&self) -> f64 {
-        let figure = match (self.carried, self.coded) {
-            (_, Some(coded)) => coded.closest(),
-            // Figure 2/V.32, 9600's non-redundant alternative: sixteen points
-            // on a grid of two.
-            (4, None) => 2.0,
-            // A B C D of Figure 1 are a knight's move apart on that grid.
-            _ => f64::sqrt(20.0),
-        };
-        figure / CONSTELLATION_RMS
-    }
-
-    /// The same for a rate this receiver is not using, so that a modem
-    /// deciding what to fall back to can ask what each rate would cost it.
-    pub fn point_spacing_at(&self, bits_per_second: u32, coding: Coding) -> f64 {
-        point_spacing_at(bits_per_second, coding)
-    }
-
-    pub fn equalizer_blind(&self) -> bool {
-        self.equalizer.is_blind()
-    }
-
-    pub fn carrier(&self) -> bool {
-        self.carrier
-    }
-
-    /// Whether the equaliser may learn from what is arriving.
-    ///
-    /// It must not while this modem is sending its training segment. The far
-    /// end is required to be silent through that, which is the whole point of
-    /// it, so everything heard is this modem's own echo and everything the
-    /// equaliser learns is about a path the far end's signal will never take.
-    ///
-    /// The two ends are not equally exposed to getting this wrong. After its
-    /// training segment the answering modem falls silent and has a clear
-    /// stretch of the far end's conditioning signal to correct itself on; the
-    /// calling modem goes straight into sending its rate signal and keeps
-    /// sending until answered, so it never has a quiet moment and carries
-    /// whatever it learned into the rest of the call.
-    pub fn set_adapting(&mut self, adapting: bool) {
-        self.adapting = adapting;
-        self.gardner.set_adapting(adapting);
-    }
-
-    pub fn level(&self) -> f64 {
-        self.level.value()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1244,6 +950,78 @@ mod tests {
                 let probe = (re + (nre - re) * 0.2, im + (nim - im) * 0.2);
                 assert_eq!(nearest_state(probe), i, "state {i} nudged towards a neighbour");
             }
+        }
+    }
+
+    #[test]
+    fn table_5_names_the_states_as_figure_1_labels_them() {
+        // Table 5: 00 A, 01 B, 11 C, 10 D. The first two bits of each state's
+        // label in Figure 1 say the same, which is the check that the table
+        // was not read in counting order.
+        for first in [false, true] {
+            for second in [false, true] {
+                assert_eq!(
+                    table_5(first, second),
+                    quadrant_of(u8::from(first), u8::from(second)),
+                    "dibit {}{}",
+                    u8::from(first),
+                    u8::from(second)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_four_point_boundaries_lie_halfway_between_neighbours() {
+        // Each state owns the ninety degrees centred on it: 44 degrees either
+        // side is still that state, 46 is the neighbour's. The old slicer's
+        // boundaries sat four degrees round from these, which fails this for
+        // every state twice: at 46 degrees one way and 44 the other.
+        for (i, &(re, im)) in STATES.iter().enumerate() {
+            let own = im.atan2(re);
+            for (off, want) in [
+                (44.0, i),
+                (-44.0, i),
+                (46.0, (i + 1) & 3),
+                (-46.0, (i + 3) & 3),
+            ] {
+                let at = own + f64::to_radians(off);
+                let p = (CONSTELLATION_RMS * at.cos(), CONSTELLATION_RMS * at.sin());
+                assert_eq!(nearest_state(p), want, "state {i}, {off:+} degrees round");
+            }
+        }
+    }
+
+    #[test]
+    fn data_goes_out_at_the_level_the_figures_draw_it() {
+        // Against the four states, which every start-up signal is made of
+        // and which sit at the constellation's mean power: level with them at
+        // 4800, 7200 and 9600, and at 12 000 and 14 400 the 42 and 41 that
+        // Figures 2-2 and 2-1/V.32bis give the data against the states' 40.
+        for (rate, coding, figure) in [
+            (4800, Coding::Uncoded, 40.0),
+            (9600, Coding::Uncoded, 40.0),
+            (7200, Coding::Trellis, 40.0),
+            (9600, Coding::Trellis, 40.0),
+            (12_000, Coding::Trellis, 42.0),
+            (14_400, Coding::Trellis, 41.0),
+        ] {
+            let mut tx = Transmitter::new(Mode::Call, 16_000.0);
+            tx.set_data_rate(rate);
+            tx.set_coding(coding);
+            let symbols = 100_000;
+            let power = (0..symbols)
+                .map(|_| {
+                    let (re, im) = tx.next_symbol();
+                    re * re + im * im
+                })
+                .sum::<f64>()
+                / f64::from(symbols);
+            let want = CONSTELLATION_MEAN_POWER * figure / 40.0;
+            assert!(
+                (power / want - 1.0).abs() < 0.01,
+                "{rate} {coding:?}: mean power {power:.3}, the figure says {want:.3}"
+            );
         }
     }
 

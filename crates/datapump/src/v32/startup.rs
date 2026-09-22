@@ -978,7 +978,23 @@ pub struct Startup {
     /// Which of 9600's two modulations the rate exchange settled on.
     coding: Coding,
     agreed: u32,
+    /// The state the receiver was last told about: see [`Startup::cue`].
+    cued: Option<State>,
 }
+
+/// Symbols the receiver must have been lost for, when reception has been
+/// unsatisfactory long enough to retrain, for the retrain to be put down to
+/// the signal going and not to the rate: half a second of the second the
+/// unsatisfactory reading has to last.
+///
+/// A receiver that has lost the signal reads unsatisfactory whatever the rate,
+/// because its error is measured against symbols that are not there. Giving up
+/// the rate for that is 5.4.1's advice about "the likely receiver performance
+/// with the particular GSTN connection" applied to a connection that has not
+/// said anything about it: a burst of noise, or a far end that went away for a
+/// moment, would have taken 14 400 out of the offer for the rest of the call
+/// (design.md 4.6).
+const LOST_NOT_UNREADABLE: usize = 1200;
 
 impl Startup {
     /// `offer` is the rate signal this modem sends, from [`rate_signal`].
@@ -1021,6 +1037,7 @@ impl Startup {
             offer,
             coding: Coding::Uncoded,
             agreed: 0,
+            cued: None,
         }
     }
 
@@ -1249,6 +1266,9 @@ impl Startup {
 
     /// Advance one sample: listen, and decide what to send.
     pub fn step(&mut self, line: f64, tx: &mut Transmitter, rx: &mut Receiver) -> Status {
+        // The first step tells the receiver where the start-up begins, which
+        // puts aside the blind start it was made with.
+        self.cue(rx);
         self.listener.feed(line);
         rx.feed(line);
 
@@ -1343,7 +1363,59 @@ impl Startup {
         {
             self.state = State::Failed;
         }
+        self.cue(rx);
         self.status()
+    }
+
+    /// Tell the receiver, on entering a state, what the far end is about to
+    /// send it (design.md 3.2).
+    ///
+    /// The receiver knows how to train, but not when: S is the one thing the
+    /// start-up sends that it can be found by, and V.32's tones and silences
+    /// look enough like S to a receiver listening for it that it has to be
+    /// told when S is due. This is the start-up telling it. Everything else it
+    /// does on its own, and in the states not named here it goes on as it was.
+    ///
+    /// It used to be told something else: to stop adapting whenever the far
+    /// end was quiet, every sample, and to adapt on everything else -- this
+    /// end's own echo in the half-duplex opening included. A receiver trained
+    /// on a known sequence has nothing to learn from any of that, and idles
+    /// through it instead.
+    fn cue(&mut self, rx: &mut Receiver) {
+        if self.cued == Some(self.state) {
+            return;
+        }
+        self.cued = Some(self.state);
+        match self.state {
+            // The tones of 5.4's opening, and the silences between them. The
+            // far end has nothing there to train on. Waiting for R1 too, at
+            // first: the answering modem's first S, S-bar and TRN are next,
+            // but the tail of its AC and this end's own reflection come
+            // before them, and the hunt begins a round trip in (`advance`).
+            State::Listening
+            | State::Aa
+            | State::AaToCc
+            | State::Cc
+            | State::AnswerTone
+            | State::RetrainAc
+            | State::Ac
+            | State::Ca
+            | State::CaToAc
+            | State::AcAgain
+            | State::Gap
+            | State::AwaitingR1 => rx.idle(),
+            // This end's own first conditioning signal, which the far end is
+            // silent for and the echo canceller learns from: all that is on
+            // the line is this end's own S and TRN, uncancelled.
+            State::PreRoll | State::SendS | State::SendSBar | State::SendTrn if !self.trained => rx.idle(),
+            // The far end's conditioning signal is next. At the answering
+            // modem, sending R1, that is the calling modem's S, for NT and
+            // 256 symbols more, then S-bar, TRN and R2. At the calling modem,
+            // sending R2, it is the answering modem's second one, full duplex
+            // over R2's cancelled echo, then R3.
+            State::SendRate if self.role == Role::Calling || self.agreed == 0 => rx.hunt(),
+            _ => {}
+        }
     }
 
     /// Whether an E sequence could legitimately arrive just now.
@@ -1523,6 +1595,28 @@ impl Startup {
             }
             State::AwaitingR1 => {
                 tx.set_signal(Signal::Silent);
+                // 5.4.1: "When the modem detects an incoming S sequence ...
+                // it shall proceed to train its receiver" -- the answering
+                // modem's first S, S-bar and TRN, and R1 after them. Listened
+                // for once the round trip just measured has gone by, and not
+                // as this state begins.
+                //
+                // For that long the line still carries the answering modem's
+                // AC, which goes on until it hears this end stop, and on a
+                // line with length the far hybrid's reflection of this end's
+                // own CC. Each alone is told from S by where its power is. The
+                // two together are not: A and C alternating, plus C, is
+                // nothing and then twice C, which repeats every two symbols
+                // with a line at the carrier and one at each band edge, as S
+                // does, and turns over as the reflection ends. The hunt took
+                // it for S and S-bar on a 20 ms line, trained on nothing, and
+                // was listening again only after the real S had gone by. The
+                // answering modem's S cannot arrive before the round trip, its
+                // 16 symbols of noticing this end stop, and its 16-symbol gap;
+                // the reflection is over a gap before that.
+                if self.symbols == self.round_trip + timing::GAP {
+                    rx.hunt();
+                }
                 if let Some(s) = sequence.filter(|&s| is_rate_signal(s)) {
                     self.agreed = usable_rate(s, self.offer)
                         .min(offered_rate(self.offer));
@@ -1889,7 +1983,14 @@ impl Startup {
                     // same of R3. A rate this receiver has just spent a second
                     // failing to read is the strongest evidence about the
                     // connection there is.
-                    self.stop_offering(running_at, rx.residual_error());
+                    //
+                    // Unless what this receiver spent the second failing to
+                    // read was nothing at all. Lost for most of it, the
+                    // signal went away, and a rate the line did not get the
+                    // chance to carry has not been shown unreadable.
+                    if rx.lost_for() < LOST_NOT_UNREADABLE {
+                        self.stop_offering(running_at, rx.residual_error());
+                    }
                     self.begin_retrain(tx, rx);
                 }
             }
@@ -2022,6 +2123,9 @@ impl Startup {
         tx.set_coding(Coding::Uncoded);
         rx.set_data_rate(4800);
         rx.set_coding(Coding::Uncoded);
+        // And the receiver waits for the far end's next S, keeping the taps it
+        // has in case the training that follows fits nothing.
+        rx.idle();
         match self.role {
             Role::Calling => {
                 tx.set_signal(Signal::StateA);
@@ -2129,6 +2233,10 @@ pub struct Modem {
     /// against everything left, and the far end is in both.
     trained_loss: f64,
     was_training: bool,
+    /// What arrived and what the canceller left of it, summed over the whole
+    /// of this end's training segment: whether it found anything to cancel.
+    heard_in_training: f64,
+    left_in_training: f64,
 }
 
 /// How far back the first run of taps looks, in milliseconds.
@@ -2163,6 +2271,49 @@ const FAR_SPAN_MS: f64 = 4.0;
 /// would against the raw line.
 const FAINTEST: f64 = 0.15;
 
+/// The canceller's step while it trains.
+///
+/// A trade between two things a step decides. The larger it is, the faster the
+/// taps follow an echo that moves while they learn, which on a sound card's
+/// cable at 100 ppm is a sample and a half in the long training segment; and
+/// the more of the line's noise they learn as if it were echo, and add back
+/// once they are held, in the far end's band (see [`NOTHING_CANCELLED_DB`]).
+///
+/// It was a half. Measured through the acceptance harness's calls: a tenth
+/// left the 100 ppm cable's calling modem with 21.6 dB of return loss at the
+/// end of training, and its receiver losing the signal seventy times in its
+/// first twenty seconds of data, where a quarter left the call clean; and a
+/// half left the hybrid with noise on it, at 9600 and 21 dB of Es/N0, putting
+/// back what it had learned of the noise as nearly as much again, and
+/// retraining, where a quarter held. `dsp::echo`'s own guide is about a
+/// tenth. A step that shrank as training went on would have both, but the
+/// canceller's is fixed when it is made.
+const ECHO_STEP: f64 = 0.25;
+
+/// How much the canceller has to have taken out of what it heard, over its
+/// training, to be kept: a decibel.
+///
+/// A canceller trained on a line with no echo on it learns the line's noise,
+/// and with the taps held from then on it adds that back as a copy of this
+/// end's own signal, which is in the far end's band and cannot be filtered
+/// off. At a step of a half, what it adds is about as loud as the noise
+/// already in that band. Measured so, on a direct line with no echo at 18.9
+/// dB of Es/N0, the calling modem trained its receiver at 18.8 dB on the
+/// answering modem's first TRN, before its canceller had learned anything,
+/// and at 15.7 dB on the second, after; and most of the acceptance harness's
+/// noisy lines, none of which has an echo, failed on those three decibels.
+/// At [`ECHO_STEP`]'s quarter it would still be a decibel and a half.
+///
+/// So a canceller is kept only if it removed more than it adds. With no echo
+/// what it heard against what it left reads a little under nothing: what it
+/// adds against nothing taken out, -0.55 to -0.60 dB on every such line of the
+/// harness. With an echo it reads 12.5 dB and more, hybrids and cables alike,
+/// counted from where the far run of taps is placed. One decibel is between
+/// the two. The sum is over the training segment, not the return-loss meter,
+/// which follows the last few milliseconds and wanders by a decibel either
+/// way on a line with no echo.
+const NOTHING_CANCELLED_DB: f64 = 1.0;
+
 impl Modem {
     /// `offer` is the rate signal this modem sends, from [`rate_signal`].
     pub fn new(role: Role, offer: u16, fs: f64) -> Self {
@@ -2171,7 +2322,7 @@ impl Modem {
             tx,
             rx,
             startup: Startup::new(role, offer, fs),
-            echo: EchoCanceller::new((ECHO_SPAN_MS * fs / 1000.0) as usize, 0.5),
+            echo: EchoCanceller::new((ECHO_SPAN_MS * fs / 1000.0) as usize, ECHO_STEP),
             finder: None,
             searched: 0,
             search_for: 0,
@@ -2179,6 +2330,8 @@ impl Modem {
             fs,
             trained_loss: 0.0,
             was_training: false,
+            heard_in_training: 0.0,
+            left_in_training: 0.0,
         }
     }
 
@@ -2228,13 +2381,45 @@ impl Modem {
         // Adapting through the far end would have the canceller try to explain
         // it as an echo of us, which it is not, and unlearn what it knows.
         let training = self.startup.training_echo();
-        // The equaliser is held still for the same reason the canceller is let
-        // loose, and over a longer stretch: what is on the line through the
-        // whole of our own conditioning sequence is this modem's own echo, and
-        // there is nothing in it for a receiver to learn.
-        self.rx.set_adapting(!self.startup.far_end_quiet());
+        // The receiver is not held here. It was, every sample, whenever the
+        // far end was meant to be quiet, because it adapted on everything
+        // else; now it trains on the far end's TRN and idles through this
+        // end's own conditioning sequence on the start-up's cues, and its
+        // gate and the canceller's are each their own (design.md 5.2).
+        if training && !self.was_training {
+            (self.heard_in_training, self.left_in_training) = (0.0, 0.0);
+        }
+        // Counted once every run of taps is where it will be. Before the far
+        // run is placed, a network's reflection is left whole whatever the
+        // near taps do.
+        if training && self.finder.is_none() {
+            self.heard_in_training += line * line;
+            self.left_in_training += cleaned * cleaned;
+        }
         if self.was_training && !training {
             self.trained_loss = self.echo.echo_return_loss();
+            // A canceller that found no echo has learned nothing but the
+            // line's noise, and would put it back from now on as this end's
+            // own signal: see [`NOTHING_CANCELLED_DB`].
+            let removed = 10.0 * (self.heard_in_training / self.left_in_training.max(1e-30)).log10();
+            if self.heard_in_training <= 1e-12 || removed <= NOTHING_CANCELLED_DB {
+                self.echo.reset();
+            }
+            // From here on the far end talks over our echo, and the taps are
+            // held still for it. What they learned was where the echo came
+            // back during training, and on a sound card's cable that does not
+            // stay put: the two clocks drift it by parts per million, and the
+            // card slips it by samples. Frozen, 20 ppm had the echo back as
+            // loud as the far end within half a minute, and a call on such a
+            // cable never came up; at 5 ppm it came up at 14 400 and retrained
+            // six times in its first minute. So the canceller goes on
+            // following where the echo is, which on a line whose echo does
+            // not move, or that has none, it simply finds has not moved.
+            //
+            // Once is enough. A retrain's training segment ends here too, and
+            // the canceller carries on from the delay and rate it had, having
+            // kept the delay moving at that rate while the taps learned again.
+            self.echo.follow_drift(true);
         }
         self.was_training = training;
         self.echo.set_adapting(training);
@@ -2316,9 +2501,15 @@ impl Modem {
         self.startup.coding()
     }
 
-    /// Whether the receiver is being allowed to learn from what is arriving.
+    /// Whether the receiver is making symbols and following them.
     pub fn receiver_adapting(&self) -> bool {
-        !self.startup.far_end_quiet()
+        self.rx.is_tracking()
+    }
+
+    /// The receiver itself, for what it can say about how it is doing: its
+    /// stage, signal to noise, slips, drift, gain and what S said.
+    pub fn receiver(&self) -> &Receiver {
+        &self.rx
     }
 
     pub fn status(&self) -> Status {
@@ -2392,6 +2583,31 @@ impl Modem {
         self.echo.echo_return_loss()
     }
 
+    /// How fast this end's own echo is drifting, in parts per million:
+    /// positive when it comes back later and later.
+    ///
+    /// On a sound card's cable this is the difference between the card's two
+    /// clocks, tens of ppm and steady. On a line with nothing to follow it
+    /// stays at nothing, and on a VoIP call it should, since the network
+    /// returns nothing measurable of what is sent.
+    pub fn echo_drift_ppm(&self) -> f64 {
+        self.echo.drift_ppm()
+    }
+
+    /// How many times the echo has been found to have jumped: a sample
+    /// dropped or repeated, or a buffer of silence, each one on a cable.
+    ///
+    /// Each ought to line up with a slip the sound card counted, with one
+    /// exception. The answering modem is silent for 2 s after R1, and often
+    /// before it has had the time to learn the drift; at 50 ppm and over, its
+    /// echo moves whole samples in that time, and the search that puts them
+    /// right when it speaks again counts too. A jump on a line with no sound
+    /// card in it would mean a reflection the search took for another, which
+    /// is worth knowing.
+    pub fn echo_jumps(&self) -> u32 {
+        self.echo.jumps()
+    }
+
     /// Queue data for transmission. Only meaningful once connected.
     pub fn send(&mut self, bytes: &[u8]) {
         self.tx.push_bytes(bytes);
@@ -2431,9 +2647,10 @@ impl Modem {
         self.rx.residual_error()
     }
 
-    /// Whether the equaliser is still adapting blind, for a test to look at.
+    /// Whether the receiver has yet to find the far end's symbols: nothing
+    /// trained, or not tracking since.
     pub fn equalizer_blind(&self) -> bool {
-        self.rx.equalizer_blind()
+        !self.rx.is_tracking()
     }
 
     /// The distance between neighbouring points of the constellation being
