@@ -422,7 +422,17 @@ impl Hunt {
                 self.reversals = None;
                 return Some(Found::Conditioning { start, turn });
             }
-            return (self.count == heard + PATIENCE).then_some(Found::Nothing);
+            if self.count == heard + PATIENCE {
+                return Some(Found::Nothing);
+            }
+            // Its start has had its chance, and a slip across the join can
+            // spoil it; segment 4 may be found further in yet. Not before:
+            // two reversals and the pattern's first thirty match its period
+            // two symbols before its start, and a short turn-on found that
+            // way could not be told from a long one.
+            if self.count <= heard + PREFIX + PATTERN {
+                return None;
+            }
         }
         // Looked for anywhere in its period only now and then, and only
         // when the symbols are two-phase at all.
