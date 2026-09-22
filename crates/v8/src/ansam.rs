@@ -71,7 +71,8 @@ const STANDING: f64 = 0.75;
 /// exact zeros as the call was picked up read as an answering tone for 40 ms,
 /// and the calling modem gave up on V.8 two seconds before the far end sent
 /// one. Averaged faster than the line, a tone that has stopped falls under it
-/// within about ten milliseconds whatever was on the line before.
+/// within about fifteen milliseconds whatever was on the line before, and at
+/// any level: it is the ratio that falls, not the tone past some threshold.
 ///
 /// Not so fast that a phase reversal takes the tone away. The tone detector's
 /// phasor passes through nothing for a few milliseconds at each one; averaged
@@ -140,20 +141,25 @@ impl AnswerTone {
     /// Whether a 2100 Hz tone is there at all.
     ///
     /// Loud enough to hear, and standing far enough above the rest of the line
-    /// to be the thing on it rather than the skirt of something else -- both
-    /// over the last few milliseconds, which says it is there now, and over
-    /// the 0.4 s the depth is measured against, which says it has been there
-    /// long enough for the depth to mean something. Either alone is wrong
-    /// somewhere. The short one is satisfied by the first moments of a tone,
-    /// when the envelope has just stepped up from nothing and the correlator
-    /// is reading the step. The long one is satisfied by silence, for the
-    /// reason given on `NOW`.
+    /// to be the thing on it rather than the skirt of something else.
+    ///
+    /// Standing above the line is asked both over the last few milliseconds,
+    /// which says the tone is there now, and over the 0.4 s the depth is
+    /// measured against, which says it has been there long enough for the
+    /// depth to mean something. Either alone is wrong somewhere. The short one
+    /// is satisfied by the first moments of a tone, when the envelope has just
+    /// stepped up from nothing and the correlator is reading the step. The
+    /// long one is satisfied by silence, for the reason given on `NOW`.
+    ///
+    /// Loud enough to hear is asked of the long average only. The short one
+    /// follows ANSam's envelope down to 0.8 of the tone fifteen times a second,
+    /// and lower at a reversal, so held to `AUDIBLE` it made a tone within a
+    /// few decibels of that come and go -- and a tone that comes and goes is
+    /// never held long enough to be believed. Nor is it needed to catch a tone
+    /// that has stopped: the comparison with the line does that at any level.
     pub fn present(&self) -> bool {
         let floor = STANDING * self.power.value();
-        self.level.value() > AUDIBLE
-            && self.level.value() > floor
-            && self.now.value() > AUDIBLE
-            && self.now.value() > floor
+        self.level.value() > AUDIBLE && self.level.value() > floor && self.now.value() > floor
     }
 
     /// How deeply the envelope is modulated, as a fraction of its average.
@@ -335,6 +341,38 @@ mod tests {
                         );
                         assert!(plain.is_plain(), "the plain tone at {db} dB lost at {t:.3} s");
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_tone_just_loud_enough_to_hear_is_heard_without_a_break() {
+        // `AUDIBLE` is about the tone, and the tone is its average: ANSam's
+        // envelope spends half of every 15 Hz cycle below that, down to 0.8 of
+        // it, and a reversal takes it lower still for a few milliseconds. Held
+        // to `AUDIBLE` over the last few milliseconds as well, a tone half a
+        // decibel above it came and went fifteen times a second, and a calling
+        // modem that believes only a reading held without a break believed
+        // neither tone at all. The weakest answering tone yet recorded, on
+        // `live-1789614742`, arrived only a few decibels above this.
+        let level = AUDIBLE * 10.0f64.powf(0.5 / 20.0);
+        for reversal in [0.0, 0.450] {
+            let mut ansam = AnswerTone::new(FS);
+            let mut plain = AnswerTone::new(FS);
+            for i in 0..(FS * 4.0) as usize {
+                let t = i as f64 / FS;
+                ansam.feed(answering_tone(NOMINAL_DEPTH, reversal, level, t));
+                plain.feed(answering_tone(0.0, reversal, level, t));
+                // Once the tone's average has risen past `AUDIBLE`, which this
+                // close to it takes a little over a second.
+                if t > 2.0 {
+                    assert!(
+                        ansam.is_ansam(),
+                        "ANSam at the floor lost at {t:.3} s, depth {:.3}",
+                        ansam.depth()
+                    );
+                    assert!(plain.is_plain(), "the plain tone at the floor lost at {t:.3} s");
                 }
             }
         }

@@ -87,15 +87,28 @@ pub mod timing {
     /// variations in the received answer-tone amplitude and phase that may be
     /// generated occasionally by network equipment", and to a detector that
     /// reads the modulation off the envelope a transient is a step in the
-    /// envelope. A step has some of every frequency in it, 15 Hz included.
-    /// The most one step, or one dropout, can put into the detector's 0.4 s
-    /// correlator is a depth of 4/(2 pi 15 Hz 0.4 s), about 0.11, which
-    /// decays back under the 0.08 that reads as modulated in about a tenth of
-    /// a second. The worst case measured on a plain tone, a dropout half a
-    /// 15 Hz cycle long so that its two edges add, read as ANSam for 0.15 s.
-    /// To last out this hold a transient would have to reach
-    /// 0.08 e^(0.25/0.4), about 0.15, which no single one can. It is also
-    /// nearly four cycles of the modulation itself.
+    /// envelope. A step has some of every frequency in it, 15 Hz included, and
+    /// the detector's 0.4 s correlator reads a step the size of the tone as a
+    /// depth of up to 4/(2 pi 15 Hz 0.4 s), about 0.11 -- a larger step, more.
+    /// But what one step leaves in the correlator turns against it at 15 Hz
+    /// and passes through nothing every 67 ms, so it reads as modulated a few
+    /// tens of milliseconds at a time: a plain tone stepping up by 10 to 30 dB
+    /// read as ANSam for at most 50 ms at a stretch. A dropout is two steps,
+    /// and half a 15 Hz cycle apart they add into a reading that holds still
+    /// and decays back under the 0.08 that reads as modulated in about a
+    /// tenth of a second. The worst measured, a single dropout of anywhere
+    /// from 5 to 600 ms put anywhere against the reversals of a plain tone,
+    /// read as ANSam for 0.19 s. The hold is longer than that, and nearly four
+    /// cycles of the modulation itself.
+    ///
+    /// It does not outlast every transient. Two dropouts a cycle of the
+    /// modulation apart add as well, and a train of them is a 15 Hz modulation
+    /// of the envelope -- which is what ANSam is, and what no hold on this
+    /// detector can tell from it: two 20 ms dropouts 67 ms apart early in a
+    /// plain tone are believed, and so are three 60 ms apart, as packets n,
+    /// n+3 and n+6 of a 20 ms network would fall. Nothing like it has been
+    /// seen yet: no two of the short dropouts in the captures so far are
+    /// within 50 to 80 ms of each other.
     ///
     /// Short enough to fit between the reversals and inside ANSam. The
     /// detector does not lose the tone at a phase reversal, but a hold shorter
@@ -1198,6 +1211,40 @@ mod tests {
                     "ANSam at {db} dB believed at {when:.3} s"
                 );
                 assert!(heard.loudest > 0.1, "never sent CM to ANSam at {db} dB");
+            }
+        }
+    }
+
+    #[test]
+    fn both_tones_are_still_believed_just_above_the_detectors_floor() {
+        // -43 dB on the scale above: half a decibel over the 0.002 below which
+        // the detector hears nothing at all, and only a few decibels under the
+        // weakest answering tone yet recorded (`live-1789614742`, -51 dBFS). A
+        // reading held without a break is only as good as the readings are
+        // steady, and here they once were not: the tone was held to the floor
+        // at every instant, ANSam's troughs and reversals took it under, and
+        // neither tone was ever believed -- the modem listened out its minute
+        // and hung up on a far end that had answered. This close to the floor
+        // the detector's average takes a little over a second to rise past
+        // it, so both decisions come that much later than a loud tone's.
+        let start = 2.0;
+        let level = 0.3 * 10.0f64.powf(-43.0 / 20.0);
+        for reversal in [0.0, 0.450] {
+            for ansam in [true, false] {
+                let heard = heard_by_a_caller(6.0, |t| {
+                    if t < start { 0.0 } else { answering_tone(ansam, reversal, level, t - start) }
+                });
+                let what = if ansam { "ANSam" } else { "the plain tone" };
+                let (when, state) = heard.left.unwrap_or_else(|| panic!("{what} never believed"));
+                if ansam {
+                    assert_eq!(state, State::Waiting, "{what}, at {when:.3} s");
+                    assert!(when < start + 1.5 + timing::ANSAM_HELD, "{what} believed at {when:.3} s");
+                    assert!(heard.loudest > 0.1, "never sent CM to {what}");
+                } else {
+                    assert_eq!(state, State::Done(Status::NoNegotiation), "{what}, at {when:.3} s");
+                    assert!(when < start + 1.5 + timing::TE, "{what} believed at {when:.3} s");
+                    assert!(heard.loudest < 1.0e-6, "sent CM to a modem that cannot hear it");
+                }
             }
         }
     }
