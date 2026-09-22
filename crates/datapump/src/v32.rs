@@ -1,4 +1,4 @@
-//! V.32 at 4800 bit/s: 2400 baud, four points, one band both ways.
+//! V.32 and V.32bis: 2400 baud, one band both ways, 4800 to 14 400 bit/s.
 //!
 //! The step up from V.22bis is not the speed. V.22bis fits two directions into
 //! one telephone channel by giving each half of it, which is why its receiver
@@ -376,7 +376,7 @@ pub fn coding_for(bits_per_second: u32, coding: Coding) -> Option<trellis::Coded
 pub fn point_spacing_at(bits_per_second: u32, coding: Coding) -> f64 {
     let figure = match coding_for(bits_per_second, coding) {
         Some(coded) => coded.closest(),
-        // Figure 2/V.32, 9600's non-redundant alternative: sixteen points on a
+        // Figure 1/V.32, 9600's non-redundant alternative: sixteen points on a
         // grid of two.
         None if bits_per_second == 9600 => 2.0,
         // A B C D of Figure 1 are a knight's move apart on that grid.
@@ -566,7 +566,7 @@ pub const ANSWER_TONE: f64 = 2100.0;
 /// Symbols of TRN sent as A or C before Table 5 takes over (5.2.3).
 pub const TRN_BINARY_SYMBOLS: u32 = 256;
 
-/// V.32 transmitter at 4800 bit/s.
+/// V.32 and V.32bis transmitter, at every rate.
 #[derive(Debug)]
 pub struct Transmitter {
     fs: f64,
