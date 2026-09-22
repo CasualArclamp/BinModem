@@ -9,7 +9,7 @@ one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
 source for every normative constant, and against the RFCs for everything
-carried over the top of them. 1643 tests.
+carried over the top of them. 1761 tests.
 
 ## What works
 
@@ -73,7 +73,7 @@ been checked three other ways: two documents, two methods, one table.
 | **Terminal** | ANSI/CP437 with mouse reporting; telnet (RFC 854) to use it alone |
 | **Settings** | remembered between runs, so the modem comes back where it was left |
 | **Files** | ZMODEM send and receive |
-| **Fax** | T.30 group 3, sending and receiving; V.29 (7200/9600) and V.27 ter (2400/4800); T.4 Modified Huffman and Modified READ, T.6 MMR; T.30 Annex A error correction mode; any number of pages in a call, each drawn as it arrives |
+| **Fax** | T.30 group 3, sending and receiving; V.17 (7200 to 14 400), V.29 (4800/7200/9600) and V.27 ter (2400/4800); T.4 Modified Huffman and Modified READ, T.6 MMR; T.30 Annex A error correction mode; any number of pages in a call, each drawn as it arrives |
 | **Network** | PPP (RFC 1661/1662) with LCP, PAP and CHAP, and IPCP, Van Jacobson header compression (RFC 1144), and a ping over it; a dial-in login prompt, and a login script for dialling out |
 | **Internet** | our own TCP (RFC 9293) and an HTTP/HTTPS proxy (RFC 9112): pages straight to the internet through a provider, or through a far BinModem that has it |
 | **Line** | full-duplex sound card, or a WAV to replay |
@@ -87,6 +87,8 @@ read off the figures -- the extracted text turns the square root of two into
 "2". What finally let a real machine's page in was twenty milliseconds of
 silence that its transmitter puts in front of every training sequence on
 purpose, and that this end had been taking for the end of the burst.
+V.17 carries it at 14 400 down to 7200 between two of these; no real machine
+has been tried at V.17 yet.
 
 Between two of these the page goes under T.30's error correction mode:
 numbered frames, and a partial page request for any the far end could not read.
@@ -149,9 +151,8 @@ OS-specific code — but only built and run on Windows so far.
 
 ## Next
 
-V.17 for fax at 14 400, and V.33 beside it -- the same trellis code as V.32bis
-again, on a fax call and a leased line respectively -- and more than one page
-to send from the fax window.
+V.33 -- the same trellis code as V.32bis again, on a leased line -- and more
+than one page to send from the fax window.
 
 V.92, on a branch. Eighteen agents read the Recommendation clause by clause off
 the rendered pages, with V.8, V.8 bis and V.250's `+P` commands beside it, and
