@@ -164,6 +164,25 @@ const PRESENCE_BANDWIDTH: f64 = 10.0;
 /// How long a tone has to be there before it is believed.
 const TONE_HELD: f64 = 0.020;
 
+/// How far below the level V.90's analogue modem heard the digital modem's
+/// tone B at in phase 2 a tone B can arrive later in the same call and still
+/// be the digital modem's: half, 6 dB down.
+///
+/// The digital modem sends everything in phase 2 but L1 "at the nominal
+/// transmit power level", and a retrain brings it back to that power
+/// (8.2/V.90): a power INFO0d names once for the whole call (Table 7/V.90,
+/// bits 29:32). So a retrain's tone B comes over the same line as loud as the
+/// tone B phase 2 heard, give or take what a softphone's gain control has
+/// done since. A softphone's own beep at the end of a call need not: one at
+/// exactly 1200 Hz, clean and 200 ms long, came as the server hung up on four
+/// live calls (live-1790032877, live-1790031913, live-1789986037,
+/// live-1789986211), 10 dB below the server's tone B, and was taken for tone
+/// B -- in data mode on the first, which then retrained into a dead call,
+/// and by the phase 2 of a retrain already under way on the second. The
+/// server's own retrain in live-1789986211 arrived at the level its phase 2
+/// tone B had.
+pub(crate) const TONE_B_FLOOR: f64 = 0.5;
+
 /// No part of phase 2 takes this long, round trips and all.
 const GIVE_UP: f64 = 20.0;
 
@@ -222,6 +241,12 @@ struct Presence {
     below: ToneDetector,
     above: ToneDetector,
     held: u64,
+    /// The most the tone has read since this was last cleared.
+    peak: f64,
+    /// How loud a tone that has been there long enough has to be to be the
+    /// far end's: [`AUDIBLE`], unless the far end's tone has been heard
+    /// before (see [`TONE_B_FLOOR`]).
+    floor: f64,
 }
 
 impl Presence {
@@ -231,7 +256,22 @@ impl Presence {
             below: ToneDetector::new(freq - 150.0, PRESENCE_BANDWIDTH, fs),
             above: ToneDetector::new(freq + 150.0, PRESENCE_BANDWIDTH, fs),
             held: 0,
+            peak: 0.0,
+            floor: AUDIBLE,
         }
+    }
+
+    /// Whether the tone has been there for `n` samples and is loud enough
+    /// now to be the far end's.
+    ///
+    /// The time runs from when the tone is first audible, and the level is
+    /// judged when it is up, by which time the detector has come most of the
+    /// way to the tone's: timed from when it passed the floor, the wait would
+    /// grow by however long the detector took to rise that far. With no level
+    /// heard before, the floor is [`AUDIBLE`], which a tone that has been
+    /// there at all is already above, and this is `held >= n` as it was.
+    fn stood(&self, n: u64) -> bool {
+        self.held >= n && self.tone.amplitude() > self.floor
     }
 
     /// Whether what is either side of the tone is louder than the tone, which
@@ -248,6 +288,7 @@ impl Presence {
         let there = self.tone.amplitude() > AUDIBLE
             && self.tone.amplitude() > OVER_LEAKAGE * self.below.amplitude().max(self.above.amplitude());
         self.held = if there { self.held + 1 } else { 0 };
+        self.peak = self.peak.max(self.tone.amplitude());
     }
 }
 
@@ -311,6 +352,11 @@ pub struct Modem {
     far_info0d: Option<Info0d>,
     /// An INFO1a asking for V.90, sent or received.
     info1a_pcm: Option<Info1aPcm>,
+    /// V.90's analogue modem: the level a digital modem's tone B stood at
+    /// just before the reversal that answered this end's (9.2.2.1.4), in the
+    /// call's first phase 2 to get that far. A retrain's phase 2 is given it,
+    /// and takes nothing much quieter for tone B (see [`TONE_B_FLOOR`]).
+    tone_b_level: Option<f64>,
 }
 
 impl Modem {
@@ -355,6 +401,7 @@ impl Modem {
             pcm_declined: false,
             far_info0d: None,
             info1a_pcm: None,
+            tone_b_level: None,
         }
     }
 
@@ -407,6 +454,13 @@ impl Modem {
             None => Self::retrain(self.role, self.fs, far),
         };
         modem.pcm_declined = self.pcm_declined;
+        // The digital modem's tone B comes back at the power it had the
+        // first time (8.2/V.90), so what the first time heard stands, and
+        // anything much quieter is something else.
+        modem.tone_b_level = self.tone_b_level;
+        if let Some(level) = self.tone_b_level {
+            modem.presence.floor = level * TONE_B_FLOOR;
+        }
         modem
     }
 
@@ -437,6 +491,15 @@ impl Modem {
     /// The INFO1a asking for V.90, if one went or came.
     pub fn info1a_pcm(&self) -> Option<Info1aPcm> {
         self.info1a_pcm
+    }
+
+    /// V.90's analogue modem: the amplitude the digital modem's tone B
+    /// arrived at in the call's first phase 2, on the line's own scale, once
+    /// its reversal has been heard. A retrain's tone B comes at the same, and
+    /// the analogue modem takes nothing much quieter for one in a retrain's
+    /// phase 2, in phases 3 and 4, or in data mode (see [`TONE_B_FLOOR`]).
+    pub fn tone_b_level(&self) -> Option<f64> {
+        self.tone_b_level
     }
 
     /// The fastest V.34 the far end's line probe says this end could
@@ -755,6 +818,12 @@ impl Modem {
             Stage::AnswerRanging if self.reversed_at.is_some_and(|ours| at > ours) => {
                 let ours = self.reversed_at.expect("checked");
                 self.round_trip = Some((at - ours).saturating_sub(self.ms(TURN)));
+                // 9.2.2.1.4: and how loud a V.90 digital modem's tone B was
+                // before it reversed, steady since this end's own reversal:
+                // the level a retrain's tone B will come at.
+                if self.pcm == Some(Pcm::Analogue) && self.far_info0d.is_some() && self.tone_b_level.is_none() {
+                    self.tone_b_level = Some(self.presence.peak);
+                }
                 // 11.2.1.2.5: tone A's reversal 40 ms on, then L1 and L2.
                 self.reverse_at = Some((at + self.ms(TURN)).max(self.now + 1));
                 self.probe_at = self.reverse_at.map(|r| r + self.ms(AFTER_REVERSAL));
@@ -897,9 +966,14 @@ impl Modem {
                 }
             }
             Stage::AnswerAwaitTone => {
-                // 11.2.1.2.3: tone B heard, and tone A on for 50 ms.
+                // 11.2.1.2.3: tone B heard, and tone A on for 50 ms. In a V.90
+                // retrain the analogue modem began, what it hears first is
+                // the digital modem's data, until tone A has been heard for
+                // 50 ms and 70 ms of silence gone (9.5.1.2/V.90); only a tone
+                // as loud as the first phase 2's tone B, or nearly, is taken
+                // for tone B then.
                 if self.tone_at.is_none()
-                    && self.presence.held >= self.ms(TONE_HELD)
+                    && self.presence.stood(self.ms(TONE_HELD))
                     && now - self.since >= self.ms(TONE_A_FIRST)
                 {
                     self.reverse_at = Some(now + 1);
@@ -908,6 +982,9 @@ impl Modem {
                     // The reversal is this end's, and the call modem's answer
                     // cannot be back before a round trip and 40 ms.
                     self.ignore_reversals_until = now + self.ms(TURN);
+                    // Its tone from here to that answer is steady, and what
+                    // it rises to is its level.
+                    self.presence.peak = 0.0;
                 }
             }
             Stage::AnswerRanging => {
@@ -929,7 +1006,7 @@ impl Modem {
                 }
                 // 11.2.1.2.6: tone B over the echo of L2, then tone A for 50 ms,
                 // its reversal, 10 ms more and silence.
-                if now > l1_until && self.presence.held >= self.ms(TONE_HELD) {
+                if now > l1_until && self.presence.stood(self.ms(TONE_HELD)) {
                     self.tx.stop();
                     self.start_tone();
                     self.reverse_at = Some(now + self.ms(TONE_A_FIRST));
@@ -1318,5 +1395,117 @@ mod tests {
         assert_eq!(analogue.status(), Status::Done);
         assert!(analogue.info1a().is_some() && analogue.info1a_pcm().is_none());
         assert!(v34.info1a().is_some());
+        // No INFO0d named a power for phase 2, and no level is kept.
+        assert_eq!(analogue.tone_b_level(), None);
+    }
+
+    /// 9.2.2.1.4: the analogue modem keeps how loud the digital modem's tone
+    /// B arrived, and hands it on to a retrain's phase 2.
+    #[test]
+    fn a_v90_analogue_modem_keeps_how_loud_tone_b_came() {
+        let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
+        let (digital, analogue) = run(&mut line, 12.0, Modem::v90(Pcm::Digital(server()), FS), Modem::v90(Pcm::Analogue, FS));
+        assert_eq!(analogue.status(), Status::Done, "analogue: {}", analogue.phase());
+        // Tone B as the digital modem sends it, held with nothing to reverse
+        // it, and as it arrives after the line's loss.
+        let mut tone_b = Modem::retrain(Role::Call, FS, Info0::default());
+        let mut sent = ToneDetector::new(Side::Call.carrier(), PRESENCE_BANDWIDTH, FS);
+        for _ in 0..(0.5 * FS) as usize {
+            sent.feed(tone_b.step(0.0));
+        }
+        let level = analogue.tone_b_level().expect("no level kept");
+        let off = 20.0 * (level / (sent.amplitude() * line.loss)).log10();
+        assert!(off.abs() < 0.5, "kept {level:.4}, {off:.2} dB from what arrived");
+        assert_eq!(digital.tone_b_level(), None);
+        // A retrain's phase 2 has it, and so does one after that, and
+        // neither measures its own over it.
+        let mut again = analogue.again().again();
+        assert_eq!(again.tone_b_level(), Some(level));
+        assert_eq!(again.presence.floor, level * TONE_B_FLOOR);
+        again.presence.peak = 0.0;
+        again.stage = Stage::AnswerRanging;
+        again.reversed_at = Some(again.now);
+        again.reversal(again.now + 1);
+        assert_eq!(again.tone_b_level(), Some(level));
+        // A V.34 modem's retrain, which kept no level, listens as it did.
+        let (_, v34) = call(&mut Line::new(0.030, 10.0, 20.0, 50.0), 12.0);
+        assert_eq!(v34.again().presence.floor, AUDIBLE);
+    }
+
+    /// Where the phase 2 of a V.90 analogue modem's retrain (9.5.2.1) takes
+    /// what it hears for tone B, in seconds from the start of `line`, if it
+    /// does: the call's first phase 2 heard tone B at `level`, if at all.
+    fn retrain_takes_tone_b(level: Option<f64>, line: impl Iterator<Item = f64>) -> Option<f64> {
+        let mut first = Modem::v90(Pcm::Analogue, FS);
+        first.far_info0d = Some(server());
+        first.tone_b_level = level;
+        let mut retrain = first.again();
+        line.enumerate().find_map(|(i, x)| {
+            retrain.step(x);
+            (retrain.stage != Stage::AnswerAwaitTone).then(|| i as f64 / FS)
+        })
+    }
+
+    /// 150 ms of silence, by when a retrain's tone A has sounded its 50 ms,
+    /// then 1200 Hz at `amplitude` for 200 ms, then silence: tone B, or a
+    /// softphone's beep.
+    fn tone_at_1200(amplitude: f64) -> impl Iterator<Item = f64> {
+        let mut nco = dsp::Nco::new(Side::Call.carrier(), FS);
+        (0..(0.550 * FS) as usize).map(move |i| {
+            let sounding = (0.150..0.350).contains(&(i as f64 / FS));
+            if sounding { amplitude * nco.step().1 } else { 0.0 }
+        })
+    }
+
+    /// A softphone's beep 10 dB under the server's tone B came while the
+    /// analogue modem's retrain was listening for tone B, and was taken for
+    /// it and answered with tone A's reversal on a dead call
+    /// (live-1790031913, 40.06 s). With the level the call's first phase 2
+    /// heard, it is not; tone B at that level is taken at the very sample it
+    /// was before, and 3 dB under it a few milliseconds later, while the
+    /// detector rises the rest of the way. With no level, as before, the beep
+    /// is tone B.
+    #[test]
+    fn a_retrain_s_phase_2_takes_no_tone_well_under_the_first_s_for_tone_b() {
+        let level = 5339.0 / 32768.0;
+        let down = |db: f64| level * 10f64.powf(-db / 20.0);
+        assert_eq!(retrain_takes_tone_b(Some(level), tone_at_1200(down(10.0))), None, "10 dB down");
+        let before = retrain_takes_tone_b(None, tone_at_1200(level)).expect("tone B with no level was never heard");
+        assert_eq!(retrain_takes_tone_b(Some(level), tone_at_1200(level)), Some(before), "at the level");
+        let under = retrain_takes_tone_b(Some(level), tone_at_1200(down(3.0))).expect("3 dB down was never heard");
+        assert!(under - 0.150 < 0.030, "3 dB down: heard {:.1} ms in", (under - 0.150) * 1e3);
+        assert!(retrain_takes_tone_b(None, tone_at_1200(down(10.0))).is_some(), "10 dB down, with no level");
+    }
+
+    /// 9.5.1.2/V.90: a digital modem answering the analogue modem's retrain
+    /// goes on with its data until it has heard tone A for 50 ms, and only
+    /// then sends 70 ms of silence and tone B. The data fills the band, and
+    /// the 1200 Hz detector reads it at a few hundredths: above
+    /// [`AUDIBLE`], and above [`OVER_LEAKAGE`] of its neighbours, so a
+    /// retrain with no level took it for tone B and reversed tone A before
+    /// the digital modem was listening for the reversal, and waited out the
+    /// two seconds of 9.2.2.2.2/V.90 for its trouble. With the first phase 2's
+    /// level it waits for tone B itself.
+    #[test]
+    fn a_retrain_s_phase_2_does_not_take_the_digital_modem_s_data_for_tone_b() {
+        let level = 5339.0 / 32768.0;
+        let mut seed = 0x2545_f491u32;
+        let mut noise = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (f64::from(seed) / f64::from(u32::MAX) - 0.5) * 2.0 * 1.7321
+        };
+        let mut nco = dsp::Nco::new(Side::Call.carrier(), FS);
+        // Data at a fifth of full scale, RMS, for 600 ms; silence; tone B.
+        let (data, tone) = ((0.600 * FS) as usize, (0.670 * FS) as usize);
+        let line = (0..(1.0 * FS) as usize).map(|i| match i {
+            i if i < data => 0.2 * noise(),
+            i if i < tone => 0.0,
+            _ => level * nco.step().1,
+        });
+        let at = retrain_takes_tone_b(Some(level), line).expect("tone B was never heard");
+        let after = at - tone as f64 / FS;
+        assert!(after > 0.0 && after < 0.030, "taken {:.1} ms after tone B began", after * 1e3);
     }
 }

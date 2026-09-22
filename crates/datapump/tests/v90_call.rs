@@ -358,6 +358,37 @@ fn a_retrain_from_either_end_comes_back_up() {
     }
 }
 
+/// A softphone's beep at the end of a call, after the server has gone quiet:
+/// 1200 Hz for 200 ms, 10 dB under the server's tone B as phase 2 heard it
+/// (live-1790032877). It is not the server retraining, and the analogue
+/// modem, which retrained on it into a dead call, lets it go by. One as loud
+/// as phase 2's tone B is a retrain.
+#[test]
+fn a_softphone_s_beep_after_the_server_has_gone_quiet_is_not_a_retrain() {
+    for (db, retrains) in [(-10.0, 0), (0.0, 1)] {
+        let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5), server(), 30.0);
+        let level = call.analogue.v90().and_then(|m| m.settings().tone_b_level).expect("phase 2 kept no level");
+        call.analogue.take_notes();
+        // The server stops, and the beep comes half a second into the quiet.
+        let mut beep = dsp::Nco::new(1200.0, FS);
+        let mut n = 0usize;
+        for _ in 0..8000 {
+            call.net.up(&call.up);
+            call.up.clear();
+            for x in call.net.down(0.0) {
+                let sounding = (0.5..0.7).contains(&(n as f64 / FS));
+                let x = x + if sounding { level * 10f64.powf(db / 20.0) * beep.step().1 } else { 0.0 };
+                call.up.push(call.analogue.step(x));
+                n += 1;
+            }
+        }
+        let notes = call.analogue.take_notes();
+        println!("{db} dB: phase 2 heard tone B at {level:.4}; {notes:?}");
+        assert_eq!(call.analogue.retrains(), retrains, "{db} dB: {notes:?}");
+        assert_eq!(notes.iter().any(|n| n.contains("tone B")), retrains > 0, "{db} dB: {notes:?}");
+    }
+}
+
 impl FullCall {
     /// Run until both ends are in data mode again, having left it; false if
     /// that takes more than `seconds`.
@@ -555,9 +586,19 @@ fn a_line_that_will_not_carry_pcm_comes_up_as_v34() {
 /// of a second to recover, and a jitter buffer cutting ten milliseconds out
 /// wherever the audio repeated itself. The DIL asks for nothing loud enough to
 /// set the gain control off, and a cut in it is found again.
+///
+/// A cut every 0.64 s costs the first start-up its Sd, and the retrain's
+/// phase 2 has to hear tone B through the gain control. This was a cut every
+/// 0.7 s, which came up only by luck: phase 3 can miss Sd to a cut ("no Sd
+/// from the digital modem"), and at 0.7 s the cuts fall the same way in every
+/// start-up once a retrain's phase 2 no longer takes the digital modem's Jd
+/// for tone B and waits out two seconds of 9.2.2.2.2 for it, so all three
+/// V.90 start-ups failed. Over cuts every 0.60 to 0.83 s, either kind, 33 of
+/// 48 calls come up as V.90 inside 40 s with that phase 2 put right and 33 of
+/// 48 without, just not the same 33.
 #[test]
 fn a_softphone_with_a_gain_control_and_a_hasty_jitter_buffer_is_followed() {
-    for (period, inserted) in [(0.7, false), (2.9, true), (3.1, false)] {
+    for (period, inserted) in [(0.64, false), (2.9, true), (3.1, false)] {
         let net = Network::new(Law::Mu, FS)
             .with_delay(0.6, FS)
             .with_noise(1e-5)
@@ -1342,9 +1383,21 @@ fn a_packet_lost_and_filled_with_silence_is_left_at_its_rate() {
 /// errored 432 of 598 with every one of the last 96 gone. What the receiver
 /// does with a hole is worth mending, and that it is not mended here is not
 /// this watch's doing.
+///
+/// Whether the retrain comes back slower turns on where the holes fall in
+/// it, and holes this regular fall in the same places in every retrain,
+/// which begins a fixed time after one. Those figures were a hole every
+/// 1.5 s, where the retrain's phase 2 took the server's data for tone B and
+/// waited out 9.2.2.2.2's two seconds for it. Now that it waits for tone B
+/// itself, its INFO1c lands on a hole at 1.5 s wherever the holes begin, so
+/// phase 2 goes round twice (9.2.2.2.4), and the call comes back no slower
+/// than 52 000 -- at 54 666 from where this test begins them, and storms.
+/// At 1.6 s it retrains once and comes back at 45 333, erring 20 of 665
+/// blocks after; the old phase 2 took two retrains there. None of it is the
+/// rate watch's doing, and it renegotiates in none of them.
 #[test]
 fn a_hole_that_costs_the_receiver_its_constellation_is_retrained_and_not_slowed() {
-    let net = voip_line().with_silent_dropout(VOIP_DISTURBED_FROM, 1.5, 0.02);
+    let net = voip_line().with_silent_dropout(VOIP_DISTURBED_FROM, 1.6, 0.02);
     let mut call = connects(net, server(), 40.0);
     let (fast, _) = call.rates();
     let mut data = Downstream::new();
@@ -1555,10 +1608,16 @@ fn holes_seen(net: Network, server: Info0d, seconds: f64) -> u32 {
 /// 17 of about 430 blocks in every stretch afterwards. At thirty it settles
 /// at 42 666 against main's 42 666, erring 13 to 20 of about 417. Neither
 /// renegotiates at all.
+///
+/// That was a hole every 1.5 s, which a retrain's phase 2 that waits for
+/// tone B itself no longer gets through: its INFO1c lands on a hole every
+/// time (see the test above). A hole every 1.6 s retrains once at either
+/// length and settles at 45 333, erring 11 to 14 of 443 blocks a stretch at
+/// twenty milliseconds and 14 to 23 at thirty, and still never renegotiates.
 #[test]
 fn a_call_through_holes_never_renegotiates_however_long_it_goes_on() {
     for length in [0.020, 0.030] {
-        let net = voip_line().with_silent_dropout(VOIP_DISTURBED_FROM, 1.5, length);
+        let net = voip_line().with_silent_dropout(VOIP_DISTURBED_FROM, 1.6, length);
         let mut call = connects(net, server(), 40.0);
         let mut data = Downstream::new();
         call.known_data(VOIP_DISTURBED_FROM - call.seconds(), &mut data);
@@ -1641,6 +1700,15 @@ fn a_floor_that_steps_up_over_the_round_trip_is_read_right_the_first_time() {
 /// then 9 to 14 of about 508 blocks errored in every ten-second stretch
 /// after.
 ///
+/// How many retrains the storm takes, though, is where the holes happen to
+/// fall in each one, and that moved when a retrain's phase 2 stopped taking
+/// the server's data for tone B and waiting out 9.2.2.2.2's two seconds for
+/// it. Now the storm is four retrains, V.90 start-ups failing in the holes
+/// until the call goes on as V.34 (9.2.2.1.9), which it is at 33 600 by
+/// 80 s, erring 6 to 9 of about 326 blocks a stretch. So
+/// what is asked is that it be a storm and be come out of: up at the end of
+/// every stretch from some point on, and early enough.
+///
 /// Only the count stands down, and that matters: a long burst of real noise
 /// makes the receiver hold its loops as well, and the looks gathered through
 /// one are exactly what say the line is bad. Standing those down too cost
@@ -1660,13 +1728,14 @@ fn a_retrain_storm_is_come_out_of_and_the_watch_stands_down_inside_it() {
         let before = data.checked;
         call.known_data(10.0, &mut data);
         last = data.checked.since(&before);
-        if back_at.is_none() && call.rate_now().is_some() && call.analogue.retrains() >= 5 {
-            back_at = Some(call.seconds());
-        }
+        // Out of it from the first stretch it is up at the end of and stays
+        // up at the end of every one after.
+        back_at = call.rate_now().and(back_at.or(Some(call.seconds())));
     }
     let rate = call.rate_now().expect("never came back out of the storm");
     let back_at = back_at.expect("never came back out of the storm");
     println!("out of the storm at {back_at:.0} s and {rate}, {} retrains; last stretch {}/{}", call.analogue.retrains(), last.0, last.1);
+    assert!(call.analogue.retrains() > 1, "no storm: {} retrains", call.analogue.retrains());
     assert!(back_at < VOIP_DISTURBED_FROM + 100.0, "came back only at {back_at:.0} s");
     assert!(last.0 * 10 < last.1, "{} of {} blocks errored at {rate}", last.0, last.1);
     assert_eq!(call.analogue.renegotiations(), 0);

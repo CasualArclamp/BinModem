@@ -495,6 +495,10 @@ pub struct Settings {
     /// asked for at the end of the DIL whatever the DIL would have chosen
     /// and whatever it predicts of it. None for the DIL's own choice.
     pub pinned: Option<u8>,
+    /// The amplitude the digital modem's tone B arrived at in the call's
+    /// first phase 2, if its reversal was heard: a retrain's tone B comes at
+    /// the same (8.2), and a tone less than half as loud is not one.
+    pub tone_b_level: Option<f64>,
 }
 
 /// What the rate menu predicts of a downstream rate.
@@ -552,6 +556,7 @@ impl Settings {
             wide: ours_wide && server.v34.constellation_1664,
             v34_receive: 0,
             pinned: None,
+            tone_b_level: None,
         }
     }
 }
@@ -1622,8 +1627,9 @@ impl Modem {
             last: [0.0; 2],
             last_symbol: None,
             heard_any: false,
-            // The digital modem takes V.34's call side, and tone B is its.
-            retrain_watch: RetrainWatch::new(Role::Call, fs),
+            // The digital modem takes V.34's call side, and tone B is its --
+            // at the level phase 2 heard it, if phase 2 did.
+            retrain_watch: RetrainWatch::new(Role::Call, fs).heard_before(settings.tone_b_level),
             wants_retrain: false,
             holes: 0,
             lost_since: None,
@@ -3314,5 +3320,122 @@ mod tests {
         };
         assert_eq!(bursts(1.5), Some(2));
         assert_eq!(bursts(10.0), None);
+    }
+
+    /// A live capture's first channel, what arrived from the line, from the
+    /// directory `V90_CAPTURES` names; None, and the call passed over, where
+    /// the capture is not there. Captures are not in the repository, so the
+    /// tests that read them are ignored unless asked for:
+    ///
+    /// ```text
+    /// V90_CAPTURES=F:/dialupmodem2/dist/captures cargo test -p datapump \
+    ///     --release --lib beep -- --ignored --nocapture
+    /// ```
+    fn arrived(name: &str) -> Option<Vec<f32>> {
+        let dir = std::env::var("V90_CAPTURES").expect("set V90_CAPTURES to the directory the captures are in");
+        let path = std::path::Path::new(&dir).join(format!("{name}.wav"));
+        if !path.exists() {
+            println!("{} is not there, so not tried", path.display());
+            return None;
+        }
+        let wav = line::wav::read(&path).expect("could not read the capture");
+        assert_eq!(wav.sample_rate, 16_000, "{name}");
+        Some(wav.channel(0))
+    }
+
+    /// The call's first phase 2, as the modem ran it on what arrived from
+    /// where V.8 handed over (as the modem's replay tells it), as far as the
+    /// start-up it hands its level to.
+    fn first_phase_2(line: &[f32], start: f64) -> crate::v90::startup::Analogue {
+        const FS: f64 = 16_000.0;
+        let mut modem = crate::v90::startup::Analogue::new(FS);
+        let from = (start * FS).round() as usize;
+        for &x in &line[from..(from + (20.0 * FS) as usize).min(line.len())] {
+            modem.step(f64::from(x));
+            if modem.v90().is_some() {
+                break;
+            }
+        }
+        modem
+    }
+
+    /// Four live calls to one server, each ended by the softphone's beep:
+    /// 1200 Hz, 200 ms, 10 dB under the server's tone B. The watch with no
+    /// level takes every one of them for tone B, as the modem did in data
+    /// mode on live-1790032877 and retrained into a dead call. With the
+    /// level each call's own first phase 2 heard, it takes none; the
+    /// server's real retrain in live-1789986211, after 70 ms of silence
+    /// (9.5.1.1), it still takes, at the very sample.
+    #[test]
+    #[ignore = "needs captures; see `arrived`"]
+    fn a_softphone_s_hang_up_beep_is_not_tone_b_and_the_server_s_retrain_is() {
+        const FS: f64 = 16_000.0;
+        let sample = |t: f64| (t * FS).round() as usize;
+        // Each call, where V.8 handed over, where the beep began, and where
+        // any real retrain's tone B began.
+        let calls: [(&str, f64, f64, Option<f64>); 4] = [
+            ("live-1790032877", 8.044, 35.3420, None),
+            ("live-1790031913", 7.906, 40.0609, None),
+            ("live-1789986037", 8.502, 31.3889, None),
+            ("live-1789986211", 9.644, 104.3474, Some(79.5064)),
+        ];
+        let mut tried = 0;
+        for (name, start, beep, retrain) in calls {
+            let Some(line) = arrived(name) else { continue };
+            tried += 1;
+            let level = first_phase_2(&line, start).v90().and_then(|m| m.settings().tone_b_level);
+            let level = level.unwrap_or_else(|| panic!("{name}: phase 2 kept no level"));
+            let db = 20.0 * (level / (5339.0 / 32768.0)).log10();
+            assert!(db.abs() < 1.0, "{name}: phase 2 kept {level:.4}, {db:.1} dB off the server's tone B");
+            // Where a watch takes a stretch of the line for tone B, if it does.
+            let taken = |mut watch: RetrainWatch, from: f64, to: f64| {
+                (sample(from)..sample(to).min(line.len())).find(|&i| watch.feed(f64::from(line[i]), FS)).map(|i| i as f64 / FS)
+            };
+            let watch = || RetrainWatch::new(Role::Call, FS).heard_before(Some(level));
+            let blind = || RetrainWatch::new(Role::Call, FS);
+            // The beep, and a second of the line before it.
+            assert!(taken(blind(), beep - 1.0, beep + 0.5).is_some(), "{name}: the beep was never tone B even with no level");
+            assert_eq!(taken(watch(), beep - 1.0, beep + 0.5), None, "{name}: the beep at {beep} s was taken for tone B");
+            if let Some(tone) = retrain {
+                let at = taken(blind(), tone - 1.0, tone + 0.5).unwrap_or_else(|| panic!("{name}: the retrain at {tone} s was missed"));
+                assert_eq!(taken(watch(), tone - 1.0, tone + 0.5), Some(at), "{name}: the retrain at {tone} s");
+                // "For more than 50 ms" (9.5.2.2), counted from where the
+                // tone stands clear of the data's echo in its neighbours.
+                assert!(at - tone > 0.050 && at - tone <= 0.075, "{name}: the retrain at {tone} s was taken at {at:.4} s");
+            }
+        }
+        assert!(tried > 0, "none of the captures was there");
+    }
+
+    /// live-1790031913's own retrain: the far end stopped in phase 4 at
+    /// 38.951 s and the analogue modem went back to phase 2 (9.5.2.1),
+    /// sending tone A and listening for tone B. The softphone's beep came a
+    /// second later, and that phase 2 took it for tone B and answered it
+    /// with tone A's reversal on a dead call. A retrain's phase 2 with the
+    /// level the call's first phase 2 heard lets it go by; one without, as
+    /// the modem was, does not.
+    #[test]
+    #[ignore = "needs captures; see `arrived`"]
+    fn a_retrain_s_phase_2_does_not_take_the_hang_up_beep_for_tone_b() {
+        use crate::v34::phase2::{self, Pcm};
+        const FS: f64 = 16_000.0;
+        let line = arrived("live-1790031913").expect("live-1790031913 is not there");
+        let modem = first_phase_2(&line, 7.906);
+        let first = modem.v34().phase2();
+        assert!(first.tone_b_level().is_some(), "phase 2 kept no level");
+        // Where a retrain's phase 2 begun at 38.951 s left the tones, and
+        // for what.
+        let heard = |mut retrain: phase2::Modem| {
+            let from = (38.951 * FS).round() as usize;
+            (from..line.len().min(from + (5.0 * FS) as usize)).find_map(|i| {
+                retrain.step(f64::from(line[i]));
+                (retrain.phase() != "V.34 tones").then(|| (i as f64 / FS, retrain.phase()))
+            })
+        };
+        assert_eq!(heard(first.again()), None, "the beep was taken for tone B in the retrain");
+        let far = first.far_capabilities().expect("no INFO0d");
+        let (at, phase) = heard(phase2::Modem::v90_retrain(Pcm::Analogue, FS, far, first.far_info0d()))
+            .expect("with no level, the beep was not taken for tone B either");
+        assert!((40.06..40.2).contains(&at), "with no level, went on to {phase} at {at:.3} s");
     }
 }

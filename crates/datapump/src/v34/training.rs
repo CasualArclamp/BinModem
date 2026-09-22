@@ -42,7 +42,7 @@ use super::data::{Acquired, Acquirer, Decoder, Encoder, Params};
 use super::frame::Framing;
 use super::info::{Info0, Info1a, Info1c};
 use super::mp::{Finder, Found, Mp, Trellis};
-use super::phase2::Role;
+use super::phase2::{self, Role};
 use super::probe;
 use super::qam::{Band, Transmitter};
 use super::receiver::{self, Heard, Receiver, Reference};
@@ -219,6 +219,9 @@ const RETRAIN_TONE_HELD: f64 = 0.055;
 /// frequency; a data or MP signal fills the band and its neighbours alike.
 const RETRAIN_TONE_CLEAR: f64 = 6.0;
 
+/// Below this a retrain's tone is not there at all, however clear it stands.
+const RETRAIN_TONE_AUDIBLE: f64 = 0.008;
+
 /// The far end's role, whose tone this end listens for.
 fn far_role(role: Role) -> Role {
     match role {
@@ -236,6 +239,11 @@ pub(crate) struct RetrainWatch {
     below: dsp::ToneDetector,
     above: dsp::ToneDetector,
     held: u64,
+    /// How loud the tone has to be, once it has stood long enough, to be a
+    /// retrain.
+    floor: f64,
+    /// Whether the tone standing now has been taken for a retrain already.
+    told: bool,
 }
 
 impl RetrainWatch {
@@ -251,20 +259,45 @@ impl RetrainWatch {
             below: dsp::ToneDetector::new(freq - 150.0, 10.0, fs),
             above: dsp::ToneDetector::new(freq + 150.0, 10.0, fs),
             held: 0,
+            floor: RETRAIN_TONE_AUDIBLE,
+            told: false,
         }
+    }
+
+    /// For V.90's analogue modem, whose phase 2 heard the digital modem's
+    /// tone B at `level`, if it did: a tone B less than half as loud is not
+    /// the digital modem's (see [`phase2::TONE_B_FLOOR`]). With no level,
+    /// the same watch as [`Self::new`].
+    pub(crate) fn heard_before(mut self, level: Option<f64>) -> Self {
+        if let Some(level) = level {
+            self.floor = level * phase2::TONE_B_FLOOR;
+        }
+        self
     }
 
     /// Hear one sample, and say whether the tone has now stood long enough to
     /// be a retrain.
+    ///
+    /// The time is counted from when the tone is first audible and clear, and
+    /// the floor judged when it is up. By then the detectors have come most
+    /// of the way to the tone's level, and a tone B as loud as phase 2's, or
+    /// a few decibels under it, is decided at the very sample it would be
+    /// with no floor. Counted from when the tone passed the floor, the 55 ms
+    /// would begin 17 ms into a tone at phase 2's level rather than 11, and
+    /// 25 ms into one 3 dB under it, and the response 9.5.2.2/V.90 asks for
+    /// "after detecting Tone B for more than 50 ms" would be that much late.
     pub(crate) fn feed(&mut self, x: f64, fs: f64) -> bool {
         self.on.feed(x);
         self.below.feed(x);
         self.above.feed(x);
         let clear = self.on.amplitude()
             > RETRAIN_TONE_CLEAR * self.below.amplitude().max(self.above.amplitude())
-            && self.on.amplitude() > 0.008;
+            && self.on.amplitude() > RETRAIN_TONE_AUDIBLE;
         self.held = if clear { self.held + 1 } else { 0 };
-        self.held == (RETRAIN_TONE_HELD * fs) as u64
+        self.told &= self.held > 0;
+        let retrain = !self.told && self.held >= (RETRAIN_TONE_HELD * fs) as u64 && self.on.amplitude() > self.floor;
+        self.told |= retrain;
+        retrain
     }
 }
 
@@ -2169,5 +2202,108 @@ mod tests {
         assert_eq!(negotiate(&call, &answer), (11, 10));
         let symmetric = Mp { asymmetric: false, ..answer };
         assert_eq!(negotiate(&call, &symmetric), (10, 10));
+    }
+
+    /// When a watch for tone B takes a tone for a retrain, in seconds from the
+    /// tone's start, and how many times: 70 ms of silence, which a digital
+    /// modem's retrain opens with (9.5.1.1/V.90), 1200 Hz at `amplitude` for
+    /// 200 ms, and silence again.
+    fn tone_b_taken(watch: &mut RetrainWatch, amplitude: f64) -> (Option<f64>, usize) {
+        let silence = (0.070 * FS) as usize;
+        let tone = (0.200 * FS) as usize;
+        let mut nco = dsp::Nco::new(1200.0, FS);
+        let (mut first, mut times) = (None, 0);
+        for i in 0..silence + tone + silence {
+            let x = if (silence..silence + tone).contains(&i) { amplitude * nco.step().1 } else { 0.0 };
+            if watch.feed(x, FS) {
+                first.get_or_insert((i - silence) as f64 / FS);
+                times += 1;
+            }
+        }
+        (first, times)
+    }
+
+    /// How soon after it begins a tone switched on from silence is taken for
+    /// a retrain, with or without a level: "for more than 50 ms"
+    /// (9.5.2.2/V.90), and 66 ms in the event. The 55 ms are counted from
+    /// when the tone stands clear of what is 150 Hz either side of it, and a
+    /// tone's switch-on splashes there for its first 11 ms. The live beep
+    /// was taken 66.5 ms in (live-1790032877, 35.3445 to 35.411 s).
+    const TAKEN_BY: f64 = 0.070;
+
+    /// The server's tone B as a live call's phase 2 heard it, 5339 of 32768,
+    /// and the softphone's beep that call took for its retrain, 10 dB under
+    /// it (live-1790032877). Knowing the level, the watch lets the beep go
+    /// by, and takes a tone B at the level or a little under it at the very
+    /// sample it would have without.
+    #[test]
+    fn a_tone_b_well_under_the_one_phase_2_heard_is_not_a_retrain() {
+        let level = 5339.0 / 32768.0;
+        let down = |db: f64| level * 10f64.powf(-db / 20.0);
+        let watch = || RetrainWatch::new(Role::Call, FS).heard_before(Some(level));
+        assert_eq!(tone_b_taken(&mut watch(), down(10.0)), (None, 0), "10 dB down");
+        for db in [0.0, 3.0] {
+            let (at, times) = tone_b_taken(&mut watch(), down(db));
+            let at = at.unwrap_or_else(|| panic!("{db} dB down was never taken for tone B"));
+            assert!(at > 0.050 && at <= TAKEN_BY, "{db} dB down: taken {:.1} ms in", at * 1e3);
+            assert_eq!(times, 1, "{db} dB down");
+            assert_eq!(tone_b_taken(&mut RetrainWatch::new(Role::Call, FS), down(db)).0, Some(at), "{db} dB down");
+        }
+    }
+
+    /// With no level from phase 2 the watch is the one V.34 and the digital
+    /// modem use, sample for sample: anything audible and clear for 55 ms is
+    /// a retrain, however quiet, and is told once.
+    #[test]
+    fn with_no_level_from_phase_2_the_watch_is_as_it_was() {
+        // The watch as it was before it knew of levels.
+        struct Before {
+            on: dsp::ToneDetector,
+            below: dsp::ToneDetector,
+            above: dsp::ToneDetector,
+            held: u64,
+        }
+        let level = 5339.0 / 32768.0;
+        for db in [0.0, 3.0, 10.0, 20.0] {
+            let (at, times) = tone_b_taken(&mut RetrainWatch::new(Role::Call, FS).heard_before(None), level * 10f64.powf(-db / 20.0));
+            let at = at.unwrap_or_else(|| panic!("{db} dB down was never taken for tone B"));
+            assert!(at > 0.050, "{db} dB down: taken {:.1} ms in", at * 1e3);
+            assert_eq!(times, 1, "{db} dB down");
+        }
+        // Tones of every length either side of the 55 ms, loud and quiet, on
+        // the frequency and off it, over a little noise, at both ends' tones.
+        for (far, freq) in [(Role::Call, 1200.0), (Role::Answer, 2400.0)] {
+            let mut watch = RetrainWatch::new(far, FS).heard_before(None);
+            let detector = |f: f64| dsp::ToneDetector::new(f, 10.0, FS);
+            let mut before = Before { on: detector(freq), below: detector(freq - 150.0), above: detector(freq + 150.0), held: 0 };
+            let mut seed = 0x2545_f491u32;
+            let mut taken = Vec::new();
+            for (n, &(ms, amplitude, off)) in
+                [(40.0, 0.2, 0.0), (54.0, 0.1, 0.0), (56.0, 0.1, 0.0), (80.0, 0.009, 0.0), (300.0, 0.3, 0.0), (120.0, 0.2, 60.0), (200.0, 0.05, 0.0)]
+                    .iter()
+                    .enumerate()
+            {
+                let mut nco = dsp::Nco::new(freq + off, FS);
+                taken.push(false);
+                for i in 0..((ms + 100.0) * FS / 1000.0) as usize {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    let noise = (f64::from(seed) / f64::from(u32::MAX) - 0.5) * 1e-3;
+                    let x = noise + if (i as f64) < ms * FS / 1000.0 { amplitude * nco.step().1 } else { 0.0 };
+                    for d in [&mut before.on, &mut before.below, &mut before.above] {
+                        d.feed(x);
+                    }
+                    let clear = before.on.amplitude() > RETRAIN_TONE_CLEAR * before.below.amplitude().max(before.above.amplitude())
+                        && before.on.amplitude() > 0.008;
+                    before.held = if clear { before.held + 1 } else { 0 };
+                    let was = before.held == (RETRAIN_TONE_HELD * FS) as u64;
+                    assert_eq!(watch.feed(x, FS), was, "{far:?}: tone {n}, sample {i}");
+                    taken[n] |= was;
+                }
+            }
+            // Some taken and some not, or the comparison proves little.
+            assert!(taken.contains(&true) && taken.contains(&false), "{far:?}: {taken:?}");
+        }
     }
 }
