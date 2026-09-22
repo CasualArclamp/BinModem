@@ -79,6 +79,34 @@ pub mod timing {
     /// ANSam shall be transmitted for a period of 5 +/- 1 s".
     pub const ANSAM: f64 = 5.0;
 
+    /// How long the calling modem hears ANSam without a break before it
+    /// believes it. Not a figure from the Recommendation, which asks only that
+    /// ANSam "has been detected" (7.2) and leaves the detector to the modem.
+    ///
+    /// Long enough to outlast a transient. Note 1 to 7.2 warns of "transient
+    /// variations in the received answer-tone amplitude and phase that may be
+    /// generated occasionally by network equipment", and to a detector that
+    /// reads the modulation off the envelope a transient is a step in the
+    /// envelope. A step has some of every frequency in it, 15 Hz included.
+    /// The most one step, or one dropout, can put into the detector's 0.4 s
+    /// correlator is a depth of 4/(2 pi 15 Hz 0.4 s), about 0.11, which
+    /// decays back under the 0.08 that reads as modulated in about a tenth of
+    /// a second. The worst case measured on a plain tone, a dropout half a
+    /// 15 Hz cycle long so that its two edges add, read as ANSam for 0.15 s.
+    /// To last out this hold a transient would have to reach
+    /// 0.08 e^(0.25/0.4), about 0.15, which no single one can. It is also
+    /// nearly four cycles of the modulation itself.
+    ///
+    /// Short enough to fit between the reversals and inside ANSam. The
+    /// detector does not lose the tone at a phase reversal, but a hold shorter
+    /// than the 425 ms 7.2 allows between two of them would be found in the
+    /// gap even if it did. And 8.2.2 keeps ANSam up for as little as 4 s:
+    /// the quarter of a second the detector takes to settle, this, Te, two CM
+    /// sequences of about 0.3 s each, and the second and a half a packet
+    /// network takes to carry the tone here and the CM back come to about
+    /// 3.7 s of it.
+    pub const ANSAM_HELD: f64 = 0.25;
+
     /// How long a calling modem waits to hear anything at all before giving
     /// up. Not a figure from the Recommendation, which leaves this to the
     /// modem: a number has to come from somewhere and this one is the wait a
@@ -154,6 +182,10 @@ pub struct Modem {
     decoder: Decoder,
     /// The calling modem's ear for the answering tone.
     answer: v8::AnswerTone,
+    /// Seconds it has said ANSam, and the plain tone of V.25, without a
+    /// break.
+    ansam_held: f64,
+    plain_held: f64,
     /// The answering modem's voice for it.
     tone: Nco,
     modulation: Nco,
@@ -210,6 +242,8 @@ impl Modem {
             bits: AsyncBits::new(8),
             decoder: Decoder::new(),
             answer: v8::AnswerTone::new(fs),
+            ansam_held: 0.0,
+            plain_held: 0.0,
             tone: Nco::new(v8::ansam::ANSWER_TONE, fs),
             modulation: Nco::new(v8::ansam::MODULATION_RATE, fs),
             reversals: 0.0,
@@ -327,6 +361,15 @@ impl Modem {
         self.level.process(line.abs());
 
         self.answer.feed(line);
+        // What the detector says at one instant is not a decision. Its
+        // readings are averages, and an average can be anything for a moment
+        // while what it is averaging changes under it: the first moments of a
+        // plain tone, the step as a call is picked up and the line goes from
+        // noise to digital silence, the last moments of a tone. Every one of
+        // those has read as ANSam, or as the plain tone, for a few tens of
+        // milliseconds on a real call.
+        self.ansam_held = if self.answer.is_ansam() { self.ansam_held + dt } else { 0.0 };
+        self.plain_held = if self.answer.is_plain() { self.plain_held + dt } else { 0.0 };
         let octet = self.rx.feed(line);
         // A character whose stop bit was not a mark. Clause 5 runs a sequence
         // octet against octet with nothing between them, so a framing error
@@ -481,16 +524,17 @@ impl Modem {
             State::Listening => {
                 // 8.1.1. ANSam means the far end will negotiate; the plain
                 // answering tone of V.25 means it will not, and the call goes
-                // on without V.8 rather than failing.
-                if self.answer.is_ansam() {
+                // on without V.8 rather than failing. Each has to be heard
+                // without a break before it is believed: a CM sent to a modem
+                // that does not do V.8 is what 7.2 forbids, and giving up on a
+                // modem that does throws away everything V.8 could have found.
+                if self.ansam_held >= timing::ANSAM_HELD {
                     self.enter(State::Waiting);
-                } else if self.answer.is_plain()
-                    && self.elapsed > timing::TE
-                {
-                    // Held for a while before believing it: ANSam is a
-                    // modulated tone, and the modulation takes a moment to
-                    // measure. Deciding on the first instant of a tone would
-                    // call every ANSam a plain one.
+                } else if self.plain_held >= timing::TE {
+                    // Held for longer: ANSam is a modulated tone, and the
+                    // modulation takes a moment to measure. Deciding on the
+                    // first instant of a tone would call every ANSam a plain
+                    // one.
                     self.enter(State::Done(Status::NoNegotiation));
                 }
             }
@@ -978,6 +1022,184 @@ mod tests {
         }
         assert_eq!(calling.status(), Status::NoNegotiation);
         assert!(out < 1.0e-6, "answered a modem that cannot hear it");
+    }
+
+    /// One sample of an answering tone `t` seconds into it: ANSam at 7.2's
+    /// depth, or the plain tone of V.25.
+    fn answering_tone(ansam: bool, reversal_s: f64, level: f64, t: f64) -> f64 {
+        let flips = if reversal_s > 0.0 { (t / reversal_s) as u64 } else { 0 };
+        let sign = if flips.is_multiple_of(2) { 1.0 } else { -1.0 };
+        let depth = if ansam { v8::ansam::NOMINAL_DEPTH } else { 0.0 };
+        let envelope = 1.0 + depth * (std::f64::consts::TAU * v8::ansam::MODULATION_RATE * t).sin();
+        level * envelope * sign * (std::f64::consts::TAU * v8::ansam::ANSWER_TONE * t).sin()
+    }
+
+    /// The gain of a tone that stops at `stop`, cut off or faded out over
+    /// `fade` seconds.
+    fn ending(t: f64, stop: f64, fade: f64) -> f64 {
+        if t < stop {
+            1.0
+        } else if fade > 0.0 {
+            (1.0 - (t - stop) / fade).max(0.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Flat, deterministic noise between -1 and 1.
+    fn noise() -> impl FnMut() -> f64 {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+        }
+    }
+
+    /// What a calling modem made of a line: when it stopped listening and
+    /// what it went on to, and the loudest thing it sent.
+    struct Verdict {
+        left: Option<(f64, State)>,
+        loudest: f64,
+    }
+
+    /// Play `line`, a function of the time since the call was connected, at a
+    /// calling modem.
+    fn heard_by_a_caller(seconds: f64, mut line: impl FnMut(f64) -> f64) -> Verdict {
+        let mut calling = Modem::new(Role::Calling, CallFunction::Data, all(), FS);
+        let mut heard = Verdict { left: None, loudest: 0.0 };
+        for i in 0..(seconds * FS) as usize {
+            let t = i as f64 / FS;
+            heard.loudest = heard.loudest.max(calling.step(line(t)).abs());
+            if heard.left.is_none() && !matches!(calling.state, State::Quiet | State::Listening) {
+                heard.left = Some((t, calling.state));
+            }
+        }
+        heard
+    }
+
+    #[test]
+    fn a_noisy_line_that_falls_silent_has_not_answered() {
+        // `live-1790039606`: line noise until the far end picked up, and then
+        // the exact zeros of a digital network with nothing on it yet. The
+        // detector's averages decayed at their own rates, passed for a plain
+        // answering tone for 40 ms, and a single instant of that was taken
+        // for a far end that does not do V.8 -- two seconds before the far
+        // end sent its tone.
+        let mut hiss = noise();
+        let heard = heard_by_a_caller(6.0, |t| if t < 3.0 { 0.05 * hiss() } else { 0.0 });
+        assert!(heard.left.is_none(), "decided on silence: {:?}", heard.left);
+        assert!(heard.loudest < 1.0e-6, "transmitted into a silent line");
+    }
+
+    #[test]
+    fn the_end_of_a_plain_tone_is_taken_for_nothing() {
+        // A calling modem that begins listening late in a plain answering
+        // tone -- a handshake started again, a line connected late -- hears
+        // too little of it to call it plain, and then hears it stop. The step
+        // down to nothing read as modulation, and a single instant of it sent
+        // CM to a modem that had just said it has never heard of V.8; where
+        // it did not, the tone outlived itself on the silence and was called
+        // plain, on nothing at all, once the modem had listened for Te.
+        for fade in [0.0, 0.050] {
+            for reversal in [0.0, 0.450] {
+                let heard = heard_by_a_caller(5.0, |t| {
+                    ending(t, 1.1, fade) * answering_tone(false, reversal, 0.3, t)
+                });
+                assert!(
+                    heard.left.is_none(),
+                    "a plain tone faded over {fade} s ended in {:?}",
+                    heard.left
+                );
+                assert!(heard.loudest < 1.0e-6, "sent CM to a modem that cannot hear it");
+            }
+        }
+    }
+
+    #[test]
+    fn a_plain_tone_is_believed_only_once_it_has_been_held() {
+        // `live-1789614742`: a plain answering tone whose first 16 ms read as
+        // modulated, because the envelope stepping up from nothing is a step
+        // and a step has 15 Hz in it. Deciding on the first instant, the modem
+        // would have answered it with CM; and where the first instant happens
+        // to read as plain instead, it has decided on a tone that could as
+        // well have been the first instant of ANSam. Which of the two it reads
+        // as depends on what else is on the line while the detector settles,
+        // so the tone is played over a telephone line's noise and started at
+        // eight points across a cycle of the modulation.
+        for k in 0..8 {
+            let start = 2.0 + f64::from(k) / 8.0 / v8::ansam::MODULATION_RATE;
+            for reversal in [0.0, 0.450] {
+                let mut hiss = noise();
+                let heard = heard_by_a_caller(5.0, |t| {
+                    let tone =
+                        if t < start { 0.0 } else { answering_tone(false, reversal, 0.3, t - start) };
+                    tone + 0.07 * hiss()
+                });
+                let (when, state) = heard.left.expect("never decided");
+                assert_eq!(
+                    state,
+                    State::Done(Status::NoNegotiation),
+                    "a plain tone from {start:.4} s, at {when:.3} s"
+                );
+                assert!(
+                    (start + timing::TE..start + timing::TE + 0.5).contains(&when),
+                    "a plain tone from {start:.4} s decided at {when:.3} s"
+                );
+                assert!(heard.loudest < 1.0e-6, "sent CM to a modem that cannot hear it");
+            }
+        }
+    }
+
+    #[test]
+    fn a_plain_tone_with_a_gap_in_it_is_decided_a_second_after_the_gap() {
+        // `live-1790039606` again: 135 ms of exact zeros in the far end's
+        // answering tone, a second after it began, which is a packet network
+        // and not the far end. A tone that has stopped has stopped. Held
+        // without a break means held since it came back.
+        let (start, gap) = (2.0, (2.95, 3.085));
+        for reversal in [0.0, 0.450] {
+            let heard = heard_by_a_caller(6.0, |t| {
+                if t < start || (gap.0..gap.1).contains(&t) {
+                    0.0
+                } else {
+                    answering_tone(false, reversal, 0.3, t - start)
+                }
+            });
+            let (when, state) = heard.left.expect("never decided");
+            assert_eq!(state, State::Done(Status::NoNegotiation), "at {when:.3} s");
+            assert!(
+                (gap.1 + timing::TE..gap.1 + timing::TE + 0.1).contains(&when),
+                "decided at {when:.3} s"
+            );
+            assert!(heard.loudest < 1.0e-6, "sent CM to a modem that cannot hear it");
+        }
+    }
+
+    #[test]
+    fn ansam_is_still_found_at_every_level_a_network_delivers() {
+        // Everything above makes the calling modem slower to believe what it
+        // hears. None of it can be allowed to cost the real thing: ANSam with
+        // its reversals and without, from a short call and a long one, is
+        // believed a hold after the detector settles, and answered a Te after
+        // that.
+        let start = 2.0;
+        for db in [0.0, -10.0, -20.0, -30.0] {
+            let level = 0.3 * 10.0f64.powf(db / 20.0);
+            for reversal in [0.0, 0.450] {
+                let heard = heard_by_a_caller(4.0, |t| {
+                    if t < start { 0.0 } else { answering_tone(true, reversal, level, t - start) }
+                });
+                let (when, state) = heard.left.expect("ANSam never believed");
+                assert_eq!(state, State::Waiting, "ANSam at {db} dB, at {when:.3} s");
+                assert!(
+                    (start + timing::ANSAM_HELD..start + timing::ANSAM_HELD + 0.4).contains(&when),
+                    "ANSam at {db} dB believed at {when:.3} s"
+                );
+                assert!(heard.loudest > 0.1, "never sent CM to ANSam at {db} dB");
+            }
+        }
     }
 
     #[test]
