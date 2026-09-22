@@ -31,7 +31,8 @@
 //!
 //! Nothing else about the modem changes with the rate: the same scrambler, the
 //! same start-up conducted entirely in the four states, and the same mean
-//! power for the gain control to hold.
+//! power for the gain control to hold -- all but the fifth of a decibel that
+//! V.32bis's figures put 12 000 and 14 400 above the others (`data_lift`).
 
 pub mod startup;
 pub mod trellis;
@@ -603,12 +604,38 @@ pub struct Transmitter {
     rate: u32,
     /// The trellis coding in use, when the rate and the choice come to one.
     coded: Option<trellis::Coded>,
+    /// What the trellis-coded data points are multiplied by: see
+    /// [`data_lift`].
+    lift: f64,
     /// Which of the two 9600 modulations is in use.
     coding: Coding,
     /// The convolutional encoder, used only by [`Coding::Trellis`].
     trellis: trellis::Encoder,
     /// The sample most recently produced, for the echo canceller.
     last_sample: f64,
+}
+
+/// How much louder than the four training states the data of a coding is.
+///
+/// The only thing either Recommendation says about level, and the figures are
+/// what say it: every one of them draws A, B, C and D among the data points,
+/// in the same units. At 4800, 7200 and 9600 the data averages what the states
+/// are. Figures 2-1 and 2-2/V.32bis put A at (-6, -2), a power of 40, and the
+/// data around it averages 41 at 14 400 and 42 at 12 000 -- a tenth and a fifth
+/// of a decibel above the states.
+///
+/// [`trellis`] brings every constellation to the one mean power instead, and
+/// is not the place to change that: V.17 shares its tables. So the difference
+/// goes back on here, and only here. A far end that sets its gain on TRN and
+/// then slices data against the figures expects it.
+fn data_lift(coded: Option<trellis::Coded>) -> f64 {
+    match coded.map(|c| c.bits) {
+        // 14 400, Figure 2-1/V.32bis.
+        Some(6) => (41.0f64 / 40.0).sqrt(),
+        // 12 000, Figure 2-2/V.32bis.
+        Some(5) => (42.0f64 / 40.0).sqrt(),
+        _ => 1.0,
+    }
 }
 
 impl Transmitter {
@@ -632,6 +659,7 @@ impl Transmitter {
             bits: 2,
             rate: 4800,
             coded: None,
+            lift: 1.0,
             coding: Coding::Uncoded,
             trellis: trellis::Encoder::new(),
             last_sample: 0.0,
@@ -674,6 +702,7 @@ impl Transmitter {
             self.trellis.reset();
         }
         self.coded = coded;
+        self.lift = data_lift(coded);
     }
 
     /// What to send.
@@ -868,7 +897,8 @@ impl Transmitter {
             // of a cross sit on an axis and belong to no quadrant, and nothing
             // reads it while this coding is running: the differential state
             // lives inside the encoder instead.
-            return coded.point(code);
+            let (re, im) = coded.point(code);
+            return (re * self.lift, im * self.lift);
         }
         let state = self.next_state();
         signal_point(state, self.within)
@@ -1366,6 +1396,39 @@ mod tests {
                 let p = (CONSTELLATION_RMS * at.cos(), CONSTELLATION_RMS * at.sin());
                 assert_eq!(nearest_state(p), want, "state {i}, {off:+} degrees round");
             }
+        }
+    }
+
+    #[test]
+    fn data_goes_out_at_the_level_the_figures_draw_it() {
+        // Against the four states, which every start-up signal is made of
+        // and which sit at the constellation's mean power: level with them at
+        // 4800, 7200 and 9600, and at 12 000 and 14 400 the 42 and 41 that
+        // Figures 2-2 and 2-1/V.32bis give the data against the states' 40.
+        for (rate, coding, figure) in [
+            (4800, Coding::Uncoded, 40.0),
+            (9600, Coding::Uncoded, 40.0),
+            (7200, Coding::Trellis, 40.0),
+            (9600, Coding::Trellis, 40.0),
+            (12_000, Coding::Trellis, 42.0),
+            (14_400, Coding::Trellis, 41.0),
+        ] {
+            let mut tx = Transmitter::new(Mode::Call, 16_000.0);
+            tx.set_data_rate(rate);
+            tx.set_coding(coding);
+            let symbols = 100_000;
+            let power = (0..symbols)
+                .map(|_| {
+                    let (re, im) = tx.next_symbol();
+                    re * re + im * im
+                })
+                .sum::<f64>()
+                / f64::from(symbols);
+            let want = CONSTELLATION_MEAN_POWER * figure / 40.0;
+            assert!(
+                (power / want - 1.0).abs() < 0.01,
+                "{rate} {coding:?}: mean power {power:.3}, the figure says {want:.3}"
+            );
         }
     }
 
