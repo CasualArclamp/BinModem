@@ -2233,6 +2233,10 @@ pub struct Modem {
     /// against everything left, and the far end is in both.
     trained_loss: f64,
     was_training: bool,
+    /// What arrived and what the canceller left of it, summed over the whole
+    /// of this end's training segment: whether it found anything to cancel.
+    heard_in_training: f64,
+    left_in_training: f64,
 }
 
 /// How far back the first run of taps looks, in milliseconds.
@@ -2267,6 +2271,49 @@ const FAR_SPAN_MS: f64 = 4.0;
 /// would against the raw line.
 const FAINTEST: f64 = 0.15;
 
+/// The canceller's step while it trains.
+///
+/// A trade between two things a step decides. The larger it is, the faster the
+/// taps follow an echo that moves while they learn, which on a sound card's
+/// cable at 100 ppm is a sample and a half in the long training segment; and
+/// the more of the line's noise they learn as if it were echo, and add back
+/// once they are held, in the far end's band (see [`NOTHING_CANCELLED_DB`]).
+///
+/// It was a half. Measured through the acceptance harness's calls: a tenth
+/// left the 100 ppm cable's calling modem with 21.6 dB of return loss at the
+/// end of training, and its receiver losing the signal seventy times in its
+/// first twenty seconds of data, where a quarter left the call clean; and a
+/// half left the hybrid with noise on it, at 9600 and 21 dB of Es/N0, putting
+/// back what it had learned of the noise as nearly as much again, and
+/// retraining, where a quarter held. `dsp::echo`'s own guide is about a
+/// tenth. A step that shrank as training went on would have both, but the
+/// canceller's is fixed when it is made.
+const ECHO_STEP: f64 = 0.25;
+
+/// How much the canceller has to have taken out of what it heard, over its
+/// training, to be kept: a decibel.
+///
+/// A canceller trained on a line with no echo on it learns the line's noise,
+/// and with the taps held from then on it adds that back as a copy of this
+/// end's own signal, which is in the far end's band and cannot be filtered
+/// off. At a step of a half, what it adds is about as loud as the noise
+/// already in that band. Measured so, on a direct line with no echo at 18.9
+/// dB of Es/N0, the calling modem trained its receiver at 18.8 dB on the
+/// answering modem's first TRN, before its canceller had learned anything,
+/// and at 15.7 dB on the second, after; and most of the acceptance harness's
+/// noisy lines, none of which has an echo, failed on those three decibels.
+/// At [`ECHO_STEP`]'s quarter it would still be a decibel and a half.
+///
+/// So a canceller is kept only if it removed more than it adds. With no echo
+/// what it heard against what it left reads a little under nothing: what it
+/// adds against nothing taken out, -0.55 to -0.60 dB on every such line of the
+/// harness. With an echo it reads 12.5 dB and more, hybrids and cables alike,
+/// counted from where the far run of taps is placed. One decibel is between
+/// the two. The sum is over the training segment, not the return-loss meter,
+/// which follows the last few milliseconds and wanders by a decibel either
+/// way on a line with no echo.
+const NOTHING_CANCELLED_DB: f64 = 1.0;
+
 impl Modem {
     /// `offer` is the rate signal this modem sends, from [`rate_signal`].
     pub fn new(role: Role, offer: u16, fs: f64) -> Self {
@@ -2275,7 +2322,7 @@ impl Modem {
             tx,
             rx,
             startup: Startup::new(role, offer, fs),
-            echo: EchoCanceller::new((ECHO_SPAN_MS * fs / 1000.0) as usize, 0.5),
+            echo: EchoCanceller::new((ECHO_SPAN_MS * fs / 1000.0) as usize, ECHO_STEP),
             finder: None,
             searched: 0,
             search_for: 0,
@@ -2283,6 +2330,8 @@ impl Modem {
             fs,
             trained_loss: 0.0,
             was_training: false,
+            heard_in_training: 0.0,
+            left_in_training: 0.0,
         }
     }
 
@@ -2337,8 +2386,25 @@ impl Modem {
         // else; now it trains on the far end's TRN and idles through this
         // end's own conditioning sequence on the start-up's cues, and its
         // gate and the canceller's are each their own (design.md 5.2).
+        if training && !self.was_training {
+            (self.heard_in_training, self.left_in_training) = (0.0, 0.0);
+        }
+        // Counted once every run of taps is where it will be. Before the far
+        // run is placed, a network's reflection is left whole whatever the
+        // near taps do.
+        if training && self.finder.is_none() {
+            self.heard_in_training += line * line;
+            self.left_in_training += cleaned * cleaned;
+        }
         if self.was_training && !training {
             self.trained_loss = self.echo.echo_return_loss();
+            // A canceller that found no echo has learned nothing but the
+            // line's noise, and would put it back from now on as this end's
+            // own signal: see [`NOTHING_CANCELLED_DB`].
+            let removed = 10.0 * (self.heard_in_training / self.left_in_training.max(1e-30)).log10();
+            if self.heard_in_training <= 1e-12 || removed <= NOTHING_CANCELLED_DB {
+                self.echo.reset();
+            }
             // From here on the far end talks over our echo, and the taps are
             // held still for it. What they learned was where the echo came
             // back during training, and on a sound card's cable that does not
