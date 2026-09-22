@@ -222,6 +222,8 @@ struct Presence {
     below: ToneDetector,
     above: ToneDetector,
     held: u64,
+    /// The most the tone has read since this was last cleared.
+    peak: f64,
 }
 
 impl Presence {
@@ -231,6 +233,7 @@ impl Presence {
             below: ToneDetector::new(freq - 150.0, PRESENCE_BANDWIDTH, fs),
             above: ToneDetector::new(freq + 150.0, PRESENCE_BANDWIDTH, fs),
             held: 0,
+            peak: 0.0,
         }
     }
 
@@ -248,6 +251,7 @@ impl Presence {
         let there = self.tone.amplitude() > AUDIBLE
             && self.tone.amplitude() > OVER_LEAKAGE * self.below.amplitude().max(self.above.amplitude());
         self.held = if there { self.held + 1 } else { 0 };
+        self.peak = self.peak.max(self.tone.amplitude());
     }
 }
 
@@ -311,6 +315,11 @@ pub struct Modem {
     far_info0d: Option<Info0d>,
     /// An INFO1a asking for V.90, sent or received.
     info1a_pcm: Option<Info1aPcm>,
+    /// V.90's analogue modem: the level a digital modem's tone B stood at
+    /// just before the reversal that answered this end's (9.2.2.1.4), in the
+    /// call's first phase 2 to get that far, and handed on from there to
+    /// every retrain's.
+    tone_b_level: Option<f64>,
 }
 
 impl Modem {
@@ -355,6 +364,7 @@ impl Modem {
             pcm_declined: false,
             far_info0d: None,
             info1a_pcm: None,
+            tone_b_level: None,
         }
     }
 
@@ -407,6 +417,9 @@ impl Modem {
             None => Self::retrain(self.role, self.fs, far),
         };
         modem.pcm_declined = self.pcm_declined;
+        // The digital modem's tone B comes back at the power it had the
+        // first time (8.2/V.90), so what the first time heard stands.
+        modem.tone_b_level = self.tone_b_level;
         modem
     }
 
@@ -437,6 +450,15 @@ impl Modem {
     /// The INFO1a asking for V.90, if one went or came.
     pub fn info1a_pcm(&self) -> Option<Info1aPcm> {
         self.info1a_pcm
+    }
+
+    /// V.90's analogue modem: the amplitude the digital modem's tone B
+    /// arrived at in the call's first phase 2, on the line's own scale, once
+    /// its reversal has been heard. A retrain's tone B comes at the same, and
+    /// the analogue modem takes nothing much quieter for one in phases 3 and
+    /// 4 and data mode.
+    pub fn tone_b_level(&self) -> Option<f64> {
+        self.tone_b_level
     }
 
     /// The fastest V.34 the far end's line probe says this end could
@@ -755,6 +777,12 @@ impl Modem {
             Stage::AnswerRanging if self.reversed_at.is_some_and(|ours| at > ours) => {
                 let ours = self.reversed_at.expect("checked");
                 self.round_trip = Some((at - ours).saturating_sub(self.ms(TURN)));
+                // 9.2.2.1.4: and how loud a V.90 digital modem's tone B was
+                // before it reversed, steady since this end's own reversal:
+                // the level a retrain's tone B will come at.
+                if self.pcm == Some(Pcm::Analogue) && self.far_info0d.is_some() && self.tone_b_level.is_none() {
+                    self.tone_b_level = Some(self.presence.peak);
+                }
                 // 11.2.1.2.5: tone A's reversal 40 ms on, then L1 and L2.
                 self.reverse_at = Some((at + self.ms(TURN)).max(self.now + 1));
                 self.probe_at = self.reverse_at.map(|r| r + self.ms(AFTER_REVERSAL));
@@ -908,6 +936,9 @@ impl Modem {
                     // The reversal is this end's, and the call modem's answer
                     // cannot be back before a round trip and 40 ms.
                     self.ignore_reversals_until = now + self.ms(TURN);
+                    // Its tone from here to that answer is steady, and what
+                    // it rises to is its level.
+                    self.presence.peak = 0.0;
                 }
             }
             Stage::AnswerRanging => {
@@ -1318,5 +1349,36 @@ mod tests {
         assert_eq!(analogue.status(), Status::Done);
         assert!(analogue.info1a().is_some() && analogue.info1a_pcm().is_none());
         assert!(v34.info1a().is_some());
+        // No INFO0d named a power for phase 2, and no level is kept.
+        assert_eq!(analogue.tone_b_level(), None);
+    }
+
+    /// 9.2.2.1.4: the analogue modem keeps how loud the digital modem's tone
+    /// B arrived, and hands it on to a retrain's phase 2.
+    #[test]
+    fn a_v90_analogue_modem_keeps_how_loud_tone_b_came() {
+        let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
+        let (digital, analogue) = run(&mut line, 12.0, Modem::v90(Pcm::Digital(server()), FS), Modem::v90(Pcm::Analogue, FS));
+        assert_eq!(analogue.status(), Status::Done, "analogue: {}", analogue.phase());
+        // Tone B as the digital modem sends it, held with nothing to reverse
+        // it, and as it arrives after the line's loss.
+        let mut tone_b = Modem::retrain(Role::Call, FS, Info0::default());
+        let mut sent = ToneDetector::new(Side::Call.carrier(), PRESENCE_BANDWIDTH, FS);
+        for _ in 0..(0.5 * FS) as usize {
+            sent.feed(tone_b.step(0.0));
+        }
+        let level = analogue.tone_b_level().expect("no level kept");
+        let off = 20.0 * (level / (sent.amplitude() * line.loss)).log10();
+        assert!(off.abs() < 0.5, "kept {level:.4}, {off:.2} dB from what arrived");
+        assert_eq!(digital.tone_b_level(), None);
+        // A retrain's phase 2 has it, and so does one after that, and
+        // neither measures its own over it.
+        let mut again = analogue.again().again();
+        assert_eq!(again.tone_b_level(), Some(level));
+        again.presence.peak = 0.0;
+        again.stage = Stage::AnswerRanging;
+        again.reversed_at = Some(again.now);
+        again.reversal(again.now + 1);
+        assert_eq!(again.tone_b_level(), Some(level));
     }
 }

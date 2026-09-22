@@ -309,6 +309,9 @@ impl Analogue {
             let mut settings = analogue::Settings::new(&server, &info1d, &asked, p2.round_trip().unwrap_or(0.0), ours_wide);
             settings.v34_receive = p2.v34_receive_rate().unwrap_or(0);
             settings.pinned = self.pinned;
+            // The call's first phase 2's, which every retrain's phase 2 is
+            // handed on from (see [`phase2::Modem::again`]).
+            settings.tone_b_level = p2.tone_b_level();
             self.v90 = Some(analogue::Modem::new(settings, self.fs));
         }
         out

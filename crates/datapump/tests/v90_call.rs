@@ -358,6 +358,37 @@ fn a_retrain_from_either_end_comes_back_up() {
     }
 }
 
+/// A softphone's beep at the end of a call, after the server has gone quiet:
+/// 1200 Hz for 200 ms, 10 dB under the server's tone B as phase 2 heard it
+/// (live-1790032877). It is not the server retraining, and the analogue
+/// modem, which retrained on it into a dead call, lets it go by. One as loud
+/// as phase 2's tone B is a retrain.
+#[test]
+fn a_softphone_s_beep_after_the_server_has_gone_quiet_is_not_a_retrain() {
+    for (db, retrains) in [(-10.0, 0), (0.0, 1)] {
+        let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5), server(), 30.0);
+        let level = call.analogue.v90().and_then(|m| m.settings().tone_b_level).expect("phase 2 kept no level");
+        call.analogue.take_notes();
+        // The server stops, and the beep comes half a second into the quiet.
+        let mut beep = dsp::Nco::new(1200.0, FS);
+        let mut n = 0usize;
+        for _ in 0..8000 {
+            call.net.up(&call.up);
+            call.up.clear();
+            for x in call.net.down(0.0) {
+                let sounding = (0.5..0.7).contains(&(n as f64 / FS));
+                let x = x + if sounding { level * 10f64.powf(db / 20.0) * beep.step().1 } else { 0.0 };
+                call.up.push(call.analogue.step(x));
+                n += 1;
+            }
+        }
+        let notes = call.analogue.take_notes();
+        println!("{db} dB: phase 2 heard tone B at {level:.4}; {notes:?}");
+        assert_eq!(call.analogue.retrains(), retrains, "{db} dB: {notes:?}");
+        assert_eq!(notes.iter().any(|n| n.contains("tone B")), retrains > 0, "{db} dB: {notes:?}");
+    }
+}
+
 impl FullCall {
     /// Run until both ends are in data mode again, having left it; false if
     /// that takes more than `seconds`.
