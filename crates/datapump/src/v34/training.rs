@@ -42,7 +42,7 @@ use super::data::{Acquired, Acquirer, Decoder, Encoder, Params};
 use super::frame::Framing;
 use super::info::{Info0, Info1a, Info1c};
 use super::mp::{Finder, Found, Mp, Trellis};
-use super::phase2::Role;
+use super::phase2::{self, Role};
 use super::probe;
 use super::qam::{Band, Transmitter};
 use super::receiver::{self, Heard, Receiver, Reference};
@@ -222,24 +222,6 @@ const RETRAIN_TONE_CLEAR: f64 = 6.0;
 /// Below this a retrain's tone is not there at all, however clear it stands.
 const RETRAIN_TONE_AUDIBLE: f64 = 0.008;
 
-/// How far below the level V.90's analogue modem heard the digital modem's
-/// tone B at in phase 2 a tone B can arrive later in the same call and still
-/// be a retrain: half, 6 dB down.
-///
-/// The digital modem sends everything in phase 2 but L1 "at the nominal
-/// transmit power level", and a retrain brings it back to that power
-/// (8.2/V.90): a power INFO0d names once for the whole call (Table 7/V.90,
-/// bits 29:32). So a retrain's tone B comes over the same line as loud as the
-/// tone B phase 2 heard, give or take what a softphone's gain control has
-/// done since. A softphone's own beep at the end of a call need not: one at
-/// exactly 1200 Hz, clean and 200 ms long, came as the server hung up on four
-/// live calls (live-1790032877, live-1790031913, live-1789986037,
-/// live-1789986211), 10 dB below the server's tone B, and on the first was
-/// taken for tone B in data mode and retrained on into a dead call. The
-/// server's own retrain in live-1789986211 arrived at the level its phase 2
-/// tone B had.
-const TONE_B_FLOOR: f64 = 0.5;
-
 /// The far end's role, whose tone this end listens for.
 fn far_role(role: Role) -> Role {
     match role {
@@ -284,11 +266,11 @@ impl RetrainWatch {
 
     /// For V.90's analogue modem, whose phase 2 heard the digital modem's
     /// tone B at `level`, if it did: a tone B less than half as loud is not
-    /// the digital modem's (see [`TONE_B_FLOOR`]). With no level, the same
-    /// watch as [`Self::new`].
+    /// the digital modem's (see [`phase2::TONE_B_FLOOR`]). With no level,
+    /// the same watch as [`Self::new`].
     pub(crate) fn heard_before(mut self, level: Option<f64>) -> Self {
         if let Some(level) = level {
-            self.floor = level * TONE_B_FLOOR;
+            self.floor = level * phase2::TONE_B_FLOOR;
         }
         self
     }
