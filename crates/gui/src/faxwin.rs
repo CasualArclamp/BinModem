@@ -324,10 +324,10 @@ impl Fax {
             halftone: Halftone::Threshold,
             v27ter: true,
             v29: true,
-            // Not written yet, so not offered. A DIS that lists a modulation
-            // this end cannot raise is an invitation to a call that dies at the
-            // training check.
-            v17: false,
+            // Offered, so a machine that has it trains at 14 400 first. T.30's
+            // ladder takes a failed training check down through 12 000, 9600
+            // and 7200 before it gives up on the modulation.
+            v17: true,
             error_correction: true,
             ..Self::default()
         }
@@ -681,11 +681,9 @@ impl Fax {
                         "7200 and 9600. Untick it to hold a call to V.27ter, \
                          which is slower and more forgiving of a bad line",
                     );
-                    ui.add_enabled_ui(false, |ui| {
-                        ui.checkbox(&mut self.v17, "V.17").on_hover_text(
-                            "7200 to 14 400, trellis coded. Not written yet",
-                        );
-                    });
+                    ui.checkbox(&mut self.v17, "V.17").on_hover_text(
+                        "7200 to 14 400, trellis coded. Untick it to hold a                          call to V.29 and V.27ter",
+                    );
                     ui.checkbox(&mut self.error_correction, "ECM").on_hover_text(
                         "Error correction mode, T.30 Annex A: the page goes in numbered frames, and any the far end cannot read are sent again instead of printed as streaks. Used only when the far end offers it too",
                     );
