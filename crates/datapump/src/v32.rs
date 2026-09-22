@@ -423,8 +423,90 @@ impl Scrambler {
     }
 }
 
-/// Encoding for the TRN segment after its first 256 symbols (Table 5).
-const TRN_STATES: [usize; 4] = [STATE_A, STATE_B, STATE_C, STATE_D];
+/// Segment 3 of the conditioning signal, TRN (5.2.3), one state at a time.
+///
+/// Binary ones through the sending end's scrambler, started from all zeros,
+/// two bits to the symbol and no differential coding. For the first 256
+/// symbols only the first bit of each pair counts, and chooses between A and
+/// C; from then on both do, by Table 5.
+///
+/// It is the one stretch of the start-up a receiver can know symbol for symbol
+/// before it arrives, which is what makes it the segment an equaliser trains
+/// on (5.2.3: "intended for training the adaptive equalizer in the receiving
+/// modem"). The far receiver runs this same sequence, from the polynomial of
+/// the end that is sending, and measures what arrived against it -- so there
+/// is one generator, and the transmitter sends what it says.
+#[derive(Debug, Clone)]
+pub struct TrnSequence {
+    scrambler: Scrambler,
+    /// Symbols produced so far.
+    sent: u64,
+}
+
+impl TrnSequence {
+    /// TRN as the modem at `mode`'s end sends it. A receiver wants the other
+    /// end's, [`Mode::peer`].
+    pub fn new(mode: Mode) -> Self {
+        // 5.2.3: "The initial state of the scrambler shall be all zeros".
+        Self {
+            scrambler: Scrambler::new(mode),
+            sent: 0,
+        }
+    }
+
+    /// The next state, as an index into the four: [`STATE_A`] to [`STATE_D`].
+    ///
+    /// There is always a next one. TRN has no end of its own: the sender
+    /// decides how long it runs, anything from 1280 symbols to 8192, and the
+    /// far end finds out only when what arrives stops matching. Which is why
+    /// this is not an `Iterator`, whose `next` would have a `None` to give and
+    /// never give it.
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> usize {
+        let state = Self::state(self.sent, &mut self.scrambler);
+        self.sent += 1;
+        state
+    }
+
+    /// Symbol `index` of TRN, taking its two bits from `scrambler`.
+    ///
+    /// Shared with [`Transmitter`], which cannot hand the segment a scrambler
+    /// of its own: the rate signal after TRN carries on with the same one, from
+    /// wherever TRN left it (5.3 resets it nowhere).
+    fn state(index: u64, scrambler: &mut Scrambler) -> usize {
+        let first = scrambler.scramble(true);
+        let second = scrambler.scramble(true);
+        if index < u64::from(TRN_BINARY_SYMBOLS) {
+            // "When this bit is ZERO, signal state A is transmitted; when this
+            // bit is ONE, signal state C is transmitted."
+            if first { STATE_C } else { STATE_A }
+        } else {
+            table_5(first, second)
+        }
+    }
+}
+
+/// Encoding for the TRN segment after its first 256 symbols (Table 5, which
+/// is Table 4/V.32bis), the first bit in time written first.
+///
+/// The table's order is not counting order: 00 A, 01 B, 11 C, 10 D. It is
+/// how Figure 1 labels the four states -- A is 0001, B 0101, C 1101 and D
+/// 1001, and the dibit is the first two bits of each label, Y1 Y2.
+///
+/// Written as a match so that it reads the way it is printed. It was an array
+/// indexed by the dibit as a binary number, which takes 10 as the third state
+/// and 11 as the fourth: C sent for D and D for C, every symbol whose first
+/// bit was a one a quarter turn from where a far end trained against Table 5
+/// would look for it. A real modem's TRN, in `tests/v32_trn.rs`, is the table
+/// as printed.
+fn table_5(first: bool, second: bool) -> usize {
+    match (first, second) {
+        (false, false) => STATE_A,
+        (false, true) => STATE_B,
+        (true, true) => STATE_C,
+        (true, false) => STATE_D,
+    }
+}
 
 /// What the transmitter puts on the line.
 ///
@@ -695,19 +777,11 @@ impl Transmitter {
             Signal::AlternateCA => alternate(STATE_C, STATE_A),
             Signal::ConditioningS => alternate(STATE_A, STATE_B),
             Signal::ConditioningSbar => alternate(STATE_C, STATE_D),
-            Signal::Trn => {
-                // 5.2.3: scrambled ones with the differential encoding
-                // disabled. For the first 256 symbols the leading bit of each
-                // dibit chooses between A and C; after that the whole dibit
-                // chooses, by Table 5.
-                let first = self.scrambler.scramble(true);
-                let second = self.scrambler.scramble(true);
-                if since_change < u64::from(TRN_BINARY_SYMBOLS) {
-                    if first { STATE_C } else { STATE_A }
-                } else {
-                    TRN_STATES[usize::from(first) << 1 | usize::from(second)]
-                }
-            }
+            // 5.2.3: scrambled ones with the differential encoding disabled,
+            // by the same generator a far receiver trains against. The
+            // scrambler is this transmitter's own, reset when the segment
+            // began, because the rate signal runs on from it.
+            Signal::Trn => TrnSequence::state(since_change, &mut self.scrambler),
             Signal::Rate(mut sequence) => {
                 // 5.3: the 16 bits repeat, scrambled, and are differentially
                 // encoded as data is.
@@ -1243,6 +1317,24 @@ mod tests {
             for &(nre, nim) in &STATES {
                 let probe = (re + (nre - re) * 0.2, im + (nim - im) * 0.2);
                 assert_eq!(nearest_state(probe), i, "state {i} nudged towards a neighbour");
+            }
+        }
+    }
+
+    #[test]
+    fn table_5_names_the_states_as_figure_1_labels_them() {
+        // Table 5: 00 A, 01 B, 11 C, 10 D. The first two bits of each state's
+        // label in Figure 1 say the same, which is the check that the table
+        // was not read in counting order.
+        for first in [false, true] {
+            for second in [false, true] {
+                assert_eq!(
+                    table_5(first, second),
+                    quadrant_of(u8::from(first), u8::from(second)),
+                    "dibit {}{}",
+                    u8::from(first),
+                    u8::from(second)
+                );
             }
         }
     }
