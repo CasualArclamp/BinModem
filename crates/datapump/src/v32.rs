@@ -293,13 +293,22 @@ const CARRIER_OFF: f64 = 5.62e-4;
 ///
 /// The states are a quarter turn apart, so the decision is which quarter the
 /// point falls in, with the boundaries midway between neighbours rather than
-/// on the axes. Turning the point by half that angle first puts the boundaries
-/// where an ordinary test of signs finds them.
+/// on the axes: forty-five degrees either side of each state, whose angles
+/// are A's 198.43 and its quarter turns. Turning the point by atan(1/2), 26.57
+/// degrees -- forty-five less atan(1/3), which is how far A sits below the
+/// negative real axis -- puts every state on a diagonal, A at (-√5, -√5), and
+/// so every boundary on an axis, where an ordinary test of signs finds it.
+///
+/// This turned by 22.5 degrees once, half a quarter turn, which is right for
+/// states that sit on the axes. These do not, and it left every boundary four
+/// degrees out: a point at 245 degrees was taken for A although it is nearer
+/// B, which biased every decision at 4800 and in the start-up.
 fn nearest_state(p: (f64, f64)) -> usize {
-    // Half of ninety degrees away from state A's own angle.
-    const COS: f64 = 0.923_879_532_511_286_8;
-    const SIN: f64 = 0.382_683_432_365_089_8;
-    // Bring A to just inside the first quadrant, then read the quadrant off.
+    // The cosine and sine of atan(1/2): two and one over the root of five.
+    const COS: f64 = 0.894_427_190_999_915_9;
+    const SIN: f64 = 0.447_213_595_499_957_9;
+    // Bring A onto the diagonal of the third quadrant, then read the quadrant
+    // off.
     let turned = (p.0 * COS - p.1 * SIN, p.0 * SIN + p.1 * COS);
     let from_a = match (turned.0 >= 0.0, turned.1 >= 0.0) {
         (true, true) => 0,
@@ -1335,6 +1344,27 @@ mod tests {
                     u8::from(first),
                     u8::from(second)
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn the_four_point_boundaries_lie_halfway_between_neighbours() {
+        // Each state owns the ninety degrees centred on it: 44 degrees either
+        // side is still that state, 46 is the neighbour's. The old slicer's
+        // boundaries sat four degrees round from these, which fails this for
+        // every state twice: at 46 degrees one way and 44 the other.
+        for (i, &(re, im)) in STATES.iter().enumerate() {
+            let own = im.atan2(re);
+            for (off, want) in [
+                (44.0, i),
+                (-44.0, i),
+                (46.0, (i + 1) & 3),
+                (-46.0, (i + 3) & 3),
+            ] {
+                let at = own + f64::to_radians(off);
+                let p = (CONSTELLATION_RMS * at.cos(), CONSTELLATION_RMS * at.sin());
+                assert_eq!(nearest_state(p), want, "state {i}, {off:+} degrees round");
             }
         }
     }
