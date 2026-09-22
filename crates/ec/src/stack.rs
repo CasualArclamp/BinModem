@@ -123,6 +123,22 @@ const XID_N400: u32 = 1;
 /// margin in it to take out.
 const XID_LAST_WAIT_MS: u32 = crate::lapm::PROPAGATION_MS;
 
+/// How many compressed streams that will not decode are answered with a
+/// re-established link before the next one releases it.
+///
+/// V.42bis 5.8 and V.44 7.15 both ask for "appropriate recovery action,
+/// including re-establishment of the error corrected connection", and 5.6 a)
+/// makes that a C-INIT at both ends: both dictionaries start again from
+/// nothing, which is the only way two that disagree ever agree again.
+///
+/// A far end whose encoder does not start again when the link does will fail
+/// the same way every time. That is what a real one did (live-1790041800):
+/// its first compressed codeword was a STEPUP and then 793, from a dictionary
+/// of more than five hundred entries, after 34 characters on the link. So
+/// the reset is only worth making a few times. After that there is no
+/// recovery left, and a link carrying nothing readable is better put down.
+pub const UNDECODABLE_RESETS: u64 = 3;
+
 /// Where a V.42 connection has got to.
 ///
 /// The three stages are separate because they answer separate questions, in
@@ -225,8 +241,8 @@ pub struct Stack {
     /// Whether the link has ever been up, which is what tells a failure to
     /// establish apart from a connection that later ended.
     established: bool,
-    /// Compressed streams that would not decode, each of which took the link
-    /// down with it.
+    /// Compressed streams that would not decode. Each re-established the
+    /// link, up to [`UNDECODABLE_RESETS`], and the one after that released it.
     ///
     /// Counted rather than inferred. It is the one failure here that looks
     /// like something else from outside: the link goes, error control starts
@@ -1232,10 +1248,23 @@ impl Stack {
                     // A compressed stream that will not decode cannot be
                     // recovered from by asking again: the dictionary at each
                     // end is built from everything that came before, so once
-                    // they disagree they stay disagreed. V.42bis 6.4 has the
-                    // receiver ask for the link to be reset.
+                    // they disagree they stay disagreed. V.42bis 5.8 has the
+                    // control function recover by "re-establishment of the
+                    // error corrected connection", and the L-ESTABLISH that
+                    // follows is 5.6 a)'s C-INIT at both ends.
+                    //
+                    // Not a release. This used to send DISC, which ended a
+                    // call over a single codeword that one SABME could have
+                    // fixed. What the far end sent before it hears the SABME
+                    // cannot reach the new decoder: those frames carry N(S)
+                    // past the V(R) of 0 the reset leaves, so they arrive out
+                    // of sequence and are never delivered.
                     self.undecodable += 1;
-                    self.lapm.disconnect();
+                    if self.undecodable > UNDECODABLE_RESETS {
+                        self.lapm.disconnect();
+                    } else {
+                        self.lapm.connect();
+                    }
                 }
             }
             None => self.delivered.extend_from_slice(&arrived),
@@ -2051,6 +2080,131 @@ mod tests {
         );
     }
 
+
+    /// A frame body written the way a frame log prints it.
+    fn hex(text: &str) -> Vec<u8> {
+        text.split_whitespace()
+            .map(|h| u8::from_str_radix(h, 16).expect("not hex"))
+            .collect()
+    }
+
+    /// Everything the far end says, framed as it would arrive.
+    fn wire(stack: &mut Stack, body: &[u8]) {
+        let mut e = Encoder::new(Fcs::Bits16);
+        e.frame(body);
+        while let Some(bit) = e.next_bit() {
+            stack.next_bit();
+            stack.feed_bit(bit);
+        }
+        stack.tick(0);
+    }
+
+    /// Idle flags from the far end, long enough for this end to send whatever
+    /// it has queued, and with time passing short of any T401.
+    fn idle(stack: &mut Stack) {
+        for _ in 0..4 {
+            for _ in 0..2_000 {
+                stack.next_bit();
+                stack.feed_bit(true);
+            }
+            stack.tick(10);
+        }
+    }
+
+    /// The frames this end has sent since the log was last taken.
+    fn sent(stack: &mut Stack) -> Vec<Vec<u8>> {
+        stack.take_log().into_iter().filter(|c| c.outbound).map(|c| c.body).collect()
+    }
+
+    /// live-1790041800's far end, up to the point where it answered our
+    /// XID with V.42bis at 1024 codewords and strings of 32, and our SABME.
+    fn linked_to_the_1790041800_far_end() -> Stack {
+        let mut stack = Stack::new(Role::Originator, Params::default()).without_detection();
+        stack.offer_compression(Compression::Both);
+        stack.connect();
+        idle(&mut stack);
+        wire(
+            &mut stack,
+            &hex("03 af 82 80 00 13 03 03 8e 89 00 05 02 04 00 06 02 04 00 07 01 0f 08 01 0f \
+                  f0 00 0f 00 03 56 34 32 01 01 03 02 02 04 00 03 01 20"),
+        );
+        idle(&mut stack);
+        wire(&mut stack, &hex("03 73"));
+        assert!(stack.is_connected(), "the link never came up");
+        assert_eq!(stack.compression_name(), Some("V.42bis"));
+        stack.take_log();
+        stack
+    }
+
+    /// A negotiated stream that will not decode resets the link; it does not
+    /// release it.
+    ///
+    /// The five I-frames are exactly what that call's far end sent. Its
+    /// third starts compressed mode with a STEPUP and then codeword 793, from
+    /// a dictionary that had been built from data that never reached us. We
+    /// sent DISC and the call ended. V.42bis 5.8 asks for the connection to be
+    /// re-established instead, which starts both dictionaries again (5.6 a).
+    #[test]
+    fn a_stream_that_will_not_decode_starts_the_link_again() {
+        let mut stack = linked_to_the_1790041800_far_end();
+        for body in [
+            "01 00 00 03 ad 7c 5f 23 9e 7c 5a 8a cf d3 8f 58 1f d7 7d dd f8 78 47 08 a0 b0 af \
+             11 74 a2 41 3f c1 08 33",
+            "01 02 00 0c c0 00 00",
+            "01 04 00 02 32 d6 98 81",
+            "01 06 00 92 25 78 19 83 75 70 b6 d0 83 11 96 d6 00 92 6b 58 d8 9a 53 19 ce 36 43 \
+             6d 45 dc 96 db 6e 47 fa 06 9c 70 27 1a 57 55 1c 2c 4e e4 e2 73 30 52 57 d5 75 d9 79",
+            "01 08 00 b1 5d 00",
+        ] {
+            wire(&mut stack, &hex(body));
+        }
+        idle(&mut stack);
+        assert_eq!(stack.undecodable_streams(), 1);
+        let sent = sent(&mut stack);
+        assert!(sent.contains(&vec![0x03, 0x7f]), "no SABME went out: {sent:02x?}");
+        assert!(!sent.contains(&vec![0x03, 0x53]), "the link was released: {sent:02x?}");
+
+        // The far end's UA, and then what it sends from its own fresh start.
+        // Frames it sent before our SABME reached it cannot get in: they
+        // carry sequence numbers the reset has left behind.
+        wire(&mut stack, &hex("03 73"));
+        assert!(stack.is_connected(), "the link did not come back");
+        stack.take_received();
+        wire(
+            &mut stack,
+            &Frame::I { ns: 0, nr: 0, poll: false, info: b"Login: ".to_vec() }
+                .encode(DLCI_DATA, Role::Answerer, Kind::Command),
+        );
+        assert_eq!(stack.take_received(), b"Login: ");
+    }
+
+    /// And a far end that never starts its dictionary again is put down, once
+    /// resetting has been tried as often as it is worth.
+    #[test]
+    fn a_far_end_that_never_starts_again_is_released_in_the_end() {
+        let mut stack = linked_to_the_1790041800_far_end();
+        for round in 0..=UNDECODABLE_RESETS {
+            // The same failure every time: ECM, then STEPUP and a codeword
+            // from a dictionary this end has never seen.
+            for (ns, info) in [(0, "0c c0 00 00"), (1, "02 32 d6 98 81")] {
+                wire(
+                    &mut stack,
+                    &Frame::I { ns, nr: 0, poll: false, info: hex(info) }
+                        .encode(DLCI_DATA, Role::Answerer, Kind::Command),
+                );
+            }
+            idle(&mut stack);
+            assert_eq!(stack.undecodable_streams(), round + 1);
+            let sent = sent(&mut stack);
+            if round < UNDECODABLE_RESETS {
+                assert!(sent.contains(&vec![0x03, 0x7f]), "round {round}: no SABME: {sent:02x?}");
+                wire(&mut stack, &hex("03 73"));
+                assert!(stack.is_connected(), "round {round}: the link did not come back");
+            } else {
+                assert!(sent.contains(&vec![0x03, 0x53]), "never released: {sent:02x?}");
+            }
+        }
+    }
 
     /// And a far end that was never compressing at all keeps its link.
     ///

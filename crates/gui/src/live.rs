@@ -1351,11 +1351,17 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         let undecodable = modem.undecodable_streams();
         if undecodable > last_undecodable {
             last_undecodable = undecodable;
-            tx.log(
-                Direction::Note,
-                "V.42bis: what arrived would not decode, so the link is being put down"
-                    .to_owned(),
-            );
+            let name = modem.compression_name().unwrap_or("compression");
+            let action = if undecodable > ec::stack::UNDECODABLE_RESETS {
+                "so the link is being put down".to_owned()
+            } else {
+                format!(
+                    "so the link is being re-established to start both dictionaries again \
+                     ({undecodable} of {})",
+                    ec::stack::UNDECODABLE_RESETS
+                )
+            };
+            tx.log(Direction::Note, format!("{name}: what arrived would not decode, {action}"));
         }
 
         let state = modem.state();
