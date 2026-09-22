@@ -1,6 +1,4 @@
-One file. Download `binmodem.exe` and run it — nothing to install, and no
-Visual C++ redistributable, because the C runtime is linked in. The build is
-checked for that before it is published.
+One file. Download `binmodem.exe` and run it. There is nothing to install, and no Visual C++ redistributable is needed because the C runtime is linked in.
 
 ```
 binmodem.exe                  a modem on a real line
@@ -9,62 +7,38 @@ binmodem.exe --telnet         a board over a socket
 binmodem.exe --capture        replay the golden capture
 ```
 
-The window opens on a real line, because that is what the program is for.
-Reaching a line outside the machine wants two virtual audio cables, so the
-output can go to a softphone's microphone while the input comes from its
-speaker — [docs/usage.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/usage.md)
-has the setup. `--capture` replays a real Bell 103 call instead and needs no
-audio at all, which is the quickest way to see whether it runs.
+[docs/usage.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/usage.md) has the setup.
 
-Bell 103, V.22, V.22bis, V.32, V.32bis and V.34; V.8 negotiation, V.42 error
-control and V.42bis compression; group 3 fax over V.29 and V.27 ter, with error
-correction mode and MMR; PPP with PAP and CHAP; a V.250 AT interface, an
-ANSI/CP437 terminal and ZMODEM.
+## What's new in 1.2
 
-New since v0.6.0: **something other than another BinModem can dial in**, and a
-fax to a real machine falls back when the line will not carry the fastest rate.
+### V.90 reaches 56k data on live calls
 
-- **A login in front of PPP, both ways round.** A call this end answers can
-  meet what a dial-up provider showed: a banner, `login:`, `Password:`, and a
-  prompt where `ppp` starts PPP, `help` lists the commands and `logout` hangs
-  up. A dialler that skips the text and sends frames from the first octet — as
-  Windows' Dial-Up Networking does — is answered as PPP and asked for the same
-  account another way. The **Network** window has the one account, and **Log
-  in, then PPP** on the calling end answers the far end's prompts by itself.
-- **PAP and CHAP** (RFC 1334, RFC 1994, over RFC 1321's MD5, checked against
-  its own test suite), in either direction. An end given an account asks callers
-  for CHAP first and PAP after, never drops the demand when a far end refuses
-  it, and ends the link with the reason on both ends when a password is wrong.
-  A far end that got LCP and then nothing, because nothing here could answer its
-  question, now gets an answer.
-- **A fax that cannot train at the top rate steps down.** A real wired fax
-  machine over a VoIP trunk offered 9600, could not train there, and answered
-  the training check by re-sending its DIS rather than the failure-to-train the
-  book asks for. This end had read every DIS as "start over" and commanded 9600
-  again, five times, until the far end gave up. A repeated DIS after the command
-  has gone is now read as the failure to train it is: 9600, 7200, 4800, 2400,
-  and then a polite goodbye.
+- **A rate menu:** the status panel has a V.90 rate drop-down listing every downstream rate. Once a call has read its DIL, green rates are predicted to read cleanly and red ones are predicted to make errors. Any of them can be tried. During a data call, a choice renegotiates to that rate at once (V.90 9.6). Before a call, it pins the rate the next start-ups ask for; "auto" leaves the choice to the modem.
+- **Falls back when the line is disturbed:** data mode counts its own wrong decisions, remembers them for fifteen seconds, and renegotiates to a slower rate when disturbances keep coming. A fall back drops at most eight bits a frame. Packet loss concealment, jitter-buffer slips and audio holes from a softphone are recognised and not held against the line. The transcript says why the rate watch acted, and on what numbers.
+- **Room in the first rate:** the rate chosen at the end of the DIL leaves a margin, rather than every level sitting exactly at the design spacing.
+- **Spectral shaping:** where the path cuts the top of the band, as a VoIP provider's did, the modem asks the server to shape its spectrum (5.4.5) and comes up faster than it would unshaped.
+- **Phase 4 in the transcript:** every CP sent and MP found, E, Ed and B1d get a line each, also written beside the recording.
+- **Dead lines:** silence is no longer taken for the server's Ed. A server that stops during phase 4 ends the phase within about a second.
+- **CP:** every CP now sends one constellation field per data frame interval.
+- **Our V.90 server:** its look-ahead sends every frame where it belongs, so a caller asking for shaping gets it.
 
-The PPP automaton was found to have four faults on the way to authenticating,
-each now fixed and tested: its configure, terminate and code-reject packets went
-out under the options the link had agreed rather than the defaults RFC 1661
-requires, so a far end back at its own defaults could not read a hang-up or a
-fresh request; a far end's Terminate-Request left this end stuck; a hang-up took
-thirty seconds rather than six; a far end wanting a method this end lacks was
-answered for ever; and a protocol this end does not run got silence rather than
-the Protocol-Reject that stops a peer asking for half a minute.
+### V.42 and V.8, from a live call
 
-V.34 does not yet follow a full retrain, which a far end falls back to when a
-renegotiation goes unanswered or the line changes too much for one; the call
-ends there instead. 33 600 wants about 35 dB of signal to noise and a VoIP line
-gives 33 or 34, so a far end asking for 31 200 or 28 800 is the line, not the
-modem.
+- **XID fixed four ways:** the poll bit, option bit 16, one command with a retransmit timer instead of a burst, and a V.44 offer a far end can read. A real server has now answered our XID, and V.44 has been negotiated live.
+- **LAPM and HDLC:** an I or supervisory frame stands in for a lost UA, an abort keeps the frame's trailing ones, and XID reads option masks of any length.
+- **V.8:** a sequence the jitter buffer tore is dropped alone, not along with the whole one after it. Two menus count as identical only when their sequences are.
+- **V.34 phase 2:** a calling modem whose ranging reversal went unanswered now sends tone B again. It used to fall silent, and both ends waited until phase 2 timed out.
 
-Fax is one page per call, and V.17 at 14 400 is not written yet. The modem
-stays in fax class after a fax call; `AT+FCLASS=0` makes it a modem again.
+### In the window
 
-V.32 at 9600 still connects to a real modem and loses the carrier about half a
-second in. `AT+MS=V32B,1,4800,14400` is what has been used for the calls that
-stayed up.
+- **Constellations:** every modulation's constellation is drawn in the same style.
 
-Checksums are in `SHA256SUMS.txt`.
+## Status
+
+- **One ISP's V.90 pool sometimes stops dead** just as its modem takes up our constellation, at the end of phase 4 or in a renegotiation. Every CP we sent was checked against V.90 Table 14 bit for bit, and they are correct. The same server has also reached data mode at 54 666 and 56 000.
+- **Known:** the softphone's end-of-call beep can be taken for the server's tone B, so a call that has already ended goes back to phase 2 briefly.
+- **Compression between two BinModems in V.90** is not yet offered correctly.
+- **V.92:** planned and in progress on a branch; not in this release.
+- **Unchanged:** the fax window sends one page per call, and V.17 is not written yet.
+
+1624 tests. Checksums are in `SHA256SUMS.txt`.

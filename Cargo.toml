@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/at", "crates/datapump", "crates/dsp", "crates/fax", "crates/ec", "crates/gui", "crates/http", "crates/line", "crates/login", "crates/modem", "crates/ppp", "crates/proxy", "crates/tcp", "crates/telemetry", "crates/telnet", "crates/transfer", "crates/v8", "crates/terminal"]
 
 [workspace.package]
-version    = "1.1.0"
+version    = "1.2.0"
 edition    = "2024"
 license    = "GPL-3.0-or-later"
 repository = "https://github.com/CasualArclamp/BinModem"
