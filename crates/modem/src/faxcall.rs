@@ -2,8 +2,9 @@
 //! them.
 //!
 //! The join between the two halves. [`fax::call`] knows the procedure and
-//! nothing about signals; [`datapump::v21`], [`datapump::v27ter`] and
-//! [`datapump::v29`] know the signals and nothing about the procedure. This
+//! nothing about signals; [`datapump::v21`], [`datapump::v27ter`],
+//! [`datapump::v29`] and [`datapump::v17`] know the signals and nothing about
+//! the procedure. This
 //! puts one on top of the other and gives the result a sample at a time, which
 //! is the only thing a line understands.
 //!
@@ -13,7 +14,7 @@
 //! then 9600, then silence, then 300 again -- and every one of those changes
 //! is a carrier going up or down at both ends.
 
-use datapump::{v21, v27ter, v29};
+use datapump::{v17, v21, v27ter, v29};
 use fax::call::{Call, Line, Phase, Role, Speed};
 use fax::coding::Coding;
 use fax::page::{Page, Resolution};
@@ -24,6 +25,7 @@ use fax::t30::Modulation;
 enum Carrier {
     V27ter(v27ter::Rate),
     V29(v29::Rate),
+    V17(v17::Rate),
 }
 
 impl Carrier {
@@ -37,10 +39,20 @@ impl Carrier {
             (Modulation::V29, 9600) => Self::V29(v29::Rate::R9600),
             (Modulation::V29, 7200) => Self::V29(v29::Rate::R7200),
             (Modulation::V29, 4800) => Self::V29(v29::Rate::R4800),
+            (Modulation::V17, rate) => Self::V17(v17::Rate::of(rate)?),
             _ => return None,
         })
     }
 }
+
+/// Every modulation this end has a pump for, and so may offer: V.27 ter, V.29
+/// and V.17.
+///
+/// Not what a call offers unless it is asked to. [`fax::call::OUR_MODULATIONS`]
+/// stays the default offer, which is what the window's boxes start from and
+/// what everything before V.17 was proved against; offering this puts V.17
+/// in the DIS, and two ends that both do settle on V.17 at 14 400.
+pub const MODULATIONS: [Modulation; 3] = [Modulation::V27ter, Modulation::V29, Modulation::V17];
 
 /// A fax call, from either end.
 #[derive(Debug)]
@@ -52,6 +64,11 @@ pub struct FaxCall {
     v27ter_rx: v27ter::Receiver,
     v29_tx: v29::Transmitter,
     v29_rx: v29::Receiver,
+    v17_tx: v17::Transmitter,
+    v17_rx: v17::Receiver,
+    /// The speed of the last V.17 long train this end sent, which decides
+    /// whether the next burst may have the short one.
+    v17_long: Option<Speed>,
     cng: v21::Tone,
     ced: v21::Tone,
     /// What the line was doing on the last sample, so a change can be seen.
@@ -74,7 +91,8 @@ impl FaxCall {
         Self::with(Call::answer(fs, identification), fs)
     }
 
-    fn with(call: Call, fs: f64) -> Self {
+    fn with(mut call: Call, fs: f64) -> Self {
+        call.set_available(&MODULATIONS);
         Self {
             call,
             control_tx: v21::Sender::new(fs),
@@ -83,6 +101,9 @@ impl FaxCall {
             v27ter_rx: v27ter::Receiver::new(fs),
             v29_tx: v29::Transmitter::new(fs),
             v29_rx: v29::Receiver::new(fs),
+            v17_tx: v17::Transmitter::new(fs),
+            v17_rx: v17::Receiver::new(fs),
+            v17_long: None,
             cng: v21::Tone::new(v21::CNG, fs),
             ced: v21::Tone::new(v21::CED, fs),
             line: Line::Quiet,
@@ -99,10 +120,12 @@ impl FaxCall {
 
     /// Put V.27 ter's protection against talker echo in front of every burst:
     /// a fifth of a second of plain carrier, then twenty milliseconds of
-    /// nothing, then the training.
+    /// nothing, then the training. V.17's is the same thing (5.3/V.17), and
+    /// goes on with it.
     #[must_use]
     pub fn with_echo_protection(mut self, on: bool) -> Self {
         self.v27ter_tx.set_echo_protection(on);
+        self.v17_tx.set_echo_protection(on);
         self
     }
 
@@ -224,7 +247,10 @@ impl FaxCall {
 
     /// Whether anything of the far end's is on the line.
     pub fn carrier(&self) -> bool {
-        self.control_rx.carrier() || self.v27ter_rx.carrier() || self.v29_rx.carrier()
+        self.control_rx.carrier()
+            || self.v27ter_rx.carrier()
+            || self.v29_rx.carrier()
+            || self.v17_rx.carrier()
     }
 
     /// The page carrier the line is on just now, if it is on one.
@@ -254,6 +280,7 @@ impl FaxCall {
             Line::Fast(speed) => match Carrier::of(speed)? {
                 Carrier::V27ter(_) => self.v27ter_tx.last_point(),
                 Carrier::V29(_) => self.v29_tx.last_point(),
+                Carrier::V17(_) => self.v17_tx.last_point(),
             },
             Line::FastListen(speed) => match Carrier::of(speed)? {
                 Carrier::V27ter(_) => self
@@ -264,6 +291,10 @@ impl FaxCall {
                     .v29_rx
                     .carrier()
                     .then(|| self.v29_rx.constellation_point()),
+                Carrier::V17(_) => self
+                    .v17_rx
+                    .carrier()
+                    .then(|| self.v17_rx.constellation_point()),
             },
             _ => None,
         }
@@ -273,10 +304,12 @@ impl FaxCall {
     ///
     /// One for V.27 ter, whose points are on the unit circle. V.29's outer
     /// ring on the axes is a third beyond it, and a scope drawn to the unit
-    /// circle would put four of its sixteen points off the edge.
+    /// circle would put four of its sixteen points off the edge. V.17's
+    /// crosses reach further still.
     pub fn constellation_peak(&self) -> f64 {
         match self.page_carrier() {
             Some(Carrier::V29(_)) => self.v29_rx.constellation_peak(),
+            Some(Carrier::V17(rate)) => rate.peak(),
             _ => 1.0,
         }
     }
@@ -305,6 +338,7 @@ impl FaxCall {
         Some(match self.page_carrier()? {
             Carrier::V27ter(_) => self.v27ter_rx.residual_error(),
             Carrier::V29(_) => self.v29_rx.residual_error(),
+            Carrier::V17(_) => self.v17_rx.residual_error(),
         })
     }
 
@@ -316,6 +350,7 @@ impl FaxCall {
                 self.v27ter_rx.residual_error() / self.v27ter_rx.point_spacing()
             }
             Carrier::V29(_) => self.v29_rx.residual_error() / self.v29_rx.point_spacing(),
+            Carrier::V17(_) => self.v17_rx.residual_error() / self.v17_rx.point_spacing(),
         })
     }
 
@@ -325,6 +360,7 @@ impl FaxCall {
             None => 2,
             Some(Carrier::V27ter(rate)) => usize::from(rate.phases()),
             Some(Carrier::V29(rate)) => rate.constellation().len(),
+            Some(Carrier::V17(rate)) => rate.points(),
         }
     }
 
@@ -341,6 +377,12 @@ impl FaxCall {
             Some(Carrier::V29(v29::Rate::R9600)) => "16APM",
             Some(Carrier::V29(v29::Rate::R7200)) => "8APM",
             Some(Carrier::V29(v29::Rate::R4800)) => "4PSK",
+            // Trellis-coded QAM, named by the points on the line rather than
+            // by the bits: 128 carry six, one of them redundant.
+            Some(Carrier::V17(v17::Rate::R14400)) => "128TCM",
+            Some(Carrier::V17(v17::Rate::R12000)) => "64TCM",
+            Some(Carrier::V17(v17::Rate::R9600)) => "32TCM",
+            Some(Carrier::V17(v17::Rate::R7200)) => "16TCM",
         }
     }
 
@@ -350,6 +392,7 @@ impl FaxCall {
             None => "V.21",
             Some(Carrier::V27ter(_)) => "V.27ter",
             Some(Carrier::V29(_)) => "V.29",
+            Some(Carrier::V17(_)) => "V.17",
         }
     }
 
@@ -376,6 +419,7 @@ impl FaxCall {
             Line::Fast(_) => {
                 self.v27ter_tx.abort();
                 self.v29_tx.abort();
+                self.v17_tx.abort();
             }
             _ => {}
         }
@@ -390,6 +434,20 @@ impl FaxCall {
                     self.v27ter_tx.start(rate, v27ter::Training::Long);
                 }
                 Some(Carrier::V29(rate)) => self.v29_tx.start(rate),
+                // T.30 5.1, Note 5: the long train for a training check and
+                // for the first message after CTC/CTR, and the resync for
+                // every other. What CTC/CTR brings is a new speed, and a
+                // resync is only any use to a receiver that has had a long
+                // train at the speed it is at, so a message at any speed but
+                // the last long train's has the long one too.
+                Some(Carrier::V17(rate)) => {
+                    let long = self.call.phase() == Phase::Training || self.v17_long != Some(speed);
+                    if long {
+                        self.v17_long = Some(speed);
+                    }
+                    let training = if long { v17::Training::Long } else { v17::Training::Resync };
+                    self.v17_tx.start(rate, training);
+                }
                 None => {}
             },
             Line::FastListen(speed) => match Carrier::of(speed) {
@@ -400,6 +458,12 @@ impl FaxCall {
                 Some(Carrier::V29(rate)) => {
                     self.v29_rx.set_rate(rate);
                     self.v29_rx.restart();
+                }
+                // The taps the last long train left are kept through this:
+                // a resync is read with them.
+                Some(Carrier::V17(rate)) => {
+                    self.v17_rx.set_rate(rate);
+                    self.v17_rx.restart();
                 }
                 None => {}
             },
@@ -440,6 +504,10 @@ impl FaxCall {
                     Some(Carrier::V29(_)) => {
                         self.v29_rx.feed(input);
                         (self.v29_rx.take_bits(), self.v29_rx.carrier())
+                    }
+                    Some(Carrier::V17(_)) => {
+                        self.v17_rx.feed(input);
+                        (self.v17_rx.take_bits(), self.v17_rx.carrier())
                     }
                     // A speed this end has no receiver for hears nothing, and
                     // the training check that never arrives is refused, which
@@ -497,6 +565,19 @@ impl FaxCall {
                     }
                     let idle = !self.v29_tx.is_transmitting();
                     (self.v29_tx.next_sample(), idle)
+                }
+                Some(Carrier::V17(_)) => {
+                    while self.v17_tx.pending_bits() < 32 {
+                        match self.call.next_fast_bit() {
+                            Some(bit) => self.v17_tx.push_bits(&[bit]),
+                            None => break,
+                        }
+                    }
+                    if self.v17_tx.trained() && self.v17_tx.pending_bits() == 0 {
+                        self.v17_tx.stop();
+                    }
+                    let idle = !self.v17_tx.is_transmitting();
+                    (self.v17_tx.next_sample(), idle)
                 }
                 None => (0.0, true),
             },

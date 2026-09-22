@@ -226,10 +226,12 @@ const T5_SECONDS: f64 = 60.0;
 const TCF_ZEROS_WANTED: f64 = 0.95;
 const TCF_STARTS_AFTER: usize = 32;
 
-/// The modulations this modem can carry a page with.
+/// The modulations a call offers and will carry a page with, unless whoever
+/// drives it says it has pumps for more ([`Call::set_available`]).
 ///
-/// V.17 is not among them yet. What goes in a DIS is this same fact in the
-/// form Table 2 wants it.
+/// What goes in a DIS is this same fact in the form Table 2 wants it. V.17
+/// is left out here, and put in by the modem crate's fax call, which has a
+/// V.17 pump to put behind it.
 pub const OUR_MODULATIONS: [Modulation; 2] = [Modulation::V27ter, Modulation::V29];
 
 /// Which post-message command goes out next under error correction mode.
@@ -285,6 +287,8 @@ pub struct Call {
     /// The modulations this end is willing to use, which is what goes in its
     /// DIS and what it will choose from when it sends.
     offer: Vec<Modulation>,
+    /// The modulations there are pumps for, which an offer is kept to.
+    available: Vec<Modulation>,
     /// The minimum scan line time the receiving end asked for, as the three
     /// bits of its DIS.
     scan_line_field: u8,
@@ -418,6 +422,7 @@ impl Call {
             rate: 4800,
             fallback: Vec::new(),
             offer: OUR_MODULATIONS.to_vec(),
+            available: OUR_MODULATIONS.to_vec(),
             scan_line_field: 0b111,
             resolution: if fine { Resolution::Fine } else { Resolution::Standard },
             coding: Coding::ModifiedHuffman,
@@ -517,12 +522,19 @@ impl Call {
         let mut kept: Vec<Modulation> = offer
             .iter()
             .copied()
-            .filter(|m| OUR_MODULATIONS.contains(m))
+            .filter(|m| self.available.contains(m))
             .collect();
         if kept.is_empty() {
             kept.push(Modulation::V27ter);
         }
         self.offer = kept;
+    }
+
+    /// Say which modulations there are pumps for: what
+    /// [`set_offer`](Self::set_offer) keeps from here on. [`OUR_MODULATIONS`]
+    /// until this is called, and the offer itself is left as it is.
+    pub fn set_available(&mut self, available: &[Modulation]) {
+        self.available = available.to_vec();
     }
 
     pub fn resolution(&self) -> Resolution {
