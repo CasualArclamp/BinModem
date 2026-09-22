@@ -580,6 +580,9 @@ pub fn our_capabilities(offer: &[Modulation], error_correction: bool) -> Vec<u8>
         offer.contains(&Modulation::V27ter),
         offer.contains(&Modulation::V29),
     ) {
+        // Table 2 has no row for V.17 without the other two, so an offer
+        // with it says all three, which is what `capabilities` reads 1101 as.
+        _ if offer.contains(&Modulation::V17) => 0b1101,
         (true, true) => 0b1100,
         (false, true) => 0b1000,
         // V.27 ter is what every group 3 machine must have, so it is also
