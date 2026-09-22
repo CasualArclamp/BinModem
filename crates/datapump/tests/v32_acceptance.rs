@@ -1497,7 +1497,12 @@ fn every_row() -> Vec<Row> {
         slips.extend(std::iter::repeat_n(Slip::Insert(160, Fill::Silence), 2));
         let line = Line::Cable { ppm: 20.0, slips_in_data: spread(&mut rng, slips, 60.0) };
         let call = Call { offer: everything, speed: Speed::At14400T, line, data_s: 60.0, seed: 0x800, trace: false };
-        add("cable_with_slips", "cable 20 ppm, slips".into(), call, Pass::Clean(0.97));
+        // Two errored 100 ms blocks per fault, and no more: twelve faults in
+        // 600 blocks is 96 % clean. A slip here costs the canceller 36-49 ms to
+        // find where the echo went and the receiver a clean 64-symbol window
+        // after that, 73-86 ms in all, so one that straddles a block boundary
+        // errs two however good the receiver is. 97 % allowed 1.5 a fault.
+        add("cable_with_slips", "cable 20 ppm, slips".into(), call, Pass::Clean(0.96));
     }
 
     // Rory's line: 0.7 s each way, the two clocks 100 ppm apart, the
@@ -1631,7 +1636,6 @@ fn cable_with_drift() {
 /// The same loopback dropping, repeating and running dry, which is what
 /// `modem-loop` counts as samples lost coming in and as underruns.
 #[test]
-#[ignore = "V.32 rebuild: enabled by package D"]
 fn cable_with_slips() {
     check("cable_with_slips");
 }
