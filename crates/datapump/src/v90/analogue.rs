@@ -992,22 +992,36 @@ fn describe_cp(cp: &Cp) -> String {
 }
 
 /// An MP as the transcript tells it (Table 16): its type, the fastest
-/// upstream it allows, its acknowledge bit, and whether its precoder does
-/// anything.
+/// upstream it allows, its acknowledge bit, whether its precoder does
+/// anything, and then everything else it asks of this end's transmitter --
+/// trellis, non-linear encoder, shaping and the precoder's three
+/// coefficients as they came, real then imaginary -- since none of it can be
+/// read back off a recording of the signal it shapes.
 fn describe_mp(mp: &Mp) -> String {
     // Bit 18: "1 = Type 1 with precoder coefficients". A type 1 MP whose
     // coefficients are all zero asks for no precoding at all.
     let precoding = mp.precoding.is_some_and(|h| h.iter().any(|&c| c != (0, 0)));
+    let trellis = match mp.trellis {
+        Trellis::States16 => 16,
+        Trellis::States32 => 32,
+        Trellis::States64 => 64,
+    };
+    let coefficients = mp
+        .precoding
+        .map(|h| format!(", h {}", h.map(|(re, im)| format!("({re},{im})")).join(" ")))
+        .unwrap_or_default();
     // V.90's bits 24:27 are where V.34 reads its answer-to-call rate:
     // "Data rate = drn*2400".
     format!(
-        "{}: type {}, upstream at most {} bit/s (drn {}), acknowledge {}, precoding {}",
+        "{}: type {}, upstream at most {} bit/s (drn {}), acknowledge {}, precoding {}, trellis {trellis}-state, non-linear {}, {} shaping{coefficients}",
         if mp.acknowledge { "MP'" } else { "MP" },
         u8::from(mp.precoding.is_some()),
         2400 * u32::from(mp.answer_to_call),
         mp.answer_to_call,
         u8::from(mp.acknowledge),
         if precoding { "on" } else { "off" },
+        if mp.non_linear { "on" } else { "off" },
+        if mp.expanded_shaping { "expanded" } else { "minimum" },
     )
 }
 
