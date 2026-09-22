@@ -2235,6 +2235,21 @@ impl Modem {
         self.rx.set_adapting(!self.startup.far_end_quiet());
         if self.was_training && !training {
             self.trained_loss = self.echo.echo_return_loss();
+            // From here on the far end talks over our echo, and the taps are
+            // held still for it. What they learned was where the echo came
+            // back during training, and on a sound card's cable that does not
+            // stay put: the two clocks drift it by parts per million, and the
+            // card slips it by samples. Frozen, 20 ppm had the echo back as
+            // loud as the far end within half a minute, and a call on such a
+            // cable never came up; at 5 ppm it came up at 14 400 and retrained
+            // six times in its first minute. So the canceller goes on
+            // following where the echo is, which on a line whose echo does
+            // not move, or that has none, it simply finds has not moved.
+            //
+            // Once is enough. A retrain's training segment ends here too, and
+            // the canceller carries on from the delay and rate it had, having
+            // kept the delay moving at that rate while the taps learned again.
+            self.echo.follow_drift(true);
         }
         self.was_training = training;
         self.echo.set_adapting(training);
@@ -2390,6 +2405,31 @@ impl Modem {
     /// been pointed at the wrong place.
     pub fn echo_return_loss_now(&self) -> f64 {
         self.echo.echo_return_loss()
+    }
+
+    /// How fast this end's own echo is drifting, in parts per million:
+    /// positive when it comes back later and later.
+    ///
+    /// On a sound card's cable this is the difference between the card's two
+    /// clocks, tens of ppm and steady. On a line with nothing to follow it
+    /// stays at nothing, and on a VoIP call it should, since the network
+    /// returns nothing measurable of what is sent.
+    pub fn echo_drift_ppm(&self) -> f64 {
+        self.echo.drift_ppm()
+    }
+
+    /// How many times the echo has been found to have jumped: a sample
+    /// dropped or repeated, or a buffer of silence, each one on a cable.
+    ///
+    /// Each ought to line up with a slip the sound card counted, with one
+    /// exception. The answering modem is silent for 2 s after R1, and often
+    /// before it has had the time to learn the drift; at 50 ppm and over, its
+    /// echo moves whole samples in that time, and the search that puts them
+    /// right when it speaks again counts too. A jump on a line with no sound
+    /// card in it would mean a reflection the search took for another, which
+    /// is worth knowing.
+    pub fn echo_jumps(&self) -> u32 {
+        self.echo.jumps()
     }
 
     /// Queue data for transmission. Only meaningful once connected.
