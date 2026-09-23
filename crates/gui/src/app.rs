@@ -269,6 +269,29 @@ const PANEL_W: f32 = 280.0;
 /// Width of the panel holding the far end's account of itself.
 const DISTANT_W: f32 = 250.0;
 
+/// One key of the dialler's keypad. Big enough to be hit with a mouse without
+/// aiming, which is the whole point of a keypad over a text box.
+const KEY_W: f32 = 74.0;
+const KEY_H: f32 = 34.0;
+
+/// How far the digit sits from the left edge of its own key.
+///
+/// The same on every key, which is the only arrangement in which twelve of
+/// them line up: a digit centred in its key sits in a different place from one
+/// centred beside its letters, and the column wanders down the grid.
+const KEY_INSET: f32 = 10.0;
+
+/// The digit, and the letters that were printed under it.
+const DIGIT_PT: f32 = 17.0;
+const LETTERS_PT: f32 = 9.0;
+
+/// How wide a box in the credentials form is. A registrar's name is the
+/// longest thing typed into one.
+const FIELD_W: f32 = 240.0;
+
+/// The key that empties the number display.
+const CLEAR: char = 'C';
+
 pub struct ScopeApp {
     rx: Subscriber,
     control: Arc<Control>,
@@ -296,6 +319,42 @@ pub struct ScopeApp {
     line_outputs: Vec<String>,
     chosen_input: usize,
     chosen_output: usize,
+    /// The SIP accounts from the account file, and which line is picked:
+    /// zero for the sound card, and one more than the account's place in the
+    /// list for a call over the network.
+    sip_accounts: Vec<String>,
+    chosen_line: usize,
+    /// The same accounts in full, as the credentials window is editing them,
+    /// and which of them it is showing.
+    ///
+    /// The names above are the names of these, and are put back in step when
+    /// the file is written rather than as the boxes are typed into: the line
+    /// row opens an account by name out of the file, so a picker offering one
+    /// that exists only in a box would open a line on nothing.
+    sip_edit: Vec<sip::Account>,
+    sip_chosen: usize,
+    sip_open: bool,
+    /// What the last save, or the read at start-up, came to: something to say
+    /// in green, or a complaint to say in red.
+    ///
+    /// Worth the field. This is the one file in the program whose contents
+    /// are a password, and a save that quietly did nothing shows up much
+    /// later as a trunk that will not register, with nothing to say why.
+    sip_note: Option<Result<String, String>>,
+    /// The dialler: whether it is open, what is on its display, and the last
+    /// number it dialled, for the redial key.
+    dial_open: bool,
+    dial_number: String,
+    dial_last: String,
+    /// The SIP account the line is open on, which is what the next run puts
+    /// back; and the name the last run left, until the start-up has had its
+    /// one chance to act on it.
+    ///
+    /// Two fields rather than one because they answer different questions.
+    /// The first is what is true now and goes in the settings file; the second
+    /// is a thing to do once, and is taken rather than read.
+    sip_line: Option<String>,
+    sip_restore: Option<String>,
     carrier: usize,
     /// The `AT+MS` subparameters the advanced window is composing, and whether
     /// it is open.
@@ -397,6 +456,25 @@ impl ScopeApp {
             // selected where there is one.
             chosen_input: chosen_in,
             chosen_output: chosen_out,
+            // Read once, here, because reading it means touching the disk and
+            // a file that appears mid-session is a file somebody is still
+            // editing. Reopening the window is the way to pick up a new
+            // account, which is also when its password is most likely to be
+            // right.
+            sip_accounts: live::sip_accounts(),
+            chosen_line: 0,
+            // Filled by `load_accounts` below, out of the same file the names
+            // above came from.
+            sip_edit: Vec::new(),
+            sip_chosen: 0,
+            sip_open: false,
+            sip_note: None,
+            dial_open: false,
+            dial_number: String::new(),
+            dial_last: String::new(),
+            // Both filled by `recall` below, out of the settings file.
+            sip_line: None,
+            sip_restore: None,
             carrier: 1,
             modulation: Modulation::default(),
             advanced: false,
@@ -422,7 +500,48 @@ impl ScopeApp {
         // Before anything is drawn, so the first frame shows what the modem
         // will actually be set to rather than the defaults it never used.
         app.recall();
+        app.load_accounts();
         app
+    }
+
+    /// Read the SIP account file into the window.
+    ///
+    /// Once, at start-up, for the same reason the names beside it are read
+    /// once: reading means touching the disk, and a file that appears or
+    /// changes mid-session is a file somebody is still editing.
+    ///
+    /// A file that will not parse leaves the list empty and says why in the
+    /// parser's own words. Those name the line, which is the whole reason it
+    /// refuses an unknown key rather than dropping it.
+    fn load_accounts(&mut self) {
+        match sip::Account::load_default() {
+            Ok(accounts) => {
+                self.sip_edit = accounts;
+                self.refresh_account_names();
+            }
+            Err(why) => self.sip_note = Some(Err(why)),
+        }
+    }
+
+    /// Put the names of the accounts back where the line row reads them.
+    ///
+    /// The row picks a line by its place in the list, so an account added or
+    /// taken out from under it would leave the box naming somebody else's.
+    /// Followed by name rather than by place for exactly that reason.
+    fn refresh_account_names(&mut self) {
+        let chosen = self
+            .chosen_line
+            .checked_sub(1)
+            .and_then(|i| self.sip_accounts.get(i).cloned());
+        self.sip_accounts = self.sip_edit.iter().map(|a| a.name.clone()).collect();
+        self.chosen_line = match chosen {
+            Some(name) => self
+                .sip_accounts
+                .iter()
+                .position(|n| *n == name)
+                .map_or(0, |i| i + 1),
+            None => 0,
+        };
     }
 
     /// Carry out what the AT layer asked for.
@@ -704,16 +823,37 @@ impl ScopeApp {
         let session = Arc::clone(session);
         let state = session.state();
 
+        // The line the last run had open, put back into the gap where there
+        // is one. Here because this is where the line is dealt with, and
+        // because the line row below has to follow whatever comes of it.
+        self.restore_line(&session, &state);
+
         // Follow the line rather than the boxes. A line opened from the
         // command line was never chosen here, and a box showing something
         // other than what is open is a box that will reopen the wrong device
         // the moment anything else on this row is touched.
         if state.open {
-            if let Some(i) = self.line_inputs.iter().position(|n| *n == state.input) {
-                self.chosen_input = i;
-            }
-            if let Some(i) = self.line_outputs.iter().position(|n| *n == state.output) {
-                self.chosen_output = i;
+            match &state.sip {
+                // A call rather than a pair of devices: follow which account
+                // it is on, for the same reason.
+                Some(progress) => {
+                    if let Some(i) = self
+                        .sip_accounts
+                        .iter()
+                        .position(|n| *n == progress.account)
+                    {
+                        self.chosen_line = i + 1;
+                    }
+                }
+                None => {
+                    self.chosen_line = 0;
+                    if let Some(i) = self.line_inputs.iter().position(|n| *n == state.input) {
+                        self.chosen_input = i;
+                    }
+                    if let Some(i) = self.line_outputs.iter().position(|n| *n == state.output) {
+                        self.chosen_output = i;
+                    }
+                }
             }
         }
 
@@ -730,7 +870,34 @@ impl ScopeApp {
             let dim = Color32::from_rgb(140, 150, 165);
             ui.label(RichText::new("line").monospace().color(dim));
 
+            // Which kind of line. A sound card is two devices that between
+            // them make a two-wire pair; a SIP account is a call placed
+            // directly, with no cable and no softphone in the path -- which
+            // is the only way the far end's G.711 codewords reach the modem
+            // as they were sent.
+            let line_before = self.chosen_line;
+            egui::ComboBox::from_id_salt("line-kind")
+                .width(150.0)
+                .selected_text(match self.chosen_line {
+                    0 => "sound card",
+                    n => self
+                        .sip_accounts
+                        .get(n - 1)
+                        .map(String::as_str)
+                        .unwrap_or("sound card"),
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.chosen_line, 0, "sound card")
+                        .on_hover_text("Two audio devices as one two-wire line");
+                    for (i, name) in self.sip_accounts.iter().enumerate() {
+                        ui.selectable_value(&mut self.chosen_line, i + 1, name)
+                            .on_hover_text("Place the call from here, with no softphone in the path");
+                    }
+                });
+            let on_sip = self.chosen_line > 0;
+
             let before = (self.chosen_input, self.chosen_output);
+            if !on_sip {
             egui::ComboBox::from_id_salt("line-input")
                 .width(230.0)
                 .selected_text(
@@ -757,17 +924,28 @@ impl ScopeApp {
                         ui.selectable_value(&mut self.chosen_output, i, name);
                     }
                 });
+            }
 
             let picked = (self.chosen_input, self.chosen_output);
             let have_both =
                 !self.line_inputs.is_empty() && !self.line_outputs.is_empty();
             // Changing a device while the line is open moves the call onto the
-            // new one, which is what picking it means.
-            if picked != before && state.open && have_both {
-                session.open(
-                    &self.line_inputs[self.chosen_input],
-                    &self.line_outputs[self.chosen_output],
-                );
+            // new one, which is what picking it means. Changing the kind of
+            // line does the same, and is the one case where what is open is
+            // put down first: a call and a sound card cannot both be the
+            // line.
+            let moved = picked != before || self.chosen_line != line_before;
+            if moved && state.open {
+                if on_sip {
+                    if let Some(name) = self.sip_accounts.get(self.chosen_line - 1) {
+                        session.open_sip(name);
+                    }
+                } else if have_both {
+                    session.open(
+                        &self.line_inputs[self.chosen_input],
+                        &self.line_outputs[self.chosen_output],
+                    );
+                }
             }
 
             if state.open {
@@ -791,31 +969,124 @@ impl ScopeApp {
                     session.set_recording(!recording);
                 }
             } else if ui
-                .add_enabled(have_both, egui::Button::new("Open"))
-                .on_hover_text("Open these two devices as one two-wire line")
+                .add_enabled(on_sip || have_both, egui::Button::new("Open"))
+                .on_hover_text(if on_sip {
+                    "Register this account and wait for ATD"
+                } else {
+                    "Open these two devices as one two-wire line"
+                })
                 .clicked()
             {
-                session.open(
-                    &self.line_inputs[self.chosen_input],
-                    &self.line_outputs[self.chosen_output],
-                );
+                if on_sip {
+                    if let Some(name) = self.sip_accounts.get(self.chosen_line - 1) {
+                        session.open_sip(name);
+                    }
+                } else {
+                    session.open(
+                        &self.line_inputs[self.chosen_input],
+                        &self.line_outputs[self.chosen_output],
+                    );
+                }
             }
 
             if state.open {
-                ui.label(
-                    RichText::new(format!("{} / {} Hz", state.input_rate, state.output_rate))
-                        .monospace()
-                        .color(dim),
-                );
-                if state.underruns > 0 {
+                match &state.sip {
+                    // A call says what it is doing, because none of it is
+                    // visible anywhere else: whether the trunk believes who
+                    // we are, where the call has got to, and what the far end
+                    // is actually sending. A modem that will not train on a
+                    // line that is not registered is not a modem fault.
+                    Some(progress) => {
+                        let good = Color32::from_rgb(120, 200, 130);
+                        let bad = Color32::from_rgb(235, 100, 90);
+                        ui.label(
+                            RichText::new(if progress.registered {
+                                "registered"
+                            } else {
+                                "not registered"
+                            })
+                            .monospace()
+                            .color(if progress.registered { good } else { bad }),
+                        )
+                        .on_hover_text(match &progress.public {
+                            Some(address) => format!(
+                                "The trunk sees this machine at {address}; renewing in {} s",
+                                progress.registration_left
+                            ),
+                            None => "The trunk has not said what address it sees us at".to_owned(),
+                        });
+                        let call = match (&progress.peer, &progress.law) {
+                            (Some(peer), Some(law)) => {
+                                format!("{} with {peer} in {law}", progress.call)
+                            }
+                            (Some(peer), None) => format!("{} {peer}", progress.call),
+                            _ => progress.call.clone(),
+                        };
+                        ui.label(RichText::new(call).monospace().color(dim))
+                            .on_hover_text(format!(
+                                "{} packets in, {} out",
+                                progress.packets_received, progress.packets_sent
+                            ));
+                        // The number that decides whose fault a failed call
+                        // was. Silence handed to the modem is a hole in the
+                        // line that nothing above can tell from noise.
+                        if progress.concealed > 0 || progress.lost > 0 {
+                            ui.label(
+                                RichText::new(format!(
+                                    "{} lost, {:.0} ms of silence",
+                                    progress.lost,
+                                    progress.concealed as f64 / 8.0
+                                ))
+                                .monospace()
+                                .color(bad),
+                            )
+                            .on_hover_text(
+                                "Packets the network did not deliver, and the silence handed to the modem in their place. A call that failed with none of this failed in the modem",
+                            );
+                        }
+                        if let Some(error) = &progress.last_error {
+                            ui.label(RichText::new(error).monospace().color(bad));
+                        }
+                    }
+                    None => {
+                        ui.label(
+                            RichText::new(format!(
+                                "{} / {} Hz",
+                                state.input_rate, state.output_rate
+                            ))
+                            .monospace()
+                            .color(dim),
+                        );
+                    }
+                }
+                // The gaps that cut into something. On a SIP line most
+                // underruns happen before the far end's audio has come
+                // through the jitter buffer, when the modem has not been
+                // stepped and has nothing to say -- silence into a gap that
+                // was already silent. Counting those in red made the first
+                // live call over this crate look like it had transmitted 760
+                // ms of holes when almost none of it cut into anything.
+                let (gaps, of_total) = match &state.sip {
+                    Some(progress) => (progress.underruns_mid_call, Some(progress.underruns)),
+                    None => (state.underruns, None),
+                };
+                if gaps > 0 {
                     ui.label(
-                        RichText::new(format!("{} gaps sent", state.underruns))
+                        RichText::new(format!("{gaps} gaps sent"))
                             .monospace()
                             .color(Color32::from_rgb(235, 100, 90)),
                     )
-                    .on_hover_text(
-                        "Times the line had nothing to send and sent silence. The far end hears a dropout",
-                    );
+                    .on_hover_text(match of_total {
+                        Some(total) => format!(
+                            "Times the line had nothing to send and sent silence into audio \
+                             the modem was producing. The far end hears a dropout. {total} \
+                             packets of silence were sent in all, the rest before the modem \
+                             had anything to say",
+                        ),
+                        None => "Times the line had nothing to send and sent silence. The far \
+                                 end hears a dropout"
+                            .to_owned(),
+                    });
                 }
                 if state.framing_errors > 0 {
                     ui.label(
@@ -1008,6 +1279,17 @@ impl ScopeApp {
                 self.network_open = !self.network_open;
             }
             if ui
+                .selectable_label(self.dial_open, "Dial")
+                .on_hover_text(
+                    "The keypad, and the trunk the call goes out over: a number \
+                     to dial, whether the account is registered, and the \
+                     credentials behind it",
+                )
+                .clicked()
+            {
+                self.dial_open = !self.dial_open;
+            }
+            if ui
                 .selectable_label(self.transfer_open, "Files")
                 .on_hover_text(
                     "ZMODEM: send a file to the far end, or take one it offers",
@@ -1038,6 +1320,12 @@ impl ScopeApp {
 
             let online = self.frame.state == telemetry::CallState::Connected;
             let on_hook = self.frame.state == telemetry::CallState::Idle;
+            // A call on a line made of packets can outlive the modem being on
+            // hook -- the modem hangs up, the trunk does not hear about it,
+            // and the call goes on. Force hang up is the way out of that, so
+            // it must not be greyed out by the very condition it exists to
+            // rescue.
+            let call_up = state.sip.as_ref().is_some_and(|p| p.media);
 
             if ui
                 .add_enabled(on_hook, egui::Button::new("Originate"))
@@ -1084,7 +1372,7 @@ impl ScopeApp {
             // a call whose far end has gone, or whose error control is still
             // sending, is exactly the one that never gives it that.
             if ui
-                .add_enabled(!on_hook, egui::Button::new("Force hang up"))
+                .add_enabled(!on_hook || call_up, egui::Button::new("Force hang up"))
                 .on_hover_text(
                     "Put the line down now, whatever the modem is doing: no escape, \
                      no ATH, nothing more sent to the far end. For a call that will not end",
@@ -1121,6 +1409,11 @@ impl ScopeApp {
         self.advanced_protection(ui, &session);
         self.transfer_window(ui, &session);
         self.network_window(ui, &session);
+        // Both take the call rather than the line: everything they show and
+        // everything they can do is about an account and a number, and a
+        // sound-card line has neither.
+        self.dialler_window(ui, &session, &state);
+        self.credentials_window(ui, &session, state.sip.as_ref());
         self.fax.observe(&self.frame);
         // Lines before the page they belong to: a page handed over first
         // would be drawn from scratch and then its own last lines ignored.
@@ -1512,6 +1805,521 @@ impl ScopeApp {
         self.network_open = open;
     }
 
+    /// The keys of the pad, and the letters that were printed under them.
+    ///
+    /// The letters are not decoration. They are most of what makes a keypad
+    /// read as a telephone rather than as a calculator, and a PBX extension
+    /// is quite often given out as a word.
+    const KEYPAD: [[(char, &'static str); 3]; 4] = [
+        [('1', ""), ('2', "ABC"), ('3', "DEF")],
+        [('4', "GHI"), ('5', "JKL"), ('6', "MNO")],
+        [('7', "PQRS"), ('8', "TUV"), ('9', "WXYZ")],
+        [('*', ""), ('0', ""), ('#', "")],
+    ];
+
+    /// The dialler: a number, a keypad, and the button that places the call.
+    ///
+    /// Shaped like the softphone it replaces, because what it replaces is a
+    /// softphone: the number at the top, the keys under it, and at the bottom
+    /// whether the trunk believes who we are -- which is the one thing about
+    /// an account that has to be visible before a call rather than worked out
+    /// from a failed one afterwards.
+    ///
+    /// Every button here types what a person would have typed. `ATD` goes
+    /// through the terminal's own path rather than into the SIP line, so the
+    /// modem sees the same command whichever way the call was placed, the
+    /// terminal shows it going out, and there is one way to place a call
+    /// instead of two that can drift apart.
+    fn dialler_window(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &Arc<live::Session>,
+        state: &live::LineState,
+    ) {
+        let dim = Color32::from_rgb(140, 150, 165);
+        let bright = Color32::from_rgb(220, 225, 235);
+        let good = Color32::from_rgb(90, 220, 130);
+        let bad = Color32::from_rgb(235, 100, 90);
+        let line = state.sip.as_ref();
+
+        // A call on its way up counts as a call. `is_a_call` is false for one
+        // on its way out and for none at all, and the button wanted while a
+        // far end is ringing is the one that stops it ringing.
+        let on_a_call = line.is_some_and(|p| sip::ua::state::is_a_call(&p.call));
+        // Whose call it would be: the account the line is open on, or, with
+        // no line open, the one the credentials window is showing, which is
+        // the one an Open would use next.
+        let account = line
+            .map(|p| p.account.clone())
+            .or_else(|| self.sip_edit.get(self.sip_chosen).map(|a| a.name.clone()));
+        let held = account
+            .as_ref()
+            .and_then(|name| self.sip_edit.iter().find(|a| a.name == *name));
+        let missing: Vec<String> = held.map(sip::Account::what_is_missing).unwrap_or_default();
+        // An account that does not register is not offline. A PBX on the
+        // local network usually wants no registration and will take a call
+        // from an address it knows already, and reporting that as a fault
+        // would be reporting a setting.
+        let registers = held.is_none_or(|a| a.register);
+
+        let mut open = self.dial_open;
+        egui::Window::new("dialler")
+            .open(&mut open)
+            .resizable(false)
+            .default_width(3.0 * KEY_W)
+            .show(ui.ctx(), |ui| {
+                let width = 3.0 * KEY_W + 2.0 * ui.spacing().item_spacing.x;
+
+                // The number. Monospaced and large, because it is the one
+                // thing in this window that gets read back digit by digit
+                // before anybody presses anything.
+                let entry = ui
+                    .add(
+                        egui::TextEdit::singleline(&mut self.dial_number)
+                            .desired_width(width)
+                            .font(egui::FontId::monospace(17.0))
+                            .hint_text("number"),
+                    )
+                    .on_hover_text(
+                        "A telephone number as it is written down: the spaces, \
+                         brackets and dashes come out on the way to a URI. Or a \
+                         whole SIP address, which goes through untouched, so \
+                         sip:1000@pbx.local reaches an extension that has no \
+                         number at all",
+                    );
+                // Return dials, because a box somebody has just typed a
+                // number into and then has to go and find a button for is a
+                // box that gets typed into twice.
+                let entered =
+                    entry.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                ui.add_space(4.0);
+                for row in Self::KEYPAD {
+                    ui.horizontal(|ui| {
+                        for (digit, letters) in row {
+                            if key(ui, digit, letters).clicked() {
+                                self.dial_number = keypad(&self.dial_number, digit);
+                            }
+                        }
+                    });
+                }
+
+                ui.horizontal(|ui| {
+                    // R was a hook flash: a quarter of a second on-hook, which
+                    // told a switch something and tells a packet network
+                    // nothing whatever. So it redials instead -- a number that
+                    // did not answer is the one most likely to be wanted again
+                    // -- rather than sitting there as a key that does nothing.
+                    let redial = ui
+                        .add_enabled_ui(!self.dial_last.is_empty(), |ui| {
+                            ui.add_sized(
+                                [KEY_W, KEY_H],
+                                egui::Button::new(RichText::new("R").size(15.0).color(bright)),
+                            )
+                        })
+                        .inner
+                        .on_hover_text("Put the last number dialled back on the display")
+                        .on_disabled_hover_text("Nothing has been dialled yet");
+                    if redial.clicked() {
+                        self.dial_number.clone_from(&self.dial_last);
+                    }
+                    if ui
+                        .add_sized(
+                            [KEY_W, KEY_H],
+                            egui::Button::new(RichText::new("+").size(15.0).color(bright)),
+                        )
+                        .on_hover_text(
+                            "The plus of an international number, which survives \
+                             into the URI where the brackets and dashes do not",
+                        )
+                        .clicked()
+                    {
+                        self.dial_number = keypad(&self.dial_number, '+');
+                    }
+                    if ui
+                        .add_sized(
+                            [KEY_W, KEY_H],
+                            egui::Button::new(RichText::new("C").size(15.0).color(bright)),
+                        )
+                        .on_hover_text("Clear the display")
+                        .clicked()
+                    {
+                        self.dial_number = keypad(&self.dial_number, CLEAR);
+                    }
+                });
+
+                ui.add_space(6.0);
+                if on_a_call {
+                    if ui
+                        .add_sized(
+                            [width, 30.0],
+                            egui::Button::new(RichText::new("Hang up").size(15.0)),
+                        )
+                        .on_hover_text(
+                            "Put the call down: the modem, and the call under it, \
+                             in one click and whatever either of them is doing",
+                        )
+                        .clicked()
+                    {
+                        // Not `ATH`, which is what this used to type. ATH ends
+                        // the modem's call and says nothing to the trunk, so
+                        // once the modem was on hook with a call still up --
+                        // which happened on a live call -- this button typed a
+                        // command that did nothing at all, and went on offering
+                        // to do it. This path puts down both.
+                        session.hang_up();
+                    }
+                } else {
+                    let ready = line.is_some()
+                        && !self.dial_number.trim().is_empty()
+                        && missing.is_empty();
+                    // A greyed-out button that does not say why is a fault
+                    // report with the fault left out.
+                    let why_not = if line.is_none() {
+                        "There is no SIP line open. Press Connect, below"
+                            .to_owned()
+                    } else if !missing.is_empty() {
+                        format!(
+                            "{} still needs {}",
+                            account.as_deref().unwrap_or("the account"),
+                            missing.join(", ")
+                        )
+                    } else {
+                        "Type a number first".to_owned()
+                    };
+                    let call = ui
+                        .add_enabled_ui(ready, |ui| {
+                            ui.add_sized(
+                                [width, 30.0],
+                                egui::Button::new(RichText::new("Call").size(15.0)),
+                            )
+                        })
+                        .inner
+                        .on_hover_text(
+                            "ATD -- place the call. It goes out through the \
+                             terminal below, which is where a call placed by hand \
+                             goes out from, so the transcript reads the same either \
+                             way",
+                        )
+                        .on_disabled_hover_text(why_not);
+                    if (call.clicked() || entered) && ready {
+                        self.dial_last.clone_from(&self.dial_number);
+                        session.type_bytes(dial_command(&self.dial_number).as_bytes());
+                    }
+                }
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let registered = line.is_some_and(|p| p.registered);
+                    let (colour, word) = match (registers, registered) {
+                        (false, _) => (dim, "No registration"),
+                        (true, true) => (good, "Online"),
+                        (true, false) => (bad, "Offline"),
+                    };
+                    // A dot as well as a word, and painted rather than
+                    // written: what fonts are loaded here is the default set,
+                    // and a round glyph is not something to take on trust from
+                    // them.
+                    dot(ui, colour);
+                    let explained = match line {
+                        None => "No SIP line is open. Connect, below, opens one on \
+                                 the account named here"
+                            .to_owned(),
+                        Some(progress) => match &progress.public {
+                            Some(address) => format!(
+                                "The trunk sees this machine at {address}. A wrong \
+                                 one is the usual reason a call connects and carries \
+                                 no audio"
+                            ),
+                            None => "The trunk has not said what address it sees us \
+                                     at. Until it has, a call can connect and carry \
+                                     nothing"
+                                .to_owned(),
+                        },
+                    };
+                    ui.label(RichText::new(word).monospace().color(colour))
+                        .on_hover_text(explained);
+                    if let Some(name) = &account {
+                        ui.label(RichText::new(name).monospace().color(dim));
+                    }
+                });
+                // The two buttons on a row of their own, under the state they
+                // act on. Beside it they made the row wider than the keypad,
+                // and a window wider than the thing it is for looks like an
+                // accident.
+                ui.horizontal(|ui| {
+                    // Opening the line from the window somebody is actually
+                    // looking at. The line row above does the same thing, and
+                    // the two are two views of one line rather than two lines.
+                    if line.is_some() {
+                        if ui
+                            .add(egui::Button::new("Disconnect").small())
+                            .on_hover_text(
+                                "Put the line down. The registration goes with it, \
+                                 so the trunk stops offering calls to this machine",
+                            )
+                            .clicked()
+                        {
+                            session.close();
+                        }
+                    } else {
+                        let ready = account.is_some() && missing.is_empty();
+                        // A trunk answers a placeholder password with a refusal
+                        // and no explanation, so the button says what is wrong
+                        // rather than letting the trunk say nothing.
+                        let why_not = match &account {
+                            None => "There are no accounts. Open Credentials and add \
+                                     one"
+                                .to_owned(),
+                            Some(name) => {
+                                format!("{name} still needs {}", missing.join(", "))
+                            }
+                        };
+                        let connect = ui
+                            .add_enabled(ready, egui::Button::new("Connect").small())
+                            .on_hover_text(if state.open {
+                                "Register with the trunk and wait for a number to \
+                                 dial. This takes the line off the sound card: a call \
+                                 and a pair of devices cannot both be the line"
+                            } else {
+                                "Register with the trunk and wait for a number to dial"
+                            })
+                            .on_disabled_hover_text(why_not);
+                        if connect.clicked()
+                            && let Some(name) = &account
+                        {
+                            session.open_sip(name);
+                            // The row picks a line by its place in the list.
+                            if let Some(i) =
+                                self.sip_accounts.iter().position(|n| n == name)
+                            {
+                                self.chosen_line = i + 1;
+                            }
+                        }
+                    }
+                    if ui
+                        .small_button("Credentials")
+                        .on_hover_text(
+                            "What the provider gave us: the SIP server, the \
+                             username, the password and which transport to reach it \
+                             over",
+                        )
+                        .clicked()
+                    {
+                        self.sip_open = !self.sip_open;
+                    }
+                });
+                // Where the call has got to, in the agent's own words, and
+                // who is at the other end of it.
+                if let Some(progress) = line.filter(|p| p.call != sip::ua::state::IDLE) {
+                    let said = match &progress.peer {
+                        Some(peer) => format!("{} -- {peer}", progress.call),
+                        None => progress.call.clone(),
+                    };
+                    ui.label(RichText::new(said).monospace().small().color(bright));
+                }
+                if let Some(why) = line.and_then(|p| p.last_error.as_ref()) {
+                    ui.label(RichText::new(why).small().color(bad));
+                }
+            });
+        self.dial_open = open;
+    }
+
+    /// The accounts themselves: what the provider gave us, and what this end
+    /// calls itself.
+    ///
+    /// A window of its own rather than a fold inside the dialler, because the
+    /// dialler is a keypad and is the width of a keypad, and this is a form
+    /// whose boxes have to hold a registrar's name. One of them would have had
+    /// to be the wrong shape.
+    ///
+    /// The file it writes is still a text file in the user's profile
+    /// directory, still readable and still what is loaded. This window only
+    /// saves somebody having to go and find it -- and it is honest about what
+    /// it costs, since a save rewrites the whole file and comments added there
+    /// by hand do not survive that.
+    fn credentials_window(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &Arc<live::Session>,
+        line: Option<&sip::Progress>,
+    ) {
+        let dim = Color32::from_rgb(140, 150, 165);
+        let good = Color32::from_rgb(90, 220, 130);
+        let bad = Color32::from_rgb(235, 100, 90);
+        let mut open = self.sip_open;
+        egui::Window::new("SIP - credentials")
+            .open(&mut open)
+            .resizable(false)
+            .default_width(420.0)
+            .show(ui.ctx(), |ui| {
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("sip-account")
+                        .width(200.0)
+                        .selected_text(
+                            self.sip_edit
+                                .get(self.sip_chosen)
+                                .map_or("no accounts", |a| a.name.as_str()),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (i, account) in self.sip_edit.iter().enumerate() {
+                                ui.selectable_value(&mut self.sip_chosen, i, &account.name);
+                            }
+                        });
+                    if ui
+                        .button("Add")
+                        .on_hover_text(
+                            "Another account, with the defaults an ordinary trunk \
+                             wants. It needs a server, a username and a password \
+                             before it can place a call",
+                        )
+                        .clicked()
+                    {
+                        self.sip_edit.push(sip::Account {
+                            name: unused_name(&self.sip_edit),
+                            ..sip::Account::default()
+                        });
+                        self.sip_chosen = self.sip_edit.len() - 1;
+                        self.sip_note = None;
+                    }
+                    let there = self.sip_chosen < self.sip_edit.len();
+                    if ui
+                        .add_enabled(there, egui::Button::new("Delete"))
+                        .on_hover_text(
+                            "Take this account out of the list. The file still has \
+                             it until Save",
+                        )
+                        .clicked()
+                    {
+                        let gone = self.sip_edit.remove(self.sip_chosen);
+                        self.sip_chosen = self
+                            .sip_chosen
+                            .min(self.sip_edit.len().saturating_sub(1));
+                        // A line open on the account that has just gone is the
+                        // case worth saying something about: nothing changes
+                        // on the line now, and everything changes when the
+                        // file is written, at which point the account it is
+                        // running on has stopped existing.
+                        self.sip_note = line
+                            .filter(|p| p.account == gone.name)
+                            .map(|p| {
+                                Ok(format!(
+                                    "{} is out of the list; the line open on it goes \
+                                     down when this is saved",
+                                    p.account
+                                ))
+                            });
+                    }
+                });
+
+                ui.separator();
+                // What the account still needs before it could place a call,
+                // and what it is called: both taken out of the borrow, so that
+                // Save below can have them. Nothing is said at all when it is
+                // ready, because a form that reports everything is fine is a
+                // form nobody reads.
+                let (mut missing, mut name) = (Vec::new(), String::new());
+                match self.sip_edit.get_mut(self.sip_chosen) {
+                    Some(account) => {
+                        credentials_form(ui, account);
+                        missing = account.what_is_missing();
+                        name.clone_from(&account.name);
+                    }
+                    None => {
+                        ui.label(
+                            RichText::new(
+                                "No accounts. Add one, or put a [section] in the \
+                                 file by hand and start the program again.",
+                            )
+                            .small()
+                            .color(dim),
+                        );
+                    }
+                }
+                if !missing.is_empty() {
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("before it can place a call it still needs")
+                            .small()
+                            .color(dim),
+                    );
+                    for what in &missing {
+                        ui.label(RichText::new(format!("- {what}")).small().color(bad));
+                    }
+                }
+
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Save")
+                        .on_hover_text(
+                            "Write every account to the file, having first read back \
+                             what is about to be written to check it says what it was \
+                             given. The whole file is rewritten, so comments put there \
+                             by hand do not survive it",
+                        )
+                        .clicked()
+                    {
+                        let outcome = match sip::Account::save_default(&self.sip_edit) {
+                            Err(why) => Err(why),
+                            Ok(()) => {
+                                self.refresh_account_names();
+                                let file = sip::Account::default_path()
+                                    .map_or_else(
+                                        || "the account file".to_owned(),
+                                        |p| p.display().to_string(),
+                                    );
+                                match line.map(|p| p.account.as_str()) {
+                                    // The line is running on an account that
+                                    // has just stopped existing. Leaving it up
+                                    // would leave a call on credentials
+                                    // nothing in the window shows any more.
+                                    Some(on)
+                                        if !self.sip_accounts.iter().any(|n| n == on) =>
+                                    {
+                                        session.close();
+                                        Ok(format!(
+                                            "written to {file}; the line was open on \
+                                             {on}, which is gone, so it has been put \
+                                             down"
+                                        ))
+                                    }
+                                    // A password changed under a line that is
+                                    // already open does nothing until the line
+                                    // is opened again -- and somebody who is
+                                    // told nothing concludes the save did not
+                                    // work and types it in again.
+                                    Some(on) if on == name => {
+                                        session.open_sip(on);
+                                        Ok(format!(
+                                            "written to {file}, and the line reopened \
+                                             on {on}"
+                                        ))
+                                    }
+                                    _ => Ok(format!("written to {file}")),
+                                }
+                            }
+                        };
+                        self.sip_note = Some(outcome);
+                    }
+                });
+                // Under the button rather than beside it, and wrapped: the
+                // path to the file is most of a line on its own, and the
+                // parser's complaints are sentences.
+                if let Some(note) = &self.sip_note {
+                    let (said, colour) = match note {
+                        Ok(said) => (said, good),
+                        Err(why) => (why, bad),
+                    };
+                    ui.add(
+                        egui::Label::new(RichText::new(said).small().color(colour)).wrap(),
+                    );
+                }
+            });
+        self.sip_open = open;
+    }
+
     /// What the link agreed and what has crossed it, and every connection
     /// over it.
     ///
@@ -1734,7 +2542,23 @@ impl ScopeApp {
         self.modulation = modulation;
         self.protection = protection;
         self.dialin = crate::dialin::Settings::recall(&loaded);
-        self.remembered = self.settings().join("\n") + &self.dialin.fingerprint();
+        // The line the last run had open. A name and nothing else: whether
+        // the account still exists, and whether anything else has claimed the
+        // line since, are questions for `restore_line` when it is asked.
+        self.sip_restore = loaded
+            .text("sip_line")
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
+        self.sip_line.clone_from(&self.sip_restore);
+        self.remembered = self.settings().join("\n")
+            + &self.dialin.fingerprint()
+            + &self.line_fingerprint();
+    }
+
+    /// The line, as something to compare from one frame to the next.
+    fn line_fingerprint(&self) -> String {
+        format!("\u{1}{}", self.sip_line.as_deref().unwrap_or(""))
     }
 
     /// Write the settings out if they have moved since they were last written.
@@ -1743,13 +2567,61 @@ impl ScopeApp {
     /// is the comparison that matters: two states that assert identically are
     /// the same state as far as the modem is concerned.
     fn remember(&mut self) {
-        let now = self.settings().join("\n") + &self.dialin.fingerprint();
+        // Which account the line is on, once the start-up restore has had its
+        // chance. Not before: the line is not open yet at that point, and
+        // writing "no line" over the name that is about to be put back would
+        // forget it a frame before using it.
+        //
+        // And only on a live window. A capture has no line and never had one,
+        // and a run of one would otherwise wipe what a modem run had left.
+        if self.sip_restore.is_none()
+            && let Source::Live(session) = &self.source
+        {
+            self.sip_line = session.state().sip.map(|progress| progress.account);
+        }
+        let now = self.settings().join("\n")
+            + &self.dialin.fingerprint()
+            + &self.line_fingerprint();
         if now != self.remembered {
             self.remembered = now;
             let mut r = to_remember(self.carrier, self.modulation, self.protection);
             self.dialin.remember(&mut r);
+            // Left out rather than written empty when there is no line, so
+            // that "nothing was open" and "this account was open" are not the
+            // same line in the file with different spacing.
+            if let Some(name) = &self.sip_line {
+                r.set("sip_line", name);
+            }
             r.save();
         }
+    }
+
+    /// Put back the SIP line the last run had open.
+    ///
+    /// Once, and only where nobody asked for anything else. The line thread is
+    /// what opens a line, and `main` may have named one before the window
+    /// existed -- `--sip`, or a pair of devices with `--in` and `--out` -- so
+    /// the thread records whether it began with a line waiting for it. That
+    /// one question settles it: a line somebody named is a line somebody
+    /// wanted, and a line the thread chose for itself is a guess that a
+    /// remembered account beats.
+    fn restore_line(&mut self, session: &Arc<live::Session>, state: &live::LineState) {
+        let Some(name) = self.sip_restore.clone() else { return };
+        // Once, whatever comes of it. A restore that found nothing to do is
+        // not one to try again next frame, and the frame after that, for ever.
+        self.sip_restore = None;
+        let Some(i) = self.sip_accounts.iter().position(|n| *n == name) else {
+            // Renamed, or deleted, between one run and the next. Nothing to
+            // say about it: the line row is standing there with the list.
+            return;
+        };
+        if !should_restore(state, session.was_asked_for_a_line()) {
+            return;
+        }
+        session.open_sip(&name);
+        // The row picks a line by its place in the list, and the row and the
+        // dialler are two views of one thing.
+        self.chosen_line = i + 1;
     }
 
     /// `&F` first, and then all of it. The window's controls are the ones a
@@ -3150,6 +4022,411 @@ impl eframe::App for ScopeApp {
     }
 }
 
+/// Whether the line the last run had open should be put back.
+///
+/// `asked` is whether a line was named before the line thread started. That is
+/// the whole of the question about audio: a line somebody named with `--in`
+/// and `--out` is one they wanted, and the pair of cables the thread opens for
+/// itself when nobody has named anything is a guess -- which a line the last
+/// run had open beats, since somebody chose that one.
+fn should_restore(state: &live::LineState, asked: bool) -> bool {
+    if asked {
+        return false;
+    }
+    // A line that would not open is a line to be read about on the row. The
+    // answer to a device that is in use is not a different line entirely.
+    if state.error.is_some() {
+        return false;
+    }
+    // Already on an account, so there is nothing to put back.
+    state.sip.is_none()
+}
+
+/// One key of the keypad: an empty button, with the digit and its letters
+/// painted into it at places this side chooses.
+///
+/// Painted rather than handed to the button as its own text, because a button
+/// centres what it is given. A key with letters centres the pair, so the 2 of
+/// "2 ABC" sat well to the left of the 1 above it, and what the eye followed
+/// down the grid was a wandering column rather than a keypad. Here every digit
+/// is placed from the left edge of its own key, the same distance on all
+/// twelve, whether or not anything stands beside it.
+fn key(ui: &mut egui::Ui, digit: char, letters: &str) -> egui::Response {
+    // A real button underneath, so a key is lit and pressed the way every
+    // other control in the window is, with nothing of that reimplemented here.
+    let response = ui.add(
+        egui::Button::new("").min_size(egui::vec2(KEY_W, KEY_H)),
+    );
+    if !ui.is_rect_visible(response.rect) {
+        return response;
+    }
+    // The button's own text colour, so the key still lights under the mouse.
+    let colour = ui.style().interact(&response).text_color();
+    let rect = response.rect;
+    let painter = ui.painter();
+    let face = egui::FontId::proportional(DIGIT_PT);
+    let at = egui::pos2(rect.left() + KEY_INSET, rect.center().y);
+    let drawn = painter.text(at, egui::Align2::LEFT_CENTER, digit, face.clone(), colour);
+    if letters.is_empty() {
+        return response;
+    }
+    // Where the letters start: the room a wide digit takes, measured rather
+    // than guessed at, so that they begin at one x all the way down the grid
+    // instead of following the width of whichever digit is in front of them.
+    let room = painter
+        .layout_no_wrap("0".to_owned(), face, colour)
+        .size()
+        .x
+        + 5.0;
+    // Against the foot of the digit rather than its head. They are half the
+    // size, and hung from the top they float above the digit instead of
+    // sitting on the line with it.
+    painter.text(
+        egui::pos2(at.x + room, drawn.bottom()),
+        egui::Align2::LEFT_BOTTOM,
+        letters,
+        egui::FontId::proportional(LETTERS_PT),
+        Color32::from_rgb(140, 150, 165),
+    );
+    response
+}
+
+/// What the number display holds after a keypad key is pressed.
+///
+/// `C` empties it, which on an empty display is an empty display and not a
+/// mistake to be reported. Everything else is a character a telephone keypad
+/// has, put where a finger puts it: at the end, whatever the text cursor in
+/// the box above happens to be doing.
+fn keypad(number: &str, key: char) -> String {
+    if key == CLEAR {
+        return String::new();
+    }
+    format!("{number}{key}")
+}
+
+/// The line the Call button types.
+///
+/// `ATD` and the number as it stands, and a carriage return to end the line.
+/// Nothing is cleaned up on the way: the punctuation of a written telephone
+/// number goes no further than [`sip::Account::dial_uri`], which knows which
+/// of it is punctuation and which of it is an extension's name, and this side
+/// of the modem is not the place to start guessing at that.
+fn dial_command(number: &str) -> String {
+    format!("ATD{}\r", number.trim())
+}
+
+/// An optional setting as something to type in.
+///
+/// The account says `None` for "not set", and a box with the word None in it
+/// is a box somebody will try to delete a letter at a time. Empty is how a
+/// text box says the same thing.
+fn optional_shown(value: &Option<String>) -> String {
+    value.clone().unwrap_or_default()
+}
+
+/// And back again. Blank means not set: an empty string kept here would go out
+/// in a header as one.
+///
+/// What is left is kept exactly as typed rather than trimmed, because this
+/// runs on every keystroke -- and a space taken off the end as it is typed is
+/// a space that cannot be typed at all.
+fn optional_stored(text: &str) -> Option<String> {
+    (!text.trim().is_empty()).then(|| text.to_owned())
+}
+
+/// A name no account has yet.
+///
+/// Two sections cannot share a name -- the parser refuses the file, which is
+/// how a save would fail -- so Add never makes a second account called the
+/// same thing as the first.
+fn unused_name(accounts: &[sip::Account]) -> String {
+    let taken = |name: &str| accounts.iter().any(|a| a.name == name);
+    if !taken("new account") {
+        return "new account".to_owned();
+    }
+    (2u32..)
+        .map(|n| format!("new account {n}"))
+        .find(|name| !taken(name))
+        .unwrap_or_default()
+}
+
+/// A small filled circle, for a state that should be seen before it is read.
+fn dot(ui: &mut egui::Ui, colour: Color32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+    ui.painter().circle_filled(rect.center(), 4.0, colour);
+}
+
+/// One labelled box in the credentials form.
+fn text_row(ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str, hover: &str) {
+    ui.label(RichText::new(label).monospace().color(Color32::from_rgb(140, 150, 165)));
+    ui.add(
+        egui::TextEdit::singleline(value)
+            .desired_width(FIELD_W)
+            .hint_text(hint),
+    )
+    .on_hover_text(hover);
+    ui.end_row();
+}
+
+/// The same for a setting the account keeps as an `Option`.
+fn optional_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut Option<String>,
+    hint: &str,
+    hover: &str,
+) {
+    let mut text = optional_shown(value);
+    ui.label(RichText::new(label).monospace().color(Color32::from_rgb(140, 150, 165)));
+    if ui
+        .add(
+            egui::TextEdit::singleline(&mut text)
+                .desired_width(FIELD_W)
+                .hint_text(hint),
+        )
+        .on_hover_text(hover)
+        .changed()
+    {
+        *value = optional_stored(&text);
+    }
+    ui.end_row();
+}
+
+/// The boxes of the credentials form: what the provider gave out first,
+/// and everything that has a sensible default folded away under it.
+///
+/// A function of its own so that the window can go on drawing Save below it
+/// whether or not there is an account to edit -- deleting the last account
+/// is a change like any other and has to be writable.
+fn credentials_form(ui: &mut egui::Ui, account: &mut sip::Account) {
+    let dim = Color32::from_rgb(140, 150, 165);
+    // The four things a provider actually gives out, and nothing between
+    // them and the person who has been handed them.
+    egui::Grid::new("sip-credentials")
+        .num_columns(2)
+        .spacing([10.0, 4.0])
+        .show(ui, |ui| {
+            text_row(
+                ui,
+                "name",
+                &mut account.name,
+                "what to call it here",
+                "This end's name for the account: the heading in the \
+                 file, and what the line row calls it. It never goes \
+                 out on the wire",
+            );
+            text_row(
+                ui,
+                "SIP server",
+                &mut account.registrar,
+                "sip.provider.net",
+                "Where REGISTER and INVITE are sent. The provider gives \
+                 you this; add :port only for a trunk that does not use \
+                 5060",
+            );
+            text_row(
+                ui,
+                "username",
+                &mut account.username,
+                "usually the number",
+                "The SIP username from the provider, which on a trunk is \
+                 usually the full number",
+            );
+            ui.label(RichText::new("password").monospace().color(dim));
+            ui.add(
+                egui::TextEdit::singleline(&mut account.password)
+                    .desired_width(FIELD_W)
+                    .password(true),
+            )
+            .on_hover_text(
+                "The SIP password from the provider's portal -- not the \
+                 one you log in to the portal with. It is kept in the \
+                 account file in clear text, and there is no alternative \
+                 to that: SIP digest authentication computes its answer \
+                 from the password itself, so whatever is stored has to \
+                 be usable as the password is. The file is as private as \
+                 your profile directory and no more private than that",
+            );
+            ui.end_row();
+            ui.label(RichText::new("transport").monospace().color(dim));
+            ui.horizontal(|ui| {
+                for (transport, label) in [
+                    (sip::Transport::Udp, "UDP"),
+                    (sip::Transport::Tcp, "TCP"),
+                ] {
+                    ui.radio_value(&mut account.transport, transport, label);
+                }
+            })
+            .response
+            .on_hover_text(
+                "How the SIP messages themselves travel; the audio is RTP \
+                 over UDP either way. UDP is what nearly every trunk \
+                 expects. TCP is for a trunk that insists on it, or for \
+                 one where a long INVITE is being fragmented and dropped \
+                 on the way",
+            );
+            ui.end_row();
+        });
+
+    // Everything with a default that is right for an ordinary trunk, which
+    // is everything else.
+    egui::CollapsingHeader::new("rarely needed")
+        .id_salt("sip-rarely-needed")
+        .show(ui, |ui| {
+            egui::Grid::new("sip-rest")
+                .num_columns(2)
+                .spacing([10.0, 4.0])
+                .show(ui, |ui| {
+                    // The domain is the server's host unless somebody says
+                    // otherwise, which is what leaving the line out of the file
+                    // means. An empty box says the same thing, and the hint says
+                    // what will be used -- rather than the host typed out twice,
+                    // in two places that then have to be kept in step.
+                    let host = sip::uri::split_host_port(&account.registrar).0;
+                    if account.domain.is_empty() {
+                        account.domain.clone_from(&host);
+                    }
+                    let mut domain = if account.domain == host {
+                        String::new()
+                    } else {
+                        account.domain.clone()
+                    };
+                    ui.label(RichText::new("domain").monospace().color(dim));
+                    let hint = if host.is_empty() {
+                        "the server's host".to_owned()
+                    } else {
+                        host.clone()
+                    };
+                    if ui
+                        .add(
+                            egui::TextEdit::singleline(&mut domain)
+                                .desired_width(FIELD_W)
+                                .hint_text(hint),
+                        )
+                        .on_hover_text(
+                            "The domain in our own address. Empty is the \
+                             server's host, which is right unless the \
+                             provider has said otherwise -- so clearing \
+                             the box puts it back to following the server",
+                        )
+                        .changed()
+                    {
+                        account.domain = if domain.trim().is_empty() {
+                            host.clone()
+                        } else {
+                            domain
+                        };
+                    }
+                    ui.end_row();
+                    optional_row(
+                        ui,
+                        "auth username",
+                        &mut account.auth_username,
+                        "only if it differs",
+                        "For a trunk that authenticates you as something \
+                         other than the username, which some do. Empty \
+                         authenticates as the username",
+                    );
+                    optional_row(
+                        ui,
+                        "display name",
+                        &mut account.display,
+                        "what the far end shows",
+                        "The name shown to the far end, where anything \
+                         shows it at all. Empty sends none",
+                    );
+                    optional_row(
+                        ui,
+                        "outbound proxy",
+                        &mut account.outbound_proxy,
+                        "only if the provider names one",
+                        "Where requests actually go, for a provider that \
+                         names a proxy apart from the registrar -- often \
+                         one machine out of several a name resolves to. \
+                         Empty sends them to the server above",
+                    );
+                    ui.label(RichText::new("register").monospace().color(dim));
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut account.register, "register with it")
+                            .on_hover_text(
+                                "A trunk wants a registration before it \
+                                 will take a call. A PBX on the local \
+                                 network usually does not: it knows this \
+                                 machine's address already and will take \
+                                 an INVITE from it",
+                            );
+                        ui.add_enabled(
+                            account.register,
+                            egui::DragValue::new(&mut account.expires)
+                                .range(60..=7200)
+                                .suffix(" s"),
+                        )
+                        .on_hover_text(
+                            "How long a registration is asked to last. The \
+                             registrar may grant less, and what it grants \
+                             is what the next refresh goes by (RFC 3261 \
+                             10.2.4)",
+                        );
+                    });
+                    ui.end_row();
+                    ui.label(RichText::new("law").monospace().color(dim));
+                    ui.horizontal(|ui| {
+                        // Both are offered either way; this is the order they
+                        // are offered in, and the far end takes the first it has.
+                        let mu = account.laws.first() != Some(&sip::Law::A);
+                        if ui.radio(mu, "mu-law first").clicked() {
+                            account.laws = vec![sip::Law::Mu, sip::Law::A];
+                        }
+                        if ui.radio(!mu, "A-law first").clicked() {
+                            account.laws = vec![sip::Law::A, sip::Law::Mu];
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "Which G.711 law to offer first. It matters here \
+                         more than it would on a telephone call: a V.90 \
+                         server's codewords are mu-law, so mu-law is the \
+                         law that needs no conversion anywhere on the \
+                         path, and every conversion is a codeword that \
+                         comes out as a different one",
+                    );
+                    ui.end_row();
+                    ui.label(RichText::new("ptime").monospace().color(dim));
+                    ui.add(
+                        egui::DragValue::new(&mut account.ptime_ms)
+                            .range(10..=40)
+                            .suffix(" ms"),
+                    )
+                    .on_hover_text(
+                        "Milliseconds of audio in each packet. 20 is what \
+                         everything at the far end expects and what the \
+                         jitter buffer is sized around",
+                    );
+                    ui.end_row();
+                    ui.label(RichText::new("ports").monospace().color(dim));
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("SIP").small().color(dim));
+                        ui.add(
+                            egui::DragValue::new(&mut account.local_port)
+                                .range(0..=65535),
+                        );
+                        ui.label(RichText::new("RTP").small().color(dim));
+                        ui.add(
+                            egui::DragValue::new(&mut account.rtp_port)
+                                .range(0..=65535),
+                        );
+                    })
+                    .response
+                    .on_hover_text(
+                        "The local ports. Zero lets the system choose, \
+                         which is right unless something upstream is \
+                         forwarding a fixed one to this machine",
+                    );
+                    ui.end_row();
+                });
+        });
+}
+
 /// A small folder button, true when clicked.
 fn browse_button(ui: &mut egui::Ui, hover: &str) -> bool {
     ui.add(egui::Button::new(RichText::new("\u{1F4C2}").size(15.0))).on_hover_text(hover).clicked()
@@ -3522,6 +4799,158 @@ mod tests {
         assert!(commands[0].starts_with("AT+ES=0"), "{:?}", commands[0]);
         let (it, _) = interpreted(&commands[0]);
         assert!(!it.error_control.wanted());
+    }
+
+    /// The keypad puts what was pressed on the end of what is there, and C
+    /// empties it. An empty display cleared is an empty display.
+    #[test]
+    fn the_keys_make_the_number_the_finger_typed() {
+        let mut number = String::new();
+        for key in "0398765432".chars() {
+            number = keypad(&number, key);
+        }
+        assert_eq!(number, "0398765432");
+        // The two that are not digits, and the plus of an international
+        // number, are keys like any other.
+        assert_eq!(keypad("", '*'), "*");
+        assert_eq!(keypad("*", '6'), "*6");
+        assert_eq!(keypad("61", '#'), "61#");
+        assert_eq!(keypad("", '+'), "+");
+        // C empties it, from anything and from nothing.
+        assert_eq!(keypad("0398765432", CLEAR), "");
+        assert_eq!(keypad("", CLEAR), "");
+    }
+
+    /// The button types the line a person would have typed, and the far end
+    /// gets the number they meant.
+    #[test]
+    fn a_dialled_number_becomes_the_line_and_then_the_uri() {
+        assert_eq!(dial_command("0398765432"), "ATD0398765432\r");
+        // Trimmed at the ends, because a box gets a stray space in it, and
+        // left alone in the middle, because the dial string is not this
+        // side's to tidy up.
+        assert_eq!(dial_command("  (03) 9876-5432 "), "ATD(03) 9876-5432\r");
+        assert_eq!(
+            dial_command("sip:1000@pbx.local"),
+            "ATDsip:1000@pbx.local\r"
+        );
+
+        // And what the modem makes of that dial string is the number: the AT
+        // interpreter hands everything after the D to the account, verbatim.
+        let account = sip::Account {
+            registrar: "sip.example.net".to_owned(),
+            domain: "sip.example.net".to_owned(),
+            ..sip::Account::default()
+        };
+        let command = dial_command("  (03) 9876-5432 ");
+        let dialled = command
+            .trim_start_matches("ATD")
+            .trim_end_matches('\r');
+        assert_eq!(
+            account.dial_uri(dialled).to_string(),
+            "sip:0398765432@sip.example.net"
+        );
+        // A whole address goes through untouched, which is the only way to
+        // reach an extension that is not a number.
+        let command = dial_command("sip:1000@pbx.local");
+        let dialled = command.trim_start_matches("ATD").trim_end_matches('\r');
+        assert_eq!(account.dial_uri(dialled).to_string(), "sip:1000@pbx.local");
+    }
+
+    /// An optional setting goes to a box and comes back, and blank is not a
+    /// setting.
+    #[test]
+    fn an_empty_box_is_not_a_setting() {
+        assert_eq!(optional_shown(&None), "");
+        assert_eq!(optional_shown(&Some("BinModem".to_owned())), "BinModem");
+        assert_eq!(optional_stored(""), None);
+        assert_eq!(optional_stored("   "), None);
+        assert_eq!(
+            optional_stored("BinModem"),
+            Some("BinModem".to_owned())
+        );
+        // Mid-typing, with the space that is about to have a word after it.
+        // This runs on every keystroke, so a value trimmed here is a space
+        // that cannot be typed.
+        assert_eq!(optional_stored("Bin "), Some("Bin ".to_owned()));
+        // Round trip, both ways round, for every state there is.
+        for value in [None, Some("x".to_owned())] {
+            assert_eq!(optional_stored(&optional_shown(&value)), value);
+        }
+    }
+
+    /// What the start-up restore is allowed to act on when nobody named a
+    /// line: nothing at all, or the pair of cables the line thread opens for
+    /// itself, which is a guess and not a choice.
+    #[test]
+    fn a_remembered_line_is_put_back_where_nobody_named_one() {
+        // No line at all -- a machine without the cables in it, which is the
+        // case the whole thing is for.
+        let nothing = live::LineState::default();
+        assert!(should_restore(&nothing, false));
+
+        // The two cables, open because the line thread went looking for them
+        // and found them. Nobody asked for that, and somebody did once ask
+        // for the account being put back.
+        let cables = live::LineState {
+            open: true,
+            input: "CABLE-A Output (VB-Audio Virtual Cable A)".to_owned(),
+            output: "CABLE-B Input (VB-Audio Virtual Cable B)".to_owned(),
+            ..live::LineState::default()
+        };
+        assert!(should_restore(&cables, false));
+
+        // Already on an account, which is nothing to put back.
+        let on_sip = live::LineState {
+            open: true,
+            sip: Some(sip::Progress::default()),
+            ..live::LineState::default()
+        };
+        assert!(!should_restore(&on_sip, false));
+
+        // A line that would not open is a line to be read about on the row,
+        // not one to quietly replace with a different line.
+        let failed = live::LineState {
+            error: Some("the device is in use".to_owned()),
+            ..live::LineState::default()
+        };
+        assert!(!should_restore(&failed, false));
+    }
+
+    /// And nothing at all when a line was named before the window existed.
+    ///
+    /// `--in "CABLE-A Output" --out "CABLE-B Input"` asks for exactly the pair
+    /// the line thread would have chosen by itself, so what is open says
+    /// nothing about who chose it. Only the line thread knows, and it is what
+    /// is asked.
+    #[test]
+    fn a_line_asked_for_by_name_is_never_taken_away() {
+        let cables = live::LineState {
+            open: true,
+            input: "CABLE-A Output (VB-Audio Virtual Cable A)".to_owned(),
+            output: "CABLE-B Input (VB-Audio Virtual Cable B)".to_owned(),
+            ..live::LineState::default()
+        };
+        assert!(!should_restore(&cables, true));
+        // Including one that was named and has not finished opening, which is
+        // what a frame early in a start-up sees.
+        assert!(!should_restore(&live::LineState::default(), true));
+    }
+
+    /// Add never makes two accounts with one name: the parser refuses a file
+    /// with two sections called the same thing, so a save would fail with two
+    /// of them on the screen.
+    #[test]
+    fn a_new_account_gets_a_name_nobody_has() {
+        let mut accounts: Vec<sip::Account> = Vec::new();
+        for expected in ["new account", "new account 2", "new account 3"] {
+            let name = unused_name(&accounts);
+            assert_eq!(name, expected);
+            accounts.push(sip::Account { name, ..sip::Account::default() });
+        }
+        // And around whatever is already in the file.
+        accounts[1].name = "trunk".to_owned();
+        assert_eq!(unused_name(&accounts), "new account 2");
     }
 
     #[test]

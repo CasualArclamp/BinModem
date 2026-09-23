@@ -30,6 +30,12 @@
     so anything that draws wrongly is the terminal's fault and not the line's.
     Takes a host, or nothing to choose one in the window.
 
+.PARAMETER Sip
+    Put the modem on a SIP account instead of a pair of audio devices: the
+    call is placed by the program itself, with no virtual cable and no
+    softphone in the path. Takes an account name out of the account file, or
+    nothing to be offered the ones there are.
+
 .PARAMETER Carrier
     Modulation for a live call: B103, V22B or V32. Both ends have to agree, so
     this sets it for the board as well.
@@ -41,6 +47,8 @@
 .EXAMPLE
     .\run.ps1 -Live
 .EXAMPLE
+    .\run.ps1 -Sip
+.EXAMPLE
     .\run.ps1 -Telnet
 .EXAMPLE
     .\run.ps1 -Telnet vert.synchro.net
@@ -50,6 +58,8 @@ param(
     [switch] $Dev,
     [switch] $List,
     [switch] $Live,
+    [Parameter()] [AllowEmptyString()]
+    [string] $Sip,
     [Parameter()] [AllowEmptyString()]
     [string] $Telnet,
     [switch] $TelnetOnly,
@@ -112,6 +122,43 @@ if ($TelnetOnly -or $Telnet) {
     Write-Host ""
     Write-Step "terminal only: no modem, no line, every byte arrives"
     & $scope @scopeArgs
+    exit $LASTEXITCODE
+}
+
+# ---- a line made of packets ------------------------------------------------
+# No audio devices in it at all, so the device menu below does not apply. The
+# account file decides everything about the line; all this has to do is build
+# and launch.
+if ($PSBoundParameters.ContainsKey("Sip")) {
+    $profileName = "release"
+    if ($Dev) { $profileName = "debug" }
+    Write-Host ""
+    Write-Step "building gui ($profileName)"
+    $buildArgs = @("build", "-p", "gui")
+    if (-not $Dev) { $buildArgs += "--release" }
+    & cargo @buildArgs
+    if ($LASTEXITCODE -ne 0) { Write-Fail "build failed"; exit 1 }
+
+    $scope = Join-Path $root "target\$profileName\binmodem.exe"
+    if (-not (Test-Path $scope)) { Write-Fail "built, but $scope is missing"; exit 1 }
+
+    # Ask the binary which accounts there are, for the same reason the device
+    # menu asks it which devices there are: it is the thing that has to read
+    # the file.
+    if (-not $Sip) {
+        Write-Host ""
+        & $scope --accounts
+        Write-Host ""
+        $Sip = Read-Host "  which account"
+        if (-not $Sip) { Write-Fail "no account chosen"; exit 1 }
+    }
+
+    Write-Host ""
+    Write-Step "no sound card in the path: the far end's G.711 arrives as it was sent"
+    Write-Host "  in the terminal pane: ATD<number>, or ATD sip:1000@host"
+    Write-Host "  ATH hangs up the call as well as the modem."
+    Write-Host ""
+    & $scope --sip $Sip
     exit $LASTEXITCODE
 }
 

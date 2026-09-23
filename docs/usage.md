@@ -224,6 +224,105 @@ found from its own levels. In data mode, the frames themselves show where a
 slip took them. Press **Record** before dialling: a capture of a V.90 call that
 went wrong is what gets it fixed.
 
+## Calling over SIP, with no softphone
+
+Everything above puts a sound card between the modem and the network. The
+**line** box has another choice in it: a SIP account, which places the call
+itself. Nothing is resampled, nothing is concealed, no gain control touches it,
+and the G.711 codewords the far end sends are the ones the modem reads -- which
+is the whole of the argument for it, and matters most to V.90, where those
+codewords *are* the far end's symbols.
+
+Start with the credentials. Press **Dial** on the toolbar for the dialler,
+then **Credentials** at the bottom of it. Four things matter and they are the
+first four in the form:
+
+- **SIP server** -- the registrar your provider gave you, `host` or
+  `host:port`.
+- **username** -- on an Australian trunk this is usually the full number.
+- **password** -- the SIP password from the provider's portal, not the one you
+  log in to the portal with.
+- **transport** -- UDP unless the provider insists otherwise. See below.
+
+Everything else has a default that suits an ordinary trunk and is folded away
+under *rarely needed*. Press **Save**. If something is still missing the form
+says so in red rather than letting you dial and fail.
+
+The form writes `%APPDATA%\BinModem\sip.txt`, which can equally be edited by
+hand -- `binmodem --accounts` prints the path and lists what is in it. The
+file holds the password in clear text, because SIP digest authentication
+computes its answer from the password itself; it is as private as your profile
+directory and no more than that. A hand-edited file is read at startup, so
+restart after editing it outside the window.
+
+Then pick the account in the **line** box instead of a sound card, press
+**Open**, and watch for the green **Online** at the foot of the dialler. Type
+a number on the keypad and press **Call**.
+
+The keypad is a telephone's: digits, `*` and `#`, `+` for an international
+number, `C` to clear and `R` to redial the last number. **Call** becomes
+**Hang up** once there is a call.
+
+Nothing is hidden behind it. **Call** types `ATD<number>` at the terminal, so
+the call is placed the same way it would be if you typed it, and you can watch
+it happen in the transcript. Everything the terminal could do it still can:
+`ATD` dials, `ATH` hangs up the call as well as the modem, `ATA` answers one
+arriving, and a whole SIP URI works for a PBX on the desk --
+`ATD sip:1000@pbx.local`, typed or pasted into the number box.
+
+The modem hears nothing at all until the far end answers, so the handshake
+starts on a connected call rather than into ringback.
+
+### UDP or TCP
+
+UDP unless you have a reason. It is what a trunk expects, and the protocol
+does its own retransmission because nothing underneath it will.
+
+TCP is there for the two cases that need it: a provider that insists on it,
+and a message too big for the path. An INVITE carrying a long description can
+pass the point where UDP fragments it, and a surprising number of routers drop
+a fragmented datagram -- which looks like a trunk ignoring your calls. Over
+TCP a message is found in the stream by its length, and the retransmissions
+are turned off, because repeating a request on a transport that already
+guarantees delivery only gives the far end a duplicate to sort out. If the
+trunk drops an idle connection, the next thing to say something opens another
+and repeats whatever was in flight.
+
+The media never changes: RTP is UDP whatever SIP travels over.
+
+Or from a shell, skipping the window's line box:
+
+```
+binmodem --sip trunk
+```
+
+What to watch, in the line row:
+
+- **registered** in green. A modem that will not train on a line that never
+  registered is not a modem fault.
+- The call state and the law -- `up with sip:0398765432@... in PCMU`. If the
+  law is PCMA on a V.90 call, the trunk is transcoding, and that costs about
+  twenty decibels of training.
+- **lost** and **ms of silence** in red. This is the number worth having.
+  Every octet of silence is a hole handed to the modem in place of audio that
+  did not arrive, counted honestly rather than papered over with a repeat of
+  the last packet the way a softphone does. **A call that failed with none of
+  this failed in the modem; one with any of it failed in the network.** That
+  distinction used to take an afternoon with a capture.
+
+When the call ends -- from either side -- the modem is told, so the terminal
+gets `NO CARRIER` rather than sitting in silence waiting for a carrier that
+has gone. The transcript then says what the call cost in packets: how many
+crossed each way, how many were lost, how much silence was handed to the modem
+in their place, and anything thrown away for a reason that was not the
+network's. If the far end puts the call on hold, it stays up and says so; the
+modem stops transmitting until it comes back, rather than talking to nobody.
+
+Fax still goes over G.711 here. A far end that asks to switch the call to T.38
+is declined, and the call stays on audio where the V.17, V.29 and V.27 ter
+modulations work as they always have. T.38 itself is the next thing to build;
+`docs/design/sip.md` sketches what it needs.
+
 ## Moving a file
 
 The **Files** button opens ZMODEM: a path to send, a directory to receive

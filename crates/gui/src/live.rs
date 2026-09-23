@@ -37,7 +37,66 @@ const FS: f64 = 16_000.0;
 #[derive(Debug, Clone)]
 enum Request {
     Open { input: String, output: String },
+    /// Open a line made of packets instead: this account from the SIP file.
+    OpenSip { account: String },
     Close,
+}
+
+/// Whichever kind of line is open.
+///
+/// A sound card and a SIP call are the same thing to everything above: a
+/// clock that delivers samples, and somewhere to put the answer. Keeping them
+/// behind one small enum rather than a trait object is not about speed --
+/// these are called once a block, not once a sample -- but about the counters,
+/// which are the same three questions asked of two quite different things.
+#[derive(Debug)]
+enum Wire {
+    /// Two audio devices, which between them are a two-wire line.
+    Audio(Box<line::Duplex>),
+    /// A call over the network, with no sound card anywhere in it.
+    Sip(Box<sip::Line>),
+}
+
+impl Wire {
+    fn receive(&self, into: &mut Vec<f32>) {
+        match self {
+            Self::Audio(line) => line.receive(into),
+            Self::Sip(line) => line.receive(into),
+        }
+    }
+
+    fn transmit(&self, samples: &[f32]) {
+        match self {
+            Self::Audio(line) => line.transmit(samples),
+            Self::Sip(line) => line.transmit(samples),
+        }
+    }
+
+    /// Samples that arrived and were lost before anything read them. On a
+    /// sound card that is the modem failing to keep up; over SIP the same
+    /// fault shows as the jitter buffer overflowing, which is counted there.
+    fn dropped_in(&self) -> u64 {
+        match self {
+            Self::Audio(line) => line.dropped_in(),
+            Self::Sip(line) => line.stats().jitter.overflowed,
+        }
+    }
+
+    /// Times the line had nothing to send and sent silence. The same fault
+    /// and the same consequence either way: the far end hears a hole.
+    fn underruns(&self) -> u64 {
+        match self {
+            Self::Audio(line) => line.underruns(),
+            Self::Sip(line) => line.stats().underruns,
+        }
+    }
+
+    fn sip(&self) -> Option<&sip::Line> {
+        match self {
+            Self::Sip(line) => Some(line),
+            Self::Audio(_) => None,
+        }
+    }
 }
 
 /// Input devices that are one half of a two-wire line, best first.
@@ -115,6 +174,123 @@ fn preferred_line() -> Option<(String, String)> {
     Some((input, output))
 }
 
+/// The SIP accounts there are to choose from, best first.
+///
+/// A machine with no file yet gets one written for it, commented, rather than
+/// an empty list and no hint about where to put an account. That is the same
+/// bargain the settings file makes: a first run should leave something behind
+/// that can be edited.
+pub fn sip_accounts() -> Vec<String> {
+    if let Some(path) = sip::Account::default_path() {
+        let _ = sip::Account::write_example(&path);
+    }
+    sip::Account::load_default()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| a.name)
+        .collect()
+}
+
+/// Open a line on one of them.
+fn open_sip(name: &str, tx: &Publisher) -> Result<sip::Line, String> {
+    let accounts = sip::Account::load_default()?;
+    if accounts.is_empty() {
+        let where_it_goes = sip::Account::default_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "the SIP account file".to_owned());
+        return Err(format!("there are no SIP accounts; fill in {where_it_goes}"));
+    }
+    let account = accounts
+        .into_iter()
+        .find(|a| a.name == name)
+        .ok_or_else(|| format!("there is no SIP account called {name:?}"))?;
+    tx.log(
+        Direction::Note,
+        format!(
+            "sip: {} as {} through {}",
+            account.name,
+            account.uri(),
+            account.next_hop()
+        ),
+    );
+    sip::Line::open(account, FS)
+}
+
+/// How long a dial is given to become a call before the modem is told it did
+/// not.
+///
+/// A modem on a line made of packets is stepped only by arriving audio, so a
+/// call that is never placed leaves it waiting for a carrier with none of its
+/// own timers running -- not slowly, but for ever. The agent refuses a dial
+/// outright in two cases (a call already in progress, a next hop that will
+/// not resolve) and says so, but nothing it says reaches the modem.
+///
+/// Ten seconds rather than one: the agent's own `place_call` resolves the
+/// next hop before it does anything else, and a slow name server can take
+/// several. Ten is long enough that a call which was going to happen has, and
+/// short enough that a person has not yet decided the program is broken.
+const DIAL_GIVES_UP: Duration = Duration::from_secs(10);
+
+/// What the modem and the call between them need doing about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reconcile {
+    Nothing,
+    /// The call has gone and the modem does not know. It is waiting for a
+    /// carrier that cannot arrive.
+    CarrierLost,
+    /// The modem has finished and the call has not. It is still connected,
+    /// and still costing money.
+    HangUp,
+}
+
+/// Everything the decision depends on, gathered up so that it can be made --
+/// and tested -- without a call, a modem or a socket.
+///
+/// Pulled out into a function because the version of this that lived inline
+/// was wrong in a way nobody could see: it fired on the single turn of the
+/// loop where the modem went on hook, and any turn on which the call happened
+/// to read as inactive lost that edge for ever. What it left was a call that
+/// could not be ended by any control in the window. That is a state machine,
+/// and a state machine that cannot be run through its cases on demand is one
+/// whose cases do not get run through.
+#[derive(Debug, Clone, Copy)]
+struct Between {
+    /// Whether the call was doing anything last time round.
+    was_active: bool,
+    /// And whether it is now.
+    active: bool,
+    /// Whether the modem is off hook: handshaking, on a call, or escaped.
+    modem_busy: bool,
+    /// Whether the modem has taken this call up at any point. Kept for the
+    /// life of the call, which is what stops an incoming call that nobody has
+    /// answered from being hung up on the modem's behalf.
+    had_the_call: bool,
+    /// Whether the call has already been asked to end, so that asking is not
+    /// repeated once every couple of milliseconds until it does.
+    told_to_hang_up: bool,
+    /// How long ago a number was handed to the agent, while no call has come
+    /// of it yet.
+    dialled_ago: Option<Duration>,
+}
+
+fn reconcile(state: Between) -> Reconcile {
+    if state.modem_busy && !state.active {
+        // Either the call ended under the modem, or it was never placed at
+        // all. The second is not a hypothetical: the agent refuses a dial
+        // while another call is live, and a refusal is silent as far as the
+        // modem is concerned.
+        let ended = state.was_active;
+        let never_started = state.dialled_ago.is_some_and(|ago| ago >= DIAL_GIVES_UP);
+        if ended || never_started {
+            return Reconcile::CarrierLost;
+        }
+    }
+    if !state.modem_busy && state.active && state.had_the_call && !state.told_to_hang_up {
+        return Reconcile::HangUp;
+    }
+    Reconcile::Nothing
+}
+
 /// What the line is doing, for the window to show.
 #[derive(Debug, Clone, Default)]
 pub struct LineState {
@@ -151,6 +327,10 @@ pub struct LineState {
     /// nearly three times higher than its own average. A drive setting that
     /// suits one clips the other.
     pub tx_peak: f32,
+    /// What the call is doing, when the line is a SIP one rather than a pair
+    /// of audio devices. None means there is a sound card on the line, or
+    /// nothing at all.
+    pub sip: Option<sip::Progress>,
     /// Mean power going out and mean power coming back, both as a fraction of
     /// full scale, over the last little while.
     ///
@@ -232,6 +412,9 @@ enum TransferRequest {
 pub struct Session {
     typed: Mutex<Vec<u8>>,
     request: Mutex<Option<Request>>,
+    /// Whether a line was named before the thread started. See
+    /// [`Session::was_asked_for_a_line`].
+    asked_for_a_line: AtomicBool,
     state: Mutex<LineState>,
     /// How hard to drive the line, as an f32 in its bit pattern.
     drive: AtomicU32,
@@ -333,6 +516,7 @@ impl Default for Session {
             fax_received: Mutex::default(),
             fax_arriving: Mutex::default(),
             recording: AtomicBool::new(false),
+            asked_for_a_line: AtomicBool::new(false),
             hang_up: AtomicBool::new(false),
             retrain: AtomicBool::new(false),
             rate_request: Mutex::default(),
@@ -517,6 +701,18 @@ impl Session {
         });
     }
 
+    /// Open a line made of packets: this account, out of the SIP file.
+    ///
+    /// The modem does not know the difference and is not told. What changes
+    /// is that a dialled number now has somewhere to go -- `ATD` places a
+    /// call rather than being a noise a switch would have heard -- and that
+    /// nothing arrives until the far end answers.
+    pub fn open_sip(&self, account: &str) {
+        self.ask(Request::OpenSip {
+            account: account.to_owned(),
+        });
+    }
+
     /// Put the line down. The modem stays: `AT` still answers `OK`.
     pub fn close(&self) {
         self.ask(Request::Close);
@@ -649,6 +845,19 @@ impl Session {
         self.request.lock().map(|s| s.is_some()).unwrap_or(false)
     }
 
+    /// Whether a line was named before this thread started -- on the command
+    /// line, or by anything else that got in first.
+    ///
+    /// Recorded rather than asked, because by the time the window is drawing
+    /// frames the request has been taken and acted on and the slot is empty
+    /// again: "was one waiting?" and "is one waiting?" are different
+    /// questions and only the first has an answer worth having. What it is
+    /// for: the window restores whichever line was open when it last closed,
+    /// and must not do that over a line somebody asked for by name.
+    pub fn was_asked_for_a_line(&self) -> bool {
+        self.asked_for_a_line.load(Ordering::Relaxed)
+    }
+
     fn ask(&self, request: Request) {
         if let Ok(mut slot) = self.request.lock() {
             *slot = Some(request);
@@ -688,7 +897,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // The line to open when nobody named one. Decided here rather than in
     // `main` because this is the thread that opens the device, so it is the
     // one that should go looking for it.
-    if !session.has_request() {
+    let asked = session.has_request();
+    session.asked_for_a_line.store(asked, Ordering::Relaxed);
+    if !asked {
         if let Some((input, output)) = preferred_line() {
             session.open(&input, &output);
         } else {
@@ -703,7 +914,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
 
     // Opened and closed on request, and never handed across a thread: on
     // Windows a cpal stream is not Send and has to stay where it was made.
-    let mut audio: Option<line::Duplex> = None;
+    let mut audio: Option<Wire> = None;
     let mut modem = Modem::new(FS);
     modem.set_pinned_rate(session.rate_pinned());
     // The rate menu, looked at a few times a second: working it out after a
@@ -727,6 +938,23 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // of this one -- has a different number in its call, or fewer lines than
     // were handed over, and gets a new number.
     let (mut fax_page_number, mut fax_lines_handed, mut fax_sheet) = (0u64, 0usize, 0usize);
+
+    // Whether the SIP call was doing anything last time round, and whether
+    // the modem ever took this call up, so that either one ending can be
+    // noticed and told to the other. Unused on a sound-card line, which has
+    // no call to speak of.
+    //
+    // The second is per call and not per turn of the loop. It is what keeps
+    // an incoming call ringing -- the modem has not answered it, so nothing
+    // here will put it down on the modem's behalf -- while still ending a
+    // call the modem has finished with, however many turns later that is
+    // noticed.
+    let mut sip_call_active = false;
+    let mut modem_had_the_call = false;
+    // Whether the call has already been told to end, and when a number was
+    // last handed to the agent without a call yet coming of it.
+    let mut asked_to_hang_up = false;
+    let mut dialled_at: Option<Instant> = None;
 
     let mut from_line: Vec<f32> = Vec::with_capacity(4096);
     let mut to_line: Vec<f32> = Vec::with_capacity(4096);
@@ -802,14 +1030,52 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
 
     let publish_every = Duration::from_millis(16);
     let mut next_publish = Instant::now();
+    // The same cadence for what the call is doing, which is published from
+    // above the early exits rather than with the audio. Its own instant so
+    // that neither can starve the other.
+    let mut next_call_publish = Instant::now();
 
     while !control.quit.load(Ordering::Relaxed) {
         if let Some(request) = session.take_request() {
+            // A line that was carrying a call takes the call with it. Over SIP
+            // the BYE does go out -- `sip::Line` drops its agent before its
+            // media, on purpose -- but the modem was never told, so it stayed
+            // in State::Data with nothing left to clock it: `audio` is None
+            // from here on, the loop takes the "no line" path every time
+            // round, and the terminal sits in data state with a call that no
+            // longer exists until somebody types +++. It cannot be noticed
+            // afterwards either, because the reconciliation further down is
+            // reset in the same breath. So the modem is told now, while there
+            // is still something to tell it about -- and told it the way the
+            // terminal needs to hear it, which is NO CARRIER: nobody at the
+            // terminal asked for this, so OK would be an answer to a question
+            // it never put.
+            let carried_a_call = audio.is_some() && modem.state() != State::Command;
             // Dropping the old one stops its streams, which has to happen
             // before the new ones open on the same device.
             audio = None;
+            if carried_a_call {
+                tx.log(Direction::Note, "the line went out from under the call");
+                modem.carrier_lost();
+            }
             let mut state = LineState::default();
             match request {
+                Request::OpenSip { account } => match open_sip(&account, &tx) {
+                    Ok(line) => {
+                        state = LineState {
+                            open: true,
+                            input: format!("sip: {account}"),
+                            output: format!("sip: {account}"),
+                            sip: Some(line.progress()),
+                            ..LineState::default()
+                        };
+                        audio = Some(Wire::Sip(Box::new(line)));
+                    }
+                    Err(e) => {
+                        tx.log(Direction::Note, format!("could not open the SIP line: {e}"));
+                        state.error = Some(e);
+                    }
+                },
                 Request::Open { input, output } => {
                     match line::Duplex::open(Some(&input), Some(&output), FS) {
                         Ok(open) => {
@@ -831,7 +1097,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                                 output_rate: open.output_rate,
                                 ..LineState::default()
                             };
-                            audio = Some(open);
+                            audio = Some(Wire::Audio(Box::new(open)));
                         }
                         Err(e) => {
                             tx.log(Direction::Note, format!("could not open the line: {e}"));
@@ -841,6 +1107,17 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 }
                 Request::Close => tx.log(Direction::Note, "line closed"),
             }
+            // A dial string the old line never used does not carry over to
+            // the new one. It matters in one direction only: a number typed
+            // at a sound-card line is a noise a switch would have heard and
+            // nothing took it, and handing it to a SIP line minutes later
+            // would place a real call nobody asked for.
+            modem.take_dial_request();
+            modem.take_answer_request();
+            sip_call_active = false;
+            modem_had_the_call = false;
+            asked_to_hang_up = false;
+            dialled_at = None;
             session.set_state(state);
         }
 
@@ -1089,6 +1366,16 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         if session.take_hang_up() {
             tx.log(Direction::Note, "putting the call down");
             modem.hang_up();
+            // And the call underneath it, where the line is one made of
+            // packets. The two are separate things and this is the one
+            // button that has to end both: a modem on hook with a call still
+            // up is a trunk still billing, and -- worse -- a state nothing
+            // else can get out of, because ATH does nothing once the modem
+            // is already on hook and the agent refuses a second call while
+            // the first is live.
+            if let Some(sip) = audio.as_ref().and_then(Wire::sip) {
+                sip.hang_up();
+            }
         }
         if session.take_retrain() {
             tx.log(Direction::Note, "retraining the line");
@@ -1157,12 +1444,117 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             continue;
         };
 
+        // A line made of packets has a call to place before it is a line at
+        // all, and the dial string is the only thing the modem knows that it
+        // needs. This has to happen before the check for samples below and
+        // not after it: until the far end answers there are no samples, which
+        // is exactly the stretch where the call is being set up.
+        if let Some(sip) = audio.sip() {
+            let was_active = sip_call_active;
+            for said in sip.poll() {
+                tx.log(Direction::Note, said);
+            }
+            if let Some(number) = modem.take_dial_request() {
+                sip.dial(&number);
+                dialled_at = Some(Instant::now());
+            }
+            if modem.take_answer_request() {
+                sip.answer();
+            }
+            // A call on its way out is not a call the modem should still be
+            // waiting on, which is what `is_a_call` decides: cancelling and
+            // hanging up are both states a call leaves by and never comes
+            // back from, and a cancel can sit unanswered for as long as the
+            // far end likes. Counting those as over costs nothing if the
+            // state does move on promptly, and saves the wait if it does
+            // not. Asking the agent rather than comparing text here is
+            // deliberate: the two crates would otherwise agree about these
+            // words only by coincidence, and stop agreeing in silence.
+            sip_call_active = sip.up() || sip::ua::state::is_a_call(&sip.status().call);
+            let modem_busy = modem.state() != State::Command;
+            if modem_busy {
+                // This call is one the modem took up. Remembered for as long
+                // as the call lasts rather than for one turn of the loop.
+                modem_had_the_call = true;
+            }
+            match reconcile(Between {
+                was_active,
+                active: sip_call_active,
+                modem_busy,
+                had_the_call: modem_had_the_call,
+                told_to_hang_up: asked_to_hang_up,
+                dialled_ago: dialled_at.map(|at| at.elapsed()),
+            }) {
+                // The call is over -- refused, cancelled, hung up at the far
+                // end, or never placed -- and the modem is still waiting for
+                // a carrier that cannot arrive. Telling it now is what gets
+                // NO CARRIER back to the terminal instead of a silence that
+                // lasts until somebody types +++.
+                Reconcile::CarrierLost => {
+                    modem.carrier_lost();
+                    dialled_at = None;
+                }
+                // The other way round: ATH, or a handshake that gave up,
+                // with the call still connected and costing money. Said once
+                // and not once every couple of milliseconds -- the agent
+                // takes a moment to act on it, and a hang-up asked for ten
+                // times is ten BYEs and nine rejections in the trunk's log.
+                Reconcile::HangUp => {
+                    sip.hang_up();
+                    asked_to_hang_up = true;
+                }
+                Reconcile::Nothing => {}
+            }
+            if sip_call_active {
+                // A number that became a call needs no rescuing.
+                dialled_at = None;
+            } else {
+                modem_had_the_call = false;
+                asked_to_hang_up = false;
+            }
+
+            // What the window shows about the call, published here and
+            // nowhere else.
+            //
+            // Here because this is above both of the early exits below, and
+            // so is reached on every turn of the loop. It used to be
+            // published with the audio measurements further down, which is
+            // past the point where a block with no samples in it gives up and
+            // goes round again -- so it was refreshed only while audio was
+            // arriving, and no audio arrives before a call is answered or
+            // after one ends. The window's picture of a call that had just
+            // ended froze at "up" and stayed there, which is a display that
+            // stops being refreshed at exactly the moment the thing it shows
+            // stops moving, and is indistinguishable from a display that is
+            // right.
+            if Instant::now() >= next_call_publish {
+                next_call_publish = Instant::now() + publish_every;
+                let progress = sip.progress();
+                if let Ok(mut state) = session.state.lock() {
+                    state.sip = Some(progress);
+                }
+            }
+        }
+
         from_line.clear();
         audio.receive(&mut from_line);
         if from_line.is_empty() {
             // Nothing has arrived, so nothing can be stepped: the line is the
             // clock. Still hand the terminal whatever the modem said in the
             // meantime, which is how `OK` gets back before a call exists.
+            //
+            // And still tell the window what the line is doing, which is the
+            // part that was missing. Everything the window shows about a SIP
+            // line was published below, past this point -- so it was only
+            // ever refreshed while audio was arriving. That is not a quiet
+            // corner: no audio arrives before a call is answered, and none
+            // arrives after one ends. The moment a call went down the
+            // window's picture of it froze at whatever it last was, so the
+            // dialler went on saying the call was up and went on offering
+            // Hang up, for ever, while every press of it worked perfectly.
+            // A display that stops being refreshed exactly when the thing it
+            // displays stops moving is indistinguishable from a display that
+            // is right.
             drain_dte(
             &mut modem,
             &tx,
@@ -1833,6 +2225,140 @@ fn start_link(
     link
 }
 
+
+#[cfg(test)]
+mod reconciliation_tests {
+    use super::{Between, DIAL_GIVES_UP, Reconcile, reconcile};
+    use std::time::Duration;
+
+    /// A call, from the number being handed over to the modem hanging up on
+    /// it, one turn of the line thread's loop at a time.
+    ///
+    /// Written as the sequence rather than as separate cases because the
+    /// fault this replaces was not in any one case: every branch was right,
+    /// and the order they came in was what went wrong. The version before
+    /// this fired on the single turn where the modem went on hook, so a turn
+    /// on which the call read as inactive -- the twenty milliseconds before
+    /// the agent thread sets "dialling", or the window while a CANCEL is
+    /// outstanding -- lost that edge for good, and left a call no control in
+    /// the window could end.
+    #[test]
+    fn a_call_from_dialling_to_hanging_up() {
+        let mut had = false;
+        let mut told = false;
+        let mut was = false;
+        // (active, busy, dialled ago) -> what should happen
+        let turns: &[(bool, bool, Option<Duration>, Reconcile)] = &[
+            // ATD: the modem goes off hook at once, and for a turn or two the
+            // agent has not caught up. Nothing is wrong yet.
+            (false, true, Some(Duration::ZERO), Reconcile::Nothing),
+            (false, true, Some(Duration::from_millis(20)), Reconcile::Nothing),
+            // The agent reports the call, and the far end answers it.
+            (true, true, None, Reconcile::Nothing),
+            (true, true, None, Reconcile::Nothing),
+            // ATH. The modem is on hook and the call is not, so it is ended --
+            // once.
+            (true, false, None, Reconcile::HangUp),
+            (true, false, None, Reconcile::Nothing),
+            (true, false, None, Reconcile::Nothing),
+            // And it goes.
+            (false, false, None, Reconcile::Nothing),
+        ];
+        for (n, (active, busy, ago, want)) in turns.iter().enumerate() {
+            if *busy {
+                had = true;
+            }
+            let got = reconcile(Between {
+                was_active: was,
+                active: *active,
+                modem_busy: *busy,
+                had_the_call: had,
+                told_to_hang_up: told,
+                dialled_ago: *ago,
+            });
+            assert_eq!(got, *want, "turn {n}");
+            if got == Reconcile::HangUp {
+                told = true;
+            }
+            if !*active {
+                had = false;
+                told = false;
+            }
+            was = *active;
+        }
+    }
+
+    /// The far end hangs up while the modem is still handshaking. The modem
+    /// has no way to know -- over packets there is no carrier to lose -- so it
+    /// has to be told, or it waits for one for ever.
+    #[test]
+    fn a_call_that_goes_away_under_the_modem_is_told_to_the_modem() {
+        let ended = reconcile(Between {
+            was_active: true,
+            active: false,
+            modem_busy: true,
+            had_the_call: true,
+            told_to_hang_up: false,
+            dialled_ago: None,
+        });
+        assert_eq!(ended, Reconcile::CarrierLost);
+    }
+
+    /// A dial the agent refused -- because a call was already up, or because
+    /// the next hop would not resolve -- never becomes a call at all, so
+    /// there is no "it ended" edge to notice. Without the clock the modem
+    /// waits for a carrier on a call that was never placed, silently, with
+    /// none of its own timers running because nothing is stepping it.
+    #[test]
+    fn a_dial_that_never_became_a_call_still_reaches_the_modem() {
+        let just_now = Between {
+            was_active: false,
+            active: false,
+            modem_busy: true,
+            had_the_call: false,
+            told_to_hang_up: false,
+            dialled_ago: Some(Duration::from_secs(1)),
+        };
+        assert_eq!(reconcile(just_now), Reconcile::Nothing, "too soon to give up");
+
+        let waited = Between {
+            dialled_ago: Some(DIAL_GIVES_UP),
+            ..just_now
+        };
+        assert_eq!(reconcile(waited), Reconcile::CarrierLost);
+    }
+
+    /// An incoming call is left alone. The modem has not answered it, so
+    /// nothing here may put it down on the modem's behalf -- that is the
+    /// whole reason the "did the modem ever take this call up" question is
+    /// asked rather than "is the modem busy".
+    #[test]
+    fn a_call_ringing_here_is_not_hung_up_for_the_modem() {
+        let ringing = Between {
+            was_active: true,
+            active: true,
+            modem_busy: false,
+            had_the_call: false,
+            told_to_hang_up: false,
+            dialled_ago: None,
+        };
+        assert_eq!(reconcile(ringing), Reconcile::Nothing);
+    }
+
+    /// Nothing at all is happening, which is most of the time.
+    #[test]
+    fn an_idle_line_is_left_alone() {
+        let idle = Between {
+            was_active: false,
+            active: false,
+            modem_busy: false,
+            had_the_call: false,
+            told_to_hang_up: false,
+            dialled_ago: None,
+        };
+        assert_eq!(reconcile(idle), Reconcile::Nothing);
+    }
+}
 
 #[cfg(test)]
 mod level_tests {

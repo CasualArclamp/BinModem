@@ -136,6 +136,29 @@ reflection, are on the panel too — on a two-wire pair that decides everything
 and is otherwise invisible, since a constellation full of noise looks the same
 whether the noise is the line or this modem listening to itself.
 
+There is a SIP caller in it now, written the same way as everything else here
+-- against RFC 3261, 3550 and 4566, with no third-party stack -- so a call can
+be placed without a virtual cable and a softphone in the path. That middle
+stretch was doing three things a modem never wants: resampling 48 kHz to 8 and
+back, running an adaptive jitter buffer that inserts about 20 ms of audio every
+few seconds, and applying gain control. The first ruins a V.90 server's
+codewords, which are the far end's actual symbols; the second was measured
+putting a V.34 receiver out of lock for 1.3 seconds. With the softphone out of
+the way the codewords arrive as they were sent, and the losses that remain are
+counted rather than concealed -- so a failed call now says whether it failed in
+the modem or in the network.
+
+It has a dialler of its own: a keypad, a number box, a Call button, and a form
+for the account -- SIP server, username, password, and UDP or TCP -- so a trunk
+can be set up without editing a file. Call types `ATD` at the terminal rather
+than reaching past it, so there is one path that places a call and it can be
+watched. T.38 is not there yet: a far end that asks for it is declined and the
+call stays on G.711, where the fax modulations already work. Compiled and
+tested against a fake trunk that challenges, refuses, retransmits and
+renegotiates -- and, since 2026-09-23, over a real trunk: it registers, places
+a call, carries it in mu-law, and the modem works over it. TCP has been
+exercised only against the fake trunk so far.
+
 Portable in principle — `cpal` for the audio, `eframe` for the window, no
 OS-specific code — but only built and run on Windows so far.
 

@@ -1000,6 +1000,7 @@ dependencies = [
  "ppp",
  "proxy",
  "rfd",
+ "sip",
  "telemetry",
  "telnet",
  "terminal",
@@ -2254,6 +2255,13 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
+
+[[package]]
+name = "sip"
+version = "1.3.0"
+dependencies = [
+ "dsp",
+]
 
 [[package]]
 name = "skrifa"

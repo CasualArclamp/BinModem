@@ -798,6 +798,17 @@ pub struct Modem {
     elapsed_samples: f64,
     /// Milliseconds since the call was placed, for the guard in V.250 5.6.1.
     since_dial_ms: u32,
+    /// What the last D command asked for, and whether the last A command has
+    /// been acted on, for a line that has to do something about it.
+    ///
+    /// A telephone line does not: the modem goes off hook, plays the digits
+    /// and starts its start-up, and the switch does the rest. A line made of
+    /// packets has to place a call before there is a line at all, so the
+    /// dialled string has to reach it. Left here for that line to take, and
+    /// dropped on the floor by every line that has no use for it -- which is
+    /// every other one.
+    dial_request: Option<String>,
+    answer_request: bool,
     /// Samples since the call was placed, which is what the line's notes
     /// are timed by.
     call_samples: u64,
@@ -897,6 +908,8 @@ impl Modem {
             async_bits: AsyncBits::new(8),
             elapsed_samples: 0.0,
             since_dial_ms: 0,
+            dial_request: None,
+            answer_request: false,
             call_samples: 0,
             line_notes: Vec::new(),
             pinned_rate: None,
@@ -940,6 +953,24 @@ impl Modem {
     pub fn hang_up(&mut self) {
         if self.pump.is_some() || self.negotiation.is_some() || self.fax.is_some() {
             self.end_call(Ended::LocalRequest);
+        }
+    }
+
+    /// The line went away underneath the call.
+    ///
+    /// The same ending, told differently, and the difference is the whole
+    /// point: [`Self::hang_up`] is `ATH` and reports `OK`, because the
+    /// terminal asked and knows why. This is the far end going, and reports
+    /// `NO CARRIER`, because the terminal did not ask and has no other way to
+    /// find out.
+    ///
+    /// A modem on copper never needed to be told: the carrier stopped
+    /// arriving and its own detector noticed. A line made of packets has no
+    /// carrier to lose -- the call ends in a BYE, somewhere above the samples
+    /// -- so the thing that knows has to say so.
+    pub fn carrier_lost(&mut self) {
+        if self.pump.is_some() || self.negotiation.is_some() || self.fax.is_some() {
+            self.end_call(Ended::CarrierLost);
         }
     }
 
@@ -991,6 +1022,19 @@ impl Modem {
     /// Seconds since the call was placed.
     pub fn call_seconds(&self) -> f64 {
         self.call_samples as f64 / self.fs
+    }
+
+    /// What the last D command dialled, for a line that has to place the call
+    /// itself. Taken once: a second caller gets nothing, because a dial
+    /// string acted on twice is a call placed twice.
+    pub fn take_dial_request(&mut self) -> Option<String> {
+        self.dial_request.take()
+    }
+
+    /// Whether an A command has been given since this was last asked, for a
+    /// line that has to accept the call itself.
+    pub fn take_answer_request(&mut self) -> bool {
+        std::mem::take(&mut self.answer_request)
     }
 
     /// Every LAPM frame that has crossed since this was last called.
@@ -2083,8 +2127,14 @@ impl Modem {
     fn run_actions(&mut self) {
         for action in self.at.take_actions() {
             match action {
-                Action::Dial(_) => self.place_call(Role::Calling),
-                Action::Answer => self.place_call(Role::Answering),
+                Action::Dial(number) => {
+                    self.dial_request = Some(number);
+                    self.place_call(Role::Calling);
+                }
+                Action::Answer => {
+                    self.answer_request = true;
+                    self.place_call(Role::Answering);
+                }
                 Action::HangUp => {
                     if self.pump.is_some() || self.negotiation.is_some() || self.fax.is_some() {
                         self.drop_call();

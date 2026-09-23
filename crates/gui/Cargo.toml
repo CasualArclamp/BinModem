@@ -23,6 +23,7 @@ telnet    = { path = "../telnet" }
 transfer  = { path = "../transfer" }
 ppp       = { path = "../ppp" }
 proxy     = { path = "../proxy" }
+sip       = { path = "../sip" }
 eframe = { version = "0.36.1", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp", "gif"] }
 rfd = "0.17.2"
