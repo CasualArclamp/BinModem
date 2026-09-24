@@ -925,6 +925,15 @@ pub struct Startup {
     timer: Option<u64>,
     counted: u64,
     round_trip: u64,
+    /// Symbols since the far end's conditioning signal was last heard while
+    /// this end was sending a rate signal, or `u64::MAX` for never.
+    ///
+    /// The one piece of direct evidence that a far end is still working
+    /// through 5.4.2, and worth more than a deadline reasoned from a round
+    /// trip measured seconds earlier: from the start of a conditioning signal
+    /// a rate signal is [`timing::R3_AT_THE_LATEST`] away at the outside, by
+    /// the construction of 5.2, and nothing else can be behind it.
+    since_conditioning: u64,
     /// Consecutive symbols the condition being waited for has held.
     held: u64,
     /// Consecutive symbols reception has been unsatisfactory for (7).
@@ -1020,6 +1029,7 @@ impl Startup {
             total: 0,
             timer: None,
             counted: 0,
+            since_conditioning: u64::MAX,
             round_trip: 0,
             held: 0,
             unsatisfactory: 0,
@@ -1478,6 +1488,16 @@ impl Startup {
         rx: &mut Receiver,
     ) {
         let heard = self.listener.classify();
+        // Time since the far end's conditioning signal, counted only while
+        // this end is sending a rate signal. Before that this end is sending a
+        // conditioning signal of its own and hearing its own echo of it, which
+        // stands a carrier and two sidebands up in exactly the same places.
+        self.since_conditioning =
+            if heard == Heard::Conditioning && self.state == State::SendRate {
+                0
+            } else {
+                self.since_conditioning.saturating_add(1)
+            };
         // How long the far end has been sending something with no line in it,
         // which is its conditioning signal and then its rate signal. Broken by
         // anything else, so a gap starts the count again.
@@ -1863,7 +1883,27 @@ impl Startup {
                         // and 5.5.1's answer to that is this end's answer to
                         // it too: back to repetitively transmitting state A
                         // and on again from 5.4.1's third paragraph.
+                        //
+                        // Unless the far end is audibly still working through
+                        // 5.4.2, which is not "something else" and is the one
+                        // thing here that is measured rather than reasoned
+                        // about. See
+                        // [`since_conditioning`](Self::since_conditioning).
+                        //
+                        // On live-1790207279 that was the whole call. A lost
+                        // packet had inverted the far end's alternation for
+                        // ninety-two milliseconds, the reversal that came out
+                        // of it stopped the round-trip clock at 706 ms on a
+                        // line whose real one is 1.22 s, and this deadline,
+                        // measured off that reading, expired 283 ms before the
+                        // far end's R3 arrived -- an R3 offering 14 400, the
+                        // rate the two ends would have agreed on. What
+                        // followed is what this deadline exists to prevent and
+                        // instead caused: back to repeating state A, opposite
+                        // a far end in a rate signal that would never alternate
+                        // again, for the whole of PATIENCE.
                         if self.symbols > timing::R3_AT_THE_LATEST + self.counted
+                            && self.since_conditioning > timing::R3_AT_THE_LATEST
                         {
                             self.start_again(tx, rx);
                             return;
@@ -2113,6 +2153,7 @@ impl Startup {
         self.timer = None;
         self.counted = 0;
         self.round_trip = 0;
+        self.since_conditioning = u64::MAX;
         self.carrier_peak = 0.0;
         self.trained = false;
         self.heard_end = false;
