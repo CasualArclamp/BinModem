@@ -319,9 +319,14 @@ pub struct ScopeApp {
     line_outputs: Vec<String>,
     chosen_input: usize,
     chosen_output: usize,
-    /// The SIP accounts from the account file, and which line is picked:
-    /// zero for the sound card, and one more than the account's place in the
-    /// list for a call over the network.
+    /// The SIP accounts from the account file, and which kind of line is
+    /// picked: zero for the sound card, one for a call over the network.
+    ///
+    /// A kind and not an account. The box used to list the accounts by name,
+    /// which made two questions one -- what sort of line this is, and whose
+    /// it is -- and named a trunk where it should have named a mechanism.
+    /// Which account is [`sip_chosen`](Self::sip_chosen), the one the
+    /// credentials window and the dialler already show.
     sip_accounts: Vec<String>,
     chosen_line: usize,
     /// The same accounts in full, as the credentials window is editing them,
@@ -525,23 +530,17 @@ impl ScopeApp {
 
     /// Put the names of the accounts back where the line row reads them.
     ///
-    /// The row picks a line by its place in the list, so an account added or
-    /// taken out from under it would leave the box naming somebody else's.
-    /// Followed by name rather than by place for exactly that reason.
+    /// These used to be followed from one list to the other by name, because
+    /// the row picked a line by its place in this one and an account added or
+    /// taken out from under it left the box naming somebody else's. The row
+    /// picks a kind of line now, and the only place a chosen account is kept
+    /// is the one the credentials window edits -- so the two cannot fall out
+    /// of step, and all that is left is keeping the choice inside the list.
     fn refresh_account_names(&mut self) {
-        let chosen = self
-            .chosen_line
-            .checked_sub(1)
-            .and_then(|i| self.sip_accounts.get(i).cloned());
         self.sip_accounts = self.sip_edit.iter().map(|a| a.name.clone()).collect();
-        self.chosen_line = match chosen {
-            Some(name) => self
-                .sip_accounts
-                .iter()
-                .position(|n| *n == name)
-                .map_or(0, |i| i + 1),
-            None => 0,
-        };
+        self.sip_chosen = self
+            .sip_chosen
+            .min(self.sip_edit.len().saturating_sub(1));
     }
 
     /// Carry out what the AT layer asked for.
@@ -835,14 +834,16 @@ impl ScopeApp {
         if state.open {
             match &state.sip {
                 // A call rather than a pair of devices: follow which account
-                // it is on, for the same reason.
+                // it is on, for the same reason -- and the account belongs to
+                // the dialler's picker now, not to the box.
                 Some(progress) => {
+                    self.chosen_line = 1;
                     if let Some(i) = self
-                        .sip_accounts
+                        .sip_edit
                         .iter()
-                        .position(|n| *n == progress.account)
+                        .position(|a| a.name == progress.account)
                     {
-                        self.chosen_line = i + 1;
+                        self.sip_chosen = i;
                     }
                 }
                 None => {
@@ -871,30 +872,38 @@ impl ScopeApp {
             ui.label(RichText::new("line").monospace().color(dim));
 
             // Which kind of line. A sound card is two devices that between
-            // them make a two-wire pair; a SIP account is a call placed
-            // directly, with no cable and no softphone in the path -- which
-            // is the only way the far end's G.711 codewords reach the modem
-            // as they were sent.
+            // them make a two-wire pair; SIP is a call placed directly, with
+            // no cable and no softphone in the path -- which is the only way
+            // the far end's G.711 codewords reach the modem as they were
+            // sent.
             let line_before = self.chosen_line;
             egui::ComboBox::from_id_salt("line-kind")
                 .width(150.0)
-                .selected_text(match self.chosen_line {
-                    0 => "sound card",
-                    n => self
-                        .sip_accounts
-                        .get(n - 1)
-                        .map(String::as_str)
-                        .unwrap_or("sound card"),
-                })
+                .selected_text(if self.chosen_line == 0 { "sound card" } else { "SIP" })
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.chosen_line, 0, "sound card")
                         .on_hover_text("Two audio devices as one two-wire line");
-                    for (i, name) in self.sip_accounts.iter().enumerate() {
-                        ui.selectable_value(&mut self.chosen_line, i + 1, name)
-                            .on_hover_text("Place the call from here, with no softphone in the path");
-                    }
+                    ui.selectable_value(&mut self.chosen_line, 1, "SIP").on_hover_text(
+                        "Place the call from this machine, with no softphone in the \
+                         path. Which account, and its credentials, are \
+                         in the dialler",
+                    );
                 });
-            let on_sip = self.chosen_line > 0;
+            let on_sip = self.chosen_line == 1;
+            // Whose call it would be, beside the box rather than in it: an
+            // account is not a kind of line. But a row that says nothing
+            // about it leaves somebody with two accounts no way of telling
+            // which one Open would use.
+            if on_sip {
+                let whose = self
+                    .sip_edit
+                    .get(self.sip_chosen)
+                    .map_or("no accounts", |a| a.name.as_str());
+                ui.label(RichText::new(whose).monospace().color(dim)).on_hover_text(
+                    "The account the dialler is showing. Change it there, under \
+                     Credentials",
+                );
+            }
 
             let before = (self.chosen_input, self.chosen_output);
             if !on_sip {
@@ -937,8 +946,8 @@ impl ScopeApp {
             let moved = picked != before || self.chosen_line != line_before;
             if moved && state.open {
                 if on_sip {
-                    if let Some(name) = self.sip_accounts.get(self.chosen_line - 1) {
-                        session.open_sip(name);
+                    if let Some(account) = self.sip_edit.get(self.sip_chosen) {
+                        session.open_sip(&account.name);
                     }
                 } else if have_both {
                     session.open(
@@ -969,17 +978,26 @@ impl ScopeApp {
                     session.set_recording(!recording);
                 }
             } else if ui
-                .add_enabled(on_sip || have_both, egui::Button::new("Open"))
+                .add_enabled(
+                    if on_sip { self.sip_chosen < self.sip_edit.len() } else { have_both },
+                    egui::Button::new("Open"),
+                )
                 .on_hover_text(if on_sip {
-                    "Register this account and wait for ATD"
+                    "Register the dialler's account and wait for ATD"
                 } else {
                     "Open these two devices as one two-wire line"
+                })
+                .on_disabled_hover_text(if on_sip {
+                    "There are no accounts. Open the dialler, then Credentials, and \
+                     add one"
+                } else {
+                    "There is no pair of devices to open"
                 })
                 .clicked()
             {
                 if on_sip {
-                    if let Some(name) = self.sip_accounts.get(self.chosen_line - 1) {
-                        session.open_sip(name);
+                    if let Some(account) = self.sip_edit.get(self.sip_chosen) {
+                        session.open_sip(&account.name);
                     }
                 } else {
                     session.open(
@@ -2090,11 +2108,14 @@ impl ScopeApp {
                             && let Some(name) = &account
                         {
                             session.open_sip(name);
-                            // The row picks a line by its place in the list.
+                            // The row shows the kind of line; which account
+                            // it is on is this picker, so point it at the one
+                            // the call is going out on.
+                            self.chosen_line = 1;
                             if let Some(i) =
-                                self.sip_accounts.iter().position(|n| n == name)
+                                self.sip_edit.iter().position(|a| a.name == *name)
                             {
-                                self.chosen_line = i + 1;
+                                self.sip_chosen = i;
                             }
                         }
                     }
@@ -2619,9 +2640,10 @@ impl ScopeApp {
             return;
         }
         session.open_sip(&name);
-        // The row picks a line by its place in the list, and the row and the
-        // dialler are two views of one thing.
-        self.chosen_line = i + 1;
+        // The row says which kind of line and the dialler which account, and
+        // the two are two views of one thing.
+        self.chosen_line = 1;
+        self.sip_chosen = i;
     }
 
     /// `&F` first, and then all of it. The window's controls are the ones a
