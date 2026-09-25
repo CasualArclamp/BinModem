@@ -14,6 +14,9 @@
 //! name has to be resolved and a handshake has to complete, either of which
 //! can take seconds. That happens on a thread of its own so the link keeps
 //! moving, and the answer comes back down a channel.
+//!
+//! Where it opens one is limited: the internet, and not the machine this runs
+//! on or the network around it (see [`crate::policy`]).
 
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
@@ -24,7 +27,7 @@ use std::time::Duration;
 use tcp::connection::Report;
 use tcp::stack::{Handle, Outgoing, Stack};
 
-use crate::{CHUNK, FAR_PORT, too_much};
+use crate::{CHUNK, FAR_PORT, policy, too_much};
 
 /// How long to wait for the far side of the internet before giving up on it.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -75,6 +78,13 @@ impl Conversation {
         }
     }
 
+    /// It is somewhere this proxy does not go, and the browser is told so.
+    fn forbidden(&mut self) {
+        if let Conversation::Http(h) = self {
+            let _ = h.answer(http::Answer::Forbidden);
+        }
+    }
+
     /// It did not. The browser is told in HTTP, which is what makes it show a
     /// page saying so rather than an empty one.
     fn would_not_open(&mut self, why: &str) {
@@ -120,7 +130,7 @@ struct Relayed {
     /// The real connection, once there is one.
     socket: Option<TcpStream>,
     /// The thread opening it, while it is being opened.
-    opening: Option<Receiver<Result<TcpStream, String>>>,
+    opening: Option<Receiver<Result<TcpStream, Unopened>>>,
     /// What has come off the link and not gone into the socket yet.
     to_socket: Vec<u8>,
     /// And what has come off the socket and not gone onto the link yet.
@@ -140,6 +150,15 @@ struct Relayed {
     told_socket: bool,
 }
 
+/// Why a socket was not opened.
+#[derive(Debug)]
+enum Unopened {
+    /// It would have gone somewhere [`policy::refused`] keeps callers out of.
+    Forbidden(&'static str),
+    /// It was tried, and did not open.
+    Failed(String),
+}
+
 /// The proxy on the machine that answered the call.
 #[derive(Debug)]
 pub struct Server {
@@ -147,6 +166,9 @@ pub struct Server {
     relays: HashMap<Handle, Relayed>,
     log: Vec<String>,
     port: u16,
+    /// Whether [`policy::refused`] is set aside, which only a test wants: its
+    /// web server is on this machine.
+    anywhere: bool,
 }
 
 impl Server {
@@ -159,7 +181,17 @@ impl Server {
             relays: HashMap::new(),
             log: Vec::new(),
             port: FAR_PORT,
+            anywhere: false,
         }
+    }
+
+    /// Go anywhere this machine can reach, its own addresses and every port
+    /// included.
+    ///
+    /// For tests, whose web servers listen on the loopback. A caller given
+    /// this reaches everything a firewall assumes nobody outside can.
+    pub fn reach_anywhere(&mut self) {
+        self.anywhere = true;
     }
 
     /// Size connections for what the link carries (see
@@ -310,8 +342,9 @@ impl Server {
             let how = if want.tunnel { " to tunnel through" } else { "" };
             self.log.push(format!("proxy: opening {where_to}{how}"));
             let (sender, receiver) = channel();
+            let (tunnel, anywhere) = (want.tunnel, self.anywhere);
             std::thread::spawn(move || {
-                let _ = sender.send(open(&where_to));
+                let _ = sender.send(open(&where_to, tunnel, anywhere));
             });
             relay.opening = Some(receiver);
         }
@@ -326,7 +359,13 @@ impl Server {
                     relay.socket = Some(socket);
                     self.log.push(format!("proxy: {} open", relay.going_to));
                 }
-                Ok(Err(why)) => {
+                Ok(Err(Unopened::Forbidden(why))) => {
+                    relay.opening = None;
+                    relay.talk.forbidden();
+                    self.log
+                        .push(format!("proxy: {} is off limits: {why}", relay.going_to));
+                }
+                Ok(Err(Unopened::Failed(why))) => {
                     relay.opening = None;
                     relay.talk.would_not_open(&why);
                     self.log
@@ -428,13 +467,24 @@ impl Server {
 }
 
 /// Resolve and connect, on a thread of its own.
-fn open(where_to: &str) -> Result<TcpStream, String> {
+///
+/// Each address is judged as it was resolved, and the socket goes to that
+/// same address, so a name that resolves to somewhere harmless when asked and
+/// somewhere else a moment later gets nowhere: nothing is looked up twice.
+fn open(where_to: &str, tunnel: bool, anywhere: bool) -> Result<TcpStream, Unopened> {
     let addresses: Vec<_> = where_to
         .to_socket_addrs()
-        .map_err(|e| format!("could not resolve: {e}"))?
+        .map_err(|e| Unopened::Failed(format!("could not resolve: {e}")))?
         .collect();
-    let mut last = "no address".to_owned();
+    let mut forbidden = None;
+    let mut last = None;
     for address in addresses {
+        if !anywhere
+            && let Some(why) = policy::refused(address.ip(), address.port(), tunnel)
+        {
+            forbidden = Some(why);
+            continue;
+        }
         match TcpStream::connect_timeout(&address, CONNECT_TIMEOUT) {
             Ok(socket) => {
                 // Every keystroke and every small write goes at once. A modem
@@ -442,13 +492,19 @@ fn open(where_to: &str) -> Result<TcpStream, String> {
                 let _ = socket.set_nodelay(true);
                 socket
                     .set_nonblocking(true)
-                    .map_err(|e| format!("{address}: {e}"))?;
+                    .map_err(|e| Unopened::Failed(format!("{address}: {e}")))?;
                 return Ok(socket);
             }
-            Err(e) => last = format!("{address}: {e}"),
+            Err(e) => last = Some(format!("{address}: {e}")),
         }
     }
-    Err(last)
+    // Refused only where nothing was tried: an address that was allowed and
+    // failed says more about why there is no page than one that was not.
+    match (last, forbidden) {
+        (Some(why), _) => Err(Unopened::Failed(why)),
+        (None, Some(why)) => Err(Unopened::Forbidden(why)),
+        (None, None) => Err(Unopened::Failed("no address".to_owned())),
+    }
 }
 
 #[cfg(test)]

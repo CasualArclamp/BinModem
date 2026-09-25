@@ -48,6 +48,9 @@ pub enum Answer {
     Unreachable,
     /// It never answered in time.
     TimedOut,
+    /// Somewhere this proxy does not go: its own machine, its own network, or
+    /// a tunnel to a port that is not a web server's.
+    Forbidden,
     /// Anything else.
     Failed,
 }
@@ -187,8 +190,10 @@ impl Session {
             // The browser is told in HTTP, which is what makes it show a page
             // saying what happened rather than an empty one. RFC 9110 15.6.3
             // is the gateway's own failure and 15.6.5 is the one where the far
-            // side never answered.
+            // side never answered. 15.5.4 is for a request understood and
+            // refused, which is what one to somewhere off limits is.
             let (status, why) = match answer {
+                Answer::Forbidden => (403, "this proxy does not go there"),
                 Answer::Refused => (502, "the far end refused the connection"),
                 Answer::Unreachable => (502, "the far end could not be reached"),
                 Answer::TimedOut => (504, "the far end did not answer in time"),
@@ -374,6 +379,7 @@ impl Session {
     fn reply(&mut self, status: u16, why: &str) {
         let reason = match status {
             400 => "Bad Request",
+            403 => "Forbidden",
             504 => "Gateway Timeout",
             _ => "Bad Gateway",
         };

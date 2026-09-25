@@ -551,6 +551,13 @@ BinModem that calls, and says *offering the internet at 10.0.0.1:1080*. The
 setting is kept for the next link, so a machine answering with a login prompt
 can offer it before anyone has called.
 
+It offers the internet and nothing nearer. A caller asking for the answering
+machine itself, or anywhere on its own network -- 127.0.0.1, 192.168.x.x,
+10.x.x.x, a router's page, a cloud host's 169.254.169.254 -- is answered 403
+and nothing is opened, since those are the places a firewall assumes nobody
+outside can reach. A tunnel goes only to port 443, which is what a browser
+wants one for, and a plain request to 80, 443 or a port above 1023.
+
 The transcript says whether the headers are being compressed — *ppp: headers
 compressed both ways, 16 slots*. That is RFC 1144, and it matters more here
 than almost anywhere: every TCP segment carries forty octets of IP and TCP
