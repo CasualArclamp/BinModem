@@ -430,6 +430,13 @@ sending to the SDP address is the classic one-way-audio call. This is what
 makes the crate work from behind a home router at all, and it is why no ICE or
 STUN is needed.
 
+It follows once. The first packet of a call says where the stream is, and
+after that another address is followed only if the packet from it is the same
+stream moving there: the same SSRC, carrying on within two seconds of where
+the stream had got to (RFC 3550 8.2 and A.1). Anything else from elsewhere is
+dropped and counted in `strangers`. Following every new source had let one
+datagram from anywhere take the call's audio over in both directions.
+
 **Connecting twice to the same call is nothing at all.** `Media::connect` used
 to restart the jitter buffer and empty the outgoing queue every time it was
 called -- up to fifty packets in and twenty-five out, thrown away without a
@@ -950,6 +957,7 @@ The network's own numbers, which are what the crate exists to produce:
 | `resynced` | The far end's sequence jumped further forward than RFC 3550 A.1's `MAX_DROPOUT`: it restarted its stream rather than dropping part of one. The timeline stepped instead of filling minutes with silence. On a call that was not renegotiated, this means the far end's RTP source changed underneath us |
 | `deepest` | The most packets ever waiting at once. A number well above 2 says how much jitter the path actually has |
 | `latched` | The far end's RTP came from an address other than the one it advertised, and we followed it. Expected behind a router and not a fault -- but if audio is one-way, this is the first thing to look at, because it says whether symmetric RTP did its job |
+| `strangers` | RTP from an address other than the call's stream that was not that stream moving, dropped rather than followed. Usually the last call's stream still arriving; a steady count on a call is somebody else sending to the port |
 | `ignored` | Datagrams that arrived and were not RTP we could use. Scanners, or a middlebox mangling packets |
 | `off_codec` | RTP that parsed but carried a payload type we never negotiated, dropped rather than decoded. Dialled digits sent as RFC 4733 events, comfort noise, or a transcoder that has changed codec under the call. Each one leaves a gap the buffer conceals, so `off_codec` and `concealed` climb together; a steady climb with no audio behind it is the third case and that call is over whatever we do |
 | `payload_changed` | The payload type inside the stream the buffer accepted changed. It is kept because the buffer on its own cannot know what was agreed, but with the payload-type filter in `media.rs` in front of it nothing should now reach it that could move this. A non-zero value here is a fault in this crate rather than in the line |

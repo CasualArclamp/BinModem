@@ -86,9 +86,10 @@
 //!
 //! Unlike A.1 there is no probation period here and no source validation. A.1
 //! is guarding against a stream of packets from somewhere else being taken up
-//! as the source; this buffer is fed by a socket that has already matched the
-//! SSRC and the address, and a modem call cannot afford to discard the first
-//! two packets of a stream while it makes up its mind.
+//! as the source; this buffer is fed by `media`'s reader, which has already
+//! kept to the call's stream -- its address, or its SSRC carrying on from
+//! another -- and a modem call cannot afford to discard the first two packets
+//! of a stream while it makes up its mind.
 
 use std::collections::BTreeMap;
 
