@@ -337,7 +337,14 @@ own. Two values in it are given only by reference to a C header -- the frame
 type numbers and the subpacket terminators -- and where the code relies on one
 it says what it was derived from.
 
-Tell the board to send first. This end answers; it does not ask.
+Tell the board to send first. This end answers; it does not ask. A board may
+send several files at once, and each is kept in the directory as it arrives,
+so a batch that is cut off partway still leaves the files that were already
+here. A name the board chose is only ever a name in that directory: any
+directories in it are dropped, characters Windows will not have in a name
+become `_`, and a device's name like `NUL` or `COM1` gets a `_` in front.
+`crates/transfer/tests/lrzsz.rs` runs the receiver against `sz` wherever
+lrzsz is installed.
 
 ## Sending a fax
 
