@@ -305,6 +305,52 @@ fn an_escape_in_transparent_data_is_announced_and_moves_on() {
     assert_eq!(back, text);
 }
 
+/// 7.14: the ESCAPE is assigned 0 "at initialization of the data compression
+/// function" and moves on by 51 at each EID, and nothing else touches it --
+/// not ECM, whose reinitialisation (6.5.2) is of the dictionary, whose state
+/// 7.5.1 lists without it. Built from the clause rather than from this
+/// encoder, because an encoder and decoder that are wrong the same way agree.
+///
+/// Transparent, a zero announced (so the ESCAPE is 51), back into compressed
+/// mode with the ESCAPE of 51, out again, and then 51 is the ESCAPE still:
+/// `33 01` is the octet 0x33, and a zero is only a zero.
+#[test]
+fn the_escape_is_not_set_back_by_entering_compressed_mode() {
+    let params = Params::default();
+    // ETM from a dictionary in its initial state, which is where the decoder
+    // starts and where it is again just after an ECM.
+    let etm = {
+        let mut enc = Encoder::new(params);
+        let mut wire = Vec::new();
+        enc.enter_transparent_now(&mut wire);
+        wire
+    };
+    let mut stream = etm.clone();
+    stream.extend([0x00, command::EID]);
+    stream.extend([0x33, command::ECM]);
+    stream.extend(&etm);
+    stream.extend([0x33, command::EID, 0x00, 0x62]);
+
+    let mut dec = Decoder::new(params);
+    let mut out = Vec::new();
+    dec.decode(&stream, &mut out).expect("a stream built from the clause would not decode");
+    assert_eq!(out, [0x00, 0x33, 0x00, 0x62]);
+
+    // And this encoder writes the transparent stretches of that same stream.
+    let mut enc = Encoder::new(params);
+    let mut wire = Vec::new();
+    enc.enter_transparent_now(&mut wire);
+    let mark = wire.len();
+    enc.encode(&[0x00], &mut wire);
+    enc.enter_compressed(&mut wire);
+    assert_eq!(wire[mark..], [0x00, command::EID, 0x33, command::ECM]);
+    enc.enter_transparent_now(&mut wire);
+    let mark = wire.len();
+    enc.encode(&[0x33, 0x00, 0x62], &mut wire);
+    enc.flush(&mut wire);
+    assert_eq!(wire[mark..], [0x33, command::EID, 0x00, 0x62]);
+}
+
 /// 7.15: a codeword above C1 is a procedural error rather than something to
 /// guess at, because the two dictionaries have come apart.
 #[test]

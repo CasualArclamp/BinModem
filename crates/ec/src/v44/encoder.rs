@@ -531,6 +531,15 @@ impl Encoder {
     /// The order matters and the clause gives it: reinitialise, then the
     /// ESCAPE, then ECM. A far end that reinitialised at a different moment
     /// would build a different dictionary from the same characters.
+    ///
+    /// The ESCAPE itself is not part of the dictionary and is left where it
+    /// is. 7.14 assigns it 0 "at initialization of the data compression
+    /// function" -- 7.5's C-INIT -- and moves it on by 51 at each EID, and
+    /// 7.5.1's initial state of the dictionary does not mention it. It was set
+    /// back to 0 here, and in the decoder at the same moment, so two of these
+    /// agreed with each other and not with a far end reading the clause: after
+    /// an EID in one stretch of transparent mode, the next stretch started
+    /// from a different ESCAPE at each end.
     pub fn enter_compressed(&mut self, out: &mut Vec<u8>) {
         if self.mode == Mode::Compressed {
             return;
@@ -539,6 +548,5 @@ impl Encoder {
         out.push(self.escape);
         out.push(super::command::ECM);
         self.mode = Mode::Compressed;
-        self.escape = 0;
     }
 }

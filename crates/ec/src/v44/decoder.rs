@@ -149,9 +149,11 @@ impl Decoder {
             self.awaiting_command = false;
             match byte {
                 command::ECM => {
+                    // 6.5.2 reinitialises the dictionary and nothing else:
+                    // the ESCAPE carries on from where it was (see
+                    // `Encoder::enter_compressed`).
                     self.reinitialize();
                     self.mode = Mode::Compressed;
-                    self.escape = 0;
                 }
                 command::EID => {
                     // 7.14: the ESCAPE was data. It goes out as itself, and
