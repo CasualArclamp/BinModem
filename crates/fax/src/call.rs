@@ -210,6 +210,11 @@ const HOLD_FOR_THE_FAR_END: f64 = 6.0;
 /// up on that too.
 const T5_SECONDS: f64 = 60.0;
 
+/// Times a page the far end answered with RTN is sent again before it is
+/// given up on. T.30 leaves the number to the sender; two more tries is what
+/// 5.4.2 allows a command, and no more.
+const PAGE_RESENDS: u8 = 2;
+
 /// How many of a training check's bits have to be zeros for the rate to be
 /// accepted, and how many in a row mark where it starts.
 ///
@@ -372,6 +377,8 @@ pub struct Call {
     /// before the call is a lost cause, and a first attempt that goes
     /// unanswered is the ordinary way a fax call starts on a bad line.
     attempts: u8,
+    /// Times the far end has answered the page in hand with RTN.
+    refused: u8,
     /// Why the call ended, when it ended badly.
     pub trouble: Option<String>,
 }
@@ -461,6 +468,7 @@ impl Call {
             kept: false,
             accepted: false,
             attempts: 0,
+            refused: 0,
             trouble: None,
         }
     }
@@ -1023,6 +1031,7 @@ impl Call {
                         self.page = Some(next);
                         self.sheet += 1;
                         self.attempts = 0;
+                        self.refused = 0;
                         // 5.3.6.1.6: after MCF to a multi-page signal the
                         // next page follows at once. After RTP it follows
                         // "after retransmission of training and CFR"
@@ -1101,8 +1110,7 @@ impl Call {
             }
             Frame::Rtn => {
                 if self.phase == Phase::AwaitingReceipt {
-                    self.trouble = Some("the far end could not read the page".to_owned());
-                    self.pause_then(Phase::Ending);
+                    self.page_refused();
                 }
             }
             Frame::Eop | Frame::Mps | Frame::Eom => {
@@ -1263,6 +1271,47 @@ impl Call {
             };
         }
         true
+    }
+
+    /// The far end could not read the page (RTN), which is not the end of the
+    /// call.
+    ///
+    /// 5.3.6.1.7: RTN says the page was not received well, "however, further
+    /// receptions may be possible, provided training is retransmitted", and
+    /// Figure 5-2 takes the sender back through the command and the training
+    /// check -- after an EOP, by way of "capable re-xmit?", and this end still
+    /// has the page. It used to disconnect at the first one. Without error
+    /// correction RTN is the only thing a machine can say about a page a slip
+    /// on the line spoiled after its training check went through clean, so
+    /// that was a failed call for what a second try usually mends.
+    ///
+    /// So the page goes again, a rung down the ladder where there is one --
+    /// the rate the check passed at did not carry the page -- and at the same
+    /// rate where there is not. Twice; after that the far end is not going to
+    /// read this page, and the next one, if there is one, is tried instead.
+    fn page_refused(&mut self) {
+        if self.ecm || self.page.is_none() {
+            self.bow_out("the far end could not read the page");
+            return;
+        }
+        let sheet = self.sheet;
+        if self.refused < PAGE_RESENDS {
+            self.refused += 1;
+        } else if let Some(next) = self.more.pop_front() {
+            self.trouble = Some(format!("the far end could not read page {sheet}"));
+            self.page = Some(next);
+            self.sheet += 1;
+            self.refused = 0;
+        } else {
+            self.bow_out(&format!("the far end could not read page {sheet}"));
+            return;
+        }
+        self.attempts = 0;
+        if self.fallback.is_empty() {
+            self.pause_then(Phase::Commanding);
+        } else {
+            self.step_down();
+        }
     }
 
     /// Try the next speed down after a failure to train (6.2.7).
@@ -2612,6 +2661,65 @@ mod tests {
         carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingCommand);
         assert_eq!(said, vec![Frame::Mcf, Frame::Csi, Frame::Dis], "no DIS once T2 ran out");
         assert_eq!(call.phase(), Phase::AwaitingCommand, "{:?}", call.trouble);
+    }
+
+    /// RTN is not the end of a call: 5.3.6.1.7 has further pages possible
+    /// "provided training is retransmitted". The same page goes again, a rung
+    /// down each time; after two more tries the far end is not going to read
+    /// it, and the next page goes instead.
+    #[test]
+    fn a_page_the_far_end_could_not_read_is_trained_for_and_sent_again() {
+        let first = blank_page(10, Resolution::Standard);
+        let second = blank_page(20, Resolution::Standard);
+        let mut call = Call::originate_pages(FS, "1", vec![first.clone(), second.clone()]);
+        call.capabilities = Some(t30::capabilities(&DIS));
+        assert!(call.choose_rate());
+        assert_eq!(call.rate(), 9600);
+
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            call.enter(Phase::AwaitingReceipt);
+            call.frame_arrived(Message::new(Frame::Rtn, false));
+            assert_eq!(call.phase(), Phase::Commanding, "{:?}", call.trouble);
+            seen.push((call.sheet(), call.rate(), call.page.as_ref().map(|p| p.lines.len())));
+        }
+        assert_eq!(
+            seen,
+            vec![
+                (1, 7200, Some(10)),
+                (1, 4800, Some(10)),
+                // Twice again is all it gets; the second page goes instead.
+                (2, 2400, Some(20)),
+                // And off the bottom of the ladder a page is tried again at
+                // the rate there is.
+                (2, 2400, Some(20)),
+            ]
+        );
+        assert_eq!(call.trouble.as_deref(), Some("the far end could not read page 1"));
+
+        // What goes out after it is the command, which is where training
+        // starts again.
+        let mut said = Vec::new();
+        carry_on(&mut call, &mut said, |c| c.phase() == Phase::Training);
+        assert_eq!(said, vec![Frame::Tsi, Frame::Dcs]);
+    }
+
+    /// And a page refused three times over with nothing after it is the end,
+    /// said as such.
+    #[test]
+    fn the_last_page_refused_three_times_ends_the_call() {
+        let mut call = Call::originate(FS, "1", Some(blank_page(10, Resolution::Standard)));
+        call.capabilities = Some(t30::capabilities(&DIS));
+        assert!(call.choose_rate());
+        for _ in 0..PAGE_RESENDS {
+            call.enter(Phase::AwaitingReceipt);
+            call.frame_arrived(Message::new(Frame::Rtn, false));
+            assert_eq!(call.phase(), Phase::Commanding);
+        }
+        call.enter(Phase::AwaitingReceipt);
+        call.frame_arrived(Message::new(Frame::Rtn, false));
+        assert_eq!(call.phase(), Phase::Ending);
+        assert_eq!(call.trouble.as_deref(), Some("the far end could not read page 1"));
     }
 
     #[test]

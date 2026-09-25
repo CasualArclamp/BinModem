@@ -375,6 +375,11 @@ The **offer** boxes are what this end will use. V.29 carries a page at 9600 and
 the fastest rate both ends have and drops a rung each time the far end refuses
 the training check. Untick V.29 to hold a call to V.27 ter on a bad line.
 
+A page the far end could not read -- T.30's RTN, which a line that slipped
+after the training check passed will cause -- is trained for again a rung down
+and sent again, twice at most. After that the next page goes instead, and the
+call says which page did not get through.
+
 **ECM** is T.30's error correction mode. The page goes in numbered frames, and
 any the far end cannot read are asked for and sent again rather than printed as
 streaks. It is used only when the far end offers it too -- the panel on the far
