@@ -189,7 +189,44 @@ pub struct Stats {
     /// Times the far end's RTP came from somewhere other than the address it
     /// gave us, and we followed it.
     pub latched: u64,
+    /// Packets from an address other than the call's that were not the
+    /// call's stream moving there, and so were dropped rather than followed.
+    ///
+    /// Anything that can reach the port can send RTP to it, and following
+    /// every new source let one packet from anywhere take the call's audio
+    /// over in both directions: its payload went to the modem, and the
+    /// modem's went back to it. A count here on an ordinary call is somebody
+    /// else's stream, most often the last call's still arriving.
+    pub strangers: u64,
     pub jitter: Counters,
+}
+
+/// The stream the call's audio is arriving on, once one has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Source {
+    address: SocketAddr,
+    ssrc: u32,
+    /// The newest sequence number heard on it.
+    sequence: u16,
+}
+
+/// How far ahead of the stream's newest packet one arriving from a new
+/// address may be and still be the same stream moving there: two seconds of
+/// 20 ms packets, which a router rebinding a port does not take.
+const FOLLOW_WITHIN: u16 = 100;
+
+impl Source {
+    /// Whether a packet from another address is this stream moving there.
+    ///
+    /// RFC 3550 8.2 has a receiver "avoid switching" on a packet that merely
+    /// claims to be a known source, and A.1's continuity check is what tells
+    /// the stream from a stranger: the same SSRC, carrying on from where the
+    /// stream had got to. Behind a router that rebinds, this is exactly what
+    /// arrives; from anywhere else, guessing both at once is not.
+    fn moved_to(&self, ssrc: u32, sequence: u16) -> bool {
+        let ahead = sequence.wrapping_sub(self.sequence);
+        ssrc == self.ssrc && (1..=FOLLOW_WITHIN).contains(&ahead)
+    }
 }
 
 #[derive(Debug)]
@@ -203,6 +240,11 @@ struct Shared {
     /// to a far end's real address a different call, and throw its buffer
     /// away for it.
     dialled: Mutex<Option<SocketAddr>>,
+    /// The stream the call's audio has been arriving on. None until the first
+    /// packet of a call, which is followed wherever it came from (symmetric
+    /// RTP); after that, a packet from anywhere else has to be that stream
+    /// moving (see [`Source::moved_to`]).
+    source: Mutex<Option<Source>>,
     /// Codewords waiting to go out, already companded.
     outgoing: Mutex<VecDeque<u8>>,
     /// Codewords that have arrived, in order, waiting to be read.
@@ -230,6 +272,7 @@ struct Shared {
     dropped_out: AtomicU64,
     flushed_out: AtomicU64,
     latched: AtomicU64,
+    strangers: AtomicU64,
 }
 
 /// Rate conversion, which only the thread calling `receive` and `transmit`
@@ -274,6 +317,7 @@ impl Media {
         let shared = Arc::new(Shared {
             remote: Mutex::new(None),
             dialled: Mutex::new(None),
+            source: Mutex::new(None),
             outgoing: Mutex::new(VecDeque::new()),
             incoming: Mutex::new(Jitter::new(JITTER_TARGET, JITTER_CAPACITY)),
             payload_type: AtomicU8::new(g711::PCMU),
@@ -292,6 +336,7 @@ impl Media {
             dropped_out: AtomicU64::new(0),
             flushed_out: AtomicU64::new(0),
             latched: AtomicU64::new(0),
+            strangers: AtomicU64::new(0),
         });
 
         let reader = {
@@ -367,6 +412,11 @@ impl Media {
         if let Ok(mut slot) = self.shared.remote.lock() {
             *slot = Some(remote);
         }
+        // A different call, or this one moved, so its stream is learned again
+        // from the first packet that arrives.
+        if let Ok(mut slot) = self.shared.source.lock() {
+            *slot = None;
+        }
         if let Ok(mut jitter) = self.shared.incoming.lock() {
             // Whatever was still waiting is counted into `abandoned` on the
             // way out, so that a call which really did change underneath us
@@ -424,6 +474,9 @@ impl Media {
             *slot = None;
         }
         if let Ok(mut slot) = self.shared.dialled.lock() {
+            *slot = None;
+        }
+        if let Ok(mut slot) = self.shared.source.lock() {
             *slot = None;
         }
         if let Ok(mut queue) = self.shared.outgoing.lock() {
@@ -545,6 +598,7 @@ impl Media {
             dropped_out: self.shared.dropped_out.load(Ordering::Relaxed),
             flushed_out: self.shared.flushed_out.load(Ordering::Relaxed),
             latched: self.shared.latched.load(Ordering::Relaxed),
+            strangers: self.shared.strangers.load(Ordering::Relaxed),
             jitter,
         }
     }
@@ -622,7 +676,41 @@ fn read(shared: Arc<Shared>, socket: UdpSocket) {
         // and sending to the SDP address is the classic one-way-audio call.
         // Following the source is what every other agent does and what every
         // trunk expects.
-        if let Ok(mut slot) = shared.remote.lock()
+        //
+        // Once, and then only the stream itself. Following every new source
+        // let a single packet from anywhere take the call over: its payload
+        // went to the modem and every packet the modem sent went back to it.
+        // So the first packet of a call says where the stream is; from then
+        // on the same address is the stream, whatever SSRC it carries, and
+        // another address is the stream only if it carries on from where the
+        // stream had got to (RFC 3550 8.2, A.1).
+        let follow = match shared.source.lock() {
+            Ok(mut slot) => match *slot {
+                None => {
+                    *slot = Some(Source { address: from, ssrc: packet.ssrc, sequence: packet.sequence });
+                    true
+                }
+                Some(ref mut source) if source.address == from => {
+                    if source.ssrc != packet.ssrc || packet.sequence.wrapping_sub(source.sequence) < 0x8000 {
+                        source.sequence = packet.sequence;
+                    }
+                    source.ssrc = packet.ssrc;
+                    false
+                }
+                Some(ref mut source) if source.moved_to(packet.ssrc, packet.sequence) => {
+                    source.address = from;
+                    source.sequence = packet.sequence;
+                    true
+                }
+                Some(_) => {
+                    shared.strangers.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+            },
+            Err(_) => false,
+        };
+        if follow
+            && let Ok(mut slot) = shared.remote.lock()
             && *slot != Some(from)
         {
             if slot.is_some() {
@@ -995,6 +1083,15 @@ mod tests {
     fn the_outgoing_queue_is_primed_so_the_first_packets_are_not_invented() {
         let (_far, media, _ours) = connected_to_a_quiet_far_end();
         thread::sleep(Duration::from_millis(200));
+        // The call is put down and the pacer left to finish before anything
+        // is read. It counts an underrun before the packet goes out and the
+        // packet once it has, so a look taken while a tick is sending sees
+        // one more underrun than packets. The pacer started ticking when the
+        // media path opened, just before this sleep, and 200 ms is ten packet
+        // times, so without this the look lands on a tick more often than not.
+        // With the call down, the tick in flight finishes and no other starts.
+        media.disconnect();
+        thread::sleep(Duration::from_millis(60));
         let stats = media.stats();
         assert!(stats.packets_sent >= 4, "the pacer sent nothing: {stats:?}");
         assert_eq!(
@@ -1220,5 +1317,99 @@ mod tests {
         media.disconnect();
         let stats = media.stats();
         assert!(stats.flushed_out >= 1000, "the tail of the call went quietly: {stats:?}");
+    }
+
+    /// One packet with a chosen SSRC, from a chosen socket.
+    fn send_from(socket: &UdpSocket, to: SocketAddr, ssrc: u32, sequence: u16) {
+        let packet = rtp::Packet {
+            payload_type: g711::PCMU,
+            marker: false,
+            sequence,
+            timestamp: u32::from(sequence) * 160,
+            ssrc,
+            payload: vec![0x7F; 160],
+        };
+        let mut datagram = Vec::new();
+        packet.write(&mut datagram);
+        socket.send_to(&datagram, to).expect("could not send");
+    }
+
+    /// Whether a packet of what the modem says reaches `socket`.
+    fn hears(media: &Media, socket: &UdpSocket) -> bool {
+        socket.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let mut heard = vec![0u8; 2048];
+        // Drain what was already on its way before the question was asked.
+        for _ in 0..3 {
+            media.transmit(&[0.0; 320]);
+        }
+        (0..10).any(|_| socket.recv_from(&mut heard).is_ok())
+    }
+
+    /// Anything that can reach the port can send it RTP, and a packet from
+    /// anywhere used to be followed: one datagram from a stranger took the
+    /// call's audio in both directions. Once a call's stream is known, a
+    /// packet from elsewhere that is not that stream is dropped and counted.
+    #[test]
+    fn a_stranger_cannot_take_the_call_over() {
+        let (far, media, ours) = connected_to_a_quiet_far_end();
+        for sequence in 0..3u16 {
+            send_from(&far, ours, 0x5EED_5EED, sequence);
+        }
+        thread::sleep(Duration::from_millis(60));
+
+        let stranger = UdpSocket::bind("127.0.0.1:0").unwrap();
+        // Another stream, and the call's own SSRC with a sequence nowhere
+        // near where the call has got to.
+        send_from(&stranger, ours, 0xBAD0_BAD0, 3);
+        send_from(&stranger, ours, 0x5EED_5EED, 3_000);
+        thread::sleep(Duration::from_millis(60));
+
+        let stats = media.stats();
+        assert_eq!(stats.strangers, 2, "{stats:?}");
+        assert_eq!(stats.latched, 0, "the call was followed to a stranger: {stats:?}");
+        assert_eq!(stats.packets_received, 3, "a stranger's audio went to the modem: {stats:?}");
+        assert!(!hears(&media, &stranger), "the modem's audio went to the stranger");
+        assert!(hears(&media, &far), "the modem's audio stopped going to the far end");
+    }
+
+    /// And the call's own stream moving -- a router behind the far end
+    /// rebinding its port, say -- is still followed, because it carries on
+    /// from where it was.
+    #[test]
+    fn the_calls_own_stream_moving_is_followed() {
+        let (far, media, ours) = connected_to_a_quiet_far_end();
+        for sequence in 10..13u16 {
+            send_from(&far, ours, 0x5EED_5EED, sequence);
+        }
+        thread::sleep(Duration::from_millis(60));
+
+        let moved = UdpSocket::bind("127.0.0.1:0").unwrap();
+        for sequence in 14..17u16 {
+            send_from(&moved, ours, 0x5EED_5EED, sequence);
+        }
+        thread::sleep(Duration::from_millis(60));
+
+        let stats = media.stats();
+        assert_eq!(stats.latched, 1, "{stats:?}");
+        assert_eq!(stats.strangers, 0, "{stats:?}");
+        assert_eq!(stats.packets_received, 6, "{stats:?}");
+        assert!(hears(&media, &moved), "the modem's audio did not follow the stream");
+    }
+
+    /// A new call learns its stream afresh, whoever the last one's was.
+    #[test]
+    fn a_new_call_learns_its_stream_again() {
+        let (far, media, ours) = connected_to_a_quiet_far_end();
+        send_from(&far, ours, 1, 1);
+        thread::sleep(Duration::from_millis(40));
+        media.disconnect();
+
+        let next = UdpSocket::bind("127.0.0.1:0").unwrap();
+        media.connect(next.local_addr().unwrap(), Law::Mu, g711::PCMU, 20);
+        send_from(&next, ours, 2, 500);
+        thread::sleep(Duration::from_millis(40));
+        let stats = media.stats();
+        assert_eq!(stats.strangers, 0, "the new call's stream was taken for a stranger: {stats:?}");
+        assert!(hears(&media, &next));
     }
 }

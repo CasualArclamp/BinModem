@@ -88,6 +88,17 @@ impl FileInfo {
     /// local security requirements." A board is not a trusted party, and a
     /// name it chose is the one part of a transfer that decides where the
     /// bytes land.
+    ///
+    /// Taking the last component is not the whole of it on Windows, where a
+    /// name with no separator in it can still leave the folder. `C:x.dll` is
+    /// drive-relative, and a path joined onto it is replaced by it, so the
+    /// bytes landed in drive C's current directory -- for a program started
+    /// by double-clicking, the program's own folder, where a DLL it loads by
+    /// bare name is looked for first. `notes.txt:x` is an alternate stream of
+    /// a file that may not be the one it seems, and `NUL` or `COM1.txt` is a
+    /// device rather than a file. The colon and the other characters Windows
+    /// will not have in a name become `_`, and a device's name gets one in
+    /// front of it.
     pub fn safe_name(&self) -> String {
         let last = self
             .name
@@ -95,7 +106,33 @@ impl FileInfo {
             .next()
             .unwrap_or_default()
             .trim_matches(|c: char| c == '.' || c.is_whitespace() || c.is_control());
-        if last.is_empty() { "received".to_owned() } else { last.to_owned() }
+        if last.is_empty() {
+            return "received".to_owned();
+        }
+        let name: String = last
+            .chars()
+            .map(|c| if c.is_control() || matches!(c, ':' | '<' | '>' | '"' | '|' | '?' | '*') { '_' } else { c })
+            .collect();
+        if is_device(&name) { format!("_{name}") } else { name }
+    }
+}
+
+/// Whether Windows takes a name for a device rather than a file.
+///
+/// What counts is the part before the first dot, whatever follows it:
+/// `NUL.txt` is the null device as much as `NUL` is. Trailing spaces go too,
+/// so `CON .log` is still the console.
+fn is_device(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or_default().trim_end().to_ascii_uppercase();
+    match stem.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" => true,
+        _ => {
+            let digit = |s: &str| {
+                let mut c = s.chars();
+                matches!((c.next(), c.next()), (Some('0'..='9' | '¹' | '²' | '³'), None))
+            };
+            stem.strip_prefix("COM").is_some_and(digit) || stem.strip_prefix("LPT").is_some_and(digit)
+        }
     }
 }
 
@@ -186,6 +223,39 @@ mod tests {
             FileInfo { name: "sub/dir/FILE.ZIP".into(), ..FileInfo::default() }.safe_name(),
             "FILE.ZIP"
         );
+    }
+
+    /// A name with no separator in it can still leave the folder on Windows:
+    /// a drive-relative path replaces the folder it is joined onto, a colon
+    /// further along names an alternate stream, and a device's name is not a
+    /// file at all.
+    #[test]
+    fn a_name_cannot_leave_the_folder_on_windows_either() {
+        for (hostile, safe) in [
+            ("C:opengl32.dll", "C_opengl32.dll"),
+            ("c:version.dll", "c_version.dll"),
+            ("sub/C:dxgi.dll", "C_dxgi.dll"),
+            ("notes.txt:hidden", "notes.txt_hidden"),
+            ("evil.exe::$DATA", "evil.exe__$DATA"),
+            ("a?b.txt", "a_b.txt"),
+            ("x<y>.zip", "x_y_.zip"),
+            ("say \"hi\"|now*", "say _hi__now_"),
+            ("NUL", "_NUL"),
+            ("con", "_con"),
+            ("COM1", "_COM1"),
+            ("LPT1.txt", "_LPT1.txt"),
+            ("aux.tar.gz", "_aux.tar.gz"),
+            ("CON .log", "_CON .log"),
+            ("COM¹", "_COM¹"),
+        ] {
+            let f = FileInfo { name: hostile.into(), ..FileInfo::default() };
+            assert_eq!(f.safe_name(), safe, "{hostile}");
+        }
+        // Names that only look like devices are files.
+        for fine in ["COM10", "CONSOLE.TXT", "NULL", "COMMAND.COM", "LPT", "ACON"] {
+            let f = FileInfo { name: fine.into(), ..FileInfo::default() };
+            assert_eq!(f.safe_name(), fine);
+        }
     }
 
     #[test]

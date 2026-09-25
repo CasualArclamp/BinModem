@@ -251,8 +251,15 @@ fn decode_hex(bytes: &[u8], mut at: usize) -> Result<(Header, Style, usize), Hea
     // 7.3.3: "the receive routine expects to see at least one of these
     // characters, two if the first is CR", and an XON may follow. Eaten here
     // so the caller is left at whatever really comes next.
+    //
+    // Any of the three may arrive with its eighth bit set, and one always
+    // does: `sz` ends the line with 0212, a line feed with the parity bit on.
+    // Matched exactly, that stopped the eating at the line feed, and whatever
+    // followed the header started with it and an XON. The one header with a
+    // subpacket behind it is ZSINIT's, so its subpacket failed its check on
+    // every try and `sz -e` never got as far as a file.
     for trailer in [b'\r', b'\n', 0o21] {
-        if bytes.get(at) == Some(&trailer) {
+        if bytes.get(at).is_some_and(|&b| b & 0o177 == trailer) {
             at += 1;
         }
     }
@@ -320,6 +327,17 @@ mod tests {
         }
         let out = Header::position(Kind::Rpos, 0).encode(Style::Hex);
         assert_eq!(out[out.len() - 1], 0o21, "everything else gets one");
+    }
+
+    /// `sz`'s ZSINIT, as it came off the pipe: its line feed is 0212, with
+    /// the parity bit set. The whole of the tail has to go, or the subpacket
+    /// behind it starts with two bytes that are not in it.
+    #[test]
+    fn a_hex_header_tail_with_the_eighth_bit_set_is_still_eaten() {
+        let bytes = b"**\x18B02000000400c47\r\x8a\x11\x18@";
+        let (h, style, used) = decode(bytes).expect("did not decode");
+        assert_eq!((h.kind, style, h.zf0()), (Kind::Sinit, Style::Hex, 0o100));
+        assert_eq!(&bytes[used..], b"\x18@");
     }
 
     #[test]

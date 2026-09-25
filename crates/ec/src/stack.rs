@@ -231,8 +231,18 @@ pub struct Stack {
     declining: bool,
     /// What the far end answered in the detection phase, if it answered.
     heard_adp: Option<Answer>,
-    /// What the far end proposed in XID, if it sent one.
+    /// What the far end proposed in XID, if it sent one: its command.
     heard_xid: Option<Xid>,
+    /// And what it answered to this end's, if it did: its response.
+    ///
+    /// Kept apart because they are different statements. The command says
+    /// what the far end can do; the response names at most one compression
+    /// algorithm, the one the call is going to use (V.44 7.3), and says
+    /// nothing of the other. Both went into one slot, the later on top, so
+    /// after an ordinary exchange the "offer" on show was a V.44-only
+    /// answer -- and the panel, reading only the V.42bis half of it, said
+    /// "none offered" on every call where V.44 was running.
+    heard_answer: Option<Xid>,
     /// The check sequence width the two ends agreed on, once they have.
     ///
     /// Not in use yet when it is set: V.42 8.10.2 keeps XID at 16 bits and
@@ -291,6 +301,17 @@ impl Detect {
             ))),
         }
     }
+}
+
+/// The compression a link is running, and on what terms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Agreed {
+    /// V.42bis, with the dictionary the two ends settled on. `in_band` where
+    /// it was never negotiated and is being followed because the far end
+    /// started sending it (see `may_follow_ecm`).
+    V42bis { params: v42bis::Params, in_band: bool },
+    /// V.44, each direction sized on its own (7.4).
+    V44 { transmit: v44::Params, receive: v44::Params },
 }
 
 /// Whichever compression the two ends settled on.
@@ -427,6 +448,7 @@ impl Stack {
             declining: false,
             heard_adp: None,
             heard_xid: None,
+            heard_answer: None,
             agreed_fcs: Fcs::Bits16,
             established: false,
             undecodable: 0,
@@ -646,6 +668,7 @@ impl Stack {
     fn may_follow_ecm(&self) -> bool {
         !self.guessed_wrong
             && self.heard_xid.is_none()
+            && self.heard_answer.is_none()
             && matches!(
                 self.offer,
                 Compression::Both | Compression::ResponderToInitiator
@@ -661,9 +684,23 @@ impl Stack {
         self.heard_adp
     }
 
-    /// What the far end proposed in XID, if it sent one.
+    /// What the far end proposed in XID, if it sent one: its command.
     pub fn far_xid(&self) -> Option<Xid> {
         self.heard_xid
+    }
+
+    /// What the far end answered to this end's XID, if it did.
+    pub fn far_xid_answer(&self) -> Option<Xid> {
+        self.heard_answer
+    }
+
+    /// The compression running and what the two ends agreed for it, if any.
+    pub fn agreed_compression(&self) -> Option<Agreed> {
+        let compressor = self.compression.as_ref()?;
+        Some(match &compressor.codec {
+            Codec::V42bis(b) => Agreed::V42bis { params: b.params, in_band: compressor.speculative },
+            Codec::V44(l) => Agreed::V44 { transmit: l.transmit, receive: l.receive },
+        })
     }
 
     /// Whether the detection phase ended on the far end's terminal's text.
@@ -984,7 +1021,10 @@ impl Stack {
             self.damaged += 1;
             return;
         };
-        self.heard_xid = Some(theirs);
+        match kind {
+            Kind::Command => self.heard_xid = Some(theirs),
+            Kind::Response => self.heard_answer = Some(theirs),
+        }
         let agreed = self.proposal().resolve(&theirs);
         // V.44 first where both were offered and both ends know it, and
         // V.42bis otherwise. 7.3 has the responder answer about at most one of
@@ -1988,6 +2028,55 @@ mod tests {
         assert_eq!(answerer.damaged_frames(), 0, "the SABME could not be read");
         assert!(answerer.is_connected(), "the answerer is {:?}", answerer.state());
         assert_eq!(answerer.fcs(), Fcs::Bits32, "and it did not follow the SABME to 32");
+    }
+
+    /// A far end's XID offering V.42bis with a P1 below the minimum.
+    ///
+    /// V.42bis 5.1 calls it a procedural error. It was taken as the lower of
+    /// the two proposals and handed to the dictionary as its size, and a P1
+    /// of 258 or less panicked building the dictionary, 259 on the first octet
+    /// sent -- on the line thread, which nothing restarts. A modem without V.44
+    /// sends exactly this XID, with the number wrong.
+    #[test]
+    fn an_xid_with_a_p1_below_the_minimum_is_refused_rather_than_built() {
+        use crate::frame::Kind;
+
+        for codewords in [0, 258, 259, 511] {
+            let mut answerer = Stack::new(Role::Answerer, Params::default()).without_detection();
+            answerer.offer_compression(Compression::Both);
+            let mut offer = Xid::proposal(Compression::Both);
+            offer.v44 = None;
+            offer.codewords = Some(codewords);
+            let xid = Frame::Xid { pf: false, info: offer.encode(Kind::Command) }
+                .encode(DLCI_DATA, Role::Originator, Kind::Command);
+            let mut e = Encoder::new(Fcs::Bits16);
+            e.idle(LEADING_FLAGS);
+            e.frame(&xid);
+            e.idle(2);
+            while let Some(bit) = e.next_bit() {
+                answerer.next_bit();
+                answerer.feed_bit(bit);
+            }
+            answerer.tick(0);
+
+            assert_eq!(answerer.compression_name(), None, "P1 {codewords} turned compression on");
+            let answers: Vec<Xid> = answerer
+                .take_log()
+                .into_iter()
+                .filter(|f| f.outbound)
+                .filter_map(|f| Frame::decode(&f.body, Role::Originator).ok())
+                .filter_map(|(address, frame)| match frame {
+                    Frame::Xid { info, .. } if address.kind == Kind::Response => Xid::decode(&info).ok(),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(answers.len(), 1, "P1 {codewords} was not answered");
+            assert_eq!(
+                answers[0].compression,
+                Some(Compression::Neither),
+                "the answer to P1 {codewords} did not refuse compression",
+            );
+        }
     }
 
     /// A far end that compresses without ever negotiating it.

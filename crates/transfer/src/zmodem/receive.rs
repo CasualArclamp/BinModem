@@ -33,12 +33,22 @@ pub struct Received {
     pub data: Vec<u8>,
 }
 
-/// One file, coming in.
+/// A session coming in: one file, or a batch of them.
 #[derive(Debug)]
 pub struct Receiver {
     state: State,
     file: Option<FileInfo>,
     data: Vec<u8>,
+    /// Files that have arrived whole and not yet been taken.
+    ///
+    /// 8.2 has the receiver close each file at its ZEOF and answer with
+    /// ZRINIT, and a sender with another file then offers it with a fresh
+    /// ZFILE. That offer used to clear the only buffer there was, so of a
+    /// batch only the last file ever came out, and the rest went without a
+    /// word -- even when the session ended cleanly.
+    arrived: Vec<Received>,
+    /// A ZSINIT's subpacket is next, rather than file data (8.1).
+    initialising: bool,
     out: Vec<u8>,
     inbox: Vec<u8>,
     previous: u8,
@@ -84,6 +94,8 @@ impl Receiver {
             state: State::Greeting,
             file: None,
             data: Vec::new(),
+            arrived: Vec::new(),
+            initialising: false,
             out: Vec::new(),
             inbox: Vec::new(),
             previous: 0,
@@ -122,11 +134,20 @@ impl Receiver {
         }
     }
 
-    /// The file, once it is all here.
+    /// Every file that has arrived whole since the last time this was asked.
+    ///
+    /// Each one as its ZEOF lands, so a batch that fails partway still keeps
+    /// the files that were already here, and each is handed up once.
+    pub fn take_arrived(&mut self) -> Vec<Received> {
+        std::mem::take(&mut self.arrived)
+    }
+
+    /// The last file, once the session is over and it is all here.
     ///
     /// All of it: a session that ended is not the same as a file that
     /// arrived, and only a ZEOF whose length matched what was counted says
-    /// the second.
+    /// the second. Of a batch, only the last; [`Self::take_arrived`] has the
+    /// rest.
     pub fn finished(&self) -> Option<Received> {
         match (self.state, self.complete, &self.file) {
             (State::Done, true, Some(file)) => {
@@ -192,6 +213,16 @@ impl Receiver {
                     Ok((packet, used)) => {
                         self.inbox.drain(..used);
                         self.waited = 0;
+                        // 8.1: the subpacket after a ZSINIT is the sender's
+                        // attention string. Nothing here interrupts a sender,
+                        // so there is no use for it, but it is not file data
+                        // and it wants an answer.
+                        if self.initialising {
+                            self.initialising = false;
+                            self.in_data = false;
+                            self.say(Header::position(Kind::Ack, 0), Style::Hex);
+                            continue;
+                        }
                         // 8.2: the subpacket after a ZFILE is the name and
                         // length, not the file. The only place a subpacket
                         // means something other than data.
@@ -274,6 +305,16 @@ impl Receiver {
             // 8.1: "if the receiving program receives a ZRQINIT header, it
             // resends the ZRINIT header".
             Kind::Rqinit => self.announce(),
+            // 8.1: "The sender may send an optional ZSINIT frame to define
+            // the receiving program's Attn sequence ... The receiver sends a
+            // ZACK header in response, containing either the serial number of
+            // the receiving program, or 0." Answered once its subpacket is
+            // in, above. Unanswered, `sz -e` sent it again until it gave up,
+            // and no file came at all.
+            Kind::Sinit => {
+                self.initialising = true;
+                self.in_data = true;
+            }
             // 8.2: the receiver "examines the file name, length, and date
             // information provided by the sender", and a ZRPOS starts the
             // data. Position 0, because nothing here resumes yet.
@@ -302,6 +343,13 @@ impl Receiver {
             // receiver ignores the ZEOF because a new ZDATA is coming."
             Kind::Eof => {
                 if u64::from(h.to_position()) == self.data.len() as u64 {
+                    // A second ZEOF for the same file -- the sender did not
+                    // hear the ZRINIT -- is answered again but not kept again.
+                    if !self.complete
+                        && let Some(file) = &self.file
+                    {
+                        self.arrived.push(Received { file: file.clone(), data: self.data.clone() });
+                    }
                     self.complete = true;
                     self.state = State::Finishing;
                     self.announce();

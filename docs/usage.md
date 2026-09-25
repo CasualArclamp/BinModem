@@ -337,7 +337,14 @@ own. Two values in it are given only by reference to a C header -- the frame
 type numbers and the subpacket terminators -- and where the code relies on one
 it says what it was derived from.
 
-Tell the board to send first. This end answers; it does not ask.
+Tell the board to send first. This end answers; it does not ask. A board may
+send several files at once, and each is kept in the directory as it arrives,
+so a batch that is cut off partway still leaves the files that were already
+here. A name the board chose is only ever a name in that directory: any
+directories in it are dropped, characters Windows will not have in a name
+become `_`, and a device's name like `NUL` or `COM1` gets a `_` in front.
+`crates/transfer/tests/lrzsz.rs` runs the receiver against `sz` wherever
+lrzsz is installed.
 
 ## Sending a fax
 
@@ -367,6 +374,11 @@ The **offer** boxes are what this end will use. V.29 carries a page at 9600 and
 7200; V.27 ter at 4800 and 2400, and every fax machine has it. A call starts at
 the fastest rate both ends have and drops a rung each time the far end refuses
 the training check. Untick V.29 to hold a call to V.27 ter on a bad line.
+
+A page the far end could not read -- T.30's RTN, which a line that slipped
+after the training check passed will cause -- is trained for again a rung down
+and sent again, twice at most. After that the next page goes instead, and the
+call says which page did not get through.
 
 **ECM** is T.30's error correction mode. The page goes in numbered frames, and
 any the far end cannot read are asked for and sent again rather than printed as
@@ -543,6 +555,13 @@ On the machine that answered, **carry web traffic** offers its internet to a
 BinModem that calls, and says *offering the internet at 10.0.0.1:1080*. The
 setting is kept for the next link, so a machine answering with a login prompt
 can offer it before anyone has called.
+
+It offers the internet and nothing nearer. A caller asking for the answering
+machine itself, or anywhere on its own network -- 127.0.0.1, 192.168.x.x,
+10.x.x.x, a router's page, a cloud host's 169.254.169.254 -- is answered 403
+and nothing is opened, since those are the places a firewall assumes nobody
+outside can reach. A tunnel goes only to port 443, which is what a browser
+wants one for, and a plain request to 80, 443 or a port above 1023.
 
 The transcript says whether the headers are being compressed — *ppp: headers
 compressed both ways, 16 slots*. That is RFC 1144, and it matters more here

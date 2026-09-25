@@ -585,6 +585,30 @@ impl Xid {
     /// V.42 9.2.3, 9.2.4 and V.42bis 5.1 all say the same thing for their own
     /// parameters: where the two ends differ, the lower value is used.
     pub fn resolve(&self, other: &Self) -> Self {
+        let codewords = lower(self.codewords, other.codewords, v42bis::DEFAULT_N2);
+        let max_string = lower(self.max_string, other.max_string, v42bis::DEFAULT_N7);
+        let mut compression = match (self.compression, other.compression) {
+            (Some(a), Some(b)) => Some(a.intersect(b)),
+            _ => None,
+        };
+        // V.42bis 5.1: a P1 below 512 or a P2 outside 6 to 250 "shall be
+        // considered a procedural error". The lower of the two is whatever the
+        // far end sent, so a far end that sent one would otherwise have its
+        // number used as the size of this end's dictionary -- and one below
+        // the 259 codewords the roots and control codes take up (6.1) took
+        // the line thread down the moment the dictionary was built. Refusing
+        // compression is kinder than the disconnection 5.1 goes on to ask
+        // for, the same choice V.44's own minimum gets below, and
+        // [`Self::answering`] tells the far end so.
+        if compression.is_some_and(|c| c != Compression::Neither) {
+            let params = v42bis::Params {
+                n2: codewords.unwrap_or(v42bis::DEFAULT_N2),
+                n7: max_string.unwrap_or(v42bis::DEFAULT_N7),
+            };
+            if params.validate().is_err() {
+                compression = Some(Compression::Neither);
+            }
+        }
         Self {
             n401_transmit: lower(self.n401_transmit, other.n401_transmit, N401_DEFAULT),
             n401_receive: lower(self.n401_receive, other.n401_receive, N401_DEFAULT),
@@ -595,12 +619,9 @@ impl Xid {
             srej_single: self.srej_single && other.srej_single,
             test_frame: self.test_frame && other.test_frame,
             srej_multiple: self.srej_multiple && other.srej_multiple,
-            compression: match (self.compression, other.compression) {
-                (Some(a), Some(b)) => Some(a.intersect(b)),
-                _ => None,
-            },
-            codewords: lower(self.codewords, other.codewords, v42bis::DEFAULT_N2),
-            max_string: lower(self.max_string, other.max_string, v42bis::DEFAULT_N7),
+            compression,
+            codewords,
+            max_string,
             // V.44's two directions are settled crosswise rather than by
             // taking the lower of matching fields, so it has its own.
             v44: self.v44_params(other),
@@ -623,11 +644,19 @@ impl Xid {
     /// that is the one [`crate::Stack`] turns on; otherwise the answer is
     /// about V.42bis, including when nothing was agreed, since a far end told
     /// no direction has been answered and a far end told nothing has not.
+    ///
+    /// Where the two came to no V.42bis at all, the answer says a P0 of zero
+    /// rather than this end's whole offer. A far end whose P1 was refused by
+    /// [`Self::resolve`] would otherwise take the lower of its own P1 and ours,
+    /// turn compression on, and send codewords at a decoder that is not there.
     pub fn answering(mut self, settled: &Self) -> Self {
         if settled.v44.is_some() {
             self.compression = None;
         } else {
             self.v44 = None;
+            if settled.compression == Some(Compression::Neither) {
+                self.compression = Some(Compression::Neither);
+            }
         }
         self
     }
@@ -1347,6 +1376,36 @@ mod v44_negotiation {
             receive: v44::Params { n2: 64, n7: 8, n8: 16 },
         };
         assert_eq!(mine.resolve(theirs), None);
+    }
+
+    /// V.42bis 5.1 makes a P1 below 512 or a P2 outside 6 to 250 "a procedural
+    /// error". Taking the lower of the two handed a far end's P1 of 258 to the
+    /// dictionary as its size, and a dictionary smaller than its own roots
+    /// panicked as it was built. The same far end is now refused compression,
+    /// and the answer it gets says so.
+    #[test]
+    fn a_v42bis_proposal_out_of_range_is_declined_and_the_answer_says_so() {
+        let mine = Xid::proposal(Compression::Both);
+        for (codewords, max_string) in [(0, 250), (258, 250), (259, 250), (511, 250), (2048, 5), (2048, 0)] {
+            let mut theirs = Xid::proposal(Compression::Both);
+            theirs.v44 = None;
+            theirs.codewords = Some(codewords);
+            theirs.max_string = Some(max_string);
+            let settled = mine.resolve(&theirs);
+            assert_eq!(settled.v42bis_params(), None, "P1 {codewords}, P2 {max_string} was taken");
+            let answer = mine.answering(&settled);
+            assert_eq!(answer.compression, Some(Compression::Neither), "P1 {codewords}, P2 {max_string}");
+            assert_eq!(answer.v44, None);
+        }
+
+        // And the smallest the Recommendation allows is still taken.
+        let mut theirs = Xid::proposal(Compression::Both);
+        theirs.v44 = None;
+        theirs.codewords = Some(512);
+        theirs.max_string = Some(6);
+        let settled = mine.resolve(&theirs);
+        assert_eq!(settled.v42bis_params(), Some(v42bis::Params { n2: 512, n7: 6 }));
+        assert_eq!(mine.answering(&settled).compression, Some(Compression::Both));
     }
 
     /// The capability byte a modem sends: Table A.1's "neither packet method

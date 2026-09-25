@@ -392,6 +392,12 @@ impl Line {
                 stats.latched
             ));
         }
+        if stats.strangers > 0 {
+            said.push(format!(
+                "sip: {} packet(s) arrived from somewhere other than the call's stream and were dropped rather than followed",
+                stats.strangers
+            ));
+        }
         said
     }
 

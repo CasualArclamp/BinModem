@@ -354,7 +354,8 @@ pub struct LineState {
 #[derive(Debug)]
 enum Job {
     Sending(Box<transfer::zmodem::Sender>),
-    Receiving(Box<transfer::zmodem::Receiver>, std::path::PathBuf),
+    /// The receiver, the folder files go into, and where the last one went.
+    Receiving(Box<transfer::zmodem::Receiver>, std::path::PathBuf, Option<String>),
 }
 
 /// What a file transfer is doing, for the window to show.
@@ -1271,14 +1272,14 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 },
                 TransferRequest::Receive(into) => {
                     tx.log(Direction::Note, "waiting for the far end to send");
-                    job = Some(Job::Receiving(Box::default(), into));
+                    job = Some(Job::Receiving(Box::default(), into, None));
                     job_started = Instant::now();
                     meter = crate::speed::Speedometer::new();
                 }
                 TransferRequest::Cancel => {
                     match job.as_mut() {
                         Some(Job::Sending(s)) => s.cancel(),
-                        Some(Job::Receiving(r, _)) => r.cancel(),
+                        Some(Job::Receiving(r, ..)) => r.cancel(),
                         None => {}
                     }
                     tx.log(Direction::Note, "transfer cancelled");
@@ -2074,17 +2075,30 @@ fn step_job(job: &mut Job, tx: &Publisher, room: usize) -> (Vec<u8>, (TransferVi
                 matches!(state, State::Done | State::Failed(_)),
             )
         }
-        Job::Receiving(r, into) => {
+        Job::Receiving(r, into, written) => {
             r.tick(TICK_MS);
             let p = r.progress();
             let state = r.state();
-            let mut written = None;
-            if let Some(got) = r.finished() {
+            // Each file as it lands rather than the last one once the session
+            // is over: of a batch, that kept only the last, and a session that
+            // failed partway kept none of the files already here.
+            for got in r.take_arrived() {
                 // 8.2 leaves the name to the receiver's judgement, and a board
                 // is not a trusted party: `safe_name` is what keeps a
-                // directory traversal out of the file system.
-                let path = into.join(got.file.safe_name());
-                let _ = std::fs::create_dir_all(into);
+                // directory traversal out of the file system. Checked again
+                // here as the path it becomes, since what counts as leaving a
+                // folder is this machine's business.
+                let name = got.file.safe_name();
+                let one_part = {
+                    let mut parts = std::path::Path::new(&name).components();
+                    matches!(
+                        (parts.next(), parts.next()),
+                        (Some(std::path::Component::Normal(_)), None)
+                    )
+                };
+                let name = if one_part { name } else { "received".to_owned() };
+                let path = into.join(name);
+                let _ = std::fs::create_dir_all(&*into);
                 match std::fs::write(&path, &got.data) {
                     Ok(()) => {
                         let shown = std::fs::canonicalize(&path)
@@ -2097,7 +2111,7 @@ fn step_job(job: &mut Job, tx: &Publisher, room: usize) -> (Vec<u8>, (TransferVi
                             Direction::Note,
                             format!("kept {} bytes as {shown}", got.data.len()),
                         );
-                        written = Some(shown);
+                        *written = Some(shown);
                     }
                     Err(e) => tx.log(Direction::Note, format!("could not write it: {e}")),
                 }
@@ -2114,7 +2128,7 @@ fn step_job(job: &mut Job, tx: &Publisher, room: usize) -> (Vec<u8>, (TransferVi
                     damaged: r.damaged(),
                     outcome: describe(state),
                     finished: matches!(state, State::Done | State::Failed(_)),
-                    written_to: written,
+                    written_to: written.clone(),
                     ..TransferView::default()
                 },
                 matches!(state, State::Done | State::Failed(_)),
@@ -2175,7 +2189,7 @@ fn drain_dte(
     *heard = Instant::now();
     match (job, network, login) {
         (Some(Job::Sending(s)), _, _) => s.feed(&out),
-        (Some(Job::Receiving(r, _)), _, _) => r.feed(&out),
+        (Some(Job::Receiving(r, ..)), _, _) => r.feed(&out),
         (None, Some(link), _) => link.feed(&out),
         (None, None, Some(running)) => running.feed(&out, tx),
         (None, None, None) => tx.line_data(&out),
