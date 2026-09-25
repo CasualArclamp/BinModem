@@ -1990,6 +1990,55 @@ mod tests {
         assert_eq!(answerer.fcs(), Fcs::Bits32, "and it did not follow the SABME to 32");
     }
 
+    /// A far end's XID offering V.42bis with a P1 below the minimum.
+    ///
+    /// V.42bis 5.1 calls it a procedural error. It was taken as the lower of
+    /// the two proposals and handed to the dictionary as its size, and a P1
+    /// of 258 or less panicked building the dictionary, 259 on the first octet
+    /// sent -- on the line thread, which nothing restarts. A modem without V.44
+    /// sends exactly this XID, with the number wrong.
+    #[test]
+    fn an_xid_with_a_p1_below_the_minimum_is_refused_rather_than_built() {
+        use crate::frame::Kind;
+
+        for codewords in [0, 258, 259, 511] {
+            let mut answerer = Stack::new(Role::Answerer, Params::default()).without_detection();
+            answerer.offer_compression(Compression::Both);
+            let mut offer = Xid::proposal(Compression::Both);
+            offer.v44 = None;
+            offer.codewords = Some(codewords);
+            let xid = Frame::Xid { pf: false, info: offer.encode(Kind::Command) }
+                .encode(DLCI_DATA, Role::Originator, Kind::Command);
+            let mut e = Encoder::new(Fcs::Bits16);
+            e.idle(LEADING_FLAGS);
+            e.frame(&xid);
+            e.idle(2);
+            while let Some(bit) = e.next_bit() {
+                answerer.next_bit();
+                answerer.feed_bit(bit);
+            }
+            answerer.tick(0);
+
+            assert_eq!(answerer.compression_name(), None, "P1 {codewords} turned compression on");
+            let answers: Vec<Xid> = answerer
+                .take_log()
+                .into_iter()
+                .filter(|f| f.outbound)
+                .filter_map(|f| Frame::decode(&f.body, Role::Originator).ok())
+                .filter_map(|(address, frame)| match frame {
+                    Frame::Xid { info, .. } if address.kind == Kind::Response => Xid::decode(&info).ok(),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(answers.len(), 1, "P1 {codewords} was not answered");
+            assert_eq!(
+                answers[0].compression,
+                Some(Compression::Neither),
+                "the answer to P1 {codewords} did not refuse compression",
+            );
+        }
+    }
+
     /// A far end that compresses without ever negotiating it.
     ///
     /// From `live-1788830261.wav`, a call to a real board. It answered the
