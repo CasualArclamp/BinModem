@@ -1184,6 +1184,44 @@ fn the_reports_come_out_in_the_order_v250_gives_them() {
     assert!(dr < connect, "CONNECT is the final result code and comes last");
 }
 
+/// The far-end panel says what a call is compressing with.
+///
+/// Its compression row read whichever XID had arrived last, and only that
+/// XID's V.42bis half. V.44 7.3 has an answer name one algorithm, so once two
+/// of these agreed V.44 the last XID named nothing else, and both panels said
+/// "none offered" on a call compressing both ways -- which is where the
+/// README's "compression between two of these in V.90 is not offered
+/// correctly" came from. It was offered, and agreed; the panel could not say
+/// so.
+#[test]
+fn the_panel_says_which_compression_the_call_is_running() {
+    let row = |m: &Modem, name: &str| {
+        m.distant().into_iter().find(|(k, _)| *k == name).map(|(_, v)| v).unwrap_or_default()
+    };
+
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(20.0);
+    for (who, modem) in [("caller", &p.caller), ("host", &p.host)] {
+        assert_eq!(modem.compression_name(), Some("V.44"), "{who}");
+        let running = row(modem, "compression");
+        assert!(running.starts_with("V.44, "), "{who}: {running:?}");
+        let offered = row(modem, "compression offered");
+        assert!(offered.contains("V.42bis") && offered.contains("V.44"), "{who}: {offered:?}");
+    }
+
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "AT+DS44=0");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(20.0);
+    let running = row(&p.host, "compression");
+    assert!(running.starts_with("V.42bis, "), "{running:?}");
+    let offered = row(&p.host, "compression offered");
+    assert!(offered.starts_with("V.42bis") && !offered.contains("V.44"), "{offered:?}");
+}
+
 #[test]
 fn without_v44_the_report_says_v42bis() {
     let mut p = Pair::new();

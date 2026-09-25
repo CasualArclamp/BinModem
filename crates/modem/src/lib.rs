@@ -1357,7 +1357,7 @@ impl Modem {
                     None => "nothing".to_owned(),
                 },
             ));
-            match ec.far_xid() {
+            match ec.far_xid().or(ec.far_xid_answer()) {
                 Some(xid) => {
                     if let Some(n) = xid.n401_transmit {
                         rows.push(("frame size", format!("{n} octets")));
@@ -1372,15 +1372,21 @@ impl Modem {
                     if xid.srej_single || xid.srej_multiple {
                         rows.push(("selective reject", "offered".to_owned()));
                     }
+                    // What it offered and what the call is running are two
+                    // rows, because they are two things. This was one row,
+                    // read from whichever XID had arrived last and from its
+                    // V.42bis half only -- and V.44 7.3 has an answer name
+                    // one algorithm, so once V.44 was agreed the last XID
+                    // named nothing else and the row said "none offered" on a
+                    // call that was compressing both ways.
+                    if ec.far_xid().is_some() {
+                        rows.push(("compression offered", offered(&xid)));
+                    }
                     rows.push((
                         "compression",
-                        match (xid.compression, xid.codewords, xid.max_string) {
-                            (Some(c), Some(n2), Some(n7))
-                                if c != ec::xid::Compression::Neither =>
-                            {
-                                format!("V.42bis, {n2} codewords, strings to {n7}")
-                            }
-                            _ => "none offered".to_owned(),
+                        match ec.agreed_compression() {
+                            Some(agreed) => agreed_terms(agreed),
+                            None => "none agreed".to_owned(),
                         },
                     ));
                 }
@@ -2554,4 +2560,45 @@ pub fn fit_to_scale(samples: &mut [f32], target: f32) -> f32 {
         *s *= gain;
     }
     gain
+}
+
+/// What a far end's XID command offers in the way of compression, in words.
+///
+/// Both algorithms where it names both: a command says what the far end can
+/// do (V.44 7.3), and a far end offering V.44 alone is saying something too.
+fn offered(xid: &ec::Xid) -> String {
+    let mut said = Vec::new();
+    if let (Some(c), Some(n2), Some(n7)) = (xid.compression, xid.codewords, xid.max_string)
+        && c != ec::Compression::Neither
+    {
+        said.push(format!("V.42bis, {n2} codewords, strings to {n7}"));
+    }
+    if let Some(v44) = xid.v44
+        && v44.compression != ec::Compression::Neither
+    {
+        said.push(format!(
+            "V.44, {}/{} codewords, history {}/{}",
+            v44.transmit.n2, v44.receive.n2, v44.transmit.n8, v44.receive.n8
+        ));
+    }
+    if said.is_empty() { "none".to_owned() } else { said.join("; ") }
+}
+
+/// The compression a link is running, and on what terms.
+///
+/// V.44's two directions are sized apart (7.4), so its figures are this end's
+/// sending over its receiving.
+fn agreed_terms(agreed: ec::stack::Agreed) -> String {
+    match agreed {
+        ec::stack::Agreed::V42bis { params, in_band } => format!(
+            "V.42bis, {} codewords, strings to {}{}",
+            params.n2,
+            params.n7,
+            if in_band { ", followed in band" } else { "" }
+        ),
+        ec::stack::Agreed::V44 { transmit, receive } => format!(
+            "V.44, {}/{} codewords, history {}/{}",
+            transmit.n2, receive.n2, transmit.n8, receive.n8
+        ),
+    }
 }

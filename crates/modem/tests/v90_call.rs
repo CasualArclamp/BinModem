@@ -391,6 +391,14 @@ fn two_of_these_connect_at_pcm_rates_when_the_codewords_reach_the_encoder() {
         assert!(host_saw.contains("from the caller"), "phase {phase}: the server saw {host_saw:?}");
         let caller_saw = String::from_utf8_lossy(&pair.caller_said).into_owned();
         assert!(caller_saw.contains("from the server"), "phase {phase}: the caller saw {caller_saw:?}");
+        // Compressed, and said so. Both panels used to say "none offered"
+        // here while both ends ran V.44, which is where the README's "not
+        // offered correctly" came from.
+        for (who, m) in [("caller", &pair.caller), ("server", &pair.host)] {
+            assert_eq!(m.compression_name(), Some("V.44"), "phase {phase}: the {who}");
+            let running = m.distant().into_iter().find(|r| r.0 == "compression").map(|r| r.1).unwrap_or_default();
+            assert!(running.starts_with("V.44, "), "phase {phase}: the {who}'s panel said {running:?}");
+        }
     }
     rates.sort_by_key(|r| r.1);
     assert_eq!(rates[0], ("V.34", 33_600), "{rates:?}");
