@@ -1083,6 +1083,15 @@ mod tests {
     fn the_outgoing_queue_is_primed_so_the_first_packets_are_not_invented() {
         let (_far, media, _ours) = connected_to_a_quiet_far_end();
         thread::sleep(Duration::from_millis(200));
+        // The call is put down and the pacer left to finish before anything
+        // is read. It counts an underrun before the packet goes out and the
+        // packet once it has, so a look taken while a tick is sending sees
+        // one more underrun than packets. The pacer started ticking when the
+        // media path opened, just before this sleep, and 200 ms is ten packet
+        // times, so without this the look lands on a tick more often than not.
+        // With the call down, the tick in flight finishes and no other starts.
+        media.disconnect();
+        thread::sleep(Duration::from_millis(60));
         let stats = media.stats();
         assert!(stats.packets_sent >= 4, "the pacer sent nothing: {stats:?}");
         assert_eq!(
