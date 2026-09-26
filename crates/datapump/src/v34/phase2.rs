@@ -37,14 +37,14 @@ pub enum Role {
 }
 
 impl Role {
-    fn side(self) -> Side {
+    pub(crate) fn side(self) -> Side {
         match self {
             Self::Call => Side::Call,
             Self::Answer => Side::Answer,
         }
     }
 
-    fn far(self) -> Side {
+    pub(crate) fn far(self) -> Side {
         match self {
             Self::Call => Side::Answer,
             Self::Answer => Side::Call,
@@ -94,10 +94,10 @@ pub enum Status {
 
 /// "40 ± 1 ms" from a far reversal arriving to the answering one leaving
 /// (11.2.1.1.3, 11.2.1.1.6 and 11.2.1.2.5).
-const TURN: f64 = 0.040;
+pub(crate) const TURN: f64 = 0.040;
 
 /// A tone goes on "for another 10 ms after the phase reversal".
-const AFTER_REVERSAL: f64 = 0.010;
+pub(crate) const AFTER_REVERSAL: f64 = 0.010;
 
 /// The answer modem's tone A before its reversals: "at least 50 ms" in
 /// 11.2.1.2.3 and exactly 50 in 11.2.1.2.6.
@@ -123,7 +123,7 @@ const L2_READ: f64 = 0.300;
 
 /// Silence before the tone that starts or answers a retrain: "70 ± 5 ms"
 /// (11.5.1.1, 11.5.1.2, 11.5.2.1, 11.5.2.2).
-const RETRAIN_SILENCE: f64 = 0.070;
+pub(crate) const RETRAIN_SILENCE: f64 = 0.070;
 
 /// Allowed on top of the recommendation's waits for the far end's tone after
 /// this end's L2 (11.2.2.1.5, 11.2.2.2.3). The far end may read the whole
@@ -134,18 +134,18 @@ const TONE_AFTER_PROBE_SLACK: f64 = 0.300;
 
 /// What is let go past before reading L2, so the windows see the line settled
 /// on it rather than the step from L1.
-const L2_SETTLE: f64 = 0.020;
+pub(crate) const L2_SETTLE: f64 = 0.020;
 
 /// 11.2.2.1.3 and 11.2.2.2.2: a reversal expected back within 2000 ms.
 const REVERSAL_WAIT: f64 = 2.0;
 
 /// Amplitude a tone has to reach before it counts as there, as V.32's start-up
 /// uses.
-const AUDIBLE: f64 = 0.008;
+pub(crate) const AUDIBLE: f64 = 0.008;
 
 /// Bandwidth of the reversal detector, which V.32's start-up has measured the
 /// latency of against real calls.
-const REVERSAL_BANDWIDTH: f64 = 60.0;
+pub(crate) const REVERSAL_BANDWIDTH: f64 = 60.0;
 
 /// How much of what is 150 Hz either side a tone has to reach to count as the
 /// far end's tone rather than this end's own L2 leaking into its detector.
@@ -162,7 +162,7 @@ const OVER_LEAKAGE: f64 = 0.05;
 const PRESENCE_BANDWIDTH: f64 = 10.0;
 
 /// How long a tone has to be there before it is believed.
-const TONE_HELD: f64 = 0.020;
+pub(crate) const TONE_HELD: f64 = 0.020;
 
 /// How far below the level V.90's analogue modem heard the digital modem's
 /// tone B at in phase 2 a tone B can arrive later in the same call and still
@@ -184,7 +184,7 @@ const TONE_HELD: f64 = 0.020;
 pub(crate) const TONE_B_FLOOR: f64 = 0.5;
 
 /// No part of phase 2 takes this long, round trips and all.
-const GIVE_UP: f64 = 20.0;
+pub(crate) const GIVE_UP: f64 = 20.0;
 
 /// Where phase 2 has got to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,7 +226,7 @@ impl Stage {
 
 /// What is on the line from this end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Speaking {
+pub(crate) enum Speaking {
     Silent,
     /// An INFO sequence or a tone, through the DPSK modulator.
     Carrier,
@@ -236,11 +236,11 @@ enum Speaking {
 
 /// A tone that is there and standing clear of what is either side of it.
 #[derive(Debug, Clone)]
-struct Presence {
+pub(crate) struct Presence {
     tone: ToneDetector,
     below: ToneDetector,
     above: ToneDetector,
-    held: u64,
+    pub(crate) held: u64,
     /// The most the tone has read since this was last cleared.
     peak: f64,
     /// How loud a tone that has been there long enough has to be to be the
@@ -250,7 +250,7 @@ struct Presence {
 }
 
 impl Presence {
-    fn new(freq: f64, fs: f64) -> Self {
+    pub(crate) fn new(freq: f64, fs: f64) -> Self {
         Self {
             tone: ToneDetector::new(freq, PRESENCE_BANDWIDTH, fs),
             below: ToneDetector::new(freq - 150.0, PRESENCE_BANDWIDTH, fs),
@@ -270,18 +270,18 @@ impl Presence {
     /// grow by however long the detector took to rise that far. With no level
     /// heard before, the floor is [`AUDIBLE`], which a tone that has been
     /// there at all is already above, and this is `held >= n` as it was.
-    fn stood(&self, n: u64) -> bool {
+    pub(crate) fn stood(&self, n: u64) -> bool {
         self.held >= n && self.tone.amplitude() > self.floor
     }
 
     /// Whether what is either side of the tone is louder than the tone, which
     /// is what a probing signal looks like from here: L2 has tones 150 Hz
     /// either side of 1200 and 2400 Hz and nothing at either.
-    fn probing(&self) -> bool {
+    pub(crate) fn probing(&self) -> bool {
         self.below.amplitude().max(self.above.amplitude()) > self.tone.amplitude()
     }
 
-    fn feed(&mut self, x: f64) {
+    pub(crate) fn feed(&mut self, x: f64) {
         self.tone.feed(x);
         self.below.feed(x);
         self.above.feed(x);
@@ -548,7 +548,7 @@ impl Modem {
     /// Everything V.34 has, since everything V.34 has is what is being
     /// built: phase 2 asks for the far end's honest projections, and a modem
     /// that said less would only be told less.
-    fn capabilities() -> Info0 {
+    pub(crate) fn capabilities() -> Info0 {
         Info0 {
             rate_2743: true,
             rate_2800: true,
@@ -1120,24 +1120,24 @@ impl Modem {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const FS: f64 = 16_000.0;
 
     /// A line between two modems: a delay each way, a loss, noise, and a
     /// little of each end's own signal coming back to it.
-    struct Line {
-        to_answer: std::collections::VecDeque<f64>,
-        to_call: std::collections::VecDeque<f64>,
-        loss: f64,
-        echo: f64,
+    pub(crate) struct Line {
+        pub(crate) to_answer: std::collections::VecDeque<f64>,
+        pub(crate) to_call: std::collections::VecDeque<f64>,
+        pub(crate) loss: f64,
+        pub(crate) echo: f64,
         seed: u32,
-        noise: f64,
+        pub(crate) noise: f64,
     }
 
     impl Line {
-        fn new(one_way: f64, loss_db: f64, echo_db: f64, noise_db: f64) -> Self {
+        pub(crate) fn new(one_way: f64, loss_db: f64, echo_db: f64, noise_db: f64) -> Self {
             let delay = (one_way * FS) as usize;
             Self {
                 to_answer: std::iter::repeat_n(0.0, delay.max(1)).collect(),
@@ -1149,7 +1149,7 @@ mod tests {
             }
         }
 
-        fn noise(&mut self) -> f64 {
+        pub(crate) fn noise(&mut self) -> f64 {
             self.seed ^= self.seed << 13;
             self.seed ^= self.seed >> 17;
             self.seed ^= self.seed << 5;
