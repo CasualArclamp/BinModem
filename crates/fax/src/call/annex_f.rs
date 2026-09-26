@@ -44,6 +44,20 @@ pub const ONES: usize = 40;
 /// them whether this end waited or not.
 pub const FLAGS_GONE: f64 = 0.1;
 
+/// How long a frame from the far end may take to finish arriving once its
+/// start has been heard, during which no timer of this end's runs out.
+///
+/// The channel carries both ends at once, so nothing is talked over; but a
+/// response whose address and control field are on the line is not a
+/// response that failed to come, and a command sent again under it costs a
+/// round trip for nothing -- the response is ignored, since the command is
+/// going out again, and the far end has to answer the command again. The
+/// longest T.30 frame is a PPR, 38 octets from opening flag to closing flag
+/// with its 256-bit map, a quarter of a second at 1200 bit/s; this is that
+/// with a margin. A frame that never ends -- its check failed, or the far
+/// end cut it off -- holds a timer this long and no longer.
+pub const FRAME_SECONDS: f64 = 0.35;
+
 /// The primary channel's slowest and fastest data rates: "2400 bit/s to
 /// 33 600 bit/s in multiples of 2400 bit/s" (5.1/V.34).
 pub const PRIMARY_SLOWEST: u32 = 2400;
@@ -54,7 +68,7 @@ const FLAG: u8 = 0x7E;
 
 /// The far end's control channel, bit by bit: what Annex F needs noticed in it
 /// besides its frames.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct FarEnd {
     /// The last eight bits heard, the newest in the top bit.
     last: u8,
@@ -62,6 +76,11 @@ pub(super) struct FarEnd {
     pub(super) ones: usize,
     /// Seconds since the last flag, for F.3.2.3's "absence of flags".
     pub(super) since_flag: f64,
+    /// Seconds since the last start of a frame, for [`mid_frame`]: never, to
+    /// begin with.
+    ///
+    /// [`mid_frame`]: Self::mid_frame
+    pub(super) since_start: f64,
     /// What has followed the last flag, with its stuffed zeros taken out,
     /// while it may yet be the start of a frame: the bits so far, how many,
     /// and the ones in a row among them.
@@ -71,7 +90,28 @@ pub(super) struct FarEnd {
     looking: bool,
 }
 
+impl Default for FarEnd {
+    fn default() -> Self {
+        Self {
+            last: 0,
+            ones: 0,
+            since_flag: 0.0,
+            since_start: f64::INFINITY,
+            head: 0,
+            got: 0,
+            run: 0,
+            looking: false,
+        }
+    }
+}
+
 impl FarEnd {
+    /// Whether a frame of the far end's is part way here: its start heard
+    /// within [`FRAME_SECONDS`], and its end not yet.
+    pub(super) fn mid_frame(&self) -> bool {
+        self.since_start < FRAME_SECONDS
+    }
+
     /// Hear one bit, and say whether it has just completed the address and
     /// control field of a T.30 frame (5.3.6.1): the start of a frame, for T2
     /// (F.3.2.3 Note 2).
@@ -110,7 +150,12 @@ impl FarEnd {
         }
         self.looking = false;
         let [address, control] = self.head.to_le_bytes();
-        address == t30::ADDRESS && matches!(control, t30::CONTROL_MORE | t30::CONTROL_FINAL)
+        let started =
+            address == t30::ADDRESS && matches!(control, t30::CONTROL_MORE | t30::CONTROL_FINAL);
+        if started {
+            self.since_start = 0.0;
+        }
+        started
     }
 }
 
@@ -168,6 +213,11 @@ impl Call {
     /// Which is how the source knows the recipient is ready for the page
     /// (F.3.2.3, F.3.4.5). The procedure watches the far end's flags itself as
     /// well, and their stopping will do if this is never said.
+    ///
+    /// Said as a level or as an edge, either will do: the procedure forgets
+    /// it as the line begins to turn round and whenever the control channel
+    /// comes back, so a carrier detector that dropped out for a moment before
+    /// the response is never taken for the recipient falling silent after it.
     pub fn set_far_silent(&mut self, silent: bool) {
         self.far_silent = silent;
     }
@@ -214,6 +264,8 @@ impl Call {
         }
         self.reader = Reader::new();
         self.far = FarEnd::default();
+        // Up at both ends, so not silent at either.
+        self.far_silent = false;
         if self.burst_started && !self.sender.is_empty() {
             let burst = std::mem::take(&mut self.burst);
             self.sender = Sender::new();
@@ -280,16 +332,23 @@ impl Call {
     }
 
     /// Both ends' counts start again as the line begins to turn round.
+    ///
+    /// And the far end is not silent yet, whatever the modem said of it
+    /// before the response that has just let the page go: it was sending
+    /// that response, and a carrier detector that dropped out for a moment is
+    /// not a recipient ready for the page.
     pub(super) fn begin_turning_around(&mut self) {
         self.ones_sent = 0;
         self.far.ones = 0;
         self.far.since_flag = 0.0;
+        self.far_silent = false;
     }
 
     /// One sample of time passing, in an Annex F call.
     pub(super) fn tick_annex_f(&mut self, idle: bool) {
         self.timer -= self.step;
         self.far.since_flag += self.step;
+        self.far.since_start += self.step;
         match self.phase {
             Phase::Calling | Phase::Listening => {
                 if self.elapsed - self.phase_b_since > T1_SECONDS {
@@ -324,13 +383,15 @@ impl Call {
             Phase::Receiving => self.hearing_the_page(),
             // No holding a timeout open while the far end talks, as clause 5
             // must on a line only one end can use at once: this channel
-            // carries both, and the far end's flags are always on it.
+            // carries both, and the far end's flags are always on it. Only
+            // while a frame of its is part way here, which is the response on
+            // its way (FRAME_SECONDS).
             Phase::AwaitingConfirm
             | Phase::AwaitingReceipt
             | Phase::AwaitingCommand
             | Phase::AwaitingPostMessage
             | Phase::AwaitingDisconnect => {
-                if self.timer <= 0.0 {
+                if self.timer <= 0.0 && !self.far.mid_frame() {
                     self.timed_out();
                 }
             }
@@ -658,6 +719,60 @@ mod tests {
         assert_eq!(call.phase(), Phase::TurningAround, "too soon");
         talk(&mut call, &mut VecDeque::new(), 0.04, false);
         assert_eq!(call.phase(), Phase::Sending);
+    }
+
+    #[test]
+    fn a_silence_from_before_the_line_began_turning_round_does_not_count() {
+        let mut call = calling(Some(a_page()));
+        let dis =
+            Message::new(Frame::Dis, false).with_fif(&t30::v34_capabilities(&[Modulation::V29], true));
+        talk(&mut call, &mut burst(&[dis]), 1.0, true);
+        assert_eq!(call.phase(), Phase::AwaitingConfirm);
+        // The modem's carrier detector dropped out for a moment before the
+        // CFR came, and nothing has been said of it since.
+        call.set_far_silent(true);
+        tell(&mut call, &[Message::new(Frame::Cfr, false)]);
+        assert_eq!(call.phase(), Phase::TurningAround);
+        // The far end is still flagging, so the ones go on.
+        talk(&mut call, &mut VecDeque::new(), 1.0, true);
+        assert_eq!(call.phase(), Phase::TurningAround, "a stale silence let the page go");
+        call.set_far_silent(true);
+        talk(&mut call, &mut VecDeque::new(), 0.01, true);
+        assert_eq!(call.phase(), Phase::Sending);
+    }
+
+    #[test]
+    fn a_response_arriving_as_t4_runs_out_is_waited_for() {
+        let mut call = calling(Some(a_page()));
+        let dis =
+            Message::new(Frame::Dis, false).with_fif(&t30::v34_capabilities(&[Modulation::V29], true));
+        talk(&mut call, &mut burst(&[dis]), 1.0, true);
+        assert_eq!(call.phase(), Phase::AwaitingConfirm);
+        // T4 all but out as the CFR begins: its address and control field are
+        // on the line before the timer runs out -- four flags and then the
+        // frame's own, some 45 ms at 1200 bit/s -- and its closing flag
+        // after, at some 75 ms. Without the wait the command would go again
+        // and the CFR, arriving while it went, would be ignored.
+        call.timer = 0.06;
+        let bits = talk(&mut call, &mut burst(&[Message::new(Frame::Cfr, false)]), 0.5, true);
+        assert_eq!(call.phase(), Phase::TurningAround, "T4 ran out under the response");
+        assert_eq!(count(&bits, Frame::Dcs), 0, "the command went again over its own answer");
+        let dis = Message::new(Frame::Dis, false)
+            .with_fif(&t30::v34_capabilities(&[Modulation::V29], true));
+        // And the start of a frame that never ends -- the address and control
+        // field, three bits more, and then an abort -- holds the timer for
+        // FRAME_SECONDS and no longer: the command goes again after it.
+        let mut call = calling(Some(a_page()));
+        talk(&mut call, &mut burst(&[dis]), 1.0, true);
+        assert_eq!(call.phase(), Phase::AwaitingConfirm);
+        call.timer = 0.06;
+        let cfr = burst(&[Message::new(Frame::Cfr, false)]);
+        let mut start: VecDeque<bool> = cfr.into_iter().take(8 * (V34_FLAGS + 1) + 20).collect();
+        start.extend(std::iter::repeat_n(true, 8));
+        let bits = talk(&mut call, &mut start, FRAME_SECONDS, true);
+        assert_eq!(count(&bits, Frame::Dcs), 0, "T4 ran out under the start of a frame");
+        let bits = talk(&mut call, &mut VecDeque::new(), 0.6, true);
+        assert_eq!(count(&bits, Frame::Dcs), 1, "held past the longest frame");
     }
 
     #[test]

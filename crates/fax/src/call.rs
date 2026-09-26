@@ -28,7 +28,7 @@ use crate::t30::{self, Capabilities, Command, Frame, Modulation};
 
 mod annex_f;
 
-pub use annex_f::{FLAGS_GONE, ONES, PRIMARY_FASTEST, PRIMARY_SLOWEST};
+pub use annex_f::{FLAGS_GONE, FRAME_SECONDS, ONES, PRIMARY_FASTEST, PRIMARY_SLOWEST};
 
 /// Which end of the call this is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
