@@ -47,6 +47,8 @@ pub struct Fax {
     pub v17: bool,
     /// Whether this end offers error correction mode.
     pub error_correction: bool,
+    /// Whether this end offers JBIG, which goes only with error correction.
+    pub jbig: bool,
     /// What the far end said, once it has said anything.
     pub far: Option<t30::Capabilities>,
     pub far_identity: String,
@@ -329,6 +331,7 @@ impl Fax {
             // and 7200 before it gives up on the modulation.
             v17: true,
             error_correction: true,
+            jbig: true,
             ..Self::default()
         }
     }
@@ -687,6 +690,10 @@ impl Fax {
                     ui.checkbox(&mut self.error_correction, "ECM").on_hover_text(
                         "Error correction mode, T.30 Annex A: the page goes in numbered frames, and any the far end cannot read are sent again instead of printed as streaks. Used only when the far end offers it too",
                     );
+                    ui.add_enabled(self.error_correction, egui::Checkbox::new(&mut self.jbig, "JBIG"))
+                        .on_hover_text(
+                            "T.85's JBIG: every pel predicted from the ones around it and arithmetic coded, a good deal smaller than MMR on a picture. Only with ECM, and only when the far end offers it too; unticked, a page goes in MMR",
+                        );
                 });
                 if again {
                     self.render();

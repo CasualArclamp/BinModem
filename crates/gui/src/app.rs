@@ -1462,6 +1462,7 @@ impl ScopeApp {
                 session.set_fax_identification(self.fax.identification.trim());
                 session.set_fax_offer(&self.fax.ours());
                 session.set_fax_error_correction(self.fax.error_correction);
+                session.set_fax_jbig(self.fax.jbig);
                 session.set_fax_page(self.fax.page().cloned());
                 session.type_bytes(crate::faxwin::Fax::commands(&start).as_bytes());
             }

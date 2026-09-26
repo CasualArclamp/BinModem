@@ -388,10 +388,17 @@ correction* while a call is using it. Untick it to see what the same line does
 to a page without it.
 
 A page goes in the smallest coding both ends have, and the progress line names
-it: MMR, T.6's coding, when there is error correction; Modified READ when the far
-end reads it; and Modified Huffman, which every machine reads, when nothing else
-is shared. The **coded** row under the page to send gives its size in all three,
-and the times beside each rate run from MMR's to Modified Huffman's.
+it: JBIG, T.85's coding, and then MMR, T.6's, when there is error correction;
+Modified READ when the far end reads it; and Modified Huffman, which every
+machine reads, when nothing else is shared. The **coded** row under the page to
+send gives its size in the three T.4 and T.6 codings, and the times beside each
+rate run from MMR's to Modified Huffman's; JBIG usually comes in under MMR, and
+on a dithered picture far under it.
+
+**JBIG** is T.85's coding: every pel predicted from the ones around it and
+arithmetic coded, which learns the page as it goes. It is only used with error
+correction, and only when the far end offers it too; untick it and a page that
+would have gone in JBIG goes in MMR.
 
 The far end's number and what its DIS says appear as soon as they arrive,
 whether or not a page follows.
