@@ -428,6 +428,9 @@ pub struct Call {
     /// Times the far end has answered the page in hand with RTN.
     refused: u8,
 
+    /// Whether this end offers V.8, which its clause 5 DIS says with bit 6
+    /// (6.1.3).
+    v8_capable: bool,
     /// Whether this is a call in T.30 Annex F: V.8 agreed V.34 half-duplex,
     /// and everything from phase B on goes over its two channels.
     v34: bool,
@@ -540,6 +543,7 @@ impl Call {
             accepted: false,
             attempts: 0,
             refused: 0,
+            v8_capable: false,
             v34: false,
             far: annex_f::FarEnd::default(),
             far_silent: false,
@@ -632,6 +636,14 @@ impl Call {
     /// until this is called, and the offer itself is left as it is.
     pub fn set_available(&mut self, available: &[Modulation]) {
         self.available = available.to_vec();
+    }
+
+    /// Say whether this end offers V.8, which is the join's to know: the
+    /// answering end's clause 5 DIS then carries bit 6 (6.1.3), the
+    /// invitation a caller that can may take up with CI (6.1.4). Off, as it
+    /// is unless told, the DIS is the one every call before V.8 sent.
+    pub fn set_v8_capable(&mut self, on: bool) {
+        self.v8_capable = on;
     }
 
     pub fn resolution(&self) -> Resolution {
@@ -1782,7 +1794,12 @@ impl Call {
         let fif = if self.v34 {
             t30::v34_capabilities(&self.offer, self.jbig_offered)
         } else {
-            t30::our_capabilities(&self.offer, self.error_correction_offered, self.jbig_offered)
+            let mut fif =
+                t30::our_capabilities(&self.offer, self.error_correction_offered, self.jbig_offered);
+            if self.v8_capable {
+                t30::say_v8_capable(&mut fif);
+            }
+            fif
         };
         let dis = Message::new(Frame::Dis, false).with_fif(&fif);
         self.queue(&[csi, dis]);
@@ -2404,6 +2421,35 @@ mod tests {
             .find(|m| m.frame == Frame::Dcs)
             .expect("no DCS")
             .fif
+    }
+
+    #[test]
+    fn the_dis_says_v8_only_when_this_end_offers_it() {
+        // 6.1.3: an answering terminal that offers V.8 and heard no call menu
+        // sends its clause 5 DIS with bit 6 set, which is 6.1.4's invitation
+        // to a caller that can; one that does not offer V.8 sends the DIS
+        // every call before it sent, bit for bit.
+        let dis_of = |v8: bool| {
+            let mut call = Call::answer(FS, "1");
+            call.set_v8_capable(v8);
+            call.send_identity();
+            let mut reader = frames::Reader::new();
+            let mut dis = None;
+            while let Some(bit) = call.sender.next_bit() {
+                if let Some(m) = reader.feed(bit)
+                    && m.frame == Frame::Dis
+                {
+                    dis = Some(m.fif);
+                }
+            }
+            dis.expect("no DIS went out")
+        };
+        let (with, without) = (dis_of(true), dis_of(false));
+        assert!(t30::bit(&with, 6), "bit 6 clear in the DIS of an end that offers V.8");
+        assert!(!t30::bit(&without, 6), "bit 6 set in the DIS of an end that does not");
+        let mut cleared = with.clone();
+        t30::set_bit(&mut cleared, 6, false);
+        assert_eq!(cleared, without, "bit 6 was not the only difference");
     }
 
     #[test]

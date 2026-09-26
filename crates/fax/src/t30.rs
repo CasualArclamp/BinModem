@@ -744,6 +744,18 @@ pub fn command(command: Command) -> Vec<u8> {
     fif
 }
 
+/// Say in a DIS that this end does V.8: bit 6, "V.8 capabilities".
+///
+/// For an answering terminal that offers V.8 and heard no call menu: 6.1.3,
+/// "if the ANSam time-out expires, the answer terminal shall proceed with the
+/// binary coded signalling procedures described in clause 5 ... Bit 6 of the
+/// DIS frame shall be set to '1'" -- so that a caller which can may start
+/// V.8 after all with CI (6.1.4, Figures F.5-8 and F.5-9). Note 23 to Table 2
+/// clears it only for Annex C's duplex procedure, which nothing here runs.
+pub fn say_v8_capable(fif: &mut Vec<u8>) {
+    set_bit(fif, 6, true);
+}
+
 /// What this modem can receive, as the DIS of a call on V.34's half-duplex
 /// control channel (T.30 Annex F).
 ///
