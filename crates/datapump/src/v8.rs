@@ -77,6 +77,11 @@ pub mod timing {
 
     /// 8.2.2: "if not terminated by the receipt of CM or a suitable sigC,
     /// ANSam shall be transmitted for a period of 5 +/- 1 s".
+    ///
+    /// What an answering modem runs unless [`Modem::with_ansam_seconds`]
+    /// says otherwise. A fax does: T.30 6.1.1 cuts its ANSam to 2.6-4.0 s.
+    ///
+    /// [`Modem::with_ansam_seconds`]: super::Modem::with_ansam_seconds
     pub const ANSAM: f64 = 5.0;
 
     /// How long the calling modem hears ANSam without a break before it
@@ -152,11 +157,17 @@ pub enum Status {
     Negotiating,
     /// Both ends have a modulation in common and the line is clear for it.
     Agreed(Modulation),
-    /// The far end sent the plain answering tone of V.25. It does not do V.8,
-    /// and 8.1.1 sends the call on to the modulation's own procedure rather
-    /// than negotiating: "if ANS (rather than ANSam) is detected, the DCE
-    /// shall proceed in accordance with Annex A/V.32 bis, ITU-T T.30, or other
-    /// appropriate Recommendations."
+    /// Nothing was negotiated, and the call goes on the old way.
+    ///
+    /// From the calling end: the far end sent the plain answering tone of
+    /// V.25. It does not do V.8, and 8.1.1 sends the call on to the
+    /// modulation's own procedure rather than negotiating: "if ANS (rather
+    /// than ANSam) is detected, the DCE shall proceed in accordance with
+    /// Annex A/V.32 bis, ITU-T T.30, or other appropriate Recommendations."
+    ///
+    /// From the answering end: ANSam ran its time out with no call menu
+    /// heard, and 8.2.2 has the same list -- "continue in accordance with
+    /// Annex A/V.32 bis, or ITU-T T.30 or other appropriate Recommendation".
     NoNegotiation,
     /// Nothing in common, or nothing heard at all.
     Failed,
@@ -238,8 +249,15 @@ pub struct Modem {
     outgoing: Vec<u8>,
     /// Zero octets of CJ seen so far (8.2.3 wants all three).
     cj: usize,
+    /// CI sequences heard for this end's own call function (7.1).
+    ci: u32,
     /// The JM this end answered with, to repeat as it was.
     sent_jm: Option<Menu>,
+    /// How long the answering end's ANSam runs when nothing ends it sooner.
+    ansam_seconds: f64,
+    /// Whether a call menu for any call function but this end's own goes
+    /// unanswered.
+    own_function_only: bool,
 }
 
 impl Modem {
@@ -278,7 +296,10 @@ impl Modem {
             far_menu: None,
             outgoing: Vec::new(),
             cj: 0,
+            ci: 0,
             sent_jm: None,
+            ansam_seconds: timing::ANSAM,
+            own_function_only: false,
         }
     }
 
@@ -302,16 +323,96 @@ impl Modem {
     pub fn overhearing(function: CallFunction, ours: Modulations, fs: f64) -> Self {
         let mut modem = Self::new(Role::Answering, function, ours, fs);
         modem.state = State::Overhearing;
+        modem.own_function_only = true;
         modem
     }
 
-    /// Whether this end is the one using the line: from its first JM until
-    /// the handover after CJ.
+    /// Run ANSam for `seconds` when nothing ends it sooner, in place of
+    /// 8.2.2's 5 +/- 1 s ([`timing::ANSAM`]).
     ///
-    /// Only an answering end that was overhearing needs to ask. Until then it
-    /// sends nothing, and whatever else the line is doing carries on.
+    /// For a fax, whose Recommendation cuts it: T.30 6.1.1 has an answering
+    /// V.34 fax "transmit ANSam until a valid CM response is received or until
+    /// an ANSam time-out (2.6 to 4.0 s) has expired", the same window as its
+    /// plain called tone (4.1.1/T.30). The data modems keep V.8's figure.
+    #[must_use]
+    pub fn with_ansam_seconds(mut self, seconds: f64) -> Self {
+        self.ansam_seconds = seconds;
+        self
+    }
+
+    /// Answer only a call menu for this end's own call function, and leave any
+    /// other unanswered, as an end that overhears leaves it: ANSam goes on and
+    /// its time-out decides.
+    ///
+    /// 8.2.3 allows the other answer -- a JM naming "an available call
+    /// function different from CM", with every modulation bit zero -- but a
+    /// fax that answered a polling caller with one would be telling it there
+    /// is nothing to poll in the one form it cannot act on; the DIS after the
+    /// time-out says the same thing in the form it can (bit 9, Note 18 to
+    /// Table 2/T.30).
+    #[must_use]
+    pub fn answering_only_its_function(mut self) -> Self {
+        self.own_function_only = true;
+        self
+    }
+
+    /// Whether this end is the one using the line, so that whatever else its
+    /// owner might be doing with it has to wait.
+    ///
+    /// An answering end from its first sample -- 8.2's silence is its silence
+    /// -- until the handover after CJ, or until it gives up; one that is only
+    /// overhearing never, until its JM goes out. A calling end from the
+    /// moment it believes ANSam: before that it is silent and listening, and
+    /// its owner's call signal (CNG, for a fax) carries on around it; 8.1.1
+    /// has that stopped on ANSam, and Te and everything after are V.8's.
     pub fn has_the_line(&self) -> bool {
-        matches!(self.state, State::SendingJm | State::Handover)
+        match self.state {
+            State::Overhearing | State::Done(_) => false,
+            State::Quiet | State::Listening => self.role == Role::Answering,
+            State::Waiting
+            | State::SendingCm
+            | State::SendingCj
+            | State::Ansam
+            | State::SendingJm
+            | State::Handover => true,
+        }
+    }
+
+    /// Whether the far end has sent CI for this end's call function, twice.
+    ///
+    /// Only an answering end whose ANSam ran out has a use for this: T.30
+    /// 6.1.4, "when an answer terminal, expecting a response to a DIS frame,
+    /// detects a CI signal, it shall enter the V.8 mode by resending the
+    /// answer tone ANSam" -- which is [`ansam_again`](Self::ansam_again).
+    /// Twice because a CI is two octets, a zero and the call function, and
+    /// two of them are asked for as two menus are; 7.1 sends at least three
+    /// in every burst.
+    pub fn heard_ci(&self) -> bool {
+        self.ci >= IDENTICAL
+    }
+
+    /// Send ANSam again, from the start, as though no call menu had ever been
+    /// waited for: T.30 6.1.4's answer to a CI (Figures F.5-8 and F.5-9).
+    ///
+    /// Whatever the last run heard is forgotten, and so is how long it has
+    /// been going: the caller has just asked for V.8, and gets all of it.
+    pub fn ansam_again(&mut self) {
+        self.last = None;
+        self.last_octets.clear();
+        self.repeats = 0;
+        self.torn = false;
+        self.torn_in_a_row = 0;
+        self.cj = 0;
+        self.ci = 0;
+        self.chosen = None;
+        self.agreed = Protocol::Unstated;
+        self.far_menu = None;
+        self.sent_jm = None;
+        self.outgoing.clear();
+        self.tx.set_transmitting(false);
+        self.reversals = 0.0;
+        self.total = 0.0;
+        self.enter(State::Ansam);
     }
 
     /// Ask for LAPM in the protocol category (Table 6).
@@ -399,6 +500,16 @@ impl Modem {
     /// The menu the far end sent, once one has arrived.
     pub fn far_menu(&self) -> Option<Menu> {
         self.far_menu
+    }
+
+    /// The joint menu of 7.4, once there is one: what the two ends have in
+    /// common, whichever end this is. The JM this end sent, or the one it
+    /// received.
+    pub fn joint_menu(&self) -> Option<Menu> {
+        match self.role {
+            Role::Calling => self.far_menu,
+            Role::Answering => self.sent_jm,
+        }
     }
 
     /// One sample in, one sample out.
@@ -501,7 +612,14 @@ impl Modem {
             }
             // 8.2.3: JM stops when "all 3 octets of CJ have been received".
             Heard::Cj => self.cj = v8::CJ.len(),
-            Heard::Ci(_) => {}
+            // 7.1: a caller saying what its call is for, before or instead of
+            // any menu. Counted only for this end's own function, since that
+            // is the only one anything here would answer.
+            Heard::Ci(function) => {
+                if function == self.menu.function {
+                    self.ci += 1;
+                }
+            }
             Heard::Jm(_) => {}
         }
     }
@@ -637,8 +755,8 @@ impl Modem {
                 // 8.2.2: "upon receiving a minimum of 2 identical CM
                 // sequences, the DCE shall transmit JM".
                 if let Some(cm) = self.settled() {
-                    self.answer(cm);
-                } else if self.elapsed >= timing::ANSAM {
+                    self.consider(cm);
+                } else if self.elapsed >= self.ansam_seconds {
                     // "If neither CM nor a suitable sigC is detected during
                     // ANSam transmission" the call goes on without V.8.
                     self.enter(State::Done(Status::NoNegotiation));
@@ -647,16 +765,7 @@ impl Modem {
 
             State::Overhearing => {
                 if let Some(cm) = self.settled() {
-                    if cm.function == self.menu.function {
-                        self.answer(cm);
-                    } else {
-                        // Not a call this end takes. Forgotten, so that a
-                        // right one arriving later is counted from its own
-                        // first copy rather than against this one.
-                        self.last = None;
-                        self.last_octets.clear();
-                        self.repeats = 0;
-                    }
+                    self.consider(cm);
                 }
             }
 
@@ -689,6 +798,21 @@ impl Modem {
             }
 
             State::Done(_) => {}
+        }
+    }
+
+    /// A call menu has arrived twice the same. Answer it, unless it is for a
+    /// call this end does not take.
+    fn consider(&mut self, cm: Menu) {
+        if !self.own_function_only || cm.function == self.menu.function {
+            self.answer(cm);
+        } else {
+            // Not a call this end takes. Forgotten, so that a right one
+            // arriving later is counted from its own first copy rather than
+            // against this one.
+            self.last = None;
+            self.last_octets.clear();
+            self.repeats = 0;
         }
     }
 
@@ -1473,6 +1597,183 @@ mod tests {
             .expect("no joint menu went out");
         assert_eq!(joint.function, CallFunction::TransmitFax, "{joint:?}");
         assert_eq!(joint.modulations, fax(), "V.34 offered by an end without it: {joint:?}");
+        assert_eq!(modem.joint_menu(), Some(joint), "the joint menu kept is not the one sent");
+    }
+
+    /// What a V.34 fax offers over V.8: the three fax modulations, and V.34
+    /// half-duplex alone -- never duplex, which 7.4's lowest item would pick.
+    fn super_g3_ours() -> Modulations {
+        let mut ours = fax();
+        ours.insert(Modulation::V34HalfDuplex);
+        ours
+    }
+
+    /// When an answering modem left alone gave up on ANSam, in seconds from
+    /// its first sample.
+    fn ansam_ran_out(mut modem: Modem) -> f64 {
+        for i in 0..(FS * 8.0) as usize {
+            modem.step(0.0);
+            if modem.status() != Status::Negotiating {
+                assert_eq!(modem.status(), Status::NoNegotiation);
+                return i as f64 / FS;
+            }
+        }
+        panic!("ANSam never ran out");
+    }
+
+    #[test]
+    fn an_answering_modems_ansam_lasts_as_long_as_it_is_told() {
+        // 8.2.2's 5 +/- 1 s unless told otherwise, after 8.2's 0.2 s of
+        // silence; and T.30 6.1.1's shorter figure for a fax, which is the
+        // owner's to give and changes nothing for a modem that does not.
+        let data = Modem::new(Role::Answering, CallFunction::Data, all(), FS);
+        let ran_out = ansam_ran_out(data);
+        let want = timing::ANSWER_QUIET + timing::ANSAM;
+        assert!((want..want + 0.01).contains(&ran_out), "ANSam ran out at {ran_out:.3} s");
+
+        let fax = Modem::new(Role::Answering, CallFunction::TransmitFax, super_g3_ours(), FS)
+            .with_ansam_seconds(3.0);
+        let ran_out = ansam_ran_out(fax);
+        let want = timing::ANSWER_QUIET + 3.0;
+        assert!((want..want + 0.01).contains(&ran_out), "ANSam ran out at {ran_out:.3} s");
+    }
+
+    #[test]
+    fn an_answering_modem_has_the_line_from_its_first_sample_and_a_calling_one_from_ansam() {
+        // The answering end's silence is 8.2's silence, and its ANSam is
+        // V.8's: nothing else of its owner's belongs on the line until V.8
+        // has given up or handed over.
+        let mut answering = Modem::new(Role::Answering, CallFunction::Data, all(), FS);
+        assert!(answering.has_the_line(), "not from the first sample");
+        for _ in 0..(FS * 0.1) as usize {
+            answering.step(0.0);
+            assert!(answering.has_the_line(), "not through the silence");
+        }
+        for _ in 0..(FS * 6.0) as usize {
+            answering.step(0.0);
+        }
+        assert_eq!(answering.status(), Status::NoNegotiation);
+        assert!(!answering.has_the_line(), "still holding a line it gave up on");
+
+        // The calling end's is silent until it believes ANSam, and its
+        // owner's call signal carries on around it; from ANSam, 8.1.1 has
+        // that stopped, and Te and the menus are V.8's.
+        let mut calling = Modem::new(Role::Calling, CallFunction::Data, all(), FS);
+        let start = 2.0;
+        let mut taken = None;
+        for i in 0..(FS * 4.0) as usize {
+            let t = i as f64 / FS;
+            let tone = if t < start { 0.0 } else { answering_tone(true, 0.450, 0.3, t - start) };
+            calling.step(tone);
+            if taken.is_none() && calling.has_the_line() {
+                taken = Some((t, calling.state));
+            }
+        }
+        let (when, state) = taken.expect("the calling end never took the line");
+        assert_eq!(state, State::Waiting, "took the line at {when:.3} s");
+        assert!(when > start + timing::ANSAM_HELD, "took the line at {when:.3} s, before ANSam");
+        assert!(when < start + 1.0, "took the line at {when:.3} s, long after ANSam");
+    }
+
+    #[test]
+    fn a_ci_after_ansam_ran_out_brings_ansam_back_and_the_menus_after_it() {
+        // T.30 6.1.4: an answering fax whose ANSam ran out has sent its DIS
+        // with bit 6 set; a caller that can may then send CI, and the
+        // answerer "shall enter the V.8 mode by resending the answer tone
+        // ANSam" (Figures F.5-8 and F.5-9). From there the exchange is the
+        // ordinary one.
+        let mut modem = Modem::new(Role::Answering, CallFunction::TransmitFax, super_g3_ours(), FS)
+            .with_ansam_seconds(1.5)
+            .answering_only_its_function();
+        for _ in 0..(FS * 2.0) as usize {
+            modem.step(0.0);
+        }
+        assert_eq!(modem.status(), Status::NoNegotiation);
+        assert!(!modem.has_the_line());
+        assert!(!modem.heard_ci(), "heard a CI in silence");
+
+        // 7.1: "at least 3 CI sequences" in a burst, each ten ONEs, the CI
+        // synchronisation and the call function octet.
+        let framing = AsyncBits::new(8);
+        let mut caller = Bell103Tx::with_tones(LOW.0, LOW.1, FS);
+        caller.set_transmitting(true);
+        for _ in 0..3 {
+            let mut bits = vec![true; v8::PREAMBLE_ONES];
+            for octet in v8::sequence(Signal::Ci, &super_g3()) {
+                bits.extend(framing.encode(octet));
+            }
+            caller.push_bits(&bits);
+        }
+        while caller.pending_bits() > 0 {
+            modem.step(caller.next_sample());
+        }
+        assert!(modem.heard_ci(), "the CI went unheard");
+        assert_eq!(modem.status(), Status::NoNegotiation, "a CI is not a menu");
+
+        modem.ansam_again();
+        assert!(modem.has_the_line(), "ANSam again, and the line not taken");
+        let mut tone = v8::AnswerTone::new(FS);
+        for _ in 0..(FS * 0.8) as usize {
+            tone.feed(modem.step(0.0));
+        }
+        assert!(tone.is_ansam(), "no ANSam after the CI: depth {:.3}", tone.depth());
+        assert_eq!(modem.status(), Status::Negotiating);
+
+        // And the call menus it was all for, answered with V.34 half-duplex.
+        let mut caller = call_menus(&super_g3(), 6);
+        for octet in v8::CJ {
+            caller.push_bits(&framing.encode(octet));
+        }
+        let mut ear = Ear::new();
+        while caller.pending_bits() > 0 {
+            ear.feed(modem.step(caller.next_sample()));
+        }
+        for _ in 0..(FS * 0.2) as usize {
+            ear.feed(modem.step(0.0));
+        }
+        assert_eq!(modem.status(), Status::Agreed(Modulation::V34HalfDuplex));
+        let joint = modem.joint_menu().expect("no joint menu");
+        assert!(joint.modulations.contains(Modulation::V34HalfDuplex), "{joint:?}");
+        assert!(
+            ear.heard.iter().any(|h| matches!(h, Heard::Cm(m) | Heard::Jm(m) if *m == joint)),
+            "the joint menu kept was never sent: {:?}",
+            ear.heard
+        );
+    }
+
+    #[test]
+    fn an_answering_fax_leaves_a_polling_call_menu_unanswered() {
+        // A fax answering a call receives on it, and a caller asking to
+        // receive (Table 4/T.30's other code) is asking for something it has
+        // not got. Told to answer only its own function, the modem lets ANSam
+        // run out instead; a modem not told keeps 8.2.3's answer, since that
+        // is what the data modems have always done.
+        let polling = Menu { function: CallFunction::ReceiveFax, ..super_g3() };
+        for (strict, answers) in [(true, false), (false, true)] {
+            let mut modem = Modem::new(Role::Answering, CallFunction::TransmitFax, super_g3_ours(), FS)
+                .with_ansam_seconds(2.0);
+            if strict {
+                modem = modem.answering_only_its_function();
+            }
+            for _ in 0..(FS * 0.3) as usize {
+                modem.step(0.0);
+            }
+            let mut caller = call_menus(&polling, 8);
+            let mut ear = Ear::new();
+            while caller.pending_bits() > 0 {
+                ear.feed(modem.step(caller.next_sample()));
+            }
+            for _ in 0..(FS * 1.5) as usize {
+                ear.feed(modem.step(0.0));
+            }
+            let answered = ear.heard.iter().any(|h| matches!(h, Heard::Cm(_) | Heard::Jm(_)));
+            assert_eq!(answered, answers, "strict {strict}: {:?}", ear.heard);
+            if strict {
+                assert_eq!(modem.status(), Status::NoNegotiation, "ANSam should have run out");
+            } else {
+                assert_eq!(modem.far_menu(), Some(polling));
+            }
+        }
     }
 
     #[test]
