@@ -22,6 +22,7 @@ use std::collections::VecDeque;
 use crate::coding::{self, Coding};
 use crate::ecm;
 use crate::frames::{Message, Reader, Sender};
+use crate::jbig;
 use crate::page::{Page, Resolution};
 use crate::t30::{self, Capabilities, Command, Frame, Modulation};
 
@@ -305,6 +306,9 @@ pub struct Call {
     /// using it.
     error_correction_offered: bool,
     ecm: bool,
+    /// Whether this end offers JBIG, and will send it to a far end that
+    /// offers it too.
+    jbig_offered: bool,
     /// Error correction mode, sending: the page cut into frames, the block of
     /// them in hand, the frames of it asked for again and how many times, and
     /// the page's number in the call.
@@ -435,6 +439,7 @@ impl Call {
             coding: Coding::ModifiedHuffman,
             error_correction_offered: true,
             ecm: false,
+            jbig_offered: true,
             ecm_frames: Vec::new(),
             ecm_block: 0,
             ecm_resend: Vec::new(),
@@ -514,6 +519,16 @@ impl Call {
     /// Whether this call is in error correction mode.
     pub fn error_correction(&self) -> bool {
         self.ecm
+    }
+
+    /// Offer JBIG, T.85's coding, or not: in the DIS when answering, and as
+    /// the coding a page goes in when sending to a far end that offers it.
+    ///
+    /// Offered by default. It only ever goes under error correction mode, so
+    /// turning that off turns this off with it; turning this off leaves MMR,
+    /// which is what a page went in before.
+    pub fn set_jbig(&mut self, on: bool) {
+        self.jbig_offered = on;
     }
 
     /// The coding the page goes in, once a DCS has settled it.
@@ -990,10 +1005,14 @@ impl Call {
                         Resolution::Standard
                     };
                     self.ecm = t30::bit(&message.fif, 27);
-                    // Bit 31 first: a sender that sets bit 16 beside it is
-                    // still sending MMR. And only with bit 27, as Note 17 has
-                    // it -- without error correction there is no MMR page.
-                    self.coding = if self.ecm && t30::bit(&message.fif, 31) {
+                    // The newest coding bit first: a sender that sets bit 16
+                    // beside 31 is still sending MMR, and one that sets 31
+                    // beside 78 is sending JBIG. And only with bit 27, as Note
+                    // 17 has it -- without error correction there is no MMR or
+                    // JBIG page.
+                    self.coding = if self.ecm && t30::commands_jbig(&message.fif) {
+                        Coding::Jbig
+                    } else if self.ecm && t30::bit(&message.fif, 31) {
                         Coding::Mmr
                     } else if t30::bit(&message.fif, 16) {
                         Coding::ModifiedRead
@@ -1260,9 +1279,12 @@ impl Call {
             };
             self.ecm = self.error_correction_offered && caps.error_correction;
             // The smallest coding the far end reads, since the page is the
-            // same page in any of them: MMR where error correction allows it,
-            // Modified READ, and Modified Huffman, which every machine reads.
-            self.coding = if self.ecm && caps.t6_coding {
+            // same page in any of them: JBIG and then MMR where error
+            // correction allows them, Modified READ, and Modified Huffman,
+            // which every machine reads.
+            self.coding = if self.ecm && self.jbig_offered && caps.jbig {
+                Coding::Jbig
+            } else if self.ecm && caps.t6_coding {
                 Coding::Mmr
             } else if caps.two_dimensional {
                 Coding::ModifiedRead
@@ -1338,9 +1360,30 @@ impl Call {
             fine: self.resolution == Resolution::Fine,
             scan_line_field: self.scan_line_field,
             coding: self.coding,
+            optional_l0: self.jbig_stripe() != jbig::BASIC_STRIPE,
             error_correction: self.ecm,
         }));
         self.sender.send(&[tsi, dcs]);
+    }
+
+    /// Lines to a stripe of a JBIG page.
+    ///
+    /// T.85's basic 128 (Table 1, Note 4), unless the far end said it takes
+    /// any (bit 79). Then about the eight millimetres of paper T.82 suggests
+    /// (Intro. 2): 32 lines at 3.85 lines/mm and 64 at 7.7, some 35 stripes to
+    /// an A4 page. Annex C looks for a better place for the AT pixel once a
+    /// stripe, and calls that reasonable "if the number of stripes per image
+    /// is not appreciably smaller than the suggested number, 35" (C.2); at 128
+    /// an A4 page has 9 or 18, and a picture on it waits a stripe of three
+    /// centimetres at standard resolution before its grain is found. The cost
+    /// is a flush and an ESC SDNORM a stripe, a handful of bytes.
+    fn jbig_stripe(&self) -> u32 {
+        let optional = self.capabilities.as_ref().is_some_and(|caps| caps.jbig_optional_l0);
+        match (optional, self.resolution) {
+            (false, _) => jbig::BASIC_STRIPE,
+            (true, Resolution::Standard) => 32,
+            (true, Resolution::Fine) => 64,
+        }
     }
 
     fn send_training_check(&mut self) {
@@ -1382,7 +1425,16 @@ impl Call {
             }
             _ => &page.lines,
         };
-        self.coding.encode(lines, self.resolution, min_bits)
+        match self.coding {
+            Coding::Jbig => coding::jbig_bits(
+                lines,
+                jbig::Options {
+                    stripe: self.jbig_stripe(),
+                    ..jbig::Options::FAX
+                },
+            ),
+            coding => coding.encode(lines, self.resolution, min_bits),
+        }
     }
 
     fn send_page(&mut self) {
@@ -1456,6 +1508,7 @@ impl Call {
                     fine: self.resolution == Resolution::Fine,
                     scan_line_field: self.scan_line_field,
                     coding: self.coding,
+                    optional_l0: self.jbig_stripe() != jbig::BASIC_STRIPE,
                     error_correction: true,
                 });
                 Message::new(Frame::Ctc, true).with_fif(&dcs[..2])
@@ -1527,7 +1580,11 @@ impl Call {
         let csi = Message::new(Frame::Csi, false)
             .and_more()
             .with_fif(&t30::identification_field(&self.identification));
-        let dis = Message::new(Frame::Dis, false).with_fif(&t30::our_capabilities(&self.offer, self.error_correction_offered));
+        let dis = Message::new(Frame::Dis, false).with_fif(&t30::our_capabilities(
+            &self.offer,
+            self.error_correction_offered,
+            self.jbig_offered,
+        ));
         self.sender.send(&[csi, dis]);
     }
 
@@ -2131,13 +2188,13 @@ mod tests {
         // It was not: the end that dialled never took its resolution from the
         // page, so every page went out saying standard, and a fine page arrived
         // at twice its height.
-        let dcs = command_for(Some(fine_page(10)), &t30::our_capabilities(&OUR_MODULATIONS, true));
+        let dcs = command_for(Some(fine_page(10)), &t30::our_capabilities(&OUR_MODULATIONS, true, true));
         assert!(t30::bit(&dcs, 15), "a fine page was commanded as standard");
     }
 
     #[test]
     fn a_fine_page_to_a_standard_machine_is_sent_standard_and_halved() {
-        let mut fif = t30::our_capabilities(&OUR_MODULATIONS, true);
+        let mut fif = t30::our_capabilities(&OUR_MODULATIONS, true, true);
         t30::set_bit(&mut fif, 15, false);
         let page = fine_page(10);
         let dcs = command_for(Some(page.clone()), &fif);
@@ -2153,34 +2210,92 @@ mod tests {
 
     #[test]
     fn the_page_goes_in_the_smallest_coding_the_far_end_reads() {
-        // Bit 16 for Modified READ, bit 31 for MMR, and neither for Modified
-        // Huffman -- never both, since a page is in one coding.
+        // Bit 16 for Modified READ, bit 31 for MMR, bit 78 for JBIG, and none
+        // of them for Modified Huffman -- never two, since a page is in one
+        // coding. The last is bit 27, error correction.
         let coding_of = |dis: &[u8]| {
             let dcs = command_for(Some(fine_page(10)), dis);
-            (t30::bit(&dcs, 16), t30::bit(&dcs, 31), t30::bit(&dcs, 27))
+            [16, 31, 78, 27].map(|n| t30::bit(&dcs, n))
         };
-        // Another of these, with error correction: MMR.
-        let ours = t30::our_capabilities(&OUR_MODULATIONS, true);
-        assert_eq!(coding_of(&ours), (false, true, true));
-        // Without error correction T.4 4.3 rules MMR out, and Modified READ is
-        // next.
-        let plain = t30::our_capabilities(&OUR_MODULATIONS, false);
-        assert_eq!(coding_of(&plain), (true, false, false));
+        // Another of these, with error correction: JBIG.
+        let ours = t30::our_capabilities(&OUR_MODULATIONS, true, true);
+        assert_eq!(coding_of(&ours), [false, false, true, true]);
+        // One with error correction and not JBIG: MMR, which is what another
+        // of these got before it had JBIG to offer.
+        let older = t30::our_capabilities(&OUR_MODULATIONS, true, false);
+        assert_eq!(coding_of(&older), [false, true, false, true]);
+        // Without error correction T.4 4.3 and 4.4 rule both out, and Modified
+        // READ is next.
+        let plain = t30::our_capabilities(&OUR_MODULATIONS, false, true);
+        assert_eq!(coding_of(&plain), [true, false, false, false]);
         // A machine that says bit 31 without bit 27 has said nothing, as
-        // Note 9 has it.
+        // Note 9 has it, and bit 78 without it nothing either (Note 17).
         let mut odd = plain.clone();
-        t30::set_bit(&mut odd, 24, true);
+        t30::extend_to(&mut odd, 79);
         t30::set_bit(&mut odd, 31, true);
-        assert_eq!(coding_of(&odd), (true, false, false));
-        // The real machine's DIS, which offers neither.
-        assert_eq!(coding_of(&DIS), (false, false, false));
+        t30::set_bit(&mut odd, 78, true);
+        assert_eq!(coding_of(&odd), [true, false, false, false]);
+        // The real machine's DIS, which offers none of them.
+        assert_eq!(coding_of(&DIS), [false, false, false, false]);
     }
 
     #[test]
-    fn an_end_that_will_not_use_error_correction_does_not_send_mmr_either() {
+    fn an_end_that_will_not_send_jbig_sends_mmr() {
+        let mut call = Call::originate(FS, "1", Some(fine_page(10)));
+        call.set_jbig(false);
+        call.capabilities = Some(t30::capabilities(&t30::our_capabilities(&OUR_MODULATIONS, true, true)));
+        assert!(call.choose_rate());
+        assert!(call.error_correction());
+        assert_eq!(call.coding, Coding::Mmr);
+    }
+
+    #[test]
+    fn an_end_that_will_not_take_jbig_does_not_offer_it() {
+        let mut call = Call::answer(FS, "1");
+        call.set_jbig(false);
+        call.enter(Phase::Identifying);
+        let bits: Vec<bool> = std::iter::from_fn(|| call.next_control_bit()).collect();
+        let mut reader = Reader::new();
+        let dis = bits
+            .iter()
+            .filter_map(|b| reader.feed(*b))
+            .find(|m| m.frame == Frame::Dis)
+            .expect("no DIS");
+        let caps = t30::capabilities(&dis.fif);
+        assert!(caps.t6_coding && !caps.jbig, "{:02x?}", dis.fif);
+        assert_eq!(caps.octets, 4, "a DIS of four octets, as before JBIG");
+    }
+
+    #[test]
+    fn a_jbig_page_goes_in_basic_stripes_unless_the_far_end_takes_others() {
+        // Bit 79 in the far end's DIS says any L0; without it, 128.
+        let stripe_of = |dis: &[u8], page: Page| {
+            let dcs = command_for(Some(page.clone()), dis);
+            let mut call = Call::originate(FS, "1", Some(page));
+            call.frame_arrived(Message::new(Frame::Dis, false).with_fif(dis));
+            assert_eq!(call.coding, Coding::Jbig);
+            let octets = ecm::pack(&call.fast_out_page());
+            let bih: &[u8; jbig::Header::LEN] = octets[..jbig::Header::LEN].try_into().unwrap();
+            let (header, _) = jbig::Header::read(bih).unwrap();
+            (header.stripe, t30::bit(&dcs, 79))
+        };
+        let any = t30::our_capabilities(&OUR_MODULATIONS, true, true);
+        let mut basic = any.clone();
+        t30::set_bit(&mut basic, 79, false);
+        assert_eq!(stripe_of(&basic, fine_page(10)), (128, false));
+        assert_eq!(stripe_of(&any, fine_page(10)), (64, true), "eight millimetres at 7.7 lines/mm");
+        let standard = Page {
+            resolution: Resolution::Standard,
+            ..fine_page(10)
+        };
+        assert_eq!(stripe_of(&any, standard), (32, true), "eight millimetres at 3.85 lines/mm");
+    }
+
+    #[test]
+    fn an_end_that_will_not_use_error_correction_sends_neither_mmr_nor_jbig() {
         let mut call = Call::originate(FS, "1", Some(fine_page(10)));
         call.set_error_correction(false);
-        call.capabilities = Some(t30::capabilities(&t30::our_capabilities(&OUR_MODULATIONS, true)));
+        call.capabilities = Some(t30::capabilities(&t30::our_capabilities(&OUR_MODULATIONS, true, true)));
         assert!(call.choose_rate());
         assert!(!call.error_correction());
         assert_eq!(call.coding, Coding::ModifiedRead);
@@ -2196,6 +2311,14 @@ mod tests {
             (vec![16, 24, 27, 31], Coding::Mmr),
             // 31 without 27 is nothing.
             (vec![16, 24, 31], Coding::ModifiedRead),
+            // Bit 78, in a field extended to reach it, is JBIG; with 79 too,
+            // or with 31 beside it, still JBIG.
+            (vec![24, 27, 32, 40, 48, 56, 64, 72, 78], Coding::Jbig),
+            (vec![24, 27, 32, 40, 48, 56, 64, 72, 78, 79], Coding::Jbig),
+            (vec![24, 27, 31, 32, 40, 48, 56, 64, 72, 78], Coding::Jbig),
+            // Without 27, or in an octet the field never reached, it is not.
+            (vec![16, 24, 32, 40, 48, 56, 64, 72, 78], Coding::ModifiedRead),
+            (vec![24, 27, 31, 32, 40, 56, 64, 72, 78], Coding::Mmr),
         ] {
             let mut dcs = t30::command(Command {
                 modulation: Modulation::V29,
@@ -2203,6 +2326,7 @@ mod tests {
                 fine: false,
                 scan_line_field: 0b111,
                 coding: Coding::ModifiedHuffman,
+                optional_l0: false,
                 error_correction: false,
             });
             for bit in &bits {
@@ -2368,22 +2492,32 @@ mod tests {
         // The DIS this modem sends, read with the same reader that reads
         // everybody else's. A capability frame that cannot be read by its own
         // parser is one no far end will read either.
-        let caps = t30::capabilities(&t30::our_capabilities(&OUR_MODULATIONS, true));
+        let caps = t30::capabilities(&t30::our_capabilities(&OUR_MODULATIONS, true, true));
         assert!(caps.receives);
         assert!(!caps.can_be_polled, "there is nothing here to fetch");
         assert_eq!(caps.modulations, vec![Modulation::V27ter, Modulation::V29]);
         assert!(caps.fine_resolution);
         assert!(caps.two_dimensional, "T.4 4.2 is offered as well as 4.1");
         assert!(caps.error_correction, "T.30 Annex A is offered");
+        assert!(caps.t6_coding, "T.6 is offered");
+        assert!(caps.jbig && caps.jbig_optional_l0, "T.85 is offered, in stripes of any length");
         assert_eq!(caps.widths_mm, vec![215]);
         assert_eq!(caps.length, "unlimited");
         assert_eq!(caps.scan_line_ms, 0.0);
-        assert_eq!(caps.octets, 4, "bit 27 is in the fourth octet");
+        // Ten octets now that JBIG is offered, where it used to be four:
+        // bits 78 and 79 are in the tenth.
+        assert_eq!(caps.octets, 10, "bits 78 and 79 are in the tenth octet");
 
-        // And without it, the three octets of a DIS with no extension.
-        let plain = t30::our_capabilities(&OUR_MODULATIONS, false);
+        // Without JBIG, the four octets bit 27 needs; without error
+        // correction, the three octets of a DIS with no extension, and no
+        // JBIG either, which T.4 4.4 allows only with it.
+        let older = t30::our_capabilities(&OUR_MODULATIONS, true, false);
+        assert_eq!(older.len(), 4);
+        assert!(!t30::capabilities(&older).jbig);
+        let plain = t30::our_capabilities(&OUR_MODULATIONS, false, true);
         assert_eq!(plain.len(), 3);
         assert!(!t30::capabilities(&plain).error_correction);
+        assert!(!t30::capabilities(&plain).jbig);
         assert!(!t30::bit(&plain, 24), "an extension bit with nothing after it");
     }
 
@@ -2396,7 +2530,7 @@ mod tests {
             // Nothing at all is V.27 ter, which every machine must have.
             (vec![], vec![Modulation::V27ter]),
         ] {
-            let caps = t30::capabilities(&t30::our_capabilities(&offer, true));
+            let caps = t30::capabilities(&t30::our_capabilities(&offer, true, true));
             assert_eq!(caps.modulations, want, "offering {offer:?}");
         }
     }
@@ -2567,6 +2701,7 @@ mod tests {
             fine: false,
             scan_line_field: 0,
             coding: Coding::ModifiedHuffman,
+            optional_l0: false,
             error_correction: false,
         });
         call.frame_arrived(Message::new(Frame::Dcs, true).with_fif(&dcs));

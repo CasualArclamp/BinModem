@@ -848,6 +848,12 @@ pub struct Modem {
     /// too, so leaving it on costs nothing against a machine without it; the
     /// reason to turn it off is to see what a page looks like without it.
     pub fax_error_correction: bool,
+    /// Whether a fax call offers T.85's JBIG, which goes only under error
+    /// correction mode.
+    ///
+    /// On unless told otherwise, and used, like error correction, only when
+    /// the far end offers it too. Off, a page goes in MMR as it did before.
+    pub fax_jbig: bool,
     /// The page waiting to be sent, taken by the next fax call that dials.
     ///
     /// Taken rather than borrowed, so that a second call does not send the
@@ -918,6 +924,7 @@ impl Modem {
             fax_result: None,
             fax_offer: fax::call::OUR_MODULATIONS.to_vec(),
             fax_error_correction: true,
+            fax_jbig: true,
             fax_page: None,
             fax_identification: String::new(),
             far_menu: None,
@@ -2206,7 +2213,8 @@ impl Modem {
             };
             self.fax = Some(
                 call.offering(&self.fax_offer)
-                    .with_error_correction(self.fax_error_correction),
+                    .with_error_correction(self.fax_error_correction)
+                    .with_jbig(self.fax_jbig),
             );
             return;
         }

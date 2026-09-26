@@ -1898,6 +1898,7 @@ struct Faxed {
     page: Option<fax::page::Page>,
     rate: u32,
     error_correction: bool,
+    coding: fax::coding::Coding,
 }
 
 fn fax_between(caller: &mut Modem, answerer: &mut Modem) -> Faxed {
@@ -1905,6 +1906,7 @@ fn fax_between(caller: &mut Modem, answerer: &mut Modem) -> Faxed {
     let mut arrived = None;
     let mut rate = 0;
     let mut error_correction = false;
+    let mut coding = fax::coding::Coding::default();
     for _ in 0..(FS * 40.0) as usize {
         let from_caller = caller.step(to_caller);
         let from_answerer = answerer.step(to_answerer);
@@ -1917,6 +1919,7 @@ fn fax_between(caller: &mut Modem, answerer: &mut Modem) -> Faxed {
         {
             rate = call.rate();
             error_correction = call.error_correction();
+            coding = call.coding();
         }
         if arrived.is_none() {
             arrived = answerer.take_received_page().map(|(_, page)| page);
@@ -1931,6 +1934,7 @@ fn fax_between(caller: &mut Modem, answerer: &mut Modem) -> Faxed {
         page: arrived,
         rate,
         error_correction,
+        coding,
     }
 }
 
@@ -1984,5 +1988,36 @@ fn a_fax_uses_error_correction_unless_either_end_is_told_not_to() {
         let got = faxed.page.unwrap_or_else(|| panic!("{case}: no page arrived"));
         assert_eq!(got.lines, page.lines, "{case}");
         assert_eq!(faxed.error_correction, want, "{case}");
+    }
+}
+
+#[test]
+fn a_fax_goes_in_jbig_unless_either_end_is_told_not_to() {
+    // The same for JBIG, the box beside the one for error correction: on at
+    // both ends by default, and the page goes in it; off at either, and it
+    // goes in MMR, the next smallest both have.
+    use fax::coding::Coding;
+    for (at_caller, at_answerer, want) in [
+        (true, true, Coding::Jbig),
+        (false, true, Coding::Mmr),
+        (true, false, Coding::Mmr),
+    ] {
+        let page = a_test_page(6);
+        let mut caller = Modem::new(FS);
+        caller.fax_page = Some(page.clone());
+        caller.fax_jbig = at_caller;
+        Pair::type_at(&mut caller, "AT+FCLASS=1");
+        Pair::type_at(&mut caller, "ATD1");
+        let mut answerer = Modem::new(FS);
+        answerer.fax_jbig = at_answerer;
+        Pair::type_at(&mut answerer, "AT+FCLASS=1");
+        Pair::type_at(&mut answerer, "ATA");
+
+        let faxed = fax_between(&mut caller, &mut answerer);
+        let case = format!("caller {at_caller}, answerer {at_answerer}");
+        let got = faxed.page.unwrap_or_else(|| panic!("{case}: no page arrived"));
+        assert_eq!(got.lines, page.lines, "{case}");
+        assert!(faxed.error_correction, "{case}");
+        assert_eq!(faxed.coding, want, "{case}");
     }
 }
