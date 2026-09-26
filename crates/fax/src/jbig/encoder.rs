@@ -44,7 +44,7 @@ pub fn encode(lines: &[Vec<bool>], options: Options) -> Vec<u8> {
             new_length(&mut out, height as u32);
         }
         let first = s * stripe;
-        let scd = page.stripe(&lines[first..height.min(first + stripe)]);
+        let scd = page.stripe(&lines[first..height.min(first.saturating_add(stripe))]);
         for byte in scd {
             out.push(byte);
             if byte == ESC {

@@ -25,6 +25,9 @@
 //! so a stripe's data can be found in the stream by its marker, but the
 //! estimates run on across them.
 //!
+//! A pel of ink is a 1: 6.1.1 makes 1 the foreground colour, which on paper is
+//! the ink, and `true` here as everywhere else in the crate.
+//!
 //! One wrong bit and every pel after it is guessed from the wrong estimates,
 //! with nothing to find its place again by: "the use of error free
 //! transmission is mandatory" (T.85 clause 3), which in a group 3 fax means
@@ -58,6 +61,11 @@ const TPBON: u8 = 0x08;
 const DPON: u8 = 0x04;
 const DPPRIV: u8 = 0x02;
 const DPLAST: u8 = 0x01;
+
+/// L0 as T.85 calls it basic: 128 lines to a stripe, which every machine that
+/// takes JBIG takes (Table 1, Note 4). Any other needs the far end to have
+/// said so, with bit 79 of its DIS.
+pub const BASIC_STRIPE: u32 = 128;
 
 /// The size of the private DP table a BIH may carry (6.6.3, equation 7).
 ///
@@ -197,10 +205,10 @@ pub struct Options {
 impl Options {
     /// What a fax call sends: T.85's basic 128 lines a stripe, the
     /// three-line template, typical prediction, and the AT pixel free to move
-    /// up to eight pels -- the parameters of the last test of 7.2.2, which is
-    /// the one that exercises everything T.85 allows.
+    /// up to eight pels -- the parameters of 7.2.2's third test, the one that
+    /// turns on everything that makes a page smaller.
     pub const FAX: Self = Self {
-        stripe: 128,
+        stripe: BASIC_STRIPE,
         mx: 8,
         two_line: false,
         typical_prediction: true,

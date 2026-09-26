@@ -86,8 +86,6 @@ pub struct Decoder {
     pending: Vec<(u32, u8)>,
     /// Where the AT pixel is, as τX.
     at: u8,
-    /// Whether a NEWLEN has arrived: there is at most one (6.2.6.2).
-    new_length: bool,
 
     rows: Rows,
     lntp_above: bool,
@@ -123,7 +121,6 @@ impl Decoder {
             moves: Vec::new(),
             pending: Vec::new(),
             at: 0,
-            new_length: false,
             rows: Rows::new(0),
             lntp_above: true,
             line_open: false,
@@ -317,20 +314,26 @@ impl Decoder {
     /// is not believed. One that is less than what has been decoded ends the
     /// page there: that is the case of a length the sender learned only after
     /// sending the stripe it falls in, which 6.2.6.2 allows and T.85
-    /// Amendment 1 shows.
+    /// Amendment 1 shows. And a stripe held for want of one can be finished.
     fn new_height(&mut self, height: u32) {
         let original = self.header_of().height;
         if height > original {
             return;
         }
-        self.new_length = true;
         self.height = u64::from(height);
         if self.lines.len() as u64 > self.height {
             self.lines.truncate(height as usize);
         }
-        if self.held {
+        if self.held && self.left() <= MAX_LINES as u64 {
             self.finish_stripe();
         }
+    }
+
+    /// Lines of the stripe in hand still to come, as the header and any
+    /// NEWLEN have it.
+    fn left(&self) -> u64 {
+        let end = (self.stripe_start + u64::from(self.header_of().stripe)).min(self.height);
+        end.saturating_sub(self.lines.len() as u64)
     }
 
     /// A byte of a stripe's PSCD, unstuffed.
@@ -342,7 +345,9 @@ impl Decoder {
             return;
         }
         if self.held {
-            self.finish_stripe();
+            // A stripe after one that never ended: see `stripe_ends`.
+            self.stage = Stage::Spoiled;
+            return;
         }
         if !self.open {
             self.open_stripe();
@@ -366,11 +371,13 @@ impl Decoder {
     /// zeros -- unless the stripe says it has more lines than any page this
     /// will decode. That is a sender that does not know how long its page is
     /// and has said so with an enormous YD and L0, and T.85 Amendment 1 (I.2)
-    /// has it send the real length after the stripe, with a NEWLEN; so those
-    /// lines wait for it.
+    /// has it send the real length after the stripe, with a NEWLEN; so the
+    /// stripe is held for that. Anything else after it -- another stripe,
+    /// with those lines still owed -- is a page that cannot be followed.
     fn stripe_ends(&mut self, reset: bool) {
         if self.held {
-            self.finish_stripe();
+            self.stage = Stage::Spoiled;
+            return;
         }
         if !self.open {
             // An SDE with no PSCD at all: the "null stripe" of T.85
@@ -379,10 +386,7 @@ impl Decoder {
         }
         self.ended = true;
         self.reset = reset;
-        let stripe = u64::from(self.header_of().stripe);
-        let end = (self.stripe_start + stripe).min(self.height);
-        let left = end.saturating_sub(self.lines.len() as u64);
-        if self.header_of().variable_length && !self.new_length && left > MAX_LINES as u64 {
+        if self.left() > MAX_LINES as u64 {
             self.held = true;
             self.run();
         } else {
@@ -620,6 +624,31 @@ mod tests {
         let decoder = decode(&joined, 200);
         assert!(decoder.is_done());
         assert_eq!(decoder.lines(), page.as_slice());
+    }
+
+    #[test]
+    fn a_stripe_longer_than_any_page_waits_for_its_newlen() {
+        // One stripe of a page of unknown length, YD and L0 both 0xffffffff
+        // (T.85 Amendment 1, I.2): its last lines are not guessed at from
+        // zeros until a NEWLEN says how many there are.
+        let page = text(50, 200);
+        let bie = encode(&page, Options { stripe: 50, ..Options::FAX });
+        let mut unknown = bie.clone();
+        unknown[8..16].fill(0xff);
+        let mut decoder = decode(&unknown, 200);
+        assert!(!decoder.is_done(), "done without knowing how long");
+        assert!(decoder.lines().len() <= 50);
+        assert_eq!(decoder.lines(), &page[..decoder.lines().len()]);
+        decoder.feed_bytes(&[ESC, NEWLEN, 0, 0, 0, 50]);
+        assert!(decoder.is_done());
+        assert_eq!(decoder.lines(), page.as_slice());
+        // Another stripe in its place, with those lines still owed, is a page
+        // that cannot be followed -- and what came before it stays.
+        let mut decoder = decode(&unknown, 200);
+        let before = decoder.lines().len();
+        decoder.feed_bytes(&bie[20..]);
+        assert_eq!(decoder.damaged(), 1);
+        assert_eq!(decoder.lines().len(), before);
     }
 
     #[test]
