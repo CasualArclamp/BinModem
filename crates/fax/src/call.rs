@@ -848,6 +848,27 @@ impl Call {
         }
     }
 
+    /// Begin phase B again from this end's DIS, after a V.8 exchange cut into
+    /// it.
+    ///
+    /// For the answering end only. 6.1.6: "If the CM/JM exchange indicates
+    /// that the modulation system defined in ITU-T Rec. V.34 is not available
+    /// in both the calling and called terminals, then the procedures defined
+    /// in clause 5 shall be followed" -- and for the end that answered, clause
+    /// 5 opens with its DIS. Whatever was going out when the far end's call
+    /// menu arrived was cut short by the joint menu, so it is dropped rather
+    /// than finished, and whatever came in meanwhile was V.8 rather than
+    /// frames. The clocks of phase B start from here.
+    pub fn restart_identifying(&mut self) {
+        debug_assert_eq!(self.role, Role::Answerer, "only the answering end sends a DIS");
+        self.sender = Sender::new();
+        self.reader = Reader::new();
+        self.attempts = 0;
+        self.held = 0.0;
+        self.phase_b_since = self.elapsed;
+        self.pause_then(Phase::Identifying);
+    }
+
     // ---- entering a phase -------------------------------------------------
 
     /// Sit out the settling time, then take up `next`.

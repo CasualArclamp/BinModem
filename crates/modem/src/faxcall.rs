@@ -14,6 +14,7 @@
 //! then 9600, then silence, then 300 again -- and every one of those changes
 //! is a carrier going up or down at both ends.
 
+use datapump::v8 as v8line;
 use datapump::{v17, v21, v27ter, v29};
 use fax::call::{Call, Line, Phase, Role, Speed};
 use fax::coding::Coding;
@@ -54,6 +55,30 @@ impl Carrier {
 /// in the DIS, and two ends that both do settle on V.17 at 14 400.
 pub const MODULATIONS: [Modulation; 3] = [Modulation::V27ter, Modulation::V29, Modulation::V17];
 
+/// The same modulations as V.8 names them (Table 4/V.8), for a joint menu.
+///
+/// V.29 is the half-duplex bit: a fax's V.29 is the half-duplex use of it,
+/// which is why V.8 gave that its own bit.
+fn v8_modulations(modulations: &[Modulation]) -> v8::Modulations {
+    let mut set = v8::Modulations::NONE;
+    for m in modulations {
+        set.insert(match m {
+            Modulation::V27ter => v8::Modulation::V27ter,
+            Modulation::V29 => v8::Modulation::V29HalfDuplex,
+            Modulation::V17 => v8::Modulation::V17,
+        });
+    }
+    set
+}
+
+/// An ear for a V.8 call menu from a far end that wants to send a fax.
+///
+/// T.30 Table 4: "Transmit facsimile from call terminal". The end that answers
+/// here receives, so that is the only call function it takes up.
+fn overhearing(offer: &[Modulation], fs: f64) -> v8line::Modem {
+    v8line::Modem::overhearing(v8::CallFunction::TransmitFax, v8_modulations(offer), fs)
+}
+
 /// A fax call, from either end.
 #[derive(Debug)]
 pub struct FaxCall {
@@ -73,6 +98,16 @@ pub struct FaxCall {
     ced: v21::Tone,
     /// What the line was doing on the last sample, so a change can be seen.
     line: Line,
+    /// The answering end's ear for a V.8 call menu, and its voice for the
+    /// joint menu that answers one.
+    ///
+    /// Only on the answering end, and only until the caller has shown it is
+    /// doing T.30 after all. See [`v8line::Modem::overhearing`] for why a
+    /// fax that sends the plain answer tone listens for a CM at all.
+    v8: Option<v8line::Modem>,
+    /// The call menu the far end sent, if it sent one.
+    far_menu: Option<v8::Menu>,
+    fs: f64,
 }
 
 impl FaxCall {
@@ -88,7 +123,9 @@ impl FaxCall {
 
     /// The end that answered.
     pub fn answer(fs: f64, identification: &str) -> Self {
-        Self::with(Call::answer(fs, identification), fs)
+        let mut call = Self::with(Call::answer(fs, identification), fs);
+        call.v8 = Some(overhearing(&fax::call::OUR_MODULATIONS, fs));
+        call
     }
 
     fn with(mut call: Call, fs: f64) -> Self {
@@ -107,14 +144,24 @@ impl FaxCall {
             cng: v21::Tone::new(v21::CNG, fs),
             ced: v21::Tone::new(v21::CED, fs),
             line: Line::Quiet,
+            v8: None,
+            far_menu: None,
+            fs,
         }
     }
 
     /// Use only these modulations: what goes in this end's DIS, and what it
     /// will choose from when it sends.
+    ///
+    /// And what goes in a joint menu, should a call menu arrive: the two
+    /// have to agree, or V.8 would settle on a modulation the DIS then
+    /// withholds.
     #[must_use]
     pub fn offering(mut self, modulations: &[Modulation]) -> Self {
         self.call.set_offer(modulations);
+        if self.v8.is_some() {
+            self.v8 = Some(overhearing(modulations, self.fs));
+        }
         self
     }
 
@@ -152,6 +199,21 @@ impl FaxCall {
 
     pub fn phase(&self) -> Phase {
         self.call.phase()
+    }
+
+    /// What the call is doing, as a person would say it: T.30's phase, or
+    /// V.8 while that has the line.
+    pub fn phase_name(&self) -> &'static str {
+        match &self.v8 {
+            Some(v8) if v8.has_the_line() => "V.8: answering the call menu",
+            _ => self.call.phase().name(),
+        }
+    }
+
+    /// The V.8 call menu the far end sent, if it sent one: what the calling
+    /// fax can do, V.34 included, whatever this end could do about it.
+    pub fn far_menu(&self) -> Option<v8::Menu> {
+        self.far_menu
     }
 
     pub fn seconds(&self) -> f64 {
@@ -398,12 +460,78 @@ impl FaxCall {
 
     /// One sample in, one sample out.
     pub fn step(&mut self, input: f64) -> f64 {
+        if let Some(out) = self.overhear(input) {
+            return out;
+        }
         let want = self.call.line();
         self.follow(want);
         self.listen(want, input);
         let (out, idle) = self.talk(want);
         self.call.tick(idle);
         out
+    }
+
+    /// Listen for a V.8 call menu while T.30 goes on, and answer one if it
+    /// comes. `Some`, with the sample to send, while V.8 has the line.
+    ///
+    /// While it has, T.30 stands still: its clocks do not run and nothing of
+    /// it reaches the line, because the far end is not listening to T.30 --
+    /// it is waiting for a JM, and a DIS sent past it goes unheard, which is
+    /// how the recorded call spent its whole length.
+    fn overhear(&mut self, input: f64) -> Option<f64> {
+        let v8 = self.v8.as_mut()?;
+        let early = matches!(
+            self.call.phase(),
+            Phase::Answering | Phase::Identifying | Phase::AwaitingCommand
+        );
+        if !early && !v8.has_the_line() {
+            // A command has arrived, so the caller is doing T.30 and there is
+            // nobody left to send a call menu.
+            self.v8 = None;
+            return None;
+        }
+        let out = v8.step(input);
+        if self.far_menu.is_none() {
+            self.far_menu = v8.far_menu();
+        }
+        match v8.status() {
+            v8line::Status::Negotiating if v8.has_the_line() => {
+                self.drop_the_line();
+                Some(out)
+            }
+            v8line::Status::Negotiating => None,
+            _ => {
+                self.v8 = None;
+                self.after_v8();
+                Some(out)
+            }
+        }
+    }
+
+    /// Stop whatever T.30 had on the line, which V.8 has just taken over: the
+    /// called tone, or a DIS part way out.
+    fn drop_the_line(&mut self) {
+        if self.line != Line::Quiet {
+            // A new transmitter rather than a silenced one, because the old
+            // one still holds the rest of the frame it was sending, and would
+            // send it first the next time it was asked for anything.
+            self.control_tx = v21::Sender::new(self.fs);
+            self.line = Line::Quiet;
+        }
+    }
+
+    /// V.8 has finished with the line.
+    ///
+    /// Nothing here does V.34, so whatever the exchange settled on, it was not
+    /// that -- and 6.1.6/T.30 sends a call that has not settled on V.34 to
+    /// clause 5, where the answering end begins with its DIS. A joint menu
+    /// with nothing in it ends the same way: 8.2.3 lets the caller hang up on
+    /// that, and if it does not, the DIS is the right thing for it to hear.
+    fn after_v8(&mut self) {
+        self.control_tx = v21::Sender::new(self.fs);
+        self.control_rx = v21::Receiver::new(self.fs);
+        self.line = Line::Quiet;
+        self.call.restart_identifying();
     }
 
     /// Put up or take down whatever changed.
@@ -678,6 +806,88 @@ mod tests {
             loudest = loudest.max(call.step(0.0).abs());
         }
         assert!(loudest > 0.1, "nothing went out: {loudest}");
+    }
+
+    /// A V.34 fax calling this end, off a real call: it took the plain answer
+    /// tone for ANSam and sent V.8 call menus instead of waiting for a DIS,
+    /// and went on sending them past every DIS this end sent. Now the call
+    /// menu is answered with a joint menu -- without V.34, which this end
+    /// does not have -- and after CJ the DIS goes out, as 6.1.6/T.30 has it.
+    #[test]
+    fn a_v34_fax_call_menu_is_answered_and_then_the_dis_follows() {
+        use datapump::bell103::{Bell103Rx, Bell103Tx};
+        use datapump::framing::AsyncBits;
+        use datapump::v8::{HIGH, LOW};
+
+        let vector = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/vectors/fax-v34-cm.wav");
+        let wav = line::wav::read(vector).expect("could not read the vector");
+        let fs = f64::from(wav.sample_rate);
+        let mut call = FaxCall::answer(fs, "61399990000").offering(&MODULATIONS);
+
+        // What this end sends, read two ways: as V.8 on the high channel, and
+        // as T.30's frames on V.21 channel 2, which is the same pair of tones.
+        let mut v8_ear = Bell103Rx::with_tones(HIGH.0, HIGH.1, fs);
+        let mut v8_decoder = v8::Decoder::new();
+        let mut joint = None;
+        let mut frames_ear = v21::Receiver::new(fs);
+        let mut reader = Reader::new();
+        let mut said: Vec<Message> = Vec::new();
+        let mut v8_had_the_line = false;
+        let mut hear = |call: &mut FaxCall, input: f64| {
+            let out = call.step(input);
+            if let Some(octet) = v8_ear.feed(out)
+                && let Some(v8::Heard::Cm(m) | v8::Heard::Jm(m)) = v8_decoder.feed(octet)
+            {
+                joint.get_or_insert(m);
+            }
+            if let Some(bit) = frames_ear.feed(out)
+                && let Some(m) = reader.feed(bit)
+            {
+                said.push(m);
+            }
+        };
+
+        for &s in &wav.channel(0) {
+            hear(&mut call, f64::from(s));
+            v8_had_the_line |= call.phase_name().starts_with("V.8");
+        }
+        assert!(v8_had_the_line, "the call menu went unanswered: {}", call.phase_name());
+        // The caller has its JMs, so it ends the call menus with CJ on the
+        // carrier that is already up (8.1.2).
+        let framing = AsyncBits::new(8);
+        let mut cj = Bell103Tx::with_tones(LOW.0, LOW.1, fs);
+        cj.set_transmitting(true);
+        for octet in v8::CJ {
+            cj.push_bits(&framing.encode(octet));
+        }
+        while cj.pending_bits() > 0 {
+            hear(&mut call, cj.next_sample());
+        }
+        for _ in 0..(fs * 3.0) as usize {
+            hear(&mut call, 0.0);
+        }
+
+        let far = call.far_menu().expect("the call menu was not kept");
+        assert_eq!(far.function, v8::CallFunction::TransmitFax);
+        assert!(far.modulations.contains(v8::Modulation::V34HalfDuplex), "{far:?}");
+        let joint = joint.expect("no joint menu went out");
+        assert!(!joint.modulations.contains(v8::Modulation::V34HalfDuplex), "{joint:?}");
+        assert!(joint.modulations.contains(v8::Modulation::V17), "{joint:?}");
+        let names: Vec<Frame> = said.iter().map(|m| m.frame).collect();
+        assert!(names.contains(&Frame::Dis), "no DIS after the V.8 exchange: {names:?}");
+        assert_eq!(call.phase(), Phase::AwaitingCommand, "{}", call.phase_name());
+    }
+
+    /// A fax that answers the ordinary way is not disturbed by listening for
+    /// V.8: the whole call still goes through, with no call menu anywhere.
+    #[test]
+    fn listening_for_a_call_menu_leaves_an_ordinary_call_alone() {
+        let mut caller = FaxCall::originate(FS, "61400000000", Some(a_page(40)));
+        let mut answerer = FaxCall::answer(FS, "61399990000");
+        between(&mut caller, &mut answerer, 60.0);
+        assert_eq!(answerer.phase(), Phase::Done, "{:?}", answerer.trouble());
+        assert!(answerer.far_menu().is_none());
+        assert_eq!(answerer.pages_received(), 1);
     }
 
     #[test]

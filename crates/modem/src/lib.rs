@@ -998,7 +998,7 @@ impl Modem {
     /// Which step of the handshake the line is on.
     pub fn line_phase(&self) -> &'static str {
         if let Some(fax) = self.fax.as_ref() {
-            return fax.phase().name();
+            return fax.phase_name();
         }
         if let Some(negotiation) = self.negotiation.as_ref() {
             return negotiation.phase();
@@ -2193,6 +2193,7 @@ impl Modem {
             self.pump = None;
             self.negotiation = None;
             self.announce = None;
+            self.far_menu = None;
             self.state = State::Handshaking;
             // The end that dialled sends; the end that answered receives.
             // T.30 has no way to swap those round on an ordinary call, and
@@ -2330,6 +2331,11 @@ impl Modem {
     fn carry_fax(&mut self, line: f64) -> f64 {
         let Some(fax) = self.fax.as_mut() else { return 0.0 };
         let out = fax.step(line);
+        // A V.34 fax calling this one says what it is in a V.8 call menu,
+        // and the far-end panel shows a call menu wherever it came from.
+        if self.far_menu.is_none() {
+            self.far_menu = fax.far_menu();
+        }
         match fax.phase() {
             fax::call::Phase::Done => {
                 // Whatever was learned is kept: the window wants to show it

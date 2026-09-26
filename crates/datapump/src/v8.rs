@@ -176,6 +176,8 @@ enum State {
     SendingCj,
     /// The answering modem's ANSam.
     Ansam,
+    /// An answering end that sends no ANSam, listening for a CM anyway.
+    Overhearing,
     /// Sending JM until CJ arrives.
     SendingJm,
     /// The 75 ms of nothing before the chosen modulation starts.
@@ -280,6 +282,38 @@ impl Modem {
         }
     }
 
+    /// An answering end that has sent, or is sending, some other answer tone,
+    /// listening for a call menu all the same.
+    ///
+    /// For a fax that does not do V.34. T.30 has it answer with its own plain
+    /// 2100 Hz tone (5.1.2, and 6.1.1 keeps ANSam for a terminal that does V.34),
+    /// and 7.2 forbids the calling end to send a CM "unless ANSam has been
+    /// detected" -- so in principle no CM ever arrives. One did: a V.34 fax
+    /// calling this end took its plain tone for ANSam and sent CM after CM,
+    /// for as long as the recording of the call ran, straight past the DIS
+    /// that was waiting for it. A caller in that state is waiting for a JM
+    /// and for nothing else.
+    ///
+    /// Silent until a CM for `function` has arrived twice the same (8.2.2),
+    /// and with no deadline of its own: whoever owns it decides how long to
+    /// keep listening. Then it answers as any answering modem does, with a JM
+    /// of what the two ends share, until CJ (8.2.3). A CM for some other
+    /// function is not answered at all.
+    pub fn overhearing(function: CallFunction, ours: Modulations, fs: f64) -> Self {
+        let mut modem = Self::new(Role::Answering, function, ours, fs);
+        modem.state = State::Overhearing;
+        modem
+    }
+
+    /// Whether this end is the one using the line: from its first JM until
+    /// the handover after CJ.
+    ///
+    /// Only an answering end that was overhearing needs to ask. Until then it
+    /// sends nothing, and whatever else the line is doing carries on.
+    pub fn has_the_line(&self) -> bool {
+        matches!(self.state, State::SendingJm | State::Handover)
+    }
+
     /// Ask for LAPM in the protocol category (Table 6).
     ///
     /// 7.3: the category "may be included in order to negotiate LAPM without
@@ -345,6 +379,7 @@ impl Modem {
             State::SendingCm => "CM",
             State::SendingCj => "CJ",
             State::Ansam => "ANSam",
+            State::Overhearing => "listening for CM",
             State::SendingJm => "JM",
             State::Handover => "handover",
             State::Done(_) => "done",
@@ -514,6 +549,14 @@ impl Modem {
 
     fn advance(&mut self) {
         // Nobody waits for ever. 8 gives no figure for this, so it is ours.
+        //
+        // Except an end that is only overhearing, which is not waiting for
+        // anything: its owner is getting on with the call and will stop
+        // listening when it has no more use for a CM. The clock starts when
+        // it answers one.
+        if self.state == State::Overhearing {
+            self.total = 0.0;
+        }
         if self.total > timing::PATIENCE && !matches!(self.state, State::Done(_)) {
             self.enter(State::Done(Status::Failed));
             return;
@@ -594,26 +637,26 @@ impl Modem {
                 // 8.2.2: "upon receiving a minimum of 2 identical CM
                 // sequences, the DCE shall transmit JM".
                 if let Some(cm) = self.settled() {
-                    self.far_menu = Some(cm);
-                    let jm = match (self.menu.pcm, self.menu.access) {
-                        (Some(pcm), access) => {
-                            cm.joint_pcm(self.menu.modulations, self.menu.protocol, pcm, access.unwrap_or_default())
-                        }
-                        _ => cm.joint(self.menu.modulations, self.menu.protocol),
-                    };
-                    self.sent_jm = Some(jm);
-                    self.chosen = jm.chosen();
-                    self.agreed = jm.protocol;
-                    self.last = None;
-                    self.last_octets.clear();
-                    self.repeats = 0;
-                    let octets = v8::sequence(Signal::Jm, &jm);
-                    self.send_sequence(octets);
-                    self.enter(State::SendingJm);
+                    self.answer(cm);
                 } else if self.elapsed >= timing::ANSAM {
                     // "If neither CM nor a suitable sigC is detected during
                     // ANSam transmission" the call goes on without V.8.
                     self.enter(State::Done(Status::NoNegotiation));
+                }
+            }
+
+            State::Overhearing => {
+                if let Some(cm) = self.settled() {
+                    if cm.function == self.menu.function {
+                        self.answer(cm);
+                    } else {
+                        // Not a call this end takes. Forgotten, so that a
+                        // right one arriving later is counted from its own
+                        // first copy rather than against this one.
+                        self.last = None;
+                        self.last_octets.clear();
+                        self.repeats = 0;
+                    }
                 }
             }
 
@@ -647,6 +690,28 @@ impl Modem {
 
             State::Done(_) => {}
         }
+    }
+
+    /// Answer a call menu that has arrived twice the same: 8.2.2, "upon
+    /// receiving a minimum of 2 identical CM sequences, the DCE shall transmit
+    /// JM".
+    fn answer(&mut self, cm: Menu) {
+        self.far_menu = Some(cm);
+        let jm = match (self.menu.pcm, self.menu.access) {
+            (Some(pcm), access) => {
+                cm.joint_pcm(self.menu.modulations, self.menu.protocol, pcm, access.unwrap_or_default())
+            }
+            _ => cm.joint(self.menu.modulations, self.menu.protocol),
+        };
+        self.sent_jm = Some(jm);
+        self.chosen = jm.chosen();
+        self.agreed = jm.protocol;
+        self.last = None;
+        self.last_octets.clear();
+        self.repeats = 0;
+        let octets = v8::sequence(Signal::Jm, &jm);
+        self.send_sequence(octets);
+        self.enter(State::SendingJm);
     }
 
     /// The JM to repeat, rebuilt from what was agreed.
@@ -1296,5 +1361,131 @@ mod tests {
             "sent a plain answering tone, depth {:.3}",
             ear.depth()
         );
+    }
+
+    /// What a group 3 fax offers over V.8: the three fax modulations.
+    fn fax() -> Modulations {
+        Modulations::of(&[Modulation::V17, Modulation::V29HalfDuplex, Modulation::V27ter])
+    }
+
+    /// The call menu the V.34 fax in `fax-v34-cm.wav` sent: sending a fax, and
+    /// V.34 half-duplex, V.17, V.29 and V.27 ter to do it with.
+    fn super_g3() -> Menu {
+        Menu {
+            function: CallFunction::TransmitFax,
+            modulations: Modulations::of(&[
+                Modulation::V34HalfDuplex,
+                Modulation::V17,
+                Modulation::V29HalfDuplex,
+                Modulation::V27ter,
+            ]),
+            protocol: Protocol::Unstated,
+            access: None,
+            pcm: None,
+        }
+    }
+
+    /// A calling end's low channel saying `menu` over and over, as 7.3 has it
+    /// sent: ten ONEs, the synchronisation, the body.
+    fn call_menus(menu: &Menu, times: usize) -> Bell103Tx {
+        let framing = AsyncBits::new(8);
+        let mut tx = Bell103Tx::with_tones(LOW.0, LOW.1, FS);
+        tx.set_transmitting(true);
+        for _ in 0..times {
+            let mut bits = vec![true; v8::PREAMBLE_ONES];
+            for octet in v8::sequence(Signal::Cm, menu) {
+                bits.extend(framing.encode(octet));
+            }
+            tx.push_bits(&bits);
+        }
+        tx
+    }
+
+    /// What an answering end's high channel carried, read back as V.8.
+    struct Ear {
+        rx: Bell103Rx,
+        decoder: Decoder,
+        heard: Vec<Heard>,
+    }
+
+    impl Ear {
+        fn new() -> Self {
+            Self { rx: Bell103Rx::with_tones(HIGH.0, HIGH.1, FS), decoder: Decoder::new(), heard: Vec::new() }
+        }
+
+        fn feed(&mut self, sample: f64) {
+            if let Some(octet) = self.rx.feed(sample)
+                && let Some(heard) = self.decoder.feed(octet)
+            {
+                self.heard.push(heard);
+            }
+        }
+    }
+
+    #[test]
+    fn an_overhearing_answerer_says_nothing_of_its_own() {
+        let mut modem = Modem::overhearing(CallFunction::TransmitFax, fax(), FS);
+        let mut loudest = 0.0f64;
+        // Longer than ANSam would last and longer than the patience of a
+        // modem that is negotiating: this one is doing neither.
+        for _ in 0..(FS * (timing::PATIENCE + 2.0)) as usize {
+            loudest = loudest.max(modem.step(0.0).abs());
+        }
+        assert!(loudest < 1.0e-6, "transmitted with nothing to answer");
+        assert_eq!(modem.status(), Status::Negotiating);
+        assert!(!modem.has_the_line());
+    }
+
+    /// The whole of the exchange an answering fax that does not do V.34 has
+    /// with a caller that does: a JM of what the two share, V.34 left out,
+    /// sent until CJ; then the handover, and an agreement on V.17.
+    #[test]
+    fn an_overhearing_answerer_answers_a_fax_call_menu() {
+        let mut modem = Modem::overhearing(CallFunction::TransmitFax, fax(), FS);
+        // Six call menus, and then CJ on the same carrier, as 8.1.2 has the
+        // caller send it once the JMs have been heard: "complete the current
+        // octet ... and then signal CJ shall be transmitted".
+        let mut caller = call_menus(&super_g3(), 6);
+        let framing = AsyncBits::new(8);
+        for octet in v8::CJ {
+            caller.push_bits(&framing.encode(octet));
+        }
+        let mut ear = Ear::new();
+        let mut answered = false;
+        while caller.pending_bits() > 0 {
+            ear.feed(modem.step(caller.next_sample()));
+            answered |= modem.has_the_line();
+        }
+        assert!(answered, "the call menu went unanswered: {}", modem.phase());
+        assert_eq!(modem.far_menu(), Some(super_g3()));
+        for _ in 0..(FS * 0.2) as usize {
+            ear.feed(modem.step(0.0));
+        }
+        assert_eq!(modem.status(), Status::Agreed(Modulation::V17));
+        assert!(!modem.has_the_line(), "still holding the line after the handover");
+        let joint = ear
+            .heard
+            .iter()
+            .find_map(|h| match h {
+                Heard::Cm(m) | Heard::Jm(m) => Some(*m),
+                _ => None,
+            })
+            .expect("no joint menu went out");
+        assert_eq!(joint.function, CallFunction::TransmitFax, "{joint:?}");
+        assert_eq!(joint.modulations, fax(), "V.34 offered by an end without it: {joint:?}");
+    }
+
+    #[test]
+    fn an_overhearing_answerer_leaves_a_data_call_alone() {
+        let data = Menu { function: CallFunction::Data, modulations: all(), ..super_g3() };
+        let mut modem = Modem::overhearing(CallFunction::TransmitFax, fax(), FS);
+        let mut caller = call_menus(&data, 6);
+        let mut loudest = 0.0f64;
+        while caller.pending_bits() > 0 {
+            loudest = loudest.max(modem.step(caller.next_sample()).abs());
+        }
+        assert!(loudest < 1.0e-6, "answered a call that was not for a fax");
+        assert!(!modem.has_the_line());
+        assert_eq!(modem.status(), Status::Negotiating);
     }
 }
