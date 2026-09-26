@@ -192,3 +192,41 @@ The full list is `spec-v34-hdx.md` section F. The ones that shape the code:
    page run until the recipient goes quiet (or its flags stop) and at least 40
    have gone -- which over this rig's VoIP line is 1.5 s or more of them
    ([voip-line-round-trip]).
+
+## 10. The seams between packages
+
+### 10.1 T.30 Annex F (`fax::call`) and the join (`FaxCall`)
+
+`fax::call` knows no signals, and keeps it that way: it says what the line
+should be doing through `Line`, and takes bits and a few facts back. In an
+Annex F call (entered once V.8 has agreed V.34 half-duplex) the words mean:
+
+| `Line` | the V.34 modem is |
+|---|---|
+| `V34Control` (frames going) / `V34Listen` (flags only) | on the control channel, sending the bits `next_control_bit` gives -- flags whenever the procedure has nothing else, since F.3.1.2/F.3.1.4 keep the channel busy -- and hearing the far end's at the same time |
+| `V34Ones` | on the control channel, sending binary ones (F.3.2.3, F.3.4.5); the procedure counts them and watches for the far end to fall silent |
+| `V34Primary` | the source: leaving the control channel (circuit 105 off: 4T of ones), then 70 ms, S, S-bar, PP, B1, and the page bits `next_fast_bit` gives |
+| `V34PrimaryListen` | the recipient: silent (4T of ones, then nothing, 12.6.3.2), waiting for the primary channel, handing up its bits |
+
+and back from the join: `control_bit` (descrambled HDLC bits, as now),
+`set_control_carrier`, `fast_bits` and `set_fast_carrier` for the primary
+channel, and one new fact, that the far end has gone quiet on the control
+channel (for the source's ones). The primary rate is the modem's (from MPh),
+reported for display; DCS bits 11-14 go as zero (Note 33). Timers follow
+Annex F (T2 restarts at each frame, F.3.2.3 Note 2).
+
+The turnarounds belong to the modem, not to T.30: going from `V34Ones` to
+`V34Primary` is circuit 105 dropping, and the modem does 12.6.3.1 and 12.5.1;
+going from `V34Primary` back to `V34Control` after RCP is 105 dropping again,
+and the modem does 12.5.3.1 and 12.6.1 (or 12.4 when a rate change is wanted --
+a `renegotiate` request from the procedure, e.g. after PPRs, since CTC/CTR are
+gone).
+
+### 10.2 The half-duplex modem (package G) and the join
+
+`halfduplex::Modem::new(role, source, fs)` with `step(input) -> output`, a
+state of `Starting | Control | ToPrimary | Primary | ToControl | Retraining |
+Failed`, control bits in and out while in `Control`, page bits in or out while
+in `Primary`, `to_primary()` and `to_control(renegotiate: bool)` for the
+turnarounds, `far_silent()`, and the rates (primary, control). The join (H3)
+maps section 10.1's `Line` onto these.
