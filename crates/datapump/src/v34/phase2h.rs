@@ -1290,6 +1290,171 @@ mod tests {
         }
     }
 
+    /// A clean run of a chain, for when things happened in it: the call
+    /// modem and the answer modem, as `run` gives them back.
+    fn clean_run(source: Role) -> (Modem, Modem) {
+        let (caller, answerer) = pair(source);
+        run(&mut short(), 12.0, caller, answerer, Shape::Flat, &[])
+    }
+
+    /// When, on the ends' shared clock, the source and the recipient of a
+    /// chain reversed their tones over a clean line, in seconds.
+    fn reversals_on_a_clean_line(source: Role) -> (f64, f64) {
+        let (c, a) = clean_run(source);
+        let (s, r) = ends(&c, &a);
+        (s.reversed_at.unwrap() as f64 / FS, r.reversed_at.unwrap() as f64 / FS)
+    }
+
+    /// The direction from the source of a chain to its recipient.
+    fn towards_recipient(source: Role) -> Role {
+        if source == Role::Call { Role::Answer } else { Role::Call }
+    }
+
+    /// 12.2.1.4.2 and 12.2.1.3.3 (12.2.2.3.2 and 12.2.2.4.3 the other way):
+    /// the source's reversal falls in a hole. The recipient, hearing no
+    /// reversal within 2000 ms of its own, listens for the source's tone;
+    /// the source, hearing no tone within 2700 ms of its reversal, stops L2
+    /// and sends its tone; the recipient sends its own, reverses again, and
+    /// the probe is sent and read again.
+    #[test]
+    fn a_source_reversal_lost_in_a_hole_is_probed_again() {
+        for source in [Role::Call, Role::Answer] {
+            let (source_reversal, _) = reversals_on_a_clean_line(source);
+            let hole = Fault::Mute { at: source_reversal - 0.050, seconds: 0.200, towards: towards_recipient(source) };
+            let (caller, answerer) = pair(source);
+            let (c, a) = run(&mut short(), 12.0, caller, answerer, Shape::Flat, &[hole]);
+            let (s, r) = ends(&c, &a);
+            let infoh = through(s, r);
+            assert_eq!(infoh.symbol_rate, SymbolRate::S3429, "{source:?} as source: {infoh:?}");
+            assert_eq!(s.recoveries(), 1, "{source:?} as source: the source did not take 12.2.1.3.3's way out");
+            assert_eq!(r.recoveries(), 1, "{source:?} as source: the recipient did not take 12.2.1.4.2's way out");
+            assert!(!r.blind());
+        }
+    }
+
+    /// 12.2.1.3.2 and 12.2.1.4.2 (12.2.2.4.2 and 12.2.2.3.2 the other way):
+    /// the recipient's reversal falls in a hole. The source keeps its tone
+    /// and waits for another, having no time limit of its own; the
+    /// recipient, hearing no reversal back within 2000 ms, hears the tone
+    /// that is still there, sends its own again and reverses again.
+    #[test]
+    fn a_recipient_reversal_lost_in_a_hole_is_made_again() {
+        for source in [Role::Call, Role::Answer] {
+            let (_, recipient_reversal) = reversals_on_a_clean_line(source);
+            let hole = Fault::Mute { at: recipient_reversal - 0.050, seconds: 0.150, towards: source };
+            let (caller, answerer) = pair(source);
+            let (c, a) = run(&mut short(), 12.0, caller, answerer, Shape::Flat, &[hole]);
+            let (s, r) = ends(&c, &a);
+            through(s, r);
+            assert_eq!(s.recoveries(), 0, "{source:?} as source: the source has no way out of 12.2.1.1.3 to take");
+            assert_eq!(r.recoveries(), 1, "{source:?} as source: the recipient did not take 12.2.1.4.2's way out");
+        }
+    }
+
+    /// 12.2.1.3.4 (12.2.2.4.4) and 12.3.3: INFOh falls in a hole. The source,
+    /// with no INFOh within 2000 ms of its tone, keeps the tone and waits
+    /// for the recipient's tone to go and come again; the recipient, with no
+    /// S within 2000 ms of its INFOh, comes back with its tone, hears the
+    /// source's, and sends INFOh again.
+    #[test]
+    fn an_infoh_lost_in_a_hole_is_sent_again() {
+        for source in [Role::Call, Role::Answer] {
+            let sent = {
+                let (c, a) = clean_run(source);
+                ends(&c, &a).1.infoh_sent_at.expect("no INFOh in a clean run") as f64 / FS
+            };
+            let hole = Fault::Mute { at: sent - 0.010, seconds: 0.120, towards: source };
+            let (caller, answerer) = pair(source);
+            let (c, a) = run(&mut short(), 12.0, caller, answerer, Shape::Flat, &[hole]);
+            let (s, r) = ends(&c, &a);
+            let infoh = through(s, r);
+            assert_eq!(infoh.symbol_rate, SymbolRate::S3429, "{source:?} as source: {infoh:?}");
+            assert_eq!(s.recoveries(), 1, "{source:?} as source: the source did not take 12.2.1.3.4's way out");
+            assert!(!r.blind());
+            // The second INFOh came from a recipient that came back to its
+            // tone, two seconds after the first.
+            assert!(r.now < (0.5 * FS) as u64, "{source:?} as source: the recipient is the one that started phase 2");
+            assert!(s.now > (3.0 * FS) as u64, "{source:?} as source: the source was done at {:.2} s", s.now as f64 / FS);
+        }
+    }
+
+    /// 12.2.1.4.3 (12.2.2.3.3): the source's tone after the probe never
+    /// reaches the recipient, which sends INFOh anyway 2000 ms after starting
+    /// its own tone; and the source, which heard the recipient's tone and
+    /// has waited out its 2000 ms for INFOh, takes it when it comes.
+    #[test]
+    fn a_recipient_that_hears_no_tone_sends_infoh_blind() {
+        for source in [Role::Call, Role::Answer] {
+            let (source_reversal, _) = reversals_on_a_clean_line(source);
+            // From after the recipient has read its L2 until past its wait.
+            let hole = Fault::Mute { at: source_reversal + 0.620, seconds: 2.600, towards: towards_recipient(source) };
+            let (caller, answerer) = pair(source);
+            let (c, a) = run(&mut short(), 12.0, caller, answerer, Shape::Flat, &[hole]);
+            let (s, r) = ends(&c, &a);
+            let infoh = through(s, r);
+            assert_eq!(infoh.symbol_rate, SymbolRate::S3429, "{source:?} as source: {infoh:?}");
+            assert!(r.blind(), "{source:?} as source: the recipient waited for a tone it could not hear");
+            assert_eq!(r.recoveries(), 1);
+        }
+    }
+
+    /// The timings of Figures 23 and 24, on a short line, for either chain:
+    /// the source's reversal 40 ± 10 ms after the recipient's reaches it; the
+    /// recipient's tone on the line 50 ms before its reversal; L1 10 ms after
+    /// the source's reversal; the recipient's tone within 670 ms of the
+    /// source's reversal reaching it; and INFOh 25 ms after the source's tone
+    /// is heard.
+    #[test]
+    fn the_timings_of_figures_23_and_24_are_kept() {
+        for source in [Role::Call, Role::Answer] {
+            let one_way = 0.010;
+            let mut line = Line::new(one_way, 10.0, f64::INFINITY, 70.0);
+            let (mut caller, mut answerer) = pair(source);
+            // When the recipient's tone was first on the line, when it began
+            // its tone after the probe, when the source began its tone after
+            // the probe, and when L1 began.
+            let (mut recipient_tone, mut recipient_tone_again, mut source_tone, mut l1) = (None, None, None, None);
+            for _ in 0..(12.0 * FS) as usize {
+                let at_call = line.to_call.pop_front().unwrap() + line.noise();
+                let at_answer = line.to_answer.pop_front().unwrap() + line.noise();
+                let from_call = caller.step(at_call);
+                let from_answer = answerer.step(at_answer);
+                line.to_answer.push_back(from_call * line.loss);
+                line.to_call.push_back(from_answer * line.loss);
+                let (s, r) = ends(&caller, &answerer);
+                if let (Stage::RecipientAwaitTone, Some(t)) = (r.stage, r.tone_since) {
+                    recipient_tone.get_or_insert(t);
+                }
+                if r.stage == Stage::RecipientAwaitTone2 {
+                    recipient_tone_again.get_or_insert(r.now);
+                }
+                if s.stage == Stage::SourceAwaitInfoH {
+                    source_tone.get_or_insert(s.now);
+                }
+                if let (Stage::SourceProbing, Speaking::Probe { l1_until }) = (s.stage, s.speaking) {
+                    l1.get_or_insert(l1_until - s.ms(probe::L1_SECONDS));
+                }
+                if caller.status() != Status::Running && answerer.status() != Status::Running {
+                    break;
+                }
+            }
+            let (s, r) = ends(&caller, &answerer);
+            through(s, r);
+            let ms = |n: u64| n as f64 / FS * 1000.0;
+            let delay = (one_way * FS) as u64;
+            let (rr, sr) = (r.reversed_at.unwrap(), s.reversed_at.unwrap());
+            let turn = ms(sr - (rr + delay));
+            assert!((30.0..=50.0).contains(&turn), "{source:?} as source: the source reversed {turn:.1} ms after the recipient's reversal arrived");
+            let own = ms(rr - recipient_tone.unwrap()) - PULSE_SPAN * 1000.0;
+            assert!(own >= 50.0, "{source:?} as source: {own:.1} ms of the recipient's tone before its reversal");
+            assert_eq!(l1.unwrap() - sr, s.ms(AFTER_REVERSAL), "{source:?} as source: L1 did not follow the reversal by 10 ms");
+            let answered = ms(recipient_tone_again.unwrap() - (sr + delay));
+            assert!(answered <= 670.0, "{source:?} as source: the recipient's tone came {answered:.1} ms after the source's reversal arrived");
+            let before_infoh = ms(r.infoh_sent_at.unwrap() - (source_tone.unwrap() + delay));
+            assert!((25.0..=95.0).contains(&before_infoh), "{source:?} as source: INFOh came {before_infoh:.1} ms after the source's tone arrived");
+        }
+    }
+
     #[test]
     fn a_far_end_that_never_answers_is_given_up_on() {
         for part in [Part::Source, Part::Recipient] {
