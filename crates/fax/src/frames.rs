@@ -80,10 +80,31 @@ pub const PREAMBLE_SECONDS: f64 = 1.0;
 /// Flags in that second at 300 bit/s: eight bits each.
 pub const PREAMBLE_FLAGS: usize = 37;
 
+/// Flags ahead of a burst on V.34's control channel (T.30 Annex F).
+///
+/// There is no preamble to speak of there. The channel is never quiet --
+/// both ends send flags whenever they have nothing else (F.3.1.2) -- so the
+/// far end is already listening, and what F.3.1.4 asks for is only that "at
+/// least two flags shall be sent prior to the first control channel frame
+/// after any start-up, resynchronization or retraining procedure". A burst
+/// queued while the modem is in one of those goes out first when it is done,
+/// so it carries its own two. Four, so that a bit lost as the channel comes
+/// back costs a flag and not the minimum.
+pub const V34_FLAGS: usize = 4;
+
+/// The flag, as HDLC puts it on the line (0111 1110, the same read either
+/// way round).
+const FLAG: u8 = 0x7E;
+
 /// Builds the bit stream for a burst of frames.
 #[derive(Debug)]
 pub struct Sender {
     encoder: hdlc::Encoder,
+    /// How far through a flag of its own [`next_bit_or_flag`] is: nought
+    /// between flags.
+    ///
+    /// [`next_bit_or_flag`]: Self::next_bit_or_flag
+    idle_at: u8,
 }
 
 impl Default for Sender {
@@ -94,13 +115,19 @@ impl Default for Sender {
 
 impl Sender {
     pub fn new() -> Self {
-        Self { encoder: hdlc::Encoder::new(Fcs::Bits16) }
+        Self { encoder: hdlc::Encoder::new(Fcs::Bits16), idle_at: 0 }
     }
 
     /// Queue a whole burst: the preamble, then every frame, then the flags
     /// that close it.
     pub fn send(&mut self, messages: &[Message]) {
-        self.encoder.idle(PREAMBLE_FLAGS);
+        self.send_flagged(messages, PREAMBLE_FLAGS);
+    }
+
+    /// Queue a burst with `flags` flags ahead of it rather than a second's
+    /// worth: [`V34_FLAGS`] on V.34's control channel.
+    pub fn send_flagged(&mut self, messages: &[Message], flags: usize) {
+        self.encoder.idle(flags);
         for m in messages {
             self.encoder.frame(&m.octets());
         }
@@ -111,6 +138,39 @@ impl Sender {
 
     pub fn next_bit(&mut self) -> Option<bool> {
         self.encoder.next_bit()
+    }
+
+    /// The next bit, and a flag's when nothing is queued: V.34's control
+    /// channel never goes quiet between frames (F.3.1.2), and flags are what
+    /// fills it (F.3.1.4).
+    ///
+    /// A flag once started is finished before anything queued meanwhile goes
+    /// out. Cut short, the start of it and the preamble behind it would reach
+    /// the far end as a few bits between two flags -- a frame too short to be
+    /// one, and a failed frame in its count for nothing.
+    pub fn next_bit_or_flag(&mut self) -> bool {
+        if self.idle_at == 0
+            && let Some(bit) = self.encoder.next_bit()
+        {
+            return bit;
+        }
+        let bit = FLAG >> self.idle_at & 1 == 1;
+        self.idle_at = (self.idle_at + 1) % 8;
+        bit
+    }
+
+    /// Whether a flag of [`next_bit_or_flag`](Self::next_bit_or_flag)'s own
+    /// is part way out.
+    pub fn mid_flag(&self) -> bool {
+        self.idle_at != 0
+    }
+
+    /// Forget a flag of [`next_bit_or_flag`](Self::next_bit_or_flag)'s own
+    /// that is part way out. The channel it was going on has been restarted,
+    /// and the rest of it would be a few bits of nothing ahead of whatever
+    /// follows.
+    pub fn drop_flag(&mut self) {
+        self.idle_at = 0;
     }
 
     pub fn pending_bits(&self) -> usize {

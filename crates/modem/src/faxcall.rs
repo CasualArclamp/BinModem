@@ -655,6 +655,13 @@ impl FaxCall {
                 self.call.set_fast_carrier(carrier);
             }
             Line::Control | Line::Fast(_) | Line::CalledTone => {}
+            // T.30 Annex F, on V.34's half-duplex modem, which this join does
+            // not have yet: nothing here ever puts a call into it.
+            Line::V34Control
+            | Line::V34Listen
+            | Line::V34Ones
+            | Line::V34Primary
+            | Line::V34PrimaryListen => {}
         }
     }
 
@@ -726,6 +733,12 @@ impl FaxCall {
             }
             Line::CalledTone => (self.ced.next_sample(), true),
             Line::Quiet | Line::Listen | Line::FastListen(_) => (0.0, true),
+            // Annex F's channels are V.34's, and not this join's yet.
+            Line::V34Control
+            | Line::V34Listen
+            | Line::V34Ones
+            | Line::V34Primary
+            | Line::V34PrimaryListen => (0.0, true),
         }
     }
 }
