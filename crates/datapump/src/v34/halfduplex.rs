@@ -265,6 +265,8 @@ pub struct Modem {
     /// What the primary receiver last trained to, in decibels.
     trained_snr: Option<f64>,
     recoveries: u32,
+    /// Control channel retrains begun, from either end.
+    retrains: u32,
     /// Rounds of AC sent without an answer.
     ac_rounds: u32,
     events: VecDeque<Event>,
@@ -324,6 +326,7 @@ impl Modem {
             ac_answered: false,
             trained_snr: None,
             recoveries: 0,
+            retrains: 0,
             ac_rounds: 0,
             events: VecDeque::new(),
             failure: None,
@@ -441,6 +444,16 @@ impl Modem {
     /// What the primary receiver last trained to, in decibels.
     pub fn primary_snr_db(&self) -> Option<f64> {
         self.trained_snr
+    }
+
+    /// Times phase 3 failed and was gone back to (12.3.3, 12.4.3.1).
+    pub fn recoveries(&self) -> u32 {
+        self.recoveries
+    }
+
+    /// Control channel retrains (12.8) begun, from either end.
+    pub fn retrains(&self) -> u32 {
+        self.retrains
     }
 
     /// Offer no more than `bits_per_second` on the primary channel in the
@@ -564,7 +577,10 @@ impl Modem {
     /// arriving, stops listening for one (12.5.3.2). False if there is no
     /// page to end.
     pub fn to_control(&mut self, renegotiate: bool) -> bool {
-        if self.stage != Stage::Page {
+        // The recipient's page ends with the far carrier, and its wish for a
+        // change holds good until the source's Sh is answered.
+        let turning = !self.source_end && self.stage == Stage::Awaiting(Awaiting::ShOrPph);
+        if self.stage != Stage::Page && !turning {
             return false;
         }
         if renegotiate {
@@ -1051,6 +1067,7 @@ impl Modem {
         self.page_ending = false;
         self.stage = Stage::Awaiting(Awaiting::Ac);
         self.wait(THREE_SECONDS);
+        self.retrains += 1;
         self.events.push_back(Event::Retraining);
     }
 
@@ -1060,13 +1077,19 @@ impl Modem {
         if let Some(recipient) = self.recipient.as_mut() {
             recipient.stop();
         }
+        // An initiator that hears AC becomes the responder (12.8.1): the
+        // same retrain, told of once.
+        let already = self.stage == Stage::Awaiting(Awaiting::Ac);
         self.control.transmitter.clear();
         self.turn = Turn::Retrain;
         self.page_ending = false;
         self.answer_pph();
         self.stage = Stage::Awaiting(Awaiting::Responding);
         self.wait(THREE_SECONDS);
-        self.events.push_back(Event::Retraining);
+        if !already {
+            self.retrains += 1;
+            self.events.push_back(Event::Retraining);
+        }
     }
 
     /// The recipient's way back from a phase 3 that failed (12.3.3): its

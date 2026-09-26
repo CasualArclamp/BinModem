@@ -20,6 +20,13 @@ const FS: f64 = 16_000.0;
 /// T.30's forty ones before the page (F.3.2.2).
 const ONES: usize = 40;
 
+/// The most ones a page may come with in front of it and still count as
+/// whole: a few mapping frames of HDLC idle.
+const IDLE_ONES: usize = 400;
+
+/// An HDLC flag, 01111110, first bit first.
+const FLAG: [bool; 8] = [false, true, true, true, true, true, true, false];
+
 fn info0(wide: bool) -> Info0 {
     Info0 {
         rate_2743: true,
@@ -125,8 +132,16 @@ struct End {
     stray_bits: usize,
     /// Control bits that came before the channel was first up.
     early_bits: usize,
+    /// When this round's frame last went, and how often it went again for
+    /// want of an answer (T.30's T4, shortened).
+    frame_sent_at: u64,
+    frame_retries: usize,
     now: u64,
 }
+
+/// How long the stand-in waits for the far end's frame before sending its
+/// own again: T.30's T4.
+const RETRY_SECONDS: f64 = 3.0;
 
 impl End {
     fn new(modem: Modem, pages: Vec<Vec<bool>>) -> Self {
@@ -148,6 +163,8 @@ impl End {
             rates: Vec::new(),
             stray_bits: 0,
             early_bits: 0,
+            frame_sent_at: 0,
+            frame_retries: 0,
             now: 0,
         }
     }
@@ -163,6 +180,9 @@ impl End {
             self.events.push((self.now, event));
             match event {
                 Event::ControlUp => {
+                    // wp-h2.md: control_restarted() goes before any bits are
+                    // taken, so none may have come yet.
+                    assert!(self.modem.take_control_bits().is_empty(), "bits before ControlUp");
                     self.rates.push(self.modem.primary_rate());
                     self.heard.clear();
                     self.up();
@@ -200,6 +220,7 @@ impl End {
         }
         let frame = frame(self.round.min(self.count), self.source());
         assert!(self.modem.send_control_bits(&frame), "bits refused with the channel up");
+        self.frame_sent_at = self.now;
         self.doing = if self.round >= self.count { Doing::Done } else { Doing::Frames };
     }
 
@@ -218,7 +239,15 @@ impl End {
         let round = self.round;
         let far_frame = frame(round, !self.source());
         match self.doing {
-            Doing::Frames if contains(&self.heard, &far_frame) && self.modem.pending_control_bits() == 0 => {
+            Doing::Frames if !contains(&self.heard, &far_frame) => {
+                if self.now >= self.frame_sent_at + (RETRY_SECONDS * FS) as u64 && self.modem.state() == State::Control {
+                    // No answer: the command again, as T.30 would send it.
+                    self.frame_retries += 1;
+                    self.frame_sent_at = self.now;
+                    assert!(self.modem.send_control_bits(&frame(round, self.source())));
+                }
+            }
+            Doing::Frames if self.modem.pending_control_bits() < 16 => {
                 if self.retrain_in == Some(round) {
                     self.retrain_in = None;
                     assert!(self.modem.retrain_control(), "retrain refused");
@@ -259,6 +288,15 @@ impl End {
                 self.doing = Doing::WaitUp;
             }
             _ => {}
+        }
+        // F.3.1.4: the channel is kept busy with flags whenever there is
+        // nothing to say -- an idle modem would send ones, which are the
+        // turnaround's signal.
+        if matches!(self.doing, Doing::WaitUp | Doing::Frames | Doing::Done)
+            && self.modem.state() == State::Control
+            && self.modem.pending_control_bits() < 16
+        {
+            self.modem.send_control_bits(&FLAG);
         }
     }
 
@@ -438,20 +476,6 @@ impl Link {
         }
     }
 
-    fn end(&self, role: Role) -> &End {
-        match role {
-            Role::Call => &self.call,
-            Role::Answer => &self.answer,
-        }
-    }
-
-    fn end_mut(&mut self, role: Role) -> &mut End {
-        match role {
-            Role::Call => &mut self.call,
-            Role::Answer => &mut self.answer,
-        }
-    }
-
     fn ends(&self) -> [&End; 2] {
         [&self.call, &self.answer]
     }
@@ -462,10 +486,6 @@ impl Link {
 
     fn recipient(&self) -> &End {
         if self.call.source() { &self.answer } else { &self.call }
-    }
-
-    fn source_role(&self) -> Role {
-        self.source().modem.role()
     }
 
     fn both_done(&self) -> bool {
@@ -479,6 +499,14 @@ impl Link {
     fn describe(&self) -> String {
         let mut s = String::new();
         for end in self.ends() {
+            let far = frame(end.round.min(end.count), !end.source());
+            s += &format!(
+                "heard {} bits, the far frame's first 32 at {:?} and all of it at {:?}, pending {}; ",
+                end.heard.len(),
+                position(&end.heard, &far[..32]),
+                position(&end.heard, &far),
+                end.modem.pending_control_bits()
+            );
             s += &format!(
                 "{:?} ({}): {:?}, round {}, state {:?} ({}), failed {:?}, rates {:?}, control {:?}, events {:?}\n",
                 end.modem.role(),
@@ -519,27 +547,35 @@ fn finish(link: &mut Link, seconds: f64) {
     check_pages(link);
 }
 
-/// Every page arrived whole, from its first bit, with B1 clean; and the
-/// control channel came up at both ends as often as it should, with no bits
-/// delivered off it.
+/// Every page arrived whole and in order, with B1 clean and at most a few
+/// hundred ones in front of it -- HDLC's idle, which T.30 reads past to the
+/// page's first flag -- and the control channel came up at both ends as
+/// often as it should, with no bits delivered off it.
+///
+/// The ones in front are a corner of the receiver's, not something a page
+/// can do without: see `a_page_can_arrive_with_a_mapping_frame_of_ones_in_front`.
 fn check_pages(link: &Link) {
     let what = link.describe();
     let (source, recipient) = (link.source(), link.recipient());
     assert_eq!(recipient.pages.len(), source.pages.len(), "pages received: {what}");
     for (k, (sent, got)) in source.pages.iter().zip(&recipient.pages).enumerate() {
-        let wrong = sent.iter().zip(got).filter(|(a, b)| a != b).count() + sent.len().saturating_sub(got.len());
-        if wrong > 0 {
+        let idle = got.iter().take_while(|b| **b).count().min(IDLE_ONES);
+        let from = (0..=idle).find(|&i| got.len() >= i + sent.len() && got[i..i + sent.len()] == sent[..]);
+        let Some(from) = from else {
             // Where it went wrong, and whether what follows is only moved.
             let first = sent.iter().zip(got).position(|(a, b)| a != b).unwrap_or(got.len());
-            let probe = first.saturating_sub(0).min(sent.len().saturating_sub(400)) + 300;
+            let probe = first.min(sent.len().saturating_sub(400)) + 300;
             let shift = position(got, &sent[probe..probe + 100]).map(|at| at as i64 - probe as i64);
             panic!(
-                "page {k}: {wrong} bits wrong of {} ({} received), the first at {first}, the tail shifted by {shift:?}: {what}",
-                sent.len(),
-                got.len()
+                "page {k}: not whole in {} bits received for {} sent, the first wrong at {first}, the tail shifted by {shift:?}: {what}",
+                got.len(),
+                sent.len()
             );
+        };
+        if from > 0 {
+            println!("page {k}: {from} ones in front of the page");
         }
-        let extra = got.len() - sent.len();
+        let extra = got.len() - from - sent.len();
         assert!(extra < 4000, "page {k}: {extra} bits after the page");
     }
     for end in link.ends() {
@@ -646,4 +682,244 @@ fn a_page_can_arrive_with_a_mapping_frame_of_ones_in_front() {
     let (call, answer) = pair(Role::Answer, setup, pages(3, 30_000, 8));
     let mut link = Link::new(call, answer, Conditions { one_way: 0.030, snr: 44.0, ppm: 40.0, echo: f64::INFINITY });
     finish(&mut link, 30.0);
+}
+
+#[test]
+fn the_voip_line_carries_three_pages_at_33_600_through_its_delay_and_echo() {
+    // Three quarters of a second each way -- a round trip of a second and a
+    // half, which every three-second wait of 12.4 and 12.6 and every 120T
+    // has to hold through -- with this end's own signal 10 dB down in its
+    // receiver, the clocks 50 ppm apart, at 3429 baud and 33 600 bit/s.
+    for source in [Role::Call, Role::Answer] {
+        let setup = setup(SymbolRate::S3429, false, Size::Sixteen, 4);
+        let (call, answer) = pair(source, setup, pages(3, 40_000, 21));
+        let mut link = Link::new(call, answer, Conditions::voip(46.0));
+        finish(&mut link, 40.0);
+        check_turns(&link, 0.750);
+        for end in link.ends() {
+            assert_eq!(end.rates, vec![Some(33_600); 4], "{}", link.describe());
+            assert_eq!(end.count_events(|e| *e == Event::Retraining), 0, "{}", link.describe());
+            assert_eq!(end.frame_retries, 0, "{:?} sent a frame again", end.modem.role());
+        }
+        println!("VoIP line from {source:?}: done in {:.1} s", link.seconds());
+    }
+}
+
+#[test]
+fn a_slip_in_a_page_loses_bits_after_it_and_nothing_of_the_pages_around() {
+    // A VoIP jitter buffer's 20 ms, dropped or made up, a third of a second
+    // into the first page at 3429 baud: what came before it is right, the
+    // page still ends, the channel comes back and the next two pages are
+    // whole (a T.30 PPR takes care of the rest).
+    for dropped in [true, false] {
+        let setup = setup(SymbolRate::S3429, true, Size::Four, 3);
+        let (call, answer) = pair(Role::Call, setup, pages(3, 40_000, 31));
+        let mut link = Link::new(call, answer, Conditions::short(46.0));
+        let started = link.run_until(10.0, |l| l.recipient().count_events(|e| matches!(e, Event::PageStarted { .. })) == 1);
+        assert!(started, "{}", link.describe());
+        link.run(0.3);
+        link.slip(Role::Answer, dropped);
+        let done = link.run_until(30.0, |l| l.both_done() || l.either_failed());
+        let what = link.describe();
+        assert!(done && !link.either_failed(), "{what}");
+        let (source, recipient) = (link.source(), link.recipient());
+        assert_eq!(recipient.pages.len(), 3, "{what}");
+        // Before the slip, right: 0.3 s at 33 600 bit/s less the decoder's
+        // delay and the receiver's.
+        let sure = (0.3 * 33_600.0) as usize - 4000;
+        let (sent, got) = (&source.pages[0], &recipient.pages[0]);
+        let wrong = sent[..sure].iter().zip(got).filter(|(a, b)| a != b).count();
+        assert_eq!(wrong, 0, "dropped {dropped}: {wrong} bits wrong before the slip: {what}");
+        for k in 1..3 {
+            let (sent, got) = (&source.pages[k], &recipient.pages[k]);
+            assert!(got.len() >= sent.len() && got[..sent.len()] == sent[..], "dropped {dropped}: page {k} after the slip: {what}");
+        }
+        assert_eq!(recipient.count_events(|e| *e == Event::PageEnded), 3, "{what}");
+        assert_eq!(recipient.count_events(|e| *e == Event::ControlUp), 4, "{what}");
+    }
+}
+
+#[test]
+fn a_slip_in_the_control_channel_costs_the_frame_it_hit_and_no_resync() {
+    // The same 20 ms, both ways, while the frames of the second round are
+    // on the line: the frame it hit goes again, as T.30 would send it, and
+    // nothing else changes -- no retrain, every page whole.
+    let setup = setup(SymbolRate::S3200, false, Size::Four, 3);
+    let (call, answer) = pair(Role::Call, setup, pages(3, 20_000, 41));
+    let mut link = Link::new(call, answer, Conditions::short(45.0));
+    let up = link.run_until(20.0, |l| l.ends().iter().all(|e| e.count_events(|e| *e == Event::ControlUp) == 2));
+    assert!(up, "{}", link.describe());
+    // The frames are 133 ms long and 31 ms away: 60 ms in, both are in flight.
+    link.run(0.060);
+    link.slip(Role::Answer, true);
+    link.slip(Role::Call, false);
+    finish(&mut link, 30.0);
+    let retries: usize = link.ends().iter().map(|e| e.frame_retries).sum();
+    assert!(retries >= 1, "no frame was sent again: {}", link.describe());
+    for end in link.ends() {
+        assert_eq!(end.count_events(|e| *e == Event::Retraining), 0, "{}", link.describe());
+        assert_eq!(end.count_events(|e| *e == Event::ControlUp), 4, "{}", link.describe());
+    }
+}
+
+#[test]
+fn the_source_changes_the_rate_through_a_start_up_after_a_page() {
+    // to_control(true) after the first page: 12.6.1.1 sends PPh instead of
+    // Sh, the MPh exchange runs again with this end offering one step less,
+    // and the next pages go at the new rate (F.3.4.5/T.30 Note 1).
+    let setup = setup(SymbolRate::S3429, false, Size::Four, 3);
+    let (mut call, answer) = pair(Role::Call, setup, pages(3, 30_000, 51));
+    call.renegotiate = vec![0];
+    let mut link = Link::new(call, answer, Conditions::short(46.0));
+    finish(&mut link, 30.0);
+    for end in link.ends() {
+        assert_eq!(end.rates, vec![Some(33_600), Some(31_200), Some(31_200), Some(31_200)], "{}", link.describe());
+        assert_eq!(end.count_events(|e| *e == Event::Retraining), 0, "{}", link.describe());
+    }
+    assert_eq!(link.source().modem.state(), State::Control);
+}
+
+#[test]
+fn the_recipient_asks_for_a_change_by_answering_sh_with_pph() {
+    // The recipient, its rate limited after the first page and a change
+    // wanted, answers the source's Sh and S-bar-h with PPh and ALT
+    // (12.6.2.3, Figure 26): the source sends PPh in its turn (12.6.1.3),
+    // the MPh exchange settles the lower rate, and the pages go at it.
+    let setup = setup(SymbolRate::S3000, true, Size::Four, 3);
+    let (call, mut answer) = pair(Role::Call, setup, pages(3, 30_000, 61));
+    answer.limit_after = Some((0, 21_600));
+    let mut link = Link::new(call, answer, Conditions::short(45.0));
+    finish(&mut link, 30.0);
+    for end in link.ends() {
+        assert_eq!(end.rates, vec![Some(28_800), Some(21_600), Some(21_600), Some(21_600)], "{}", link.describe());
+        assert_eq!(end.count_events(|e| *e == Event::Retraining), 0, "{}", link.describe());
+    }
+}
+
+#[test]
+fn a_control_channel_retrain_from_either_end_or_both_at_once_brings_the_channel_back() {
+    // 12.8 from the source, from the recipient, and the collision: AC from
+    // both, each becoming the responder to the other's (12.8.1). The channel
+    // comes back with the rates settled again, the frames go again, and the
+    // pages after are whole.
+    for initiators in [vec![Role::Call], vec![Role::Answer], vec![Role::Call, Role::Answer]] {
+        let setup = setup(SymbolRate::S3429, false, Size::Four, 3);
+        let (mut call, mut answer) = pair(Role::Call, setup, pages(3, 20_000, 71));
+        if initiators.contains(&Role::Call) {
+            call.retrain_in = Some(1);
+        }
+        if initiators.contains(&Role::Answer) {
+            answer.retrain_in = Some(1);
+        }
+        let mut link = Link::new(call, answer, Conditions::short(46.0));
+        finish(&mut link, 30.0);
+        for end in link.ends() {
+            let what = link.describe();
+            assert_eq!(end.count_events(|e| *e == Event::Retraining), 1, "{initiators:?}: {what}");
+            assert_eq!(end.count_events(|e| *e == Event::ControlUp), 5, "{initiators:?}: {what}");
+            assert_eq!(end.modem.retrains(), 1, "{initiators:?}: {what}");
+            assert_eq!(end.rates, vec![Some(33_600); 5], "{initiators:?}: {what}");
+        }
+        println!("{initiators:?} retraining: done in {:.1} s", link.seconds());
+    }
+}
+
+#[test]
+fn a_phase_3_the_recipient_never_heard_is_gone_back_to_through_the_tones() {
+    // A hole swallows the source's S, S-bar, PP and TRN. The recipient hears
+    // no S in 2000 ms and goes back to its tone (12.3.3); the source, waiting
+    // for PPh, hears the tone instead and answers with its own (12.4.3.1);
+    // INFOh comes again, phase 3 runs again, and the call goes on from there.
+    for source in [Role::Call, Role::Answer] {
+        let setup = setup(SymbolRate::S3200, false, Size::Four, 3);
+        let (call, answer) = pair(source, setup, pages(2, 20_000, 81));
+        let mut link = Link::new(call, answer, Conditions::short(45.0));
+        link.mute(if source == Role::Call { Role::Answer } else { Role::Call }, 0.6);
+        finish(&mut link, 30.0);
+        let what = link.describe();
+        let (s, r) = (link.source(), link.recipient());
+        assert_eq!(r.count_events(|e| *e == Event::Phase3Over { well: false }), 1, "{what}");
+        assert_eq!(r.count_events(|e| *e == Event::Phase3Over { well: true }), 1, "{what}");
+        assert_eq!((s.modem.recoveries(), r.modem.recoveries()), (1, 1), "{what}");
+        assert_eq!(s.count_events(|e| *e == Event::Retraining), 0, "{what}");
+        // Phase 3 again, and the channel up, inside a few seconds of the hole.
+        let up = s.events.iter().find(|(_, e)| *e == Event::ControlUp).map(|(at, _)| *at as f64 / FS).unwrap();
+        assert!(up < 6.0, "{source:?}: the channel took {up:.1} s to come up: {what}");
+        println!("recovery from {source:?}: up at {up:.2} s");
+    }
+}
+
+#[test]
+fn a_page_that_never_trained_ends_in_the_resync_the_control_receiver_hears() {
+    // A hole swallows the second page's S, S-bar and PP. The recipient trains
+    // on nothing and no page starts; the source sends its page, then Sh and
+    // S-bar-h, which the recipient's control receiver hears while it is
+    // still listening for the page (wp-e.md item 5): it answers, the channel
+    // comes back, and the third page is whole.
+    let setup = setup(SymbolRate::S3429, false, Size::Four, 3);
+    let (call, answer) = pair(Role::Call, setup, pages(3, 20_000, 91));
+    let mut link = Link::new(call, answer, Conditions::short(46.0));
+    let turned = link.run_until(20.0, |l| l.recipient().turned_at.len() == 2);
+    assert!(turned, "{}", link.describe());
+    link.mute(Role::Answer, 0.4);
+    let done = link.run_until(30.0, |l| l.both_done() || l.either_failed());
+    let what = link.describe();
+    assert!(done && !link.either_failed(), "{what}");
+    let (s, r) = (link.source(), link.recipient());
+    assert_eq!(r.count_events(|e| matches!(e, Event::PageStarted { .. })), 2, "{what}");
+    assert_eq!(r.count_events(|e| *e == Event::PageEnded), 2, "{what}");
+    assert_eq!(r.count_events(|e| *e == Event::ControlUp), 4, "{what}");
+    assert_eq!(r.count_events(|e| *e == Event::Retraining), 0, "{what}");
+    assert_eq!(r.pages.len(), 3, "{what}");
+    assert!(r.pages[1].is_empty(), "the lost page gave {} bits", r.pages[1].len());
+    for k in [0, 2] {
+        assert!(r.pages[k].starts_with(&s.pages[k]), "page {k}: {what}");
+    }
+}
+
+#[test]
+fn the_control_channel_runs_at_2400_when_both_ask_and_at_1200_when_one_does() {
+    for (call_asks, answer_asks, want) in [(true, true, 2400), (true, false, 1200), (false, true, 1200)] {
+        let setup = setup(SymbolRate::S3429, false, Size::Four, 2);
+        let (mut call, mut answer) = pair(Role::Call, setup, pages(1, 10_000, 3));
+        if call_asks {
+            call.modem.ask_control_rate(ControlRate::Bps2400);
+        }
+        if answer_asks {
+            answer.modem.ask_control_rate(ControlRate::Bps2400);
+        }
+        let mut link = Link::new(call, answer, Conditions::voip(40.0));
+        finish(&mut link, 20.0);
+        for end in link.ends() {
+            assert_eq!(end.modem.control_rates(), Some((want, want)), "{call_asks} {answer_asks}: {}", link.describe());
+        }
+    }
+}
+
+#[test]
+fn a_far_end_that_never_answers_is_given_up_on_after_ac_three_times() {
+    // 12.4.3.2's three seconds without PPh lead to 12.8.1's AC, which no one
+    // answers: three rounds of three seconds (plan.md 8.4), and Failed.
+    let mut modem = Modem::after_phase2(Role::Call, true, FS, setup(SymbolRate::S2400, false, Size::Four, 2));
+    let mut events = Vec::new();
+    for i in 0..(20.0 * FS) as usize {
+        modem.step(0.0);
+        while let Some(e) = modem.event() {
+            events.push((i as f64 / FS, e));
+        }
+        if modem.state() == State::Failed {
+            break;
+        }
+    }
+    let at = |wanted: &dyn Fn(&Event) -> bool| events.iter().filter(|(_, e)| wanted(e)).map(|(t, _)| *t).collect::<Vec<_>>();
+    let retraining = at(&|e| *e == Event::Retraining);
+    let failed = at(&|e| matches!(e, Event::Failed(_)));
+    assert_eq!(retraining.len(), 1, "{events:?}");
+    assert_eq!(failed.len(), 1, "{events:?}");
+    // Phase 3 is 70 ms, S, S-bar, PP and 70 ms of TRN (about 0.36 s), then
+    // 70 ms and PPh: AC three seconds after PPh, Failed nine after that.
+    assert!((3.4..3.8).contains(&retraining[0]), "AC at {:.2} s", retraining[0]);
+    assert!((failed[0] - retraining[0] - 9.0).abs() < 0.1, "failed at {:.2} s", failed[0]);
+    assert_eq!(modem.failure(), Some("the far end did not answer AC"));
+    assert_eq!(modem.retrains(), 1);
 }
