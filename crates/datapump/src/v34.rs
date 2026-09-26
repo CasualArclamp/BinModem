@@ -20,6 +20,7 @@
 //! recording has it. The data mode is next.
 
 pub mod constellation;
+pub mod control;
 pub mod data;
 pub mod dpsk;
 pub mod frame;
