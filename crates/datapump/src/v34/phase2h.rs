@@ -144,44 +144,65 @@ const ENDED_NEAR: f64 = 0.008;
 /// end sending INFO0 again for a tone that came "before" an INFO0 that was
 /// still arriving. So `Presence` is the judge where L2 is on the line, and
 /// this is the judge where a sequence might be.
+///
+/// It is also the judge a modem in data or control-channel mode wants for a
+/// far end that begins a primary channel retrain (12.7.1.2, 12.7.2.2): the
+/// control channel is 600 baud on the same two carriers, and its symbols dip
+/// the amplitude as a sequence's do, so a carrier held steady for 50 ms is
+/// the tone and nothing else is. [`Steady::held`] counts it.
 #[derive(Debug, Clone)]
-struct Steady {
+pub(crate) struct Steady {
     fast: ToneDetector,
     /// The amplitude, slowly: what a dip is a dip below.
     envelope: OnePole,
+    /// Samples fed.
+    now: u64,
     /// Samples the amplitude has gone without a dip.
     held: u64,
+    /// [`STEADY`], in samples.
+    steady: u64,
     /// When the last stretch of [`STEADY`] or more ended, in a dip.
     ended: Option<u64>,
 }
 
 impl Steady {
-    fn new(freq: f64, fs: f64) -> Self {
+    /// A judge of the carrier at `freq`: 1200 Hz for the call modem's tone B
+    /// and sequences, 2400 for the answer modem's tone A and sequences.
+    pub(crate) fn new(freq: f64, fs: f64) -> Self {
         Self {
             fast: ToneDetector::new(freq, REVERSAL_BANDWIDTH, fs),
             envelope: OnePole::new(0.020, fs),
+            now: 0,
             held: 0,
+            steady: (STEADY * fs).round() as u64,
             ended: None,
         }
     }
 
-    fn feed(&mut self, x: f64, now: u64, steady: u64) {
+    pub(crate) fn feed(&mut self, x: f64) {
+        self.now += 1;
         self.fast.feed(x);
         let amplitude = self.fast.amplitude();
         let envelope = self.envelope.process(amplitude);
         if amplitude > AUDIBLE && amplitude > DIP * envelope {
             self.held += 1;
         } else {
-            if self.held >= steady {
-                self.ended = Some(now);
+            if self.held >= self.steady {
+                self.ended = Some(self.now);
             }
             self.held = 0;
         }
     }
 
-    /// Whether the far carrier is a tone now: steady for `steady` samples.
-    fn is_tone(&self, steady: u64) -> bool {
-        self.held >= steady
+    /// Whether the far carrier is a tone now: steady for [`STEADY`].
+    pub(crate) fn is_tone(&self) -> bool {
+        self.held() >= self.steady
+    }
+
+    /// How long the far carrier has been steady, in samples, and nought
+    /// while anything is on it or it is away.
+    pub(crate) fn held(&self) -> u64 {
+        self.held
     }
 
     /// Whether the far carrier was a tone up to `at`, and dipped there: the
@@ -511,7 +532,7 @@ impl Modem {
         self.now += 1;
         let info = self.rx.feed(line);
         self.presence.feed(line);
-        self.steady.feed(line, self.now, self.ms(STEADY));
+        self.steady.feed(line);
         // A probing signal -- the source's, arriving, or the echo of this
         // end's own -- leaves the reversal detector sure the tone after it is
         // far off frequency (see `ReversalDetector::restart`).
@@ -724,14 +745,13 @@ impl Modem {
     fn stage_step(&mut self) {
         let now = self.now;
         let held = self.ms(TONE_HELD);
-        let steady = self.ms(STEADY);
         match self.stage {
             Stage::SourceInfo0 | Stage::RecipientInfo0 => {
                 // 12.2.1.3.1 and its siblings: the far tone "detected before
                 // correctly receiving" the far INFO0, so this end's is sent
                 // again, and again, until the far end's arrives. The tone,
                 // not the far INFO0 still arriving on the same carrier.
-                if self.far.is_none() && self.steady.is_tone(steady) && self.tx.pending() == 0 {
+                if self.far.is_none() && self.steady.is_tone() && self.tx.pending() == 0 {
                     self.repeat_info0();
                 }
                 // 12.2.1.1.2 and its siblings: the far INFO0 in, and this
@@ -784,7 +804,7 @@ impl Modem {
                     if self.presence.held == 0 {
                         self.far_tone_gone = true;
                     }
-                    if self.far_tone_gone && self.steady.is_tone(steady) {
+                    if self.far_tone_gone && self.steady.is_tone() {
                         // "Upon detection of Tone A, the call modem proceeds
                         // in accordance with 12.2.1.1.4."
                         self.deadline = Some(now + self.ms(WAIT));
@@ -796,7 +816,7 @@ impl Modem {
                 // "condition its receiver to detect Tone B. Upon detecting
                 // Tone B, the answer modem transmits Tone A". Not while a
                 // retrain's tone is already due after its silence.
-                if matches!(self.speaking, Speaking::Silent) && self.tone_at.is_none() && self.steady.is_tone(steady) {
+                if matches!(self.speaking, Speaking::Silent) && self.tone_at.is_none() && self.steady.is_tone() {
                     self.start_tone();
                     return;
                 }
@@ -806,7 +826,7 @@ impl Modem {
                 // 2000 ms from the transmission of the Tone A phase reversal"
                 // (12.2.1.4.2).
                 let own = self.tone_since.is_some_and(|t| now - t >= self.ms(TONE_BEFORE_REVERSAL + PULSE_SPAN));
-                if own && self.steady.is_tone(steady) {
+                if own && self.steady.is_tone() {
                     self.reverse_at = Some(now + 1);
                     self.enter(Stage::RecipientAwaitReversal);
                     self.deadline = Some(now + 1 + self.ms(WAIT));
@@ -841,7 +861,7 @@ impl Modem {
                 if self.infoh_at.is_some() {
                     return;
                 }
-                if self.steady.is_tone(steady) {
+                if self.steady.is_tone() {
                     // 12.2.1.2.6, 12.2.2.1.6: the source's tone, after its L2;
                     // 25 ms more of this end's, then INFOh.
                     self.infoh_at = Some(now + self.ms(TONE_BEFORE_INFOH));
@@ -1164,6 +1184,32 @@ mod tests {
         }
     }
 
+    /// Both chains over the VoIP line with noise on it: 30 dB of signal to
+    /// noise across the band, and then 6, which the detectors of tones,
+    /// reversals and sequences have to hear through with nothing repeated
+    /// and no way out taken, and which the reading then answers to. The
+    /// analyser's windows lift a tone some 10 dB clear of the broadband
+    /// figure, so 30 dB still earns 3429 Bd and sixteen points, and 6 dB
+    /// four points at whichever symbol rate projects 9600 or 12 000.
+    #[test]
+    fn a_noisy_voip_line_is_survived_both_ways() {
+        for (noise_db, trn_size) in [(50.0, Size::Sixteen), (26.0, Size::Four)] {
+            for source in [Role::Call, Role::Answer] {
+                let (caller, answerer) = pair(source);
+                let (c, a) = run(&mut Line::new(0.750, 20.0, 15.0, noise_db), 20.0, caller, answerer, Shape::Flat, &[]);
+                let (s, r) = ends(&c, &a);
+                let infoh = through(s, r);
+                let case = format!("{source:?} as source with noise at -{noise_db} dB");
+                assert_eq!(s.recoveries() + r.recoveries(), 0, "{case}: a way out was taken");
+                assert_eq!(s.info0_repeats() + r.info0_repeats(), 0, "{case}: an INFO0 was repeated");
+                assert_eq!(infoh.trn_size, trn_size, "{case}: {infoh:?}");
+                if trn_size == Size::Sixteen {
+                    assert_eq!(infoh.symbol_rate, SymbolRate::S3429, "{case}: {infoh:?}");
+                }
+            }
+        }
+    }
+
     /// The VoIP line with a jitter buffer's inserts every 700 ms, in both
     /// directions, placed three ways so that some land on the INFO0 and the
     /// INFOh, which are then lost and asked for again.
@@ -1235,6 +1281,14 @@ mod tests {
             settle(Modem::new(Role::Call, Part::Recipient, FS), source, Shape::Flat, 55.0)
         };
         assert_eq!((lesser.symbol_rate, lesser.high_carrier), (SymbolRate::S3200, false), "{lesser:?}");
+        // A source whose INFO0 bit 20 says it could send quieter is not asked
+        // to: no power reduction is ever asked for, as none is in INFO1a.
+        let willing = {
+            let ours = Info0 { can_reduce_power: true, ..phase2::Modem::capabilities() };
+            let source = Modem::with_capabilities(Role::Call, Part::Source, FS, ours);
+            settle(source, Modem::new(Role::Answer, Part::Recipient, FS), Shape::Flat, 55.0)
+        };
+        assert_eq!((willing.power_reduction, willing.symbol_rate), (0, SymbolRate::S3429), "{willing:?}");
     }
 
     /// 12.7: a retrain runs the tone exchange again, from 70 ms of silence
@@ -1264,28 +1318,124 @@ mod tests {
         }
     }
 
+    /// 12.7 as it happens: one end begins a retrain while the other is still
+    /// talking on the control channel. The other hears the tone for 50 ms
+    /// (12.7.1.2, 12.7.2.2) -- through a [`Steady`] of its own, as whatever
+    /// owns it will -- and only then falls silent for 70 ms and answers with
+    /// its own tone. Until then it talks, stood in for by the DPSK modulator
+    /// sending random bits: 600 baud on the same carrier, with the same
+    /// turns of the phase in it as the control channel's symbols, none of
+    /// which may pass for the tone or its reversal. Either part begins it,
+    /// on either chain, and the exchange ends in the INFOh of the first time.
+    #[test]
+    fn a_retrain_begun_at_one_end_is_answered_by_the_other() {
+        for source in [Role::Call, Role::Answer] {
+            for beginner in [Part::Source, Part::Recipient] {
+                let (c, a) = clean_run(source);
+                let (s, r) = ends(&c, &a);
+                let first = through(s, r);
+                let (begins, answers) = if beginner == Part::Source { (s, r) } else { (r, s) };
+                let case = format!("{source:?} as source, the {beginner:?} beginning");
+                let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
+                let mut begun = begins.again();
+                let mut answered: Option<Modem> = None;
+                let mut chatter = dpsk::Transmitter::new(answers.role().side(), FS);
+                let mut seed = 0x2545_f491u32;
+                let mut watch = Steady::new(begins.role().side().carrier(), FS);
+                // When the answering end heard 50 ms of the tone, when each
+                // end's tone then began, on the shared clock.
+                let (mut heard, mut begun_tone, mut answered_tone) = (None, None, None);
+                let (mut from_call, mut from_answer) = (0.0, 0.0);
+                for i in 0..(12.0 * FS) as usize {
+                    let at_call = line.to_call.pop_front().unwrap() + line.echo * from_call + line.noise();
+                    let at_answer = line.to_answer.pop_front().unwrap() + line.echo * from_answer + line.noise();
+                    let begins_call = begins.role() == Role::Call;
+                    let (at_begun, at_answering) = if begins_call { (at_call, at_answer) } else { (at_answer, at_call) };
+                    let out_begun = begun.step(at_begun);
+                    if out_begun.abs() > 1e-9 {
+                        begun_tone.get_or_insert(i);
+                    }
+                    watch.feed(at_answering);
+                    if answered.is_none() && watch.held() >= (0.050 * FS) as u64 {
+                        heard = Some(i);
+                        chatter.stop();
+                        answered = Some(answers.again());
+                    }
+                    let out_answering = match answered.as_mut() {
+                        Some(m) => {
+                            let out = m.step(at_answering);
+                            if out.abs() > 1e-9 {
+                                answered_tone.get_or_insert(i);
+                            }
+                            out
+                        }
+                        None => {
+                            if chatter.pending() < 64 {
+                                let bits: Vec<bool> = (0..256)
+                                    .map(|_| {
+                                        seed ^= seed << 13;
+                                        seed ^= seed >> 17;
+                                        seed ^= seed << 5;
+                                        seed & 1 == 1
+                                    })
+                                    .collect();
+                                chatter.send(&bits);
+                            }
+                            chatter.next_sample()
+                        }
+                    };
+                    (from_call, from_answer) = if begins_call { (out_begun, out_answering) } else { (out_answering, out_begun) };
+                    line.to_answer.push_back(from_call * line.loss);
+                    line.to_call.push_back(from_answer * line.loss);
+                    if begun.status() != Status::Running && answered.as_ref().is_some_and(|m| m.status() != Status::Running) {
+                        break;
+                    }
+                }
+                let answered = answered.unwrap_or_else(|| panic!("{case}: the tone was never heard for 50 ms"));
+                let (s, r) = if beginner == Part::Source { (&begun, &answered) } else { (&answered, &begun) };
+                assert_eq!(through(s, r), first, "{case}");
+                assert_eq!(s.recoveries() + r.recoveries(), 0, "{case}: a way out was taken");
+                assert_eq!(s.info0_repeats() + r.info0_repeats(), 0, "{case}: an INFO0 went in a retrain");
+                let ms = |n: usize| n as f64 / FS * 1000.0;
+                let (heard, begun_tone, answered_tone) = (heard.unwrap(), begun_tone.unwrap(), answered_tone.unwrap());
+                assert!((65.0..=75.0).contains(&ms(begun_tone)), "{case}: the beginner's tone came after {} ms", ms(begun_tone));
+                // The tone crossed the line and was heard 50 ms, and not much
+                // more: the answering end's own detector took what it took.
+                let listened = ms(heard - begun_tone) - 30.0;
+                assert!((50.0..=70.0).contains(&listened), "{case}: the tone was listened to for {listened:.1} ms before it was answered");
+                let silent = ms(answered_tone - heard);
+                assert!((65.0..=75.0).contains(&silent), "{case}: the answering end was silent for {silent:.1} ms");
+            }
+        }
+    }
+
     /// 12.2.1.3.1, 12.2.1.4.1, 12.2.2.3.1, 12.2.2.4.1: an INFO0 lost in a
     /// hole, from either end of either chain. The end that missed it hears
     /// the other's tone with no INFO0 before it, and sends its own INFO0
     /// again; the other, getting a second INFO0 that does not acknowledge its
     /// own, sends its own again with bit 28 set; and the exchange goes on
-    /// from there.
+    /// from there. On the short line one repeat is in flight at a time; on
+    /// the VoIP line a round trip holds twenty of them, every one of which
+    /// is answered before either end reverses.
     #[test]
     fn a_lost_info0_is_sent_again_and_acknowledged() {
-        for source in [Role::Call, Role::Answer] {
-            for lost in [Role::Call, Role::Answer] {
-                let towards = if lost == Role::Call { Role::Answer } else { Role::Call };
-                let hole = Fault::Mute { at: 0.030, seconds: 0.030, towards };
-                let (caller, answerer) = pair(source);
-                let (c, a) = run(&mut short(), 12.0, caller, answerer, Shape::Flat, &[hole]);
-                let (s, r) = ends(&c, &a);
-                let infoh = through(s, r);
-                assert_eq!(infoh.symbol_rate, SymbolRate::S3429, "{source:?} source, {lost:?} INFO0 lost: {infoh:?}");
-                let (missed, sent) = if lost == Role::Call { (&a, &c) } else { (&c, &a) };
-                assert!(missed.info0_repeats() >= 1, "{source:?} source, {lost:?} INFO0 lost: the end that missed it did not repeat its own");
-                assert!(sent.info0_repeats() >= 1, "{source:?} source, {lost:?} INFO0 lost: the end whose INFO0 was lost did not send it again");
-                assert!(missed.far_capabilities().unwrap().acknowledge, "the INFO0 that got through did not acknowledge");
-                assert_eq!(s.recoveries() + r.recoveries(), 0, "{source:?} source, {lost:?} INFO0 lost: a wait ran out");
+        for (line, name) in [(short as fn() -> Line, "short"), (voip, "VoIP")] {
+            for source in [Role::Call, Role::Answer] {
+                for lost in [Role::Call, Role::Answer] {
+                    let towards = if lost == Role::Call { Role::Answer } else { Role::Call };
+                    let hole = Fault::Mute { at: 0.030, seconds: 0.030, towards };
+                    let (caller, answerer) = pair(source);
+                    let (c, a) = run(&mut line(), 20.0, caller, answerer, Shape::Flat, &[hole]);
+                    let (s, r) = ends(&c, &a);
+                    let infoh = through(s, r);
+                    let case = format!("{name} line, {source:?} source, {lost:?} INFO0 lost");
+                    assert_eq!(infoh.symbol_rate, SymbolRate::S3429, "{case}: {infoh:?}");
+                    let (missed, sent) = if lost == Role::Call { (&a, &c) } else { (&c, &a) };
+                    assert!(missed.info0_repeats() >= 1, "{case}: the end that missed it did not repeat its own");
+                    assert!(sent.info0_repeats() >= 1, "{case}: the end whose INFO0 was lost did not send it again");
+                    assert!(missed.far_capabilities().unwrap().acknowledge, "{case}: the INFO0 that got through did not acknowledge");
+                    assert_eq!(s.recoveries() + r.recoveries(), 0, "{case}: a wait ran out");
+                }
             }
         }
     }
