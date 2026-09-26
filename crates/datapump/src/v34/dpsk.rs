@@ -12,12 +12,15 @@
 //! them apart in phase 2: both modems talk at once, and until phase 3 there is
 //! no echo canceller trained to take one off the other. A channel filter does
 //! it, as it does for V.22bis.
+//!
+//! Half-duplex's phase 2 uses the same signals, with INFOh in place of the two
+//! INFO1 (10.2.2), and a receiver that listens for those two and no others.
 
 use std::collections::VecDeque;
 
 use dsp::{ComplexFir, Nco, fir_lowpass, rrc_at, rrc_taps};
 
-use super::info::{self, Info, Info0, Info0d, Info1a, Info1aPcm, Info1c};
+use super::info::{self, Info, Info0, Info0d, Info1a, Info1aPcm, Info1c, InfoH};
 
 /// "600 bit/s ± 0.01%", one bit a symbol.
 pub const BAUD: f64 = 600.0;
@@ -77,17 +80,27 @@ impl Side {
         }
     }
 
-    /// The lengths of the sequences this side sends: INFO0 from either, and
-    /// then INFO1c from the call modem or INFO1a from the answer modem.
+    /// The lengths of the sequences this side sends, shortest first: INFO0
+    /// from either, and then INFO1c from the call modem or INFO1a from the
+    /// answer modem.
     ///
     /// V.90 adds one. Its digital modem takes the call modem's side of phase 2
     /// -- 1200 Hz and tone B, whichever end dialled -- and sends INFO0d, which
     /// is longer than V.34's INFO0. Its analogue modem's INFO0a and INFO1a are
     /// V.34's lengths, and INFO1d is INFO1c.
-    fn lengths(self) -> &'static [usize] {
-        match self {
-            Self::Call => &[info::INFO0_BITS, info::INFO0D_BITS, info::INFO1C_BITS],
-            Self::Answer => &[info::INFO0_BITS, info::INFO1A_BITS],
+    ///
+    /// Half-duplex has INFO0 and INFOh and nothing else (10.2.2), and either
+    /// side may send the INFOh: it comes from the recipient, which is the
+    /// answer modem when the call modem sends the page (12.2.1) and the call
+    /// modem when the answer modem does (12.2.2). Neither kind of receiver
+    /// listens for the other kind's sequences. They never come, and each would
+    /// be one more thing the start of a longer sequence could pass for: an
+    /// INFO0d begins with an INFOh that checks once in 2048.
+    fn lengths(self, half_duplex: bool) -> &'static [usize] {
+        match (self, half_duplex) {
+            (_, true) => &[info::INFO0_BITS, info::INFOH_BITS],
+            (Self::Call, false) => &[info::INFO0_BITS, info::INFO0D_BITS, info::INFO1C_BITS],
+            (Self::Answer, false) => &[info::INFO0_BITS, info::INFO1A_BITS],
         }
     }
 }
@@ -235,6 +248,36 @@ impl Transmitter {
 /// per cent of its opening.
 const PHASES: usize = 8;
 
+/// Fill ones a half-duplex receiver waits for after an INFO0's CRC before it
+/// hands the INFO0 over.
+///
+/// Every INFO sequence starts with the same fill and frame sync and ends its
+/// information with a CRC over it (10.1.2.3.2), and a CRC register that has
+/// its own contents shifted back into it comes to nothing. So the start of a
+/// longer sequence checks as the whole of a shorter one whenever the
+/// information bits it has beyond the shorter one's length happen to be the
+/// register's lowest bits at that point -- and INFOh runs just two bits
+/// further than INFO0, so a quarter of all INFOh begin with an INFO0 that
+/// checks. What follows tells them apart. After a real INFO0's CRC come its
+/// fill ones; after a false one, the rest of INFOh's own CRC, which in just
+/// that case is the register shifted down two bits, and so ends in two zeros.
+/// One fill bit settles it, and the second makes sure.
+///
+/// The same two bits are all there is between the two, the other way round
+/// too: an INFO0 with two zeros where its fill should begin is a whole INFOh.
+/// A differential decision spoils two bits for every symbol it gets wrong, so
+/// one symbol lost there turns an INFO0 into an INFOh, or one of those INFOh
+/// into an INFO0, where a symbol lost anywhere else loses the sequence. A
+/// caller that sets aside what its stage of phase 2 is not waiting for -- a
+/// recipient never hears INFOh, a source hears it only after probing (12.2)
+/// -- loses no more than that.
+///
+/// A duplex receiver does not wait: it never hears an INFOh, and handing what
+/// it does hear over 3.3 ms later moves the rest of phase 2 and everything
+/// after it, which whole V.90 calls over lines that slip and drop out are not
+/// indifferent to.
+const FILL_HEARD: usize = 2;
+
 /// One way of sampling the stream: an instant within the symbol, and the bits
 /// that instant has decided.
 #[derive(Debug, Clone)]
@@ -263,6 +306,8 @@ struct Branch {
 #[derive(Debug, Clone)]
 pub struct Receiver {
     side: Side,
+    /// Listening for half-duplex's sequences rather than duplex's.
+    half_duplex: bool,
     nco: Nco,
     select: ComplexFir,
     matched: ComplexFir,
@@ -277,11 +322,22 @@ pub struct Receiver {
 }
 
 impl Receiver {
-    /// A receiver for what `side` sends.
+    /// A receiver for what `side` sends in duplex's phase 2, or V.90's.
     pub fn new(side: Side, fs: f64) -> Self {
+        Self::listening(side, false, fs)
+    }
+
+    /// A receiver for what `side` sends in half-duplex's phase 2: INFO0, and
+    /// INFOh if `side` is the recipient (10.2.2).
+    pub fn half_duplex(side: Side, fs: f64) -> Self {
+        Self::listening(side, true, fs)
+    }
+
+    fn listening(side: Side, half_duplex: bool, fs: f64) -> Self {
         let sps = fs / BAUD;
         Self {
             side,
+            half_duplex,
             nco: Nco::new(side.carrier(), fs),
             // Linear phase, for the reason V.22bis's is. The other direction
             // is 1200 Hz away and the answer modem's own guard tone 600 Hz
@@ -310,7 +366,8 @@ impl Receiver {
         self.level
     }
 
-    /// Feed one line sample. Yields a sequence the moment its CRC checks.
+    /// Feed one line sample. Yields a sequence the moment its CRC checks -- or
+    /// an INFO0 in half-duplex a little after (`FILL_HEARD`).
     pub fn feed(&mut self, sample: f64) -> Option<Info> {
         let (cos, sin) = self.nco.step();
         let selected = self.select.process((sample * cos, sample * -sin));
@@ -331,7 +388,7 @@ impl Receiver {
                 );
                 branch.next += self.sps;
                 if found.is_none() {
-                    found = decide(branch, at, self.side);
+                    found = decide(branch, at, self.side, self.half_duplex);
                 }
             }
         }
@@ -347,7 +404,7 @@ impl Receiver {
 }
 
 /// One branch's decision on a symbol, and the sequence it completes if any.
-fn decide(branch: &mut Branch, symbol: (f64, f64), side: Side) -> Option<Info> {
+fn decide(branch: &mut Branch, symbol: (f64, f64), side: Side, half_duplex: bool) -> Option<Info> {
     // The differential decision: a point turned half way round from the last
     // one is a 1. Nothing about the carrier's absolute phase matters, which is
     // why there is no carrier loop here at all -- a few hertz of offset turns
@@ -362,16 +419,24 @@ fn decide(branch: &mut Branch, symbol: (f64, f64), side: Side) -> Option<Info> {
     branch.bits.push_back(turned < 0.0);
 
     let bits = branch.bits.make_contiguous();
-    for &length in side.lengths() {
-        // Checked the moment the CRC is in: the trailing fill says nothing,
-        // and whatever follows a sequence may not be ones at all.
+    for &length in side.lengths(half_duplex) {
+        // Checked the moment the CRC is in -- or, for an INFO0 that could be
+        // the start of an INFOh, once the first of the fill is in too. The
+        // rest of the fill says nothing more, and whatever follows a sequence
+        // may not be ones at all.
         let without_fill = length - info::FILL.len();
-        if bits.len() < without_fill {
+        let heard = without_fill + if half_duplex && length == info::INFO0_BITS { FILL_HEARD } else { 0 };
+        if bits.len() < heard {
             continue;
         }
-        let candidate = &bits[bits.len() - without_fill..];
+        let candidate = &bits[bits.len() - heard..];
+        if candidate[without_fill..].contains(&false) {
+            continue;
+        }
         let found = match (side, length) {
             (_, info::INFO0_BITS) => Info0::from_bits(candidate).map(Info::Info0),
+            // Whichever modem is the recipient sends it.
+            (_, info::INFOH_BITS) => InfoH::from_bits(candidate).map(Info::InfoH),
             (Side::Call, info::INFO0D_BITS) => Info0d::from_bits(candidate).map(Info::Info0d),
             (Side::Call, _) => Info1c::from_bits(candidate).map(Info::Info1c),
             // The same length either way; bits 37:39 say which.
@@ -389,6 +454,7 @@ fn decide(branch: &mut Branch, symbol: (f64, f64), side: Side) -> Option<Info> {
 #[cfg(test)]
 mod tests {
     use super::super::info::{Probed, SymbolRate};
+    use super::super::signals::Size;
     use super::*;
 
     const FS: f64 = 16_000.0;
@@ -422,11 +488,50 @@ mod tests {
         }
     }
 
-    /// Run a transmitter into a receiver through `line`, and collect what the
-    /// receiver found.
-    fn through(side: Side, sequences: &[Vec<bool>], mut line: impl FnMut(usize, f64) -> f64) -> Vec<Info> {
+    /// Two INFOh a recipient might send. The second begins with an INFO0 that
+    /// checks, as a quarter of all INFOh do (`FILL_HEARD`).
+    fn requests() -> [InfoH; 2] {
+        [
+            InfoH {
+                power_reduction: 2,
+                trn_length: 30,
+                high_carrier: true,
+                pre_emphasis: 3,
+                symbol_rate: SymbolRate::S3429,
+                trn_size: Size::Sixteen,
+            },
+            InfoH {
+                power_reduction: 0,
+                trn_length: 20,
+                high_carrier: false,
+                pre_emphasis: 0,
+                symbol_rate: SymbolRate::S3200,
+                trn_size: Size::Sixteen,
+            },
+        ]
+    }
+
+    /// Forty decibels down with noise twenty decibels under the signal.
+    fn quiet_and_noisy() -> impl FnMut(usize, f64) -> f64 {
+        let mut seed = 12345u32;
+        move |_, x| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let noise = (f64::from(seed) / f64::from(u32::MAX) - 0.5) * 2.0 * 0.1 * 0.707 * 1.73;
+            (x + noise) * 0.01
+        }
+    }
+
+    /// Run a transmitter into a duplex receiver through `line`, and collect
+    /// what the receiver found.
+    fn through(side: Side, sequences: &[Vec<bool>], line: impl FnMut(usize, f64) -> f64) -> Vec<Info> {
+        heard_by(Receiver::new(side, FS), side, sequences, line)
+    }
+
+    /// The same, into `rx`.
+    fn heard_by(mut rx: Receiver, side: Side, sequences: &[Vec<bool>], mut line: impl FnMut(usize, f64) -> f64) -> Vec<Info> {
         let mut tx = Transmitter::new(side, FS);
-        let mut rx = Receiver::new(side, FS);
         for bits in sequences {
             tx.send(bits);
         }
@@ -534,16 +639,88 @@ mod tests {
 
     #[test]
     fn a_quiet_noisy_line_still_carries_them() {
-        // Forty decibels down with noise twenty decibels under the signal.
-        let mut seed = 12345u32;
-        let found = through(Side::Answer, &[capabilities().to_bits(), results().to_bits()], |_, x| {
-            seed ^= seed << 13;
-            seed ^= seed >> 17;
-            seed ^= seed << 5;
-            let noise = (f64::from(seed) / f64::from(u32::MAX) - 0.5) * 2.0 * 0.1 * 0.707 * 1.73;
-            (x + noise) * 0.01
-        });
+        let found = through(Side::Answer, &[capabilities().to_bits(), results().to_bits()], quiet_and_noisy());
         assert_eq!(found, vec![Info::Info0(capabilities()), Info::Info1a(results())]);
+    }
+
+    #[test]
+    fn either_side_carries_infoh() {
+        // The recipient sends INFOh after its INFO0, and the recipient is the
+        // answer modem when the call modem sends the page (12.2.1) and the
+        // call modem when the answer modem does (12.2.2). The second request
+        // would come out as an INFO0 made of its first 45 bits if the
+        // receiver took an INFO0 the moment its CRC checked.
+        for side in [Side::Call, Side::Answer] {
+            for infoh in requests() {
+                let bits = [capabilities().to_bits(), infoh.to_bits()];
+                let expected = vec![Info::Info0(capabilities()), Info::InfoH(infoh)];
+                assert_eq!(heard_by(Receiver::half_duplex(side, FS), side, &bits, |_, x| x), expected, "{side:?}");
+                let noisy = heard_by(Receiver::half_duplex(side, FS), side, &bits, quiet_and_noisy());
+                assert_eq!(noisy, expected, "{side:?}, quiet and noisy");
+            }
+        }
+    }
+
+    #[test]
+    fn infoh_follows_the_recipient_s_tone_while_the_source_sends_its_own() {
+        // 12.2.1.2.6 and 12.2.2.1.6: on hearing the source's tone the recipient
+        // keeps its own tone going 25 ms more and then sends INFOh, straight on
+        // from it as one group; and the source, with its own tone going, is
+        // listening for INFOh under it (12.2.1.1.4, 12.2.2.2.4).
+        for (recipient, source) in [(Side::Answer, Side::Call), (Side::Call, Side::Answer)] {
+            for infoh in requests() {
+                let mut sends = Transmitter::new(recipient, FS);
+                let mut other = Transmitter::new(source, FS);
+                let mut hears = Receiver::half_duplex(recipient, FS);
+                sends.send(&[]);
+                other.send(&[]);
+                let mut found = Vec::new();
+                for i in 0..(FS as usize) {
+                    if i == 4000 {
+                        sends.send(&infoh.to_bits());
+                        sends.silence();
+                    }
+                    let line = sends.next_sample() + 1.2 * other.next_sample();
+                    found.extend(hears.feed(line));
+                }
+                assert_eq!(found, vec![Info::InfoH(infoh)], "from the {recipient:?} side");
+            }
+        }
+    }
+
+    #[test]
+    fn a_half_duplex_receiver_hears_info0_and_infoh_and_nothing_else() {
+        // An INFO0 and then both requests in one run, the second of them
+        // starting with an INFO0 that checks: each comes out as what it is.
+        let [plain, early] = requests();
+        for side in [Side::Call, Side::Answer] {
+            let sent = [capabilities().to_bits(), plain.to_bits(), early.to_bits()];
+            let found = heard_by(Receiver::half_duplex(side, FS), side, &sent, |_, x| x);
+            assert_eq!(found, vec![Info::Info0(capabilities()), Info::InfoH(plain), Info::InfoH(early)], "{side:?}");
+        }
+        // Duplex's results are not half-duplex's sequences, nor taken for
+        // them.
+        let info1c = Info1c { md_length: 12, ..Info1c::default() };
+        assert_eq!(heard_by(Receiver::half_duplex(Side::Call, FS), Side::Call, &[info1c.to_bits()], |_, x| x), vec![]);
+        assert_eq!(heard_by(Receiver::half_duplex(Side::Answer, FS), Side::Answer, &[results().to_bits()], |_, x| x), vec![]);
+    }
+
+    #[test]
+    fn only_half_duplex_waits_for_an_info0_s_fill() {
+        // The same INFO0 into both kinds of receiver: the duplex one hands it
+        // over the moment its CRC checks, as it always has, and the
+        // half-duplex one with the first two of its fill ones.
+        for side in [Side::Call, Side::Answer] {
+            let heard_at = |mut rx: Receiver| {
+                let mut tx = Transmitter::new(side, FS);
+                tx.send(&capabilities().to_bits());
+                (0..FS as usize).find(|_| rx.feed(tx.next_sample()) == Some(Info::Info0(capabilities())))
+            };
+            let duplex = heard_at(Receiver::new(side, FS)).expect("the duplex receiver heard nothing");
+            let half = heard_at(Receiver::half_duplex(side, FS)).expect("the half-duplex receiver heard nothing");
+            let later = (half - duplex) as f64 * BAUD / FS;
+            assert!((later - FILL_HEARD as f64).abs() < 0.25, "{side:?}: {later:.2} symbols later");
+        }
     }
 
     #[test]

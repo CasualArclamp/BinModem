@@ -103,6 +103,7 @@ fn the_analogue_modem_asks_for_v90_and_names_its_training_codeword() {
                 Info::Info0d(_) => "INFO0d",
                 Info::Info1c(_) => "INFO1d",
                 Info::Info1a(_) => "INFO1a (V.34)",
+                Info::InfoH(_) => "INFOh",
                 Info::Info1aPcm(_) => "INFO1a (V.90)",
             };
             (*side, kind)

@@ -8,8 +8,15 @@
 //! fill ones, eight bits of frame sync, the information, sixteen bits of CRC
 //! and four more fill ones -- and differ only in what the information is.
 //!
+//! Half-duplex keeps INFO0 and puts one results frame, INFOh, in place of the
+//! two INFO1 (10.2.2). Only one direction will carry data, so only one end
+//! probes and only the other answers: the recipient, having heard the
+//! source's L1 and L2, tells it how to send. The same shape again.
+//!
 //! Every multi-bit field is written "LSB:MSB": the lower bit number is the
 //! least significant, and bit 0 goes first in time.
+
+use super::signals::Size;
 
 /// Bits 0:3 and the last four of every INFO sequence: "Fill bits: 1111".
 pub const FILL: [bool; 4] = [true; 4];
@@ -22,6 +29,9 @@ pub const SYNC: [bool; 8] = [false, true, true, true, false, false, true, false]
 pub const INFO0_BITS: usize = 49;
 pub const INFO1C_BITS: usize = 109;
 pub const INFO1A_BITS: usize = 70;
+
+/// Bits in INFOh, fill to fill (Table 22).
+pub const INFOH_BITS: usize = 51;
 
 /// V.90's INFO0d (Table 7/V.90), the one sequence of V.90's phase 2 whose
 /// length is not one of V.34's. The other three are V.34's lengths: INFO0a
@@ -360,6 +370,84 @@ impl Info1a {
     }
 }
 
+/// INFOh (Table 22, 10.2.2.1): what the recipient of a half-duplex call, having
+/// heard the source's line probing, asks the source to send with.
+///
+/// Only the recipient sends one, and either modem can be the recipient: the
+/// answer modem when the call modem sends the page (12.2.1), the call modem
+/// when it is the answer modem that sends (12.2.2). So it comes on either
+/// carrier, and everything in it is about the one direction there is, source
+/// to recipient -- the symbol rate, carrier, pre-emphasis and power the source
+/// is to use from phase 3 on (10.2.3), and how much TRN to train on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InfoH {
+    /// Bits 12:14: the power reduction the recipient's receiver asks of the
+    /// source's transmitter, 0 to 7 dB. "These bits shall indicate 0 if the
+    /// source modem's INFO0 indicated that the source modem transmitter cannot
+    /// reduce its power" -- bit 20 of its INFO0.
+    pub power_reduction: u8,
+    /// Bits 15:21: how long the source is to send TRN for in phase 3, 0 to 127
+    /// steps of 35 ms.
+    pub trn_length: u8,
+    /// Bit 22: the high carrier rather than the low one, which "must be
+    /// consistent with the capabilities indicated in the source modem's INFO0"
+    /// (bits 15 to 18). At 3429 the two carriers are the same (Table 2).
+    pub high_carrier: bool,
+    /// Bits 23:26: the pre-emphasis filter the source is to send with, 0 to 10
+    /// (Tables 3 and 4).
+    pub pre_emphasis: u8,
+    /// Bits 27:29: the symbol rate.
+    pub symbol_rate: SymbolRate,
+    /// Bit 30: TRN on the 16-point constellation (1) or the 4-point one (0),
+    /// generated as in 10.1.3.8 either way (10.2.3.4).
+    pub trn_size: Size,
+}
+
+impl InfoH {
+    pub fn to_bits(&self) -> Vec<bool> {
+        let mut info = Vec::with_capacity(19);
+        put(&mut info, u32::from(self.power_reduction), 3);
+        put(&mut info, u32::from(self.trn_length), 7);
+        info.push(self.high_carrier);
+        put(&mut info, u32::from(self.pre_emphasis), 4);
+        put(&mut info, self.symbol_rate.index(), 3);
+        info.push(self.trn_size == Size::Sixteen);
+        frame(&info)
+    }
+
+    pub fn from_bits(bits: &[bool]) -> Option<Self> {
+        let info = unframe(bits, INFOH_BITS)?;
+        Some(Self {
+            power_reduction: get(info, 0, 3) as u8,
+            trn_length: get(info, 3, 7) as u8,
+            high_carrier: info[10],
+            pre_emphasis: get(info, 11, 4) as u8,
+            // As in INFO1a: six and seven are not symbol rates, and a sequence
+            // that names one asks for something no source can do.
+            symbol_rate: SymbolRate::from_index(get(info, 15, 3))?,
+            trn_size: if info[18] { Size::Sixteen } else { Size::Four },
+        })
+    }
+
+    /// TRN's length in symbols, at the symbol rate this asks for.
+    ///
+    /// 35 ms is a whole number of symbols at every rate Table 1 has -- 84 a/c,
+    /// which is 84, 96, 98, 105, 112 and 120 -- so nothing here is rounded, and
+    /// the count a recipient finds TRN's end by (12.3.2) is the count the source
+    /// sends.
+    pub fn trn_symbols(&self) -> usize {
+        let per_step = match self.symbol_rate {
+            SymbolRate::S2400 => 84,
+            SymbolRate::S2743 => 96,
+            SymbolRate::S2800 => 98,
+            SymbolRate::S3000 => 105,
+            SymbolRate::S3200 => 112,
+            SymbolRate::S3429 => 120,
+        };
+        usize::from(self.trn_length) * per_step
+    }
+}
+
 /// INFO0d (Table 7/V.90): a V.90 digital modem's capabilities.
 ///
 /// Bits 12 to 28 are INFO0a's, word for word -- the digital modem falls back
@@ -507,6 +595,8 @@ pub enum Info {
     /// INFO1c, and V.90's INFO1d, which is the same sequence.
     Info1c(Info1c),
     Info1a(Info1a),
+    /// Half-duplex's one results frame, from whichever modem is the recipient.
+    InfoH(InfoH),
     /// V.90's digital modem's INFO0.
     Info0d(Info0d),
     /// V.90's INFO1a, asking for phase 3 of V.90.
@@ -517,10 +607,22 @@ pub enum Info {
 mod tests {
     use super::*;
 
+    fn request() -> InfoH {
+        InfoH {
+            power_reduction: 2,
+            trn_length: 30,
+            high_carrier: true,
+            pre_emphasis: 3,
+            symbol_rate: SymbolRate::S3429,
+            trn_size: Size::Sixteen,
+        }
+    }
+
     #[test]
     fn every_sequence_is_the_length_its_table_says() {
         assert_eq!(Info0::default().to_bits().len(), INFO0_BITS);
         assert_eq!(Info1c::default().to_bits().len(), INFO1C_BITS);
+        assert_eq!(request().to_bits().len(), INFOH_BITS);
         let info1a = Info1a {
             min_power_reduction: 0,
             additional_power_reduction: 0,
@@ -684,5 +786,151 @@ mod tests {
             frequency_offset: None,
         };
         assert_eq!(Info1aPcm::from_bits(&v34.to_bits()), None);
+    }
+
+    /// Table 22 as the rendered page has it (PDF page 42), a field at a time:
+    /// the bit each starts at, then its bits in the order they go, least
+    /// significant first. Every multi-bit value reads differently backwards,
+    /// so a field sent the wrong way round cannot pass. The CRC was worked
+    /// out apart from `crc`, on a model of Figure 14's cells, so this does not
+    /// take the code's word for it.
+    #[test]
+    fn infoh_is_table_22_bit_for_bit() {
+        let asked = InfoH {
+            power_reduction: 6,
+            trn_length: 83,
+            high_carrier: true,
+            pre_emphasis: 10,
+            symbol_rate: SymbolRate::S3200,
+            trn_size: Size::Four,
+        };
+        let table = [
+            (0, "1111"),              // fill
+            (4, "01110010"),          // frame sync, the left-most bit first
+            (12, "011"),              // power reduction, 6 dB
+            (15, "1100101"),          // TRN, 83 steps of 35 ms
+            (22, "1"),                // the high carrier
+            (23, "0101"),             // pre-emphasis filter 10
+            (27, "001"),              // symbol rate 4, which is 3200
+            (30, "0"),                // TRN on the 4-point constellation
+            (31, "0000000100110001"), // CRC
+            (47, "1111"),             // fill
+        ];
+        let mut expected = Vec::new();
+        for (at, field) in table {
+            assert_eq!(expected.len(), at, "the field at bit {at}");
+            expected.extend(field.chars().map(|c| c == '1'));
+        }
+        assert_eq!(expected.len(), INFOH_BITS);
+        assert_eq!(asked.to_bits(), expected);
+        assert_eq!(InfoH::from_bits(&expected), Some(asked));
+    }
+
+    #[test]
+    fn every_infoh_field_comes_back_at_every_symbol_rate() {
+        for (i, symbol_rate) in SymbolRate::ALL.into_iter().enumerate() {
+            for (power_reduction, trn_length, pre_emphasis) in [(0, 0, 0), (7, 127, 10), (3, 64, 5)] {
+                let asked = InfoH {
+                    power_reduction,
+                    trn_length,
+                    high_carrier: i % 2 == 0,
+                    pre_emphasis,
+                    symbol_rate,
+                    trn_size: if i % 3 == 0 { Size::Sixteen } else { Size::Four },
+                };
+                assert_eq!(InfoH::from_bits(&asked.to_bits()), Some(asked), "{asked:?}");
+            }
+        }
+    }
+
+    /// 10.1.2.3.2: the CRC is over everything but the frame sync and the fill,
+    /// which in INFOh is bits 12 to 30.
+    #[test]
+    fn infoh_s_crc_is_over_bits_12_to_30_and_one_wrong_bit_is_caught() {
+        let bits = request().to_bits();
+        assert_eq!(get(&bits, 31, 16) as u16, crc(&bits[12..31]));
+        for i in 0..INFOH_BITS - FILL.len() {
+            let mut spoiled = bits.clone();
+            spoiled[i] = !spoiled[i];
+            assert_eq!(InfoH::from_bits(&spoiled), None, "bit {i}");
+        }
+        // Six and seven fit the symbol rate's field and check, and are still
+        // not symbol rates.
+        for index in [6, 7] {
+            let mut info = bits[12..31].to_vec();
+            for k in 0..3 {
+                info[15 + k] = index >> k & 1 == 1;
+            }
+            let bits = frame(&info);
+            assert!(unframe(&bits, INFOH_BITS).is_some());
+            assert_eq!(InfoH::from_bits(&bits), None, "symbol rate {index}");
+        }
+    }
+
+    #[test]
+    fn infoh_is_none_of_the_duplex_sequences_and_they_are_not_it() {
+        let info1a = Info1a {
+            min_power_reduction: 1,
+            additional_power_reduction: 0,
+            md_length: 3,
+            probed: Probed { high_carrier: true, pre_emphasis: 2, max_rate: 12 },
+            answer_to_call: SymbolRate::S3200,
+            call_to_answer: SymbolRate::S3000,
+            frequency_offset: None,
+        };
+        let info1c = Info1c { md_length: 5, ..Info1c::default() };
+        let infoh = request().to_bits();
+        assert_eq!(Info0::from_bits(&infoh), None);
+        assert_eq!(Info1c::from_bits(&infoh), None);
+        assert_eq!(Info1a::from_bits(&infoh), None);
+        for other in [Info0::default().to_bits(), info1c.to_bits(), info1a.to_bits()] {
+            assert_eq!(InfoH::from_bits(&other), None);
+        }
+
+        // All three share the fill and the sync, so what keeps them apart is
+        // the CRC -- and the CRC alone is not quite enough between INFO0 and
+        // INFOh, which is two bits longer. A whole INFO0 is never the start
+        // of an INFOh: its first two fill ones land in the top of where an
+        // INFOh's CRC would be, and a CRC register that has taken in two bits
+        // of its own contents has zeros there. Which is also why, with two
+        // zeros in place of those fill ones, every INFO0 there is would be an
+        // INFOh (dpsk's FILL_HEARD):
+        for value in 0..1u32 << 17 {
+            let info: Vec<bool> = (0..17).map(|i| value >> i & 1 == 1).collect();
+            let mut bits = frame(&info);
+            assert!(unframe(&bits[..INFOH_BITS - FILL.len()], INFOH_BITS).is_none(), "{value:#x}");
+            bits[45] = false;
+            bits[46] = false;
+            assert!(unframe(&bits[..INFOH_BITS - FILL.len()], INFOH_BITS).is_some(), "{value:#x} and two zeros");
+        }
+        // But the start of an INFOh is a whole INFO0 once in four times, and
+        // this one, which a recipient could well ask for, is. What tells them
+        // apart is what comes next: fill ones after a real INFO0, and here the
+        // top of INFOh's own CRC, which is then zeros -- so a receiver that
+        // waits for a fill one is not fooled (dpsk's FILL_HEARD).
+        let plain = InfoH {
+            power_reduction: 0,
+            trn_length: 20,
+            high_carrier: false,
+            pre_emphasis: 0,
+            symbol_rate: SymbolRate::S3200,
+            trn_size: Size::Sixteen,
+        };
+        let bits = plain.to_bits();
+        assert!(unframe(&bits[..INFO0_BITS - FILL.len()], INFO0_BITS).is_some());
+        assert_eq!(&bits[45..47], &[false, false]);
+    }
+
+    /// 35 ms at each symbol rate of Table 1, against the rates as `probe`
+    /// works them out from a and c.
+    #[test]
+    fn trn_symbols_are_35_ms_steps_at_the_symbol_rate_asked_for() {
+        for symbol_rate in SymbolRate::ALL {
+            for trn_length in [0, 1, 127] {
+                let asked = InfoH { symbol_rate, trn_length, ..request() };
+                let exact = f64::from(trn_length) * 0.035 * crate::v34::probe::symbols_per_second(symbol_rate);
+                assert!((asked.trn_symbols() as f64 - exact).abs() < 1e-6, "{symbol_rate:?}: {exact}");
+            }
+        }
     }
 }
