@@ -188,6 +188,13 @@ impl FaxCall {
         self.call.error_correction()
     }
 
+    /// Offer JBIG, or not. Only ever used under error correction mode.
+    #[must_use]
+    pub fn with_jbig(mut self, on: bool) -> Self {
+        self.call.set_jbig(on);
+        self
+    }
+
     /// The coding the page goes in, once a DCS has settled it.
     pub fn coding(&self) -> Coding {
         self.call.coding()
@@ -1171,11 +1178,11 @@ mod tests {
     ///
     /// Two of these offer each other every coding and both resolutions, so
     /// this is the page as it should arrive: every line, at the resolution it
-    /// was drawn at, in the smallest coding the two ends share -- MMR with
-    /// error correction, and Modified READ without.
+    /// was drawn at, in the smallest coding the two ends share -- JBIG with
+    /// error correction, now that both have it, and Modified READ without.
     #[test]
     fn a_fine_page_arrives_fine_in_the_smallest_coding_both_ends_have() {
-        for (error_correction, want) in [(true, Coding::Mmr), (false, Coding::ModifiedRead)] {
+        for (error_correction, want) in [(true, Coding::Jbig), (false, Coding::ModifiedRead)] {
             let mut page = a_page(12);
             page.resolution = Resolution::Fine;
             let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()));
@@ -1262,7 +1269,7 @@ mod tests {
         }
         assert!(caller.error_correction(), "the caller did not choose it");
         assert!(answerer.error_correction(), "the answerer was not told");
-        assert_eq!(answerer.coding(), Coding::Mmr, "error correction and no MMR");
+        assert_eq!(answerer.coding(), Coding::Jbig, "error correction and no JBIG");
         assert!(sent.contains(&Frame::Pps), "no partial page signal: {sent:?}");
         assert!(!sent.contains(&Frame::Eop), "a bare EOP under error correction");
         assert_eq!(answerer.received().expect("no page").lines, page.lines);
@@ -1302,8 +1309,12 @@ mod tests {
         for error_correction in [true, false] {
             let page = a_page(400);
             let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()));
-            let mut answerer =
-                FaxCall::answer(FS, "61388880000").with_error_correction(error_correction);
+            // MMR under error correction, which brings this page in 21 frames
+            // and is what the count below was set for; JBIG brings it in 8,
+            // and is watched arriving in the modem crate's tests of it.
+            let mut answerer = FaxCall::answer(FS, "61388880000")
+                .with_error_correction(error_correction)
+                .with_jbig(false);
             let seen = watch_it_arrive(&mut caller, &mut answerer);
             assert_eq!(caller.error_correction(), error_correction);
             let got = answerer.received().expect("no page");

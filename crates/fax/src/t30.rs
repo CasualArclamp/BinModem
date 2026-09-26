@@ -213,6 +213,27 @@ pub fn bit(fif: &[u8], n: usize) -> bool {
     fif.get(octet).is_some_and(|o| o >> within & 1 == 1)
 }
 
+/// Bit `n` of a field that has to have been extended to reach it.
+///
+/// Note 5 of Table 2: the field is 24 bits, and "if the 'extend field' bit(s)
+/// is a '1', the FIF field shall be extended by an additional 8 bits". The
+/// extend bit is the last of each octet from the third on, so a bit in the
+/// tenth octet -- where JBIG's are -- is only there if bits 24, 32 and so on
+/// up to 72 all are. An octet past a clear extend bit is not part of the
+/// frame, whatever is in it.
+pub fn extended_bit(fif: &[u8], n: usize) -> bool {
+    let octet = (n - 1) / 8;
+    (3..=octet).all(|k| bit(fif, 8 * k)) && bit(fif, n)
+}
+
+/// Set the extend bits that make a field reach bit `n`: 24, 32 and on, up to
+/// the one in the octet before it.
+pub fn extend_to(fif: &mut Vec<u8>, n: usize) {
+    for k in 3..=(n - 1) / 8 {
+        set_bit(fif, 8 * k, true);
+    }
+}
+
 /// A run of bits, read as Table 2 writes it: first bit leftmost.
 ///
 /// Which is the opposite way round from how they arrive, and the reason the
@@ -284,6 +305,11 @@ pub struct Capabilities {
     pub error_correction: bool,
     /// Bit 31.
     pub t6_coding: bool,
+    /// Bit 78: T.85's single-progression sequential JBIG, with the stripes of
+    /// 128 lines T.85 calls basic.
+    pub jbig: bool,
+    /// Bit 79: and stripes of any other length, T.85's option.
+    pub jbig_optional_l0: bool,
     /// How many octets the field ran to.
     pub octets: usize,
 }
@@ -412,8 +438,19 @@ pub fn capabilities(fif: &[u8]) -> Capabilities {
         error_correction: bit(fif, 27),
         // Note 9: "valid only when bit 27 (error correction mode) is set".
         t6_coding: bit(fif, 31) && bit(fif, 27),
+        // Note 17 has bit 27 set whenever 78 or 79 is, as T.4 4.4 allows JBIG
+        // only under error correction; Note 30 has 78 set whenever 79 is. A
+        // machine that says otherwise has not said it can read JBIG.
+        jbig: jbig_offered(fif),
+        jbig_optional_l0: jbig_offered(fif) && extended_bit(fif, 79),
         octets: fif.len(),
     }
+}
+
+/// Whether a DIS offers JBIG: bit 78, in a field that reaches it, beside
+/// bit 27.
+fn jbig_offered(fif: &[u8]) -> bool {
+    extended_bit(fif, 78) && bit(fif, 27)
 }
 
 impl Capabilities {
@@ -481,12 +518,13 @@ impl Capabilities {
             ),
             (
                 "coding",
-                if self.t6_coding {
-                    "MH, MR, MMR".to_owned()
-                } else if self.two_dimensional {
-                    "MH and MR".to_owned()
-                } else {
-                    "MH".to_owned()
+                match (self.t6_coding, self.jbig) {
+                    (true, true) => "MH, MR, MMR, JBIG".to_owned(),
+                    (false, true) if self.two_dimensional => "MH, MR, JBIG".to_owned(),
+                    (false, true) => "MH and JBIG".to_owned(),
+                    (true, false) => "MH, MR, MMR".to_owned(),
+                    (false, false) if self.two_dimensional => "MH and MR".to_owned(),
+                    (false, false) => "MH".to_owned(),
                 },
             ),
             (
@@ -565,11 +603,12 @@ pub fn set_field(fif: &mut Vec<u8>, from: usize, to: usize, value: u8) {
 
 /// What this modem can receive, as the parameter field of a DIS.
 ///
-/// Three octets, which is the shortest a DIS can be: bit 24 is the extension
-/// bit and everything past it is optional, so leaving it clear says there is
-/// nothing more to say. Error correction, T.6 coding and every later
-/// extension live beyond it and are not offered, because they are not built.
-pub fn our_capabilities(offer: &[Modulation], error_correction: bool) -> Vec<u8> {
+/// Three octets without error correction, which is the shortest a DIS can be:
+/// bit 24 is the extension bit and everything past it is optional, so leaving
+/// it clear says there is nothing more to say. Error correction and T.6 coding
+/// take a fourth, and JBIG a tenth, with the six octets between it and the
+/// fourth there only to carry their extend bits.
+pub fn our_capabilities(offer: &[Modulation], error_correction: bool, jbig: bool) -> Vec<u8> {
     let mut fif = vec![0u8; 3];
     // Bit 10: this machine can receive a document. Bit 9 stays clear -- there
     // is nothing here for the far end to poll.
@@ -607,6 +646,15 @@ pub fn our_capabilities(offer: &[Modulation], error_correction: bool) -> Vec<u8>
         // Bit 31: T.6's coding, which Note 9 makes meaningless without bit 27
         // and T.4 4.3 limits to error correction mode.
         set_bit(&mut fif, 31, true);
+        if jbig {
+            // Bits 78 and 79: T.85's JBIG, which T.4 4.4 limits to error
+            // correction mode too, in stripes of any length -- a decoder
+            // here takes whatever L0 a header says, so the option costs
+            // nothing to offer, and Note 30 wants 78 beside it.
+            extend_to(&mut fif, 79);
+            set_bit(&mut fif, 78, true);
+            set_bit(&mut fif, 79, true);
+        }
     }
     fif
 }
@@ -638,9 +686,12 @@ pub struct Command {
     pub fine: bool,
     /// Bits 21 to 23, as the receiver asked for them in its DIS.
     pub scan_line_field: u8,
-    /// Bit 16 for Modified READ, bit 31 for MMR, and neither for Modified
-    /// Huffman.
+    /// Bit 16 for Modified READ, bit 31 for MMR, bit 78 for JBIG, and none of
+    /// them for Modified Huffman.
     pub coding: crate::coding::Coding,
+    /// Bit 79 beside 78: the JBIG page goes in stripes of other than the 128
+    /// lines T.85 calls basic, which the far end said it takes.
+    pub optional_l0: bool,
     /// Bit 27: the page goes in frames under T.30 Annex A.
     pub error_correction: bool,
 }
@@ -681,8 +732,22 @@ pub fn command(command: Command) -> Vec<u8> {
         // 27. A page asked to go in MMR without error correction goes out
         // saying nothing of the kind, and T.4 4.3 would not have it go at all.
         set_bit(&mut fif, 31, command.coding == crate::coding::Coding::Mmr);
+        if command.coding == crate::coding::Coding::Jbig {
+            // Bit 78, "T.85 basic", in the tenth octet, and 79 with it for
+            // stripes of another length: Note 30 ties 79 to 78 in a DIS, and
+            // a DCS saying both says JBIG to a reader that looks at either.
+            extend_to(&mut fif, 79);
+            set_bit(&mut fif, 78, true);
+            set_bit(&mut fif, 79, command.optional_l0);
+        }
     }
     fif
+}
+
+/// Whether a DCS commands JBIG: bit 78 or 79 in a field that reaches them,
+/// beside bit 27 (Note 17).
+pub fn commands_jbig(fif: &[u8]) -> bool {
+    (extended_bit(fif, 78) || extended_bit(fif, 79)) && bit(fif, 27)
 }
 
 /// An identification field: twenty characters, and the digits reversed.
@@ -734,6 +799,7 @@ mod tests {
             fine,
             scan_line_field,
             coding: crate::coding::Coding::ModifiedHuffman,
+            optional_l0: false,
             error_correction,
         };
         assert_eq!(field_of(&super::command(command(true, 0b110, false)), 21, 23), 0b010);
@@ -887,6 +953,79 @@ mod tests {
                 "field {bits:04b}"
             );
         }
+    }
+
+    #[test]
+    fn jbig_is_offered_in_the_tenth_octet_with_every_extend_bit_before_it() {
+        let ours = our_capabilities(&[Modulation::V27ter, Modulation::V29], true, true);
+        assert_eq!(ours.len(), 10, "bits 78 and 79 are in the tenth octet");
+        for extend in [24, 32, 40, 48, 56, 64, 72] {
+            assert!(bit(&ours, extend), "extend bit {extend}");
+        }
+        assert!(!bit(&ours, 80), "an extend bit with nothing after it");
+        let caps = capabilities(&ours);
+        assert!(caps.jbig && caps.jbig_optional_l0);
+        assert!(caps.t6_coding && caps.error_correction, "and everything a fourth octet said");
+        // The octets between carry nothing else.
+        let others: Vec<usize> = (25..=80)
+            .filter(|&n| bit(&ours, n) && ![27, 31, 78, 79].contains(&n) && n % 8 != 0)
+            .collect();
+        assert!(others.is_empty(), "{others:?}");
+        // Without it, or without error correction, the field is as it was.
+        assert_eq!(our_capabilities(&[Modulation::V29], true, false).len(), 4);
+        assert_eq!(our_capabilities(&[Modulation::V29], false, true).len(), 3);
+    }
+
+    #[test]
+    fn jbig_is_only_what_notes_5_17_and_30_allow() {
+        let good = our_capabilities(&[Modulation::V29], true, true);
+        // Without bit 27 beside it (Note 17).
+        let mut no_ecm = good.clone();
+        set_bit(&mut no_ecm, 27, false);
+        assert!(!capabilities(&no_ecm).jbig);
+        // In a tenth octet the field never reached: bit 48 clear ends it at
+        // the sixth (Note 5).
+        let mut short = good.clone();
+        set_bit(&mut short, 48, false);
+        assert!(!capabilities(&short).jbig);
+        // Bit 79 alone is not JBIG (Note 30), and 78 alone is JBIG with
+        // stripes of 128.
+        let mut option_only = good.clone();
+        set_bit(&mut option_only, 78, false);
+        assert!(!capabilities(&option_only).jbig);
+        assert!(!capabilities(&option_only).jbig_optional_l0);
+        let mut basic = good;
+        set_bit(&mut basic, 79, false);
+        assert!(capabilities(&basic).jbig);
+        assert!(!capabilities(&basic).jbig_optional_l0);
+        // And no machine on record offers it.
+        assert!(!capabilities(&REAL_DIS).jbig);
+    }
+
+    #[test]
+    fn a_jbig_command_says_78_and_79_only_for_another_l0() {
+        let command = |optional_l0: bool, error_correction: bool| Command {
+            modulation: Modulation::V17,
+            bits_per_second: 14_400,
+            fine: true,
+            scan_line_field: 0b111,
+            coding: crate::coding::Coding::Jbig,
+            optional_l0,
+            error_correction,
+        };
+        let basic = super::command(command(false, true));
+        assert_eq!(basic.len(), 10);
+        assert!(bit(&basic, 27) && bit(&basic, 78) && !bit(&basic, 79));
+        assert!(!bit(&basic, 31) && !bit(&basic, 16), "a page is in one coding");
+        assert!(commands_jbig(&basic));
+        let option = super::command(command(true, true));
+        assert!(bit(&option, 78) && bit(&option, 79));
+        assert!(commands_jbig(&option));
+        // T.4 4.4 has no JBIG without error correction, and the command does
+        // not say it.
+        let plain = super::command(command(false, false));
+        assert_eq!(plain.len(), 3);
+        assert!(!commands_jbig(&plain));
     }
 
     #[test]

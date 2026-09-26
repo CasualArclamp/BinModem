@@ -10,6 +10,7 @@ pub mod call;
 pub mod coding;
 pub mod ecm;
 pub mod frames;
+pub mod jbig;
 pub mod mmr;
 pub mod mr;
 pub mod page;

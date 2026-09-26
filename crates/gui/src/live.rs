@@ -465,6 +465,8 @@ pub struct Session {
     fax_offer: Mutex<Vec<fax::t30::Modulation>>,
     /// Whether the window allows error correction mode.
     fax_error_correction: AtomicBool,
+    /// Whether the window allows JBIG.
+    fax_jbig: AtomicBool,
     /// A page the window has loaded, waiting for the line thread to take it.
     ///
     /// Taken rather than read, and a page is megabytes of booleans, so it
@@ -513,6 +515,7 @@ impl Default for Session {
             fax_identification: Mutex::default(),
             fax_offer: Mutex::new(fax::call::OUR_MODULATIONS.to_vec()),
             fax_error_correction: AtomicBool::new(true),
+            fax_jbig: AtomicBool::new(true),
             fax_page: Mutex::default(),
             fax_received: Mutex::default(),
             fax_arriving: Mutex::default(),
@@ -573,6 +576,15 @@ impl Session {
 
     pub fn set_fax_error_correction(&self, on: bool) {
         self.fax_error_correction.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether a fax call may use JBIG.
+    pub fn fax_jbig(&self) -> bool {
+        self.fax_jbig.load(Ordering::Relaxed)
+    }
+
+    pub fn set_fax_jbig(&self, on: bool) {
+        self.fax_jbig.store(on, Ordering::Relaxed);
     }
 
     /// Leave a page for the next fax call that dials.
@@ -1336,6 +1348,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         modem.fax_identification = session.fax_identification();
         modem.fax_offer = session.fax_offer();
         modem.fax_error_correction = session.fax_error_correction();
+        modem.fax_jbig = session.fax_jbig();
         if let Some(page) = session.take_fax_page() {
             modem.fax_page = Some(page);
         }
