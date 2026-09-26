@@ -42,6 +42,14 @@
 //! last few dozen symbols afresh from the raw samples at each fraction of a
 //! symbol either side, and takes up again at whichever reads back as the
 //! constellation.
+//!
+//! Half-duplex (clause 12) trains the same way in its phase 3, on S, S-bar, PP
+//! and a TRN of four or sixteen points, and then again before every page on
+//! PP alone, which B1 and the page follow straight away (12.5). Between the
+//! two come seconds of the control channel, a different signal on other
+//! carriers, and nothing of the carrier's phase or of where the symbols fall
+//! survives that: so the equaliser is solved for on PP from nothing, as phase
+//! 3's was, and the receiver comes out of it on B1's first symbol.
 
 use std::collections::VecDeque;
 
@@ -218,10 +226,49 @@ impl Slicer {
 /// A training sequence, known from its first symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reference {
-    /// PP, and then TRN at four points: phase 3 (10.1.3.6, 10.1.3.8).
+    /// PP, and then TRN at four points: duplex phase 3 (10.1.3.6, 10.1.3.8),
+    /// trained on PP and TRN's first 64 symbols together.
     PpThenTrn,
+    /// PP, and then TRN at the size given: half-duplex phase 3, whose TRN is
+    /// four or sixteen points as INFOh's bit 30 asks, and may be any length
+    /// INFOh's bits 15 to 21 ask for, none included (10.2.3.4, 12.3.2.2).
+    ///
+    /// Trained on PP alone, as a page's resynchronisation is, and TRN then
+    /// followed from its first symbol. With the far clock off this one's, the
+    /// timing moves across the window, and TRN's rows at its end fit worst,
+    /// sixteen points' worse than four's: at 50 ppm, PP with 64 symbols of TRN
+    /// trained 0.2 to 0.8 dB short of PP alone at four points, and 1.2 to 1.7
+    /// dB short at sixteen. With the clocks together all of them come within
+    /// about a tenth of a decibel of each other.
+    PpThenTrnAt(Size),
+    /// PP alone: half-duplex's resynchronisation before a page, whose PP runs
+    /// straight into B1 and the page (12.5.1, 12.5.2). The first symbol made
+    /// after training is B1's first.
+    ///
+    /// Solved for from nothing, as phase 3 was. The taps kept through `idle`
+    /// would be no use until the timing had been found again to a fraction of
+    /// a symbol and the carrier's phase with it, and PP alone comes to what
+    /// phase 3 trained to anyway, give or take half a decibel.
+    ///
+    /// Nothing known follows PP, so there is no second try further in: an S-bar
+    /// that PP does not follow was not a page's, and the receiver hunts again
+    /// from just after it. And what follows is data mode, whose grid only the
+    /// caller knows, so the slicer is left for it to set.
+    Pp,
     /// TRN alone, at the size given: phase 4.
     Trn(Size),
+}
+
+impl Reference {
+    /// The constellation of the sequence's TRN, and of what the receiver
+    /// decides against after it; none for PP alone.
+    fn trn(self) -> Option<Size> {
+        match self {
+            Self::PpThenTrn => Some(Size::Four),
+            Self::PpThenTrnAt(size) | Self::Trn(size) => Some(size),
+            Self::Pp => None,
+        }
+    }
 }
 
 /// What the receiver has to report.
@@ -234,7 +281,9 @@ pub enum Heard {
     Reversal { at: u64 },
     /// Trained, with the signal to noise the training left.
     Trained { snr_db: f64 },
-    /// Nothing trained: the sequence was not where S-bar said.
+    /// Nothing trained: the sequence was not where S-bar said. After PP alone
+    /// the receiver is hunting again already, from just after that S-bar, and
+    /// what it hears there follows this.
     Untrained,
     Symbol(Symbol),
 }
@@ -519,17 +568,40 @@ impl Receiver {
         self.mode = Mode3::Hunting(Hunt::default());
     }
 
+    /// Hunt from half-symbol sample `from`: through the samples already kept,
+    /// and then on as they come.
+    fn hunt_from(&mut self, from: u64) {
+        let mut hunt = Hunt::default();
+        for index in from.max(self.first)..self.made {
+            match hunt.feed(self.halves[(index - self.first) as usize], index) {
+                Some(Hunted::S) => self.heard.push_back(Heard::S),
+                Some(Hunted::Reversal(at)) => {
+                    self.mode = Mode3::Idle;
+                    self.heard.push_back(Heard::Reversal { at });
+                    return;
+                }
+                None => {}
+            }
+        }
+        self.mode = Mode3::Hunting(hunt);
+    }
+
     /// Train on `reference`, which starts sixteen symbols after the S-bar at
     /// half-symbol sample `s_bar`, and is sent by a modem whose scrambler is
     /// `far`'s.
+    ///
+    /// After a sequence with TRN in it, symbols are decided against TRN's
+    /// constellation. After PP alone they are decided against whatever the
+    /// slicer was: set the data grid with `set_grid` any time before
+    /// `Heard::Trained`, or on hearing it -- the first symbol after PP, which
+    /// is B1's first, is not made until the half-symbol sample after that.
     pub fn train(&mut self, reference: Reference, far: Mode, s_bar: u64) {
         let start = s_bar + 2 * signals::S_BAR_SYMBOLS as u64;
         self.mode = Mode3::Collecting { reference, far, start, second: false };
-        self.size = match reference {
-            Reference::PpThenTrn => Size::Four,
-            Reference::Trn(size) => size,
-        };
-        self.slicer = Slicer::Points(self.size);
+        if let Some(size) = reference.trn() {
+            self.size = size;
+            self.slicer = Slicer::Points(size);
+        }
     }
 
     /// Stop listening.
@@ -744,9 +816,12 @@ impl Receiver {
         let solution = match (known, reference) {
             (Some(s), _) if enough(&s) => Some(s),
             (known, Reference::Trn(size)) if self.ever_trained && !second => self.reacquire(size, far, start).or(known),
+            // PP alone has nothing known after it to try again in, and a fit
+            // that is not good enough on the first try is the wrong one.
+            (_, Reference::Pp) => None,
             (known, _) => known,
         };
-        if !second && solution.as_ref().is_none_or(|s| !enough(s)) {
+        if !second && reference.trn().is_some() && solution.as_ref().is_none_or(|s| !enough(s)) {
             // Nothing fitted where S-bar said. A slip in the middle of the
             // window spoils a fit that way; so try again further into TRN,
             // searching wide for where it went.
@@ -754,8 +829,20 @@ impl Receiver {
             return;
         }
         let Some(solution) = solution else {
-            self.mode = Mode3::Idle;
             self.heard.push_back(Heard::Untrained);
+            if reference == Reference::Pp {
+                // Not a page's S-bar, or a page's spoilt. A tone within a few
+                // hundred hertz of the carrier passes for S, and coming or
+                // going for S-bar: an answer modem's 1800 Hz guard tone, heard
+                // alone for a few milliseconds where its control channel
+                // starts and stops -- dpsk.rs's is -- passed for S at nine of
+                // the eleven carriers, and for S-bar at five. The page's own S
+                // may have come while this was tried; so hunt again, through
+                // what is kept from just after the S-bar tried, and on.
+                self.hunt_from(start - 2 * signals::S_BAR_SYMBOLS as u64 + 4);
+            } else {
+                self.mode = Mode3::Idle;
+            }
             return;
         };
         self.taps = solution.taps;
@@ -775,6 +862,16 @@ impl Receiver {
         self.settled = solution.mse;
         self.mode = Mode3::Trained;
         self.heard.push_back(Heard::Trained { snr_db: self.trained_snr });
+        if reference == Reference::Pp {
+            // The loops kept for a rewind were the last page's, on a carrier
+            // phase and a timing this signal owes nothing to: a loss early in
+            // B1 is to hold the loops still, not to put those back.
+            self.earlier.clear();
+            // B1 and the page come next, on the caller's grid, which it may
+            // only set on hearing this: they are made from the next half-symbol
+            // sample on, B1's first symbol first.
+            return;
+        }
         // Everything already here past the window.
         while self.next_symbol + REACH as u64 + 2 <= self.made {
             let symbol = self.symbol();
@@ -1214,11 +1311,16 @@ impl Receiver {
 /// Where training searches for alignment, and the whole window it trains on,
 /// as symbol ranges of the reference; for a second try, further into TRN and
 /// still inside the 512 symbols it is sent for at least.
+///
+/// Half-duplex trains on the five of PP's six periods that the alignment is
+/// searched over, and nothing else: the window ends with PP, and the first
+/// symbol made after it is TRN's first, or B1's.
 fn windows(reference: Reference, second: bool) -> ((usize, usize), (usize, usize)) {
     let trn = signals::PP_SYMBOLS;
     match (reference, second) {
         (Reference::PpThenTrn, false) => ((PP_SKIPPED, trn), (PP_SKIPPED, trn + TRN_AFTER_PP)),
-        (Reference::PpThenTrn, true) => ((trn + 256, trn + 512), (trn + 256, trn + 512)),
+        (Reference::PpThenTrnAt(_), false) | (Reference::Pp, _) => ((PP_SKIPPED, trn), (PP_SKIPPED, trn)),
+        (Reference::PpThenTrn | Reference::PpThenTrnAt(_), true) => ((trn + 256, trn + 512), (trn + 256, trn + 512)),
         (Reference::Trn(_), false) => ((TRN_SKIPPED, 256), (TRN_SKIPPED, TRN_ALONE)),
         (Reference::Trn(_), true) => ((TRN_ALONE - 64, 512), (TRN_ALONE - 64, 512)),
     }
@@ -1228,11 +1330,13 @@ fn windows(reference: Reference, second: bool) -> ((usize, usize), (usize, usize
 fn sequence(reference: Reference, far: Mode, length: usize) -> Vec<Complex> {
     let mut sender = signals::Sender::new(far);
     let point = |p: Point, size: Size| Complex::new(f64::from(p.0), f64::from(p.1)).scale(unit(size));
+    let pp = if matches!(reference, Reference::Trn(_)) { 0 } else { signals::PP_SYMBOLS };
     (0..length)
-        .map(|k| match reference {
-            Reference::PpThenTrn if k < signals::PP_SYMBOLS => signals::pp(k).into(),
-            Reference::PpThenTrn => point(sender.trn(Size::Four), Size::Four),
-            Reference::Trn(size) => point(sender.trn(size), size),
+        .map(|k| match reference.trn() {
+            _ if k < pp => signals::pp(k).into(),
+            Some(size) => point(sender.trn(size), size),
+            // Nothing trains on PP alone past its end.
+            None => Complex::ZERO,
         })
         .collect()
 }
@@ -1305,9 +1409,13 @@ fn bessel_i0(x: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::v34::data::{Decoder, Encoder, Params};
+    use crate::v34::dpsk;
+    use crate::v34::frame::Framing;
     use crate::v34::info::SymbolRate;
     use crate::v34::qam::Transmitter;
     use crate::v34::signals::{J_SIXTEEN, Reader, Sender};
+    use crate::v34::trellis::Code;
 
     const FS: f64 = 16_000.0;
 
@@ -1670,6 +1778,435 @@ mod tests {
                 let snr = heard.snr.unwrap_or_else(|| panic!("{rate:?} high {high} never trained"));
                 assert!(snr > 28.0, "{rate:?} high {high}: {snr:.1} dB");
                 assert!(heard.j.is_some(), "{rate:?} high {high}: no J");
+            }
+        }
+    }
+
+    /// A point of the four- or sixteen-point set at unit mean power.
+    fn at_unit(p: Point, size: Size) -> Complex {
+        Complex::new(f64::from(p.0), f64::from(p.1)).scale(unit(size))
+    }
+
+    /// Symbols out through a transmitter of their own, and its pulse played
+    /// out after them: one burst of a half-duplex source, whose symbol clock
+    /// and carrier owe nothing to any burst before it.
+    fn burst(band: Band, symbols: Vec<Complex>) -> Vec<f64> {
+        let mut tx = Transmitter::new(band, 0, 0, FS);
+        let total = symbols.len() as u64;
+        let mut symbols = VecDeque::from(symbols);
+        let mut out = Vec::new();
+        while tx.symbols() < total + 2 * Transmitter::lookahead() as u64 {
+            out.push(tx.next_sample(|| symbols.pop_front().unwrap_or(Complex::ZERO)));
+        }
+        out
+    }
+
+    /// The start of every burst of the primary channel: 70 ms of silence, S
+    /// for 128T, S-bar for 16T and PP (12.3.1.1, 12.5.1).
+    fn s_s_bar_pp(band: Band) -> Vec<Complex> {
+        let mut symbols = vec![Complex::ZERO; (0.070 * band.baud()) as usize];
+        symbols.extend((0..signals::S_SYMBOLS).map(|n| at_unit(signals::s(n), Size::Four)));
+        symbols.extend((0..signals::S_BAR_SYMBOLS).map(|n| at_unit(signals::s_bar(n), Size::Four)));
+        symbols.extend((0..signals::PP_SYMBOLS).map(|n| Complex::from(signals::pp(n))));
+        symbols
+    }
+
+    /// Half-duplex phase 3 from a source whose scrambler is `mode`'s: S,
+    /// S-bar, PP, and `trn` symbols of TRN at `size` (12.3.1).
+    fn hdx_phase3(band: Band, mode: Mode, size: Size, trn: usize) -> Vec<f64> {
+        let mut sender = Sender::new(mode);
+        let mut symbols = s_s_bar_pp(band);
+        symbols.extend((0..trn).map(|_| at_unit(sender.trn(size), size)));
+        burst(band, symbols)
+    }
+
+    /// Data mode at `primary` bit/s, as a source whose scrambler is `mode`'s
+    /// sends it with no precoding.
+    fn data_mode(rate: SymbolRate, primary: u32, code: Code, mode: Mode) -> Params {
+        let framing = Framing::new(rate, primary, false, false).expect("a rate Table 8 has");
+        Params { framing, code, nonlinear: false, precoding: [(0, 0); 3], mode }
+    }
+
+    /// A page as the source sends it: S, S-bar and PP, B1 (10.1.3.1), `data`,
+    /// and 35 ms of ones to turn off (12.5.1, 12.5.3.1) -- all of it turned
+    /// `turn` radians, for a carrier phase of the page's own.
+    fn page(band: Band, params: Params, data: &[bool], turn: f64) -> Vec<f64> {
+        burst(band, page_symbols(band, params, data, turn))
+    }
+
+    /// The same page's symbols, before they go through a transmitter.
+    fn page_symbols(band: Band, params: Params, data: &[bool], turn: f64) -> Vec<Complex> {
+        let mut symbols = s_s_bar_pp(band);
+        let mut encoder = Encoder::new(params);
+        for _ in 0..params.framing.symbols_per_data_frame() {
+            symbols.push(encoder.next_symbol(&mut || true));
+        }
+        let (mut next, mut taken) = (data.iter().copied(), 0);
+        while taken < data.len() {
+            symbols.push(encoder.next_symbol(&mut || {
+                taken += 1;
+                next.next().unwrap_or(true)
+            }));
+        }
+        for _ in 0..(0.035 * band.baud()).ceil() as usize {
+            symbols.push(encoder.next_symbol(&mut || true));
+        }
+        let spin = Complex::from_polar(1.0, turn);
+        symbols.into_iter().map(|s| s * spin).collect()
+    }
+
+    /// The control channel between bursts, as far as the primary channel's
+    /// receiver is concerned: `seconds` of something else at 600 baud from the
+    /// source, on 1200 Hz from a call modem and on 2400 Hz with the guard tone
+    /// from an answer modem (10.2.4).
+    fn control(side: dpsk::Side, seconds: f64) -> Vec<f64> {
+        let mut tx = dpsk::Transmitter::new(side, FS);
+        tx.send(&random_bits((seconds * dpsk::BAUD) as usize, 0x0bad_cafe));
+        tx.silence();
+        let mut out = Vec::new();
+        while tx.is_sending() {
+            out.push(tx.next_sample());
+        }
+        out
+    }
+
+    fn random_bits(count: usize, mut seed: u32) -> Vec<bool> {
+        (0..count)
+            .map(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                seed & 1 == 1
+            })
+            .collect()
+    }
+
+    /// What a half-duplex recipient made of phase 3 and the pages after it.
+    #[derive(Default)]
+    struct Heard12 {
+        phase3_snr: Option<f64>,
+        /// TRN's bits once the descrambler had filled, how many of them were
+        /// ones, and the squared error of every TRN symbol made.
+        trn_bits: usize,
+        trn_ones: usize,
+        trn_errors: Vec<f64>,
+        /// Trainings on PP alone that found no PP where S-bar said.
+        untrained: usize,
+        /// For each page: what training on its PP came to, the bits decoded
+        /// from the first symbol after PP on, and the squared errors of the
+        /// symbols against the data grid.
+        page_snrs: Vec<f64>,
+        pages: Vec<Vec<bool>>,
+        page_errors: Vec<Vec<f64>>,
+    }
+
+    /// Hear `samples` as a half-duplex recipient: phase 3 trained on
+    /// `phase3`'s reference and TRN read for its length (12.3.2), if there is
+    /// a phase 3, and idle once TRN is over by the count; then at each of
+    /// `hunts` a hunt for a page's S, training on its PP alone, and data mode
+    /// read with `params` from the symbol after PP on (12.5.2).
+    fn recipient(samples: &[f64], band: Band, far: Mode, phase3: Option<(Reference, usize)>, hunts: &[usize], params: Option<Params>) -> Heard12 {
+        let mut rx = Receiver::new(band, FS);
+        let mut heard = Heard12::default();
+        let mut reader = Reader::new(far);
+        let size = phase3.and_then(|(reference, _)| reference.trn()).unwrap_or(Size::Four);
+        let (mut in_phase3, mut trn_left, mut read) = (phase3.is_some(), 0, 0);
+        let mut decoder: Option<Decoder> = None;
+        let mut hunts = hunts.iter().copied().peekable();
+        if in_phase3 {
+            rx.hunt();
+        }
+        for (i, &x) in samples.iter().enumerate() {
+            if hunts.next_if_eq(&i).is_some() {
+                in_phase3 = false;
+                decoder = None;
+                rx.hunt();
+            }
+            rx.feed(x);
+            while let Some(event) = rx.heard() {
+                match event {
+                    Heard::S => {}
+                    Heard::Reversal { at } => match phase3 {
+                        Some((reference, _)) if in_phase3 => rx.train(reference, far, at),
+                        _ => rx.train(Reference::Pp, far, at),
+                    },
+                    Heard::Trained { snr_db } if in_phase3 => {
+                        heard.phase3_snr = Some(snr_db);
+                        // What of TRN training took in, if any; the symbols
+                        // made from here on are the rest of it.
+                        let (reference, trn) = phase3.expect("phase 3");
+                        let taken = windows(reference, false).1.1 - signals::PP_SYMBOLS;
+                        trn_left = trn - taken;
+                        if trn_left == 0 {
+                            rx.idle();
+                        }
+                    }
+                    Heard::Trained { snr_db } => {
+                        let params = params.expect("pages come with their data mode");
+                        let fresh = Decoder::new(params);
+                        rx.set_grid(fresh.grid_scale(), fresh.extent());
+                        decoder = Some(fresh);
+                        heard.page_snrs.push(snr_db);
+                        heard.pages.push(Vec::new());
+                        heard.page_errors.push(Vec::new());
+                    }
+                    Heard::Untrained if in_phase3 => panic!("phase 3 did not train"),
+                    // The receiver is hunting again already.
+                    Heard::Untrained => heard.untrained += 1,
+                    Heard::Symbol(symbol) => {
+                        if let Some(decoder) = decoder.as_mut() {
+                            decoder.feed(symbol.point);
+                            heard.pages.last_mut().expect("a page").extend(decoder.take_bits());
+                            heard.page_errors.last_mut().expect("a page").push(symbol.error);
+                        } else if in_phase3 && trn_left > 0 {
+                            let bits = reader.trn(symbol.decided, size);
+                            heard.trn_errors.push(symbol.error);
+                            // The descrambler fills on the first 23 bits.
+                            read += 1;
+                            if read > 12 {
+                                heard.trn_bits += bits.len();
+                                heard.trn_ones += bits.iter().filter(|b| **b).count();
+                            }
+                            trn_left -= 1;
+                            if trn_left == 0 {
+                                // 12.3.2.3: TRN is over by the count, and the
+                                // control channel is next.
+                                rx.idle();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        heard
+    }
+
+    /// Signal to noise over squared errors, in decibels.
+    fn snr_of(errors: &[f64]) -> f64 {
+        -10.0 * (errors.iter().sum::<f64>() / errors.len().max(1) as f64).log10()
+    }
+
+    /// Bits a page decoded that are not what went: B1's data frame of ones
+    /// first (10.1.3.1), and then `data`.
+    fn wrong_bits(params: Params, data: &[bool], got: &[bool]) -> usize {
+        let b1 = params.framing.n;
+        let sent = std::iter::repeat_n(true, b1).chain(data.iter().copied());
+        let wrong = sent.zip(got).filter(|(a, b)| a != *b).count();
+        wrong + (b1 + data.len()).saturating_sub(got.len())
+    }
+
+    /// The signal to noise of a page's data, from its errors: over the middle
+    /// of the symbols B1 and `bits` of data take, and none of what came after.
+    fn data_snr(params: Params, bits: usize, errors: &[f64]) -> f64 {
+        let f = &params.framing;
+        let symbols = (f.n + bits) * f.symbols_per_data_frame() / f.n;
+        snr_of(&errors[symbols / 4..(3 * symbols / 4).min(errors.len())])
+    }
+
+    /// The fastest data mode each symbol rate has (Table 8).
+    fn fastest(rate: SymbolRate) -> u32 {
+        match rate {
+            SymbolRate::S2400 => 21_600,
+            SymbolRate::S2743 | SymbolRate::S2800 => 26_400,
+            SymbolRate::S3000 => 28_800,
+            SymbolRate::S3200 => 31_200,
+            SymbolRate::S3429 => 33_600,
+        }
+    }
+
+    #[test]
+    fn half_duplex_phase_3_trains_on_sixteen_point_trn_as_well_as_on_four() {
+        // INFOh's bit 30 asks for TRN at sixteen points (10.2.3.4). Against
+        // duplex phase 3's training at four -- PP and 64 symbols of TRN -- with
+        // the far clock 50 ppm off this one's, where TRN's rows cost the most.
+        for rate in SymbolRate::ALL {
+            let band = Band::new(rate, rate == SymbolRate::S3200);
+            let trn = 2000;
+            let mut results = Vec::new();
+            for reference in [Reference::PpThenTrn, Reference::PpThenTrnAt(Size::Four), Reference::PpThenTrnAt(Size::Sixteen)] {
+                let sent = hdx_phase3(band, Mode::Call, reference.trn().expect("TRN"), trn);
+                let heard = recipient(&line(&sent, 50.0, 10.0, 45.0), band, Mode::Call, Some((reference, trn)), &[], None);
+                let trained = heard.phase3_snr.unwrap_or_else(|| panic!("{rate:?} {reference:?} never trained"));
+                let made = heard.trn_errors.len();
+                assert_eq!(made, trn - windows(reference, false).1.1 + signals::PP_SYMBOLS, "{rate:?} {reference:?}: TRN's symbols");
+                assert_eq!(heard.trn_ones, heard.trn_bits, "{rate:?} {reference:?}: TRN not all ones");
+                results.push((trained, snr_of(&heard.trn_errors[made / 2..])));
+            }
+            let [(duplex, duplex_tracked), (four, _), (sixteen, sixteen_tracked)] = results[..] else { unreachable!() };
+            assert!(duplex > 40.0, "{rate:?}: duplex phase 3 trained to {duplex:.1} dB");
+            assert!(sixteen >= duplex, "{rate:?}: sixteen points trained to {sixteen:.2} dB, duplex's four {duplex:.2} dB");
+            assert!((sixteen - four).abs() < 0.1, "{rate:?}: sixteen points {sixteen:.2} dB, four {four:.2} dB");
+            // Followed through TRN, sixteen points come out a few tenths of a
+            // decibel under four.
+            assert!(sixteen_tracked > duplex_tracked - 1.0, "{rate:?}: tracked {sixteen_tracked:.2} dB, duplex's {duplex_tracked:.2} dB");
+        }
+    }
+
+    #[test]
+    fn trn_is_followed_for_as_long_as_infoh_can_ask_and_for_none_at_all() {
+        // INFOh's bits 15 to 21 give TRN in steps of 35 ms from none to 127:
+        // 4.445 s at the most, which Figures 23 and 24 as corrected allow.
+        // All of it is read, from a clock 114 ppm off, and none at all trains
+        // as well: training is on PP.
+        let band = Band::new(SymbolRate::S3429, true);
+        for steps in [127.0, 0.0] {
+            let trn = (steps * 0.035 * band.baud()) as usize;
+            let mut sent = hdx_phase3(band, Mode::Answer, Size::Sixteen, trn);
+            // The 70 ms of silence before the control channel (12.4.1.1).
+            sent.extend(std::iter::repeat_n(0.0, (0.070 * FS) as usize));
+            let reference = Reference::PpThenTrnAt(Size::Sixteen);
+            let heard = recipient(&line(&sent, 114.0, 15.0, 45.0), band, Mode::Answer, Some((reference, trn)), &[], None);
+            let trained = heard.phase3_snr.expect("never trained");
+            assert!(trained > 35.0, "{steps} steps: trained to {trained:.1} dB");
+            assert_eq!(heard.trn_errors.len(), trn, "{steps} steps: TRN's symbols");
+            assert_eq!(heard.trn_ones, heard.trn_bits, "{steps} steps: TRN not all ones");
+            if trn > 0 {
+                let late = snr_of(&heard.trn_errors[trn - 2000..]);
+                assert!(late > 40.0, "tracked to {late:.1} dB at the end of TRN");
+            }
+        }
+    }
+
+    #[test]
+    fn a_page_resyncs_on_pp_alone_at_every_symbol_rate_and_is_read_from_b1() {
+        // Phase 3; three seconds of the control channel, with the receiver
+        // idle; and then a page, from a transmitter of its own started a
+        // fraction of a symbol off phase 3's clock, on a carrier turned round:
+        // nothing phase 3 left of the timing or the phase is any use. The hunt
+        // begins half a second before the page, in the control channel -- an
+        // answer modem's in one case in three, whose guard tone, alone for a
+        // moment at its end, passes for S-bar at three of these carriers.
+        for (r, rate) in SymbolRate::ALL.into_iter().enumerate() {
+            for (variant, (shift, turn)) in [(0usize, 0.0), (1, 2.2), (3, 4.1)].into_iter().enumerate() {
+                let band = Band::new(rate, (r + variant) % 2 == 1);
+                let (side, far) = if variant == 1 { (dpsk::Side::Answer, Mode::Answer) } else { (dpsk::Side::Call, Mode::Call) };
+                let params = data_mode(rate, fastest(rate), Code::States16, far);
+                let data = random_bits(fastest(rate) as usize / 2, 0x1234_5679 + variant as u32);
+                let mut sent = hdx_phase3(band, far, Size::Sixteen, 1000);
+                sent.extend(control(side, 3.0));
+                sent.extend(std::iter::repeat_n(0.0, shift));
+                let page_at = sent.len();
+                sent.extend(page(band, params, &data, turn));
+                sent.extend(std::iter::repeat_n(0.0, FS as usize / 5));
+                let hunt = page_at - FS as usize / 2;
+                let reference = Reference::PpThenTrnAt(Size::Sixteen);
+                let heard = recipient(&line(&sent, 0.0, 10.0, 50.0), band, far, Some((reference, 1000)), &[hunt], Some(params));
+                let what = format!("{rate:?} high {} shift {shift} turn {turn}", band.high_carrier);
+                let phase3 = heard.phase3_snr.unwrap_or_else(|| panic!("{what}: phase 3 never trained"));
+                assert_eq!(heard.page_snrs.len(), 1, "{what}: pages trained");
+                let resync = heard.page_snrs[0];
+                // PP alone does as well as phase 3 did, from nothing.
+                assert!(resync > phase3 - 1.5, "{what}: resync {resync:.1} dB, phase 3 {phase3:.1} dB");
+                let errors = &heard.page_errors[0];
+                let tracked = data_snr(params, data.len(), errors);
+                assert!(tracked > 45.0, "{what}: data at {tracked:.1} dB");
+                let wrong = wrong_bits(params, &data, &heard.pages[0]);
+                assert_eq!(wrong, 0, "{what}: {wrong} bits wrong of B1 and {}", data.len());
+            }
+        }
+    }
+
+    #[test]
+    fn pages_resync_through_noise_a_clock_offset_and_slips_between_them() {
+        // Four pages, each after two to four seconds of the control channel
+        // with a jitter buffer's slip somewhere in it, over a line 33 dB above
+        // its noise and a far clock tens of ppm off: every page trains on its
+        // PP alone to about what phase 3 did, 37 dB, and decodes from B1 on
+        // without a bit wrong.
+        for (rate, primary, ppm) in [(SymbolRate::S3429, 28_800, 40.0), (SymbolRate::S2400, 19_200, -70.0), (SymbolRate::S3000, 24_000, 25.0)] {
+            let band = Band::new(rate, false);
+            let far = Mode::Call;
+            let params = data_mode(rate, primary, Code::States64, far);
+            let mut sent = hdx_phase3(band, far, Size::Four, 600);
+            let (mut hunts, mut datas) = (Vec::new(), Vec::new());
+            for (n, (seconds, inserted, turn)) in [(2.0, true, 0.7), (4.0, false, 3.0), (2.5, true, 5.1), (3.0, false, 1.9)].into_iter().enumerate() {
+                let gap = sent.len();
+                sent.extend(control(dpsk::Side::Call, seconds));
+                slip(&mut sent, gap + (seconds * FS / 2.0) as usize, inserted);
+                // Hunting from the end of the control channel, as a recipient
+                // that has heard it stop would.
+                hunts.push(((sent.len() as f64) * (1.0 + ppm * 1e-6)) as usize);
+                let data = random_bits(primary as usize / 3, 77 + n as u32);
+                sent.extend(page(band, params, &data, turn));
+                datas.push(data);
+            }
+            sent.extend(std::iter::repeat_n(0.0, FS as usize / 5));
+            let reference = Reference::PpThenTrnAt(Size::Four);
+            let heard = recipient(&line(&sent, ppm, 20.0, 33.0), band, far, Some((reference, 600)), &hunts, Some(params));
+            assert_eq!(heard.page_snrs.len(), datas.len(), "{rate:?} at {ppm} ppm: pages trained {:?}", heard.page_snrs);
+            let phase3 = heard.phase3_snr.expect("phase 3 trained");
+            for (n, data) in datas.iter().enumerate() {
+                let (snr, errors) = (heard.page_snrs[n], &heard.page_errors[n]);
+                assert!(snr > 35.0 && snr > phase3 - 1.0, "{rate:?} page {n}: resync {snr:.1} dB, phase 3 {phase3:.1} dB");
+                let tracked = data_snr(params, data.len(), errors);
+                let wrong = wrong_bits(params, data, &heard.pages[n]);
+                assert_eq!(wrong, 0, "{rate:?} at {ppm} ppm, page {n} ({snr:.1} dB, data {tracked:.1} dB): {wrong} bits wrong");
+            }
+        }
+    }
+
+    #[test]
+    fn a_receiver_nothing_trained_resyncs_on_a_page_alone() {
+        // Nothing kept from before: no taps, no carrier, no timing. PP alone
+        // is all a resynchronisation has to go on, and it is enough. And the
+        // grid may be set as soon as training begins, rather than once it is
+        // done, with the same symbols from B1's first on.
+        let band = Band::new(SymbolRate::S3429, true);
+        let params = data_mode(SymbolRate::S3429, 33_600, Code::States32, Mode::Answer);
+        let data = random_bits(20_000, 5);
+        let mut sent = page(band, params, &data, 1.0);
+        sent.extend(std::iter::repeat_n(0.0, FS as usize / 5));
+        let mut rx = Receiver::new(band, FS);
+        rx.hunt();
+        let mut decoder = Decoder::new(params);
+        let (mut trained, mut bits) = (None, Vec::new());
+        for x in line(&sent, -30.0, 10.0, 50.0) {
+            rx.feed(x);
+            while let Some(heard) = rx.heard() {
+                match heard {
+                    Heard::S => {}
+                    Heard::Reversal { at } => {
+                        rx.train(Reference::Pp, Mode::Answer, at);
+                        rx.set_grid(decoder.grid_scale(), decoder.extent());
+                    }
+                    Heard::Trained { snr_db } => trained = Some(snr_db),
+                    Heard::Untrained => panic!("did not train"),
+                    Heard::Symbol(symbol) => {
+                        assert!(trained.is_some(), "a symbol before training");
+                        decoder.feed(symbol.point);
+                        bits.extend(decoder.take_bits());
+                    }
+                }
+            }
+        }
+        let trained = trained.expect("never trained");
+        assert!(trained > 45.0, "trained to {trained:.1} dB");
+        assert_eq!(wrong_bits(params, &data, &bits), 0);
+    }
+
+    #[test]
+    fn an_s_bar_that_pp_does_not_follow_is_hunted_past() {
+        // S and S-bar with no PP after them, and a page close behind, whose S
+        // comes while PP is still being looked for where the first S-bar put
+        // it. Straight after that S-bar, the page's S-bar is found again in
+        // what the receiver kept; 70 ms and more after it, the page's S is
+        // found there or as it comes, and its S-bar as it comes.
+        for rate in [SymbolRate::S2400, SymbolRate::S3429] {
+            for silent in [false, true] {
+                let band = Band::new(rate, false);
+                let params = data_mode(rate, 14_400, Code::States16, Mode::Call);
+                let data = random_bits(10_000, 9);
+                let mut symbols: Vec<Complex> = (0..60).map(|n| at_unit(signals::s(n), Size::Four)).collect();
+                symbols.extend((0..signals::S_BAR_SYMBOLS).map(|n| at_unit(signals::s_bar(n), Size::Four)));
+                let page = page_symbols(band, params, &data, 0.0);
+                let skipped = if silent { 0 } else { (0.070 * band.baud()) as usize };
+                symbols.extend(&page[skipped..]);
+                let mut sent = burst(band, symbols);
+                sent.extend(std::iter::repeat_n(0.0, FS as usize / 5));
+                let heard = recipient(&line(&sent, 0.0, 10.0, 45.0), band, Mode::Call, None, &[0], Some(params));
+                assert_eq!(heard.untrained, 1, "{rate:?} silent {silent}: the first S-bar");
+                assert_eq!(heard.page_snrs.len(), 1, "{rate:?} silent {silent}: the page's");
+                assert_eq!(wrong_bits(params, &data, &heard.pages[0]), 0, "{rate:?} silent {silent}");
             }
         }
     }
