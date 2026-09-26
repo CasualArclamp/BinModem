@@ -24,6 +24,7 @@ pub mod control;
 pub mod data;
 pub mod dpsk;
 pub mod frame;
+pub mod halfduplex;
 pub mod info;
 pub mod mp;
 pub mod phase2;
