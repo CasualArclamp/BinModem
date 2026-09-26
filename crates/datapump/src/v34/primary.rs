@@ -32,7 +32,7 @@ use super::signals::{self, Reader, Sender, Size};
 use super::trellis::Code;
 use crate::v32::Mode;
 
-/// "Silence for 70 ± 5 ms" before S, in phase 3 and before every page
+/// "Silence for 70 +/- 5 ms" before S, in phase 3 and before every page
 /// (12.3.1.1, 12.5.1).
 const SILENCE_SECONDS: f64 = 0.070;
 
@@ -1169,6 +1169,8 @@ mod tests {
         /// Each page's bits, from B1's end.
         pages: Vec<Vec<bool>>,
         trn_share: f64,
+        /// Slips the receiver found and followed.
+        slips: u32,
     }
 
     impl Received {
@@ -1223,6 +1225,7 @@ mod tests {
                 page.extend(rx.take_bits());
             }
         }
+        received.slips = rx.slips();
         received
     }
 
@@ -1301,4 +1304,282 @@ mod tests {
         }
     }
 
+    /// A jitter buffer's slip at sample `at`: twenty milliseconds made up --
+    /// the twenty before, faded across both joins as concealment does -- or
+    /// twenty dropped.
+    fn slip(samples: &mut Vec<f64>, at: usize, inserted: bool) {
+        let n = (0.020 * FS) as usize;
+        if inserted {
+            let fade = 40;
+            let mut made: Vec<f64> = samples[at - n..at].to_vec();
+            for (i, x) in made.iter_mut().enumerate() {
+                let edge = i.min(n - 1 - i);
+                if edge < fade {
+                    *x *= edge as f64 / fade as f64;
+                }
+            }
+            samples.splice(at..at, made);
+        } else {
+            samples.drain(at..at + n);
+        }
+    }
+
+    /// Where `needle` first occurs in `haystack`.
+    fn find(haystack: &[bool], needle: &[bool]) -> Option<usize> {
+        haystack.windows(needle.len()).position(|w| w == needle)
+    }
+
+    /// One page from a source that has done phase 3 and a spell of the
+    /// control channel: the samples, and the samples at which the source was
+    /// asked for the page's first data symbol and began carrying its last
+    /// symbol out.
+    fn one_page(channel: Channel, mode: Mode, data: DataMode, bits: &[bool]) -> (Vec<f64>, usize, usize) {
+        let mut source = Source::new(channel, mode, FS);
+        source.phase3();
+        let (mut out, _) = burst(&mut source);
+        out.extend(std::iter::repeat_n(0.0, (0.070 * FS) as usize));
+        out.extend(control(mode, 0.5));
+        out.extend(std::iter::repeat_n(0.0, FS as usize / 2));
+        assert!(source.page(data));
+        source.push_bits(bits);
+        source.end_page();
+        let (samples, changes) = burst(&mut source);
+        let at = |wanted: Sending| out.len() + changes.iter().find(|(_, s)| *s == wanted).expect("the segment").0;
+        let (start, end) = (at(Sending::Data), at(Sending::Flushing));
+        out.extend(samples);
+        out.extend(std::iter::repeat_n(0.0, FS as usize / 2));
+        (out, start, end)
+    }
+
+    #[test]
+    fn a_slip_inside_a_page_costs_only_the_bits_in_flight() {
+        // Twenty milliseconds made up or dropped by a jitter buffer a second
+        // and a half into a page: the receiver finds the jump and the acquirer
+        // the frames after it, and everything before the slip, and from a
+        // second after it to the end, is right bit for bit.
+        for (rate, bits_per_second, inserted, ppm) in [
+            (SymbolRate::S3429, 28_800, true, 40.0),
+            (SymbolRate::S3429, 28_800, false, -30.0),
+            (SymbolRate::S2743, 21_600, false, 55.0),
+            (SymbolRate::S2800, 14_400, true, 0.0),
+            (SymbolRate::S3200, 24_000, false, -45.0),
+        ] {
+            let channel = channel(rate, false, Size::Four, 3);
+            let data = data_mode(bits_per_second, Code::States64);
+            let bits = random_bits(3 * bits_per_second as usize, 21);
+            let (mut sent, start, _) = one_page(channel, Mode::Call, data, &bits);
+            let at = 1.5;
+            slip(&mut sent, start + (at * FS) as usize, inserted);
+            let heard = listen(&line(&sent, ppm, 15.0, noise_for(bits_per_second) - 2.0, 0.020), channel, Mode::Call, Some(data));
+            let what = format!("{rate:?} at {bits_per_second}, inserted {inserted}");
+            assert_eq!(heard.page_starts().len(), 1, "{what}: pages");
+            assert_eq!(heard.page_ends().len(), 1, "{what}: ends");
+            assert_eq!(heard.slips, 1, "{what}: slips followed");
+            let got = &heard.pages[0];
+            // Up to the slip, less a frame and the decoder's traceback.
+            let before = ((at - 0.05) * bits_per_second as f64) as usize;
+            assert_eq!(wrong_bits(&bits[..before], got), 0, "{what}: bits wrong before the slip");
+            // From a second after it: found again in what was decoded, and
+            // right from there to the end.
+            let from = ((at + 1.0) * bits_per_second as f64) as usize;
+            let tail = &bits[from..];
+            let found = find(&got[before..], &tail[..64]).unwrap_or_else(|| panic!("{what}: the page after the slip is not there")) + before;
+            assert_eq!(wrong_bits(tail, &got[found..]), 0, "{what}: bits wrong after the slip");
+            // What went: the slip, the receiver's finding it, and the
+            // search's superframe -- under a second's worth.
+            assert!(found <= from, "{what}: {} bits more decoded than sent", found - from);
+            assert!(from - found < bits_per_second as usize, "{what}: {} bits lost to the slip", from - found);
+        }
+    }
+
+    #[test]
+    fn a_page_the_size_of_an_ecm_block_arrives_whole() {
+        // 256 frames of 256 octets with their flags, addresses, controls,
+        // frame numbers and checks, and three RCPs (T.4 Annex A): about
+        // 70 000 octets, 16.7 s at 33 600 bit/s. Every bit, at the fastest
+        // rate with expanded shaping and at 28 800 on 3000 baud, the clocks
+        // 45 and 55 ppm apart.
+        for (rate, bits_per_second, code, expanded, ppm) in
+            [(SymbolRate::S3429, 33_600, Code::States64, true, 45.0), (SymbolRate::S3000, 28_800, Code::States32, false, -55.0)]
+        {
+            let channel = channel(rate, true, Size::Sixteen, 8);
+            let data = DataMode { expanded, ..data_mode(bits_per_second, code) };
+            let bits = random_bits(70_000 * 8, 31);
+            let (sent, _) = call(channel, Mode::Call, data, &[(1.0, bits.clone())]);
+            let heard = listen(&line(&sent, ppm, 10.0, noise_for(bits_per_second), 0.050), channel, Mode::Call, Some(data));
+            let what = format!("{rate:?} at {bits_per_second}");
+            assert_eq!(heard.phase3_well(), Some(true), "{what}");
+            let starts = heard.page_starts();
+            assert_eq!(starts.len(), 1, "{what}: pages started {starts:?}");
+            assert_eq!(starts[0].1, 0, "{what}: B1 errors");
+            assert_eq!(heard.page_ends().len(), 1, "{what}: pages ended");
+            assert_eq!(heard.slips, 0, "{what}: slips");
+            let wrong = wrong_bits(&bits, &heard.pages[0]);
+            assert_eq!(wrong, 0, "{what}: {wrong} bits wrong of {} ({} decoded)", bits.len(), heard.pages[0].len());
+        }
+    }
+
+    /// `samples` faded by `depth_db` from `from` for `seconds`, eased in and
+    /// out over 10 ms.
+    fn fade(samples: &mut [f64], from: usize, seconds: f64, depth_db: f64) {
+        let ramp = (0.010 * FS) as usize;
+        let length = (seconds * FS) as usize;
+        let floor = 10f64.powf(-depth_db / 20.0);
+        for i in 0..length {
+            let edge = i.min(length - 1 - i);
+            let eased = if edge < ramp { 0.5 - 0.5 * (std::f64::consts::PI * edge as f64 / ramp as f64).cos() } else { 1.0 };
+            samples[from + i] *= 1.0 - eased * (1.0 - floor);
+        }
+    }
+
+    #[test]
+    fn the_end_of_a_page_is_seen_inside_25_ms_and_a_fade_is_not_an_end() {
+        // 6.6.2: circuit 109 off 20 to 25 ms after the level falls, measured
+        // here from the last symbol's centre on the line; and not off for a
+        // carrier that dips 6 or 10 dB for 300 ms, the deeper of them 2 dB
+        // above the threshold.
+        for (rate, bits_per_second) in [(SymbolRate::S2400, 16_800), (SymbolRate::S3000, 24_000), (SymbolRate::S3429, 31_200)] {
+            let channel = channel(rate, rate == SymbolRate::S3000, Size::Four, 2);
+            let data = data_mode(bits_per_second, Code::States16);
+            let bits = random_bits((1.2 * bits_per_second as f64) as usize, 41);
+            let (sent, start, end) = one_page(channel, Mode::Answer, data, &bits);
+            for depth_db in [0.0, 6.0, 10.0] {
+                let (ppm, delay) = (30.0, 0.025);
+                let mut samples = line(&sent, ppm, 12.0, 40.0, delay);
+                let on_line = |at: usize| (at as f64 * (1.0 + ppm * 1e-6) + delay * FS) as usize;
+                if depth_db > 0.0 {
+                    fade(&mut samples, on_line(start) + (0.5 * FS) as usize, 0.3, depth_db);
+                }
+                let heard = listen(&samples, channel, Mode::Answer, Some(data));
+                let what = format!("{rate:?} at {bits_per_second}, fade {depth_db} dB");
+                assert_eq!(heard.page_starts().len(), 1, "{what}: pages started");
+                let ends = heard.page_ends();
+                assert_eq!(ends.len(), 1, "{what}: the page ended {} times", ends.len());
+                let last = on_line(end) as f64 + Transmitter::lookahead() as f64 * samples_per_symbol(channel.band);
+                let latency = (ends[0] as f64 - last) / FS * 1000.0;
+                assert!((18.0..=25.5).contains(&latency), "{what}: the end seen {latency:.1} ms after the last symbol");
+                if depth_db == 0.0 {
+                    assert_eq!(wrong_bits(&bits, &heard.pages[0]), 0, "{what}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn trn_of_sixteen_points_for_127_steps_and_of_no_length_at_all_train() {
+        // INFOh's TRN at sixteen points for the 4.445 s of 127 steps: read,
+        // all ones, and phase 3 over at the count. And TRN of no length, at
+        // either size: trained on PP, and over at once.
+        for (rate, size, steps) in [
+            (SymbolRate::S3429, Size::Sixteen, 127),
+            (SymbolRate::S2400, Size::Sixteen, 127),
+            (SymbolRate::S3429, Size::Four, 0),
+            (SymbolRate::S2400, Size::Sixteen, 0),
+        ] {
+            let channel = channel(rate, rate == SymbolRate::S3429, size, steps);
+            let mut source = Source::new(channel, Mode::Answer, FS);
+            source.phase3();
+            let (mut sent, changes) = burst(&mut source);
+            let trn_end = changes.iter().find(|(_, s)| *s == Sending::Flushing).expect("the flush").0;
+            sent.extend(std::iter::repeat_n(0.0, FS as usize / 4));
+            let (ppm, delay) = (-80.0, 0.010);
+            let heard = listen(&line(&sent, ppm, 10.0, 42.0, delay), channel, Mode::Answer, None);
+            let what = format!("{rate:?} {size:?} x {steps}");
+            let trained = heard
+                .events
+                .iter()
+                .find_map(|(_, e)| match e {
+                    Event::Trained { snr_db } => Some(*snr_db),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("{what}: never trained"));
+            assert!(trained > 35.0, "{what}: trained to {trained:.1} dB");
+            assert_eq!(heard.phase3_well(), Some(true), "{what}: {:?}", heard.events);
+            let over = heard.at(|e| matches!(e, Event::Phase3Over { .. }))[0];
+            let expected = trn_end as f64 * (1.0 + ppm * 1e-6) + delay * FS;
+            let late = (over as f64 - expected) / FS * 1000.0;
+            assert!((-10.0..=40.0).contains(&late), "{what}: phase 3 over {late:.1} ms after TRN's end");
+            if steps > 0 {
+                assert!((heard.trn_share - 1.0).abs() < 1e-9, "{what}: TRN ones {:.4}", heard.trn_share);
+            }
+        }
+    }
+
+    #[test]
+    fn phase_3_is_not_well_without_s_in_2000_ms_or_with_a_trn_that_is_not_trn() {
+        let rate = SymbolRate::S3200;
+        let channel = channel(rate, false, Size::Sixteen, 6);
+        // Nothing but noise: 12.3.3's 2000 ms, and then the recovery.
+        let silence = vec![0.0; (2.5 * FS) as usize];
+        let heard = listen(&line(&silence, 0.0, 10.0, 40.0, 0.0), channel, Mode::Call, None);
+        assert!(heard.events.iter().all(|(_, e)| !matches!(e, Event::Trained { .. })), "trained on noise");
+        let over = heard.at(|e| matches!(e, Event::Phase3Over { well: false }));
+        assert_eq!(over.len(), 1, "{:?}", heard.events);
+        let at = over[0] as f64 / FS;
+        assert!((1.99..=2.01).contains(&at), "phase 3 given up at {at:.3} s");
+        // S, S-bar and PP as they should be, and random sixteen-point symbols
+        // for TRN's length: PP trains, and TRN does not descramble to ones.
+        let mut symbols: Vec<Complex> = vec![Complex::ZERO; channel.silence_symbols()];
+        symbols.extend((0..signals::S_SYMBOLS).map(|n| grid(signals::s(n), Size::Four)));
+        symbols.extend((0..signals::S_BAR_SYMBOLS).map(|n| grid(signals::s_bar(n), Size::Four)));
+        symbols.extend((0..signals::PP_SYMBOLS).map(|n| Complex::from(signals::pp(n))));
+        let random = random_bits(4 * channel.trn_symbols(), 77);
+        symbols.extend(random.chunks(4).map(|b| {
+            let axis = |outer: bool, negative: bool| if outer { 3 } else { 1 } * if negative { -1 } else { 1 };
+            grid((axis(b[0], b[1]), axis(b[2], b[3])), Size::Sixteen)
+        }));
+        let mut tx = Transmitter::new(channel.band, 0, 0, FS);
+        let total = symbols.len() as u64;
+        let mut symbols = VecDeque::from(symbols);
+        let mut sent = Vec::new();
+        while tx.symbols() < total + 2 * Transmitter::lookahead() as u64 {
+            sent.push(tx.next_sample(|| symbols.pop_front().unwrap_or(Complex::ZERO)));
+        }
+        sent.extend(std::iter::repeat_n(0.0, FS as usize / 4));
+        let heard = listen(&line(&sent, 20.0, 10.0, 40.0, 0.0), channel, Mode::Call, None);
+        assert!(heard.events.iter().any(|(_, e)| matches!(e, Event::Trained { .. })), "PP did not train");
+        assert_eq!(heard.phase3_well(), Some(false), "{:?}", heard.events);
+        assert!(heard.trn_share < 0.9, "TRN ones {:.3}", heard.trn_share);
+        // And TRN at four points where sixteen were asked, as an INFOh misread
+        // would have it: the point's own bits come out as noise.
+        let mut source = Source::new(Channel { trn_size: Size::Four, ..channel }, Mode::Call, FS);
+        source.phase3();
+        let (mut sent, _) = burst(&mut source);
+        sent.extend(std::iter::repeat_n(0.0, FS as usize / 4));
+        let heard = listen(&line(&sent, 0.0, 10.0, 40.0, 0.0), channel, Mode::Call, None);
+        assert_eq!(heard.phase3_well(), Some(false), "four-point TRN read as sixteen: {:?}", heard.events);
+        assert!(heard.trn_share < 0.9, "TRN ones {:.3}", heard.trn_share);
+    }
+
+    #[test]
+    fn a_slip_of_whole_symbols_and_cycles_at_2400_or_3000_baud_leaves_no_jump_to_find() {
+        // Twenty milliseconds is 48 symbols at 2400 baud and 60 at 3000, and
+        // 32, 36 or 40 whole cycles of their carriers: twenty milliseconds
+        // dropped, or made up with only concealment's fades to show for it,
+        // leaves no jump in the timing or the carrier's phase, and the
+        // receiver's loops see nothing. Nor does the decoder's cost say much:
+        // the trellis carries on, and only Table 12's inversions, now half a
+        // data frame out, cost it anything. At 2400 baud the mapping frames
+        // still line up, so the bits after the slip come out right except
+        // where the inversions disagree; at 3000 they are half a frame out
+        // and the rest of the burst is wrong. T.30's ECM sends those frames
+        // again; the cure is a decoder that counts inversions against Table
+        // 12 (data.rs), not anything here. What holds: everything before the
+        // slip is right, the receiver did not think it slipped, and the end
+        // is still seen.
+        for (rate, bits_per_second, high, inserted) in [(SymbolRate::S2400, 19_200, false, false), (SymbolRate::S3000, 21_600, true, false), (SymbolRate::S3000, 14_400, false, true)] {
+            let channel = channel(rate, high, Size::Four, 3);
+            let data = data_mode(bits_per_second, Code::States16);
+            let bits = random_bits(2 * bits_per_second as usize, 23);
+            let (mut sent, start, _) = one_page(channel, Mode::Call, data, &bits);
+            slip(&mut sent, start + FS as usize, inserted);
+            let heard = listen(&line(&sent, 30.0, 15.0, noise_for(bits_per_second), 0.020), channel, Mode::Call, Some(data));
+            let what = format!("{rate:?} at {bits_per_second}, inserted {inserted}");
+            assert_eq!(heard.page_starts().len(), 1, "{what}: pages");
+            assert_eq!(heard.page_ends().len(), 1, "{what}: ends");
+            assert_eq!(heard.slips, 0, "{what}: the receiver found a jump after all");
+            let before = ((1.0 - 0.05) * bits_per_second as f64) as usize;
+            assert_eq!(wrong_bits(&bits[..before], &heard.pages[0]), 0, "{what}: bits wrong before the slip");
+        }
+    }
 }
