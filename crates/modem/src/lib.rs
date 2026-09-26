@@ -854,6 +854,17 @@ pub struct Modem {
     /// On unless told otherwise, and used, like error correction, only when
     /// the far end offers it too. Off, a page goes in MMR as it did before.
     pub fax_jbig: bool,
+    /// Whether a fax call offers V.34 half-duplex over V.8: ANSam in place of
+    /// the called tone when answering, a call menu on hearing ANSam when
+    /// dialling (T.30 clause 6), and T.30 Annex F once V.8 has agreed it.
+    ///
+    /// Off, and nothing turns it on yet: the half-duplex modem that would
+    /// carry an Annex F call is not in the join (packages G and H3 of
+    /// `docs/design/superg3/plan.md`), so a call that agreed V.34 today would
+    /// stop at the hand-over point with the line quiet. H3 turns it on. Off,
+    /// a fax call is what it was: the tones of clause 5, and a V.34 caller's
+    /// call menu overheard and answered without V.34.
+    pub fax_v34: bool,
     /// The page waiting to be sent, taken by the next fax call that dials.
     ///
     /// Taken rather than borrowed, so that a second call does not send the
@@ -925,6 +936,7 @@ impl Modem {
             fax_offer: fax::call::OUR_MODULATIONS.to_vec(),
             fax_error_correction: true,
             fax_jbig: true,
+            fax_v34: false,
             fax_page: None,
             fax_identification: String::new(),
             far_menu: None,
@@ -2215,7 +2227,8 @@ impl Modem {
             self.fax = Some(
                 call.offering(&self.fax_offer)
                     .with_error_correction(self.fax_error_correction)
-                    .with_jbig(self.fax_jbig),
+                    .with_jbig(self.fax_jbig)
+                    .with_v34(self.fax_v34),
             );
             return;
         }

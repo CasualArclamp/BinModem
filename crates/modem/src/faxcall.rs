@@ -71,12 +71,31 @@ fn v8_modulations(modulations: &[Modulation]) -> v8::Modulations {
     set
 }
 
-/// An ear for a V.8 call menu from a far end that wants to send a fax.
+/// How long the answering end's ANSam lasts with no call menu heard, when
+/// V.34 is offered.
 ///
-/// T.30 Table 4: "Transmit facsimile from call terminal". The end that answers
-/// here receives, so that is the only call function it takes up.
-fn overhearing(offer: &[Modulation], fs: f64) -> v8line::Modem {
-    v8line::Modem::overhearing(v8::CallFunction::TransmitFax, v8_modulations(offer), fs)
+/// T.30 6.1.1: "an answering V.34 capable facsimile terminal shall transmit
+/// ANSam until a valid CM response is received or until an ANSam time-out
+/// (2.6 to 4.0 s) has expired" -- the window its plain called tone has
+/// (4.1.1), in place of V.8's 5 +/- 1 s ([`v8line::timing::ANSAM`]), which
+/// the data modems keep. The long end of it, because everything the caller
+/// has to do fits inside: hear the tone and believe it, Te, two call menus --
+/// and a call over a packet network puts a second and a half of round trip in
+/// front of the first menu.
+const ANSAM_SECONDS: f64 = 3.8;
+
+/// What carries a call once V.8 has agreed V.34 half-duplex and T.30 Annex F
+/// has it: the modem of V.34 clause 12, which is package G's and not in this
+/// join yet.
+///
+/// H3 puts `datapump::v34::halfduplex::Modem` in a variant beside this one
+/// and maps [`Line`]'s `V34*` words onto it (plan 10.1 and 10.2). Until then
+/// there is one thing it can be.
+#[derive(Debug)]
+enum HalfDuplex {
+    /// No modem. The line is quiet, no bit of the procedure's is taken and
+    /// none is handed up; the procedure's clocks run, and nothing else does.
+    Missing,
 }
 
 /// A fax call, from either end.
@@ -98,15 +117,27 @@ pub struct FaxCall {
     ced: v21::Tone,
     /// What the line was doing on the last sample, so a change can be seen.
     line: Line,
-    /// The answering end's ear for a V.8 call menu, and its voice for the
-    /// joint menu that answers one.
+    /// V.8, as much of it as this call runs.
     ///
-    /// Only on the answering end, and only until the caller has shown it is
-    /// doing T.30 after all. See [`v8line::Modem::overhearing`] for why a
-    /// fax that sends the plain answer tone listens for a CM at all.
+    /// With V.34 offered, all of it, at either end (T.30 clause 6). Without,
+    /// the answering end's ear for a V.8 call menu and its voice for the
+    /// joint menu that answers one -- see [`v8line::Modem::overhearing`] for
+    /// why a fax that sends the plain answer tone listens for a CM at all --
+    /// and nothing at the calling end. Kept only until the far end has shown
+    /// it is doing T.30 after all.
     v8: Option<v8line::Modem>,
-    /// The call menu the far end sent, if it sent one.
+    /// Whether V.34 half-duplex is offered ([`with_v34`](Self::with_v34)).
+    v34_offered: bool,
+    /// This end's fax modulations as a V.8 menu names them: what a joint
+    /// menu is the intersection with, and what a call menu offers.
+    v8_offer: v8::Modulations,
+    /// Where the call stands with V.34's half-duplex modem: `Some` from the
+    /// moment V.8 agreed V.34 half-duplex and the call went to Annex F.
+    v34: Option<HalfDuplex>,
+    /// The menu the far end sent, if it sent one.
     far_menu: Option<v8::Menu>,
+    /// The joint menu V.8 settled, once it has.
+    joint_menu: Option<v8::Menu>,
     fs: f64,
 }
 
@@ -123,14 +154,12 @@ impl FaxCall {
 
     /// The end that answered.
     pub fn answer(fs: f64, identification: &str) -> Self {
-        let mut call = Self::with(Call::answer(fs, identification), fs);
-        call.v8 = Some(overhearing(&fax::call::OUR_MODULATIONS, fs));
-        call
+        Self::with(Call::answer(fs, identification), fs)
     }
 
     fn with(mut call: Call, fs: f64) -> Self {
         call.set_available(&MODULATIONS);
-        Self {
+        let mut this = Self {
             call,
             control_tx: v21::Sender::new(fs),
             control_rx: v21::Receiver::new(fs),
@@ -145,24 +174,90 @@ impl FaxCall {
             ced: v21::Tone::new(v21::CED, fs),
             line: Line::Quiet,
             v8: None,
+            v34_offered: false,
+            v8_offer: v8_modulations(&fax::call::OUR_MODULATIONS),
+            v34: None,
             far_menu: None,
+            joint_menu: None,
             fs,
-        }
+        };
+        this.start_v8();
+        this
     }
 
     /// Use only these modulations: what goes in this end's DIS, and what it
     /// will choose from when it sends.
     ///
-    /// And what goes in a joint menu, should a call menu arrive: the two
-    /// have to agree, or V.8 would settle on a modulation the DIS then
-    /// withholds.
+    /// And what goes in a joint menu, should a call menu arrive, or in this
+    /// end's own call menu: the two have to agree, or V.8 would settle on a
+    /// modulation the DIS then withholds.
     #[must_use]
     pub fn offering(mut self, modulations: &[Modulation]) -> Self {
         self.call.set_offer(modulations);
-        if self.v8.is_some() {
-            self.v8 = Some(overhearing(modulations, self.fs));
-        }
+        self.v8_offer = v8_modulations(modulations);
+        self.start_v8();
         self
+    }
+
+    /// Offer V.34 half-duplex, or not: T.30 clause 6 in place of clause 5's
+    /// tones, at either end.
+    ///
+    /// Answering, that is ANSam in place of the called tone (6.1.1), and a
+    /// joint menu with V.34 half-duplex in it for a caller whose call menu
+    /// has it; dialling, a call menu on hearing ANSam (6.1.2). Either way the
+    /// call goes to T.30 Annex F once V.8 has agreed it (6.1.5,
+    /// [`Call::start_annex_f`]) and to clause 5 as before when it has not
+    /// (6.1.6).
+    ///
+    /// Off unless asked, and nothing asks yet: this join has no V.34
+    /// half-duplex modem to hand an Annex F call to (packages G and H3 of
+    /// `docs/design/superg3/plan.md`), so a call that agreed V.34 today would
+    /// stop at the hand-over point with the line quiet. H3 turns it on. Off,
+    /// the call is what it was before: the called tone and a DIS, with a call
+    /// menu overheard and answered without V.34.
+    #[must_use]
+    pub fn with_v34(mut self, on: bool) -> Self {
+        self.v34_offered = on;
+        self.start_v8();
+        self
+    }
+
+    /// The V.8 this call begins with, if any, from what it offers.
+    ///
+    /// The end that answers receives, so "transmit facsimile from call
+    /// terminal" (Table 4/T.30) is the only call function it takes up, and
+    /// the one the end that dials asks for.
+    fn start_v8(&mut self) {
+        let function = v8::CallFunction::TransmitFax;
+        self.v8 = match (self.call.role(), self.v34_offered) {
+            (Role::Answerer, false) => {
+                Some(v8line::Modem::overhearing(function, self.v8_offer, self.fs))
+            }
+            (Role::Answerer, true) => Some(
+                v8line::Modem::new(v8line::Role::Answering, function, self.super_g3_offer(), self.fs)
+                    .with_ansam_seconds(ANSAM_SECONDS)
+                    .answering_only_its_function(),
+            ),
+            (Role::Caller, true) => Some(v8line::Modem::new(
+                v8line::Role::Calling,
+                function,
+                self.super_g3_offer(),
+                self.fs,
+            )),
+            (Role::Caller, false) => None,
+        };
+    }
+
+    /// This end's modulations with V.34 half-duplex, as a menu offers them.
+    ///
+    /// Half-duplex alone, never V.34 duplex beside it: 7.4/V.8 settles a
+    /// joint menu on the lowest item number of Table 4/V.8, duplex is item 1
+    /// to half-duplex's 2, and a fax that offered both would find itself in
+    /// Annex C (plan 8.5).
+    fn super_g3_offer(&self) -> v8::Modulations {
+        let mut offer = self.v8_offer;
+        offer.insert(v8::Modulation::V34HalfDuplex);
+        offer
     }
 
     /// Put V.27 ter's protection against talker echo in front of every burst:
@@ -211,16 +306,46 @@ impl FaxCall {
     /// What the call is doing, as a person would say it: T.30's phase, or
     /// V.8 while that has the line.
     pub fn phase_name(&self) -> &'static str {
-        match &self.v8 {
-            Some(v8) if v8.has_the_line() => "V.8: answering the call menu",
-            _ => self.call.phase().name(),
+        if let Some(v8) = &self.v8
+            && v8.has_the_line()
+        {
+            return match v8.phase() {
+                "quiet" => "V.8: the silence before ANSam",
+                "ANSam" => "V.8: sending ANSam",
+                "Te" => "V.8: ANSam heard, the silence before the call menu",
+                "CM" => "V.8: sending the call menu",
+                "CJ" => "V.8: ending the call menu",
+                "JM" => "V.8: answering the call menu",
+                "handover" => "V.8: handing over",
+                _ => "V.8",
+            };
+        }
+        match self.v34 {
+            Some(HalfDuplex::Missing) => "V.34 half-duplex agreed, and no modem here for it",
+            None => self.call.phase().name(),
         }
     }
 
-    /// The V.8 call menu the far end sent, if it sent one: what the calling
-    /// fax can do, V.34 included, whatever this end could do about it.
+    /// The V.8 menu the far end sent, if it sent one. Answering, its call
+    /// menu: what the calling fax can do, V.34 included, whatever this end
+    /// could do about it. Dialling, its joint menu.
     pub fn far_menu(&self) -> Option<v8::Menu> {
         self.far_menu
+    }
+
+    /// The joint menu V.8 settled, once it has: what the two ends have in
+    /// common, whichever end this is (7.4/V.8).
+    pub fn joint_menu(&self) -> Option<v8::Menu> {
+        self.joint_menu
+    }
+
+    /// Whether V.8 agreed V.34 half-duplex, so that the call is T.30 Annex
+    /// F's (6.1.5) -- from the hand-over point on, 75 ms after CJ, with the
+    /// modem's own start-up (INFO0, 11.1/V.34) due next.
+    ///
+    /// On a modem this join has not got yet: see [`with_v34`](Self::with_v34).
+    pub fn v34_agreed(&self) -> bool {
+        self.v34.is_some()
     }
 
     pub fn seconds(&self) -> f64 {
@@ -457,6 +582,9 @@ impl FaxCall {
 
     /// The modulation carrying the line just now.
     pub fn standard(&self) -> &'static str {
+        if self.v34.is_some() {
+            return "V.34";
+        }
         match self.page_carrier() {
             None => "V.21",
             Some(Carrier::V27ter(_)) => "V.27ter",
@@ -467,7 +595,7 @@ impl FaxCall {
 
     /// One sample in, one sample out.
     pub fn step(&mut self, input: f64) -> f64 {
-        if let Some(out) = self.overhear(input) {
+        if let Some(out) = self.negotiate(input) {
             return out;
         }
         let want = self.call.line();
@@ -478,40 +606,75 @@ impl FaxCall {
         out
     }
 
-    /// Listen for a V.8 call menu while T.30 goes on, and answer one if it
-    /// comes. `Some`, with the sample to send, while V.8 has the line.
+    /// Run V.8 beside T.30, and in front of it while V.8 has the line.
+    /// `Some`, with the sample to send, while it has.
     ///
     /// While it has, T.30 stands still: its clocks do not run and nothing of
     /// it reaches the line, because the far end is not listening to T.30 --
     /// it is waiting for a JM, and a DIS sent past it goes unheard, which is
-    /// how the recorded call spent its whole length.
-    fn overhear(&mut self, input: f64) -> Option<f64> {
+    /// how the recorded call spent its whole length. Or it is sending ANSam
+    /// and waiting for a CM, and the calling tone it would hear instead is
+    /// what 8.1.1/V.8 has stopped.
+    ///
+    /// While it has not, V.8 only listens -- an answering end for a call
+    /// menu behind its called tone, or for a CI after its DIS (6.1.4/T.30); a
+    /// calling end for ANSam -- and T.30 has the line as though V.8 were not
+    /// there.
+    fn negotiate(&mut self, input: f64) -> Option<f64> {
         let v8 = self.v8.as_mut()?;
-        let early = matches!(
-            self.call.phase(),
-            Phase::Answering | Phase::Identifying | Phase::AwaitingCommand
-        );
+        let role = self.call.role();
+        let early = match role {
+            Role::Answerer => matches!(
+                self.call.phase(),
+                Phase::Answering | Phase::Identifying | Phase::AwaitingCommand
+            ),
+            Role::Caller => matches!(self.call.phase(), Phase::Calling | Phase::Listening),
+        };
         if !early && !v8.has_the_line() {
-            // A command has arrived, so the caller is doing T.30 and there is
-            // nobody left to send a call menu.
+            // A command has arrived, or a DIS: the far end is doing T.30 and
+            // there is nobody left to send a menu.
             self.v8 = None;
             return None;
         }
+        let was = v8.status();
         let out = v8.step(input);
         if self.far_menu.is_none() {
             self.far_menu = v8.far_menu();
         }
-        match v8.status() {
-            v8line::Status::Negotiating if v8.has_the_line() => {
+        match (was, v8.status()) {
+            (v8line::Status::Negotiating, v8line::Status::Negotiating) if v8.has_the_line() => {
                 self.drop_the_line();
                 Some(out)
             }
-            v8line::Status::Negotiating => None,
-            _ => {
+            (v8line::Status::Negotiating, v8line::Status::Negotiating) => None,
+            // The calling end heard the plain answering tone: the far end
+            // does not do V.8, and T.30, which never stopped, goes on exactly
+            // as it was (8.1.1/V.8) -- this sample included, since V.8 was
+            // only listening and has nothing to put on the line in its place.
+            // A call to a fax without V.8 is the call it was before V.8 was
+            // offered, to the sample.
+            (v8line::Status::Negotiating, v8line::Status::NoNegotiation)
+                if role == Role::Caller =>
+            {
                 self.v8 = None;
-                self.after_v8();
+                None
+            }
+            (v8line::Status::Negotiating, settled) => {
+                self.after_v8(settled);
                 Some(out)
             }
+            // ANSam ran out, the DIS went with bit 6, and the modem stayed as
+            // an ear: 6.1.4/T.30, "when an answer terminal, expecting a
+            // response to a DIS frame, detects a CI signal, it shall enter
+            // the V.8 mode by resending the answer tone ANSam" (Figures F.5-8
+            // and F.5-9). Whatever of the DIS is still going out is cut: the
+            // caller has stopped reading it.
+            (_, v8line::Status::NoNegotiation) if v8.heard_ci() => {
+                v8.ansam_again();
+                self.drop_the_line();
+                Some(out)
+            }
+            _ => None,
         }
     }
 
@@ -527,18 +690,53 @@ impl FaxCall {
         }
     }
 
-    /// V.8 has finished with the line.
-    ///
-    /// Nothing here does V.34, so whatever the exchange settled on, it was not
-    /// that -- and 6.1.6/T.30 sends a call that has not settled on V.34 to
-    /// clause 5, where the answering end begins with its DIS. A joint menu
-    /// with nothing in it ends the same way: 8.2.3 lets the caller hang up on
-    /// that, and if it does not, the DIS is the right thing for it to hear.
-    fn after_v8(&mut self) {
+    /// V.8 has finished with the line, one way or another -- except the
+    /// calling end's plain tone, which [`negotiate`](Self::negotiate) settles
+    /// without coming here, since nothing of the line is V.8's to give back.
+    fn after_v8(&mut self, status: v8line::Status) {
+        let role = self.call.role();
+        self.joint_menu = self.v8.as_ref().and_then(v8line::Modem::joint_menu);
         self.control_tx = v21::Sender::new(self.fs);
         self.control_rx = v21::Receiver::new(self.fs);
         self.line = Line::Quiet;
-        self.call.restart_identifying();
+        match status {
+            // 6.1.5: V.34 at both ends, and half-duplex, so Annex F. This is
+            // the hand-over point: the 75 ms of silence after CJ (8.1.2,
+            // 8.2.3/V.8) have passed, the modem's own start-up is due next,
+            // and the procedure begins phase B with the control channel taken
+            // as up. The modem that should carry it is not here yet.
+            v8line::Status::Agreed(v8::Modulation::V34HalfDuplex) => {
+                self.v8 = None;
+                self.v34 = Some(HalfDuplex::Missing);
+                self.call.start_annex_f();
+            }
+            // 6.1.3: ANSam ran out with no call menu, so clause 5 from the
+            // DIS, with bit 6 set to say V.8 is here -- and the V.8 modem kept
+            // as an ear for the CI that bit invites (6.1.4). 75 ms of silence
+            // first (8.2.2/V.8; Figures F.5-8 and F.5-9 have 75 +/- 20 ms),
+            // which is the pause the restart sits out.
+            v8line::Status::NoNegotiation => {
+                debug_assert_eq!(role, Role::Answerer, "the calling end's plain tone never gets here");
+                self.call.set_v8_capable(true);
+                self.call.restart_identifying();
+            }
+            // 6.1.6: no V.34 at both ends, so clause 5. For the end that
+            // answered that begins with its DIS (Figure F.5-10: 75 +/- 5 ms
+            // after JM); for the end that dialled it is waiting for that DIS
+            // on V.21, which is what it was doing before. A joint menu with
+            // nothing in it ends the same way: 8.2.3 lets the caller hang up
+            // on that, and if it does not, the DIS is the right thing for it
+            // to hear. Bit 6 stays clear: the V.8 the bit invites has just
+            // been had.
+            v8line::Status::Agreed(_) | v8line::Status::Failed => {
+                self.v8 = None;
+                if role == Role::Answerer {
+                    self.call.set_v8_capable(false);
+                    self.call.restart_identifying();
+                }
+            }
+            v8line::Status::Negotiating => {}
+        }
     }
 
     /// Put up or take down whatever changed.
@@ -655,8 +853,8 @@ impl FaxCall {
                 self.call.set_fast_carrier(carrier);
             }
             Line::Control | Line::Fast(_) | Line::CalledTone => {}
-            // T.30 Annex F, on V.34's half-duplex modem, which this join does
-            // not have yet: nothing here ever puts a call into it.
+            // T.30 Annex F, on V.34's half-duplex modem: H3 feeds it here and
+            // hands its bits up (plan 10.1). Until then nothing is heard.
             Line::V34Control
             | Line::V34Listen
             | Line::V34Ones
@@ -733,12 +931,16 @@ impl FaxCall {
             }
             Line::CalledTone => (self.ced.next_sample(), true),
             Line::Quiet | Line::Listen | Line::FastListen(_) => (0.0, true),
-            // Annex F's channels are V.34's, and not this join's yet.
+            // Annex F's channels are V.34's half-duplex modem's, which H3
+            // puts here (plan 10.1). Until then the line is quiet and no bit
+            // of the procedure's is taken.
             Line::V34Control
             | Line::V34Listen
             | Line::V34Ones
             | Line::V34Primary
-            | Line::V34PrimaryListen => (0.0, true),
+            | Line::V34PrimaryListen => match self.v34 {
+                Some(HalfDuplex::Missing) | None => (0.0, true),
+            },
         }
     }
 }
@@ -908,6 +1110,500 @@ mod tests {
         assert_eq!(answerer.phase(), Phase::Done, "{:?}", answerer.trouble());
         assert!(answerer.far_menu().is_none());
         assert_eq!(answerer.pages_received(), 1);
+    }
+
+    // ---- V.34 offered: T.30 clause 6 ---------------------------------------
+
+    /// Everything this end has, as a V.34 fax's call or joint menu names it.
+    fn super_g3_menu() -> v8::Modulations {
+        v8::Modulations::of(&[
+            v8::Modulation::V34HalfDuplex,
+            v8::Modulation::V17,
+            v8::Modulation::V29HalfDuplex,
+            v8::Modulation::V27ter,
+        ])
+    }
+
+    /// One direction of the line read as V.8: the menus, CJ and CI on it,
+    /// each with when it finished arriving.
+    struct V8Ear {
+        rx: datapump::bell103::Bell103Rx,
+        decoder: v8::Decoder,
+        heard: Vec<(f64, v8::Heard)>,
+    }
+
+    impl V8Ear {
+        /// On the channel the calling end sends in, or the answering end's.
+        fn new(calling: bool, fs: f64) -> Self {
+            let (space, mark) = if calling { datapump::v8::LOW } else { datapump::v8::HIGH };
+            Self {
+                rx: datapump::bell103::Bell103Rx::with_tones(space, mark, fs),
+                decoder: v8::Decoder::new(),
+                heard: Vec::new(),
+            }
+        }
+
+        fn feed(&mut self, t: f64, sample: f64) {
+            if let Some(octet) = self.rx.feed(sample)
+                && let Some(h) = self.decoder.feed(octet)
+            {
+                self.heard.push((t, h));
+            }
+        }
+
+        /// The first menu heard, and when.
+        fn menu(&self) -> Option<(f64, v8::Menu)> {
+            self.heard.iter().find_map(|(t, h)| match h {
+                v8::Heard::Cm(m) | v8::Heard::Jm(m) => Some((*t, *m)),
+                _ => None,
+            })
+        }
+
+        fn cj(&self) -> Option<f64> {
+            self.heard.iter().find_map(|(t, h)| (*h == v8::Heard::Cj).then_some(*t))
+        }
+    }
+
+    /// The amplitude of `block` at `f`, as a plain correlation.
+    fn amplitude_at(block: &[f64], f: f64) -> f64 {
+        let (mut re, mut im) = (0.0f64, 0.0f64);
+        for (i, &x) in block.iter().enumerate() {
+            let w = std::f64::consts::TAU * f * i as f64 / FS;
+            re += x * w.cos();
+            im -= x * w.sin();
+        }
+        2.0 * re.hypot(im) / block.len() as f64
+    }
+
+    /// Whether a block of the calling end's output is its calling tone:
+    /// 1100 Hz (5.1.1/T.30) standing well above V.21's low channel either
+    /// side of it, which is where its call menu would be instead.
+    fn is_calling_tone(block: &[f64]) -> bool {
+        let cng = amplitude_at(block, v21::CNG);
+        let (space, mark) = datapump::v8::LOW;
+        cng > 0.01 && cng > 4.0 * (amplitude_at(block, space) + amplitude_at(block, mark))
+    }
+
+    /// What two ends that both offer V.34 said to each other, and when.
+    #[derive(Debug, Default)]
+    struct Exchange {
+        ansam: Option<f64>,
+        cm: Option<(f64, v8::Menu)>,
+        jm: Option<(f64, v8::Menu)>,
+        cj: Option<f64>,
+        /// When the calling end's V.8 took the line: on ANSam.
+        caller_took_the_line: Option<f64>,
+        /// When each end went to Annex F.
+        caller_agreed: Option<f64>,
+        answerer_agreed: Option<f64>,
+        /// Blocks of the calling end's output that were its calling tone,
+        /// before and after its V.8 took the line.
+        cng_before: usize,
+        cng_after: usize,
+        /// The loudest sample either end sent once both were in Annex F.
+        loudest_after: f64,
+    }
+
+    /// Run two ends against each other with `delay` seconds each way, taps
+    /// on both directions, for `seconds` or until both are in Annex F and
+    /// have been for a second.
+    fn negotiate_v34(
+        caller: &mut FaxCall,
+        answerer: &mut FaxCall,
+        delay: f64,
+        seconds: f64,
+    ) -> Exchange {
+        use std::collections::VecDeque;
+        let lag = (delay * FS) as usize;
+        let mut to_caller: VecDeque<f64> = std::iter::repeat_n(0.0, lag + 1).collect();
+        let mut to_answerer: VecDeque<f64> = std::iter::repeat_n(0.0, lag + 1).collect();
+        let mut tone = v8::AnswerTone::new(FS);
+        let mut low = V8Ear::new(true, FS);
+        let mut high = V8Ear::new(false, FS);
+        let mut block: Vec<f64> = Vec::new();
+        let mut x = Exchange::default();
+        for i in 0..(seconds * FS) as usize {
+            let t = i as f64 / FS;
+            let a = caller.step(to_caller.pop_front().unwrap_or(0.0));
+            let b = answerer.step(to_answerer.pop_front().unwrap_or(0.0));
+            to_answerer.push_back(a);
+            to_caller.push_back(b);
+            tone.feed(b);
+            if x.ansam.is_none() && tone.is_ansam() {
+                x.ansam = Some(t);
+            }
+            low.feed(t, a);
+            high.feed(t, b);
+            if x.caller_took_the_line.is_none() && caller.phase_name().starts_with("V.8") {
+                x.caller_took_the_line = Some(t);
+            }
+            if x.caller_agreed.is_none() && caller.v34_agreed() {
+                x.caller_agreed = Some(t);
+            }
+            if x.answerer_agreed.is_none() && answerer.v34_agreed() {
+                x.answerer_agreed = Some(t);
+            }
+            block.push(a);
+            if block.len() == (FS * 0.05) as usize {
+                if is_calling_tone(&block) {
+                    if x.caller_took_the_line.is_some() {
+                        x.cng_after += 1;
+                    } else {
+                        x.cng_before += 1;
+                    }
+                }
+                block.clear();
+            }
+            if let (Some(ca), Some(aa)) = (x.caller_agreed, x.answerer_agreed) {
+                x.loudest_after = x.loudest_after.max(a.abs()).max(b.abs());
+                if t > ca.max(aa) + 1.0 {
+                    break;
+                }
+            }
+        }
+        x.cm = low.menu();
+        x.jm = high.menu();
+        x.cj = low.cj();
+        x
+    }
+
+    /// Two of these that both offer V.34 agree it over V.8 and go to Annex F:
+    /// ANSam, CM, JM, CJ, and both ends at the hand-over point within a few
+    /// seconds -- with the calling tone stopped from ANSam on (8.1.1/V.8),
+    /// which is why the line has 0.4 s of delay each way: without it V.8 is
+    /// over before the second burst of calling tone is due.
+    #[test]
+    fn two_of_these_offering_v34_agree_it_over_v8_and_go_to_annex_f() {
+        let mut caller = FaxCall::originate(FS, "61399990000", Some(a_page(8)))
+            .offering(&MODULATIONS)
+            .with_v34(true);
+        let mut answerer =
+            FaxCall::answer(FS, "61388880000").offering(&MODULATIONS).with_v34(true);
+        let x = negotiate_v34(&mut caller, &mut answerer, 0.4, 10.0);
+
+        let ansam = x.ansam.expect("no ANSam from the answering end");
+        let (cm_at, cm) = x.cm.expect("no call menu from the calling end");
+        let (jm_at, jm) = x.jm.expect("no joint menu from the answering end");
+        let cj = x.cj.expect("no CJ from the calling end");
+        assert!(ansam < cm_at && cm_at < jm_at && jm_at < cj, "out of order: {x:?}");
+        assert_eq!(cm.function, v8::CallFunction::TransmitFax, "{cm:?}");
+        assert_eq!(cm.modulations, super_g3_menu(), "{cm:?}");
+        assert_eq!(jm.modulations, super_g3_menu(), "{jm:?}");
+        assert!(
+            !cm.modulations.contains(v8::Modulation::V34Duplex),
+            "offered duplex, which 7.4/V.8 would pick over half-duplex"
+        );
+
+        let caller_agreed = x.caller_agreed.expect("the calling end never went to Annex F");
+        let answerer_agreed = x.answerer_agreed.expect("the answering end never went to Annex F");
+        assert!(caller_agreed < 7.0 && answerer_agreed < 7.0, "{x:?}");
+        assert!(caller_agreed > cj && answerer_agreed > cj, "in Annex F before CJ: {x:?}");
+        assert_eq!(caller.phase(), Phase::Listening, "{}", caller.phase_name());
+        assert_eq!(answerer.phase(), Phase::Identifying, "{}", answerer.phase_name());
+        assert!(x.loudest_after < 1.0e-9, "the line was not quiet after the hand-over: {x:?}");
+        assert_eq!(caller.standard(), "V.34");
+
+        // 8.1.1/V.8: "after detection of ANS or ANSam, the call signal shall
+        // be stopped". The first burst of it went; none went after.
+        let took = x.caller_took_the_line.expect("the calling end's V.8 never took the line");
+        assert!(took > ansam, "{x:?}");
+        assert!(x.cng_before > 0, "no calling tone before ANSam, so nothing was proved: {x:?}");
+        assert_eq!(x.cng_after, 0, "calling tone after ANSam: {x:?}");
+
+        // Both ends keep what was agreed, for the far-end panel.
+        assert_eq!(caller.joint_menu(), Some(jm));
+        assert_eq!(answerer.joint_menu(), Some(jm));
+        assert_eq!(caller.far_menu(), Some(jm), "the caller's far menu is the JM");
+        assert_eq!(answerer.far_menu(), Some(cm), "the answerer's far menu is the CM");
+    }
+
+    /// The recorded V.34 fax's call menu, answered by an end that offers
+    /// V.34: the joint menu carries V.34 half-duplex, and after CJ the call
+    /// is in Annex F with the line quiet and no DIS on V.21 -- there is no
+    /// modem here to carry it further, which is what the switch is for.
+    #[test]
+    fn a_v34_fax_call_menu_is_answered_with_v34_and_the_call_goes_to_annex_f() {
+        use datapump::bell103::Bell103Tx;
+        use datapump::framing::AsyncBits;
+        use datapump::v8::LOW;
+
+        let vector = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/vectors/fax-v34-cm.wav");
+        let wav = line::wav::read(vector).expect("could not read the vector");
+        let fs = f64::from(wav.sample_rate);
+        let mut call = FaxCall::answer(fs, "61399990000").offering(&MODULATIONS).with_v34(true);
+
+        let mut high = V8Ear::new(false, fs);
+        let mut frames_ear = v21::Receiver::new(fs);
+        let mut reader = Reader::new();
+        let mut said: Vec<Message> = Vec::new();
+        let mut t = 0.0;
+        let mut loudest_after_handover = 0.0f64;
+        let mut hear = |call: &mut FaxCall, input: f64, after_handover: bool| {
+            let out = call.step(input);
+            t += 1.0 / fs;
+            high.feed(t, out);
+            if let Some(bit) = frames_ear.feed(out)
+                && let Some(m) = reader.feed(bit)
+            {
+                said.push(m);
+            }
+            if after_handover {
+                loudest_after_handover = loudest_after_handover.max(out.abs());
+            }
+        };
+
+        for &s in &wav.channel(0) {
+            hear(&mut call, f64::from(s), false);
+        }
+        assert!(!call.v34_agreed(), "in Annex F before CJ");
+        let framing = AsyncBits::new(8);
+        let mut cj = Bell103Tx::with_tones(LOW.0, LOW.1, fs);
+        cj.set_transmitting(true);
+        for octet in v8::CJ {
+            cj.push_bits(&framing.encode(octet));
+        }
+        while cj.pending_bits() > 0 {
+            hear(&mut call, cj.next_sample(), false);
+        }
+        // 8.2.3/V.8: JM stops on CJ, and 75 ms of silence follow.
+        for _ in 0..(fs * 0.2) as usize {
+            hear(&mut call, 0.0, false);
+        }
+        assert!(call.v34_agreed(), "not in Annex F after CJ: {}", call.phase_name());
+        for _ in 0..(fs * 3.0) as usize {
+            hear(&mut call, 0.0, true);
+        }
+
+        let far = call.far_menu().expect("the call menu was not kept");
+        assert_eq!(far.function, v8::CallFunction::TransmitFax);
+        assert!(far.modulations.contains(v8::Modulation::V34HalfDuplex), "{far:?}");
+        let (_, joint) = high.menu().expect("no joint menu went out");
+        assert!(joint.modulations.contains(v8::Modulation::V34HalfDuplex), "{joint:?}");
+        assert!(joint.modulations.contains(v8::Modulation::V17), "{joint:?}");
+        assert_eq!(call.joint_menu(), Some(joint));
+        assert_eq!(call.phase(), Phase::Identifying, "{}", call.phase_name());
+        assert!(loudest_after_handover < 1.0e-9, "the line was not quiet: {loudest_after_handover}");
+        let names: Vec<Frame> = said.iter().map(|m| m.frame).collect();
+        assert!(names.is_empty(), "frames on V.21 in an Annex F call: {names:?}");
+    }
+
+    /// An end offering V.34 that dials a fax without it: the plain called
+    /// tone says the far end does not do V.8, and the call is clause 5's,
+    /// unchanged -- the same page, and the same length of call to the
+    /// sample.
+    #[test]
+    fn a_caller_offering_v34_to_a_plain_answerer_faxes_a_page_as_before() {
+        let page = a_page(8);
+        let mut ended = Vec::new();
+        for v34 in [false, true] {
+            let mut caller =
+                FaxCall::originate(FS, "61399990000", Some(page.clone())).with_v34(v34);
+            let mut answerer = FaxCall::answer(FS, "61388880000");
+            between(&mut caller, &mut answerer, 40.0);
+            assert_eq!(caller.phase(), Phase::Done, "v34 {v34}: {:?}", caller.trouble());
+            let got = answerer.received().expect("no page arrived");
+            assert_eq!(got.lines, page.lines, "the page came out different");
+            assert!(!caller.v34_agreed() && caller.far_menu().is_none(), "V.8 with a plain fax");
+            assert!(answerer.far_menu().is_none(), "a call menu went to a plain fax");
+            ended.push((caller.seconds(), answerer.seconds()));
+        }
+        assert_eq!(ended[0], ended[1], "offering V.34 changed the timing of a plain call");
+    }
+
+    /// What one end's V.21 channel 2 carried, and its answering tone.
+    #[derive(Debug, Default)]
+    struct AnswererTap {
+        /// When the answering tone read as ANSam, first and last.
+        ansam: Option<(f64, f64)>,
+        /// The longest run of the plain tone, in seconds, after ANSam ended.
+        plain_after: f64,
+        plain_run: f64,
+        /// When V.21's carrier first came up after ANSam ended.
+        carrier_after: Option<f64>,
+        /// The first DIS, with its parameter field.
+        dis: Option<(f64, Vec<u8>)>,
+    }
+
+    /// An end that answers offering V.34, called by a fax without it: ANSam
+    /// runs out inside T.30 6.1.1's 2.6 to 4.0 s, the DIS follows on V.21
+    /// with bit 6 set and no called tone in between (6.1.3, Figures F.5-8
+    /// and F.5-9), and the page goes through on clause 5.
+    #[test]
+    fn an_answerer_offering_v34_to_a_plain_caller_times_out_ansam_and_the_page_follows() {
+        let page = a_page(8);
+        let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()));
+        let mut answerer = FaxCall::answer(FS, "61388880000").with_v34(true);
+        let mut tone = v8::AnswerTone::new(FS);
+        let mut ear = v21::Receiver::new(FS);
+        let mut reader = Reader::new();
+        let mut tap = AnswererTap::default();
+        let (mut to_caller, mut to_answerer) = (0.0, 0.0);
+        for i in 0..(FS * 40.0) as usize {
+            let t = i as f64 / FS;
+            let a = caller.step(to_caller);
+            let b = answerer.step(to_answerer);
+            to_caller = b;
+            to_answerer = a;
+            tone.feed(b);
+            if tone.is_ansam() {
+                tap.ansam = Some((tap.ansam.map_or(t, |(first, _)| first), t));
+            }
+            if let Some((_, last)) = tap.ansam
+                && t > last + 0.5
+            {
+                tap.plain_run = if tone.is_plain() { tap.plain_run + 1.0 / FS } else { 0.0 };
+                tap.plain_after = tap.plain_after.max(tap.plain_run);
+                if tap.carrier_after.is_none() && ear.carrier() {
+                    tap.carrier_after = Some(t);
+                }
+            }
+            if let Some(bit) = ear.feed(b)
+                && let Some(m) = reader.feed(bit)
+                && m.frame == Frame::Dis
+                && tap.dis.is_none()
+            {
+                tap.dis = Some((t, m.fif.clone()));
+            }
+            if caller.phase().is_over() && answerer.phase().is_over() {
+                break;
+            }
+        }
+
+        let (first, last) = tap.ansam.expect("no ANSam");
+        let ran_for = last - first;
+        assert!(
+            (2.4..=4.0).contains(&ran_for),
+            "ANSam read for {ran_for:.2} s, from {first:.2} to {last:.2}"
+        );
+        assert!(tap.plain_after < 0.3, "a called tone after ANSam, {:.2} s of it", tap.plain_after);
+        let carrier = tap.carrier_after.expect("no V.21 after ANSam");
+        assert!(carrier < last + 0.8, "V.21 up at {carrier:.2} s, {:.2} s after ANSam", carrier - last);
+        let (dis_at, fif) = tap.dis.expect("no DIS");
+        assert!(fax::t30::bit(&fif, 6), "bit 6 clear in the DIS after ANSam ran out: {fif:02x?}");
+        assert!(dis_at > last, "a DIS during ANSam");
+        assert_eq!(answerer.phase(), Phase::Done, "{:?}", answerer.trouble());
+        let got = answerer.received().expect("no page arrived");
+        assert_eq!(got.lines, page.lines, "the page came out different");
+        assert!(!answerer.v34_agreed() && answerer.far_menu().is_none());
+    }
+
+    /// What an answering end put on the line, read as its answering tone
+    /// and as T.30's frames: every span in which the tone read as ANSam, and
+    /// every DIS.
+    struct CiTap {
+        tone: v8::AnswerTone,
+        ear: v21::Receiver,
+        reader: Reader,
+        dis: Vec<(f64, Vec<u8>)>,
+        ansam_spans: Vec<(f64, f64)>,
+        t: f64,
+    }
+
+    impl CiTap {
+        fn new() -> Self {
+            Self {
+                tone: v8::AnswerTone::new(FS),
+                ear: v21::Receiver::new(FS),
+                reader: Reader::new(),
+                dis: Vec::new(),
+                ansam_spans: Vec::new(),
+                t: 0.0,
+            }
+        }
+
+        /// One sample into the call, and what came out of it noted.
+        fn hear(&mut self, call: &mut FaxCall, input: f64) {
+            let out = call.step(input);
+            self.t += 1.0 / FS;
+            self.tone.feed(out);
+            if self.tone.is_ansam() {
+                match self.ansam_spans.last_mut() {
+                    Some((_, last)) if self.t - *last < 0.5 => *last = self.t,
+                    _ => self.ansam_spans.push((self.t, self.t)),
+                }
+            }
+            if let Some(bit) = self.ear.feed(out)
+                && let Some(m) = self.reader.feed(bit)
+                && m.frame == Frame::Dis
+            {
+                self.dis.push((self.t, m.fif.clone()));
+            }
+        }
+    }
+
+    /// T.30 6.1.4: a caller that took the DIS's bit 6 up with CI gets ANSam
+    /// again, and the exchange after it goes to Annex F.
+    #[test]
+    fn a_ci_after_the_dis_brings_ansam_back_and_the_call_to_annex_f() {
+        use datapump::bell103::Bell103Tx;
+        use datapump::framing::AsyncBits;
+        use datapump::v8::LOW;
+
+        let mut call = FaxCall::answer(FS, "61388880000").offering(&MODULATIONS).with_v34(true);
+        let mut tap = CiTap::new();
+
+        // Nothing from the caller: ANSam runs out and the DIS goes. Eight
+        // seconds, because 300 bit/s is slow: 0.2 s of silence, 3.8 s of
+        // ANSam, the 75 ms pause, and then a second of preamble, CSI and DIS
+        // -- about 2.1 s of frames -- so the DIS closes at about 6.2 s, and
+        // T2 would not bring another before 12.
+        for _ in 0..(FS * 8.0) as usize {
+            tap.hear(&mut call, 0.0);
+        }
+        assert_eq!(tap.ansam_spans.len(), 1, "{:?}", tap.ansam_spans);
+        assert_eq!(tap.dis.len(), 1, "{} DISes in eight seconds", tap.dis.len());
+        assert!(fax::t30::bit(&tap.dis[0].1, 6), "bit 6 clear: {:02x?}", tap.dis[0].1);
+        assert_eq!(call.phase(), Phase::AwaitingCommand);
+
+        // The caller's CI: 7.1/V.8, at least three sequences.
+        let framing = AsyncBits::new(8);
+        let mut caller = Bell103Tx::with_tones(LOW.0, LOW.1, FS);
+        caller.set_transmitting(true);
+        let menu = v8::Menu {
+            function: v8::CallFunction::TransmitFax,
+            modulations: super_g3_menu(),
+            protocol: v8::Protocol::Unstated,
+            access: None,
+            pcm: None,
+        };
+        for _ in 0..3 {
+            let mut bits = vec![true; v8::PREAMBLE_ONES];
+            for octet in v8::sequence(v8::Signal::Ci, &menu) {
+                bits.extend(framing.encode(octet));
+            }
+            caller.push_bits(&bits);
+        }
+        while caller.pending_bits() > 0 {
+            tap.hear(&mut call, caller.next_sample());
+        }
+        for _ in 0..(FS * 1.0) as usize {
+            tap.hear(&mut call, 0.0);
+        }
+        assert_eq!(tap.ansam_spans.len(), 2, "no ANSam after the CI: {:?}", tap.ansam_spans);
+        assert!(call.phase_name().starts_with("V.8"), "{}", call.phase_name());
+
+        // And the menus, as in any V.8 exchange.
+        for _ in 0..6 {
+            let mut bits = vec![true; v8::PREAMBLE_ONES];
+            for octet in v8::sequence(v8::Signal::Cm, &menu) {
+                bits.extend(framing.encode(octet));
+            }
+            caller.push_bits(&bits);
+        }
+        for octet in v8::CJ {
+            caller.push_bits(&framing.encode(octet));
+        }
+        while caller.pending_bits() > 0 {
+            tap.hear(&mut call, caller.next_sample());
+        }
+        for _ in 0..(FS * 0.3) as usize {
+            tap.hear(&mut call, 0.0);
+        }
+        assert!(call.v34_agreed(), "not in Annex F: {}", call.phase_name());
+        assert_eq!(call.phase(), Phase::Identifying);
+        assert_eq!(tap.dis.len(), 1, "a DIS on V.21 after V.8 agreed V.34");
+        let joint = call.joint_menu().expect("no joint menu");
+        assert!(joint.modulations.contains(v8::Modulation::V34HalfDuplex), "{joint:?}");
     }
 
     #[test]
