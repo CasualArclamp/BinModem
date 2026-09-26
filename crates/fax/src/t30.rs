@@ -744,6 +744,47 @@ pub fn command(command: Command) -> Vec<u8> {
     fif
 }
 
+/// What this modem can receive, as the DIS of a call on V.34's half-duplex
+/// control channel (T.30 Annex F).
+///
+/// [`our_capabilities`] with two things Table 2 and clause 6 settle:
+///
+/// - bit 27 always. Error correction mode "is mandatory for all facsimile
+///   messages using the V.34 modulation system" (F.3, and 6.1), so there is
+///   no call of this kind without it -- and T.6 and JBIG, which Note 17 ties
+///   to it, go in beside it as they would anyway;
+/// - bit 6, "V.8 capabilities". The call is on V.34 only because V.8 agreed
+///   it, so the bit is simply true. Notes 23 and 24 fix bits 6, 7 and 28 only
+///   for Annex C's duplex procedure; in half-duplex bit 7 keeps its meaning,
+///   and it stays clear: frames of 256 octets preferred.
+///
+/// Bits 11 to 14 still name the modulations of clause 5, which Note 33 leaves
+/// alone in a DIS. And bit 67, "duplex and half-duplex capabilities", is zero
+/// -- "half-duplex operation only" -- which is the truth here, and what a
+/// field that ends before its ninth octet says too.
+pub fn v34_capabilities(offer: &[Modulation], jbig: bool) -> Vec<u8> {
+    let mut fif = our_capabilities(offer, true, jbig);
+    set_bit(&mut fif, 6, true);
+    fif
+}
+
+/// A DCS for a page on V.34's primary channel (T.30 Annex F).
+///
+/// Note 33: "When the modulation system defined in ITU-T Rec. V.34 is used
+/// ... bits 11-14 in DCS are invalid and should be set to '0'". The rate is
+/// the modem's, from its own MPh exchange, and nothing in T.30 says it. Bit 27
+/// is set whatever the command asked, as in [`v34_capabilities`]; bit 28
+/// stays clear, frames of 256 octets, which Note 42 has every receiver take;
+/// and bit 67 is zero, "half-duplex operation only".
+pub fn v34_command(command: Command) -> Vec<u8> {
+    let mut fif = self::command(Command {
+        error_correction: true,
+        ..command
+    });
+    set_field(&mut fif, 11, 14, 0b0000);
+    fif
+}
+
 /// Whether a DCS commands JBIG: bit 78 or 79 in a field that reaches them,
 /// beside bit 27 (Note 17).
 pub fn commands_jbig(fif: &[u8]) -> bool {
