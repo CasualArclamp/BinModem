@@ -28,15 +28,15 @@ pub struct Fax {
     source: Option<Grey>,
     source_size: (usize, usize),
     page: Option<Page>,
-    /// How long the page codes to in each coding -- MH, MR and MMR -- worked
-    /// out once when it is made.
+    /// How long the page codes to in each coding -- MH, MR, MMR and JBIG --
+    /// worked out once when it is made.
     ///
     /// Coding a full page is two to four milliseconds, and the panel wants
     /// the figures once for itself and again for each rate it could go out
     /// at. All of those in every frame of a window that is open for the whole
     /// of a call is tens of milliseconds a frame spent recomputing numbers
     /// that cannot have changed.
-    coded_bits: [usize; 3],
+    coded_bits: [usize; 4],
     /// A small copy of the page for the window to draw.
     preview: Option<egui::TextureHandle>,
     pub resolution: Resolution,
@@ -79,6 +79,10 @@ pub struct Fax {
     /// The number to dial, and what this end calls itself.
     pub number: String,
     pub identification: String,
+    /// What this call's page is going, or went, in -- kept from the moment a
+    /// page starts moving until the call is over, so that it does not blink
+    /// out in the turnaround between one page and the next.
+    carried: Option<Carried>,
     /// A page that arrived: the one `scan` is a picture of.
     incoming: Option<Page>,
     /// The page arriving, or the last one that did, drawn as it came in.
@@ -91,6 +95,17 @@ pub struct Fax {
     looking: Option<(usize, Scan)>,
     /// What was said about saving the last page.
     pub saved: Option<String>,
+}
+
+/// What a page is carried in: its coding, the modulation under it and its
+/// rates, and whether error correction is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Carried {
+    coding: &'static str,
+    modulation: &'static str,
+    rate: u32,
+    symbol_rate: u32,
+    correcting: bool,
 }
 
 /// What the window is asking the modem to do.
@@ -126,6 +141,50 @@ const UNSCANNED: Color32 = Color32::from_rgb(24, 28, 36);
 /// turnaround between one block and the next, a partial page signal and its
 /// answer and a training sequence, which is two or three seconds at most.
 const STILL_ARRIVING: f64 = 4.0;
+
+/// Green: the best a fax can do -- JBIG, V.34, error correction.
+const BEST: Color32 = Color32::from_rgb(90, 220, 130);
+/// Yellow, orange and a redder orange for the rungs below it.
+const GOOD: Color32 = Color32::from_rgb(235, 205, 90);
+const FAIR: Color32 = Color32::from_rgb(240, 160, 80);
+const POOR: Color32 = Color32::from_rgb(225, 120, 90);
+/// The ink on a badge's coloured ground.
+const BADGE_INK: Color32 = Color32::from_rgb(18, 20, 24);
+
+/// A page coding's colour, by how small it makes a page: T.85's JBIG, then
+/// T.6's MMR, then T.4's MR and MH.
+fn coding_colour(coding: &str) -> Color32 {
+    match coding {
+        "JBIG" => BEST,
+        "MMR" => GOOD,
+        "MR" => FAIR,
+        _ => POOR,
+    }
+}
+
+/// A page carrier's colour, by how fast it goes: V.34's half-duplex mode
+/// (Super G3, to 33 600), then V.17, V.29 and V.27 ter.
+fn modulation_colour(modulation: &str) -> Color32 {
+    match modulation {
+        "V.34" => BEST,
+        "V.17" => GOOD,
+        "V.29" => FAIR,
+        _ => POOR,
+    }
+}
+
+/// A word on a coloured ground, big enough to read from across the room.
+fn badge(ui: &mut egui::Ui, text: &str, ground: Color32, tip: &str) {
+    ui.label(
+        RichText::new(format!(" {text} "))
+            .monospace()
+            .strong()
+            .size(15.0)
+            .color(BADGE_INK)
+            .background_color(ground),
+    )
+    .on_hover_text(tip);
+}
 
 /// What a far end's NSF comes to, as rows for its table.
 ///
@@ -396,7 +455,7 @@ impl Fax {
     pub fn render(&mut self) {
         let Some(source) = self.source.as_ref() else { return };
         let page = fax::page::render(source, self.resolution, self.halftone);
-        self.coded_bits = [Coding::ModifiedHuffman, Coding::ModifiedRead, Coding::Mmr]
+        self.coded_bits = [Coding::ModifiedHuffman, Coding::ModifiedRead, Coding::Mmr, Coding::Jbig]
             .map(|coding| coding.encode(&page.lines, page.resolution, 0).len());
         self.page = Some(page);
         self.preview = None;
@@ -459,6 +518,17 @@ impl Fax {
         self.coding = frame.fax_coding;
         self.sending = frame.fax_sending;
         self.fax_class = frame.fax_class;
+        // Only once a page is moving: until the command has settled it, the
+        // coding the call reports is the MH every call starts from.
+        if frame.fax_progress.is_some() && frame.fax_rate > 0 {
+            self.carried = Some(Carried {
+                coding: frame.fax_coding,
+                modulation: frame.modulation,
+                rate: frame.fax_rate,
+                symbol_rate: frame.fax_symbol_rate,
+                correcting: frame.fax_error_correction,
+            });
+        }
         if !frame.fax_identity.is_empty() {
             self.far_identity = frame.fax_identity.clone();
         }
@@ -743,7 +813,7 @@ impl Fax {
                             }
                             ui.vertical(|ui| {
                                 if let Some(page) = self.page.as_ref() {
-                                    let [mh, mr, mmr] = self.coded_bits;
+                                    let [mh, mr, mmr, jbig] = self.coded_bits;
                                     let rows = [
                                         (
                                             "picture",
@@ -757,15 +827,6 @@ impl Fax {
                                             format!("{} by {} pels", page.width(), page.height()),
                                         ),
                                         ("ink", format!("{:.1}% of the paper", page.coverage() * 100.0)),
-                                        (
-                                            "coded",
-                                            format!(
-                                                "MH {}k, MR {}k, MMR {}k bits",
-                                                mh / 1000,
-                                                mr / 1000,
-                                                mmr / 1000
-                                            ),
-                                        ),
                                     ];
                                     egui::Grid::new("fax-page")
                                         .num_columns(2)
@@ -778,31 +839,62 @@ impl Fax {
                                                 );
                                                 ui.end_row();
                                             }
+                                            // Each coding in its colour, JBIG in the
+                                            // green of the best there is.
+                                            ui.label(RichText::new("coded").monospace().color(dim));
+                                            ui.horizontal(|ui| {
+                                                for (name, bits) in [("MH", mh), ("MR", mr), ("MMR", mmr), ("JBIG", jbig)] {
+                                                    ui.label(
+                                                        RichText::new(format!("{name} {}k", bits / 1000))
+                                                            .monospace()
+                                                            .color(coding_colour(name)),
+                                                    );
+                                                }
+                                                ui.label(RichText::new("bits").monospace().color(dim));
+                                            });
+                                            ui.end_row();
                                             // What it costs at each rate this end is
                                             // willing to use, which is the number
                                             // anybody actually wants from this window:
-                                            // from MMR, if the far end has error
-                                            // correction, to MH, which every machine
-                                            // reads.
+                                            // from the smallest coding this end will
+                                            // send -- JBIG or MMR under error
+                                            // correction, MR without -- to MH, which
+                                            // every machine reads. V.34 first, which
+                                            // has error correction always (T.30 F.3).
+                                            let packed = if self.jbig { jbig.min(mmr) } else { mmr };
+                                            let best = if self.error_correction { packed } else { mr };
+                                            let mut times: Vec<(u32, usize, &str)> = Vec::new();
+                                            if self.v34 {
+                                                times.push((33_600, packed, "V.34"));
+                                            }
                                             for m in self.ours() {
                                                 for rate in m.rates() {
-                                                    ui.label(
-                                                        RichText::new(format!("at {rate}"))
-                                                            .monospace()
-                                                            .color(dim),
-                                                    );
+                                                    times.push((*rate, best, m.name()));
+                                                }
+                                            }
+                                            for (rate, least, name) in times {
+                                                ui.label(
+                                                    RichText::new(format!("at {rate}"))
+                                                        .monospace()
+                                                        .color(dim),
+                                                );
+                                                ui.horizontal(|ui| {
                                                     ui.label(
                                                         RichText::new(format!(
-                                                            "{:.0} to {:.0} s  {}",
-                                                            mmr as f64 / f64::from(*rate),
-                                                            mh as f64 / f64::from(*rate),
-                                                            m.name()
+                                                            "{:.0} to {:.0} s",
+                                                            least as f64 / f64::from(rate),
+                                                            mh as f64 / f64::from(rate),
                                                         ))
                                                         .monospace()
                                                         .color(bright),
                                                     );
-                                                    ui.end_row();
-                                                }
+                                                    ui.label(
+                                                        RichText::new(name)
+                                                            .monospace()
+                                                            .color(modulation_colour(name)),
+                                                    );
+                                                });
+                                                ui.end_row();
                                             }
                                         });
                                 }
@@ -907,7 +999,21 @@ impl Fax {
                                         continue;
                                     }
                                     ui.label(RichText::new(k).monospace().color(dim));
-                                    ui.label(RichText::new(v).monospace().color(bright));
+                                    match (k, v.split_once("JBIG")) {
+                                        // The best coding there is, in its green,
+                                        // where the far end says it has it.
+                                        ("coding", Some((before, after))) => {
+                                            ui.horizontal(|ui| {
+                                                ui.spacing_mut().item_spacing.x = 0.0;
+                                                ui.label(RichText::new(before).monospace().color(bright));
+                                                ui.label(RichText::new("JBIG").monospace().strong().color(BEST));
+                                                ui.label(RichText::new(after).monospace().color(bright));
+                                            });
+                                        }
+                                        _ => {
+                                            ui.label(RichText::new(v).monospace().color(bright));
+                                        }
+                                    }
                                     ui.end_row();
                                 }
                                 ui.label(RichText::new("both ends").monospace().color(dim));
@@ -948,6 +1054,7 @@ impl Fax {
         bright: Color32,
     ) -> Option<Start> {
         if on_hook {
+            self.carried = None;
             // A modem stays whatever class it was last told, which is also a
             // good way to dial a bulletin board and greet it with a calling
             // tone. Worth saying, since nothing else on the panel does.
@@ -981,19 +1088,6 @@ impl Fax {
                 stop = Some(Start::HangUp);
             }
             ui.label(RichText::new(format!("{side}: {what}")).small().color(bright));
-            if self.rate > 0 {
-                // V.34 picks its symbol rate as well as its bit rate, and the
-                // two together say how crowded the constellation is.
-                let carried = if self.symbol_rate > 0 {
-                    format!("at {} bit/s on {} baud in {}", self.rate, self.symbol_rate, self.coding)
-                } else {
-                    format!("at {} bit/s in {}", self.rate, self.coding)
-                };
-                ui.label(RichText::new(carried).small().color(dim));
-            }
-            if self.correcting {
-                ui.label(RichText::new("with error correction").small().color(dim));
-            }
             if self.sending && self.sheets > 1 {
                 ui.label(
                     RichText::new(format!("page {} of {}", self.sheet, self.sheets))
@@ -1012,6 +1106,50 @@ impl Fax {
                 );
             }
         });
+        // What the page is going in, where it can be seen from across the
+        // room: the coding, the modulation and its rates, and error
+        // correction, each in green when it is the best a fax has. V.34
+        // picks its symbol rate as well as its bit rate, and the two together
+        // say how crowded the constellation is.
+        if let Some(c) = self.carried {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{side} in")).color(bright));
+                badge(
+                    ui,
+                    c.coding,
+                    coding_colour(c.coding),
+                    "The page's coding, best first: JBIG (T.85), MMR (T.6), MR and \
+                     MH (T.4). JBIG and MMR go only with error correction, and only \
+                     when both ends have them",
+                );
+                ui.label(RichText::new("over").color(bright));
+                let carrier = if c.symbol_rate > 0 {
+                    format!("{} {} bit/s on {} baud", c.modulation, c.rate, c.symbol_rate)
+                } else {
+                    format!("{} {} bit/s", c.modulation, c.rate)
+                };
+                badge(
+                    ui,
+                    &carrier,
+                    modulation_colour(c.modulation),
+                    "What carries the page, fastest first: V.34 half-duplex (Super \
+                     G3) to 33 600, V.17 to 14 400, V.29 to 9600, V.27 ter to 4800",
+                );
+                badge(
+                    ui,
+                    if c.correcting { "ECM" } else { "no ECM" },
+                    if c.correcting { BEST } else { POOR },
+                    "Error correction mode: frames the far end could not read are \
+                     asked for and sent again, rather than printed as streaks",
+                );
+                if c.coding == "JBIG" && c.modulation == "V.34" && c.correcting {
+                    ui.label(RichText::new("best mode").strong().color(BEST)).on_hover_text(
+                        "JBIG over V.34 with error correction: the smallest page \
+                         at the fastest rate a fax has",
+                    );
+                }
+            });
+        }
         if let Some(fraction) = self.progress {
             ui.add(
                 egui::ProgressBar::new(fraction as f32)
@@ -1572,5 +1710,51 @@ mod tests {
         };
         assert!(fax.arriving(arriving, 9.0));
         assert!(fax.earlier.is_empty(), "the last call's pages are still there");
+    }
+
+    /// The badges' colours rank the codings and the carriers, the best of
+    /// each in green: JBIG and V.34.
+    #[test]
+    fn the_best_coding_and_carrier_are_green_and_the_rest_are_not() {
+        assert_eq!(coding_colour("JBIG"), BEST);
+        for worse in ["MMR", "MR", "MH"] {
+            assert_ne!(coding_colour(worse), BEST, "{worse}");
+        }
+        assert_eq!(modulation_colour("V.34"), BEST);
+        for slower in ["V.17", "V.29", "V.27ter", "V.21"] {
+            assert_ne!(modulation_colour(slower), BEST, "{slower}");
+        }
+    }
+
+    /// What the page goes in is taken only once a page is moving -- before
+    /// the command settles it every call reports MH -- and is kept through
+    /// the turnaround after it, when the page's progress has gone.
+    #[test]
+    fn what_a_page_goes_in_is_kept_from_the_page_and_not_before() {
+        let mut fax = Fax::new();
+        let mut frame = telemetry::Frame::new(16, 16, 16_000.0);
+        frame.fax_coding = "MH";
+        frame.modulation = "V.34";
+        frame.fax_rate = 33_600;
+        frame.fax_symbol_rate = 3429;
+        frame.fax_error_correction = true;
+        fax.observe(&frame);
+        assert_eq!(fax.carried, None, "taken before a page was moving");
+
+        frame.fax_coding = "JBIG";
+        frame.fax_progress = Some(0.25);
+        fax.observe(&frame);
+        let page = Carried {
+            coding: "JBIG",
+            modulation: "V.34",
+            rate: 33_600,
+            symbol_rate: 3429,
+            correcting: true,
+        };
+        assert_eq!(fax.carried, Some(page));
+
+        frame.fax_progress = None;
+        fax.observe(&frame);
+        assert_eq!(fax.carried, Some(page), "lost in the turnaround after the page");
     }
 }
