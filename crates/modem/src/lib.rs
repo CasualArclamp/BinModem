@@ -865,12 +865,13 @@ pub struct Modem {
     /// what it was: the tones of clause 5, and a V.34 caller's call menu
     /// overheard and answered without V.34.
     pub fax_v34: bool,
-    /// The page waiting to be sent, taken by the next fax call that dials.
+    /// The pages waiting to be sent, in order, taken by the next fax call
+    /// that dials.
     ///
     /// Taken rather than borrowed, so that a second call does not send the
-    /// first one again by accident: putting a page in is a deliberate act and
-    /// so is putting the same one in twice.
-    pub fax_page: Option<fax::page::Page>,
+    /// first one's again by accident: putting pages in is a deliberate act
+    /// and so is putting the same ones in twice.
+    pub fax_pages: Vec<fax::page::Page>,
     /// What this end calls itself in a fax call, sent as a TSI.
     ///
     /// Twenty characters of digits, spaces and a plus, and blank is legal:
@@ -937,7 +938,7 @@ impl Modem {
             fax_error_correction: true,
             fax_jbig: true,
             fax_v34: true,
-            fax_page: None,
+            fax_pages: Vec::new(),
             fax_identification: String::new(),
             far_menu: None,
             v34_report: None,
@@ -2226,7 +2227,8 @@ impl Modem {
             // operator put it in and asked for a number.
             let call = match role {
                 Role::Calling => {
-                    FaxCall::originate(self.fs, &self.fax_identification, self.fax_page.take())
+                    let pages = std::mem::take(&mut self.fax_pages);
+                    FaxCall::originate_pages(self.fs, &self.fax_identification, pages)
                 }
                 Role::Answering => FaxCall::answer(self.fs, &self.fax_identification),
             };

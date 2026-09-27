@@ -35,6 +35,7 @@ mod answer;
 mod app;
 mod crashlog;
 mod dialin;
+mod document;
 mod faxwin;
 mod console;
 mod engine;

@@ -75,15 +75,16 @@ been checked three other ways: two documents, two methods, one table.
 | **Terminal** | ANSI/CP437 with mouse reporting; telnet (RFC 854) to use it alone |
 | **Settings** | remembered between runs, so the modem comes back where it was left |
 | **Files** | ZMODEM send and receive |
-| **Fax** | T.30 group 3, sending and receiving; V.17 (7200 to 14 400), V.29 (4800/7200/9600) and V.27 ter (2400/4800); Super G3 -- V.8, then T.30 Annex F on V.34's half-duplex mode at up to 33 600; T.4 Modified Huffman and Modified READ, T.6 MMR, T.85 JBIG; T.30 Annex A error correction mode; any number of pages in a call, each drawn as it arrives |
+| **Fax** | T.30 group 3, sending and receiving; V.17 (7200 to 14 400), V.29 (4800/7200/9600) and V.27 ter (2400/4800); Super G3 -- V.8, then T.30 Annex F on V.34's half-duplex mode at up to 33 600; T.4 Modified Huffman and Modified READ, T.6 MMR, T.85 JBIG; T.30 Annex A error correction mode; any number of pages in a call, each drawn as it arrives; a PDF sent a page to a sheet at its printed size, and the pages received saved as a PDF |
 | **Network** | PPP (RFC 1661/1662) with LCP, PAP and CHAP, and IPCP, Van Jacobson header compression (RFC 1144), and a ping over it; a dial-in login prompt, and a login script for dialling out |
 | **Internet** | our own TCP (RFC 9293) and an HTTP/HTTPS proxy (RFC 9112): pages straight to the internet through a provider, or through a far BinModem that has it |
 | **Line** | full-duplex sound card, or a WAV to replay |
 
 It is a fax machine as well. A picture loaded in the Fax window becomes a
-group 3 page and goes out under T.30; a public fax service over the same VoIP
+group 3 page, and a PDF becomes one for each of its pages, drawn at their
+printed size; they go out under T.30. A public fax service over the same VoIP
 trunk accepts the training check and confirms the page, and a page it sends
-back arrives and saves as a PNG. V.29 carries it at 9600 and 7200, falling back
+back arrives and saves as a PDF or a PNG. V.29 carries it at 9600 and 7200, falling back
 to V.27 ter at 4800 and 2400, and every point and training sequence of both was
 read off the figures -- the extracted text turns the square root of two into
 "2". What finally let a real machine's page in was twenty milliseconds of
@@ -178,8 +179,7 @@ OS-specific code — but only built and run on Windows so far.
 
 ## Next
 
-V.33 -- the same trellis code as V.32bis again, on a leased line -- and more
-than one page to send from the fax window.
+V.33 -- the same trellis code as V.32bis again, on a leased line.
 
 V.92, on a branch. Eighteen agents read the Recommendation clause by clause off
 the rendered pages, with V.8, V.8 bis and V.250's `+P` commands beside it, and

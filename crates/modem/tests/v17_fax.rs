@@ -125,7 +125,7 @@ fn a_page_crosses_at_v17_between_two_modems() {
     // unticked at one end, since two of these with it ticked go to V.34.
     let page = a_page(24);
     let mut caller = Modem::new(FS);
-    caller.fax_page = Some(page.clone());
+    caller.fax_pages = vec![page.clone()];
     caller.fax_offer = WITH_V17.to_vec();
     caller.fax_v34 = false;
     let mut answerer = Modem::new(FS);

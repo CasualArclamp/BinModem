@@ -228,7 +228,16 @@ pub fn render(image: &Grey, resolution: Resolution, halftone: Halftone) -> Page 
         let lines = (image.height as f64 / image.width as f64) * WIDTH_MM * resolution.lines_per_mm();
         (lines.round() as usize).clamp(1, max_lines)
     };
-    let mut grey = image.fit(WIDTH, height, resolution.lines_per_mm());
+    ink(image.fit(WIDTH, height, resolution.lines_per_mm()), resolution, halftone)
+}
+
+/// Turn grey that is already on the paper into a page: `WIDTH` values across
+/// each scan line, one line after another, 0.0 for paper and 1.0 for ink.
+///
+/// What [`render`] does once it has fitted a picture, and what a document
+/// drawn straight onto the pel grid needs without the fitting.
+pub fn ink(mut grey: Vec<f32>, resolution: Resolution, halftone: Halftone) -> Page {
+    let height = grey.len() / WIDTH;
     let mut lines = Vec::with_capacity(height);
     match halftone {
         Halftone::Threshold => {
