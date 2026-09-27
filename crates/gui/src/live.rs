@@ -467,6 +467,9 @@ pub struct Session {
     fax_error_correction: AtomicBool,
     /// Whether the window allows JBIG.
     fax_jbig: AtomicBool,
+    /// Whether the window allows V.34 half-duplex: V.8 in front of the call,
+    /// and the page on V.34 where the far end has it.
+    fax_v34: AtomicBool,
     /// A page the window has loaded, waiting for the line thread to take it.
     ///
     /// Taken rather than read, and a page is megabytes of booleans, so it
@@ -516,6 +519,7 @@ impl Default for Session {
             fax_offer: Mutex::new(fax::call::OUR_MODULATIONS.to_vec()),
             fax_error_correction: AtomicBool::new(true),
             fax_jbig: AtomicBool::new(true),
+            fax_v34: AtomicBool::new(true),
             fax_page: Mutex::default(),
             fax_received: Mutex::default(),
             fax_arriving: Mutex::default(),
@@ -585,6 +589,15 @@ impl Session {
 
     pub fn set_fax_jbig(&self, on: bool) {
         self.fax_jbig.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether a fax call may offer V.34 half-duplex.
+    pub fn fax_v34(&self) -> bool {
+        self.fax_v34.load(Ordering::Relaxed)
+    }
+
+    pub fn set_fax_v34(&self, on: bool) {
+        self.fax_v34.store(on, Ordering::Relaxed);
     }
 
     /// Leave a page for the next fax call that dials.
@@ -1349,6 +1362,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         modem.fax_offer = session.fax_offer();
         modem.fax_error_correction = session.fax_error_correction();
         modem.fax_jbig = session.fax_jbig();
+        modem.fax_v34 = session.fax_v34();
         if let Some(page) = session.take_fax_page() {
             modem.fax_page = Some(page);
         }
@@ -1862,6 +1876,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     f.fax_capabilities = call.capability_field().map(<[u8]>::to_vec);
                     f.fax_progress = call.progress();
                     f.fax_rate = call.rate();
+                    f.fax_symbol_rate = call.symbol_rate().unwrap_or(0);
                     f.fax_lines = call.lines_received();
                     f.fax_sheet = call.sheet();
                     f.fax_sheets = call.sheets();

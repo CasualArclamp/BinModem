@@ -121,11 +121,13 @@ fn two_ends_offering_v17_send_the_page_at_14400() {
 #[test]
 fn a_page_crosses_at_v17_between_two_modems() {
     // The whole modem: AT+FCLASS=1, a dial and an answer, and the fax offer
-    // the window's V.17 box puts in `fax_offer`.
+    // the window's V.17 box puts in `fax_offer` -- with its V.34 box
+    // unticked at one end, since two of these with it ticked go to V.34.
     let page = a_page(24);
     let mut caller = Modem::new(FS);
     caller.fax_page = Some(page.clone());
     caller.fax_offer = WITH_V17.to_vec();
+    caller.fax_v34 = false;
     let mut answerer = Modem::new(FS);
     answerer.fax_offer = WITH_V17.to_vec();
     for (modem, dial) in [(&mut caller, "ATD1"), (&mut answerer, "ATA")] {
