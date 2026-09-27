@@ -187,6 +187,24 @@ const V34_PAGE_AHEAD: usize = 512;
 /// 2 lets the line go straight after the DCN, not before it).
 const V34_FLUSH_SYMBOLS: u64 = 10;
 
+/// How long the source holds its turn to the page for the modem to hear the
+/// recipient fall silent, once T.30 has taken the recipient's flags stopping
+/// for its turn, before turning on that alone.
+///
+/// F.3.2.3 lets the source turn on "silence (or absence of flags)", and T.30
+/// takes the second once [`fax::call::FLAGS_GONE`], a tenth of a second, has
+/// passed without one. But the flags stop too for the 70 ms of silence a far
+/// end keeps before its 12.7/V.34 retrain tone. T.30 then asks for the page
+/// 130 to 165 ms after the far end stopped, by the control receiver's delay
+/// and the noise, and the modem goes into the retrain -- after which it
+/// refuses the turn -- once it has heard 50 ms of the tone, about 155 ms
+/// after: a race either may win, and a page sent into a recipient in phase 2
+/// if T.30 does. So the modem's own hearing of the silence,
+/// [`halfduplex::Modem::far_silent`], is what turns the source (`wp-g.md`,
+/// "For H3"), and this is the fallback for a far end whose silence it cannot
+/// hear: a fifth of a second more, by when a retrain has shown itself.
+const V34_TURN_HOLD: f64 = 0.2;
+
 /// What carries a call once V.8 has agreed V.34 half-duplex and T.30 Annex F
 /// has it: the modem of clause 12, from its phase 2 on.
 ///
@@ -282,8 +300,12 @@ pub struct FaxCall {
     /// ([`limit_v34_rate`](Self::limit_v34_rate)).
     v34_cap: Option<u32>,
     /// Whether the modem has accepted this end's turn to the primary channel
-    /// for the page in hand, so that a turn it refused is asked for again.
+    /// for the page in hand, so that a turn it refused, or one a retrain
+    /// undid, is asked for again.
     v34_turned: bool,
+    /// Samples the source has held a turn T.30 asked for, waiting for the
+    /// modem to hear the recipient silent ([`V34_TURN_HOLD`]).
+    v34_held: u64,
     /// Samples for which the control channel's transmitter has had no bit of
     /// T.30's waiting, for [`Call::tick`]'s `idle`.
     v34_drained: u64,
@@ -334,6 +356,7 @@ impl FaxCall {
             v34_trouble: None,
             v34_cap: None,
             v34_turned: false,
+            v34_held: 0,
             v34_drained: 0,
             far_menu: None,
             joint_menu: None,
@@ -1026,16 +1049,23 @@ impl FaxCall {
                             if let Some(rate) = modem.primary_rate() {
                                 self.call.set_primary_rate(rate);
                             }
+                            self.v34_held = 0;
+                        }
+                        // A retrain, of either channel, from either end, puts
+                        // both back on the control channel: a turn made before
+                        // it is undone, and is made again once the channel is
+                        // back if T.30 still wants the page. Nothing else
+                        // undoes one -- the channel coming back after a page
+                        // is the page's turn over, not one to make again for a
+                        // recipient whose T.30 is a moment behind its modem.
+                        Event::Retraining => {
                             self.v34_turned = false;
+                            self.v34_held = 0;
                         }
                         // Phase 2 failing, or anything after it: the modem's
                         // reason is the call's.
                         Event::Failed(why) => failed = Some(format!("V.34: {why}")),
-                        Event::Phase2Over
-                        | Event::Phase3Over { .. }
-                        | Event::PageStarted { .. }
-                        | Event::PageEnded
-                        | Event::Retraining => {}
+                        Event::Phase2Over | Event::Phase3Over { .. } | Event::PageStarted { .. } | Event::PageEnded => {}
                     }
                 }
                 // What INFOh chose, once phase 2 is over: the first time, or
@@ -1078,8 +1108,10 @@ impl FaxCall {
                 let change_wanted = self.v34_cap.is_some_and(|cap| modem.primary_rate().is_some_and(|rate| cap < rate));
                 if want != self.line {
                     match (self.line, want) {
+                        // A turn asked for, made below once the modem can.
                         (_, Line::V34Primary | Line::V34PrimaryListen) => {
-                            self.v34_turned = modem.to_primary();
+                            self.v34_turned = false;
+                            self.v34_held = 0;
                         }
                         (Line::V34Primary, _) if source => {
                             modem.to_control(self.call.renegotiate() || change_wanted);
@@ -1093,13 +1125,25 @@ impl FaxCall {
                         _ => {}
                     }
                     self.line = want;
-                } else if !self.v34_turned
+                }
+                // The turn itself, from the control channel only: one asked
+                // for while the modem is between channels -- a retrain -- is
+                // held until the channel is back, never dropped. The recipient
+                // turns at once, T.30 having heard the forty ones (F.3.2.2);
+                // the source once the modem hears the recipient silent
+                // (F.3.2.3), or T.30's "absence of flags" has stood a while
+                // longer ([`V34_TURN_HOLD`]). Until then the source's control
+                // channel, fed nothing, goes on sending ones.
+                if !self.v34_turned
                     && matches!(want, Line::V34Primary | Line::V34PrimaryListen)
                     && modem.state() == State::Control
                 {
-                    // A turn the modem could not take when it was asked --
-                    // it was between channels -- asked again now it is back.
-                    self.v34_turned = modem.to_primary();
+                    let ready = !source || modem.far_silent() || self.v34_held as f64 >= V34_TURN_HOLD * self.fs;
+                    if ready {
+                        self.v34_turned = modem.to_primary();
+                    } else {
+                        self.v34_held += 1;
+                    }
                 }
 
                 // A recipient with something to say on a channel that is
@@ -1283,6 +1327,7 @@ impl FaxCall {
                 self.v34 = Some(HalfDuplex::Modem(modem));
                 self.v34_facts = V34Facts::default();
                 self.v34_turned = false;
+                self.v34_held = 0;
                 self.v34_drained = 0;
                 self.call.start_annex_f();
             }
@@ -2031,6 +2076,81 @@ mod tests {
         assert!(caller.error_correction() && answerer.error_correction(), "F.3: ECM is mandatory");
         assert_eq!((caller.standard(), answerer.standard()), ("V.34", "V.34"));
         eprintln!("done in {:.1} s", caller.seconds());
+    }
+
+    /// A recipient that retrains the primary channel (12.7/V.34) just as the
+    /// source begins its ones for the page. Its flags stop for the 70 ms of
+    /// silence in front of its tone, and T.30 takes that for its turn after
+    /// a tenth of a second without a flag -- over this little noise, 133 ms
+    /// after the recipient stopped, before the source's modem has heard the
+    /// 50 ms of tone that send it into the retrain (at about 155 ms). A join
+    /// that turned then sent the page into a recipient in phase 2. This one
+    /// holds the turn for the modem to hear the recipient silent; the modem
+    /// hears the tone instead and joins the retrain; and the turn is made
+    /// once the channel is back. The page arrives whole, one retrain each.
+    #[test]
+    fn a_page_waits_out_a_primary_channel_retrain_begun_as_it_was_due() {
+        let page = a_page(8);
+        let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()))
+            .offering(&MODULATIONS)
+            .with_v34(true);
+        let mut answerer = FaxCall::answer(FS, "61388880000").offering(&MODULATIONS).with_v34(true);
+        // The noise `a_page_gets_through_a_line_with_noise_on_it` has. On a
+        // clean line T.30's flags-gone comes 10 ms after the modem has left
+        // for the retrain, and there is no race to lose.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut noise = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64 * 0.02 - 0.01
+        };
+        let (mut to_caller, mut to_answerer) = (0.0, 0.0);
+        let mut retrain_at = None;
+        // When the caller's T.30 asked for the page, with what its modem was
+        // doing then, and when the modem took the turn.
+        let (mut asked, mut turned) = (None, None);
+        for i in 0..(FS * 60.0) as usize {
+            let t = i as f64 / FS;
+            let a = caller.step(to_caller);
+            let b = answerer.step(to_answerer);
+            to_caller = b + noise();
+            to_answerer = a + noise();
+            if retrain_at.is_none()
+                && caller.call.line() == Line::V34Ones
+                && let Some(HalfDuplex::Modem(modem)) = answerer.v34.as_mut()
+            {
+                assert!(modem.retrain_primary(), "the recipient could not retrain: {}", modem.phase());
+                retrain_at = Some(t);
+            }
+            if asked.is_none()
+                && caller.call.line() == Line::V34Primary
+                && let Some(HalfDuplex::Modem(modem)) = caller.v34.as_ref()
+            {
+                asked = Some((t, modem.state()));
+            }
+            if turned.is_none() && caller.v34_turned {
+                turned = Some(t);
+            }
+            if caller.phase().is_over() && answerer.phase().is_over() {
+                break;
+            }
+        }
+        let retrain_at = retrain_at.expect("the caller never sent its ones");
+        let (asked, state) = asked.expect("the caller's T.30 never asked for the page");
+        let turned = turned.expect("the caller never turned to the page");
+        // T.30 took the stopped flags for the recipient's turn while the
+        // modem was still on the control channel, so the race was on...
+        assert_eq!(state, State::Control, "T.30 asked {:.3} s after the retrain began", asked - retrain_at);
+        // ...and the turn waited out the retrain -- phase 2, phase 3 and a
+        // control channel start-up -- which is seconds, not a tenth of one.
+        assert!(turned - asked > 1.0, "turned {:.3} s after T.30 asked", turned - asked);
+        assert_eq!(caller.phase(), Phase::Done, "the caller: {:?}", caller.trouble());
+        assert_eq!(answerer.phase(), Phase::Done, "the answerer: {:?}", answerer.trouble());
+        assert_eq!(answerer.received().expect("no page arrived").lines, page.lines);
+        assert_eq!(caller.v34_retrains(), (1, 0), "the caller");
+        assert_eq!(answerer.v34_retrains(), (1, 0), "the answerer");
+        assert_eq!(caller.primary_rate(), Some(33_600));
     }
 
     /// An end offering V.34 that dials a fax without it: the plain called
