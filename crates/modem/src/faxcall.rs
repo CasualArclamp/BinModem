@@ -13,7 +13,19 @@
 //! ten times before a page has moved -- a tone, then 300 bit/s, then silence,
 //! then 9600, then silence, then 300 again -- and every one of those changes
 //! is a carrier going up or down at both ends.
+//!
+//! A Super G3 call answers it differently. Once V.8 has agreed V.34
+//! half-duplex (T.30 clause 6) the line belongs to one modem for the rest of
+//! the call, [`datapump::v34::halfduplex`], which has two channels of its own
+//! and turns between them itself; the procedure, T.30 Annex F, says only
+//! which channel it wants ([`Line`]'s `V34*` words) and hands over bits. What
+//! this join does there is map the one onto the other (`plan.md` 10.1), and
+//! keep to the rule that the modem is never given a bit it will not send.
 
+use datapump::v34::halfduplex::{self, Event, Setup, State};
+use datapump::v34::phase2::{Role as V34Role, Status as ProbeStatus};
+use datapump::v34::phase2h::{self, Part};
+use datapump::v34::{control, data, signals::Size};
 use datapump::v8 as v8line;
 use datapump::{v17, v21, v27ter, v29};
 use fax::call::{Call, Line, Phase, Role, Speed};
@@ -71,6 +83,66 @@ fn v8_modulations(modulations: &[Modulation]) -> v8::Modulations {
     set
 }
 
+/// A name for V.34's data-mode constellation by its points, as the V.17
+/// names go: the L of Table 10/V.34 for the rate and symbol rate in use,
+/// which is every value Table 10's rule gives across Table 8's rows, minimum
+/// and expanded shaping both.
+fn tcm_name(points: usize) -> &'static str {
+    match points {
+        4 => "4TCM",
+        8 => "8TCM",
+        12 => "12TCM",
+        16 => "16TCM",
+        20 => "20TCM",
+        24 => "24TCM",
+        28 => "28TCM",
+        32 => "32TCM",
+        36 => "36TCM",
+        40 => "40TCM",
+        44 => "44TCM",
+        48 => "48TCM",
+        52 => "52TCM",
+        56 => "56TCM",
+        68 => "68TCM",
+        72 => "72TCM",
+        88 => "88TCM",
+        96 => "96TCM",
+        104 => "104TCM",
+        112 => "112TCM",
+        120 => "120TCM",
+        128 => "128TCM",
+        144 => "144TCM",
+        160 => "160TCM",
+        176 => "176TCM",
+        192 => "192TCM",
+        208 => "208TCM",
+        224 => "224TCM",
+        256 => "256TCM",
+        272 => "272TCM",
+        320 => "320TCM",
+        352 => "352TCM",
+        384 => "384TCM",
+        416 => "416TCM",
+        448 => "448TCM",
+        512 => "512TCM",
+        544 => "544TCM",
+        576 => "576TCM",
+        640 => "640TCM",
+        704 => "704TCM",
+        768 => "768TCM",
+        832 => "832TCM",
+        896 => "896TCM",
+        960 => "960TCM",
+        1024 => "1024TCM",
+        1152 => "1152TCM",
+        1280 => "1280TCM",
+        1408 => "1408TCM",
+        1536 => "1536TCM",
+        1664 => "1664TCM",
+        _ => "TCM",
+    }
+}
+
 /// How long the answering end's ANSam lasts with no call menu heard, when
 /// V.34 is offered.
 ///
@@ -84,18 +156,88 @@ fn v8_modulations(modulations: &[Modulation]) -> v8::Modulations {
 /// front of the first menu.
 const ANSAM_SECONDS: f64 = 3.8;
 
-/// What carries a call once V.8 has agreed V.34 half-duplex and T.30 Annex F
-/// has it: the modem of V.34 clause 12, which is package G's and not in this
-/// join yet.
+/// How many control channel bits the join hands V.34's half-duplex modem
+/// ahead of the line.
 ///
-/// H3 puts `datapump::v34::halfduplex::Modem` in a variant beside this one
-/// and maps [`Line`]'s `V34*` words onto it (plan 10.1 and 10.2). Until then
-/// there is one thing it can be.
+/// Sixteen is 13 ms at 1200 bit/s. Enough that a symbol never finds fewer
+/// bits than it carries -- four at most, and the queue is filled again every
+/// sample -- since a symbol short of bits is padded with ones, which inside a
+/// frame is a frame spoilt (`control::Transmitter::send_bits`); and few
+/// enough that what T.30 counts as sent is on the line within a flag or two,
+/// which matters for the forty ones it counts before a page (F.3.2.3), and
+/// that a burst cut into by a restart loses almost nothing.
+const V34_CONTROL_AHEAD: usize = 16;
+
+/// How many page bits are kept ahead of the primary channel's encoder.
+///
+/// The encoder takes bits a mapping frame at a time, up to 79 of them at
+/// 33 600 bit/s, and pads a short frame with ones (`primary::Symbols`); this
+/// is several frames at every rate, and 15 ms at the fastest, so the page
+/// never runs dry inside a frame while T.30 still has bits to give. When
+/// T.30 has none left the queue drains to nothing, which is the end of the
+/// burst.
+const V34_PAGE_AHEAD: usize = 512;
+
+/// Where the control channel's transmitter puts a bit on the line, after
+/// taking it: its pulse's lookahead and a symbol either side, in symbols at
+/// 600 baud.
+///
+/// What [`Call::tick`]'s `idle` has to wait for at the end of an Annex F
+/// call: the DCN's closing flag has been taken by the modem, and has then
+/// to have left the pulse before the line is dropped under it (F.3.4.5 Note
+/// 2 lets the line go straight after the DCN, not before it).
+const V34_FLUSH_SYMBOLS: u64 = 10;
+
+/// What carries a call once V.8 has agreed V.34 half-duplex and T.30 Annex F
+/// has it: V.34's phase 2, and then the modem of clause 12.
+///
+/// Two modems in turn rather than one, because that is how package G's API
+/// has it: `halfduplex::Modem::after_phase2` starts at phase 3 with what
+/// phase 2 settled, and phase 2 is `phase2h::Modem`'s. The hand-over between
+/// them is a sample's work. Both roles of this join are fixed by T.30: the
+/// end that dialled is the call modem and sends the page, so it is phase 2's
+/// source; the end that answered is the answer modem and the recipient. T.30
+/// has no other case on an ordinary call, and polling is not built.
 #[derive(Debug)]
 enum HalfDuplex {
-    /// No modem. The line is quiet, no bit of the procedure's is taken and
-    /// none is handed up; the procedure's clocks run, and nothing else does.
-    Missing,
+    /// Phase 2 (12.2/V.34): INFO0 both ways, the tones and their reversals,
+    /// L1 and L2 from the source, INFOh from the recipient. Nothing of
+    /// T.30's is taken; its clocks run.
+    Probing(Box<phase2h::Modem>),
+    /// Phase 3 and everything after (12.3 to 12.8/V.34): the modem T.30's
+    /// bits go through.
+    Modem(Box<halfduplex::Modem>),
+    /// The call is over and the line dropped, or the modem gave up: nothing
+    /// is on the line, and what was learnt is in [`FaxCall::v34_facts`].
+    Over,
+}
+
+/// What the half-duplex modem has settled, copied out once a sample so that
+/// the window and the far-end panel can have it after the modem has gone.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct V34Facts {
+    /// The primary channel's symbol rate, from INFOh.
+    symbol_rate: Option<u32>,
+    high_carrier: bool,
+    /// The primary channel's data rate, as the last MPh exchange settled it.
+    primary_rate: Option<u32>,
+    /// The control channel's rates, this end's transmitter's and receiver's.
+    control_rates: Option<(u32, u32)>,
+    /// What the primary receiver last trained to, at the recipient.
+    trained_snr_db: Option<f64>,
+    retrains: u32,
+    recoveries: u32,
+}
+
+/// Which of V.34's two channels the scope should be drawing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum V34Channel {
+    /// The control channel, on four points at 1200 bit/s or sixteen at 2400
+    /// (10.2.4/V.34).
+    Control(Size),
+    /// The primary channel in its data mode, with the parameters that fix
+    /// its constellation.
+    Primary(data::Params),
 }
 
 /// A fax call, from either end.
@@ -134,6 +276,19 @@ pub struct FaxCall {
     /// Where the call stands with V.34's half-duplex modem: `Some` from the
     /// moment V.8 agreed V.34 half-duplex and the call went to Annex F.
     v34: Option<HalfDuplex>,
+    /// What that modem settled, kept after it.
+    v34_facts: V34Facts,
+    /// Why the modem gave up, when it did: the call is failed from then.
+    v34_trouble: Option<String>,
+    /// The most the primary channel is to be offered, once anyone has asked
+    /// ([`limit_v34_rate`](Self::limit_v34_rate)).
+    v34_cap: Option<u32>,
+    /// Whether the modem has accepted this end's turn to the primary channel
+    /// for the page in hand, so that a turn it refused is asked for again.
+    v34_turned: bool,
+    /// Samples for which the control channel's transmitter has had no bit of
+    /// T.30's waiting, for [`Call::tick`]'s `idle`.
+    v34_drained: u64,
     /// The menu the far end sent, if it sent one.
     far_menu: Option<v8::Menu>,
     /// The joint menu V.8 settled, once it has.
@@ -177,6 +332,11 @@ impl FaxCall {
             v34_offered: false,
             v8_offer: v8_modulations(&fax::call::OUR_MODULATIONS),
             v34: None,
+            v34_facts: V34Facts::default(),
+            v34_trouble: None,
+            v34_cap: None,
+            v34_turned: false,
+            v34_drained: 0,
             far_menu: None,
             joint_menu: None,
             fs,
@@ -206,15 +366,14 @@ impl FaxCall {
     /// joint menu with V.34 half-duplex in it for a caller whose call menu
     /// has it; dialling, a call menu on hearing ANSam (6.1.2). Either way the
     /// call goes to T.30 Annex F once V.8 has agreed it (6.1.5,
-    /// [`Call::start_annex_f`]) and to clause 5 as before when it has not
-    /// (6.1.6).
+    /// [`Call::start_annex_f`]), carried by V.34's half-duplex modem from
+    /// its phase 2 to the last page, and to clause 5 as before when it has
+    /// not (6.1.6).
     ///
-    /// Off unless asked, and nothing asks yet: this join has no V.34
-    /// half-duplex modem to hand an Annex F call to (packages G and H3 of
-    /// `docs/design/superg3/plan.md`), so a call that agreed V.34 today would
-    /// stop at the hand-over point with the line quiet. H3 turns it on. Off,
-    /// the call is what it was before: the called tone and a DIS, with a call
-    /// menu overheard and answered without V.34.
+    /// Off unless asked, here; the modem above this join asks
+    /// (`Modem::fax_v34`, the window's V.34 box). Off, the call is what it was
+    /// before: the called tone and a DIS, with a call menu overheard and
+    /// answered without V.34.
     #[must_use]
     pub fn with_v34(mut self, on: bool) -> Self {
         self.v34_offered = on;
@@ -299,12 +458,23 @@ impl FaxCall {
         self.call.role()
     }
 
+    /// How far the call has got: T.30's phase, or failed once V.34's modem
+    /// has given up under it.
+    ///
+    /// The modem giving up ends the call from here rather than from inside
+    /// the procedure, which has no way of being told and would otherwise sit
+    /// out a timer of its own -- T1 is 35 s -- before saying something less
+    /// true than the modem's reason.
     pub fn phase(&self) -> Phase {
+        if self.v34_trouble.is_some() {
+            return Phase::Failed;
+        }
         self.call.phase()
     }
 
     /// What the call is doing, as a person would say it: T.30's phase, or
-    /// V.8 while that has the line.
+    /// V.8 while that has the line, or V.34's modem while it is between
+    /// channels and the procedure is waiting on it.
     pub fn phase_name(&self) -> &'static str {
         if let Some(v8) = &self.v8
             && v8.has_the_line()
@@ -320,9 +490,15 @@ impl FaxCall {
                 _ => "V.8",
             };
         }
-        match self.v34 {
-            Some(HalfDuplex::Missing) => "V.34 half-duplex agreed, and no modem here for it",
-            None => self.call.phase().name(),
+        match self.v34.as_ref() {
+            Some(HalfDuplex::Probing(probe)) => probe.phase(),
+            // On a channel, the procedure's word for it: "sending the page"
+            // says more than "V.34 page". Between them, the modem's.
+            Some(HalfDuplex::Modem(modem)) => match modem.state() {
+                State::Control | State::Primary => self.call.phase().name(),
+                _ => modem.phase(),
+            },
+            Some(HalfDuplex::Over) | None => self.phase().name(),
         }
     }
 
@@ -341,11 +517,92 @@ impl FaxCall {
 
     /// Whether V.8 agreed V.34 half-duplex, so that the call is T.30 Annex
     /// F's (6.1.5) -- from the hand-over point on, 75 ms after CJ, with the
-    /// modem's own start-up (INFO0, 11.1/V.34) due next.
-    ///
-    /// On a modem this join has not got yet: see [`with_v34`](Self::with_v34).
+    /// modem's own start-up (INFO0, 11.1/V.34) begun on that sample.
     pub fn v34_agreed(&self) -> bool {
         self.v34.is_some()
+    }
+
+    /// The primary channel's symbol rate in baud, once V.34's INFOh has
+    /// chosen it (12.2/V.34); kept after the call.
+    pub fn symbol_rate(&self) -> Option<u32> {
+        self.v34_facts.symbol_rate
+    }
+
+    /// The primary channel's data rate in bit/s, as V.34's last MPh exchange
+    /// settled it (12.4/V.34); kept after the call. What [`rate`](Self::rate)
+    /// says too, once the procedure has been told, but from the modem.
+    pub fn primary_rate(&self) -> Option<u32> {
+        self.v34_facts.primary_rate
+    }
+
+    /// The control channel's rates in bit/s, this end's transmitter's and
+    /// its receiver's (12.4.1.4/V.34); kept after the call.
+    pub fn control_rates(&self) -> Option<(u32, u32)> {
+        self.v34_facts.control_rates
+    }
+
+    /// Control channel retrains (12.8/V.34) the call has had, from either
+    /// end, and times phase 3 failed and was gone back to (12.3.3/V.34).
+    pub fn v34_retrains(&self) -> (u32, u32) {
+        (self.v34_facts.retrains, self.v34_facts.recoveries)
+    }
+
+    /// What the primary receiver last trained to, in decibels, at the end
+    /// that receives the page.
+    pub fn v34_snr_db(&self) -> Option<f64> {
+        self.v34_facts.trained_snr_db
+    }
+
+    /// Offer the primary channel no more than this, in bit/s, from the next
+    /// MPh exchange on -- and, when a page is already going faster, ask for
+    /// one at the next start of the control channel (F.3.4.1/T.30, 12.6/V.34:
+    /// the source through a start-up in place of its resynchronisation, the
+    /// recipient by answering Sh with PPh, 12.6.2.3).
+    ///
+    /// The window's cap, should it grow one, and a way of forcing a rate
+    /// change in a test. Rounded down to a multiple of 2400 by the modem, and
+    /// never below it.
+    pub fn limit_v34_rate(&mut self, bits_per_second: u32) {
+        self.v34_cap = Some(bits_per_second);
+        if let Some(HalfDuplex::Modem(modem)) = self.v34.as_mut() {
+            modem.limit_rate(bits_per_second);
+        }
+    }
+
+    /// What the V.34 modem settled, for the far-end panel, in rows: nothing
+    /// until V.8 has agreed V.34.
+    pub fn v34_rows(&self) -> Vec<(&'static str, String)> {
+        let mut rows = Vec::new();
+        let facts = &self.v34_facts;
+        match self.v34.as_ref() {
+            None => return rows,
+            Some(HalfDuplex::Probing(probe)) => rows.push(("V.34 fax", format!("phase 2: {}", probe.phase()))),
+            Some(HalfDuplex::Modem(_) | HalfDuplex::Over) => {}
+        }
+        if let Some(baud) = facts.symbol_rate {
+            let carrier = if facts.high_carrier { "high" } else { "low" };
+            let rate = facts.primary_rate.map_or("no rate yet".to_owned(), |r| format!("{r} bit/s"));
+            rows.push(("primary channel", format!("{rate} on {baud} baud, {carrier} carrier")));
+        }
+        if let Some((transmit, receive)) = facts.control_rates {
+            let mut what = if transmit == receive {
+                format!("{transmit} bit/s both ways")
+            } else {
+                format!("{transmit} bit/s out, {receive} in")
+            };
+            if facts.retrains > 0 {
+                what.push_str(&format!(", {} retrain{}", facts.retrains, if facts.retrains == 1 { "" } else { "s" }));
+            }
+            rows.push(("control channel", what));
+        }
+        if let Some(snr) = facts.trained_snr_db {
+            let mut what = format!("{snr:.1} dB");
+            if facts.recoveries > 0 {
+                what.push_str(&format!(", phase 3 gone back to {} time{}", facts.recoveries, if facts.recoveries == 1 { "" } else { "s" }));
+            }
+            rows.push(("page trained to", what));
+        }
+        rows
     }
 
     pub fn seconds(&self) -> f64 {
@@ -430,9 +687,10 @@ impl FaxCall {
         self.call.sheets()
     }
 
-    /// Why the call went badly, if it did.
+    /// Why the call went badly, if it did: the modem's reason where V.34's
+    /// modem gave up, the procedure's otherwise.
     pub fn trouble(&self) -> Option<&str> {
-        self.call.trouble.as_deref()
+        self.v34_trouble.as_deref().or(self.call.trouble.as_deref())
     }
 
     pub fn take_heard(&mut self) -> Vec<fax::frames::Message> {
@@ -441,6 +699,9 @@ impl FaxCall {
 
     /// Whether anything of the far end's is on the line.
     pub fn carrier(&self) -> bool {
+        if let Some(HalfDuplex::Modem(modem)) = self.v34.as_ref() {
+            return modem.control_carrier() || modem.page_carrier();
+        }
         self.control_rx.carrier()
             || self.v27ter_rx.carrier()
             || self.v29_rx.carrier()
@@ -460,6 +721,75 @@ impl FaxCall {
         }
     }
 
+    /// Which of V.34's channels the scope should be drawing, once the call is
+    /// on the half-duplex modem: the primary channel from the moment this end
+    /// turns to it until the page is over, the control channel otherwise.
+    fn v34_channel(&self) -> Option<V34Channel> {
+        let Some(HalfDuplex::Modem(modem)) = self.v34.as_ref() else { return None };
+        Some(match modem.state() {
+            State::Primary | State::ToPrimary => {
+                let data = modem.data_mode()?;
+                // Which scrambler the source has does not move a point of the
+                // constellation; the source is the call modem here anyway.
+                V34Channel::Primary(data.params(modem.channel().band.rate, datapump::v32::Mode::Call)?)
+            }
+            State::Failed => return None,
+            _ => V34Channel::Control(modem.control().receiver.rate().size()),
+        })
+    }
+
+    /// The point V.34's receivers last decided on, while one of them is
+    /// deciding: the primary channel's at the recipient from B1 on, the
+    /// control channel's from PPh or Sh until the far end stops. The source
+    /// has nothing to draw while its page goes out -- the primary channel is
+    /// one way, and its transmitter keeps no reading of what it sends.
+    fn v34_point(&self) -> Option<(f64, f64)> {
+        let Some(HalfDuplex::Modem(modem)) = self.v34.as_ref() else { return None };
+        match self.v34_channel()? {
+            V34Channel::Primary(_) => {
+                let recipient = modem.primary_recipient()?;
+                recipient.carrier().then(|| recipient.last_point()).flatten().map(Into::into)
+            }
+            V34Channel::Control(_) => {
+                let receiver = &modem.control().receiver;
+                receiver.is_locked().then(|| receiver.constellation_point())
+            }
+        }
+    }
+
+    /// Signal to noise of the V.34 receiver that is deciding, in decibels,
+    /// while one is.
+    fn v34_snr(&self) -> Option<f64> {
+        let Some(HalfDuplex::Modem(modem)) = self.v34.as_ref() else { return None };
+        match self.v34_channel()? {
+            V34Channel::Primary(_) => {
+                let recipient = modem.primary_recipient()?;
+                recipient.carrier().then(|| recipient.snr_db())
+            }
+            V34Channel::Control(_) => {
+                let receiver = &modem.control().receiver;
+                receiver.is_locked().then(|| receiver.snr_db())
+            }
+        }
+    }
+
+    /// The gap between neighbouring points of the V.34 constellation being
+    /// decided, at the unit mean power the points are reported in.
+    ///
+    /// Exact for the control channel's four and sixteen points. For the
+    /// primary channel's shaped hundreds it is the square constellation's
+    /// figure -- sqrt(6 / (L - 1)) for L points at odd multiples of half a
+    /// gap -- which is a little under the truth, since shaping uses the outer
+    /// rings less and so spends less power for the same gap; near enough for
+    /// a meter whose decision boundary is half.
+    fn v34_point_spacing(channel: V34Channel) -> f64 {
+        match channel {
+            V34Channel::Control(Size::Four) => 2.0 * std::f64::consts::FRAC_1_SQRT_2,
+            V34Channel::Control(Size::Sixteen) => 2.0 / 10f64.sqrt(),
+            V34Channel::Primary(params) => (6.0 / (params.framing.l.max(2) - 1) as f64).sqrt(),
+        }
+    }
+
     /// The constellation on the line just now, while a page carrier is.
     ///
     /// Whichever end of it this is. Sending, it is the points going out --
@@ -469,7 +799,12 @@ impl FaxCall {
     /// decided on, but only while it hears a carrier: the silence either side
     /// of a burst comes out of an equaliser as a smear at the centre that is
     /// not a picture of anything.
+    ///
+    /// On V.34 it is whichever channel is up: see [`Self::v34_point`].
     pub fn constellation_point(&self) -> Option<(f64, f64)> {
+        if self.v34.is_some() {
+            return self.v34_point();
+        }
         match self.line {
             Line::Fast(speed) => match Carrier::of(speed)? {
                 Carrier::V27ter(_) => self.v27ter_tx.last_point(),
@@ -501,6 +836,18 @@ impl FaxCall {
     /// circle would put four of its sixteen points off the edge. V.17's
     /// crosses reach further still.
     pub fn constellation_peak(&self) -> f64 {
+        if self.v34.is_some() {
+            // V.34's points are reported at unit mean power, and its peaks
+            // are the largest coordinate at that power, as the duplex pump
+            // has them: 1/sqrt(2) for four points, 3/sqrt(10) for sixteen,
+            // and data mode's own, about one and a half for the shaped
+            // hundreds.
+            return match self.v34_channel() {
+                Some(V34Channel::Control(Size::Four)) | None => std::f64::consts::FRAC_1_SQRT_2,
+                Some(V34Channel::Control(Size::Sixteen)) => 3.0 / 10f64.sqrt(),
+                Some(V34Channel::Primary(params)) => data::peak(&params),
+            };
+        }
         match self.page_carrier() {
             Some(Carrier::V29(_)) => self.v29_rx.constellation_peak(),
             Some(Carrier::V17(rate)) => rate.peak(),
@@ -522,13 +869,21 @@ impl FaxCall {
         self.control_rx.take_symbol()
     }
 
+    /// Whether V.21's channel is the one the scope should be drawing: not
+    /// while a page carrier is, and never once the call is V.34's, whose
+    /// control channel is QAM and has a constellation rather than an eye.
     fn on_the_control_channel(&self) -> bool {
-        !matches!(self.line, Line::Fast(_) | Line::FastListen(_))
+        self.v34.is_none() && !matches!(self.line, Line::Fast(_) | Line::FastListen(_))
     }
 
     /// Mean distance from the decisions being made, where there are points to
-    /// decide between.
+    /// decide between: at unit mean power, so that a signal to noise in
+    /// decibels is minus twenty times its logarithm, which is how V.34's
+    /// receivers report theirs.
     pub fn residual_error(&self) -> Option<f64> {
+        if self.v34.is_some() {
+            return self.v34_snr().map(|snr_db| 10f64.powf(-snr_db / 20.0));
+        }
         Some(match self.page_carrier()? {
             Carrier::V27ter(_) => self.v27ter_rx.residual_error(),
             Carrier::V29(_) => self.v29_rx.residual_error(),
@@ -539,6 +894,10 @@ impl FaxCall {
     /// That distance as a fraction of the gap between neighbouring points,
     /// where half is the decision boundary.
     pub fn reception(&self) -> Option<f64> {
+        if self.v34.is_some() {
+            let channel = self.v34_channel()?;
+            return self.residual_error().map(|error| error / Self::v34_point_spacing(channel));
+        }
         Some(match self.page_carrier()? {
             Carrier::V27ter(_) => {
                 self.v27ter_rx.residual_error() / self.v27ter_rx.point_spacing()
@@ -550,6 +909,14 @@ impl FaxCall {
 
     /// How many points the scope should expect.
     pub fn states(&self) -> usize {
+        if self.v34.is_some() {
+            return match self.v34_channel() {
+                Some(V34Channel::Control(size)) => 1 << size.bits(),
+                Some(V34Channel::Primary(params)) => params.framing.l,
+                // Phase 2's INFO sequences: binary DPSK on a tone.
+                None => 2,
+            };
+        }
         match self.page_carrier() {
             None => 2,
             Some(Carrier::V27ter(rate)) => usize::from(rate.phases()),
@@ -562,8 +929,18 @@ impl FaxCall {
     ///
     /// V.29 is amplitude and phase rather than a square grid, so its names
     /// say so: two radii on each of the eight phases is not what "16QAM" makes
-    /// anybody picture.
+    /// anybody picture. V.34's data mode is named as V.17's is, by the points
+    /// on the line -- "1408TCM" at 33 600 on 3429 baud -- and its control
+    /// channel by its four or sixteen.
     pub fn shape(&self) -> &'static str {
+        if self.v34.is_some() {
+            return match self.v34_channel() {
+                Some(V34Channel::Control(Size::Four)) => "4PSK",
+                Some(V34Channel::Control(Size::Sixteen)) => "16QAM",
+                Some(V34Channel::Primary(params)) => tcm_name(params.framing.l),
+                None => "DPSK",
+            };
+        }
         match self.page_carrier() {
             None => "2FSK",
             Some(Carrier::V27ter(v27ter::Rate::R4800)) => "8PSK",
@@ -595,14 +972,212 @@ impl FaxCall {
 
     /// One sample in, one sample out.
     pub fn step(&mut self, input: f64) -> f64 {
+        if self.v34_trouble.is_some() {
+            // The modem gave up and took the line with it: nothing more is
+            // sent or heard, and the call is failed (see `phase`).
+            return 0.0;
+        }
         if let Some(out) = self.negotiate(input) {
             return out;
+        }
+        if self.v34.is_some() {
+            return self.annex_f_step(input);
         }
         let want = self.call.line();
         self.follow(want);
         self.listen(want, input);
         let (out, idle) = self.talk(want);
         self.call.tick(idle);
+        out
+    }
+
+    /// One sample of an Annex F call: V.34's phase 2, and then the
+    /// half-duplex modem with T.30 mapped onto it (`plan.md` 10.1).
+    fn annex_f_step(&mut self, input: f64) -> f64 {
+        // Over, the modem goes with the line: it stops, and nothing is left
+        // dying away, which F.3.4.5 Note 2 allows once the DCN has gone.
+        if self.call.line() == Line::Quiet && !matches!(self.v34, Some(HalfDuplex::Over)) {
+            self.v34 = Some(HalfDuplex::Over);
+            self.line = Line::Quiet;
+        }
+        let mut failed = None;
+        let out = match self.v34.as_mut() {
+            None | Some(HalfDuplex::Over) => {
+                self.call.tick(true);
+                0.0
+            }
+            Some(HalfDuplex::Probing(probe)) => {
+                let out = probe.step(input);
+                match probe.status() {
+                    ProbeStatus::Running => {}
+                    // 12.2 is over: phase 3 from here, on what INFOh chose
+                    // (`wp-d.md`, "For G"). The source is silent from INFOh's
+                    // arrival and begins its 70 ms and S at once; the
+                    // recipient listens for them as its INFOh leaves the line.
+                    ProbeStatus::Done => match probe.infoh() {
+                        Some(infoh) => {
+                            let setup = Setup {
+                                infoh,
+                                ours: probe.capabilities(),
+                                far: probe.far_capabilities().unwrap_or_default(),
+                            };
+                            let role = probe.role();
+                            let source = probe.part() == Part::Source;
+                            let modem = halfduplex::Modem::after_phase2(role, source, self.fs, setup);
+                            self.v34_facts.symbol_rate = Some(infoh.symbol_rate.nominal());
+                            self.v34_facts.high_carrier = infoh.high_carrier;
+                            let mut modem = Box::new(modem);
+                            if let Some(cap) = self.v34_cap {
+                                modem.limit_rate(cap);
+                            }
+                            self.v34 = Some(HalfDuplex::Modem(modem));
+                        }
+                        None => failed = Some("V.34 phase 2 ended without INFOh".to_owned()),
+                    },
+                    ProbeStatus::Failed(why) => failed = Some(format!("V.34 phase 2: {why}")),
+                }
+                // Nothing of T.30's has been taken, so nothing of its is
+                // waiting to leave.
+                self.call.tick(true);
+                out
+            }
+            Some(HalfDuplex::Modem(modem)) => {
+                let out = modem.step(input);
+                let source = modem.is_source();
+                while let Some(event) = modem.event() {
+                    match event {
+                        // Before any bit is taken: what came either side of
+                        // the restart is no frame, and a burst it cut into
+                        // goes again whole (`wp-h2.md`). The rate is the last
+                        // MPh exchange's, which the restart may have changed.
+                        Event::ControlUp => {
+                            self.call.control_restarted();
+                            if let Some(rate) = modem.primary_rate() {
+                                self.call.set_primary_rate(rate);
+                            }
+                            self.v34_turned = false;
+                        }
+                        Event::Failed(why) => failed = Some(format!("V.34: {why}")),
+                        Event::Phase3Over { .. } | Event::PageStarted { .. } | Event::PageEnded | Event::Retraining => {}
+                    }
+                }
+                self.v34_facts.primary_rate = modem.primary_rate();
+                self.v34_facts.control_rates = modem.control_rates();
+                self.v34_facts.trained_snr_db = modem.primary_snr_db();
+                self.v34_facts.retrains = modem.retrains();
+                self.v34_facts.recoveries = modem.recoveries();
+
+                // What the far end has to say, and what the modem knows of
+                // it: the control channel's bits whenever the channel is up
+                // (the modem hands up none off it), the page's at the
+                // recipient, and the far end's silence for the source's turn
+                // (F.3.2.3).
+                self.call.set_far_silent(modem.far_silent());
+                for bit in modem.take_control_bits() {
+                    self.call.control_bit(bit);
+                }
+                if !source {
+                    let bits = modem.take_page_bits();
+                    if !bits.is_empty() {
+                        self.call.fast_bits(&bits);
+                    }
+                    self.call.set_fast_carrier(modem.page_carrier());
+                }
+
+                // The turnarounds, which are the modem's to make and the
+                // procedure's to ask for (`plan.md` 10.1): V34Ones to
+                // V34Primary at the source and V34Listen to V34PrimaryListen
+                // at the recipient are circuit 105 dropping, 12.6.3/V.34; the
+                // page's end at the source is 105 dropping again, 12.5.3.1,
+                // and then 12.6.1 -- or 12.4.1.1 when a new rate is wanted.
+                let want = self.call.line();
+                let change_wanted = self.v34_cap.is_some_and(|cap| modem.primary_rate().is_some_and(|rate| cap < rate));
+                if want != self.line {
+                    match (self.line, want) {
+                        (_, Line::V34Primary | Line::V34PrimaryListen) => {
+                            self.v34_turned = modem.to_primary();
+                        }
+                        (Line::V34Primary, _) if source => {
+                            modem.to_control(self.call.renegotiate() || change_wanted);
+                        }
+                        // The recipient's page ends with the far carrier; only
+                        // a wish for a new rate is the modem's to hear of
+                        // (12.6.2.3/V.34).
+                        (Line::V34PrimaryListen, _) if change_wanted => {
+                            modem.to_control(true);
+                        }
+                        _ => {}
+                    }
+                    self.line = want;
+                } else if !self.v34_turned
+                    && matches!(want, Line::V34Primary | Line::V34PrimaryListen)
+                    && modem.state() == State::Control
+                {
+                    // A turn the modem could not take when it was asked --
+                    // it was between channels -- asked again now it is back.
+                    self.v34_turned = modem.to_primary();
+                }
+
+                // A recipient with something to say on a channel that is
+                // down: its page never came and T.30 has given up on it, with
+                // a DCN queued for a channel the modem is still listening for
+                // the page over. 12.8.1's retrain brings the channel back for
+                // it, or fails the call trying (`wp-h2.md`, "For G and H3").
+                if !source && want == Line::V34Control && modem.state() == State::Primary && !modem.page_carrier() {
+                    modem.retrain_control();
+                }
+
+                // What T.30 has to say, taken only as fast as the modem will
+                // send it: control bits -- frames, flags, the source's ones --
+                // while the channel is up, page bits while the page is going.
+                if matches!(want, Line::V34Control | Line::V34Listen | Line::V34Ones) && modem.state() == State::Control {
+                    while modem.pending_control_bits() < V34_CONTROL_AHEAD {
+                        match self.call.next_control_bit() {
+                            Some(bit) => {
+                                modem.send_control_bits(&[bit]);
+                            }
+                            None => break,
+                        }
+                    }
+                }
+                if source && want == Line::V34Primary && modem.state() == State::Primary {
+                    let mut bits = Vec::new();
+                    while modem.pending_page_bits() + bits.len() < V34_PAGE_AHEAD {
+                        match self.call.next_fast_bit() {
+                            Some(bit) => bits.push(bit),
+                            None => break,
+                        }
+                    }
+                    if !bits.is_empty() {
+                        modem.send_page_bits(&bits);
+                    }
+                }
+
+                // Idle only once nothing of T.30's is left with the modem:
+                // the page's bits all in the encoder, or the control
+                // channel's all through the pulse and on the line. The
+                // procedure ends a page on the first and the call on the
+                // second.
+                if modem.pending_control_bits() == 0 {
+                    self.v34_drained += 1;
+                } else {
+                    self.v34_drained = 0;
+                }
+                let flushed = self.v34_drained as f64 >= V34_FLUSH_SYMBOLS as f64 * self.fs / control::BAUD;
+                let idle = if want == Line::V34Primary {
+                    modem.pending_page_bits() == 0
+                } else {
+                    modem.pending_control_bits() == 0 && flushed
+                };
+                self.call.tick(idle);
+                out
+            }
+        };
+        if let Some(why) = failed {
+            self.v34_trouble = Some(why);
+            self.v34 = Some(HalfDuplex::Over);
+            return 0.0;
+        }
         out
     }
 
@@ -702,12 +1277,23 @@ impl FaxCall {
         match status {
             // 6.1.5: V.34 at both ends, and half-duplex, so Annex F. This is
             // the hand-over point: the 75 ms of silence after CJ (8.1.2,
-            // 8.2.3/V.8) have passed, the modem's own start-up is due next,
-            // and the procedure begins phase B with the control channel taken
-            // as up. The modem that should carry it is not here yet.
+            // 8.2.3/V.8) have passed, and the modem's own start-up begins
+            // here -- phase 2's INFO0 goes on this sample (11.1, 12.2/V.34)
+            // -- while the procedure begins phase B with the control channel
+            // taken as up, and waits on the modem for it. The end that
+            // dialled is the call modem and sends the page; the end that
+            // answered is the answer modem and receives it (T.30 has no other
+            // case on an ordinary call).
             v8line::Status::Agreed(v8::Modulation::V34HalfDuplex) => {
                 self.v8 = None;
-                self.v34 = Some(HalfDuplex::Missing);
+                let (v34_role, part) = match role {
+                    Role::Caller => (V34Role::Call, Part::Source),
+                    Role::Answerer => (V34Role::Answer, Part::Recipient),
+                };
+                self.v34 = Some(HalfDuplex::Probing(Box::new(phase2h::Modem::new(v34_role, part, self.fs))));
+                self.v34_facts = V34Facts::default();
+                self.v34_turned = false;
+                self.v34_drained = 0;
                 self.call.start_annex_f();
             }
             // 6.1.3: ANSam ran out with no call menu, so clause 5 from the
@@ -853,8 +1439,8 @@ impl FaxCall {
                 self.call.set_fast_carrier(carrier);
             }
             Line::Control | Line::Fast(_) | Line::CalledTone => {}
-            // T.30 Annex F, on V.34's half-duplex modem: H3 feeds it here and
-            // hands its bits up (plan 10.1). Until then nothing is heard.
+            // T.30 Annex F is V.34's half-duplex modem's, and `annex_f_step`
+            // hears for it: an Annex F call never comes this way.
             Line::V34Control
             | Line::V34Listen
             | Line::V34Ones
@@ -931,16 +1517,14 @@ impl FaxCall {
             }
             Line::CalledTone => (self.ced.next_sample(), true),
             Line::Quiet | Line::Listen | Line::FastListen(_) => (0.0, true),
-            // Annex F's channels are V.34's half-duplex modem's, which H3
-            // puts here (plan 10.1). Until then the line is quiet and no bit
-            // of the procedure's is taken.
+            // Annex F's channels are V.34's half-duplex modem's, and
+            // `annex_f_step` talks for it: an Annex F call never comes this
+            // way.
             Line::V34Control
             | Line::V34Listen
             | Line::V34Ones
             | Line::V34Primary
-            | Line::V34PrimaryListen => match self.v34 {
-                Some(HalfDuplex::Missing) | None => (0.0, true),
-            },
+            | Line::V34PrimaryListen => (0.0, true),
         }
     }
 }
@@ -1269,9 +1853,10 @@ mod tests {
 
     /// Two of these that both offer V.34 agree it over V.8 and go to Annex F:
     /// ANSam, CM, JM, CJ, and both ends at the hand-over point within a few
-    /// seconds -- with the calling tone stopped from ANSam on (8.1.1/V.8),
-    /// which is why the line has 0.4 s of delay each way: without it V.8 is
-    /// over before the second burst of calling tone is due.
+    /// seconds, with V.34's phase 2 begun there -- with the calling tone
+    /// stopped from ANSam on (8.1.1/V.8), which is why the line has 0.4 s of
+    /// delay each way: without it V.8 is over before the second burst of
+    /// calling tone is due.
     #[test]
     fn two_of_these_offering_v34_agree_it_over_v8_and_go_to_annex_f() {
         let mut caller = FaxCall::originate(FS, "61399990000", Some(a_page(8)))
@@ -1298,9 +1883,15 @@ mod tests {
         let answerer_agreed = x.answerer_agreed.expect("the answering end never went to Annex F");
         assert!(caller_agreed < 7.0 && answerer_agreed < 7.0, "{x:?}");
         assert!(caller_agreed > cj && answerer_agreed > cj, "in Annex F before CJ: {x:?}");
+        // A second after the hand-over both ends are in V.34's phase 2 --
+        // INFO0, the tones, the probe -- and T.30 has not been asked for a
+        // bit: the answerer still has its CSI and DIS queued, the caller is
+        // still waiting for them.
         assert_eq!(caller.phase(), Phase::Listening, "{}", caller.phase_name());
         assert_eq!(answerer.phase(), Phase::Identifying, "{}", answerer.phase_name());
-        assert!(x.loudest_after < 1.0e-9, "the line was not quiet after the hand-over: {x:?}");
+        assert!(x.loudest_after > 0.1, "nothing of phase 2 on the line after the hand-over: {x:?}");
+        assert!(caller.phase_name().starts_with("V.34"), "{}", caller.phase_name());
+        assert!(answerer.phase_name().starts_with("V.34"), "{}", answerer.phase_name());
         assert_eq!(caller.standard(), "V.34");
 
         // 8.1.1/V.8: "after detection of ANS or ANSam, the call signal shall
@@ -1319,8 +1910,8 @@ mod tests {
 
     /// The recorded V.34 fax's call menu, answered by an end that offers
     /// V.34: the joint menu carries V.34 half-duplex, and after CJ the call
-    /// is in Annex F with the line quiet and no DIS on V.21 -- there is no
-    /// modem here to carry it further, which is what the switch is for.
+    /// is in Annex F with no DIS on V.21 -- INFO0a goes out instead, V.34's
+    /// phase 2 having the line (11.1, 12.2.1.2.1/V.34).
     #[test]
     fn a_v34_fax_call_menu_is_answered_with_v34_and_the_call_goes_to_annex_f() {
         use datapump::bell103::Bell103Tx;
@@ -1336,6 +1927,10 @@ mod tests {
         let mut frames_ear = v21::Receiver::new(fs);
         let mut reader = Reader::new();
         let mut said: Vec<Message> = Vec::new();
+        // The answer modem's INFO sequences, as the calling modem would read
+        // them (10.1.2.3.1/V.34).
+        let mut info_ear = datapump::v34::dpsk::Receiver::half_duplex(datapump::v34::dpsk::Side::Answer, fs);
+        let mut info0 = None;
         let mut t = 0.0;
         let mut loudest_after_handover = 0.0f64;
         let mut hear = |call: &mut FaxCall, input: f64, after_handover: bool| {
@@ -1349,6 +1944,9 @@ mod tests {
             }
             if after_handover {
                 loudest_after_handover = loudest_after_handover.max(out.abs());
+                if let Some(datapump::v34::info::Info::Info0(info)) = info_ear.feed(out) {
+                    info0.get_or_insert(info);
+                }
             }
         };
 
@@ -1365,9 +1963,13 @@ mod tests {
         while cj.pending_bits() > 0 {
             hear(&mut call, cj.next_sample(), false);
         }
-        // 8.2.3/V.8: JM stops on CJ, and 75 ms of silence follow.
+        // 8.2.3/V.8: JM stops on CJ, and 75 ms of silence follow -- and then
+        // INFO0a, from the hand-over point (the CJ's last stop bit is still
+        // going through the ear for a moment, so the hand-over is looked for
+        // rather than timed).
         for _ in 0..(fs * 0.2) as usize {
-            hear(&mut call, 0.0, false);
+            let agreed = call.v34_agreed();
+            hear(&mut call, 0.0, agreed);
         }
         assert!(call.v34_agreed(), "not in Annex F after CJ: {}", call.phase_name());
         for _ in 0..(fs * 3.0) as usize {
@@ -1381,10 +1983,64 @@ mod tests {
         assert!(joint.modulations.contains(v8::Modulation::V34HalfDuplex), "{joint:?}");
         assert!(joint.modulations.contains(v8::Modulation::V17), "{joint:?}");
         assert_eq!(call.joint_menu(), Some(joint));
+        // T.30 has its CSI and DIS queued for a control channel that is not
+        // up yet; V.34's phase 2 has the line, and its INFO0a is what went
+        // out, not a frame.
         assert_eq!(call.phase(), Phase::Identifying, "{}", call.phase_name());
-        assert!(loudest_after_handover < 1.0e-9, "the line was not quiet: {loudest_after_handover}");
+        assert!(call.phase_name().starts_with("V.34"), "{}", call.phase_name());
+        assert!(loudest_after_handover > 0.1, "nothing went out after the hand-over");
+        let info0 = info0.expect("no INFO0a after CJ");
+        assert!(info0.rate_3429 && info0.constellation_1664, "not this end's capabilities: {info0:?}");
         let names: Vec<Frame> = said.iter().map(|m| m.frame).collect();
         assert!(names.is_empty(), "frames on V.21 in an Annex F call: {names:?}");
+    }
+
+    /// Two of these that both offer V.34 fax a page over it: V.8, phase 2,
+    /// phase 3, the control channel start-up, phase B's frames on the control
+    /// channel, the turn to the primary channel, the page at 33 600, and the
+    /// way back for the receipt and the disconnect.
+    ///
+    /// `FAX_TRACE=1` prints every change of phase at both ends, the modem's
+    /// included.
+    #[test]
+    fn two_of_these_offering_v34_fax_a_page_over_it() {
+        let page = a_page(8);
+        let mut caller = FaxCall::originate(FS, "61399990000", Some(page.clone()))
+            .offering(&MODULATIONS)
+            .with_v34(true);
+        let mut answerer = FaxCall::answer(FS, "61388880000").offering(&MODULATIONS).with_v34(true);
+        let trace = std::env::var("FAX_TRACE").is_ok();
+        let (mut was_a, mut was_b) = ("", "");
+        let (mut to_caller, mut to_answerer) = (0.0, 0.0);
+        let mut rate_while_sending = None;
+        for i in 0..(FS * 60.0) as usize {
+            let a = caller.step(to_caller);
+            let b = answerer.step(to_answerer);
+            to_caller = b;
+            to_answerer = a;
+            if caller.phase() == Phase::Sending {
+                rate_while_sending = caller.primary_rate();
+            }
+            if trace && (caller.phase_name() != was_a || answerer.phase_name() != was_b) {
+                eprintln!("{:6.2}s caller {:<40} answerer {}", i as f64 / FS, caller.phase_name(), answerer.phase_name());
+                was_a = caller.phase_name();
+                was_b = answerer.phase_name();
+            }
+            if caller.phase().is_over() && answerer.phase().is_over() {
+                break;
+            }
+        }
+        assert!(caller.v34_agreed() && answerer.v34_agreed());
+        assert_eq!(caller.phase(), Phase::Done, "the caller: {:?}", caller.trouble());
+        assert_eq!(answerer.phase(), Phase::Done, "the answerer: {:?}", answerer.trouble());
+        let got = answerer.received().expect("no page arrived");
+        assert_eq!(got.lines, page.lines, "the page came out different");
+        assert_eq!(rate_while_sending, Some(33_600));
+        assert_eq!(caller.symbol_rate(), Some(3429));
+        assert_eq!(answerer.primary_rate(), Some(33_600));
+        assert!(caller.error_correction() && answerer.error_correction(), "F.3: ECM is mandatory");
+        assert_eq!((caller.standard(), answerer.standard()), ("V.34", "V.34"));
+        eprintln!("done in {:.1} s", caller.seconds());
     }
 
     /// An end offering V.34 that dials a fax without it: the plain called
