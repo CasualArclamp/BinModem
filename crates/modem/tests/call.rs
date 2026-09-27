@@ -1805,7 +1805,7 @@ fn one_modem_faxes_a_page_to_another_over_at_commands() {
     let mut caller = Modem::new(FS);
     caller.fax_identification = "61399990000".to_owned();
     let page = a_test_page(10);
-    caller.fax_page = Some(page.clone());
+    caller.fax_pages = vec![page.clone()];
     Pair::type_at(&mut caller, "AT+FCLASS=1");
     Pair::type_at(&mut caller, "ATD61388880000");
 
@@ -1954,7 +1954,7 @@ fn a_fax_goes_at_9600_unless_it_is_told_not_to() {
     ] {
         let page = a_test_page(6);
         let mut caller = Modem::new(FS);
-        caller.fax_page = Some(page.clone());
+        caller.fax_pages = vec![page.clone()];
         caller.fax_offer = offer.clone();
         caller.fax_v34 = false;
         Pair::type_at(&mut caller, "AT+FCLASS=1");
@@ -1982,7 +1982,7 @@ fn a_fax_uses_error_correction_unless_either_end_is_told_not_to() {
     {
         let page = a_test_page(6);
         let mut caller = Modem::new(FS);
-        caller.fax_page = Some(page.clone());
+        caller.fax_pages = vec![page.clone()];
         caller.fax_error_correction = at_caller;
         caller.fax_v34 = false;
         Pair::type_at(&mut caller, "AT+FCLASS=1");
@@ -2013,7 +2013,7 @@ fn a_fax_goes_in_jbig_unless_either_end_is_told_not_to() {
     ] {
         let page = a_test_page(6);
         let mut caller = Modem::new(FS);
-        caller.fax_page = Some(page.clone());
+        caller.fax_pages = vec![page.clone()];
         caller.fax_jbig = at_caller;
         Pair::type_at(&mut caller, "AT+FCLASS=1");
         Pair::type_at(&mut caller, "ATD1");

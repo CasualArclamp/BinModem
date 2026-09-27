@@ -470,11 +470,12 @@ pub struct Session {
     /// Whether the window allows V.34 half-duplex: V.8 in front of the call,
     /// and the page on V.34 where the far end has it.
     fax_v34: AtomicBool,
-    /// A page the window has loaded, waiting for the line thread to take it.
+    /// The pages the window has loaded, waiting for the line thread to take
+    /// them.
     ///
-    /// Taken rather than read, and a page is megabytes of booleans, so it
-    /// crosses the two threads exactly once.
-    fax_page: Mutex<Option<fax::page::Page>>,
+    /// Taken rather than read, and a page is megabytes of booleans, so they
+    /// cross the two threads exactly once.
+    fax_pages: Mutex<Option<Vec<fax::page::Page>>>,
     /// Pages that arrived, with their numbers in the call, waiting for the
     /// window to take them.
     fax_received: Mutex<std::collections::VecDeque<(usize, fax::page::Page)>>,
@@ -520,7 +521,7 @@ impl Default for Session {
             fax_error_correction: AtomicBool::new(true),
             fax_jbig: AtomicBool::new(true),
             fax_v34: AtomicBool::new(true),
-            fax_page: Mutex::default(),
+            fax_pages: Mutex::default(),
             fax_received: Mutex::default(),
             fax_arriving: Mutex::default(),
             recording: AtomicBool::new(false),
@@ -600,15 +601,15 @@ impl Session {
         self.fax_v34.store(on, Ordering::Relaxed);
     }
 
-    /// Leave a page for the next fax call that dials.
-    pub fn set_fax_page(&self, page: Option<fax::page::Page>) {
-        if let Ok(mut v) = self.fax_page.lock() {
-            *v = page;
+    /// Leave pages for the next fax call that dials, in the order they go.
+    pub fn set_fax_pages(&self, pages: Vec<fax::page::Page>) {
+        if let Ok(mut v) = self.fax_pages.lock() {
+            *v = Some(pages);
         }
     }
 
-    fn take_fax_page(&self) -> Option<fax::page::Page> {
-        self.fax_page.lock().ok().and_then(|mut v| v.take())
+    fn take_fax_pages(&self) -> Option<Vec<fax::page::Page>> {
+        self.fax_pages.lock().ok().and_then(|mut v| v.take())
     }
 
     fn set_fax_received(&self, sheet: usize, page: fax::page::Page) {
@@ -1363,8 +1364,8 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         modem.fax_error_correction = session.fax_error_correction();
         modem.fax_jbig = session.fax_jbig();
         modem.fax_v34 = session.fax_v34();
-        if let Some(page) = session.take_fax_page() {
-            modem.fax_page = Some(page);
+        if let Some(pages) = session.take_fax_pages() {
+            modem.fax_pages = pages;
         }
         if let Some(call) = modem
             .fax_call()

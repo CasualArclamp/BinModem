@@ -14,6 +14,7 @@ pub mod jbig;
 pub mod mmr;
 pub mod mr;
 pub mod page;
+pub mod pdf;
 pub mod t30;
 pub mod t4;
 
