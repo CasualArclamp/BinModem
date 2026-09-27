@@ -22,9 +22,8 @@
 //! this join does there is map the one onto the other (`plan.md` 10.1), and
 //! keep to the rule that the modem is never given a bit it will not send.
 
-use datapump::v34::halfduplex::{self, Event, Setup, State};
-use datapump::v34::phase2::{Role as V34Role, Status as ProbeStatus};
-use datapump::v34::phase2h::{self, Part};
+use datapump::v34::halfduplex::{self, Event, State};
+use datapump::v34::phase2::{Role as V34Role, Status as Phase2Status};
 use datapump::v34::{control, data, signals::Size};
 use datapump::v8 as v8line;
 use datapump::{v17, v21, v27ter, v29};
@@ -189,23 +188,22 @@ const V34_PAGE_AHEAD: usize = 512;
 const V34_FLUSH_SYMBOLS: u64 = 10;
 
 /// What carries a call once V.8 has agreed V.34 half-duplex and T.30 Annex F
-/// has it: V.34's phase 2, and then the modem of clause 12.
+/// has it: the modem of clause 12, from its phase 2 on.
 ///
-/// Two modems in turn rather than one, because that is how package G's API
-/// has it: `halfduplex::Modem::after_phase2` starts at phase 3 with what
-/// phase 2 settled, and phase 2 is `phase2h::Modem`'s. The hand-over between
-/// them is a sample's work. Both roles of this join are fixed by T.30: the
-/// end that dialled is the call modem and sends the page, so it is phase 2's
-/// source; the end that answered is the answer modem and the recipient. T.30
-/// has no other case on an ordinary call, and polling is not built.
+/// One modem from the hand-over point to the last page. It runs phase 2
+/// (12.2/V.34) itself from the 75 ms of silence after V.8 -- INFO0 on its
+/// first sample -- and then phase 3 and the control channel start-up; and it
+/// goes back through phase 2 for a primary channel retrain (12.7), so none of
+/// phase 2 is the join's to run (`wp-g.md`, "For H3"). Both roles are fixed
+/// by T.30: the end that dialled is the call modem and sends the page, so it
+/// is phase 2's source; the end that answered is the answer modem and the
+/// recipient. T.30 has no other case on an ordinary call, and polling is not
+/// built.
 #[derive(Debug)]
 enum HalfDuplex {
-    /// Phase 2 (12.2/V.34): INFO0 both ways, the tones and their reversals,
-    /// L1 and L2 from the source, INFOh from the recipient. Nothing of
-    /// T.30's is taken; its clocks run.
-    Probing(Box<phase2h::Modem>),
-    /// Phase 3 and everything after (12.3 to 12.8/V.34): the modem T.30's
-    /// bits go through.
+    /// Phase 2 to the last page (12.2 to 12.8/V.34): the modem T.30's bits
+    /// go through. Nothing of T.30's is taken until the control channel is
+    /// first up; its clocks run from the hand-over (F.3.2.3 Note 1).
     Modem(Box<halfduplex::Modem>),
     /// The call is over and the line dropped, or the modem gave up: nothing
     /// is on the line, and what was learnt is in [`FaxCall::v34_facts`].
@@ -491,9 +489,9 @@ impl FaxCall {
             };
         }
         match self.v34.as_ref() {
-            Some(HalfDuplex::Probing(probe)) => probe.phase(),
             // On a channel, the procedure's word for it: "sending the page"
-            // says more than "V.34 page". Between them, the modem's.
+            // says more than "V.34 page". Between them, the modem's, which in
+            // phase 2 is phase 2's own ("V.34 INFO0", "V.34 tones" ...).
             Some(HalfDuplex::Modem(modem)) => match modem.state() {
                 State::Control | State::Primary => self.call.phase().name(),
                 _ => modem.phase(),
@@ -576,7 +574,10 @@ impl FaxCall {
         let facts = &self.v34_facts;
         match self.v34.as_ref() {
             None => return rows,
-            Some(HalfDuplex::Probing(probe)) => rows.push(("V.34 fax", format!("phase 2: {}", probe.phase()))),
+            // The first phase 2, before INFOh has settled anything to show.
+            Some(HalfDuplex::Modem(modem)) if modem.infoh().is_none() => {
+                rows.push(("V.34 fax", format!("phase 2: {}", modem.phase())));
+            }
             Some(HalfDuplex::Modem(_) | HalfDuplex::Over) => {}
         }
         if let Some(baud) = facts.symbol_rate {
@@ -726,12 +727,17 @@ impl FaxCall {
     /// turns to it until the page is over, the control channel otherwise.
     fn v34_channel(&self) -> Option<V34Channel> {
         let Some(HalfDuplex::Modem(modem)) = self.v34.as_ref() else { return None };
+        // Phase 2 -- the first, or a 12.7 retrain's -- is neither channel:
+        // INFO sequences in binary DPSK, and tones, with nothing to decide.
+        if modem.phase2().is_some_and(|phase2| phase2.status() == Phase2Status::Running) {
+            return None;
+        }
         Some(match modem.state() {
             State::Primary | State::ToPrimary => {
                 let data = modem.data_mode()?;
                 // Which scrambler the source has does not move a point of the
                 // constellation; the source is the call modem here anyway.
-                V34Channel::Primary(data.params(modem.channel().band.rate, datapump::v32::Mode::Call)?)
+                V34Channel::Primary(data.params(modem.channel()?.band.rate, datapump::v32::Mode::Call)?)
             }
             State::Failed => return None,
             _ => V34Channel::Control(modem.control().receiver.rate().size()),
@@ -991,8 +997,8 @@ impl FaxCall {
         out
     }
 
-    /// One sample of an Annex F call: V.34's phase 2, and then the
-    /// half-duplex modem with T.30 mapped onto it (`plan.md` 10.1).
+    /// One sample of an Annex F call: the half-duplex modem, from its phase 2
+    /// on, with T.30 mapped onto it (`plan.md` 10.1).
     fn annex_f_step(&mut self, input: f64) -> f64 {
         // Over, the modem goes with the line: it stops, and nothing is left
         // dying away, which F.3.4.5 Note 2 allows once the DCN has gone.
@@ -1005,41 +1011,6 @@ impl FaxCall {
             None | Some(HalfDuplex::Over) => {
                 self.call.tick(true);
                 0.0
-            }
-            Some(HalfDuplex::Probing(probe)) => {
-                let out = probe.step(input);
-                match probe.status() {
-                    ProbeStatus::Running => {}
-                    // 12.2 is over: phase 3 from here, on what INFOh chose
-                    // (`wp-d.md`, "For G"). The source is silent from INFOh's
-                    // arrival and begins its 70 ms and S at once; the
-                    // recipient listens for them as its INFOh leaves the line.
-                    ProbeStatus::Done => match probe.infoh() {
-                        Some(infoh) => {
-                            let setup = Setup {
-                                infoh,
-                                ours: probe.capabilities(),
-                                far: probe.far_capabilities().unwrap_or_default(),
-                            };
-                            let role = probe.role();
-                            let source = probe.part() == Part::Source;
-                            let modem = halfduplex::Modem::after_phase2(role, source, self.fs, setup);
-                            self.v34_facts.symbol_rate = Some(infoh.symbol_rate.nominal());
-                            self.v34_facts.high_carrier = infoh.high_carrier;
-                            let mut modem = Box::new(modem);
-                            if let Some(cap) = self.v34_cap {
-                                modem.limit_rate(cap);
-                            }
-                            self.v34 = Some(HalfDuplex::Modem(modem));
-                        }
-                        None => failed = Some("V.34 phase 2 ended without INFOh".to_owned()),
-                    },
-                    ProbeStatus::Failed(why) => failed = Some(format!("V.34 phase 2: {why}")),
-                }
-                // Nothing of T.30's has been taken, so nothing of its is
-                // waiting to leave.
-                self.call.tick(true);
-                out
             }
             Some(HalfDuplex::Modem(modem)) => {
                 let out = modem.step(input);
@@ -1057,9 +1028,22 @@ impl FaxCall {
                             }
                             self.v34_turned = false;
                         }
+                        // Phase 2 failing, or anything after it: the modem's
+                        // reason is the call's.
                         Event::Failed(why) => failed = Some(format!("V.34: {why}")),
-                        Event::Phase3Over { .. } | Event::PageStarted { .. } | Event::PageEnded | Event::Retraining => {}
+                        Event::Phase2Over
+                        | Event::Phase3Over { .. }
+                        | Event::PageStarted { .. }
+                        | Event::PageEnded
+                        | Event::Retraining => {}
                     }
+                }
+                // What INFOh chose, once phase 2 is over: the first time, or
+                // again after a primary channel retrain (12.7) or a phase 3
+                // gone back to (12.3.3), either of which may choose afresh.
+                if let Some(infoh) = modem.infoh() {
+                    self.v34_facts.symbol_rate = Some(infoh.symbol_rate.nominal());
+                    self.v34_facts.high_carrier = infoh.high_carrier;
                 }
                 self.v34_facts.primary_rate = modem.primary_rate();
                 self.v34_facts.control_rates = modem.control_rates();
@@ -1286,11 +1270,17 @@ impl FaxCall {
             // case on an ordinary call).
             v8line::Status::Agreed(v8::Modulation::V34HalfDuplex) => {
                 self.v8 = None;
-                let (v34_role, part) = match role {
-                    Role::Caller => (V34Role::Call, Part::Source),
-                    Role::Answerer => (V34Role::Answer, Part::Recipient),
+                let (v34_role, source) = match role {
+                    Role::Caller => (V34Role::Call, true),
+                    Role::Answerer => (V34Role::Answer, false),
                 };
-                self.v34 = Some(HalfDuplex::Probing(Box::new(phase2h::Modem::new(v34_role, part, self.fs))));
+                let mut modem = Box::new(halfduplex::Modem::new(v34_role, source, self.fs));
+                // A cap asked for before the call reached here goes into the
+                // first MPh this end sends.
+                if let Some(cap) = self.v34_cap {
+                    modem.limit_rate(cap);
+                }
+                self.v34 = Some(HalfDuplex::Modem(modem));
                 self.v34_facts = V34Facts::default();
                 self.v34_turned = false;
                 self.v34_drained = 0;
