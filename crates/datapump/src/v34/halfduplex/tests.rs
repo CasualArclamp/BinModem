@@ -1062,6 +1062,36 @@ fn a_primary_channel_retrain_from_either_end_runs_phase_2_again_once_the_tone_ha
 }
 
 #[test]
+fn a_noisier_line_settles_the_rate_the_recipient_trained_for_and_every_page_is_whole_at_it() {
+    // From V.8's silence over a noisy line -- 27 dB by this harness's
+    // measure, which the primary receiver trains to about 31 dB on, where
+    // 33 dB here still trains to 37 and earns 33 600: phase 2 reads the
+    // probe and chooses INFOh, and the recipient's MPh offers what the
+    // signal to noise it trained to on phase 3 allows (`rate_by_snr`,
+    // training.rs's rule) -- less than the 33 600 a clean line gets, the
+    // same at both ends, and not so much that a page loses a bit at it. And
+    // the source finds the recipient silent when it turns, as ever: the
+    // control receiver's own carrier-off, V.32's absolute level, never came
+    // on this line, the noise in the far band holding the carrier on.
+    for source in [Role::Call, Role::Answer] {
+        let (call, answer) = pair_from_v8(source, pages(3, 30_000, 141));
+        let conditions = Conditions::short(27.0);
+        let mut link = Link::new(call, answer, conditions);
+        finish(&mut link, 40.0);
+        check_turns(&link, conditions.one_way);
+        let what = link.describe();
+        let rate = link.source().rates[0].expect("no rate settled");
+        let snr = link.recipient().modem.primary_snr_db().expect("the recipient never trained");
+        for end in link.ends() {
+            assert_eq!(end.rates, vec![Some(rate); 4], "{source:?} as source: {what}");
+            assert_eq!(end.count_events(|e| *e == Event::Retraining), 0, "{source:?} as source: {what}");
+        }
+        assert!((14_400..33_600).contains(&rate), "{source:?} as source: {rate} bit/s, trained to {snr:.1} dB: {what}");
+        println!("{source:?} as source: trained to {snr:.1} dB, {rate} bit/s on {:?}", link.source().modem.infoh());
+    }
+}
+
+#[test]
 fn a_cap_below_what_the_symbol_rate_has_settles_its_least_rate() {
     // limit_rate(2400) at 3200 baud, where Table 8 begins at 4800: the MPh
     // offers 4800, not a rate its own mask has not, and the pages go at it.
