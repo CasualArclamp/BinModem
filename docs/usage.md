@@ -374,6 +374,12 @@ The **offer** boxes are what this end will use. V.29 carries a page at 9600 and
 7200; V.27 ter at 4800 and 2400, and every fax machine has it. A call starts at
 the fastest rate both ends have and drops a rung each time the far end refuses
 the training check. Untick V.29 to hold a call to V.27 ter on a bad line.
+**V.34** is Super G3: V.8 in front of the call -- answering, ANSam in place of
+the called tone -- and, where the far end has it too, the page over V.34's
+half-duplex mode at up to 33 600 with the T.30 frames on its 1200 bit/s control
+channel; the progress line then gives the symbol rate beside the bit rate, and
+the far-end panel the two ends' menus and what the modem settled. A plain fax
+hears the ordinary tone in ANSam and the call is as before.
 
 A page the far end could not read -- T.30's RTN, which a line that slipped
 after the training check passed will cause -- is trained for again a rung down

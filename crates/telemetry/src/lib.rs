@@ -160,6 +160,9 @@ pub struct Frame {
     /// have arrived. None for the fraction until there is a page moving.
     pub fax_progress: Option<f64>,
     pub fax_rate: u32,
+    /// The symbol rate under that rate, in baud, on a V.34 call; nought on
+    /// any other, whose modulations have one symbol rate each.
+    pub fax_symbol_rate: u32,
     pub fax_lines: usize,
     /// Which page of the call that is, counting from one, and how many the
     /// call has as far as this end knows.
@@ -216,6 +219,7 @@ impl Frame {
             fax_non_standard: None,
             fax_progress: None,
             fax_rate: 0,
+            fax_symbol_rate: 0,
             fax_lines: 0,
             fax_sheet: 0,
             fax_sheets: 0,

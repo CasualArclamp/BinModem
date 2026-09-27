@@ -45,6 +45,9 @@ pub struct Fax {
     pub v27ter: bool,
     pub v29: bool,
     pub v17: bool,
+    /// Whether this end offers V.34 half-duplex -- Super G3, the page at up
+    /// to 33 600 -- which puts V.8 in front of the call.
+    pub v34: bool,
     /// Whether this end offers error correction mode.
     pub error_correction: bool,
     /// Whether this end offers JBIG, which goes only with error correction.
@@ -56,10 +59,12 @@ pub struct Fax {
     pub far_non_standard: Option<Vec<u8>>,
     /// Where the call has got to, straight off the modem.
     pub phase: Option<&'static str>,
-    /// How far through the page, at what rate, and how many lines have
-    /// arrived. Straight off the modem as well.
+    /// How far through the page, at what rate -- and, on V.34, at what
+    /// symbol rate under it -- and how many lines have arrived. Straight off
+    /// the modem as well.
     pub progress: Option<f64>,
     pub rate: u32,
+    pub symbol_rate: u32,
     pub lines: usize,
     /// Which page of the call is going or arriving, and how many it has.
     pub sheet: usize,
@@ -330,6 +335,10 @@ impl Fax {
             // ladder takes a failed training check down through 12 000, 9600
             // and 7200 before it gives up on the modulation.
             v17: true,
+            // Offered too: a Super G3 machine hears ANSam and sends its call
+            // menu, and the page goes at up to 33 600; a plain one hears the
+            // called tone and the call is clause 5's.
+            v34: true,
             error_correction: true,
             jbig: true,
             ..Self::default()
@@ -442,6 +451,7 @@ impl Fax {
         self.phase = frame.fax_phase;
         self.progress = frame.fax_progress;
         self.rate = frame.fax_rate;
+        self.symbol_rate = frame.fax_symbol_rate;
         self.lines = frame.fax_lines;
         self.sheet = frame.fax_sheet;
         self.sheets = frame.fax_sheets;
@@ -686,6 +696,9 @@ impl Fax {
                     );
                     ui.checkbox(&mut self.v17, "V.17").on_hover_text(
                         "7200 to 14 400, trellis coded. Untick it to hold a                          call to V.29 and V.27ter",
+                    );
+                    ui.checkbox(&mut self.v34, "V.34").on_hover_text(
+                        "Super G3: V.8 in front of the call, and the page over V.34's half-duplex mode at up to 33 600, with the T.30 frames on its 1200 bit/s control channel. Used only when the far end has it; answering, it means ANSam in place of the called tone. Untick it for the plain tones and V.17 down",
                     );
                     ui.checkbox(&mut self.error_correction, "ECM").on_hover_text(
                         "Error correction mode, T.30 Annex A: the page goes in numbered frames, and any the far end cannot read are sent again instead of printed as streaks. Used only when the far end offers it too",
@@ -954,11 +967,14 @@ impl Fax {
             }
             ui.label(RichText::new(format!("{side}: {what}")).small().color(bright));
             if self.rate > 0 {
-                ui.label(
-                    RichText::new(format!("at {} bit/s in {}", self.rate, self.coding))
-                        .small()
-                        .color(dim),
-                );
+                // V.34 picks its symbol rate as well as its bit rate, and the
+                // two together say how crowded the constellation is.
+                let carried = if self.symbol_rate > 0 {
+                    format!("at {} bit/s on {} baud in {}", self.rate, self.symbol_rate, self.coding)
+                } else {
+                    format!("at {} bit/s in {}", self.rate, self.coding)
+                };
+                ui.label(RichText::new(carried).small().color(dim));
             }
             if self.correcting {
                 ui.label(RichText::new("with error correction").small().color(dim));

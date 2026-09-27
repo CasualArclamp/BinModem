@@ -856,14 +856,14 @@ pub struct Modem {
     pub fax_jbig: bool,
     /// Whether a fax call offers V.34 half-duplex over V.8: ANSam in place of
     /// the called tone when answering, a call menu on hearing ANSam when
-    /// dialling (T.30 clause 6), and T.30 Annex F once V.8 has agreed it.
+    /// dialling (T.30 clause 6), and T.30 Annex F on V.34's half-duplex modem
+    /// once V.8 has agreed it -- the page at up to 33 600 bit/s, Super G3.
     ///
-    /// Off, and nothing turns it on yet: the half-duplex modem that would
-    /// carry an Annex F call is not in the join (packages G and H3 of
-    /// `docs/design/superg3/plan.md`), so a call that agreed V.34 today would
-    /// stop at the hand-over point with the line quiet. H3 turns it on. Off,
-    /// a fax call is what it was: the tones of clause 5, and a V.34 caller's
-    /// call menu overheard and answered without V.34.
+    /// On unless told otherwise, like the other two, and used only where the
+    /// far end has it: a plain fax hears ANSam as the called tone and sends
+    /// no call menu, and the call is clause 5's as before. Off, a fax call is
+    /// what it was: the tones of clause 5, and a V.34 caller's call menu
+    /// overheard and answered without V.34.
     pub fax_v34: bool,
     /// The page waiting to be sent, taken by the next fax call that dials.
     ///
@@ -936,7 +936,7 @@ impl Modem {
             fax_offer: fax::call::OUR_MODULATIONS.to_vec(),
             fax_error_correction: true,
             fax_jbig: true,
-            fax_v34: false,
+            fax_v34: true,
             fax_page: None,
             fax_identification: String::new(),
             far_menu: None,
@@ -1354,6 +1354,12 @@ impl Modem {
         rows.extend(self.error_control_rows());
         if let Some(report) = self.v34_report.as_ref() {
             rows.extend(report.rows());
+        }
+        // A Super G3 call's channels, from the half-duplex modem: what its
+        // MPh exchange settled and what its receiver trained to, beside the
+        // menus V.8 exchanged to get there.
+        if let Some(fax) = self.fax_call() {
+            rows.extend(fax.v34_rows());
         }
         rows
     }
@@ -2356,6 +2362,15 @@ impl Modem {
         // and the far-end panel shows a call menu wherever it came from.
         if self.far_menu.is_none() {
             self.far_menu = fax.far_menu();
+        }
+        // A Super G3 call's primary channel goes one way, at the rate the
+        // modem's MPh exchange settled: the rate rows show it in the
+        // direction the page goes, and nothing in the other.
+        if let Some(rate) = fax.primary_rate() {
+            match fax.role() {
+                fax::call::Role::Caller => self.transmit_rate = rate,
+                fax::call::Role::Answerer => self.rate = rate,
+            }
         }
         match fax.phase() {
             fax::call::Phase::Done => {

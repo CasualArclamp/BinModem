@@ -1858,6 +1858,9 @@ fn a_fax_that_answers_does_not_go_looking_for_v8() {
     // V.8 negotiation must never be started on a fax call. This is the same
     // rule the dialling side already follows, from the other end.
     let mut answerer = Modem::new(FS);
+    // The plain fax's tone: with V.34 offered the called tone is ANSam
+    // (6.1.1/T.30), which has the reversals on purpose.
+    answerer.fax_v34 = false;
     Pair::type_at(&mut answerer, "AT+FCLASS=1");
     Pair::type_at(&mut answerer, "ATA");
     let seconds = 2.0;
@@ -1942,7 +1945,9 @@ fn fax_between(caller: &mut Modem, answerer: &mut Modem) -> Faxed {
 fn a_fax_goes_at_9600_unless_it_is_told_not_to() {
     // Two of these offer V.29 and V.27 ter to each other, so the page goes at
     // V.29's 9600. Told to use V.27 ter alone -- the box in the window -- the
-    // same call goes at 4800, and the page arrives just the same.
+    // same call goes at 4800, and the page arrives just the same. With the
+    // V.34 box unticked at one end, since two of these with it ticked go to
+    // V.34 instead.
     for (offer, want) in [
         (fax::call::OUR_MODULATIONS.to_vec(), 9600),
         (vec![fax::t30::Modulation::V27ter], 4800),
@@ -1951,6 +1956,7 @@ fn a_fax_goes_at_9600_unless_it_is_told_not_to() {
         let mut caller = Modem::new(FS);
         caller.fax_page = Some(page.clone());
         caller.fax_offer = offer.clone();
+        caller.fax_v34 = false;
         Pair::type_at(&mut caller, "AT+FCLASS=1");
         Pair::type_at(&mut caller, "ATD1");
         let mut answerer = Modem::new(FS);
@@ -1968,7 +1974,9 @@ fn a_fax_goes_at_9600_unless_it_is_told_not_to() {
 fn a_fax_uses_error_correction_unless_either_end_is_told_not_to() {
     // On at both ends by default, so two of these use it. Turned off at
     // either end -- the box in the window -- the call goes without, since it
-    // takes both ends offering it, and the page arrives just the same.
+    // takes both ends offering it, and the page arrives just the same. On
+    // clause 5, that is: under V.34 error correction is not a choice (F.3),
+    // so the V.34 box is unticked at the caller.
     for (at_caller, at_answerer, want) in
         [(true, true, true), (false, true, false), (true, false, false)]
     {
@@ -1976,6 +1984,7 @@ fn a_fax_uses_error_correction_unless_either_end_is_told_not_to() {
         let mut caller = Modem::new(FS);
         caller.fax_page = Some(page.clone());
         caller.fax_error_correction = at_caller;
+        caller.fax_v34 = false;
         Pair::type_at(&mut caller, "AT+FCLASS=1");
         Pair::type_at(&mut caller, "ATD1");
         let mut answerer = Modem::new(FS);
