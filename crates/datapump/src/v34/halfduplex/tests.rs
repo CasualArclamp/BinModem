@@ -125,6 +125,14 @@ struct End {
     limit_after: Option<(usize, u32)>,
     /// A round in whose frames this end asks for a control channel retrain.
     retrain_in: Option<usize>,
+    /// A round in whose frames this end asks for a primary channel retrain
+    /// (12.7).
+    retrain_primary_in: Option<usize>,
+    /// Primary channel retrains this end began.
+    primary_retrains: usize,
+    /// A retrain has been announced and the channel has not come back: the
+    /// modem must say `Retraining` throughout.
+    retraining: bool,
     /// The primary rate at each coming up of the control channel.
     rates: Vec<Option<u32>>,
     /// Control bits that came while the modem said it was off the control
@@ -160,6 +168,9 @@ impl End {
             renegotiate: Vec::new(),
             limit_after: None,
             retrain_in: None,
+            retrain_primary_in: None,
+            primary_retrains: 0,
+            retraining: false,
             rates: Vec::new(),
             stray_bits: 0,
             early_bits: 0,
@@ -185,12 +196,23 @@ impl End {
                     assert!(self.modem.take_control_bits().is_empty(), "bits before ControlUp");
                     self.rates.push(self.modem.primary_rate());
                     self.heard.clear();
+                    self.retraining = false;
                     self.up();
                 }
+                Event::Retraining => self.retraining = true,
                 Event::PageEnded if self.doing == Doing::Page => self.page_over(),
                 Event::Failed(_) => self.doing = Doing::Done,
                 _ => {}
             }
+        }
+        if self.retraining {
+            assert!(
+                matches!(self.modem.state(), State::Retraining | State::Failed),
+                "{:?} says {:?} ({}) in a retrain",
+                self.modem.role(),
+                self.modem.state(),
+                self.modem.phase()
+            );
         }
         let bits = self.modem.take_control_bits();
         if !bits.is_empty() {
@@ -251,6 +273,11 @@ impl End {
                 if self.retrain_in == Some(round) {
                     self.retrain_in = None;
                     assert!(self.modem.retrain_control(), "retrain refused");
+                    self.doing = Doing::WaitUp;
+                } else if self.retrain_primary_in == Some(round) {
+                    self.retrain_primary_in = None;
+                    self.primary_retrains += 1;
+                    assert!(self.modem.retrain_primary(), "primary channel retrain refused");
                     self.doing = Doing::WaitUp;
                 } else if self.source() {
                     self.ones_sent = 0;
@@ -531,6 +558,18 @@ fn pair(source: Role, setup: Setup, pages: Vec<Vec<bool>>) -> (End, End) {
     (make(Role::Call), make(Role::Answer))
 }
 
+/// The two ends where V.8's CJ and the 75 ms of silence after it leave
+/// them: phase 2 to come, INFO0 first (12.1, 12.2).
+fn pair_from_v8(source: Role, pages: Vec<Vec<bool>>) -> (End, End) {
+    let make = |role: Role| End::new(Modem::new(role, role == source, FS), pages.clone());
+    (make(Role::Call), make(Role::Answer))
+}
+
+/// When `end` first announced `wanted`, in seconds of its own clock.
+fn first(end: &End, wanted: Event) -> Option<f64> {
+    end.events.iter().find(|(_, e)| *e == wanted).map(|(at, _)| *at as f64 / FS)
+}
+
 /// `count` pages of `bits` random bits each.
 fn pages(count: usize, bits: usize, seed: u32) -> Vec<Vec<bool>> {
     (0..count).map(|k| pattern(bits, seed + 7 * k as u32)).collect()
@@ -583,8 +622,11 @@ fn check_pages(link: &Link) {
         assert_eq!(started, if end.source() { 0 } else { source.pages.len() }, "pages started clean: {what}");
         assert_eq!(end.stray_bits, 0, "{:?}: control bits delivered off the control channel: {what}", end.modem.role());
         assert_eq!(end.early_bits, 0, "{:?}: control bits before the channel was up: {what}", end.modem.role());
+        // Phase 3 once, and once more for every primary channel retrain
+        // (12.7), whichever end began it.
         let phase3 = end.count_events(|e| matches!(e, Event::Phase3Over { well: true }));
-        assert_eq!(phase3, if end.source() { 0 } else { 1 }, "{what}");
+        let retrained = link.call.primary_retrains + link.answer.primary_retrains;
+        assert_eq!(phase3, if end.source() { 0 } else { 1 + retrained }, "{what}");
     }
 }
 
@@ -922,4 +964,109 @@ fn a_far_end_that_never_answers_is_given_up_on_after_ac_three_times() {
     assert!((failed[0] - retraining[0] - 9.0).abs() < 0.1, "failed at {:.2} s", failed[0]);
     assert_eq!(modem.failure(), Some("the far end did not answer AC"));
     assert_eq!(modem.retrains(), 1);
+}
+
+#[test]
+fn a_call_from_the_end_of_v8_runs_phase_2_and_the_pages_on_what_it_settled() {
+    // Modem::new at both ends, where V.8's CJ and the 75 ms of silence
+    // after it leave them: INFO0, the tones, the probe and INFOh (12.2),
+    // phase 3 on that INFOh, the control channel start-up, and three pages
+    // with frames between them -- with either end the source, over the
+    // short line and over the VoIP line's delay and echo. Nothing here says
+    // what INFOh is to be; phase 2 reads the line and the pages go on what
+    // it chose, and on a line this clean that is a fast symbol rate.
+    for (conditions, name, seconds) in [(Conditions::short(46.0), "short", 30.0), (Conditions::voip(46.0), "VoIP", 50.0)] {
+        for source in [Role::Call, Role::Answer] {
+            let (call, answer) = pair_from_v8(source, pages(3, 30_000, 111));
+            let mut link = Link::new(call, answer, conditions);
+            finish(&mut link, seconds);
+            check_turns(&link, conditions.one_way);
+            let what = link.describe();
+            let case = format!("{name} line, {source:?} as source");
+            let infoh = link.source().modem.infoh().expect("the source has no INFOh");
+            for end in link.ends() {
+                assert_eq!(end.count_events(|e| *e == Event::Phase2Over), 1, "{case}: {what}");
+                assert_eq!(end.modem.infoh(), Some(infoh), "{case}: {what}");
+                assert!(end.modem.far_capabilities().is_some(), "{case}: {what}");
+                let phase2 = end.modem.phase2().expect("no phase 2 to read");
+                assert_eq!((phase2.recoveries(), phase2.info0_repeats()), (0, 0), "{case}: {what}");
+                assert_eq!(end.count_events(|e| *e == Event::ControlUp), 4, "{case}: {what}");
+                assert_eq!(end.count_events(|e| *e == Event::Retraining), 0, "{case}: {what}");
+                assert_eq!(end.rates, link.source().rates, "{case}: {what}");
+                assert_eq!(end.modem.control_rates(), Some((1200, 1200)), "{case}: {what}");
+            }
+            let rate = link.source().rates[0].expect("no rate settled");
+            assert!(rate >= 28_800, "{case}: {rate} bit/s on {infoh:?}: {what}");
+            // Phase 2 is over within its second and a half plus the six
+            // crossings of the line it takes (tone, reversal, reversal, tone,
+            // tone, INFOh); the channel is up within TRN's second, phase 3's
+            // and the start-up's other signals, and four crossings more.
+            let up = first(link.source(), Event::ControlUp).unwrap();
+            let over = first(link.source(), Event::Phase2Over).unwrap();
+            assert!(over < 2.0 + 6.0 * conditions.one_way, "{case}: phase 2 took {over:.2} s: {what}");
+            assert!(up - over < 2.2 + 4.0 * conditions.one_way, "{case}: phase 3 and the start-up took {:.2} s: {what}", up - over);
+            println!("{case}: {infoh:?}, {rate} bit/s, phase 2 over at {over:.2} s, up at {up:.2} s, done in {:.1} s", link.seconds());
+        }
+    }
+}
+
+#[test]
+fn a_primary_channel_retrain_from_either_end_runs_phase_2_again_once_the_tone_has_been_heard_50_ms() {
+    // 12.7 from the control channel, begun by the source or by the
+    // recipient, with the call modem as source and with the answer modem:
+    // the initiator falls silent and sends its tone 70 ms on (12.7.1.1,
+    // 12.7.2.1); the far end, hearing the tone for more than 50 ms, falls
+    // silent for 70 ms and answers with its own (12.7.1.2, 12.7.2.2); the
+    // tone exchange, the probe and INFOh run again with no INFO0, then
+    // phase 3 and the control channel start-up; both ends say Retraining
+    // from the first silence to the channel coming back; the frames go
+    // again and the pages after are whole.
+    for source in [Role::Call, Role::Answer] {
+        for initiator in [Role::Call, Role::Answer] {
+            let (mut call, mut answer) = pair_from_v8(source, pages(3, 20_000, 121));
+            if initiator == Role::Call {
+                call.retrain_primary_in = Some(1);
+            } else {
+                answer.retrain_primary_in = Some(1);
+            }
+            let conditions = Conditions::short(46.0);
+            let mut link = Link::new(call, answer, conditions);
+            finish(&mut link, 40.0);
+            let what = link.describe();
+            let case = format!("{source:?} as source, the {initiator:?} modem retraining");
+            for end in link.ends() {
+                assert_eq!(end.count_events(|e| *e == Event::Retraining), 1, "{case}: {what}");
+                assert_eq!(end.count_events(|e| *e == Event::Phase2Over), 2, "{case}: {what}");
+                assert_eq!(end.count_events(|e| *e == Event::ControlUp), 5, "{case}: {what}");
+                assert_eq!(end.modem.retrains(), 1, "{case}: {what}");
+                let phase2 = end.modem.phase2().expect("no phase 2 to read");
+                assert_eq!((phase2.recoveries(), phase2.info0_repeats()), (0, 0), "{case}: {what}");
+                assert_eq!(end.modem.infoh(), link.source().modem.infoh(), "{case}: {what}");
+                assert_eq!(end.rates, link.source().rates, "{case}: {what}");
+            }
+            // The far end heard the tone for 50 ms and not much more: its
+            // retrain began, less the line's delay, between 120 and 250 ms
+            // after the initiator's -- the initiator's 70 ms of silence, the
+            // 50 ms, and what the watch takes to be sure of a tone.
+            let (begun, answered) = if initiator == Role::Call { (&link.call, &link.answer) } else { (&link.answer, &link.call) };
+            let after = first(answered, Event::Retraining).unwrap() - first(begun, Event::Retraining).unwrap() - conditions.one_way;
+            assert!((0.120..0.250).contains(&after), "{case}: the far end answered the retrain {after:.3} s after it began: {what}");
+            println!("{case}: answered after {after:.3} s, done in {:.1} s", link.seconds());
+        }
+    }
+}
+
+#[test]
+fn a_cap_below_what_the_symbol_rate_has_settles_its_least_rate() {
+    // limit_rate(2400) at 3200 baud, where Table 8 begins at 4800: the MPh
+    // offers 4800, not a rate its own mask has not, and the pages go at it.
+    let setup = setup(SymbolRate::S3200, false, Size::Four, 2);
+    let (mut call, answer) = pair(Role::Call, setup, pages(2, 6_000, 131));
+    call.modem.limit_rate(2400);
+    assert_eq!(call.modem.make_mph().max_rate, 2);
+    let mut link = Link::new(call, answer, Conditions::short(40.0));
+    finish(&mut link, 30.0);
+    for end in link.ends() {
+        assert_eq!(end.rates, vec![Some(4800); 3], "{}", link.describe());
+    }
 }

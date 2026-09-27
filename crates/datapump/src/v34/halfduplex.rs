@@ -96,6 +96,15 @@ const INFOH_WAIT: f64 = 5.0;
 /// tone B): the far end wants the primary channel retrained.
 const RETRAIN_TONE_SECONDS: f64 = 0.050;
 
+/// How far the far end's control carrier has to fall, against its level as
+/// this end began a primary channel retrain, to count as gone: 12 dB, which
+/// the control receiver's 20 ms envelope takes 28 ms to fall by once the
+/// far end stops -- leaving 40 ms of its 70 ms of silence before its tone --
+/// and which a jitter buffer's 20 ms hole never takes it to. The receiver's
+/// own carrier-off judgement is V.32's 59 dB, a hundred milliseconds down
+/// the same envelope, and swallowed the first half of the far tone.
+const FAR_GONE: f64 = 0.25;
+
 /// How long the far end's control carrier has to have been gone before the
 /// far end counts as silent (F.3.2.3/T.30, the source's turn to the page):
 /// longer than the 20 ms hole a VoIP jitter buffer leaves, and short beside
@@ -237,6 +246,10 @@ pub struct Modem {
     phase2: Option<phase2h::Modem>,
     /// Phase 2 is over, and [`Modem::infoh`] means something.
     phase2_done: bool,
+    /// A primary channel retrain this end began with the far end still on
+    /// the control channel: its carrier's level then, and phase 2 is fed
+    /// silence until the level has fallen [`FAR_GONE`] below it.
+    deaf_above: Option<f64>,
 
     control: control::Modem,
     source: Option<primary::Source>,
@@ -336,6 +349,7 @@ impl Modem {
             deadline: None,
             phase2: None,
             phase2_done: true,
+            deaf_above: None,
             control: control::Modem::new(side, fs),
             source: None,
             recipient: None,
@@ -380,20 +394,20 @@ impl Modem {
 
     pub fn state(&self) -> State {
         match self.stage {
-            Stage::Phase2 if self.turn == Turn::Retrain => State::Retraining,
-            Stage::Phase2 => State::Starting,
-            Stage::Phase3 | Stage::Recovering { .. } if self.turn == Turn::Retrain => State::Retraining,
-            Stage::Phase3 | Stage::Recovering { .. } | Stage::Awaiting(Awaiting::FirstPph) => State::Starting,
-            Stage::Awaiting(Awaiting::Ac | Awaiting::Responding) => State::Retraining,
+            Stage::Control => State::Control,
+            Stage::TurningOff => State::ToPrimary,
+            Stage::Page => State::Primary,
+            Stage::Failed => State::Failed,
+            // A retrain, of either channel, is one to the join from its
+            // first silence to the channel coming back: a 12.7 retrain's
+            // phase 3 and start-up included.
+            _ if self.turn == Turn::Retrain => State::Retraining,
+            Stage::Phase2 | Stage::Phase3 | Stage::Recovering { .. } | Stage::Awaiting(Awaiting::FirstPph) => State::Starting,
             Stage::Awaiting(_) | Stage::Mph | Stage::AwaitE => match self.turn {
                 Turn::First => State::Starting,
                 Turn::Page => State::ToControl,
                 Turn::Retrain => State::Retraining,
             },
-            Stage::Control => State::Control,
-            Stage::TurningOff => State::ToPrimary,
-            Stage::Page => State::Primary,
-            Stage::Failed => State::Failed,
         }
     }
 
@@ -681,7 +695,7 @@ impl Modem {
         if self.stage != Stage::Control {
             return false;
         }
-        self.begin_phase2_again();
+        self.begin_phase2_again(true);
         true
     }
 
@@ -693,9 +707,30 @@ impl Modem {
         self.now += 1;
         if self.stage == Stage::Phase2 {
             // Phase 2 has the line to itself: nothing else listens or
-            // speaks until INFOh has gone or come.
+            // speaks until INFOh has gone or come. Except that in a retrain
+            // this end began, the far end is still on the control channel
+            // for a round trip and more, and its 600 baud symbols are on the
+            // very carrier phase 2 listens to for the far tone: at four
+            // points three transitions in four turn the phase by a quarter
+            // or not at all, which phase 2's tone judge does not see as a
+            // dip, and the one in four that turns it half way is a tone's
+            // reversal to it. 12.7.1.1 and 12.7.2.1 have the initiator
+            // "condition its receiver to detect" the far tone after its own
+            // silence; here phase 2 hears silence until the far carrier has
+            // gone, the control receiver's envelope of it saying when, and
+            // the far end's own 70 ms of silence then come before its tone.
+            if let Some(loud) = self.deaf_above {
+                self.control.receiver.feed(input);
+                while self.control.receiver.heard().is_some() {}
+                self.control.receiver.take_sync_bits();
+                self.control.receiver.take_bits();
+                if self.control.receiver.level() <= loud * FAR_GONE {
+                    self.deaf_above = None;
+                }
+            }
+            let heard = if self.deaf_above.is_some() { 0.0 } else { input };
             let Some(phase2) = self.phase2.as_mut() else { return 0.0 };
-            let out = phase2.step(input);
+            let out = phase2.step(heard);
             match phase2.status() {
                 phase2h::Status::Running => {}
                 phase2h::Status::Done => self.finish_phase2(),
@@ -866,7 +901,7 @@ impl Modem {
                     if well {
                         // 12.4.2.1, and 12.4.4.1's three seconds "after
                         // receipt of the end of signal TRN".
-                        self.turn = Turn::First;
+                        self.turn = self.turn_after_phase3();
                         self.stage = Stage::Awaiting(Awaiting::FirstPph);
                         self.wait(THREE_SECONDS);
                     } else {
@@ -950,7 +985,7 @@ impl Modem {
                 Stage::Control | Stage::Mph | Stage::AwaitE | Stage::Awaiting(Awaiting::ShOrPph | Awaiting::Pph | Awaiting::ChangePph)
             )
         {
-            self.begin_phase2_again();
+            self.begin_phase2_again(false);
             return;
         }
 
@@ -959,7 +994,7 @@ impl Modem {
                 // 12.3.1.3: TRN over, the control channel follows -- 70 ms of
                 // silence and PPh (12.4.1.1).
                 if self.source.as_ref().is_some_and(|s| s.sending() == Sending::Idle) {
-                    self.begin_startup(Turn::First);
+                    self.begin_startup(self.turn_after_phase3());
                     // A tone already there is 12.3.3's recovery under way.
                     if self.control.receiver.hearing() == Hearing::Tone {
                         self.recover_source();
@@ -1023,14 +1058,22 @@ impl Modem {
         }
     }
 
+    /// What the start-up after phase 3 is to the join: the first, or the
+    /// tail of a primary channel retrain (12.7) begun on the control channel.
+    fn turn_after_phase3(&self) -> Turn {
+        if self.turn == Turn::Retrain { Turn::Retrain } else { Turn::First }
+    }
+
     /// The source's control channel start-up (12.4.1.1): 70 ms of silence,
-    /// PPh, ALT for at least 16T; the far PPh awaited.
+    /// PPh, ALT for at least 16T; the far PPh awaited. Straight after phase
+    /// 3 -- the first time, or after a 12.7 retrain -- the recipient's tone
+    /// may come instead of PPh (12.4.3.1), so that wait has its own name.
     fn begin_startup(&mut self, turn: Turn) {
         self.turn = turn;
         self.control.transmitter.queue(Segment::Silence(control::SILENCE_SYMBOLS));
         self.queue_pph();
         self.control.transmitter.queue(Segment::Alt { at_least: control::ALT_LEAST });
-        self.stage = Stage::Awaiting(if turn == Turn::First { Awaiting::FirstPph } else { Awaiting::Pph });
+        self.stage = Stage::Awaiting(if turn == Turn::Page { Awaiting::Pph } else { Awaiting::FirstPph });
         self.deadline = None;
     }
 
@@ -1273,10 +1316,13 @@ impl Modem {
     }
 
     /// A primary channel retrain (12.7), begun here or answered: everything
-    /// else falls silent, and phase 2 runs again from its tones.
-    fn begin_phase2_again(&mut self) {
+    /// else falls silent, and phase 2 runs again from its tones. When
+    /// `initiating`, the far end has yet to hear of it, and its control
+    /// carrier is kept out of phase 2's ears until it goes (see `step`).
+    fn begin_phase2_again(&mut self, initiating: bool) {
         self.control.transmitter.stop();
         self.control.receiver.stop();
+        self.deaf_above = (initiating && self.control.receiver.carrier()).then(|| self.control.receiver.level());
         if let Some(recipient) = self.recipient.as_mut() {
             recipient.stop();
         }
@@ -1311,10 +1357,14 @@ impl Modem {
             (false, Some(snr_db)) => rate_by_snr(snr_db, self.channel.band.baud()),
             _ => 14,
         };
-        let max_rate = probe::ceiling(rate).min(wide).min(by_line).min(self.cap).max(1);
         let rates = (1..=14u8)
             .filter(|&n| Framing::new(rate, u32::from(n) * 2400, false, false).is_some())
             .fold(0u16, |mask, n| mask | 1 << (n - 1));
+        // Never below the least rate the symbol rate has: 2400 bit/s is
+        // 2400 Bd's alone (Table 8), and a cap or a poor line asking for it
+        // elsewhere would leave the two MPh with no rate in common.
+        let least = rates.trailing_zeros() as u8 + 1;
+        let max_rate = probe::ceiling(rate).min(wide).min(by_line).min(self.cap).max(least);
         Mph {
             max_rate,
             control_rate: self.control_rate,
