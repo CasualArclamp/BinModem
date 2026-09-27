@@ -9,6 +9,8 @@
 //! says how a modem goes from one to the other and back, and this is that
 //! procedure, strung over the pieces the other modules built:
 //!
+//! - phase 2 (12.2), [`super::phase2h`]'s, from the 75 ms of silence that
+//!   end V.8 to INFOh, and again for a primary channel retrain (12.7);
 //! - phase 3 (12.3): the source sends S, S-bar, PP and TRN, the recipient
 //!   trains on them, and a recipient that heard nothing goes back to its
 //!   phase 2 tone (12.3.3), which the source answers (12.4.3.1);
@@ -50,12 +52,14 @@ use std::collections::VecDeque;
 use super::control::{self, Heard, Hearing, Kind, Phase, Rate, Reading, Segment, Sent};
 use super::dpsk::{self, Side};
 use super::frame::Framing;
-use super::info::{Info, Info0, InfoH};
+use super::info::{Info, Info0, InfoH, SymbolRate};
 use super::mp::{self, Coefficient, ControlRate, Mph, MphFinder, MphFound, Trellis};
 pub use super::phase2::Role;
+use super::phase2h::{self, Part};
 use super::primary::{self, Channel, DataMode, Sending};
 use super::probe;
 use super::qam::Band;
+use super::signals::Size;
 use super::trellis::Code;
 use crate::v32::Mode;
 
@@ -88,6 +92,10 @@ const TONE_WAIT: f64 = 2.0;
 /// gives it that and a second exchange of tones, and then gives the call up.
 const INFOH_WAIT: f64 = 5.0;
 
+/// "After detecting Tone A for more than 50 ms" (12.7.1.2; 12.7.2.2 of
+/// tone B): the far end wants the primary channel retrained.
+const RETRAIN_TONE_SECONDS: f64 = 0.050;
+
 /// How long the far end's control carrier has to have been gone before the
 /// far end counts as silent (F.3.2.3/T.30, the source's turn to the page):
 /// longer than the 20 ms hole a VoIP jitter buffer leaves, and short beside
@@ -117,6 +125,9 @@ pub enum State {
 /// What the modem has to tell the join.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Event {
+    /// Phase 2 is over: INFOh has gone or come, and [`Modem::infoh`] and
+    /// [`Modem::far_capabilities`] say what it settled.
+    Phase2Over,
     /// Phase 3 is over (12.3.2.3); or it failed and the tone exchange that
     /// repeats it has begun (12.3.3).
     Phase3Over { well: bool },
@@ -175,6 +186,9 @@ enum Awaiting {
 /// Where the modem is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
+    /// Phase 2 (12.2): the first time, or again for a primary channel
+    /// retrain (12.7). Nothing else of the modem runs meanwhile.
+    Phase2,
     /// Phase 3 (12.3): the source sending it, the recipient training on it.
     Phase3,
     /// The tone exchange that repeats phase 3: the recipient's tone, the
@@ -218,6 +232,11 @@ pub struct Modem {
     turn: Turn,
     /// When the wait in hand runs out, in samples.
     deadline: Option<u64>,
+
+    /// Phase 2, while it runs, and kept for its readings after.
+    phase2: Option<phase2h::Modem>,
+    /// Phase 2 is over, and [`Modem::infoh`] means something.
+    phase2_done: bool,
 
     control: control::Modem,
     source: Option<primary::Source>,
@@ -274,24 +293,39 @@ pub struct Modem {
 }
 
 impl Modem {
-    /// One end from phase 3 on, phase 2 having settled `setup`: the source
-    /// begins its 70 ms of silence and S at once (12.3.1.1), the recipient
-    /// listens for them (12.3.2.1). `role` is which modem dialled, which
-    /// fixes the carriers and the scramblers; `source` whether this end
-    /// sends the page.
+    /// One end from the 75 ms of silence that end V.8 (12.1): phase 2 goes
+    /// first, INFO0 at once, and phase 3 follows on what it settles. `role`
+    /// is which modem dialled, which fixes the carriers and the scramblers;
+    /// `source` whether this end sends the page.
+    pub fn new(role: Role, source: bool, fs: f64) -> Self {
+        let phase2 = phase2h::Modem::new(role, part_of(source), fs);
+        let placeholder = InfoH {
+            power_reduction: 0,
+            trn_length: 0,
+            high_carrier: false,
+            pre_emphasis: 0,
+            symbol_rate: SymbolRate::S2400,
+            trn_size: Size::Four,
+        };
+        let setup = Setup { infoh: placeholder, ours: phase2.capabilities(), far: Info0::default() };
+        let mut modem = Self::build(role, source, fs, setup);
+        modem.phase2 = Some(phase2);
+        modem.phase2_done = false;
+        modem.stage = Stage::Phase2;
+        modem
+    }
+
+    /// One end from phase 3 on, phase 2 having settled `setup` elsewhere:
+    /// the source begins its 70 ms of silence and S at once (12.3.1.1), the
+    /// recipient listens for them (12.3.2.1).
     pub fn after_phase2(role: Role, source: bool, fs: f64, setup: Setup) -> Self {
-        let channel = channel_of(&setup.infoh);
+        let mut modem = Self::build(role, source, fs, setup);
+        modem.begin_phase3();
+        modem
+    }
+
+    fn build(role: Role, source: bool, fs: f64, setup: Setup) -> Self {
         let side = side_of(role);
-        let (mut primary_source, mut recipient) = (None, None);
-        if source {
-            let mut s = primary::Source::new(channel, mode_of(role), fs);
-            s.phase3();
-            primary_source = Some(s);
-        } else {
-            let mut r = primary::Recipient::new(channel, mode_of(other(role)), fs);
-            r.expect_phase3();
-            recipient = Some(r);
-        }
         Self {
             role,
             source_end: source,
@@ -300,14 +334,16 @@ impl Modem {
             stage: Stage::Phase3,
             turn: Turn::First,
             deadline: None,
+            phase2: None,
+            phase2_done: true,
             control: control::Modem::new(side, fs),
-            source: primary_source,
-            recipient,
+            source: None,
+            recipient: None,
             tone: dpsk::Transmitter::new(side, fs),
             infoh_rx: None,
             tone_pending: false,
             infoh: setup.infoh,
-            channel,
+            channel: channel_of(&setup.infoh),
             ours: setup.ours,
             far: setup.far,
             reading: Reading::default(),
@@ -344,6 +380,9 @@ impl Modem {
 
     pub fn state(&self) -> State {
         match self.stage {
+            Stage::Phase2 if self.turn == Turn::Retrain => State::Retraining,
+            Stage::Phase2 => State::Starting,
+            Stage::Phase3 | Stage::Recovering { .. } if self.turn == Turn::Retrain => State::Retraining,
             Stage::Phase3 | Stage::Recovering { .. } | Stage::Awaiting(Awaiting::FirstPph) => State::Starting,
             Stage::Awaiting(Awaiting::Ac | Awaiting::Responding) => State::Retraining,
             Stage::Awaiting(_) | Stage::Mph | Stage::AwaitE => match self.turn {
@@ -366,6 +405,7 @@ impl Modem {
     /// A name for the window.
     pub fn phase(&self) -> &'static str {
         match self.stage {
+            Stage::Phase2 => self.phase2.as_ref().map_or("V.34 phase 2", phase2h::Modem::phase),
             Stage::Phase3 => "V.34 phase 3",
             Stage::Recovering { .. } => "V.34 phase 3 again",
             Stage::Awaiting(Awaiting::Ac | Awaiting::Responding) => "V.34 control retrain",
@@ -387,21 +427,31 @@ impl Modem {
         self.events.pop_front()
     }
 
-    /// What INFOh chose for the primary channel.
-    pub fn channel(&self) -> Channel {
-        self.channel
+    /// What INFOh chose for the primary channel, once phase 2 is over.
+    pub fn channel(&self) -> Option<Channel> {
+        self.phase2_done.then_some(self.channel)
     }
 
-    pub fn infoh(&self) -> InfoH {
-        self.infoh
+    /// INFOh as it went or came, once phase 2 is over.
+    pub fn infoh(&self) -> Option<InfoH> {
+        self.phase2_done.then_some(self.infoh)
     }
 
+    /// This end's INFO0.
     pub fn capabilities(&self) -> Info0 {
         self.ours
     }
 
-    pub fn far_capabilities(&self) -> Info0 {
-        self.far
+    /// The far end's INFO0, once phase 2 has it.
+    pub fn far_capabilities(&self) -> Option<Info0> {
+        self.phase2_done.then_some(self.far)
+    }
+
+    /// Phase 2, for the window's readings of it: what it probed, how often
+    /// it recovered. None for a modem started from phase 3 that has not
+    /// retrained through it.
+    pub fn phase2(&self) -> Option<&phase2h::Modem> {
+        self.phase2.as_ref()
     }
 
     /// The primary channel's rate in bit/s, as the last MPh exchange settled
@@ -622,12 +672,37 @@ impl Modem {
         true
     }
 
+    /// Retrain the primary channel (12.7.1.1, 12.7.2.1): circuit 106 off,
+    /// 70 ms of silence, this end's phase 2 tone, and the tone exchange,
+    /// phase 3 and the control channel start-up again, with no INFO0. From
+    /// the control channel only; T.30 leaves its use in phase C for further
+    /// study (F.3.3). False elsewhere.
+    pub fn retrain_primary(&mut self) -> bool {
+        if self.stage != Stage::Control {
+            return false;
+        }
+        self.begin_phase2_again();
+        true
+    }
+
     /// Carry the modem one sample further: hear `input`, and say what goes
     /// on the line -- the control channel's sample and the primary
     /// channel's summed, each nought when idle, and phase 2's tone in the
     /// recoveries.
     pub fn step(&mut self, input: f64) -> f64 {
         self.now += 1;
+        if self.stage == Stage::Phase2 {
+            // Phase 2 has the line to itself: nothing else listens or
+            // speaks until INFOh has gone or come.
+            let Some(phase2) = self.phase2.as_mut() else { return 0.0 };
+            let out = phase2.step(input);
+            match phase2.status() {
+                phase2h::Status::Running => {}
+                phase2h::Status::Done => self.finish_phase2(),
+                phase2h::Status::Failed(why) => self.fail(why),
+            }
+            return out;
+        }
         let mut out = self.control.step(input);
         if let Some(recipient) = self.recipient.as_mut() {
             recipient.feed(input);
@@ -864,6 +939,21 @@ impl Modem {
             }
         }
 
+        // 12.7.1.2, 12.7.2.2: the far end's phase 2 tone "for more than
+        // 50 ms" while this end is on the control channel is a primary
+        // channel retrain to answer. Where PPh is awaited after phase 3 it is
+        // 12.3.3's recovery instead (`on_tone`).
+        if self.control.receiver.hearing() == Hearing::Tone
+            && self.control.receiver.hearing_for() > RETRAIN_TONE_SECONDS
+            && matches!(
+                self.stage,
+                Stage::Control | Stage::Mph | Stage::AwaitE | Stage::Awaiting(Awaiting::ShOrPph | Awaiting::Pph | Awaiting::ChangePph)
+            )
+        {
+            self.begin_phase2_again();
+            return;
+        }
+
         match self.stage {
             Stage::Phase3 if self.source_end => {
                 // 12.3.1.3: TRN over, the control channel follows -- 70 ms of
@@ -925,7 +1015,7 @@ impl Modem {
             // goes anyway.
             Stage::Recovering { infoh_sent: false, .. } if !self.source_end => self.send_infoh(),
             Stage::Recovering { .. } if self.source_end => self.fail("no INFOh after the recipient's tone"),
-            Stage::Recovering { .. } | Stage::Phase3 | Stage::Control | Stage::TurningOff | Stage::Page | Stage::Failed => {}
+            Stage::Recovering { .. } | Stage::Phase2 | Stage::Phase3 | Stage::Control | Stage::TurningOff | Stage::Page | Stage::Failed => {}
             // 12.4.3.2 to 12.4.3.4, 12.4.4.1 to 12.4.4.3, 12.6.1.5, 12.6.1.6,
             // 12.6.2.4, 12.6.2.5: "initiate a control channel retrain as
             // defined in 12.8.1".
@@ -1153,6 +1243,56 @@ impl Modem {
         self.deadline = None;
     }
 
+    /// Phase 2 is done: INFOh, the far INFO0, and phase 3 on them.
+    fn finish_phase2(&mut self) {
+        let Some(phase2) = self.phase2.as_ref() else { return };
+        let Some(infoh) = phase2.infoh() else { return self.fail("phase 2 done without INFOh") };
+        self.infoh = infoh;
+        self.channel = channel_of(&infoh);
+        self.ours = phase2.capabilities();
+        self.far = phase2.far_capabilities().unwrap_or_default();
+        self.phase2_done = true;
+        self.events.push_back(Event::Phase2Over);
+        self.begin_phase3();
+    }
+
+    /// Phase 3 (12.3): the source's burst begins with its 70 ms of silence,
+    /// the recipient listens for S.
+    fn begin_phase3(&mut self) {
+        if self.source_end {
+            let mut source = primary::Source::new(self.channel, mode_of(self.role), self.fs);
+            source.phase3();
+            self.source = Some(source);
+        } else {
+            let mut recipient = primary::Recipient::new(self.channel, mode_of(other(self.role)), self.fs);
+            recipient.expect_phase3();
+            self.recipient = Some(recipient);
+        }
+        self.stage = Stage::Phase3;
+        self.deadline = None;
+    }
+
+    /// A primary channel retrain (12.7), begun here or answered: everything
+    /// else falls silent, and phase 2 runs again from its tones.
+    fn begin_phase2_again(&mut self) {
+        self.control.transmitter.stop();
+        self.control.receiver.stop();
+        if let Some(recipient) = self.recipient.as_mut() {
+            recipient.stop();
+        }
+        self.tone.stop();
+        self.infoh_rx = None;
+        self.tone_pending = false;
+        self.phase2 = Some(phase2h::Modem::retrain(self.role, part_of(self.source_end), self.fs, self.ours, self.far));
+        self.turn = Turn::Retrain;
+        self.stage = Stage::Phase2;
+        self.deadline = None;
+        self.far_e = false;
+        self.page_ending = false;
+        self.retrains += 1;
+        self.events.push_back(Event::Retraining);
+    }
+
     /// This end's MPh (Tables 23 and 24, and `wp-ab.md` "For G").
     ///
     /// The source offers every rate Table 8 has at the symbol rate, up to
@@ -1250,6 +1390,11 @@ fn channel_of(infoh: &InfoH) -> Channel {
         trn_size: infoh.trn_size,
         trn_steps: infoh.trn_length,
     }
+}
+
+/// Phase 2's name for which end sends the page.
+fn part_of(source: bool) -> Part {
+    if source { Part::Source } else { Part::Recipient }
 }
 
 /// The other end of the call.
