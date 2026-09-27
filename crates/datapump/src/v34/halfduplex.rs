@@ -96,22 +96,37 @@ const INFOH_WAIT: f64 = 5.0;
 /// tone B): the far end wants the primary channel retrained.
 const RETRAIN_TONE_SECONDS: f64 = 0.050;
 
-/// How far the far end's control carrier has to fall, against its level as
-/// this end began a primary channel retrain, to count as gone: 12 dB, which
-/// the control receiver's 20 ms envelope takes 28 ms to fall by once the
-/// far end stops -- leaving 40 ms of its 70 ms of silence before its tone --
-/// and which a jitter buffer's 20 ms hole never takes it to. The receiver's
-/// own carrier-off judgement is V.32's 59 dB, on a line losing 15 dB a
-/// hundred milliseconds down the same envelope: longer than the far end's
-/// silence, so its tone came with the carrier still on, and phase 2 stayed
-/// deaf through the tone and its reversal.
+/// How far the far end's control carrier has to fall below the level it has
+/// lately had on the channel to count as gone: for the source's turn to the
+/// page (F.3.2.3/T.30) and for the ears of a modem that began a primary
+/// channel retrain. 12 dB, which the control receiver's 20 ms envelope takes
+/// 28 ms to fall by once the far end stops -- leaving 40 ms of a retraining
+/// far end's 70 ms of silence before its tone -- and which a jitter buffer's
+/// 20 ms hole never takes it to.
+///
+/// Relative, as the page's end is (`wp-e.md`), since nothing here knows dBm
+/// on a VoIP line. The receiver's own carrier-off is V.32's absolute 59 dB
+/// under nominal: on a line losing 15 dB it is a hundred milliseconds down
+/// the same envelope, longer than that 70 ms of silence, so a retraining far
+/// end's tone came with the carrier still on and phase 2 stayed deaf through
+/// the tone and its reversal; and on a noisy line it never came at all, the
+/// noise in the far band holding the carrier on, and a source waiting for
+/// the recipient to fall silent waited for ever.
 const FAR_GONE: f64 = 0.25;
+
+/// How slowly the level the far end's going is judged against follows the
+/// far carrier down: over a second, where it follows it up at once.
+const FAR_LEVEL_SECONDS: f64 = 1.0;
 
 /// How long the far end's control carrier has to have been gone before the
 /// far end counts as silent (F.3.2.3/T.30, the source's turn to the page):
-/// longer than the 20 ms hole a VoIP jitter buffer leaves, and short beside
-/// the 70 ms of silence the source itself puts before its S.
-const FAR_SILENT_SECONDS: f64 = 0.050;
+/// with the 28 ms [`FAR_GONE`] takes, 128 ms of silence. Longer than any
+/// silence the far end keeps on the channel and then breaks: a far end that
+/// begins a primary channel retrain is silent 70 ± 5 ms before its tone
+/// (12.7.1.1, 12.7.2.1), which is gone for at most 53 ms of it -- and read as
+/// the recipient's turn at 50, the source sent a page into a retrain. A
+/// jitter buffer's 20 ms hole never counts at all.
+const FAR_SILENT_SECONDS: f64 = 0.100;
 
 /// Where the modem is, for the join (`plan.md` 10.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -294,6 +309,11 @@ pub struct Modem {
     far_e: bool,
     /// Since when the far end's control carrier has been gone.
     far_off_since: Option<u64>,
+    /// The far end's control carrier as loud as it has lately been on the
+    /// channel: what its going is judged against ([`FAR_GONE`]).
+    far_level: f64,
+    /// [`FAR_LEVEL_SECONDS`] as a factor a sample.
+    far_level_keep: f64,
     /// The AC being heard has been answered.
     ac_answered: bool,
     /// What the primary receiver last trained to, in decibels.
@@ -375,6 +395,8 @@ impl Modem {
             page_ending: false,
             far_e: false,
             far_off_since: None,
+            far_level: 0.0,
+            far_level_keep: (-1.0 / (FAR_LEVEL_SECONDS * fs)).exp(),
             ac_answered: false,
             trained_snr: None,
             recoveries: 0,
@@ -543,10 +565,11 @@ impl Modem {
     }
 
     /// Whether the far end has fallen silent on the control channel: its
-    /// carrier gone for [`FAR_SILENT_SECONDS`] while this end is on the
-    /// channel. How the source knows the recipient is ready for the page
-    /// (F.3.2.3, F.3.4.5/T.30). False from the moment the channel comes
-    /// back, and while this end is turning round.
+    /// carrier gone -- [`FAR_GONE`] below the level it has lately had, or
+    /// under the receiver's own carrier-off -- for [`FAR_SILENT_SECONDS`]
+    /// while this end is on the channel. How the source knows the recipient
+    /// is ready for the page (F.3.2.3, F.3.4.5/T.30). False from the moment
+    /// the channel comes back, and while this end is turning round.
     pub fn far_silent(&self) -> bool {
         self.stage == Stage::Control
             && self.far_off_since.is_some_and(|since| (self.now - since) as f64 >= FAR_SILENT_SECONDS * self.fs)
@@ -726,7 +749,7 @@ impl Modem {
                 while self.control.receiver.heard().is_some() {}
                 self.control.receiver.take_sync_bits();
                 self.control.receiver.take_bits();
-                if self.control.receiver.level() <= loud * FAR_GONE {
+                if self.far_gone(loud) {
                     self.deaf_above = None;
                 }
             }
@@ -953,9 +976,22 @@ impl Modem {
         }
     }
 
+    /// Whether the far end's control carrier has gone: fallen [`FAR_GONE`]
+    /// below `loud`, or under the receiver's own carrier-off.
+    fn far_gone(&self, loud: f64) -> bool {
+        !self.control.receiver.carrier() || self.control.receiver.level() <= loud * FAR_GONE
+    }
+
     /// What is watched for rather than reported.
     fn poll(&mut self) {
-        self.far_off_since = if self.control.receiver.carrier() { None } else { self.far_off_since.or(Some(self.now)) };
+        let gone = self.far_gone(self.far_level);
+        self.far_off_since = if gone { self.far_off_since.or(Some(self.now)) } else { None };
+        // The far carrier's level on the channel, followed up at once and
+        // down slowly, and not at all once it has gone: a far end that has
+        // been quiet a while is not the far end's level.
+        if self.stage == Stage::Control && !gone {
+            self.far_level = self.control.receiver.level().max(self.far_level * self.far_level_keep);
+        }
 
         // 12.8.2: "After detecting signal AC for more than 100 ms", PPh and
         // ALT; and 12.8.1's collision rule, an initiator that hears AC
@@ -1166,6 +1202,9 @@ impl Modem {
         self.renegotiate = false;
         self.ac_rounds = 0;
         self.far_off_since = None;
+        // The far end's E has just come: its carrier as it is now is what
+        // its going quiet is judged against.
+        self.far_level = self.control.receiver.level();
         // Nothing read before this moment is the far end's data.
         self.control.receiver.take_bits();
         self.events.push_back(Event::ControlUp);
@@ -1324,7 +1363,10 @@ impl Modem {
     fn begin_phase2_again(&mut self, initiating: bool) {
         self.control.transmitter.stop();
         self.control.receiver.stop();
-        self.deaf_above = (initiating && self.control.receiver.carrier()).then(|| self.control.receiver.level());
+        // Judged against the level the far carrier has had on the channel,
+        // so that a far end already quiet leaves phase 2 its ears at once.
+        let loud = self.far_level.max(self.control.receiver.level());
+        self.deaf_above = (initiating && !self.far_gone(loud)).then_some(loud);
         if let Some(recipient) = self.recipient.as_mut() {
             recipient.stop();
         }
