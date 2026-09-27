@@ -392,6 +392,21 @@ pub fn peak(params: &Params) -> f64 {
         .fold(1.0, f64::max)
 }
 
+/// The largest coordinate any point of a direction's constellation reaches at
+/// the unit mean power symbols travel at -- out of the encoder, down the line
+/// and into the decoder -- which is what a scope drawing them has to be
+/// scaled to.
+///
+/// [`peak`] is in grid units, and at the higher rates those run to tens: a
+/// scope sized by it draws every point of a page within a few hundredths of
+/// its centre. This divides by the root of the mean energy, as
+/// [`Decoder::peak`] does, for whoever has the parameters and no decoder.
+pub fn unit_peak(params: &Params) -> f64 {
+    let shell = Shell::new(params.framing.m);
+    let (_, bent) = energies(params, &shell);
+    peak(params) / bent.sqrt()
+}
+
 /// The label of each point of the quarter superconstellation, by position.
 fn quarter_label(point: Point) -> Option<usize> {
     static LABELS: std::sync::OnceLock<std::collections::HashMap<Point, usize>> = std::sync::OnceLock::new();
@@ -1265,5 +1280,37 @@ mod tests {
         let wrong = sent.iter().zip(&got).skip(23).filter(|(a, b)| a != b).count();
         assert!(got.len() > 1000);
         assert_eq!(wrong, 0);
+    }
+
+    /// A scope's range is the unit-power peak, not the grid's: what the
+    /// encoder sends reaches it and never passes it, and it is the decoder's
+    /// own figure. Sized by the grid-unit [`peak`] instead, a half-duplex fax
+    /// window drew every point of a real 33 600 page as one dot at the centre.
+    #[test]
+    fn the_unit_peak_is_as_far_as_the_symbols_reach() {
+        for (rate, primary) in [(SymbolRate::S3429, 33_600), (SymbolRate::S3200, 28_800), (SymbolRate::S2400, 9_600)] {
+            for nonlinear in [false, true] {
+                let p = params(rate, primary, Code::States16, false, nonlinear);
+                let unit = unit_peak(&p);
+                assert!((unit - Decoder::new(p).peak()).abs() < 1e-12, "{primary}: not the decoder's peak");
+                assert!(peak(&p) > 3.0 * unit, "{primary}: grid units and unit power agree, so this test proves nothing");
+                let mut encoder = Encoder::new(p);
+                let mut seed = 0x9e37_79b9_u32;
+                let mut reach = 0.0f64;
+                for _ in 0..20_000 {
+                    let symbol = encoder.next_symbol(&mut || {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 17;
+                        seed ^= seed << 5;
+                        seed & 1 == 1
+                    });
+                    reach = reach.max(symbol.re.abs()).max(symbol.im.abs());
+                }
+                assert!(
+                    reach <= unit * (1.0 + 1e-9) && reach > 0.5 * unit,
+                    "{primary}, non-linear {nonlinear}: symbols reach {reach:.3} against a peak of {unit:.3}"
+                );
+            }
+        }
     }
 }

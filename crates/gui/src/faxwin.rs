@@ -895,20 +895,35 @@ impl Fax {
                                         ui.end_row();
                                     }
                                 }
+                                // On a V.34 call the answering end's field is
+                                // the caller's DCS, whose rate bits T.30 has
+                                // sent as zero (Table 2, Note 33): read as a
+                                // DIS they say V.27 ter at 4800, which is not
+                                // what the far end can do. The rate is the
+                                // modem's, from its MPh exchange.
+                                let v34 = self.symbol_rate > 0;
                                 for (k, v) in caps.rows() {
+                                    if v34 && !self.sending && matches!(k, "modulations" | "fastest") {
+                                        continue;
+                                    }
                                     ui.label(RichText::new(k).monospace().color(dim));
                                     ui.label(RichText::new(v).monospace().color(bright));
                                     ui.end_row();
                                 }
                                 ui.label(RichText::new("both ends").monospace().color(dim));
-                                let shared = caps.best_shared(&self.ours());
+                                let shared = if v34 {
+                                    Some(format!(
+                                        "V.34 at {} bit/s on {} baud",
+                                        self.rate, self.symbol_rate
+                                    ))
+                                } else {
+                                    caps.best_shared(&self.ours())
+                                        .map(|(m, rate)| format!("{} at {rate} bit/s", m.name()))
+                                };
                                 ui.label(
-                                    RichText::new(match shared {
-                                        Some((m, rate)) => {
-                                            format!("{} at {rate} bit/s", m.name())
-                                        }
-                                        None => "nothing in common".to_owned(),
-                                    })
+                                    RichText::new(
+                                        shared.clone().unwrap_or_else(|| "nothing in common".to_owned()),
+                                    )
                                     .monospace()
                                     .color(match shared {
                                         Some(_) => Color32::from_rgb(90, 220, 130),

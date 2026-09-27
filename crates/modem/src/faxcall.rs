@@ -870,11 +870,13 @@ impl FaxCall {
             // are the largest coordinate at that power, as the duplex pump
             // has them: 1/sqrt(2) for four points, 3/sqrt(10) for sixteen,
             // and data mode's own, about one and a half for the shaped
-            // hundreds.
+            // hundreds. `data::peak` is not that -- it is in grid units,
+            // tens of them at 33 600 -- and a scope sized by it drew every
+            // point of the first real Super G3 page as one dot at the centre.
             return match self.v34_channel() {
                 Some(V34Channel::Control(Size::Four)) | None => std::f64::consts::FRAC_1_SQRT_2,
                 Some(V34Channel::Control(Size::Sixteen)) => 3.0 / 10f64.sqrt(),
-                Some(V34Channel::Primary(params)) => data::peak(&params),
+                Some(V34Channel::Primary(params)) => data::unit_peak(&params),
             };
         }
         match self.page_carrier() {
@@ -2048,6 +2050,9 @@ mod tests {
         let (mut was_a, mut was_b) = ("", "");
         let (mut to_caller, mut to_answerer) = (0.0, 0.0);
         let mut rate_while_sending = None;
+        // The page's points at the answerer, and the range the window's scope
+        // is given for them.
+        let (mut reach, mut scope) = (0.0f64, None);
         for i in 0..(FS * 60.0) as usize {
             let a = caller.step(to_caller);
             let b = answerer.step(to_answerer);
@@ -2055,6 +2060,12 @@ mod tests {
             to_answerer = a;
             if caller.phase() == Phase::Sending {
                 rate_while_sending = caller.primary_rate();
+            }
+            if answerer.shape().ends_with("TCM")
+                && let Some((x, y)) = answerer.constellation_point()
+            {
+                reach = reach.max(x.abs()).max(y.abs());
+                scope = Some(answerer.constellation_peak());
             }
             if trace && (caller.phase_name() != was_a || answerer.phase_name() != was_b) {
                 eprintln!("{:6.2}s caller {:<40} answerer {}", i as f64 / FS, caller.phase_name(), answerer.phase_name());
@@ -2075,6 +2086,14 @@ mod tests {
         assert_eq!(answerer.primary_rate(), Some(33_600));
         assert!(caller.error_correction() && answerer.error_correction(), "F.3: ECM is mandatory");
         assert_eq!((caller.standard(), answerer.standard()), ("V.34", "V.34"));
+        // Drawn to scale: the page's points fill the scope and stay inside it.
+        // Sized in grid units, the range was tens against points of one and
+        // a half, and the first real Super G3 page was one dot at the centre.
+        let scope = scope.expect("no point of the page to draw");
+        assert!(
+            reach > 0.5 * scope && reach < 1.2 * scope,
+            "the page's points reach {reach:.3} in a scope sized {scope:.3}"
+        );
         eprintln!("done in {:.1} s", caller.seconds());
     }
 
