@@ -9,7 +9,7 @@ one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
 source for every normative constant, and against the RFCs for everything
-carried over the top of them. 2000 tests.
+carried over the top of them. 2175 tests.
 
 ## What works
 
@@ -73,7 +73,7 @@ been checked three other ways: two documents, two methods, one table.
 | **Terminal** | ANSI/CP437 with mouse reporting; telnet (RFC 854) to use it alone |
 | **Settings** | remembered between runs, so the modem comes back where it was left |
 | **Files** | ZMODEM send and receive |
-| **Fax** | T.30 group 3, sending and receiving; V.17 (7200 to 14 400), V.29 (4800/7200/9600) and V.27 ter (2400/4800); Super G3 -- V.8, then T.30 Annex F on V.34's half-duplex mode at up to 33 600 -- between two of these; T.4 Modified Huffman and Modified READ, T.6 MMR, T.85 JBIG; T.30 Annex A error correction mode; any number of pages in a call, each drawn as it arrives |
+| **Fax** | T.30 group 3, sending and receiving; V.17 (7200 to 14 400), V.29 (4800/7200/9600) and V.27 ter (2400/4800); Super G3 -- V.8, then T.30 Annex F on V.34's half-duplex mode at up to 33 600; T.4 Modified Huffman and Modified READ, T.6 MMR, T.85 JBIG; T.30 Annex A error correction mode; any number of pages in a call, each drawn as it arrives |
 | **Network** | PPP (RFC 1661/1662) with LCP, PAP and CHAP, and IPCP, Van Jacobson header compression (RFC 1144), and a ping over it; a dial-in login prompt, and a login script for dialling out |
 | **Internet** | our own TCP (RFC 9293) and an HTTP/HTTPS proxy (RFC 9112): pages straight to the internet through a provider, or through a far BinModem that has it |
 | **Line** | full-duplex sound card, or a WAV to replay |
@@ -91,7 +91,8 @@ V.17 carries it at 14 400 down to 7200 between two of these; no real machine
 has been tried at V.17 yet. Super G3 -- V.8 in front of the call and the page
 over V.34's half-duplex mode at up to 33 600, with T.30's frames on its 1200
 bit/s control channel -- goes between two of these too, over the VoIP line's
-delay and slips; a real Super G3 machine has yet to be tried.
+delay and slips, and a real Super G3 fax has sent one a page at 33 600 on 3429
+baud, in JBIG. Sending to one has yet to get through.
 
 Between two of these the page goes under T.30's error correction mode:
 numbered frames, and a partial page request for any the far end could not read.
