@@ -1149,3 +1149,52 @@ fn over_the_voip_line_the_sources_e_reaches_the_recipient_after_its_own() {
         println!("{source:?} source: recipient's E at {r_began:.2} s, source's at {s_began:.2} s, heard at {r_heard:.2} s");
     }
 }
+
+
+/// The same after a page. In the resynchronisation of 12.6 the source's E
+/// waits for the recipient's too: the first page BinModem sent to a real
+/// Super G3 fax went through, and then the machine resynchronised, sent its
+/// E, and never answered the PPS behind this end's E (live-1790511602).
+#[test]
+fn over_the_voip_line_the_resyncs_e_from_the_source_comes_after_the_recipients() {
+    for source in [Role::Call, Role::Answer] {
+        let setup = setup(SymbolRate::S3429, false, Size::Four, 4);
+        let (call, answer) = pair(source, setup, pages(1, 20_000, 43));
+        let mut link = Link::new(call, answer, Conditions::voip(46.0));
+        // Every time each end's E began going out, and every time it began
+        // to hear the far end's, on the link's clock: call, then answer.
+        let mut began: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+        let mut heard: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+        let mut was = [(false, false); 2];
+        let done = link.run_until(40.0, |l| {
+            for (k, end) in l.ends().into_iter().enumerate() {
+                let control = end.modem.control();
+                let now = (control.transmitter.on_air() == Some(control::Kind::E), control.receiver.e_seen());
+                if now.0 && !was[k].0 {
+                    began[k].push(l.seconds());
+                }
+                if now.1 && !was[k].1 {
+                    heard[k].push(l.seconds());
+                }
+                was[k] = now;
+            }
+            began.iter().chain(&heard).all(|times| times.len() >= 2)
+        });
+        let what = link.describe();
+        assert!(done, "no resynchronisation after the page: {began:?} {heard:?}: {what}");
+        let (s, r) = if source == Role::Call { (0, 1) } else { (1, 0) };
+        assert!(
+            began[s][1] > heard[s][1],
+            "{source:?} source: its resync E at {:.3} s, before the recipient's reached it at {:.3} s: {what}",
+            began[s][1],
+            heard[s][1]
+        );
+        assert!(
+            heard[r][1] > began[r][1],
+            "{source:?} source: its resync E reached the recipient at {:.3} s, before the recipient's own went at {:.3} s: {what}",
+            heard[r][1],
+            began[r][1]
+        );
+        finish(&mut link, 40.0);
+    }
+}
