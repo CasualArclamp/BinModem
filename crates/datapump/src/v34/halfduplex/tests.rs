@@ -1020,20 +1020,22 @@ fn a_primary_channel_retrain_from_either_end_runs_phase_2_again_once_the_tone_ha
     // tone exchange, the probe and INFOh run again with no INFO0, then
     // phase 3 and the control channel start-up; both ends say Retraining
     // from the first silence to the channel coming back; the frames go
-    // again and the pages after are whole.
-    for source in [Role::Call, Role::Answer] {
-        for initiator in [Role::Call, Role::Answer] {
+    // again and the pages after are whole. On the short line, and on the
+    // VoIP line, where the initiator hears the far end's control channel
+    // for a round trip of a second and a half after its own has stopped.
+    let lines = [(Conditions::short(46.0), "short", 40.0), (Conditions::voip(46.0), "VoIP", 70.0)];
+    for (conditions, name, seconds) in lines {
+        for (source, initiator) in [(Role::Call, Role::Call), (Role::Call, Role::Answer), (Role::Answer, Role::Call), (Role::Answer, Role::Answer)] {
             let (mut call, mut answer) = pair_from_v8(source, pages(3, 20_000, 121));
             if initiator == Role::Call {
                 call.retrain_primary_in = Some(1);
             } else {
                 answer.retrain_primary_in = Some(1);
             }
-            let conditions = Conditions::short(46.0);
             let mut link = Link::new(call, answer, conditions);
-            finish(&mut link, 40.0);
+            finish(&mut link, seconds);
             let what = link.describe();
-            let case = format!("{source:?} as source, the {initiator:?} modem retraining");
+            let case = format!("{name} line, {source:?} as source, the {initiator:?} modem retraining");
             for end in link.ends() {
                 assert_eq!(end.count_events(|e| *e == Event::Retraining), 1, "{case}: {what}");
                 assert_eq!(end.count_events(|e| *e == Event::Phase2Over), 2, "{case}: {what}");
@@ -1049,9 +1051,12 @@ fn a_primary_channel_retrain_from_either_end_runs_phase_2_again_once_the_tone_ha
             // after the initiator's -- the initiator's 70 ms of silence, the
             // 50 ms, and what the watch takes to be sure of a tone.
             let (begun, answered) = if initiator == Role::Call { (&link.call, &link.answer) } else { (&link.answer, &link.call) };
-            let after = first(answered, Event::Retraining).unwrap() - first(begun, Event::Retraining).unwrap() - conditions.one_way;
+            let began = first(begun, Event::Retraining).unwrap();
+            let after = first(answered, Event::Retraining).unwrap() - began - conditions.one_way;
             assert!((0.120..0.250).contains(&after), "{case}: the far end answered the retrain {after:.3} s after it began: {what}");
-            println!("{case}: answered after {after:.3} s, done in {:.1} s", link.seconds());
+            let up = begun.events.iter().filter(|(_, e)| *e == Event::ControlUp).map(|(at, _)| *at as f64 / FS).find(|&at| at > began);
+            let took = up.unwrap() - began;
+            println!("{case}: answered after {after:.3} s, the channel back {took:.2} s after the retrain began, done in {:.1} s", link.seconds());
         }
     }
 }

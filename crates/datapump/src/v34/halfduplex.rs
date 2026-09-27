@@ -101,8 +101,10 @@ const RETRAIN_TONE_SECONDS: f64 = 0.050;
 /// the control receiver's 20 ms envelope takes 28 ms to fall by once the
 /// far end stops -- leaving 40 ms of its 70 ms of silence before its tone --
 /// and which a jitter buffer's 20 ms hole never takes it to. The receiver's
-/// own carrier-off judgement is V.32's 59 dB, a hundred milliseconds down
-/// the same envelope, and swallowed the first half of the far tone.
+/// own carrier-off judgement is V.32's 59 dB, on a line losing 15 dB a
+/// hundred milliseconds down the same envelope: longer than the far end's
+/// silence, so its tone came with the carrier still on, and phase 2 stayed
+/// deaf through the tone and its reversal.
 const FAR_GONE: f64 = 0.25;
 
 /// How long the far end's control carrier has to have been gone before the
