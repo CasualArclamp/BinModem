@@ -90,6 +90,20 @@ const THREE_SECONDS: f64 = 3.0;
 /// is inside that.
 const E_WAIT: f64 = 2.0;
 
+/// The same, for the source's E in a resynchronisation after a page: how
+/// long it goes on with ALT after the recipient's Sh and S-bar-h, waiting for
+/// the recipient's E, before it sends its own.
+///
+/// 12.6.1.4 has the source send E after 16T to 120T of ALT once it has heard
+/// the recipient's Sh and S-bar-h, and the first page BinModem sent to a real
+/// Super G3 fax went through that way and then stopped (live-1790511602):
+/// the machine resynchronised, sent its E, and never answered the PPS that
+/// followed, twice over -- the start-up's lost E again. The recipient's E
+/// follows its S-bar-h after at most 120T of ALT (12.6.2.2), 200 ms; half a
+/// second is past that for any recipient that sends one, and inside the three
+/// seconds 12.6.1.6 gives.
+const RESYNC_E_WAIT: f64 = 0.5;
+
 /// 12.8.1 gives no time for an AC that is never answered (`spec-v34-hdx.md`
 /// F-V34 #12). It gets the same three seconds as everything else, this many
 /// times over, and then the call is given up: a far end that has gone should
@@ -313,6 +327,9 @@ pub struct Modem {
     /// When the far end's first MPh of this start-up came in, which
     /// [`E_WAIT`] counts from.
     far_mph_since: Option<u64>,
+    /// When the source heard the recipient's Sh and S-bar-h in a
+    /// resynchronisation, which [`RESYNC_E_WAIT`] counts from.
+    reversal_at: Option<u64>,
     finder: MphFinder,
     /// The precoding coefficients the far recipient's Type 1 MPh gave this
     /// start-up, zero until one does (10.2.4.4).
@@ -411,6 +428,7 @@ impl Modem {
             mph: Mph::default(),
             far_mph: None,
             far_mph_since: None,
+            reversal_at: None,
             finder: MphFinder::new(),
             precoding: [(0, 0); 3],
             data: None,
@@ -880,8 +898,12 @@ impl Modem {
     /// Sh followed by S-bar-h from the far end.
     fn on_reversal(&mut self) {
         match self.stage {
-            // 12.6.1.4: E now, at the rates of before.
-            Stage::Awaiting(Awaiting::ShOrPph) if self.source_end => self.queue_e(false),
+            // 12.6.1.4: E at the rates of before -- once the recipient's has
+            // come, or RESYNC_E_WAIT has passed.
+            Stage::Awaiting(Awaiting::ShOrPph) if self.source_end => {
+                self.reversal_at = Some(self.now);
+                self.maybe_e();
+            }
             // 12.6.2.2 and 12.6.2.3. Sh in a page that never trained, or
             // still being listened for, is the page over (wp-e.md item 5);
             // in AC, the source came back from its page before hearing it;
@@ -1152,6 +1174,7 @@ impl Modem {
     fn begin_resync(&mut self) {
         self.turn = Turn::Page;
         self.far_e = false;
+        self.reversal_at = None;
         let tx = &mut self.control.transmitter;
         tx.queue(Segment::Silence(control::SILENCE_SYMBOLS));
         tx.queue(Segment::Sh(control::SH_SYMBOLS));
@@ -1169,6 +1192,7 @@ impl Modem {
         self.control.transmitter.queue(Segment::Pph(self.reading));
         self.far_mph = None;
         self.far_mph_since = None;
+        self.reversal_at = None;
         self.precoding = [(0, 0); 3];
         self.finder = MphFinder::new();
         self.far_e = false;
@@ -1197,13 +1221,24 @@ impl Modem {
     /// sequences" -- and at the source, the far end's E as well, or
     /// [`E_WAIT`] since the far MPh came.
     fn maybe_e(&mut self) {
-        if self.stage != Stage::Mph {
-            return;
-        }
-        let Some(since) = self.far_mph_since else { return };
-        let due = !self.source_end || self.far_e || self.now >= since + self.seconds(E_WAIT);
-        if due && self.settle() {
-            self.queue_e(true);
+        match self.stage {
+            Stage::Mph => {
+                let Some(since) = self.far_mph_since else { return };
+                let due = !self.source_end || self.far_e || self.now >= since + self.seconds(E_WAIT);
+                if due && self.settle() {
+                    self.queue_e(true);
+                }
+            }
+            // The source's resynchronisation (12.6.1.4), once the recipient's
+            // Sh and S-bar-h have come.
+            Stage::Awaiting(Awaiting::ShOrPph) if self.source_end => {
+                let Some(at) = self.reversal_at else { return };
+                if self.far_e || self.now >= at + self.seconds(RESYNC_E_WAIT) {
+                    self.reversal_at = None;
+                    self.queue_e(false);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1284,6 +1319,7 @@ impl Modem {
         self.turn = Turn::Retrain;
         self.far_mph = None;
         self.far_mph_since = None;
+        self.reversal_at = None;
         self.far_e = false;
         self.page_ending = false;
         self.stage = Stage::Awaiting(Awaiting::Ac);
