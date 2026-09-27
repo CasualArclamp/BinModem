@@ -2158,9 +2158,18 @@ mod tests {
         let retrain_at = retrain_at.expect("the caller never sent its ones");
         let (asked, state) = asked.expect("the caller's T.30 never asked for the page");
         let turned = turned.expect("the caller never turned to the page");
-        // T.30 took the stopped flags for the recipient's turn while the
-        // modem was still on the control channel, so the race was on...
-        assert_eq!(state, State::Control, "T.30 asked {:.3} s after the retrain began", asked - retrain_at);
+        // T.30 took the stopped flags for the recipient's turn around the
+        // moment the modem heard the retrain's tone: before it, on the control
+        // channel still, or just after, in the retrain. The race is 130 to
+        // 165 ms against about 155, and which side of it a call lands on
+        // moves with the call's timing -- the source waiting for the far E
+        // (E_WAIT in halfduplex.rs) put this one just after. Either way the
+        // turn is asked for while the recipient is leaving for phase 2...
+        assert!(
+            matches!(state, State::Control | State::Retraining),
+            "T.30 asked {:.3} s after the retrain began, with the modem {state:?}",
+            asked - retrain_at
+        );
         // ...and the turn waited out the retrain -- phase 2, phase 3 and a
         // control channel start-up -- which is seconds, not a tenth of one.
         assert!(turned - asked > 1.0, "turned {:.3} s after T.30 asked", turned - asked);

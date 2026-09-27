@@ -1105,3 +1105,47 @@ fn a_cap_below_what_the_symbol_rate_has_settles_its_least_rate() {
         assert_eq!(end.rates, vec![Some(4800); 3], "{}", link.describe());
     }
 }
+
+/// Over the VoIP line the source's E goes only after the recipient's has
+/// reached it, so the recipient has sent its own E before the source's
+/// arrives. 12.4.1.3's E on the first MPh reached a real Super G3 fax some
+/// 50 ms before that machine sent its own E, and the machine read nothing of
+/// this end's after it (live-1790500484); see [`E_WAIT`].
+#[test]
+fn over_the_voip_line_the_sources_e_reaches_the_recipient_after_its_own() {
+    for source in [Role::Call, Role::Answer] {
+        let setup = setup(SymbolRate::S3429, false, Size::Four, 4);
+        let (call, answer) = pair(source, setup, pages(1, 20_000, 41));
+        let mut link = Link::new(call, answer, Conditions::voip(46.0));
+        // When each end's E began going out, and when it first heard the
+        // far end's, on the link's clock: call first, then answer.
+        let mut began = [None; 2];
+        let mut heard = [None; 2];
+        link.run_until(20.0, |l| {
+            for (k, end) in l.ends().into_iter().enumerate() {
+                let control = end.modem.control();
+                if began[k].is_none() && control.transmitter.on_air() == Some(control::Kind::E) {
+                    began[k] = Some(l.seconds());
+                }
+                if heard[k].is_none() && control.receiver.e_seen() {
+                    heard[k] = Some(l.seconds());
+                }
+            }
+            began.iter().chain(&heard).all(Option::is_some)
+        });
+        let what = link.describe();
+        let (s, r) = if source == Role::Call { (0, 1) } else { (1, 0) };
+        let [s_began, r_began] = [began[s], began[r]].map(|t| t.expect("an E never went"));
+        let [s_heard, r_heard] = [heard[s], heard[r]].map(|t| t.expect("an E was never heard"));
+        assert!(
+            s_began > s_heard,
+            "{source:?} source: its E at {s_began:.3} s, before the recipient's reached it at {s_heard:.3} s: {what}"
+        );
+        assert!(
+            r_heard > r_began,
+            "{source:?} source: its E reached the recipient at {r_heard:.3} s, before the recipient's own went at {r_began:.3} s: {what}"
+        );
+        finish(&mut link, 40.0);
+        println!("{source:?} source: recipient's E at {r_began:.2} s, source's at {s_began:.2} s, heard at {r_heard:.2} s");
+    }
+}

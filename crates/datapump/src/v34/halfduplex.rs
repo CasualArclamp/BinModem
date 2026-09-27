@@ -68,6 +68,28 @@ use crate::v32::Mode;
 /// begun (12.8.1).
 const THREE_SECONDS: f64 = 3.0;
 
+/// How long the source goes on sending its MPh after the far end's first
+/// has come, waiting for the far end's E, before it sends its own E anyway.
+///
+/// 12.4.1.3 has the source send E as soon as one MPh is in, and over a
+/// telephone line that is what every start-up does. Over this rig's VoIP
+/// line it is too soon for a real machine. On 2026-09-27 (live-1790500484)
+/// this end, the source, sent E 86 ms after a Super G3 fax's first MPh came
+/// in; with half a second each way, it reached the machine some 50 ms before
+/// the machine sent E of its own -- and the machine never read a frame of
+/// this end's after it. It sent its NSF and DIS four times over, three
+/// seconds apart, and never answered the DCS, while everything of its own
+/// this end decoded whole. A receiver that looks for the far E only once its
+/// own has gone reads nothing of what follows an E that came first.
+///
+/// So the source waits for the recipient's E. The recipient, which sends E
+/// on the first MPh as 12.4.2.4 has it, never waits for the source's, so two
+/// ends of this modem do not wait for each other; this bounds the wait for
+/// one that does. The recipient gives the source's E three seconds from the
+/// source's MPh (12.4.4.3): two seconds, and up to 750 ms of one-way delay,
+/// is inside that.
+const E_WAIT: f64 = 2.0;
+
 /// 12.8.1 gives no time for an AC that is never answered (`spec-v34-hdx.md`
 /// F-V34 #12). It gets the same three seconds as everything else, this many
 /// times over, and then the call is given up: a far end that has gone should
@@ -288,6 +310,9 @@ pub struct Modem {
     /// This end's MPh as last sent, and the far end's as last received.
     mph: Mph,
     far_mph: Option<Mph>,
+    /// When the far end's first MPh of this start-up came in, which
+    /// [`E_WAIT`] counts from.
+    far_mph_since: Option<u64>,
     finder: MphFinder,
     /// The precoding coefficients the far recipient's Type 1 MPh gave this
     /// start-up, zero until one does (10.2.4.4).
@@ -385,6 +410,7 @@ impl Modem {
             reading: Reading::default(),
             mph: Mph::default(),
             far_mph: None,
+            far_mph_since: None,
             finder: MphFinder::new(),
             precoding: [(0, 0); 3],
             data: None,
@@ -780,6 +806,7 @@ impl Modem {
             self.primary_events();
             self.sync_bits();
             self.poll();
+            self.maybe_e();
             if self.deadline.is_some_and(|d| self.now >= d) {
                 self.on_deadline();
             }
@@ -890,6 +917,8 @@ impl Modem {
         self.far_e = true;
         if self.stage == Stage::AwaitE {
             self.up();
+        } else {
+            self.maybe_e();
         }
     }
 
@@ -966,12 +995,15 @@ impl Modem {
                 if let Some(precoding) = far.precoding {
                     self.precoding = precoding;
                 }
-                // 12.4.1.3, 12.4.2.4: "received at least one MPh sequence and
-                // the modem is sending MPh sequences ... complete the current
-                // MPh and send a single 20-bit E sequence".
-                if self.stage == Stage::Mph && self.settle() {
-                    self.queue_e(true);
+                if self.far_mph_since.is_none() {
+                    self.far_mph_since = Some(self.now);
+                    // What is waited for now is the far end's E: "within
+                    // three seconds after receiving MPh" (12.4.3.4, 12.4.4.3).
+                    if self.stage == Stage::Mph {
+                        self.wait(THREE_SECONDS);
+                    }
                 }
+                self.maybe_e();
             }
         }
     }
@@ -1136,6 +1168,7 @@ impl Modem {
     fn queue_pph(&mut self) {
         self.control.transmitter.queue(Segment::Pph(self.reading));
         self.far_mph = None;
+        self.far_mph_since = None;
         self.precoding = [(0, 0); 3];
         self.finder = MphFinder::new();
         self.far_e = false;
@@ -1156,7 +1189,20 @@ impl Modem {
         self.stage = Stage::Mph;
         // 12.4.3.3, 12.4.4.2: three seconds for the far MPh.
         self.wait(THREE_SECONDS);
-        if self.far_mph.is_some() && self.settle() {
+        self.maybe_e();
+    }
+
+    /// E, and data behind it, once it is time: 12.4.1.3 and 12.4.2.4's "has
+    /// received at least one MPh sequence and the modem is sending MPh
+    /// sequences" -- and at the source, the far end's E as well, or
+    /// [`E_WAIT`] since the far MPh came.
+    fn maybe_e(&mut self) {
+        if self.stage != Stage::Mph {
+            return;
+        }
+        let Some(since) = self.far_mph_since else { return };
+        let due = !self.source_end || self.far_e || self.now >= since + self.seconds(E_WAIT);
+        if due && self.settle() {
             self.queue_e(true);
         }
     }
@@ -1237,6 +1283,7 @@ impl Modem {
         self.control.transmitter.queue(Segment::Ac);
         self.turn = Turn::Retrain;
         self.far_mph = None;
+        self.far_mph_since = None;
         self.far_e = false;
         self.page_ending = false;
         self.stage = Stage::Awaiting(Awaiting::Ac);

@@ -169,8 +169,10 @@ The full list is `spec-v34-hdx.md` section F. The ones that shape the code:
    diagonal points, of the same family as duplex PP (10-1, which is built on
    k*I). So the I reading is the default, the printed one is kept beside it
    under its own name, and the control-channel receiver looks for either and
-   says which it found. **The first capture of a real modem's control-channel
-   start-up settles it.**
+   says which it found. **Settled on 2026-09-27 by a real one:** a Super G3
+   fax's PPh in `live-1790500484` reads as the I reading, and the control
+   receiver trained on it to 43 dB (`crates/modem/tests/superg3_capture.rs`
+   reads any capture this way).
 2. **T at two rates.** S, S-bar, PP, TRN and B1 are primary-channel symbols; PPh,
    ALT, AC, E, MPh, Sh, S-bar-h and the 4T of ones are 600 baud control-channel
    symbols.
