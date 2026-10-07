@@ -8,5 +8,5 @@ license.workspace    = true
 workspace = true
 
 [dependencies]
-cpal = "0.18.2"
+cpal = { version = "0.18.2", features = ["pipewire"] }
 dsp  = { path = "../dsp" }
