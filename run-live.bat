@@ -11,7 +11,7 @@ rem It will ask which audio devices to use, picking out a virtual cable if it
 rem finds one, and offer to start a second modem on the same line so that there
 rem is something to dial. Arguments are passed through, so
 rem   run-live.bat -Carrier V32
-rem works, as do B103 and V22B. Both ends have to agree, and this sets both.
+rem works, as do B103, V21 and V22B. Both ends have to agree, and this sets both.
 rem
 rem Bypasses the execution policy for this one script only, rather than
 rem changing the machine's policy.

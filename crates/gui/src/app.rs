@@ -201,6 +201,7 @@ impl Modulation {
             // V.32bis 2.3: the two V.32 rates and the three it adds, all at
             // the same 2400 baud.
             3 => &[4800, 7200, 9600, 12_000, 14_400],
+            6 => &[300],
             // V.34 5.1: "2400 bit/s to 33 600 bit/s in multiples of 2400".
             _ => &[
                 2400, 4800, 7200, 9600, 12_000, 14_400, 16_800, 19_200, 21_600, 24_000, 26_400,
@@ -752,7 +753,10 @@ impl ScopeApp {
     }
 
     /// Modulations the modem will accept, in the order the box shows them.
-    const CARRIERS: [(&'static str, &'static str); 6] = [
+    ///
+    /// Positions are what the rate lists, the ceilings and the default go by,
+    /// so a new one goes on the end rather than where it might read best.
+    const CARRIERS: [(&'static str, &'static str); 7] = [
         ("B103", "Bell 103 - 300 bit/s"),
         ("V22B", "V.22bis - 1200 or 2400"),
         ("V32", "V.32 - 4800 or 9600"),
@@ -765,6 +769,7 @@ impl ScopeApp {
             "V90",
             "V.90 - up to 56000 from an ISP's server and 33600 back. A far end that is no V.90 server gets V.34",
         ),
+        ("V21", "V.21 - 300 bit/s, Bell 103's counterpart outside North America"),
     ];
 
     /// Boards to start from, because a text box on its own is a box nobody
@@ -5428,7 +5433,9 @@ mod modulation_tests {
         // downstream is whatever the route allows, and +MS does not name it.
         assert_eq!(ScopeApp::CARRIERS[5].0, "V90");
         assert_eq!(Modulation::rates(5), Modulation::rates(4));
-        assert_eq!(ScopeApp::CARRIERS.len(), 6);
+        assert_eq!(ScopeApp::CARRIERS[6].0, "V21");
+        assert_eq!(Modulation::rates(6), &[300]);
+        assert_eq!(ScopeApp::CARRIERS.len(), 7);
     }
 
     /// The two V.32 carriers are two ceilings on one modulation, and the

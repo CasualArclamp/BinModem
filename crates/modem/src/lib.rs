@@ -25,6 +25,7 @@ use at::result::ResultCode;
 use at::{Action, Interpreter};
 use datapump::AsyncBits;
 use datapump::bell103;
+use datapump::v21;
 use datapump::v22bis;
 use datapump::v32;
 use datapump::v34;
@@ -94,7 +95,8 @@ enum Pump {
     /// V.32: both directions in the whole band at once, 4800 or 9600 bit/s,
     /// with the echo canceller that makes that possible.
     V32(Box<v32::startup::Modem>),
-    /// Bell 103: 300 bit/s, two tones a direction, and nothing else at all.
+    /// Bell 103 or V.21: 300 bit/s, two tones a direction, and nothing else
+    /// at all. Which of the two is in the modem's `Plan`.
     Bell103(Box<bell103::Modem>),
     /// V.34: the line probed and ranged in phase 2, both receivers trained
     /// and data mode's parameters exchanged in phases 3 and 4, and data after.
@@ -408,7 +410,7 @@ impl Pump {
                 v32::startup::Status::Connected(rate) if rate > 9600 => "V.32bis",
                 _ => "V.32",
             },
-            Self::Bell103(_) => "Bell 103",
+            Self::Bell103(m) => m.standard(),
             Self::V34(_) => "V.34",
             // V.90 until phase 2 says the far end is not a server.
             Self::V90(m) if m.is_v90() || m.v34().training().is_none() => "V.90",
@@ -1198,6 +1200,7 @@ impl Modem {
                 "V32B" => "V.32bis",
                 "V32" => "V.32",
                 "B103" => "Bell 103",
+                "V21" => "V.21",
                 _ => "V.22bis",
             },
         }
@@ -2324,7 +2327,10 @@ impl Modem {
             // without V.34 picks one of those, and the call goes ahead on it.
             // V.90 rides on V.34's bit, with the PCM category beside it.
             "V34" | "V90" => Some(Modulation::V34Duplex),
-            "B103" => None,
+            // V.8 does have a bit for V.21 (Table 4). But this modem's V.21
+            // answers with V.25's tone, as a V.21 modem does, rather than
+            // ANSam, and nothing after V.8 has been taught to skip it.
+            "B103" | "V21" => None,
             _ => Some(Modulation::V22bis),
         }) else {
             return Modulations::NONE;
@@ -2522,6 +2528,13 @@ impl Modem {
                     Role::Answering => bell103::Role::Answer,
                 };
                 Pump::Bell103(Box::new(bell103::Modem::new(hs_role, self.fs)))
+            }
+            "V21" => {
+                let hs_role = match role {
+                    Role::Calling => bell103::Role::Originate,
+                    Role::Answering => bell103::Role::Answer,
+                };
+                Pump::Bell103(Box::new(bell103::Modem::with_plan(v21::DATA, hs_role, self.fs)))
             }
             _ => {
                 let hs_role = match role {

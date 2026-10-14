@@ -373,16 +373,15 @@ impl Interpreter {
             identity: Identity::default(),
             // What this DCE can originate. Plain V.22 is absent because
             // V.22bis at 1200 bit/s *is* V.22, and answering to both names
-            // would be two entries for one thing. V.21 is absent because the
-            // tones implemented are Bell 103's, and a modem that claimed V.21
-            // and whistled at 1270 Hz would be lying to whoever asked.
+            // would be two entries for one thing. V.21 and Bell 103 are one
+            // modem on two sets of tones, and both sets are there.
             // V.32 and V.32bis are separate names because V.250 makes them
             // separate carriers, and the difference is real: V32 tops out at
             // 9600 and V32B at 14 400. A far end that will not hold the faster
             // rates is asked for the slower carrier and gets exactly it. V90 is
             // the analogue half of V.90 only: this modem dials a server, and
             // is not one.
-            modulations: ["V90", "V34", "V32B", "V32", "V22B", "B103"]
+            modulations: ["V90", "V34", "V32B", "V32", "V22B", "V21", "B103"]
                 .iter()
                 .map(|s| (*s).to_owned())
                 .collect(),

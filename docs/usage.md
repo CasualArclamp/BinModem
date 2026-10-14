@@ -42,11 +42,11 @@ window, and Open joins them into one two-wire line. Changing either box moves
 the call onto the new device.
 
 The terminal in the window is the modem's DTE. Type `AT` and it answers `OK`;
-`AT+MS=B103` or `V22B` or `V32` chooses the modulation; `ATD` originates, `ATA`
-answers and `+++` escapes back to command state. The buttons above do exactly
-those and nothing else — the modem has one interface, and a button that reached
-past it would be able to ask for things a terminal could not. The scopes show
-the call as it happens rather than a recording of somebody else's.
+`AT+MS=B103`, `V21`, `V22B` or `V32` chooses the modulation; `ATD` originates,
+`ATA` answers and `+++` escapes back to command state. The buttons above do
+exactly those and nothing else — the modem has one interface, and a button
+that reached past it would be able to ask for things a terminal could not. The
+scopes show the call as it happens rather than a recording of somebody else's.
 
 An ordinary `ATD` now negotiates before it starts. V.250 6.4.1 names the
 mechanism — `<automode>` "enables or disables automatic modulation negotiation
