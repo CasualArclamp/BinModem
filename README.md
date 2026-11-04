@@ -1,5 +1,7 @@
 # BinModem
 
+If you've found this worth your time, please consider [donating via PayPal](https://www.paypal.me/Arclamp).
+
 <img width="1314" height="892" alt="image" src="https://github.com/user-attachments/assets/f07ab50e-662e-4474-bae8-eda9861fb87a" />
 
 A dial-up softmodem in Rust. Everything a modem does — the tones, the
