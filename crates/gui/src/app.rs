@@ -292,6 +292,9 @@ const SMALL_KEY: egui::Vec2 = egui::vec2(92.0, 24.0);
 const WATERFALL_W: usize = 720;
 const WATERFALL_H: usize = 260;
 
+/// Height of the strip under the terminal that says how far the call has got.
+const TIMELINE_H: f32 = 74.0;
+
 /// Width of the panel holding the far end's account of itself.
 const DISTANT_W: f32 = 250.0;
 
@@ -443,6 +446,11 @@ pub struct ScopeApp {
     /// is due.
     script: std::collections::VecDeque<String>,
     script_due: Option<std::time::Instant>,
+    /// Whether the terminal's type is sized to the room it has.
+    fit: bool,
+    /// When the call first reached each step of the timeline, by the step's
+    /// number; nought, on hook, is never timed.
+    step_at: [Option<std::time::Instant>; 6],
     /// What was written out last, so that a frame which changed nothing does
     /// not rewrite the file sixty times a second.
     remembered: String,
@@ -552,6 +560,8 @@ impl ScopeApp {
             marks: std::collections::VecDeque::new(),
             script: std::collections::VecDeque::new(),
             script_due: None,
+            fit: true,
+            step_at: [None; 6],
             remembered: String::new(),
         };
         // Before anything is drawn, so the first frame shows what the modem
@@ -862,7 +872,7 @@ impl ScopeApp {
             {
                 session.set_logging(logging);
             }
-            ui.add(egui::Slider::new(&mut self.font_size, 9.0..=22.0).text("font"));
+            self.font_controls(ui);
         });
     }
 
@@ -3524,6 +3534,163 @@ impl ScopeApp {
         }
     }
 
+    /// The type's size: fitted to the room, or set by hand.
+    fn font_controls(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.fit, "fit")
+            .on_hover_text("Size the type so the whole screen fills the room there is for it");
+        ui.add_enabled(
+            !self.fit,
+            egui::Slider::new(&mut self.font_size, 9.0..=22.0).text("font"),
+        );
+    }
+
+    /// How far the call has got, as the timeline numbers it: on hook, off
+    /// hook, negotiating, training, connected, and connected with error
+    /// control running.
+    fn step(&self) -> usize {
+        use telemetry::CallState as S;
+        match self.frame.state {
+            S::Idle => 0,
+            S::OffHook | S::Dialling | S::Ringing | S::Disconnecting => 1,
+            // The modem calls the whole start-up negotiating. On the
+            // timeline that is V.8 only; once a modulation has been agreed
+            // and its own start-up is running, the call is training.
+            S::Negotiating if self.frame.modulation.starts_with("V.8") => 2,
+            S::Negotiating | S::Training => 3,
+            S::Connected if self.frame.leds.ec => 5,
+            S::Connected => 4,
+        }
+    }
+
+    /// The strip under the terminal: the call as five steps in a row, each
+    /// lit when it is done, with what it settled and how long it took.
+    ///
+    /// A call that is not coming up is stuck at one of these, and from the
+    /// terminal alone there is no telling which: the screen shows nothing
+    /// until the last of them is over. This is the same question the scopes'
+    /// card answers at length, in the one line there is room for here.
+    fn timeline(&self, ui: &mut egui::Ui) {
+        use telemetry::CallState as S;
+        let f = &self.frame;
+        let step = self.step();
+        let grey = Color32::from_rgb(110, 115, 130);
+        let now = std::time::Instant::now();
+        let phase = if f.line_phase == "-" { "" } else { f.line_phase };
+
+        let line = match f.state {
+            S::Idle => "on hook".to_owned(),
+            S::Dialling => "dialling".to_owned(),
+            S::Ringing => "ringing".to_owned(),
+            S::Disconnecting => "hanging up".to_owned(),
+            _ => "off hook".to_owned(),
+        };
+        let agreed = match step {
+            0 | 1 => "–".to_owned(),
+            2 => f.modulation.to_owned(),
+            _ => format!("agreed {}", f.modulation),
+        };
+        let training = match step {
+            3 if !phase.is_empty() => phase.to_owned(),
+            3 => "training".to_owned(),
+            4 | 5 => "done".to_owned(),
+            _ => "–".to_owned(),
+        };
+        let rate = match (step, f.bit_rate, f.tx_bit_rate) {
+            (4 | 5, Some(rx), Some(tx)) if rx != tx => format!("{rx} in, {tx} out"),
+            (4 | 5, Some(rx), _) => format!("{rx} bit/s"),
+            (4 | 5, None, _) => "connected".to_owned(),
+            _ => "–".to_owned(),
+        };
+        let control = match step {
+            5 => "running".to_owned(),
+            4 => "none".to_owned(),
+            _ => "–".to_owned(),
+        };
+        let steps: [(&str, String); 5] = [
+            ("Line", line),
+            ("Negotiate", agreed),
+            ("Train", training),
+            ("Connect", rate),
+            ("Error control", control),
+        ];
+
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), TIMELINE_H - 8.0),
+            egui::Sense::hover(),
+        );
+        let painter = ui.painter_at(rect);
+        let cell = rect.width() / steps.len() as f32;
+        let y = rect.top() + 16.0;
+        let dot_x = |i: usize| rect.left() + cell * i as f32 + 12.0;
+        for (i, (name, about)) in steps.iter().enumerate() {
+            let k = i + 1;
+            // Connected is where a call stays, so reaching it is having done
+            // it; every other step is done once the call is past it.
+            let done = step > k || (k >= 4 && step == k);
+            let current = step == k && !done;
+            let colour = if done {
+                GOOD
+            } else if current {
+                WARN
+            } else {
+                grey
+            };
+            // The rule to the next step, lit once this one is behind.
+            if i + 1 < steps.len() {
+                painter.line_segment(
+                    [egui::pos2(dot_x(i) + 9.0, y), egui::pos2(dot_x(i + 1) - 9.0, y)],
+                    egui::Stroke::new(2.0, if step > k { GOOD.gamma_multiply(0.6) } else { BEZEL }),
+                );
+            }
+            let centre = egui::pos2(dot_x(i), y);
+            if current {
+                // A slow pulse on the step the call is at.
+                let beat = (ui.input(|i| i.time) * 3.0).sin() as f32 * 0.5 + 0.5;
+                painter.circle_filled(centre, 7.0 + 3.0 * beat, colour.gamma_multiply(0.25));
+            }
+            if done || current {
+                painter.circle_filled(centre, 6.0, colour);
+            } else {
+                painter.circle_stroke(centre, 5.5, egui::Stroke::new(1.5, colour));
+            }
+
+            // Its name over the rule's start, cut to its own cell so a long
+            // phase does not write over the next step.
+            let cut = egui::Rect::from_min_max(
+                egui::pos2(rect.left() + cell * i as f32, rect.top()),
+                egui::pos2(rect.left() + cell * (i + 1) as f32 - 6.0, rect.bottom()),
+            );
+            let inside = painter.with_clip_rect(cut);
+            // How long it took, or has taken so far.
+            let took = self.step_at[k].and_then(|from| {
+                let until = self.step_at[k + 1..].iter().flatten().next().copied();
+                match until {
+                    Some(until) => Some(until - from),
+                    None if current => Some(now - from),
+                    None => None,
+                }
+            });
+            let title = match took {
+                Some(took) if k == 2 || k == 3 => format!("{name}  {:.1} s", took.as_secs_f32()),
+                _ => (*name).to_owned(),
+            };
+            inside.text(
+                egui::pos2(centre.x - 6.0, y + 12.0),
+                egui::Align2::LEFT_TOP,
+                title,
+                FontId::proportional(13.0),
+                if done || current { BRIGHT } else { grey },
+            );
+            inside.text(
+                egui::pos2(centre.x - 6.0, y + 29.0),
+                egui::Align2::LEFT_TOP,
+                about,
+                FontId::proportional(11.5),
+                if done || current { DIM } else { grey.gamma_multiply(0.7) },
+            );
+        }
+    }
+
     /// How long the call has been up, and the byte counts of the last few
     /// seconds for a rate to be taken from.
     fn keep_time(&mut self) {
@@ -3535,6 +3702,17 @@ impl ScopeApp {
         }
         let (rx, tx) = (self.frame.rx_bytes, self.frame.tx_bytes);
         // Counts that went backwards are a new call's.
+        // The timeline's clock: each step timed from when the call first
+        // reached it. Back on hook forgets the lot, and a call that goes
+        // back a step -- a retrain -- times what follows afresh.
+        let step = self.step();
+        for (k, at) in self.step_at.iter_mut().enumerate() {
+            if k == 0 || k > step {
+                *at = None;
+            } else {
+                at.get_or_insert(now);
+            }
+        }
         if self.marks.back().is_some_and(|m| rx < m.1 || tx < m.2) {
             self.marks.clear();
         }
@@ -4023,6 +4201,9 @@ impl ScopeApp {
         // whatever the rate needs: said with the size, as the others are.
         let shape = if f.symbol_label == "QAM" {
             format!("{}QAM", f.tones)
+        } else if f.symbol_label == "PCM" {
+            // The same for PCM: how many levels the rate in use is sent on.
+            format!("{}PCM", f.tones)
         } else {
             f.symbol_label.to_owned()
         };
@@ -4483,7 +4664,7 @@ impl ScopeApp {
             // In telnet mode this sits up with the host box instead, where
             // there is room for it.
             if self.tab == Tab::Terminal && !self.source.is_telnet() {
-                ui.add(egui::Slider::new(&mut self.font_size, 9.0..=22.0).text("font"));
+                self.font_controls(ui);
             }
         });
         ui.separator();
@@ -4492,10 +4673,20 @@ impl ScopeApp {
                 // A socket has no far end that describes itself, so there is
                 // nothing to put here and the terminal takes the room.
                 if !self.source.is_telnet() {
+                    egui::Panel::bottom("timeline")
+                        .resizable(false)
+                        .exact_size(TIMELINE_H)
+                        .show(ui, |ui| self.timeline(ui));
                     egui::Panel::right("distant")
                         .resizable(false)
                         .exact_size(DISTANT_W)
                         .show(ui, |ui| self.distant(ui));
+                }
+                if self.fit {
+                    // A little short of the room, so that a rounding of the
+                    // last row does not bring the scroll bars out.
+                    let room = ui.available_size() - egui::vec2(4.0, 4.0);
+                    self.font_size = console::fit(ui, &self.console.term, room);
                 }
                 egui::ScrollArea::both()
                     .auto_shrink([false, false])
