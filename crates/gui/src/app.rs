@@ -291,7 +291,6 @@ const SMALL_KEY: egui::Vec2 = egui::vec2(92.0, 24.0);
 
 const WATERFALL_W: usize = 720;
 const WATERFALL_H: usize = 260;
-const PANEL_W: f32 = 280.0;
 
 /// Width of the panel holding the far end's account of itself.
 const DISTANT_W: f32 = 250.0;
@@ -430,6 +429,16 @@ pub struct ScopeApp {
     tab: Tab,
     font_size: f32,
     last_repaint: std::time::Instant,
+    /// The highest each spectrum bin has been lately, falling slowly.
+    hold: Vec<f32>,
+    /// How long a waterfall row lasts, measured from the frames arriving,
+    /// and when the last one did.
+    row_secs: f32,
+    last_row: Option<std::time::Instant>,
+    /// When the call reached data, for how long it has been there.
+    connected_at: Option<std::time::Instant>,
+    /// The byte counts a few moments ago, for a rate: when, received, sent.
+    marks: std::collections::VecDeque<(std::time::Instant, u64, u64)>,
     /// What was written out last, so that a frame which changed nothing does
     /// not rewrite the file sixty times a second.
     remembered: String,
@@ -532,6 +541,11 @@ impl ScopeApp {
             tab: Tab::Terminal,
             font_size: 14.0,
             last_repaint: std::time::Instant::now(),
+            hold: vec![-120.0; SPECTRUM_BINS],
+            row_secs: 1.0 / 30.0,
+            last_row: None,
+            connected_at: None,
+            marks: std::collections::VecDeque::new(),
             remembered: String::new(),
         };
         // Before anything is drawn, so the first frame shows what the modem
@@ -3325,74 +3339,101 @@ impl ScopeApp {
     /// was there is here: the constellation, the status grid with the V.90
     /// rate menu in it, the retrain, the waterfall and the spectrum.
     fn scopes_pane(&mut self, ui: &mut egui::Ui) {
+        const CARD_W: f32 = 420.0;
+        let measured = scopes::measure(&self.frame.spectrum_db, self.frame.hz_per_bin);
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
-                ui.set_width(PANEL_W - 20.0);
-                ui.label(RichText::new("symbols").strong());
-                let label = self.symbol_label();
-                let scope = scopes::symbol_scope(
-                    ui,
-                    &self.frame.symbols,
-                    scopes::Constellation {
-                        points: &self.frame.constellation,
-                        tones: self.frame.tones,
-                        peak: self.frame.constellation_peak,
-                        pairs: self.frame.symbol_label == "PCM",
-                    },
-                    &label,
-                    self.frame.symbol_quality(),
-                    PANEL_W - 20.0,
-                );
-                if scope.on_hover_text("Click to draw it large").clicked() {
-                    self.constellation_open = !self.constellation_open;
-                }
-
-                ui.add_space(10.0);
-                if let Some(drn) = self.status(ui)
-                    && let Source::Live(session) = &self.source
-                {
-                    session.choose_rate(drn);
-                }
-
-                // A retrain by hand, under the rate it would change.
-                // V.34's is the full one (11.5), back through phase
-                // 2; the button is there only on a V.34 call that is
-                // up, since that is the only place a retrain means
-                // anything.
-                if let Source::Live(session) = &self.source {
-                    let connected = self.frame.state == telemetry::CallState::Connected;
-                    let v34 = self.frame.modulation == "V.34";
-                    ui.add_space(6.0);
-                    if ui
-                        .add_enabled(connected && v34, egui::Button::new("Retrain"))
-                        .on_hover_text(
-                            "V.34 11.5: send the retrain tone and go back through \
-                             phase 2, measuring the line again and training on \
-                             what it will carry now -- on the same call",
-                        )
-                        .clicked()
-                    {
-                        session.retrain();
-                    }
-                }
+                ui.set_width(CARD_W);
+                egui::ScrollArea::vertical()
+                    .id_salt("call-card")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        // Clear of the scroll bar, which egui floats over
+                        // the content.
+                        ui.set_width(CARD_W - 14.0);
+                        self.call_card(ui, measured);
+                        ui.add_space(8.0);
+                        self.symbol_row(ui);
+                        self.distant(ui);
+                    });
             });
             ui.separator();
             ui.vertical(|ui| {
-                ui.label(RichText::new("waterfall  (0 - 4000 Hz)").strong());
-                let available = (ui.available_height() - 60.0).max(140.0);
-                self.waterfall.paint(ui, available * 0.60, self.frame.modulation);
-                ui.add_space(6.0);
-                ui.label(RichText::new("spectrum").strong());
+                let caption = |ui: &mut egui::Ui, name: &str, about: String| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(name).strong());
+                        ui.label(RichText::new(about).small().color(DIM));
+                    });
+                };
+                caption(
+                    ui,
+                    "waterfall",
+                    format!(
+                        "0 - 4000 Hz · newest at the top · {:.0} s deep · {:.0} rows a second",
+                        WATERFALL_H as f32 * self.row_secs,
+                        1.0 / self.row_secs
+                    ),
+                );
+                let available = (ui.available_height() - 50.0).max(140.0);
+                self.waterfall
+                    .paint(ui, available * 0.58, self.frame.modulation, self.row_secs);
+                ui.add_space(4.0);
+                caption(
+                    ui,
+                    "spectrum",
+                    format!(
+                        "{FFT_SIZE}-point FFT · {:.1} Hz a bin · faint trace: the peak, held",
+                        self.frame.hz_per_bin
+                    ),
+                );
                 scopes::spectrum(
                     ui,
-                    &self.frame.spectrum_db,
-                    self.frame.hz_per_bin,
-                    (available * 0.40).max(90.0),
-                    self.waterfall.floor_db,
-                    self.waterfall.ceiling_db,
-                    self.frame.modulation,
+                    (available * 0.42).max(90.0),
+                    scopes::Trace {
+                        bins: &self.frame.spectrum_db,
+                        hold: &self.hold,
+                        hz_per_bin: self.frame.hz_per_bin,
+                        floor: self.waterfall.floor_db,
+                        ceiling: self.waterfall.ceiling_db,
+                        modulation: self.frame.modulation,
+                        measured,
+                    },
                 );
             });
+        });
+    }
+
+    /// The symbol scope and, beside it, the line as an oscilloscope has it.
+    fn symbol_row(&mut self, ui: &mut egui::Ui) {
+        const SIDE: f32 = 190.0;
+        ui.horizontal_top(|ui| {
+            let label = self.symbol_label();
+            let scope = ui
+                .allocate_ui(egui::vec2(SIDE, SIDE), |ui| {
+                    scopes::symbol_scope(
+                        ui,
+                        &self.frame.symbols,
+                        scopes::Constellation {
+                            points: &self.frame.constellation,
+                            tones: self.frame.tones,
+                            peak: self.frame.constellation_peak,
+                            pairs: self.frame.symbol_label == "PCM",
+                        },
+                        &label,
+                        self.frame.symbol_quality(),
+                        SIDE,
+                    )
+                })
+                .inner;
+            if scope.on_hover_text("Click to draw it large").clicked() {
+                self.constellation_open = !self.constellation_open;
+            }
+            scopes::oscilloscope(
+                ui,
+                &self.frame.waveform,
+                self.frame.sample_rate,
+                egui::vec2(ui.available_width(), SIDE),
+            );
         });
     }
 
@@ -3450,13 +3491,59 @@ impl ScopeApp {
         }
     }
 
+    /// How long the call has been up, and the byte counts of the last few
+    /// seconds for a rate to be taken from.
+    fn keep_time(&mut self) {
+        let now = std::time::Instant::now();
+        if self.frame.state == telemetry::CallState::Connected {
+            self.connected_at.get_or_insert(now);
+        } else {
+            self.connected_at = None;
+        }
+        let (rx, tx) = (self.frame.rx_bytes, self.frame.tx_bytes);
+        // Counts that went backwards are a new call's.
+        if self.marks.back().is_some_and(|m| rx < m.1 || tx < m.2) {
+            self.marks.clear();
+        }
+        if self.marks.back().is_none_or(|m| (now - m.0).as_secs_f32() >= 0.25) {
+            self.marks.push_back((now, rx, tx));
+        }
+        while self.marks.front().is_some_and(|m| (now - m.0).as_secs_f32() > 3.0) {
+            self.marks.pop_front();
+        }
+    }
+
+    /// Bytes a second each way over the last few seconds: received, sent.
+    fn byte_rates(&self) -> (f64, f64) {
+        match (self.marks.front(), self.marks.back()) {
+            (Some(a), Some(b)) if b.0 > a.0 => {
+                let secs = (b.0 - a.0).as_secs_f64();
+                ((b.1 - a.1) as f64 / secs, (b.2 - a.2) as f64 / secs)
+            }
+            _ => (0.0, 0.0),
+        }
+    }
+
     /// Pull whatever the engine has published since the last repaint.
     fn poll(&mut self) {
         if self.rx.read(&mut self.frame) && self.frame.seq != self.last_seq {
             self.last_seq = self.frame.seq;
             self.waterfall
                 .push_row(&self.frame.spectrum_db, self.frame.hz_per_bin);
+            // A row's length, smoothed; a gap of a second is a pause, not a
+            // slow row.
+            let now = std::time::Instant::now();
+            if let Some(before) = self.last_row.replace(now) {
+                let gap = (now - before).as_secs_f32();
+                if gap < 1.0 {
+                    self.row_secs += (gap - self.row_secs) * 0.05;
+                }
+            }
+            for (held, &now) in self.hold.iter_mut().zip(&self.frame.spectrum_db) {
+                *held = (*held - 0.15).max(now);
+            }
         }
+        self.keep_time();
         // Only the final line can still be growing, so re-read from there
         // rather than treating everything already copied as settled.
         let tail = self.rx.log_after(self.frozen_seq);
@@ -3720,122 +3807,395 @@ impl ScopeApp {
         });
     }
 
-    /// The status grid, and above its rates the V.90 rate menu: what was
-    /// chosen from it, a drn or None for the DIL's own choice.
-    fn status(&self, ui: &mut egui::Ui) -> Option<Option<u8>> {
+    /// The call's card, laid out as DecSAT lays out a DVB carrier's.
+    ///
+    /// A title bar in the modulation's colour -- lit on a call that is up,
+    /// half lit while it is coming up, grey with no call -- naming the
+    /// modulation and the state, with the symbol rate and the bit rate at the
+    /// right. Under it what the receiver is slicing, large, and beside that
+    /// how much it has in hand; a bar of the same; and then the receive
+    /// chain, a line a stage with a health dot, on a rule down the left.
+    fn call_card(&self, ui: &mut egui::Ui, measured: Option<scopes::Measured>) {
         let f = &self.frame;
-        let dim = Color32::from_rgb(140, 150, 165);
-        let bright = Color32::from_rgb(220, 225, 235);
-        let mut pressed = None;
-        egui::Grid::new("status")
-            .num_columns(2)
-            .spacing([12.0, 4.0])
+        let grey = Color32::from_rgb(110, 115, 130);
+        let connected = f.state == telemetry::CallState::Connected;
+        let coming_up = matches!(
+            f.state,
+            telemetry::CallState::Negotiating | telemetry::CallState::Training
+        );
+        let (standard, baud, about) = family(f.modulation);
+        let colour = match f.state {
+            telemetry::CallState::Connected => standard,
+            telemetry::CallState::Idle => grey,
+            _ => standard.gamma_multiply(0.55),
+        };
+
+        // ---- the title bar
+        let title = if f.modulation == "-" {
+            f.state.label().to_owned()
+        } else {
+            format!("{} · {}", f.modulation, f.state.label())
+        };
+        let bar = egui::Frame::new()
+            .fill(colour.gamma_multiply(0.15))
+            .inner_margin(egui::Margin { left: 8, right: 8, top: 3, bottom: 3 })
             .show(ui, |ui| {
-                let row = |ui: &mut egui::Ui, k: &str, v: String, colour: Color32| {
-                    ui.label(RichText::new(k).monospace().color(dim));
-                    ui.label(RichText::new(v).monospace().color(colour));
-                    ui.end_row();
-                };
-                row(ui, "state", f.state.label().into(), bright);
-                row(ui, "modulation", f.modulation.into(), bright);
-                row(ui, "phase", f.line_phase.into(), dim);
-                // Both directions, because they need not match: V.34 settles
-                // each separately, from what each end's receiver asked for.
-                let bps = |r: Option<u32>| r.map(|r| format!("{r} bps")).unwrap_or_else(|| "-".into());
-                // V.90's rate by hand, above the rate it moves: every rate,
-                // green where the DIL -- and data mode since -- predict it
-                // reads cleanly and red where they predict it will not, and
-                // any of them to be had. In data mode a choice is a rate
-                // renegotiation (9.6); before it, the rate the next start-ups
-                // ask for, which is the only way to try a rate on a far end
-                // that never lets a call reach data mode at the one it was
-                // given.
-                if let Source::Live(session) = &self.source {
-                    let v90 = f.modulation == "V.90";
-                    let connected = f.state == telemetry::CallState::Connected;
-                    if v90 || !connected {
-                        ui.label(RichText::new("V.90 rate").monospace().color(dim));
-                        pressed = Self::rate_menu(ui, session, v90 && connected);
-                        ui.end_row();
-                    }
-                }
-                row(ui, "rx rate", bps(f.bit_rate), bright);
-                row(ui, "tx rate", bps(f.tx_bit_rate), bright);
-                row(
-                    ui,
-                    "carrier",
-                    if f.carrier { "detected" } else { "none" }.into(),
-                    if f.carrier { Color32::from_rgb(90, 220, 130) } else { dim },
-                );
-                // How far the receiver is missing by, against the distance
-                // between the points it is choosing between. It is the number
-                // 7's retrain decides on, and the only one that means the same
-                // thing at 4800 and at 14 400: a tenth is a clean lock,
-                // a quarter is where this modem gives up on the rate, and a
-                // half is a coin flip.
-                if let Some(miss) = f.reception {
-                    row(
-                        ui,
-                        "reading",
-                        format!("{miss:.2} of the gap"),
-                        if miss < 0.25 {
-                            Color32::from_rgb(90, 220, 130)
-                        } else {
-                            Color32::from_rgb(230, 140, 90)
-                        },
-                    );
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(title).monospace().size(14.0).strong().color(colour));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new("bit/s").size(11.0).color(DIM));
+                        ui.label(
+                            RichText::new(f.bit_rate.map_or("–".to_owned(), |r| r.to_string()))
+                                .monospace()
+                                .size(20.0)
+                                .color(BRIGHT),
+                        );
+                        if let Some(baud) = baud {
+                            ui.add_space(10.0);
+                            ui.label(RichText::new("Bd").size(11.0).color(DIM));
+                            ui.label(
+                                RichText::new(baud.to_string()).monospace().size(16.0).color(BRIGHT),
+                            );
+                        }
+                    });
+                });
+            })
+            .response;
+        ui.painter()
+            .hline(bar.rect.x_range(), bar.rect.bottom(), egui::Stroke::new(2.0, colour));
+        if !about.is_empty() {
+            bar.on_hover_text(about);
+        }
+        ui.add_space(4.0);
+
+        // ---- what is being sliced, and how much there is in hand.
+        //
+        // The reading is how far the receiver misses by against the gap
+        // between points, and this modem gives a rate up at a quarter: so
+        // the margin is the reading against that quarter, in decibels, and
+        // means the same at 4800 as at 33 600. FSK has no such reading and
+        // shows its slicer's quality out of a hundred.
+        let (merit, merit_colour, fill, tick, left, right) = match (f.reception, f.symbol_quality()) {
+            (Some(miss), _) if miss > 0.0 => {
+                let db = 20.0 * (0.25 / miss).log10();
+                let c = if db < 0.0 {
+                    BAD
+                } else if db < 3.0 {
+                    WARN
                 } else {
-                    row(
-                        ui,
-                        "quality",
-                        f.symbol_quality()
-                            .map(|q| q.to_string())
-                            .unwrap_or_else(|| "-".into()),
-                        bright,
-                    );
+                    GOOD
+                };
+                (
+                    Some(format!("{db:+5.1} dB")),
+                    c,
+                    (1.0 - miss / 0.5).clamp(0.0, 1.0) as f32,
+                    Some(0.5),
+                    format!("missing by {miss:.2} of the gap between points"),
+                    "retrains at 0.25",
+                )
+            }
+            (_, Some(q)) => {
+                let c = if q >= 80 {
+                    GOOD
+                } else if q >= 50 {
+                    WARN
+                } else {
+                    BAD
+                };
+                (
+                    Some(format!("Q {q}")),
+                    c,
+                    q as f32 / 100.0,
+                    None,
+                    format!("slicer margin {q} of 100"),
+                    "0 is a coin flip",
+                )
+            }
+            _ => {
+                let left = match f.state {
+                    telemetry::CallState::Idle => "no call".to_owned(),
+                    _ if f.line_phase != "-" => f.line_phase.to_owned(),
+                    state => format!("{}…", state.label()),
+                };
+                (None, grey, 0.0, None, left, "")
+            }
+        };
+        let has_symbols = f.symbol_label != "-";
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(if has_symbols { f.symbol_label } else { "–" })
+                    .monospace()
+                    .size(26.0)
+                    .color(if has_symbols { colour } else { grey }),
+            );
+            if let Some(merit) = &merit {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(merit).monospace().size(18.0).color(merit_colour));
+                });
+            }
+        })
+        .response
+        .on_hover_text(
+            "Left: what the receiver is slicing. Right: what it has in hand. On a \
+             constellation that is the margin: how far it misses by, against the quarter \
+             of the gap between points at which this modem gives the rate up, in decibels. \
+             Under 0 dB it retrains; within 3 dB a burst of noise will make it.",
+        );
+
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 10.0), egui::Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(rect, 0.0, READOUT);
+        if fill > 0.0 {
+            let lit = egui::Rect::from_min_max(
+                rect.min,
+                egui::pos2(rect.left() + rect.width() * fill, rect.bottom()),
+            );
+            p.rect_filled(lit, 0.0, merit_colour);
+        }
+        if let Some(t) = tick {
+            let x = rect.left() + rect.width() * t;
+            p.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(x - 1.0, rect.top() - 3.0),
+                    egui::pos2(x + 1.0, rect.bottom() + 3.0),
+                ),
+                0.0,
+                BRIGHT,
+            );
+        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(left).size(12.0).color(DIM));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new(right).size(12.0).color(DIM));
+            });
+        });
+
+        // ---- the receive chain
+        ui.add_space(6.0);
+        let chain = ui.horizontal(|ui| {
+            ui.add_space(10.0);
+            ui.vertical(|ui| {
+                // The line: what is arriving, before anything is made of it.
+                let level = f.rx_level_db;
+                let wave = scopes::wave(&f.waveform);
+                let clipped = wave.map_or(0, |w| w.clipped);
+                let mut text = format!("{level:.1} dBFS");
+                if let Some(w) = wave.filter(|w| w.rms_db > -100.0) {
+                    text.push_str(&format!(
+                        " · peaks {:.1} · crest {:.1} dB",
+                        w.peak_db,
+                        w.peak_db - w.rms_db
+                    ));
                 }
+                text.push_str(&format!(" · {:.0} Hz sampling", f.sample_rate));
+                let health = if clipped > 0 {
+                    text.push_str(&format!(" · {clipped} samples at full scale"));
+                    BAD
+                } else if level > -3.0 {
+                    text.push_str(" · too hot");
+                    BAD
+                } else if level > -12.0 {
+                    text.push_str(" · hot");
+                    WARN
+                } else if level < -70.0 {
+                    text.push_str(" · silent");
+                    grey
+                } else {
+                    GOOD
+                };
+                stage(ui, health, "Line", text).on_hover_text(
+                    "The received level, the largest sample and the crest factor of the \
+                     last eighth of a second. A modem receiving above -10 dBFS is almost \
+                     certainly clipping somewhere upstream.",
+                );
+
+                // The carrier, and what the spectrum says is there.
+                let seen = measured.map(|m| {
+                    format!(
+                        "strongest at {:.0} Hz, {:.0} dB over the floor · {:.0} - {:.0} Hz occupied",
+                        m.peak_hz,
+                        m.peak_db - m.floor_db,
+                        m.low_hz,
+                        m.high_hz
+                    )
+                });
+                match (f.carrier, seen) {
+                    (true, Some(seen)) => stage(ui, GOOD, "Carrier", format!("detected · {seen}")),
+                    (true, None) => stage(ui, GOOD, "Carrier", "detected".into()),
+                    (false, Some(seen)) => stage(ui, grey, "Carrier", format!("none · {seen}")),
+                    (false, None) => stage(ui, grey, "Carrier", "none, and nothing over the noise".into()),
+                };
+
+                // Where the start-up has got to.
+                let phase = if f.line_phase == "-" { String::new() } else { format!(" · {}", f.line_phase) };
+                match self.connected_at {
+                    Some(since) if connected => {
+                        let secs = since.elapsed().as_secs();
+                        stage(
+                            ui,
+                            GOOD,
+                            "Start-up",
+                            format!("done · {}:{:02} in data{phase}", secs / 60, secs % 60),
+                        )
+                    }
+                    _ if coming_up => stage(ui, WARN, "Start-up", format!("{}{phase}", f.state.label())),
+                    _ => stage(ui, grey, "Start-up", format!("{}{phase}", f.state.label())),
+                };
+
+                // The demodulator: what it slices and how well.
+                let shown = f.symbols.len() + f.constellation.len();
+                if has_symbols {
+                    let mut text = format!("{} · {} points", f.symbol_label, f.tones);
+                    if shown > 0 {
+                        text.push_str(&format!(" · {shown} symbols on the scope"));
+                    }
+                    let health = match (f.reception, f.symbol_quality()) {
+                        (Some(miss), _) => {
+                            text.push_str(&format!(" · reading {miss:.2}"));
+                            if miss < 0.25 { GOOD } else { WARN }
+                        }
+                        (None, Some(q)) => {
+                            text.push_str(&format!(" · quality {q}"));
+                            if q >= 50 { GOOD } else { WARN }
+                        }
+                        _ if shown > 0 => GOOD,
+                        _ => grey,
+                    };
+                    stage(ui, health, "Demodulator", text);
+                } else {
+                    stage(ui, grey, "Demodulator", "no symbols".into());
+                }
+
                 // What the echo canceller is doing, which on a two-wire pair
                 // decides everything and is otherwise invisible: a
                 // constellation full of noise looks the same whether the noise
                 // is the line or this modem listening to itself.
                 if let Some(db) = f.echo_loss_db {
-                    row(
+                    let found = match f.echo_at {
+                        Some((delay, strength)) => format!(
+                            "reflection at {:.0} ms, {strength:.2} strong",
+                            delay as f64 * 1000.0 / f.sample_rate
+                        ),
+                        None => "reflection not found".into(),
+                    };
+                    stage(
                         ui,
-                        "echo out",
-                        format!("{db:.1} dB"),
-                        if db >= 6.0 {
-                            Color32::from_rgb(90, 220, 130)
-                        } else {
-                            Color32::from_rgb(230, 140, 90)
-                        },
-                    );
-                    row(
-                        ui,
-                        "echo at",
-                        match f.echo_at {
-                            Some((delay, strength)) => format!(
-                                "{:.0} ms, {:.2}",
-                                delay as f64 * 1000.0 / f.sample_rate,
-                                strength
-                            ),
-                            None => "not found".into(),
-                        },
-                        if f.echo_at.is_some() { dim } else { Color32::from_rgb(230, 140, 90) },
+                        if db >= 6.0 && f.echo_at.is_some() { GOOD } else { WARN },
+                        "Echo canceller",
+                        format!("taking out {db:.1} dB · {found}"),
                     );
                 }
-                row(ui, "rx bytes", f.rx_bytes.to_string(), bright);
-                row(ui, "tx bytes", f.tx_bytes.to_string(), bright);
-                row(ui, "dropped", self.rx.dropped_frames().to_string(), dim);
+
+                // The rates, both ways: V.34 settles each separately.
+                let bps = |r: Option<u32>| r.map_or("–".to_owned(), |r| r.to_string());
+                stage(
+                    ui,
+                    if f.bit_rate.is_some() { GOOD } else { grey },
+                    "Rates",
+                    format!("receiving {} · sending {} bit/s", bps(f.bit_rate), bps(f.tx_bit_rate)),
+                );
+
+                stage(
+                    ui,
+                    if f.leds.ec { GOOD } else { grey },
+                    "Error control",
+                    if f.leds.ec {
+                        "running: frames checked and resent".into()
+                    } else if connected {
+                        "none: bytes go as the line delivers them".into()
+                    } else {
+                        "not up".into()
+                    },
+                );
+
+                let (rx_rate, tx_rate) = self.byte_rates();
+                stage(
+                    ui,
+                    if connected { GOOD } else { grey },
+                    "Data",
+                    format!(
+                        "{} bytes in at {rx_rate:.0} a second · {} out at {tx_rate:.0}",
+                        f.rx_bytes, f.tx_bytes
+                    ),
+                );
+
+                if let Some(phase) = f.fax_phase {
+                    let mut text = phase.to_owned();
+                    if f.fax_rate > 0 {
+                        text.push_str(&format!(" · {} bit/s", f.fax_rate));
+                    }
+                    if f.fax_sheet > 0 {
+                        text.push_str(&format!(" · page {} of {}", f.fax_sheet, f.fax_sheets.max(f.fax_sheet)));
+                    }
+                    if f.fax_lines > 0 {
+                        text.push_str(&format!(" · {} lines", f.fax_lines));
+                    }
+                    if f.fax_coding != "-" {
+                        text.push_str(&format!(" · {}", f.fax_coding));
+                    }
+                    if f.fax_error_correction {
+                        text.push_str(" · ECM");
+                    }
+                    match &f.fax_trouble {
+                        Some(trouble) => stage(ui, BAD, "Fax", format!("{text} · {trouble}")),
+                        None => stage(ui, GOOD, "Fax", text),
+                    };
+                }
+
+                let dropped = self.rx.dropped_frames();
+                let mut text = format!(
+                    "{:.0} spectra a second · {dropped} frame{} dropped",
+                    1.0 / self.row_secs,
+                    if dropped == 1 { "" } else { "s" }
+                );
                 if self.monitor.is_some() {
-                    row(
-                        ui,
-                        "audio u/o",
-                        format!("{} / {}", self.sink.underruns(), self.sink.overruns()),
-                        dim,
-                    );
+                    text.push_str(&format!(
+                        " · monitor {} underruns, {} overruns",
+                        self.sink.underruns(),
+                        self.sink.overruns()
+                    ));
+                }
+                stage(ui, grey, "Display", text);
+            });
+        });
+        let r = chain.response.rect;
+        ui.painter().vline(r.left() + 2.0, r.y_range(), egui::Stroke::new(2.0, BEZEL));
+
+        // V.90's rate by hand: every rate, green where the DIL -- and data
+        // mode since -- predict it reads cleanly and red where they predict
+        // it will not, and any of them to be had. In data mode a choice is a
+        // rate renegotiation (9.6); before it, the rate the next start-ups
+        // ask for, which is the only way to try a rate on a far end that
+        // never lets a call reach data mode at the one it was given.
+        //
+        // And a retrain by hand beside it. V.34's is the full one (11.5),
+        // back through phase 2; the button is there only on a V.34 call that
+        // is up, since that is the only place a retrain means anything.
+        if let Source::Live(session) = &self.source {
+            let v90 = f.modulation == "V.90";
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if v90 || !connected {
+                    ui.label(RichText::new("V.90 rate").color(DIM));
+                    if let Some(drn) = Self::rate_menu(ui, session, v90 && connected) {
+                        session.choose_rate(drn);
+                    }
+                }
+                if ui
+                    .add_enabled(connected && f.modulation == "V.34", egui::Button::new("Retrain"))
+                    .on_hover_text(
+                        "V.34 11.5: send the retrain tone and go back through \
+                         phase 2, measuring the line again and training on \
+                         what it will carry now -- on the same call",
+                    )
+                    .clicked()
+                {
+                    session.retrain();
                 }
             });
-        pressed
+        }
     }
 
     /// The V.90 rate menu: the fastest rate first, each coloured and worded
@@ -4205,6 +4565,46 @@ fn from_remembered(
         p.report_compression = v;
     }
     (carrier, m, p)
+}
+
+/// A modulation's colour on the call card, its symbol rate where it has
+/// only the one, and what it is in a sentence.
+fn family(modulation: &str) -> (Color32, Option<u32>, &'static str) {
+    const FSK: Color32 = Color32::from_rgb(240, 230, 90);
+    const QAM: Color32 = Color32::from_rgb(110, 220, 110);
+    const V34: Color32 = Color32::from_rgb(100, 170, 255);
+    const PCM: Color32 = Color32::from_rgb(200, 150, 255);
+    const FAX: Color32 = Color32::from_rgb(245, 180, 70);
+    // "V.34 (no receiver)" is V.34 for this.
+    let name = modulation.split(" (").next().unwrap_or(modulation);
+    match name {
+        "Bell 103" | "V.21" => (FSK, Some(300), "Frequency-shift keying: a pair of tones each way, 300 bit/s."),
+        "V.22bis" => (QAM, Some(600), "QAM at 600 baud on two carriers, 1200 Hz calling and 2400 Hz answering."),
+        "V.32" | "V.32bis" => (
+            QAM,
+            Some(2400),
+            "Trellis-coded QAM at 2400 baud, both ways on the one 1800 Hz carrier, told apart by echo cancelling.",
+        ),
+        "V.34" => (V34, None, "V.34: the symbol rate and carrier are chosen by probing the line, each way separately."),
+        "V.90" | "V.92" => (PCM, Some(8000), "PCM downstream, a codeword a network sample; V.34 upstream."),
+        "V.17" | "V.29" => (FAX, Some(2400), "A fax page modulation at 2400 baud."),
+        "V.27ter" => (FAX, None, "A fax page modulation: 1600 baud at 4800 bit/s, 1200 at 2400."),
+        _ if name.starts_with("V.8") => (V34, None, "V.8: the two modems saying what they have."),
+        _ => (BRIGHT, None, ""),
+    }
+}
+
+/// One stage of the call card's chain: a health dot, the stage, and what it
+/// is doing in words.
+fn stage(ui: &mut egui::Ui, health: Color32, name: &str, text: String) -> egui::Response {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 14.0), egui::Sense::hover());
+        ui.painter().circle_filled(dot.center(), 4.0, health);
+        ui.label(RichText::new(name).strong().color(BRIGHT));
+        ui.label(RichText::new(text).color(DIM));
+    })
+    .response
 }
 
 impl eframe::App for ScopeApp {
