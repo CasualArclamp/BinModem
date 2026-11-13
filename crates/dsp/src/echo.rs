@@ -907,8 +907,8 @@ impl EchoCanceller {
         self.take_in(transmitted);
         let shift = drift.shift();
         if drift.stale {
-            for from in 0..RING {
-                drift.ring[from] = self.retimed_output(from, shift);
+            for (from, slot) in drift.ring.iter_mut().enumerate().take(RING) {
+                *slot = self.retimed_output(from, shift);
             }
             drift.stale = false;
         } else {

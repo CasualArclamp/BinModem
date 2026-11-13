@@ -52,8 +52,8 @@ impl Fft {
         assert_eq!(im.len(), self.n);
 
         // Reorder into bit-reversed index order.
-        for i in 0..self.n {
-            let j = self.reversal[i] as usize;
+        for (i, &j) in self.reversal.iter().enumerate() {
+            let j = j as usize;
             if j > i {
                 re.swap(i, j);
                 im.swap(i, j);
