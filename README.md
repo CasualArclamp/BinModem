@@ -2,7 +2,7 @@
 
 If you've found this worth your time, please consider [donating via PayPal](https://www.paypal.me/Arclamp).
 
-<img width="1314" height="892" alt="image" src="https://github.com/user-attachments/assets/f07ab50e-662e-4474-bae8-eda9861fb87a" />
+![BinModem on a V.34 call at 33 600: the faceplate, the call card and the scopes](docs/images/releases/v3.0.0/scopes-v34.png)
 
 A dial-up softmodem in Rust. Everything a modem does — the tones, the
 handshakes, the error control, the compression — is code, and the line is a
@@ -136,8 +136,15 @@ loopback.
 Connected six seconds into the call, network phase at seven, a page back at
 2400 bit/s — and it runs without a sound card.
 
-The window around it is a scope: waterfall, spectrum, constellation, LED
-faceplate, decoded transcript, and a log of every frame both ends sent. What
+The window is a modem's faceplate: the lamps, the level, the rate it connected
+at, and the keys that dial and answer. Under it are the terminal, with a strip
+that says how far the call has got and how long each step took, a transcript
+of every frame both ends sent, and the scopes: a card that names what the
+receiver is slicing and its margin and then goes down the receive chain a
+stage at a time, beside the constellation, an oscilloscope, a waterfall and a
+spectrum that label their own peak, noise floor and occupied band. A recording
+of somebody else's call replays through the same scopes, as far as one tap on
+the line lets it be followed. What
 the echo canceller is taking out, and where on the line it found the
 reflection, are on the panel too — on a two-wire pair that decides everything
 and is otherwise invisible, since a constellation full of noise looks the same
