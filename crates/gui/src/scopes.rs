@@ -28,6 +28,15 @@ const BELL103: &[(f64, &str, Color32)] = &[
     (2225.0, "2225 A-mark", ANSWERING),
 ];
 
+/// V.21 6: channel 1 from the calling modem and channel 2 from the answering
+/// one, each a mark below its space.
+const V21: &[(f64, &str, Color32)] = &[
+    (980.0, "980 C-mark", CALLING),
+    (1180.0, "1180 C-space", CALLING),
+    (1650.0, "1650 A-mark", ANSWERING),
+    (1850.0, "1850 A-space", ANSWERING),
+];
+
 const V22BIS: &[(f64, &str, Color32)] = &[
     (1200.0, "1200 calling", CALLING),
     (2400.0, "2400 answering", ANSWERING),
@@ -51,6 +60,7 @@ const V32: &[(f64, &str, Color32)] = &[
 pub fn markers(modulation: &str) -> &'static [(f64, &'static str, Color32)] {
     match modulation {
         "Bell 103" => BELL103,
+        "V.21" => V21,
         "V.22bis" => V22BIS,
         "V.32" | "V.32bis" => V32,
         _ => &[],
