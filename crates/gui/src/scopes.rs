@@ -418,24 +418,24 @@ fn margin_colour(margin: f32) -> Color32 {
 /// One faceplate lamp.
 fn lamp(painter: &Painter, centre: Pos2, on: bool, label: &str, hue: Color32) {
     let colour = if on { hue } else { hue.gamma_multiply(0.16) };
-    painter.circle_filled(centre, 6.0, colour);
+    painter.circle_filled(centre, 8.0, colour);
     if on {
         // A soft halo, so a lit lamp reads at a glance.
-        painter.circle_filled(centre, 9.0, colour.gamma_multiply(0.25));
+        painter.circle_filled(centre, 12.0, colour.gamma_multiply(0.25));
     }
-    painter.circle_stroke(centre, 6.0, Stroke::new(1.0, GRID));
+    painter.circle_stroke(centre, 8.0, Stroke::new(1.0, GRID));
     painter.text(
-        pos2(centre.x, centre.y + 11.0),
+        pos2(centre.x, centre.y + 13.0),
         Align2::CENTER_TOP,
         label,
-        FontId::monospace(9.0),
+        FontId::monospace(11.0),
         if on { LABEL } else { LABEL.gamma_multiply(0.5) },
     );
 }
 
 /// The LED faceplate, in the order a real modem carried the lamps.
 pub fn faceplate(ui: &mut Ui, leds: &telemetry::Leds) {
-    let size = vec2(ui.available_width(), 44.0);
+    let size = vec2(ui.available_width(), 52.0);
     let (response, painter) = ui.allocate_painter(size, Sense::hover());
     let rect = response.rect;
     painter.rect_filled(rect, 0.0, BACKDROP);
@@ -459,7 +459,7 @@ pub fn faceplate(ui: &mut Ui, leds: &telemetry::Leds) {
     let step = rect.width() / lamps.len() as f32;
     for (i, (label, on, hue)) in lamps.iter().enumerate() {
         let x = rect.left() + step * (i as f32 + 0.5);
-        lamp(&painter, pos2(x, rect.top() + 12.0), *on, label, *hue);
+        lamp(&painter, pos2(x, rect.top() + 16.0), *on, label, *hue);
     }
     frame_border(&painter, rect);
 }
