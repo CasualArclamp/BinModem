@@ -260,6 +260,8 @@ impl Modulation {
 enum Tab {
     Terminal,
     Transcript,
+    /// The signal path, drawn: not there for a socket, which has none.
+    Scopes,
 }
 
 /// The colours of the faceplate, said once.
@@ -401,8 +403,6 @@ pub struct ScopeApp {
     /// levels. Shown regardless while there is no line, since that row is
     /// the only way to get one.
     setup_open: bool,
-    /// The scopes, which the faceplate took the place of on the main window.
-    scopes_open: bool,
     /// Whether the window has asked for a stream of echoes rather than one.
     ping_repeatedly: bool,
     /// And whether it has asked for web traffic to be carried.
@@ -519,7 +519,6 @@ impl ScopeApp {
             network_open: false,
             constellation_open: false,
             setup_open: false,
-            scopes_open: false,
             ping_repeatedly: false,
             carry_web: false,
             compress_headers: true,
@@ -540,7 +539,9 @@ impl ScopeApp {
         app.recall();
         // A capture is there to be looked at, and the scopes are what there
         // is to look at.
-        app.scopes_open = !app.source.is_line();
+        if !app.source.is_line() {
+            app.tab = Tab::Scopes;
+        }
         app.load_accounts();
         app
     }
@@ -1347,14 +1348,15 @@ impl ScopeApp {
 
         // And the ones that open something.
         ui.horizontal_wrapped(|ui| {
-            if small_key(ui, self.scopes_open, "Scopes")
+            if small_key(ui, self.tab == Tab::Scopes, "Scopes")
                 .on_hover_text(
                     "The waterfall, the spectrum, the constellation, and the \
-                     numbers the receiver has for the call",
+                     numbers the receiver has for the call, where the terminal \
+                     is. Again for the terminal back",
                 )
                 .clicked()
             {
-                self.scopes_open = !self.scopes_open;
+                self.toggle_scopes();
             }
             if small_key(ui, self.transfer_open, "Files")
                 .on_hover_text("ZMODEM: send a file to the far end, or take one it offers")
@@ -3311,92 +3313,87 @@ impl ScopeApp {
         );
     }
 
-    /// The scopes and the receiver's own numbers, in a window of their own.
+    /// The Scopes key: to the scopes, and from them back to the terminal.
+    fn toggle_scopes(&mut self) {
+        self.tab = if self.tab == Tab::Scopes { Tab::Terminal } else { Tab::Scopes };
+    }
+
+    /// The scopes and the receiver's own numbers, as a tab beside the
+    /// terminal.
     ///
     /// They were the main window, and the faceplate is now. Everything that
     /// was there is here: the constellation, the status grid with the V.90
     /// rate menu in it, the retrain, the waterfall and the spectrum.
-    fn scopes_window(&mut self, ui: &mut egui::Ui) {
-        let mut open = self.scopes_open;
-        egui::Window::new("scopes")
-            .open(&mut open)
-            .resizable(true)
-            // Under the faceplate rather than over it: the lamps and the
-            // rate are what the scopes are read against.
-            .default_pos([70.0, 262.0])
-            .default_size([1000.0, 560.0])
-            .show(ui.ctx(), |ui| {
-                ui.horizontal_top(|ui| {
-                    ui.vertical(|ui| {
-                        ui.set_width(PANEL_W - 20.0);
-                        ui.label(RichText::new("symbols").strong());
-                        let label = self.symbol_label();
-                        let scope = scopes::symbol_scope(
-                            ui,
-                            &self.frame.symbols,
-                            scopes::Constellation {
-                                points: &self.frame.constellation,
-                                tones: self.frame.tones,
-                                peak: self.frame.constellation_peak,
-                                pairs: self.frame.symbol_label == "PCM",
-                            },
-                            &label,
-                            self.frame.symbol_quality(),
-                            PANEL_W - 20.0,
-                        );
-                        if scope.on_hover_text("Click to draw it large").clicked() {
-                            self.constellation_open = !self.constellation_open;
-                        }
+    fn scopes_pane(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(PANEL_W - 20.0);
+                ui.label(RichText::new("symbols").strong());
+                let label = self.symbol_label();
+                let scope = scopes::symbol_scope(
+                    ui,
+                    &self.frame.symbols,
+                    scopes::Constellation {
+                        points: &self.frame.constellation,
+                        tones: self.frame.tones,
+                        peak: self.frame.constellation_peak,
+                        pairs: self.frame.symbol_label == "PCM",
+                    },
+                    &label,
+                    self.frame.symbol_quality(),
+                    PANEL_W - 20.0,
+                );
+                if scope.on_hover_text("Click to draw it large").clicked() {
+                    self.constellation_open = !self.constellation_open;
+                }
 
-                        ui.add_space(10.0);
-                        if let Some(drn) = self.status(ui)
-                            && let Source::Live(session) = &self.source
-                        {
-                            session.choose_rate(drn);
-                        }
+                ui.add_space(10.0);
+                if let Some(drn) = self.status(ui)
+                    && let Source::Live(session) = &self.source
+                {
+                    session.choose_rate(drn);
+                }
 
-                        // A retrain by hand, under the rate it would change.
-                        // V.34's is the full one (11.5), back through phase
-                        // 2; the button is there only on a V.34 call that is
-                        // up, since that is the only place a retrain means
-                        // anything.
-                        if let Source::Live(session) = &self.source {
-                            let connected = self.frame.state == telemetry::CallState::Connected;
-                            let v34 = self.frame.modulation == "V.34";
-                            ui.add_space(6.0);
-                            if ui
-                                .add_enabled(connected && v34, egui::Button::new("Retrain"))
-                                .on_hover_text(
-                                    "V.34 11.5: send the retrain tone and go back through \
-                                     phase 2, measuring the line again and training on \
-                                     what it will carry now -- on the same call",
-                                )
-                                .clicked()
-                            {
-                                session.retrain();
-                            }
-                        }
-                    });
-                    ui.separator();
-                    ui.vertical(|ui| {
-                        ui.label(RichText::new("waterfall  (0 - 4000 Hz)").strong());
-                        let available = (ui.available_height() - 60.0).max(360.0);
-                        self.waterfall.paint(ui, available * 0.60, self.frame.modulation);
-                        ui.add_space(6.0);
-                        ui.label(RichText::new("spectrum").strong());
-                        scopes::spectrum(
-                            ui,
-                            &self.frame.spectrum_db,
-                            self.frame.hz_per_bin,
-                            (available * 0.40).max(90.0),
-                            self.waterfall.floor_db,
-                            self.waterfall.ceiling_db,
-                            self.frame.modulation,
-                        );
-                    });
-                });
+                // A retrain by hand, under the rate it would change.
+                // V.34's is the full one (11.5), back through phase
+                // 2; the button is there only on a V.34 call that is
+                // up, since that is the only place a retrain means
+                // anything.
+                if let Source::Live(session) = &self.source {
+                    let connected = self.frame.state == telemetry::CallState::Connected;
+                    let v34 = self.frame.modulation == "V.34";
+                    ui.add_space(6.0);
+                    if ui
+                        .add_enabled(connected && v34, egui::Button::new("Retrain"))
+                        .on_hover_text(
+                            "V.34 11.5: send the retrain tone and go back through \
+                             phase 2, measuring the line again and training on \
+                             what it will carry now -- on the same call",
+                        )
+                        .clicked()
+                    {
+                        session.retrain();
+                    }
+                }
             });
-        self.scopes_open = open;
+            ui.separator();
+            ui.vertical(|ui| {
+                ui.label(RichText::new("waterfall  (0 - 4000 Hz)").strong());
+                let available = (ui.available_height() - 60.0).max(140.0);
+                self.waterfall.paint(ui, available * 0.60, self.frame.modulation);
+                ui.add_space(6.0);
+                ui.label(RichText::new("spectrum").strong());
+                scopes::spectrum(
+                    ui,
+                    &self.frame.spectrum_db,
+                    self.frame.hz_per_bin,
+                    (available * 0.40).max(90.0),
+                    self.waterfall.floor_db,
+                    self.waterfall.ceiling_db,
+                    self.frame.modulation,
+                );
+            });
+        });
     }
 
     fn audio_controls(&mut self, ui: &mut egui::Ui) {
@@ -3567,8 +3564,8 @@ impl ScopeApp {
             }
 
             ui.separator();
-            if small_key(ui, self.scopes_open, "Scopes").clicked() {
-                self.scopes_open = !self.scopes_open;
+            if small_key(ui, self.tab == Tab::Scopes, "Scopes").clicked() {
+                self.toggle_scopes();
             }
             ui.separator();
             self.audio_controls(ui);
@@ -3954,6 +3951,9 @@ impl ScopeApp {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.tab, Tab::Terminal, "terminal");
             ui.selectable_value(&mut self.tab, Tab::Transcript, "transcript");
+            if !self.source.is_telnet() {
+                ui.selectable_value(&mut self.tab, Tab::Scopes, "scopes");
+            }
             ui.separator();
             // A socket has no command state to be in, so saying which one it
             // was in would be answering a question nobody asked.
@@ -4025,6 +4025,7 @@ impl ScopeApp {
                     .show(ui, |ui| self.terminal_pane(ui));
             }
             Tab::Transcript => self.transcript(ui),
+            Tab::Scopes => self.scopes_pane(ui),
         }
     }
 
@@ -4228,7 +4229,6 @@ impl eframe::App for ScopeApp {
             return;
         }
 
-        self.scopes_window(ui);
         self.constellation_window(ui);
 
         egui::CentralPanel::default().show(ui, |ui| self.lower(ui));
