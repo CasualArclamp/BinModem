@@ -439,6 +439,10 @@ pub struct ScopeApp {
     connected_at: Option<std::time::Instant>,
     /// The byte counts a few moments ago, for a rate: when, received, sent.
     marks: std::collections::VecDeque<(std::time::Instant, u64, u64)>,
+    /// Lines still to be typed at the modem by `--type`, and when the next
+    /// is due.
+    script: std::collections::VecDeque<String>,
+    script_due: Option<std::time::Instant>,
     /// What was written out last, so that a frame which changed nothing does
     /// not rewrite the file sixty times a second.
     remembered: String,
@@ -546,6 +550,8 @@ impl ScopeApp {
             last_row: None,
             connected_at: None,
             marks: std::collections::VecDeque::new(),
+            script: std::collections::VecDeque::new(),
+            script_due: None,
             remembered: String::new(),
         };
         // Before anything is drawn, so the first frame shows what the modem
@@ -3491,6 +3497,33 @@ impl ScopeApp {
         }
     }
 
+    /// What `--type` and `--scopes` asked for: lines to type at the modem
+    /// once its line is open, and the scopes as the tab to open on.
+    pub fn script(&mut self, typed: Vec<String>, scopes: bool) {
+        self.script = typed.into();
+        if scopes && !self.source.is_telnet() {
+            self.tab = Tab::Scopes;
+        }
+    }
+
+    /// Type the next scripted line when it is due: the first a second and a
+    /// half after the line opens, and one a second after that, which is
+    /// longer than the modem takes to answer any command but a dial.
+    fn run_script(&mut self) {
+        let Source::Live(session) = &self.source else { return };
+        if self.script.is_empty() || !session.state().open {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let due = *self.script_due.get_or_insert(now + std::time::Duration::from_millis(1500));
+        if now >= due
+            && let Some(line) = self.script.pop_front()
+        {
+            session.type_bytes(format!("{line}\r").as_bytes());
+            self.script_due = Some(now + std::time::Duration::from_secs(1));
+        }
+    }
+
     /// How long the call has been up, and the byte counts of the last few
     /// seconds for a rate to be taken from.
     fn keep_time(&mut self) {
@@ -3544,6 +3577,7 @@ impl ScopeApp {
             }
         }
         self.keep_time();
+        self.run_script();
         // Only the final line can still be growing, so re-read from there
         // rather than treating everything already copied as settled.
         let tail = self.rx.log_after(self.frozen_seq);
@@ -3876,7 +3910,50 @@ impl ScopeApp {
         // the margin is the reading against that quarter, in decibels, and
         // means the same at 4800 as at 33 600. FSK has no such reading and
         // shows its slicer's quality out of a hundred.
+        //
+        // PCM has neither: what it has is the rate menu, which says of every
+        // downstream rate whether the levels the line probe found carry it
+        // with room. So its bar is the rate in use along the rates on offer,
+        // ticked at the fastest one predicted clean.
+        let pcm = match &self.source {
+            Source::Live(session) if f.modulation == "V.90" => session.rate_menu(),
+            _ => None,
+        }
+        .and_then(|menu| {
+            use datapump::v90::analogue::Outlook;
+            let now = menu.current?;
+            let rate = |drn: u8| menu.rates.iter().find(|r| r.0 == drn).map(|r| r.1);
+            let carried = |o: &Outlook| matches!(o, Outlook::Good | Outlook::Bad);
+            let slowest = menu.rates.iter().find(|r| carried(&r.2))?.1;
+            let fastest = menu.rates.iter().rfind(|r| carried(&r.2))?.1;
+            let clean = menu.rates.iter().rfind(|r| r.2 == Outlook::Good).map(|r| r.1);
+            Some((rate(now)?, menu.outlook(now)?, slowest, fastest, clean))
+        });
         let (merit, merit_colour, fill, tick, left, right) = match (f.reception, f.symbol_quality()) {
+            _ if pcm.is_some() => {
+                use datapump::v90::analogue::Outlook;
+                let (rate, outlook, slowest, fastest, clean) = pcm.unwrap_or((0, Outlook::Good, 0, 1, None));
+                let along = |r: u32| {
+                    (r.saturating_sub(slowest) as f32 / fastest.saturating_sub(slowest).max(1) as f32)
+                        .clamp(0.0, 1.0)
+                };
+                let (word, c) = match (outlook, clean) {
+                    (Outlook::Good, Some(clean)) if clean > rate => ("room above", GOOD),
+                    (Outlook::Good, _) => ("clean", GOOD),
+                    _ => ("tight", WARN),
+                };
+                (
+                    Some(word.to_owned()),
+                    c,
+                    along(rate),
+                    clean.map(along),
+                    format!("{rate} of {slowest} - {fastest} bit/s"),
+                    match clean {
+                        Some(_) => "tick: fastest clean",
+                        None => "none predicted clean",
+                    },
+                )
+            }
             (Some(miss), _) if miss > 0.0 => {
                 let db = 20.0 * (0.25 / miss).log10();
                 let c = if db < 0.0 {
@@ -4067,9 +4144,20 @@ impl ScopeApp {
                 // The demodulator: what it slices and how well.
                 let shown = f.symbols.len() + f.constellation.len();
                 if has_symbols {
-                    let mut text = format!("{} · {} points", f.symbol_label, f.tones);
+                    // PCM's are levels and samples: there is no plane for
+                    // them to be points on.
+                    let pcm = f.symbol_label == "PCM";
+                    let mut text = format!(
+                        "{} · {} {}",
+                        f.symbol_label,
+                        f.tones,
+                        if pcm { "levels" } else { "points" }
+                    );
                     if shown > 0 {
-                        text.push_str(&format!(" · {shown} symbols on the scope"));
+                        text.push_str(&format!(
+                            " · {shown} {} on the scope",
+                            if pcm { "samples" } else { "symbols" }
+                        ));
                     }
                     let health = match (f.reception, f.symbol_quality()) {
                         (Some(miss), _) => {

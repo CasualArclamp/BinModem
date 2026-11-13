@@ -122,6 +122,10 @@ struct Args {
     /// to point it. `Some(None)` is the mode with the host chosen in the
     /// window, which is the usual way in.
     telnet: Option<Option<String>>,
+    /// Lines to type at the modem once its line is open, in order, and
+    /// whether to open on the scopes: for a call with nobody at the keyboard.
+    typed: Vec<String>,
+    scopes: bool,
 }
 
 fn parse() -> Result<Option<Args>, String> {
@@ -133,6 +137,8 @@ fn parse() -> Result<Option<Args>, String> {
         output: None,
         sip: None,
         telnet: None,
+        typed: Vec::new(),
+        scopes: false,
     };
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut rest = raw.iter();
@@ -163,6 +169,8 @@ fn parse() -> Result<Option<Args>, String> {
                 list_accounts();
                 return Ok(None);
             }
+            "--type" => args.typed.push(value("--type")?),
+            "--scopes" => args.scopes = true,
             "--in" => args.input = Some(value("--in")?),
             "--out" => args.output = Some(value("--out")?),
             "--devices" | "--list-devices" => {
@@ -173,6 +181,7 @@ fn parse() -> Result<Option<Args>, String> {
                 println!(
                     "binmodem                                   a modem, line chosen in the window\n\
                      binmodem --in <dev> --out <dev>            and opened straight away\n\
+                     binmodem ... --type <line> [--scopes]      typed at the modem once the line is open\n\
                      binmodem [path.wav]                        replay a capture\n\
                      binmodem --capture                         replay the Bell 103 golden vector\n\
                      binmodem --devices                         list audio devices\n\
@@ -229,7 +238,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(i32::from(code != std::process::ExitCode::SUCCESS));
     }
 
-    let Some(args) = parse()? else { return Ok(()) };
+    let Some(mut args) = parse()? else { return Ok(()) };
+    // Taken now, because `args` is picked apart below.
+    let (typed, scopes) = (std::mem::take(&mut args.typed), args.scopes);
 
     let control = Arc::new(Control::default());
     let (sample_rate, title) = if args.live {
@@ -294,13 +305,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(eframe::egui::Visuals::dark());
-            Ok(Box::new(app::ScopeApp::new(
-                rx,
-                ui_control,
-                sink,
-                sample_rate,
-                source,
-            )))
+            let mut app = app::ScopeApp::new(rx, ui_control, sink, sample_rate, source);
+            app.script(typed, scopes);
+            Ok(Box::new(app))
         }),
     )?;
 
