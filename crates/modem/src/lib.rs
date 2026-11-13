@@ -305,7 +305,10 @@ impl Pump {
         match self {
             Self::V22bis(m) => Some(m.residual_error()),
             Self::V32(m) => Some(m.residual_error()),
-            Self::Bell103(_) | Self::V34(_) | Self::V90(_) | Self::V90Server(_) => None,
+            // V.34 keeps its error as a power in decibels; as a distance it
+            // is the root of that.
+            Self::V34(m) => m.snr_db().map(|db| 10f64.powf(-db / 20.0)),
+            Self::Bell103(_) | Self::V90(_) | Self::V90Server(_) => None,
         }
     }
 

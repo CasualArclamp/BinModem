@@ -4003,10 +4003,10 @@ impl ScopeApp {
                 (
                     Some(format!("{db:.1} dB")),
                     c,
-                    (db / 40.0).clamp(0.0, 1.0),
+                    (db / 60.0).clamp(0.0, 1.0),
                     None,
                     format!("decisions {db:.1} dB clear of the error"),
-                    "scale 0 - 40 dB",
+                    "scale 0 - 60 dB",
                 )
             }
             _ => {
@@ -4019,9 +4019,16 @@ impl ScopeApp {
             }
         };
         let has_symbols = f.symbol_label != "-";
+        // V.34 calls its modulation QAM and no more, since the size is
+        // whatever the rate needs: said with the size, as the others are.
+        let shape = if f.symbol_label == "QAM" {
+            format!("{}QAM", f.tones)
+        } else {
+            f.symbol_label.to_owned()
+        };
         ui.horizontal(|ui| {
             ui.label(
-                RichText::new(if has_symbols { f.symbol_label } else { "–" })
+                RichText::new(if has_symbols { shape.as_str() } else { "–" })
                     .monospace()
                     .size(26.0)
                     .color(if has_symbols { colour } else { grey }),
@@ -4086,9 +4093,8 @@ impl ScopeApp {
                         w.peak_db - w.rms_db
                     ));
                 }
-                text.push_str(&format!(" · {:.0} Hz sampling", f.sample_rate));
                 let health = if clipped > 0 {
-                    text.push_str(&format!(" · {clipped} samples at full scale"));
+                    text.push_str(&format!(" · {clipped} clipped"));
                     BAD
                 } else if level > -3.0 {
                     text.push_str(" · too hot");
@@ -4111,7 +4117,7 @@ impl ScopeApp {
                 // The carrier, and what the spectrum says is there.
                 let seen = measured.map(|m| {
                     format!(
-                        "strongest at {:.0} Hz, {:.0} dB over the floor · {:.0} - {:.0} Hz occupied",
+                        "strongest at {:.0} Hz, {:.0} dB over the floor\n{:.0} - {:.0} Hz occupied",
                         m.peak_hz,
                         m.peak_db - m.floor_db,
                         m.low_hz,
@@ -4120,13 +4126,13 @@ impl ScopeApp {
                 });
                 match (f.carrier, seen) {
                     (true, Some(seen)) => stage(ui, GOOD, "Carrier", format!("detected · {seen}")),
-                    (true, None) => stage(ui, GOOD, "Carrier", "detected".into()),
+                    (true, None) => stage(ui, GOOD, "Carrier", "detected\nnothing over the noise to measure".into()),
                     (false, Some(seen)) => stage(ui, grey, "Carrier", format!("none · {seen}")),
-                    (false, None) => stage(ui, grey, "Carrier", "none, and nothing over the noise".into()),
+                    (false, None) => stage(ui, grey, "Carrier", "none\nnothing over the noise".into()),
                 };
 
                 // Where the start-up has got to.
-                let phase = if f.line_phase == "-" { String::new() } else { format!(" · {}", f.line_phase) };
+                let phase = if f.line_phase == "-" { "\n–".to_owned() } else { format!("\n{}", f.line_phase) };
                 match self.connected_at {
                     Some(since) if connected => {
                         let secs = since.elapsed().as_secs();
@@ -4148,20 +4154,17 @@ impl ScopeApp {
                     // them to be points on.
                     let pcm = f.symbol_label == "PCM";
                     let mut text = format!(
-                        "{} · {} {}",
-                        f.symbol_label,
+                        "{shape} · {} {}",
                         f.tones,
                         if pcm { "levels" } else { "points" }
                     );
-                    if shown > 0 {
-                        text.push_str(&format!(
-                            " · {shown} {} on the scope",
-                            if pcm { "samples" } else { "symbols" }
-                        ));
-                    }
+                    text.push_str(&format!(
+                        "\n{shown} {} on the scope",
+                        if pcm { "samples" } else { "symbols" }
+                    ));
                     let health = match (f.reception, f.symbol_quality()) {
                         (Some(miss), _) => {
-                            text.push_str(&format!(" · reading {miss:.2}"));
+                            text.push_str(&format!(" · reading {miss:.2} of the gap"));
                             if miss < 0.25 { GOOD } else { WARN }
                         }
                         (None, Some(q)) => {
@@ -4178,7 +4181,7 @@ impl ScopeApp {
                     };
                     stage(ui, health, "Demodulator", text);
                 } else {
-                    stage(ui, grey, "Demodulator", "no symbols".into());
+                    stage(ui, grey, "Demodulator", "no symbols\n–".into());
                 }
 
                 // What the echo canceller is doing, which on a two-wire pair
@@ -4197,7 +4200,7 @@ impl ScopeApp {
                         ui,
                         if db >= 6.0 && f.echo_at.is_some() { GOOD } else { WARN },
                         "Echo canceller",
-                        format!("taking out {db:.1} dB · {found}"),
+                        format!("taking out {db:.1} dB\n{found}"),
                     );
                 }
 
@@ -4259,13 +4262,14 @@ impl ScopeApp {
 
                 let dropped = self.rx.dropped_frames();
                 let mut text = format!(
-                    "{:.0} spectra a second · {dropped} frame{} dropped",
+                    "{:.0} spectra a second · {:.0} Hz · {dropped} frame{} dropped",
                     1.0 / self.row_secs,
+                    f.sample_rate,
                     if dropped == 1 { "" } else { "s" }
                 );
                 if self.monitor.is_some() {
                     text.push_str(&format!(
-                        " · monitor {} underruns, {} overruns",
+                        "\nmonitor {} underruns, {} overruns",
                         self.sink.underruns(),
                         self.sink.overruns()
                     ));
@@ -4709,13 +4713,27 @@ fn family(modulation: &str) -> (Color32, Option<u32>, &'static str) {
 
 /// One stage of the call card's chain: a health dot, the stage, and what it
 /// is doing in words.
+///
+/// The words come as lines, split at each newline, and a line is cut short
+/// rather than wrapped. Wrapping is what made the card jump: the figures
+/// change width as they change, a line that just fitted stops fitting, and
+/// everything under it moves down a row and back up again several times a
+/// second. A stage that always gives the same number of lines stays put.
 fn stage(ui: &mut egui::Ui, health: Color32, name: &str, text: String) -> egui::Response {
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing.x = 5.0;
-        let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 14.0), egui::Sense::hover());
-        ui.painter().circle_filled(dot.center(), 4.0, health);
-        ui.label(RichText::new(name).strong().color(BRIGHT));
-        ui.label(RichText::new(text).color(DIM));
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 1.0;
+        for (row, line) in text.split('\n').enumerate() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 5.0;
+                let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 14.0), egui::Sense::hover());
+                if row == 0 {
+                    ui.painter().circle_filled(dot.center(), 4.0, health);
+                    ui.label(RichText::new(name).strong().color(BRIGHT));
+                }
+                ui.add(egui::Label::new(RichText::new(line).color(DIM)).truncate());
+            });
+        }
+        ui.add_space(2.0);
     })
     .response
 }
