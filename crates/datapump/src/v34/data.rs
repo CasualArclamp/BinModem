@@ -621,8 +621,8 @@ impl Decoder {
         let n = code.states();
         let mut next = vec![f64::MAX; n];
         let mut back = vec![(0u8, 0u8, 0u8); n];
-        for state in 0..n {
-            if self.metrics[state] == f64::MAX {
+        for (state, &metric) in self.metrics.iter().enumerate().take(n) {
+            if metric == f64::MAX {
                 continue;
             }
             let y0 = usize::from(code.output(state as u8) ^ inversion);
@@ -632,7 +632,7 @@ impl Decoder {
                     continue;
                 }
                 let to = code.next(state as u8, y) as usize;
-                let total = self.metrics[state] + d;
+                let total = metric + d;
                 if total < next[to] {
                     next[to] = total;
                     back[to] = (state as u8, pair.0, pair.1);

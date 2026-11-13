@@ -547,9 +547,11 @@ impl Fax {
             for rx in 0..PREVIEW_WIDTH {
                 let mut ink = 0usize;
                 let mut n = 0usize;
-                for y in ry * across..((ry + 1) * across).min(page.height()) {
-                    for x in rx * across..((rx + 1) * across).min(fax::page::WIDTH) {
-                        ink += usize::from(page.lines[y][x]);
+                let down = ry * across..((ry + 1) * across).min(page.height());
+                let along = rx * across..((rx + 1) * across).min(fax::page::WIDTH);
+                for line in &page.lines[down] {
+                    for &pel in &line[along.clone()] {
+                        ink += usize::from(pel);
                         n += 1;
                     }
                 }

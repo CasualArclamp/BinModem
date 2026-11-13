@@ -591,11 +591,11 @@ mod tests {
     fn the_analysis_reads_the_levels_and_the_noise() {
         let route = analyse(0.002, false);
         assert!((route.noise() / 0.002 - 1.0).abs() < 0.2, "noise read as {}", route.noise());
-        for i in 0..INTERVALS {
+        for (i, levels) in route.levels.iter().enumerate().take(INTERVALS) {
             // UINFO read off the references, and the loudest the DIL asks for.
             for u in [0u8, 40, 79, 98] {
                 let want = ucode::level(Law::Mu, u);
-                assert!((route.levels[i][usize::from(u)] - want).abs() < 0.003, "interval {i} code {u}");
+                assert!((levels[usize::from(u)] - want).abs() < 0.003, "interval {i} code {u}");
             }
         }
     }
