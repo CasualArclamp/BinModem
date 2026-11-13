@@ -3912,6 +3912,26 @@ impl ScopeApp {
                     "0 is a coin flip",
                 )
             }
+            // Neither, but the receiver's own error against its decisions:
+            // as decibels, so a tighter constellation is a larger number.
+            _ if f.snr_db.is_some() => {
+                let db = f.snr_db.unwrap_or(0.0);
+                let c = if db >= 20.0 {
+                    GOOD
+                } else if db >= 12.0 {
+                    WARN
+                } else {
+                    BAD
+                };
+                (
+                    Some(format!("{db:.1} dB")),
+                    c,
+                    (db / 40.0).clamp(0.0, 1.0),
+                    None,
+                    format!("decisions {db:.1} dB clear of the error"),
+                    "scale 0 - 40 dB",
+                )
+            }
             _ => {
                 let left = match f.state {
                     telemetry::CallState::Idle => "no call".to_owned(),
@@ -4059,6 +4079,11 @@ impl ScopeApp {
                         (None, Some(q)) => {
                             text.push_str(&format!(" · quality {q}"));
                             if q >= 50 { GOOD } else { WARN }
+                        }
+                        _ if f.snr_db.is_some() => {
+                            let db = f.snr_db.unwrap_or(0.0);
+                            text.push_str(&format!(" · error {db:.1} dB down"));
+                            if db >= 12.0 { GOOD } else { WARN }
                         }
                         _ if shown > 0 => GOOD,
                         _ => grey,
