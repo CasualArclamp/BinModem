@@ -1847,6 +1847,12 @@ impl Modem {
                     if let Some(ms) = round_trip {
                         stack = stack.over_a_round_trip(ms);
                     }
+                    // V.92's data modes do not start together, so its
+                    // answerer waits longer for the originator's pattern;
+                    // every other call keeps V.42's one T400.
+                    if matches!(self.pump.as_ref(), Some(Pump::V90Server(m)) if m.modem().is_v92()) {
+                        stack = stack.waiting_for_a_late_far_end();
+                    }
                     if !self.want_error_control {
                         stack = stack.declining();
                     }
@@ -2401,6 +2407,11 @@ impl Modem {
             // digital half from the end that answers. Over a VoIP call the
             // answering end's samples reach a G.711 encoder, which is as near
             // to the digital network as a sound card gets.
+            // A V.92 server takes the line at the start of V.8's handover
+            // silence; a V.90 one at the end of it, as it always has.
+            if self.at.modulation.carrier == "V92" && self.role == Role::Answering {
+                negotiation = negotiation.handing_over_early();
+            }
             if matches!(self.at.modulation.carrier.as_str(), "V90" | "V92") {
                 negotiation = match self.role {
                     Role::Calling => negotiation.offering_pcm(Pcm::ANALOGUE),

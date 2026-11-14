@@ -472,6 +472,9 @@ pub struct Answerer {
     /// Whether the clock has run out on a pattern that was being repeated
     /// for an originator whose flags never came.
     expired: bool,
+    /// Whether the far end may be late: ten T400s of patience where there
+    /// would be one. See [`Self::prompt`].
+    wide: bool,
     /// Characters of plain text in a row, and everything heard while
     /// detecting.
     text: u32,
@@ -504,7 +507,22 @@ impl Answerer {
             heard: Vec::new(),
             detecting: false,
             expired: false,
+            wide: true,
         }
+    }
+
+    /// One T400 of patience and not ten, for a call whose two directions
+    /// reach data mode together.
+    ///
+    /// The wide bound is for a far end that is not listening yet when this
+    /// end starts (see [`Self::tick`]): V.92, whose two data modes do not
+    /// begin together. On every other modulation both ends connect within a
+    /// few symbols of each other, T400 is the whole of the wait V.42 7.2.1.3
+    /// has in mind, and nine more of them is seven seconds of nothing before
+    /// a caller without error control is given its CONNECT.
+    pub fn prompt(mut self) -> Self {
+        self.wide = false;
+        self
     }
 
     /// Everything the line brought while the detection phase ran: the far
@@ -695,7 +713,8 @@ impl Answerer {
         }
         let patience = match self.answer {
             Answer::None if self.someone_is_detecting() => self.t400_ms,
-            _ => self.t400_ms.saturating_mul(10),
+            _ if self.wide => self.t400_ms.saturating_mul(10),
+            _ => self.t400_ms,
         };
         if self.elapsed >= patience {
             if self.outcome == Outcome::OriginatorDetected {

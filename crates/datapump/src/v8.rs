@@ -200,6 +200,9 @@ enum State {
 #[derive(Debug)]
 pub struct Modem {
     role: Role,
+    /// Whether a digital modem's start-up takes the line at the start of the
+    /// handover silence. See [`Self::handing_over_early`].
+    early_digital: bool,
     /// What this end can do, and what the call is for.
     menu: Menu,
     tx: Bell103Tx,
@@ -290,6 +293,7 @@ impl Modem {
             repeats: 0,
             framing_errors: 0,
             torn: false,
+            early_digital: false,
             torn_in_a_row: 0,
             chosen: None,
             agreed: Protocol::Unstated,
@@ -430,6 +434,21 @@ impl Modem {
         self
     }
 
+    /// As the digital modem, hand the line over at the start of the handover
+    /// silence and not at its end.
+    ///
+    /// For a V.92 server, whose far ends were found to need its receiver
+    /// conditioned through the silence (9.2.1.1.1/V.90). Not for a plain
+    /// V.90 one: there, handing over early turned a V.90 call between two of
+    /// these over a 15 ms line into V.34, and two more never connected, and
+    /// handing over at the end of the silence is what every V.90 call
+    /// measured here was made with. The analogue end always listens from the
+    /// start of the silence, which costs nothing.
+    pub fn handing_over_early(mut self) -> Self {
+        self.early_digital = true;
+        self
+    }
+
     /// Offer to be half of a V.90 pair (Table 5).
     ///
     /// 7.3: a call menu carrying the PCM category also carries the PSTN
@@ -476,7 +495,12 @@ impl Modem {
             // conditions its receiver during it. Everything else is told at
             // the end of the silence, as before.
             State::Handover => match self.chosen {
-                Some(modulation) if self.pcm_role().is_some() => Status::Agreed(modulation),
+                Some(modulation)
+                    if self.pcm_role() == Some(PcmRole::Analogue)
+                        || (self.early_digital && self.pcm_role() == Some(PcmRole::Digital)) =>
+                {
+                    Status::Agreed(modulation)
+                }
                 _ => Status::Negotiating,
             },
             _ => Status::Negotiating,

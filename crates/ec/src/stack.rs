@@ -309,6 +309,9 @@ pub struct Stack {
     watch: Option<Box<Answerer>>,
     /// Whether the error correction procedure is suspended (V.42 7.10).
     suspended: bool,
+    /// Whether the far end's data mode may begin after this end's, so that
+    /// an answerer waits ten T400s for its pattern and not one.
+    late_far_end: bool,
 }
 
 /// One end of the detection phase (7.2.1). Which one depends on the role.
@@ -321,13 +324,15 @@ enum Detect {
 
 impl Detect {
     /// The detection phase from the beginning, for this end of the call.
-    fn start(role: Role, t400_ms: u32, declining: bool) -> Self {
+    fn start(role: Role, t400_ms: u32, declining: bool, late: bool) -> Self {
         match role {
             Role::Originator => Self::Origin(Box::new(Originator::new(t400_ms))),
-            Role::Answerer => Self::Answer(Box::new(Answerer::new(
-                t400_ms,
-                if declining { Answer::None } else { Answer::ErrorControl },
-            ))),
+            Role::Answerer => {
+                let answer = if declining { Answer::None } else { Answer::ErrorControl };
+                let answerer = Answerer::new(t400_ms, answer);
+                // Ten T400s only where the far end may not be listening yet.
+                Self::Answer(Box::new(if late { answerer } else { answerer.prompt() }))
+            }
         }
     }
 }
@@ -470,7 +475,7 @@ impl Stack {
             damaged: 0,
             log: Vec::new(),
             phase: Phase::Detecting,
-            detect: Detect::start(role, crate::detect::DEFAULT_T400_MS, false),
+            detect: Detect::start(role, crate::detect::DEFAULT_T400_MS, false, false),
             offer: Compression::Neither,
             limits: (v42bis::OFFERED_N2, v42bis::OFFERED_N7),
             guessed_wrong: false,
@@ -495,6 +500,7 @@ impl Stack {
             unclaimed: Vec::new(),
             watch: None,
             suspended: false,
+            late_far_end: false,
         }
     }
 
@@ -590,13 +596,29 @@ impl Stack {
         self
     }
 
+    /// Wait for a far end whose data mode begins after this end's.
+    ///
+    /// V.92's two directions do not reach data mode together, and an answerer
+    /// that gave the originator one T400 from its own start had gone
+    /// transparent two seconds before the far end could send anything. On
+    /// such a call the answerer waits ten. Everywhere else it waits one, as
+    /// V.42 7.2.1.3 has it, so that a caller with no error control is not
+    /// kept seven seconds from its CONNECT.
+    pub fn waiting_for_a_late_far_end(mut self) -> Self {
+        self.late_far_end = true;
+        if !matches!(self.detect, Detect::Done) {
+            self.detect = Detect::start(self.role, self.t400_ms(), self.declining, true);
+        }
+        self
+    }
+
     /// Answer the detection phase by declining error control (V.42 Table 3).
     ///
     /// For tests, and for a configuration in which a terminal has asked for a
     /// connection without it.
     pub fn declining(mut self) -> Self {
         self.declining = true;
-        self.detect = Detect::start(self.role, self.t400_ms(), true);
+        self.detect = Detect::start(self.role, self.t400_ms(), true, self.late_far_end);
         self
     }
 
@@ -621,7 +643,7 @@ impl Stack {
     pub fn over_a_round_trip(mut self, round_trip_ms: u32) -> Self {
         self.round_trip_ms = round_trip_ms;
         if !matches!(self.detect, Detect::Done) {
-            self.detect = Detect::start(self.role, self.t400_ms(), self.declining);
+            self.detect = Detect::start(self.role, self.t400_ms(), self.declining, self.late_far_end);
         }
         // And the detector a bypass leaves running, which has the same T400
         // and is on the same line. Rebuilt rather than adjusted because
