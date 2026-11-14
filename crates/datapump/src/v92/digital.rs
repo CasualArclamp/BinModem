@@ -58,6 +58,7 @@ use crate::v92::sequences::{
 };
 use crate::v92::up_signals::{Trn2uReader, Trn2uSize, TwoPointReader};
 use crate::v92::upchoice::choose;
+use crate::v92::upstream::UpEncoder;
 use crate::v92::{FilterLimits, Parameters, PeerCp, PeerSuv, SequenceKind, Trellis};
 
 /// The network's rate: one codeword per 125 microseconds (5/V.92).
@@ -1693,6 +1694,7 @@ impl Modem {
                 self.upstream_drop_until = self.upstream_drop_until.min(self.now);
                 self.note("V.92: no phase 4 fit on TRN2u".into());
             }
+            self.fit_for_data_mode();
         }
         // 9.5.1.1.7-9.5.1.1.8: Jp waits for the phase the receiver has to work
         // out, and the phase is measured on the Su that follows the 24.5T
@@ -2133,6 +2135,17 @@ impl Modem {
         if self.upstream.is_some() {
             return;
         }
+        // 8.7.6: "The differential encoder memory shall be initialized with
+        // the last transmitted sign bit of the preceding E1u sequence." The
+        // symbol the reader has just been given is E1u's last, read through
+        // the equaliser TRN1u trained, so its sign is the analogue modem's
+        // own (8.5.7 fixes TRN1u's) and TRN2u's reference starts from it.
+        // When this is reached without an E1u having been read, the sign is
+        // whatever was on the line last and the fits on TRN2u are as likely
+        // to come out inverted as they always were.
+        if let Some(negative) = self.reader.last_sign() {
+            self.rx.set_trn2u_seed(negative);
+        }
         // 9.6.1.1.1 with 8.7.6: TRN2u is the first four-point signal since CPt,
         // so the fit designed on TRN1u goes in here, before a single symbol of
         // it is read. Without it this end reads TRN2u at the thirteen decibels
@@ -2371,6 +2384,56 @@ impl Modem {
         Some(choice.parameters.clone())
     }
 
+    /// The data-mode equaliser, fitted while TRN2u is on the line for the line
+    /// this end's own CPd is about to ask for (9.6.1.1.6 with 6.4.2).
+    ///
+    /// The CPd's precoder and prefilter take effect at B1u's first symbol
+    /// (8.7.1), and they are this end's design of the line's inverse: from
+    /// there on the analogue modem equalises at its transmitter. The receiver
+    /// TRN2u trained equalises the bare line, so it and the CPd cannot both be
+    /// in force. `Receiver::train_for_data_mode` fits the one that goes with
+    /// the CPd, on TRN2u as those filters would have shaped it, and
+    /// `begin_b1u` puts it in place.
+    ///
+    /// A CPd that asks for no shaping at all -- a prefilter of one unit tap and
+    /// no precoder, which is what `V92_PRE=none` sends -- leaves the line as
+    /// TRN2u found it, and the receiver TRN2u trained is then the right one
+    /// for B1u too. Nothing is fitted and nothing changes.
+    fn fit_for_data_mode(&mut self) {
+        let Some(parameters) = self.parameters.as_ref() else { return };
+        let filters = &parameters.filters;
+        let unit = filters.z2.len() == 1 && (filters.z2[0] - 1.0).abs() < f64::EPSILON;
+        if unit && filters.z1.is_empty() && filters.p1.is_empty() && filters.p2.is_empty() {
+            return;
+        }
+        let Some(wire) = self.parameters_on_the_wire() else { return };
+        let fitted =
+            self.rx.train_for_data_mode(TRAIN_WINDOW, self.trn2u_from, &wire.filters, self.upstream_delay);
+        match fitted {
+            Some(snr) => self.note(format!(
+                "V.92: data mode receiver fitted through CPd's filters, {snr:.1} dB at a delay of {}",
+                self.upstream_delay
+            )),
+            None => self.note("V.92: no data mode fit through CPd's filters".into()),
+        }
+    }
+
+    /// The upstream parameters as the analogue modem has them: this end's own,
+    /// through CPd's fields and back.
+    ///
+    /// Table 30 carries the coefficients as sixteen-bit fractions and the gain
+    /// as 4G in sixteen bits, so what the far end runs is the design rounded,
+    /// not the design. For slicing the difference is nothing. For saying which
+    /// member of an equivalence class the far end's precoder will pick it is
+    /// everything: the choice goes to whichever leaves |x(n)| smallest (the
+    /// NOTE to 8.8.3), and two members that are nearly as good as each other
+    /// are told apart by the last bit of a coefficient.
+    fn parameters_on_the_wire(&self) -> Option<Parameters> {
+        let cpd = self.cpd.as_ref()?;
+        let read = Cpd::from_bits(&cpd.to_bits(UP_INTERVALS))?;
+        Parameters::try_from(&read).ok()
+    }
+
     /// 9.6.1.1.5-6: B1d out, and the receiver conditioned for B1u.
     ///
     /// The downstream's mapping comes from the analogue modem's CPu, which is
@@ -2458,10 +2521,10 @@ impl Modem {
     ///
     /// Three things happen together and are all about the same symbol: the
     /// slicer moves to CPd's data mode constellation, the equaliser becomes
-    /// the memoryless scale the far end's own precoder and prefilter left the
-    /// channel at (6.4.2 -- they equalise at the transmitter, so a decision
-    /// feedback section here would equalise a second time), and the decoder
-    /// starts a data frame at what is now symbol 0.
+    /// the one fitted for the line as CPd's precoder and prefilter leave it
+    /// (`fit_for_data_mode`; a CPd that asked for no shaping keeps the one
+    /// TRN2u trained), and the decoder starts a data frame at what is now
+    /// symbol 0.
     fn begin_b1u(&mut self) {
         let Some(parameters) = self.parameters.clone() else { return };
         let mut levels: Vec<f64> = Vec::new();
@@ -2474,10 +2537,23 @@ impl Modem {
         }
         levels.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         levels.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
-        // The slicer moves to CPd's constellation and the equaliser stays: the
-        // prefilter the far end runs is this end's design of it, and on a line
-        // with insertion loss it is never exact.
-        self.rx.set_data_mode(levels);
+        // The slicer moves to CPd's constellation, and with it the equaliser
+        // if one was fitted for the line that CPd asked for.
+        let shaped = self.rx.set_data_mode(levels);
+        // 8.7.1: B1u is forty-eight data frames of ones from zeroed memories,
+        // through the parameters this end sent, so every symbol of it is
+        // known here before it arrives. The same encoder the analogue modem
+        // transmits with says what they are (AD-6), given the coefficients as
+        // the wire carried them; `Receiver::expect_b1u` has what they are for.
+        // Only for the fit that has just gone in: the receiver TRN2u trained
+        // goes on as it always has.
+        if shaped
+            && let Some(wire) = self.parameters_on_the_wire()
+            && let Ok(mut encoder) = UpEncoder::new(&wire)
+        {
+            let symbols = encoder.b1u().iter().map(|symbol| parameters.gain * symbol.u).collect();
+            self.rx.expect_b1u(symbols, self.upstream_delay);
+        }
         self.upstream_data = Some(Decoder::new(&parameters));
         if std::env::var_os("V92_RX_BITS").is_some() {
             eprintln!(
