@@ -507,6 +507,13 @@ impl Modem {
         }
     }
 
+    /// Whether a calling modem has heard an answer tone, of either kind, and
+    /// so has stopped merely listening. Until then it sends nothing, and a
+    /// V.8 bis transaction can have the line above it.
+    pub fn heard_answer(&self) -> bool {
+        !matches!(self.state, State::Quiet | State::Listening)
+    }
+
     /// How much of V.8's handover silence is left to run, in seconds.
     ///
     /// Only nonzero while [`State::Handover`], which is no longer a state this

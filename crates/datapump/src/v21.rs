@@ -125,7 +125,14 @@ pub struct Sender {
 
 impl Sender {
     pub fn new(fs: f64) -> Self {
-        let (space, mark) = CHANNEL_2;
+        Self::on(CHANNEL_2, fs)
+    }
+
+    /// A sender on either channel, as `(space, mark)`. Fax only ever uses
+    /// channel 2; V.8 bis puts its initiating station's messages on channel
+    /// 1 and its responding station's on channel 2 (V.8 bis 7.2.1).
+    pub fn on(channel: (f64, f64), fs: f64) -> Self {
+        let (space, mark) = channel;
         let mut tx = Bell103Tx::with_tones(space, mark, fs);
         tx.set_transmitting(false);
         Self { tx }
@@ -190,7 +197,12 @@ const PULL: f64 = 0.125;
 
 impl Receiver {
     pub fn new(fs: f64) -> Self {
-        let (space, mark) = CHANNEL_2;
+        Self::on(CHANNEL_2, fs)
+    }
+
+    /// A receiver on either channel, as `(space, mark)`.
+    pub fn on(channel: (f64, f64), fs: f64) -> Self {
+        let (space, mark) = channel;
         Self {
             detector: FskDetector::new(space, mark, BAUD, fs),
             sps: fs / BAUD,
@@ -243,6 +255,14 @@ impl Receiver {
 
     pub fn carrier(&self) -> bool {
         self.detector.carrier()
+    }
+
+    /// How much signal there is in this channel's band: the magnitude of
+    /// the band-filtered line, which for a tone of amplitude A is A over two.
+    /// For telling a carrier from line noise against the whole line's level,
+    /// which the fixed threshold of [`Self::carrier`] cannot do.
+    pub fn band_level(&self) -> f64 {
+        self.detector.level()
     }
 
     /// Decision margin at the last bit, which is what a scope plots.
