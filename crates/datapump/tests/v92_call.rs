@@ -651,7 +651,11 @@ fn a_v92_call_connects_with_pcm_both_ways_and_carries_data() {
 /// bits 22:26 (Table 30).
 #[test]
 fn the_rates_are_the_ones_the_two_ends_asked_for() {
-    let call = connected_call(Descriptor::none());
+    // The upstream rung pinned at the slowest: left to itself the digital
+    // modem takes the fastest this noiseless line carries, which is the top.
+    let mut call = Call::new(digital_settings(0), analogue_for_data(Descriptor::none()));
+    call.digital.set_pinned_upstream(Some(1));
+    let call = connected(call);
     let said = format!("{:#?}\n{:#?}", call.digital_notes, call.analogue_notes);
     // What each end chose, and what the other read.
     assert!(call.analogue_notes.iter().any(|note| note.contains("the CPu will ask for drn 16")), "{said}");

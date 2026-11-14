@@ -42,6 +42,8 @@ use std::collections::VecDeque;
 
 use crate::v32::{Mode, Scrambler};
 use crate::v34::info::Info1aPcmUp;
+use crate::v34::phase2::Role;
+use crate::v34::training::RetrainWatch;
 use crate::v90::encoder::Encoder;
 use crate::v90::encoder::Mapping as CodeMapping;
 use crate::v90::sequences::{Cp, CpFinder, Descriptor, DescriptorFinder, Jd, JA_UNIT_BITS, Layout};
@@ -59,7 +61,7 @@ use crate::v92::sequences::{
 use crate::v92::up_signals::{Trn2uReader, Trn2uSize, TwoPointReader};
 use crate::v92::upchoice::choose;
 use crate::v92::upstream::UpEncoder;
-use crate::v92::{FilterLimits, Parameters, PeerCp, PeerSuv, SequenceKind, Trellis};
+use crate::v92::{FilterLimits, Parameters, PeerCp, PeerSuv, SequenceKind, Trellis, UP_RATES, up_rate};
 
 /// The network's rate: one codeword per 125 microseconds (5/V.92).
 pub const FS: f64 = 8000.0;
@@ -174,6 +176,44 @@ const REFIT_WINDOW: usize = 600;
 /// exactly the sequence, 0 nothing like it, and a window of anything else lands
 /// at about `1/sqrt(`[`ALIGN_WINDOW`]`)` = 0.04. Half is far past that.
 const REFIT_QUALITY: f64 = 0.5;
+
+/// Decibels taken off the line's measured signal to noise before the upstream
+/// rate is chosen against it: the measurement is of a tenth of a second, and
+/// the data is for the rest of the call.
+const UP_MARGIN_DB: f64 = 6.0;
+
+/// Symbols the two power readings are taken over.
+const POWER_WINDOW: u64 = 800;
+
+/// How far before Su is first reported the silence is read up to: the hunt
+/// reports Su a few periods after it began, and this is well clear of that.
+const SILENCE_BEFORE_SU: u64 = 400;
+
+/// Whether `samples` are G.711 codewords of `law`, each exactly one of the
+/// law's levels: what a network's A/D hands a digital modem, and what a sound
+/// card's samples never are.
+fn are_codewords(law: Law, samples: &[f64]) -> bool {
+    let exact = samples
+        .iter()
+        .filter(|&&x| {
+            let (code, _) = ucode::nearest(law, (x * 32768.0).round() as i32);
+            (ucode::level(law, code) - x.abs()).abs() < 1e-9
+        })
+        .count();
+    !samples.is_empty() && exact * 10 >= samples.len() * 9
+}
+
+/// The mean square of `samples`, or `None` of too few to mean anything.
+fn mean_square(samples: &[f64]) -> Option<f64> {
+    (samples.len() as u64 >= POWER_WINDOW / 2).then(|| samples.iter().map(|x| x * x).sum::<f64>() / samples.len() as f64)
+}
+
+/// How far past the symbol it decides the refit's equaliser looks: one data
+/// frame, so that the 12-symbol count is undisturbed (see
+/// `Receiver::train_verified_ahead`). The first fit's search settles a dozen
+/// or so symbols in on its own; the refit is taken at the alignment the
+/// correlation found, and without this has no look-ahead at all.
+const REFIT_AHEAD: u64 = 12;
 
 /// How much worse than the fit already in place a refit may be, in decibels,
 /// and still be taken for the alignment's sake. The two-point stream's figure
@@ -1276,6 +1316,23 @@ pub struct Modem {
     cpt: Option<Cp>,
     /// Where TRN1u began, in receiver history indices.
     trn_from: Option<u64>,
+    /// The mean square of the line while the first TRN1u was on it, and
+    /// while the analogue modem was silent under this end's TRN1d
+    /// (9.5.2.1.3): the signal and the noise the upstream rate is chosen
+    /// against, both in the line's own samples.
+    trn1u_power: Option<f64>,
+    silence_power: Option<f64>,
+    /// Whether what arrives is a codec's codewords, sample for sample: a
+    /// network's A/D is in the line, and its steps are a noise no silence
+    /// shows.
+    codewords: bool,
+    /// The upstream rate to ask for whatever the line says, as its drn (see
+    /// [`Self::set_pinned_upstream`]).
+    pinned_up: Option<u8>,
+    /// The analogue modem's Tone A, which is how it begins a retrain
+    /// (9.7.1.2), and whether one has been heard and not yet taken.
+    retrain_watch: RetrainWatch,
+    retrain_heard: bool,
     /// Where the Su that Jp's epsilon is measured on begins, in absolute
     /// symbols, once the S-bar-u reversal that opens it has been heard.
     su_from: Option<u64>,
@@ -1434,6 +1491,8 @@ pub struct Modem {
     outbound: VecDeque<bool>,
     /// Upstream data bits recovered since B1u began, handed up on `take_bits`.
     recovered: Vec<bool>,
+    /// The upstream as the equaliser gave it, for a scope.
+    scope: crate::v92::ScopePair,
     /// Largest sample seen since the last trace line.
     peak: f64,
     notes: Vec<String>,
@@ -1467,6 +1526,12 @@ impl Modem {
             descriptor: None,
             cpt: None,
             trn_from: None,
+            trn1u_power: None,
+            silence_power: None,
+            codewords: false,
+            pinned_up: None,
+            retrain_watch: RetrainWatch::new(Role::Answer, FS),
+            retrain_heard: false,
             su_from: None,
             jp_sent: false,
             refit_from: None,
@@ -1509,6 +1574,7 @@ impl Modem {
             upstream_bits: 0,
             outbound: VecDeque::new(),
             recovered: Vec::new(),
+            scope: crate::v92::ScopePair::default(),
             downstream: None,
             b1d_left: 0,
             downstream_scrambler: Scrambler::new(Mode::Call),
@@ -1540,6 +1606,27 @@ impl Modem {
             }
         }
         self.outbound.extend(bits.iter().copied());
+    }
+
+    /// The upstream rate CPd is to ask for whatever the line's noise says, as
+    /// its drn (1 is 24 000 bit/s, 19 is 48 000; 6.1), or `None` for this
+    /// end's own choice. Read when CPd is designed, during the second TRN1u.
+    pub fn set_pinned_upstream(&mut self, drn: Option<u8>) {
+        self.pinned_up = drn;
+    }
+
+    /// The last two upstream symbols, each against the one after it, for a
+    /// scope (see [`crate::v92::ScopePair`]).
+    #[must_use]
+    pub fn pair(&self) -> Option<(f64, f64)> {
+        self.scope.pair()
+    }
+
+    /// How many points the upstream is being read against, both signs
+    /// counted (see `Receiver::points`).
+    #[must_use]
+    pub fn points(&self) -> usize {
+        self.rx.points().max(2)
     }
 
     /// How many B1d bits are still waiting to be encoded.
@@ -1574,6 +1661,12 @@ impl Modem {
     /// What is on the line, for the transcript.
     #[must_use]
     pub fn phase(&self) -> &'static str {
+        // Data mode is not a stage of Phase 4: the last signal this end sent
+        // is still B1d, and saying so with the call up reads as a call that
+        // is not.
+        if matches!(self.status, Status::Connected { .. }) {
+            return "V.92 data";
+        }
         match self.stage {
             Stage::AwaitRu | Stage::WaitMd => "V.92 phase 3: waiting for Ru",
             Stage::Training => "V.92 phase 3: training on TRN1u",
@@ -1626,6 +1719,13 @@ impl Modem {
         self.now
     }
 
+    /// Whether the analogue modem has begun a retrain with Tone A since this
+    /// was last asked (9.7.1.2). The owner sends what follows: Tone B and
+    /// Phase 2 are V.34's signals.
+    pub fn take_retrain(&mut self) -> bool {
+        std::mem::take(&mut self.retrain_heard)
+    }
+
     /// Lines for the transcript, taken by whoever shows one.
     pub fn take_notes(&mut self) -> Vec<String> {
         std::mem::take(&mut self.notes)
@@ -1652,6 +1752,15 @@ impl Modem {
             if let Ok(mut file) = file.lock() {
                 let _ = writeln!(file, "{} {input:.8}", self.now);
             }
+        }
+        // 9.7.1.2: "If Tone A is detected ... the digital modem shall respond
+        // to retrain". Watched from Phase 4 on, where everything the analogue
+        // modem sends fills the band; in Phase 3 its Ru and Su are six-symbol
+        // patterns, and a start-up that loses its place there has its own
+        // deadlines to end it.
+        if matches!(self.status, Status::Phase4 | Status::Connected { .. }) && self.retrain_watch.feed(input, FS) {
+            self.retrain_heard = true;
+            self.note("V.92: tone A, the analogue modem is retraining".into());
         }
         self.rx.feed(input);
         while let Some(heard) = self.rx.heard() {
@@ -1791,7 +1900,7 @@ impl Modem {
                     self.trn2_from = Some(base + aligned);
                     // 9.6.1.1.1's design is scheduled here: see `design_at`.
                     self.design_at = self.trn2_from.map(|at| at + DESIGN_AFTER);
-                    let taken = self.rx.train_verified(aligned, TRAIN_WINDOW);
+                    let taken = self.rx.train_verified_ahead(aligned, TRAIN_WINDOW, REFIT_AHEAD);
                     if tracing() {
                         eprintln!(
                             "V92TRACE: refit at {aligned}, quality {quality:.3} -> {taken} at {:.1} dB (was {baseline:.1})",
@@ -1863,6 +1972,9 @@ impl Modem {
             let at = from.saturating_sub(base);
             if self.rx.train_near(at, TRAIN_SEARCH) {
                 self.stage = Stage::ReadJa;
+                let heard = self.rx.history_range(from, from + POWER_WINDOW);
+                self.trn1u_power = mean_square(&heard);
+                self.codewords = are_codewords(self.settings.law, &heard);
                 self.note(format!("V.92: TRN1u trained at {:.1} dB", self.rx.snr_db()));
             } else {
                 // A burst at the start of TRN1u must cost a retry, not the
@@ -1914,6 +2026,13 @@ impl Modem {
             Heard::RuReversal { at } => self.ru_reversal(at),
             Heard::Su { at } => {
                 if self.stage == Stage::AwaitSu {
+                    // The analogue modem has been silent since Ja, with this
+                    // end's Sd, S-bar-d and TRN1d going down (9.5.2.1.3): what
+                    // arrived in that time is the line's noise and whatever
+                    // of this end's own signal comes back, which is all the
+                    // upstream will have against it. Read well clear of Su.
+                    let to = at.saturating_sub(SILENCE_BEFORE_SU);
+                    self.silence_power = mean_square(&self.rx.history_range(to.saturating_sub(POWER_WINDOW), to));
                     self.note(format!("V.92: Su at {at}"));
                 }
             }
@@ -2332,10 +2451,52 @@ impl Modem {
         // noise. Asking for a rung the receiver cannot then demodulate would end
         // the call in Phase 4, which is exactly where V.92's last attempt this
         // far stopped.
-        const SLOWEST: u32 = 1;
-        let ja = self.ja.upstream_rates().unwrap_or(0) & SLOWEST;
-        let ja = if ja == 0 { SLOWEST } else { ja };
+        //
+        // Unless there is a reading of the noise after all, which there is:
+        // the analogue modem is silent for the whole of TRN1d, and what
+        // arrives then is noise (and echo) with no fit in between. See below.
+        let every = (1u32 << UP_RATES) - 1;
+        let allowed = match self.ja.upstream_rates().unwrap_or(0) & every {
+            0 => every,
+            mask => mask,
+        };
         let trellis = Trellis::Sixteen;
+        // A rate somebody chose: that rung and no judgement of it, if Ja
+        // allows it and the design can be built at all. It is how to find out
+        // what a line carries rather than what this end predicts of it.
+        if let Some(drn) = self.pinned_up.filter(|&drn| (1..=UP_RATES as u8).contains(&drn))
+            && allowed & (1 << (drn - 1)) != 0
+            && let Some(choice) = choose(&designed, 0.0, 1 << (drn - 1), trellis)
+        {
+            self.note(format!("V.92: upstream pinned at {} bit/s", up_rate(drn)));
+            return Some(choice.parameters);
+        }
+        // The line's own noise, where it was measured: the fastest rung that
+        // stands clear of it by [`UP_MARGIN_DB`], from every rung Ja allowed.
+        //
+        // Not where the samples are a codec's codewords. An A/D's steps are
+        // an error that is only there when there is a signal to quantise, a
+        // silence says nothing of it, and nothing here yet puts the points
+        // on the codec's own levels: so behind a codec the rung stays the
+        // slowest, as it was.
+        if let (Some(signal), Some(silence)) = (self.trn1u_power, self.silence_power)
+            && signal > 0.0
+            && !self.codewords
+        {
+            let snr = 10.0 * (signal / silence.max(signal * 1e-12)).log10();
+            let noise = 10f64.powf(-(snr - UP_MARGIN_DB) / 10.0);
+            if let Some(choice) = choose(&designed, noise, allowed, trellis) {
+                self.note(format!(
+                    "V.92: the line is {snr:.0} dB clear under TRN1d; upstream {} bit/s of {} to {}",
+                    up_rate(choice.parameters.drn),
+                    up_rate(1 + allowed.trailing_zeros() as u8),
+                    up_rate(32 - allowed.leading_zeros() as u8)
+                ));
+                return Some(choice.parameters);
+            }
+        }
+        // Neither: the slowest rung Ja allows.
+        let ja = allowed.isolate_lowest_one();
         // The noise the design is told about, and the one number in this file
         // that is a reading of the line rather than of a fit. TRN1u is a
         // two-point stream with two thirds of its power at 4000 Hz, where a
@@ -2878,6 +3039,10 @@ impl Modem {
                 self.cp_len = 0;
                 self.cp_pos = 0;
                 self.e1u_zeroes = 0;
+                // The far end has stepped by epsilon on this reversal, and by
+                // half a symbol on the one before: whatever was fitted and
+                // scored before now was scored at a phase that has gone.
+                self.rx.far_end_stepped();
                 self.note("V.92: second S-bar-u, 107 on".into());
             }
             _ => {}
@@ -2885,6 +3050,7 @@ impl Modem {
     }
 
     fn symbol(&mut self, symbol: Symbol) {
+        self.scope.feed(symbol.value);
         // 8.7.2-8.7.6: Phase 4's upstream arrives four points to a symbol, and
         // what it carries is SUVu, CPu, E2u and then B1u's payload.
         if self.upstream.is_some() || self.upstream_data.is_some() {

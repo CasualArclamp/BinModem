@@ -383,6 +383,38 @@ impl Settings {
     }
 }
 
+/// The CPt an end that asked for no DIL sends: 48 000 bit/s (drn 16) on
+/// Ucodes 16 to 47 in every interval.
+///
+/// With no DIL nothing has been measured, so this is a guess, and a careful
+/// one: Ucodes below 16 are a few LSBs of the codec apart and a resampler's
+/// noise alone confuses them, and 32 points carry drn 16's six bits a symbol
+/// with room to spare (Table 14/V.90).
+#[must_use]
+pub fn readable_cpt() -> Cp {
+    let mask = (16..=47u8).fold(0u128, |mask, u| mask | 1 << u);
+    Cp { drn: 16, constellations: vec![mask], ..Cp::default() }
+}
+
+/// A CPt for a downstream rate somebody chose, as its drn (1 is 28 000 bit/s,
+/// 22 is 56 000; Table 14/V.90): just enough levels to carry it, spread evenly
+/// over Ucodes 16 to 79, the same in every interval.
+///
+/// A rate of (drn + 20) x 8000/6 is (drn + 20)/6 bits a symbol, one of them
+/// the sign, so the levels wanted are 2^((drn + 14)/6) rounded up: six at
+/// 28 000, thirty-two at 48 000 and all sixty-four at 56 000. Like
+/// [`readable_cpt`] it is a guess made without a DIL -- which rates it reads
+/// cleanly at is the line's to say, and trying one is how to ask.
+#[must_use]
+pub fn cpt_for(drn: u8) -> Cp {
+    const LOWEST: u32 = 16;
+    const SPAN: u32 = 64;
+    let drn = drn.clamp(1, DOWNSTREAM_RATES as u8);
+    let levels = (2f64.powf((f64::from(drn) + 14.0) / 6.0) - 1e-9).ceil().clamp(2.0, f64::from(SPAN)) as u32;
+    let mask = (0..levels).fold(0u128, |mask, k| mask | 1 << (LOWEST + k * SPAN / levels));
+    Cp { drn, constellations: vec![mask], ..Cp::default() }
+}
+
 /// How the start-up is going.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -1046,6 +1078,8 @@ pub struct Modem {
     b1d_failed: Option<u64>,
     /// Data bits received since circuit 104 was unclamped, for whoever asks.
     recovered: Vec<bool>,
+    /// The downstream as the equaliser gave it, for a scope.
+    scope: crate::v92::ScopePair,
     status: Status,
     notes: Vec<String>,
 }
@@ -1089,6 +1123,7 @@ impl Modem {
             circuit109: false,
             b1d_failed: None,
             recovered: Vec::new(),
+            scope: crate::v92::ScopePair::default(),
             source: Source::new(&settings),
             settings,
             rx,
@@ -1205,6 +1240,26 @@ impl Modem {
     /// gone out, because until then circuit 106 is OFF (9.6.2.1.5).
     pub fn send_bits(&mut self, bits: &[bool]) {
         self.source.outbound.extend(bits.iter().copied());
+    }
+
+    /// The last two downstream symbols, each against the one after it, for
+    /// a scope (see [`crate::v92::ScopePair`]).
+    #[must_use]
+    pub fn pair(&self) -> Option<(f64, f64)> {
+        self.scope.pair()
+    }
+
+    /// How many points the downstream is being read against, both signs
+    /// counted: two through Phase 3, the CPt's constellation through Phase 4
+    /// (V.90 8.6.5) and the CPu's in data mode (V.90 8.6.1).
+    #[must_use]
+    pub fn points(&self) -> usize {
+        let of = |cp: &Cp| 2 * cp.points(0).len();
+        match self.status {
+            Status::Connected { .. } => self.cpu().map_or(2, of),
+            Status::Phase4 => of(&self.settings.cpt),
+            _ => 2,
+        }
     }
 
     /// How many of those bits the encoder has not taken yet.
@@ -2048,6 +2103,7 @@ impl Modem {
     }
 
     fn symbol(&mut self, symbol: Symbol) {
+        self.scope.feed(symbol.value);
         // From R-bar-i on, what arrives is the 5.4 encoder's and is read a
         // data frame at a time. The equaliser calls U_INFO's level one, and
         // hands it over the other way up ([`DOWN_SIGN`]).
