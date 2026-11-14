@@ -1059,6 +1059,8 @@ pub struct Modem {
     b1d_failed: Option<u64>,
     /// Data bits received since circuit 104 was unclamped, for whoever asks.
     recovered: Vec<bool>,
+    /// The downstream as the equaliser gave it, for a scope.
+    scope: crate::v92::ScopePair,
     status: Status,
     notes: Vec<String>,
 }
@@ -1102,6 +1104,7 @@ impl Modem {
             circuit109: false,
             b1d_failed: None,
             recovered: Vec::new(),
+            scope: crate::v92::ScopePair::default(),
             source: Source::new(&settings),
             settings,
             rx,
@@ -1218,6 +1221,26 @@ impl Modem {
     /// gone out, because until then circuit 106 is OFF (9.6.2.1.5).
     pub fn send_bits(&mut self, bits: &[bool]) {
         self.source.outbound.extend(bits.iter().copied());
+    }
+
+    /// The last two downstream symbols, each against the one after it, for
+    /// a scope (see [`crate::v92::ScopePair`]).
+    #[must_use]
+    pub fn pair(&self) -> Option<(f64, f64)> {
+        self.scope.pair()
+    }
+
+    /// How many points the downstream is being read against, both signs
+    /// counted: two through Phase 3, the CPt's constellation through Phase 4
+    /// (V.90 8.6.5) and the CPu's in data mode (V.90 8.6.1).
+    #[must_use]
+    pub fn points(&self) -> usize {
+        let of = |cp: &Cp| 2 * cp.points(0).len();
+        match self.status {
+            Status::Connected { .. } => self.cpu().map_or(2, of),
+            Status::Phase4 => of(&self.settings.cpt),
+            _ => 2,
+        }
     }
 
     /// How many of those bits the encoder has not taken yet.
@@ -2061,6 +2084,7 @@ impl Modem {
     }
 
     fn symbol(&mut self, symbol: Symbol) {
+        self.scope.feed(symbol.value);
         // From R-bar-i on, what arrives is the 5.4 encoder's and is read a
         // data frame at a time. The equaliser calls U_INFO's level one, and
         // hands it over the other way up ([`DOWN_SIGN`]).

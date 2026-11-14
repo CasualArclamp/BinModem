@@ -113,6 +113,23 @@ impl Analogue {
         self.v92.as_deref().map(pcm_line::Line::modem)
     }
 
+    /// The last two downstream symbols, each against the one after it, for a
+    /// scope: V.90's or V.92's, whichever the call came to.
+    pub fn pair(&self) -> Option<(f64, f64)> {
+        match self.v92() {
+            Some(m) => m.pair(),
+            None => self.v90.as_ref().and_then(analogue::Modem::pair),
+        }
+    }
+
+    /// How many points the downstream is being read against.
+    pub fn points(&self) -> usize {
+        match self.v92() {
+            Some(m) => m.points(),
+            None => self.v90.as_ref().map_or(2, analogue::Modem::points),
+        }
+    }
+
     /// How many bits one upstream data frame takes, for a caller keeping the
     /// queue fed (see [`pcm_up::Modem::fill_bits`]). Zero outside V.92's data
     /// mode.
@@ -633,8 +650,9 @@ impl Digital {
 
     /// The analogue modem's last upstream symbol, for a scope.
     pub fn constellation_point(&self) -> Option<(f64, f64)> {
-        if self.v92.is_some() {
-            return None;
+        if let Some(m) = self.v92.as_ref() {
+            // PCM, which has no plane: each symbol against the next.
+            return m.pair();
         }
         match self.v90.as_ref() {
             Some(m) => m.last_point(),
@@ -646,7 +664,8 @@ impl Digital {
     /// [`Self::constellation_point`].
     pub fn constellation_peak(&self) -> Option<f64> {
         if self.v92.is_some() {
-            return None;
+            // The pairs are scaled to one already.
+            return Some(1.0);
         }
         match self.v90.as_ref() {
             Some(m) => Some(m.upstream_peak()),
@@ -656,8 +675,8 @@ impl Digital {
 
     /// Points the upstream is read against.
     pub fn constellation_size(&self) -> Option<usize> {
-        if self.v92.is_some() {
-            return None;
+        if let Some(m) = self.v92.as_ref() {
+            return Some(m.points());
         }
         match self.v90.as_ref() {
             Some(m) => Some(m.upstream_points()),

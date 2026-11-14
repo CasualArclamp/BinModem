@@ -243,6 +243,41 @@ impl FilterSections {
     }
 }
 
+/// The last two symbols a PCM receiver equalised, each against the one after
+/// it, for a scope: there is no plane to plot PCM in, but a sample set
+/// against the next lays the levels out on a grid of its own (as
+/// `v90::analogue::Modem::pair` does for V.90's downstream).
+///
+/// The scale is the loudest symbol of the last second or so, held and let
+/// fall slowly, so that two points, four and a data constellation each fill
+/// the box without anyone having to say which is on the line.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScopePair {
+    last: [f64; 2],
+    peak: f64,
+    any: bool,
+}
+
+impl ScopePair {
+    /// How much of the held peak is left a symbol later: half in 0.9 s.
+    const HOLD: f64 = 0.9999;
+
+    /// One equalised symbol.
+    pub fn feed(&mut self, value: f64) {
+        self.last = [self.last[1], value];
+        self.peak = (self.peak * Self::HOLD).max(value.abs());
+        self.any = true;
+    }
+
+    /// The last symbol but one against the last, scaled so the loudest is
+    /// one. `None` before any symbol has been read.
+    #[must_use]
+    pub fn pair(&self) -> Option<(f64, f64)> {
+        let scale = self.peak.max(1e-9);
+        self.any.then(|| (self.last[0] / scale, self.last[1] / scale))
+    }
+}
+
 /// What INFO1a bits 12:17 allow a CPd to download: the sections, the total
 /// number of coefficients and the most any one section may have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

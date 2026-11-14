@@ -1191,6 +1191,20 @@ impl Receiver {
         self.b1u_differed = 0;
     }
 
+    /// How many points the slicer is deciding between, both signs counted:
+    /// two, four or eight in training, and twice the levels CPd's set holds
+    /// in data mode. Nought when nothing is decided here.
+    #[must_use]
+    pub fn points(&self) -> usize {
+        match &self.slicer {
+            Slicer::TwoPoint => 2,
+            Slicer::FourPoint => 4,
+            Slicer::EightPoint => 8,
+            Slicer::Levels(levels) => 2 * levels.len(),
+            Slicer::Unsliced => 0,
+        }
+    }
+
     /// 9.5.1.1.10: "the first symbol of the second TRN1u shall be symbol 0 of
     /// the 12-symbol data frame". The count starts here.
     pub fn set_frame_origin(&mut self, at: u64) {

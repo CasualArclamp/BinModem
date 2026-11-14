@@ -1441,6 +1441,8 @@ pub struct Modem {
     outbound: VecDeque<bool>,
     /// Upstream data bits recovered since B1u began, handed up on `take_bits`.
     recovered: Vec<bool>,
+    /// The upstream as the equaliser gave it, for a scope.
+    scope: crate::v92::ScopePair,
     /// Largest sample seen since the last trace line.
     peak: f64,
     notes: Vec<String>,
@@ -1516,6 +1518,7 @@ impl Modem {
             upstream_bits: 0,
             outbound: VecDeque::new(),
             recovered: Vec::new(),
+            scope: crate::v92::ScopePair::default(),
             downstream: None,
             b1d_left: 0,
             downstream_scrambler: Scrambler::new(Mode::Call),
@@ -1547,6 +1550,20 @@ impl Modem {
             }
         }
         self.outbound.extend(bits.iter().copied());
+    }
+
+    /// The last two upstream symbols, each against the one after it, for a
+    /// scope (see [`crate::v92::ScopePair`]).
+    #[must_use]
+    pub fn pair(&self) -> Option<(f64, f64)> {
+        self.scope.pair()
+    }
+
+    /// How many points the upstream is being read against, both signs
+    /// counted (see `Receiver::points`).
+    #[must_use]
+    pub fn points(&self) -> usize {
+        self.rx.points().max(2)
     }
 
     /// How many B1d bits are still waiting to be encoded.
@@ -1581,6 +1598,12 @@ impl Modem {
     /// What is on the line, for the transcript.
     #[must_use]
     pub fn phase(&self) -> &'static str {
+        // Data mode is not a stage of Phase 4: the last signal this end sent
+        // is still B1d, and saying so with the call up reads as a call that
+        // is not.
+        if matches!(self.status, Status::Connected { .. }) {
+            return "V.92 data";
+        }
         match self.stage {
             Stage::AwaitRu | Stage::WaitMd => "V.92 phase 3: waiting for Ru",
             Stage::Training => "V.92 phase 3: training on TRN1u",
@@ -2896,6 +2919,7 @@ impl Modem {
     }
 
     fn symbol(&mut self, symbol: Symbol) {
+        self.scope.feed(symbol.value);
         // 8.7.2-8.7.6: Phase 4's upstream arrives four points to a symbol, and
         // what it carries is SUVu, CPu, E2u and then B1u's payload.
         if self.upstream.is_some() || self.upstream_data.is_some() {
