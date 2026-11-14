@@ -469,6 +469,9 @@ pub struct Answerer {
     /// receiver is up, which on V.92 is two seconds before the far end's data
     /// mode exists.
     detecting: bool,
+    /// Whether the clock has run out on a pattern that was being repeated
+    /// for an originator whose flags never came.
+    expired: bool,
     /// Characters of plain text in a row, and everything heard while
     /// detecting.
     text: u32,
@@ -500,6 +503,7 @@ impl Answerer {
             text: 0,
             heard: Vec::new(),
             detecting: false,
+            expired: false,
         }
     }
 
@@ -550,6 +554,7 @@ impl Answerer {
         // Nothing to say when nothing was asked, and nothing more to say once
         // the clock has given up on the far end.
         matches!(self.outcome, Outcome::ProtocolStarted | Outcome::TimedOut)
+            || self.expired
             || (self.repeats >= ADP_REPEATS && self.flags)
     }
 
@@ -693,7 +698,17 @@ impl Answerer {
             _ => self.t400_ms.saturating_mul(10),
         };
         if self.elapsed >= patience {
-            self.outcome = Outcome::TimedOut;
+            if self.outcome == Outcome::OriginatorDetected {
+                // The pattern has been repeated for as long as it is going to
+                // be, but an originator was heard, and that is still what
+                // happened: a far end that sent an ODP does V.42, and the
+                // protocol phase is what follows it whether or not its flags
+                // were seen. Calling this a timeout would send the call
+                // transparent against a modem known to want error control.
+                self.expired = true;
+            } else {
+                self.outcome = Outcome::TimedOut;
+            }
         }
         self.outcome
     }

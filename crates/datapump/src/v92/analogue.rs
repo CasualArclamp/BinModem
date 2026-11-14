@@ -546,7 +546,7 @@ impl Modem {
         while let Some(heard) = self.rx.heard() {
             self.heard(heard);
         }
-        if tracing() && self.now % 2000 == 0 {
+        if tracing() && self.now.is_multiple_of(2000) {
             eprintln!(
                 "V92ATRACE: {} symbols, {}, up {:?}, trained {}, snr {:.1}",
                 self.now,

@@ -392,7 +392,7 @@ fn decode_frame(
     // is a search over readings of the clause, not a hunt for the one reading
     // that happens to keep every frame inside its rate.
     let s = 2 * r > m.wrapping_sub(1);
-    *d_prev = s ^ *d_prev;
+    *d_prev ^= s;
     let value = r & ((1u128 << k) - 1);
     Some((0..k).map(|i| (value >> i & 1) == 1).collect::<Vec<bool>>())
 }
@@ -532,7 +532,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             rows.push((agree, seen, at));
         }
-        rows.sort_by(|a, b| b.0.cmp(&a.0));
+        rows.sort_by_key(|a| std::cmp::Reverse(a.0));
         for &(agree, seen, at) in rows.iter().take(3) {
             println!("  {at:>6}  {agree:>4}/{seen:<4}   {:.1}%", 100.0 * agree as f64 / seen as f64);
         }
@@ -641,7 +641,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let mut common: Vec<(u8, usize)> = octets.into_iter().collect();
-    common.sort_by(|a, b| b.1.cmp(&a.1));
+    common.sort_by_key(|a| std::cmp::Reverse(a.1));
     let shown: Vec<String> = common.iter().take(8).map(|(octet, n)| format!("{octet:02x}:{n}")).collect();
     println!("  most common octets in the window: {}", shown.join(" "));
 

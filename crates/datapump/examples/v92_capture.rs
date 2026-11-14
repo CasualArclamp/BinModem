@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let bytes = fs::read(&path)?;
     let samples: Vec<f64> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|p| f64::from(i16::from_le_bytes([p[0], p[1]])))
         .collect();
     let seconds = samples.len() as f64 / 8000.0;
@@ -107,7 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut finder = UpFinder::new(trn2u_unit(false));
             let (from, to) = limits(span, seconds);
             let mut found = 0;
-            for (n, symbol) in samples.chunks_exact(UP_SPB).enumerate() {
+            for (n, symbol) in samples.as_chunks::<UP_SPB>().0.iter().enumerate() {
                 if n * UP_SPB < from || n * UP_SPB >= to {
                     continue;
                 }

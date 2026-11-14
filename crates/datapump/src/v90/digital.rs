@@ -111,9 +111,14 @@ pub struct Habits {
 }
 
 impl Habits {
-    /// TRN1d long enough for a far end to turn round, and the
-    /// Recommendation's wait for S.
-    pub const PROMPT: Self = Self { trn1d: TRN1D, s_wait_counts_round_trip: true };
+    /// Short TRN1d, and the Recommendation's wait for S.
+    pub const PROMPT: Self = Self { trn1d: 0.3, s_wait_counts_round_trip: true };
+
+    /// TRN1d long enough for a far end to turn round (see [`TRN1D`]), and the
+    /// Recommendation's wait for S. What a server that offers V.92 uses: the
+    /// modems that needed it were V.92 ones. A plain V.90 server keeps
+    /// [`Self::PROMPT`], which every V.90 call measured here was tuned on.
+    pub const PATIENT: Self = Self { trn1d: TRN1D, s_wait_counts_round_trip: true };
 
     /// What a live server did: four seconds of TRN1d, and a wait for S that
     /// did not allow for a second-long round trip.

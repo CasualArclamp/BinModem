@@ -721,7 +721,7 @@ impl Source {
     fn padded(&self, mut bits: Vec<bool>) -> Vec<bool> {
         let d = self.phase4_frame_bits();
         if d > 1 {
-            while bits.len() % d != 0 {
+            while !bits.len().is_multiple_of(d) {
                 bits.push(false);
             }
         }
@@ -1567,7 +1567,7 @@ impl Modem {
     pub fn step(&mut self, input: f64) -> f64 {
         self.now += 1;
         self.peak = self.peak.max(input.abs());
-        if tracing() && self.now % 2000 == 0 {
+        if tracing() && self.now.is_multiple_of(2000) {
             eprintln!(
                 "V92TRACE: {} symbols, stage {:?}, out {:?}, peak {:.0}, rx trained {}, snr {:.1}",
                 self.now,
@@ -2032,12 +2032,9 @@ impl Modem {
         let Some(exchange) = self.exchange.as_mut() else { return };
         let kind = exchange.next_sequence(now);
         let ack = exchange.sequence_started(kind);
-        match kind {
-            SequenceKind::Suv => {
-                let bits = Suvd { silence: false, ack }.to_bits(INTERVALS);
-                self.source.send(Out::Suvd, bits);
-            }
-            _ => {}
+        if kind == SequenceKind::Suv {
+            let bits = Suvd { silence: false, ack }.to_bits(INTERVALS);
+            self.source.send(Out::Suvd, bits);
         }
     }
 
@@ -2687,7 +2684,7 @@ impl Modem {
                 if let Some(bit) = self.reader.feed(symbol.value) {
                     self.ja_bits += 1;
                     self.ja_ones += u64::from(bit);
-                    if tracing() && self.ja_bits % 400 == 0 {
+                    if tracing() && self.ja_bits.is_multiple_of(400) {
                         eprintln!(
                             "V92TRACE: Ja reader {} bits, {} ones, value {:.3}",
                             self.ja_bits, self.ja_ones, symbol.value
@@ -2815,7 +2812,7 @@ impl Modem {
     fn cpt_bit(&mut self, bit: bool) {
         self.cp_bits += 1;
         self.cp_ones += u64::from(bit);
-        if tracing() && self.cp_bits % 400 == 0 {
+        if tracing() && self.cp_bits.is_multiple_of(400) {
             eprintln!("V92TRACE: CPt reader {} bits, {} ones", self.cp_bits, self.cp_ones);
             self.cp_ones = 0;
         }
@@ -3172,7 +3169,7 @@ mod tests {
         // The slowest rung of 6.1's ladder, which is what this end asks for
         // first: K = 36 bits over twelve intervals, eight levels each.
         let parameters = {
-            let mut taps = vec![0.0f64; 16];
+            let mut taps = [0.0f64; 16];
             taps[0] = 1.0;
             let channel = Channel::estimate(&[1.0, -1.0, 1.0, 1.0, -1.0, 1.0], &[1.0, -1.0, 1.0, 1.0, -1.0, 1.0], 4)
                 .expect("a flat channel");

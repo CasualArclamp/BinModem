@@ -2141,7 +2141,7 @@ impl Modem {
         if std::env::var_os("V92_EC_TRACE").is_some() {
             use std::sync::atomic::{AtomicU64, Ordering};
             static LAST: AtomicU64 = AtomicU64::new(0);
-            let now = self.call_samples as u64;
+            let now = self.call_samples;
             let prev = LAST.load(Ordering::Relaxed);
             if now.saturating_sub(prev) >= 8 * 2000 {
                 LAST.store(now, Ordering::Relaxed);

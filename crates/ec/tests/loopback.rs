@@ -750,11 +750,13 @@ fn every_repeated_xid_command_is_answered() {
     // The pattern is sent for at least ten repetitions and then until the
     // clock says the originator is not coming (7.2.1.3, III.1), so the phase
     // does not change until both the timer has run and the last repetition is
-    // off the queue.
+    // off the queue. That clock is ten T400s since the pattern was made to
+    // wait for a far end whose data mode starts after this one's (see
+    // `Answerer::tick`).
     for _ in 0..40_000 {
         stack.next_bit();
     }
-    stack.tick(ec::detect::DEFAULT_T400_MS);
+    stack.tick(ec::detect::DEFAULT_T400_MS * 10);
     for _ in 0..4096 {
         if stack.phase() != ec::stack::Phase::Detecting {
             break;

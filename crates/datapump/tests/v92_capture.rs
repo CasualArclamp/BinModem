@@ -24,7 +24,7 @@ use datapump::v92::up_signals::TwoPointReader;
 fn capture() -> Option<Vec<f64>> {
     let path = PathBuf::from(std::env::var_os("V92_CAPTURE")?);
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    Some(bytes.chunks_exact(2).map(|c| f64::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0).collect())
+    Some(bytes.as_chunks::<2>().0.iter().map(|c| f64::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0).collect())
 }
 
 /// Whether a CPt of any kind can be read out of a capture at all.

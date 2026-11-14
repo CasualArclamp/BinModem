@@ -396,6 +396,9 @@ impl Digital {
     /// which at that point is only the empty phase 2.
     pub fn with_v92(mut self, wish: V92Wish) -> Self {
         self.wish = wish;
+        // The far ends this is for take a quarter of a second to turn round
+        // to TRN1d, which the short one is over before (see `digital::TRN1D`).
+        self.habits = digital::Habits::PATIENT;
         self.v34 = v34::Modem::with_phase2(
             phase2::Modem::v90(Pcm::DigitalV92(self.info0d, wish), digital::FS, self.lead_in),
             digital::FS,

@@ -33,6 +33,23 @@
 //! name, because Phase 3 alone runs five of them at once and V.90's single
 //! overwritten slot cannot carry that.
 
+// These modules came in as one contribution, written before clippy 1.100
+// and its newer lints. What it objects to here is style -- indexed loops
+// over taps, negated float comparisons, a loop switched off as `0..0` --
+// and rewriting another author's signal processing to suit a linter risks
+// changing what it computes. Allowed for this module until each is looked
+// at with the tests beside it.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::neg_cmp_op_on_partial_ord,
+    clippy::should_implement_trait,
+    clippy::assertions_on_constants,
+    clippy::single_match,
+    clippy::redundant_locals,
+    clippy::reversed_empty_ranges,
+    unused_assignments
+)]
+
 pub mod analogue;
 pub mod anspcm;
 pub mod decoder;

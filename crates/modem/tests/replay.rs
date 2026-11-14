@@ -260,7 +260,7 @@ fn probe_replay_raw() {
     let fs: f64 = std::env::var("MODEM_FS").ok().and_then(|s| s.parse().ok()).unwrap_or(8000.0);
     let bytes = std::fs::read(&path).expect("could not read the capture");
     let line: Vec<f64> = bytes
-        .chunks_exact(2)
+        .as_chunks::<2>().0.iter()
         .map(|c| f64::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0)
         .collect();
     println!("\n{path}: {:.1} s at {fs} Hz", line.len() as f64 / fs);

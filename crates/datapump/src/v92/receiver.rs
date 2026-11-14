@@ -1406,7 +1406,7 @@ impl Receiver {
             use std::sync::atomic::{AtomicU64, Ordering};
             static N: AtomicU64 = AtomicU64::new(0);
             let n = N.fetch_add(1, Ordering::Relaxed);
-            if std::env::var_os("V92_RX_TRACE").is_some() && n % 4000 == 0 {
+            if std::env::var_os("V92_RX_TRACE").is_some() && n.is_multiple_of(4000) {
                 let taps: f64 = (self.forward.iter().map(|t| t * t).sum::<f64>()
                     / self.forward.len().max(1) as f64)
                     .sqrt();
@@ -2895,7 +2895,7 @@ mod tests {
         eprintln!("V92BENCH: single TRN1u: designed {designed} at {fitted:.2} dB, taken {taken} -> {:.2} dB", rx.snr_db());
         let best = if taken { rx.snr_db() } else { fitted };
         let _ = best;
-        #[allow(unused_mut)]
+
         assert!(designed && taken, "the Phase 4 fit needs the second TRN1u, and it must not");
         assert!(best.is_finite());
     }
