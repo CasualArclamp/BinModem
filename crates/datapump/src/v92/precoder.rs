@@ -59,11 +59,13 @@ use crate::v34::trellis::{self, Code};
 /// and always on the first symbol of a run, where c(n) is zero and the two
 /// members a(-1) and a(0) are equidistant.
 ///
-/// Nothing on the wire depends on which way a tie goes: the digital modem
-/// decodes the index it actually receives, and 6.4.1's differential sign step
-/// makes even a wholesale inversion of every index decode the same. The
-/// setting is named so that a capture which shows a far end's transmitter
-/// preferring the larger magnitude can be matched with one edit.
+/// No bit on the wire depends on which way a tie goes: the digital modem
+/// decodes the index it actually receives. What does depend on it is the
+/// digital modem's prediction of B1u (`digital::Modem::begin_b1u`), which
+/// runs this chain to say what the analogue modem is about to send and is
+/// checked against what arrives for exactly that reason. The setting is named
+/// so that a capture which shows a far end's transmitter preferring the larger
+/// magnitude can be matched with one edit.
 pub const TIE_TO_SMALLER_INDEX: bool = true;
 
 /// The index offset the class of a 4D pair's *first* symbol carries, in
@@ -85,6 +87,19 @@ pub const TIE_TO_SMALLER_INDEX: bool = true;
 /// likely how a pair's first index is numbered when the constellation's levels
 /// arrive from a CPd of eight odd magnitudes; the offline enumeration that
 /// established it is `crates/datapump/examples/v92_b1u_search.rs`.
+///
+/// It has a cost the printed classes do not have, and the capture could not
+/// show it. With eta_k = Ki + z_k Mi everywhere, inverting every symbol turns
+/// each Ki into Mi - 1 - Ki, which is 6.4.1's R0 complemented, and the
+/// differential sign of 6.4.1 takes that out: the upstream reads the same
+/// either way up. With an offset of o on some positions those become
+/// Mi - 1 - Ki - 2o, which is the same thing only when Mi divides 2o. At
+/// Mi = 8 it does not, and an upstream read upside down comes out with one bit
+/// in six wrong -- B1u as 83% ones, which is the figure quoted above. So the
+/// digital modem has to read the upstream the right way up
+/// (`receiver::Receiver::set_trn2u_seed`, from 8.7.6), and a capture that was
+/// read the other way up would have measured this constant with the other
+/// sign.
 pub const PAIR_FIRST_INDEX_OFFSET: i64 = 2;
 
 /// Whether `k` is the first index of its 4D pair. 6.4.3's inverse map takes

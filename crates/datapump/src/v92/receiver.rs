@@ -36,10 +36,11 @@ use std::collections::VecDeque;
 
 use dsp::Complex;
 
+use super::precoder::{Precoder, Prefilter};
 use super::up_signals::{self, RU_PERIOD};
 use crate::v32::Mode;
 
-use super::UP_INTERVALS;
+use super::{Filters, UP_INTERVALS};
 
 /// The mean square a window needs before any of its shape means anything.
 ///
@@ -190,6 +191,28 @@ pub const DFE_FORWARD: usize = 48;
 /// what is left of the channel is a post-cursor a few symbols long, which is
 /// exactly what a DFE takes out.
 pub const DFE_FEEDBACK: usize = 16;
+
+/// The feed-forward length of the data-mode fit, when this end's CPd has asked
+/// the far end to shape what it sends ([`Receiver::train_for_data_mode`]).
+///
+/// Twice [`DFE_FORWARD`], and the second half is the design's. The prefilter
+/// is the inverse of the line *as the design saw it*, which is forty-eight taps
+/// from the main one on; write the line as that part and the part before it,
+/// and what the prefilter leaves of the whole is the Phase 4 problem over
+/// again with those forty-eight taps convolved into its answer. Measured
+/// between this crate's two modems, as the fit's own signal to noise against
+/// the Phase 4 fit's on the same TRN2u:
+///
+/// | line | Phase 4, 48 taps | data, 48 | data, 96 | data, 144 |
+/// |---|---|---|---|---|
+/// | 3.4 kHz, no DIL | 49.1 dB | 37.6 | 48.6 | 49.1 |
+/// | 3.4 kHz, a DIL | 49.1 dB | 29.0 | 47.4 | 49.1 |
+/// | 3.7 kHz through mu-law, no DIL | 36.2 dB | 18.5 | 35.0 | 36.7 |
+/// | 3.7 kHz through A-law, a DIL | 36.9 dB | 25.5 | 36.8 | 37.3 |
+///
+/// At forty-eight the upstream of the last two lost bits in data mode; at
+/// ninety-six all four carry it clean, and the third half buys a decibel.
+pub const DATA_FORWARD: usize = 2 * DFE_FORWARD;
 
 /// How far the feed-forward section may move per symbol in data mode, as a
 /// fraction of the tap norm: a decision-directed step, and nothing more.
@@ -556,6 +579,17 @@ pub enum Slicer {
     EightPoint,
     /// The levels CPd's constellation set holds, in ascending order.
     Levels(Vec<f64>),
+    /// Nothing is decided here: the equaliser's output is handed over as it
+    /// is, for a reader that slices it itself.
+    ///
+    /// The analogue modem's Phase 4 downstream is this. What arrives is V.90
+    /// 5.4's encoder on six constellations, one for each data frame interval
+    /// (V.90 8.6.5), and which of the six a symbol belongs to is the reader's
+    /// to know, not this receiver's. With no decisions there is nothing for
+    /// the level anchor to measure against either, so the gain stays where
+    /// training left it -- a two-point anchor held against a PCM constellation
+    /// would follow the data instead of the line.
+    Unsliced,
 }
 
 impl Slicer {
@@ -579,6 +613,7 @@ impl Slicer {
                 nearest(&set, value)
             }
             Self::Levels(levels) => nearest(levels, value),
+            Self::Unsliced => None,
         }
     }
 
@@ -596,6 +631,8 @@ impl Slicer {
                 }
                 if closest.is_finite() { closest / 2.0 } else { 0.5 }
             }
+            // No decisions, so no span to hold their errors against.
+            Self::Unsliced => 1.0,
         }
     }
 }
@@ -777,9 +814,34 @@ pub struct Receiver {
     /// its symbols are known, which is a better anchor than TRN1u because they
     /// are the very levels Phase 4 is read with.
     pending_levels: Option<Vec<f64>>,
+    /// And a line handed to the next fit instead of the history's own samples,
+    /// for the one fit that is made against a line nobody has sent yet: TRN2u
+    /// as the prefilter CPd asks for would have shaped it (see
+    /// [`Self::train_for_data_mode`]).
+    pending_line: Option<Vec<f64>>,
     /// The Phase 4 fit, designed while the second TRN1u is still on the line
     /// and put in place when TRN2u begins (see [`Self::prepare_phase_four`]).
     phase_four: Option<Fitted>,
+    /// The data-mode fit, made while TRN2u is on the line and put in place
+    /// when B1u begins (see [`Self::train_for_data_mode`]). `None` when this
+    /// end's CPd asks the far end for no shaping, and the Phase 4 equaliser is
+    /// then data mode's as well.
+    data_fit: Option<Fitted>,
+    /// Symbols still to go before the data-mode fit's window holds nothing
+    /// but the line it was fitted for: see [`Self::set_data_mode`].
+    settling: usize,
+    /// B1u as this end's CPd says it will be sent, in the slicer's units, and
+    /// how many symbols are still to come before its first: see
+    /// [`Self::expect_b1u`].
+    b1u: VecDeque<f64>,
+    b1u_after: usize,
+    /// How often, since the window filled, the slicer's own decision was the
+    /// B1u symbol expected and how often it was not.
+    b1u_agreed: u32,
+    b1u_differed: u32,
+    /// The sign TRN2u's differential encoder starts from: whether the last
+    /// symbol of E1u was negative (8.7.6). See [`Self::set_trn2u_seed`].
+    trn2u_seed: bool,
     /// Training: the feed-forward and feedback sections of the decision
     /// feedback equaliser the fit designed.
     forward: Vec<f64>,
@@ -850,7 +912,15 @@ impl Receiver {
             state: Hunt::Searching,
             anchor: None,
             pending_levels: None,
+            pending_line: None,
             phase_four: None,
+            data_fit: None,
+            settling: 0,
+            b1u: VecDeque::new(),
+            b1u_after: 0,
+            b1u_agreed: 0,
+            b1u_differed: 0,
+            trn2u_seed: false,
             forward: Vec::new(),
             feedback: Vec::new(),
             decided: VecDeque::with_capacity(DFE_FEEDBACK + 1),
@@ -987,27 +1057,92 @@ impl Receiver {
         self.gain = 1.0;
     }
 
-    /// Recondition the slicer for B1u (9.6.1.1.6), and keep the equaliser.
+    /// Say which sign TRN2u starts from: `negative` is whether the last symbol
+    /// of the E1u before it was a negative voltage.
+    ///
+    /// "The sign bit of TRN2u is differentially encoded by modulo 2 addition
+    /// of the present sign bit with the previously transmitted sign bit. The
+    /// differential encoder memory shall be initialized with the last
+    /// transmitted sign bit of the preceding E1u sequence" (8.7.6). So TRN2u
+    /// is one sequence and not one of two: its scrambler starts from zero and
+    /// its first sign from a symbol this end has just read, through an
+    /// equaliser whose own polarity TRN1u fixed ("a scrambler output of 0
+    /// represents a positive voltage", 8.5.7).
+    ///
+    /// The fits made on TRN2u took it with a positive start whatever E1u had
+    /// been, and let the least squares absorb the difference: the equaliser
+    /// then came out inverted on every call whose E1u ended negative. Nothing
+    /// in Phase 4 can tell, because SUVu, CPu and E2u are all sign
+    /// differential (8.7.2, 8.7.3, 8.7.5). Data mode can. 6.4.1 carries a data
+    /// frame's sign differentially, and with every class as 6.4.2 prints it an
+    /// inverted line turns each Ki into Mi - 1 - Ki, which is that sign and
+    /// nothing else, so it would read the same. With the first index of a pair
+    /// taken two further on (`precoder::PAIR_FIRST_INDEX_OFFSET`, which is a
+    /// measurement and not the clause) it does not: an inverted symbol stream
+    /// decodes with one bit in six wrong, B1u as 300 ones in 360. Between this
+    /// crate's two modems that was the upstream of every call in which a DIL
+    /// had been asked for, whose E1u ends on the other sign from a call's
+    /// without one.
+    pub fn set_trn2u_seed(&mut self, negative: bool) {
+        self.trn2u_seed = negative;
+    }
+
+    /// Stop deciding and hand the equaliser's output over as it is
+    /// ([`Slicer::Unsliced`]), keeping the equaliser and the gain training
+    /// left: the analogue modem's reader of the Phase 4 downstream slices
+    /// each symbol against its own interval's constellation (V.90 8.6.5).
+    pub fn hand_over_unsliced(&mut self) {
+        self.slicer = Slicer::Unsliced;
+        self.decided.clear();
+    }
+
+    /// Recondition the receiver for B1u (9.6.1.1.6): the slicer for CPd's
+    /// constellation, and the equaliser for the line CPd asked for. Returns
+    /// whether a fit made for that line went in.
     ///
     /// 6.4.2 puts the equalisation at the transmitter: the analogue modem runs
     /// this end's own prefilter and precoder, so what arrives is meant to be the
     /// constellation itself. "Meant to be" is not "is": the prefilter is a FIR
     /// of at most LZ2 taps fitted to a channel estimate, and a real line has
     /// insertion loss that no such filter inverts exactly. What it leaves is
-    /// post-cursor ISI, and a decision feedback section is what removes
-    /// post-cursor ISI -- it was fitted on TRN2u for exactly that line.
+    /// ISI, and an equaliser is what removes ISI.
     ///
-    /// Replacing the feed-forward section with one tap and clearing the feedback
-    /// (which is what this used to do) throws that away and hands the residual
-    /// straight to the slicer. It survives a straight wire and nothing else,
-    /// which is why it looked right on a bench.
+    /// Not the one TRN2u trained, though, when the CPd asked for any shaping
+    /// at all: that one was fitted for the bare line, and from B1u's first
+    /// symbol the line is the prefilter's and the precoder's as well. Keeping
+    /// it (which is what this did) equalises the line twice; replacing it
+    /// with one tap and no feedback (which is what it did before that) hands
+    /// the slicer everything the design missed, and survives a straight wire
+    /// and nothing else. [`Self::train_for_data_mode`] makes the fit that
+    /// belongs to the line as it will be, and this is where it goes in. A CPd
+    /// that asked for no shaping has no such fit, and the equaliser TRN2u
+    /// trained stays, which is right for it.
     ///
-    /// The `gain` the four-point tiers established is kept as well: it is the
-    /// AGC that puts the equaliser's output on the scale the levels are on, and
-    /// TRN2u and B1u are transmitted at the same power (3.8, 8.7.1).
-    pub fn set_data_mode(&mut self, levels: Vec<f64>) {
+    /// The `gain` the four-point tiers established is kept either way: it is
+    /// the AGC that puts the equaliser's output on the scale the levels are
+    /// on, and TRN2u and B1u are transmitted at the same power (3.8, 8.7.1).
+    pub fn set_data_mode(&mut self, levels: Vec<f64>) -> bool {
         self.slicer = Slicer::Levels(levels);
         self.decided.clear();
+        self.b1u.clear();
+        // A CPd that asked the far end to shape what it sends has changed the
+        // line under the equaliser TRN2u trained, and the fit made for that
+        // line takes over here (see `train_for_data_mode`).
+        let shaped = if let Some(fit) = self.data_fit.take() {
+            self.forward = fit.forward;
+            self.feedback = fit.feedback;
+            self.snr_db = fit.snr_db;
+            // Until every sample under the feed-forward section is one the
+            // prefilter shaped, what comes out is not the constellation: it
+            // is not measured and not adapted on (`equalise_and_slice`). B1u
+            // is there for this (8.7.1: forty-eight data frames of ones
+            // before any data), and the stretch is shorter than the frames of
+            // it the decoder is not given.
+            self.settling = self.forward.len();
+            true
+        } else {
+            false
+        };
         self.measured = 0;
         self.anchor_gain = self.gain;
         self.level_by_line = 0.0;
@@ -1017,6 +1152,39 @@ impl Receiver {
             Some(step) => step,
             None => DATA_TRACKING,
         };
+        shaped
+    }
+
+    /// Hand over B1u as it will be sent: its symbols' levels, in the units
+    /// [`Self::set_data_mode`] was given the constellation in, the first of
+    /// them `after` symbols from now.
+    ///
+    /// B1u is "48 data frames of scrambled binary ones" sent with "the
+    /// scrambler, the differential encoder, the precoder and the prefilter
+    /// memories ... initialized to zero" (8.7.1), through coefficients this end
+    /// chose: there is nothing in it this end does not know, which is what it
+    /// is for. So while it lasts the feedback section is given the symbols
+    /// themselves rather than the slicer's opinion of them, and the
+    /// feed-forward section adapts on them.
+    ///
+    /// What that buys is the start. A decision feedback equaliser that begins
+    /// on a wrong decision subtracts the wrong thing from the next sixteen,
+    /// and with sixteen levels to choose between that is enough to make the
+    /// next decision wrong too: the data-mode fit put in at E2u starts
+    /// with a window full of a line it was not fitted for, and left to its own
+    /// decisions it took anything from ten to three hundred data frames to
+    /// come right (measured between this crate's two modems, through a codec;
+    /// on a line with no codec it was right at once).
+    ///
+    /// It is a prediction of what another modem will send, and is held to
+    /// that: once the window has filled, a slicer that disagrees with it about
+    /// one symbol in four over two data frames is reading a B1u this end did
+    /// not predict, and the rest is left to the decisions as before.
+    pub fn expect_b1u(&mut self, symbols: Vec<f64>, after: usize) {
+        self.b1u = symbols.into();
+        self.b1u_after = after;
+        self.b1u_agreed = 0;
+        self.b1u_differed = 0;
     }
 
     /// 9.5.1.1.10: "the first symbol of the second TRN1u shall be symbol 0 of
@@ -1355,7 +1523,11 @@ impl Receiver {
         // is over (9.6.1.1.4) -- into ones, and the call never left Phase 3.
         let width = self.forward.len();
         let power: f64 = self.history.iter().rev().take(width).map(|&x| x * x).sum::<f64>() / width as f64;
-        if !(power > AUDIBLE) {
+        // That is a guard on the feedback loop, so it is not applied when
+        // nothing is decided ([`Slicer::Unsliced`]): there is no loop, and a
+        // PCM constellation's quietest points are real symbols that sit below
+        // the level a silent line is told from.
+        if !(power > AUDIBLE) && self.slicer != Slicer::Unsliced {
             self.decided.clear();
             let index = self.origin.map_or(self.count, |origin| self.count.saturating_sub(origin));
             self.events.push_back(Heard::Symbol(Symbol { index, raw: self.count, value: 0.0, decided: None }));
@@ -1394,9 +1566,23 @@ impl Receiver {
                 );
             }
         }
+        // A data-mode fit that has just gone in is not measured or adapted
+        // on until its window has filled (see `set_data_mode`).
+        let settling = self.settling > 0;
+        self.settling = self.settling.saturating_sub(1);
+        // And the symbol this one is known to be, while B1u lasts (see
+        // `expect_b1u`).
+        let known = if self.b1u_after > 0 {
+            self.b1u_after -= 1;
+            None
+        } else {
+            self.b1u.pop_front()
+        };
         // What the four-point tiers measure on this line rather than on the
         // Recommendation's drawing: see `measure_levels`.
-        self.measure_levels(value);
+        if !settling {
+            self.measure_levels(value);
+        }
         let shown = value * self.gain;
         {
             // The demodulator's own account of itself, so that two runs of the
@@ -1420,7 +1606,7 @@ impl Receiver {
         let index = self.origin.map_or(self.count, |origin| self.count.saturating_sub(origin));
         let chosen = self.slicer.decide(shown);
         let span = self.slicer.half_span();
-        if let Some((_, error)) = chosen {
+        if let Some((_, error)) = chosen.filter(|_| !settling) {
             if error > span {
                 self.wrong += 1;
             } else {
@@ -1438,10 +1624,28 @@ impl Receiver {
                 self.wrong /= 2;
             }
         }
+        // B1u as it was predicted against B1u as it is read, once there is
+        // something to read: two data frames in which the slicer and the
+        // prediction differ on a quarter of the symbols are not the same B1u.
+        if let (Some(wanted), Some((level, _)), false) = (known, chosen, settling) {
+            if (level - wanted).abs() > span {
+                self.b1u_differed += 1;
+            } else {
+                self.b1u_agreed += 1;
+            }
+            let seen = self.b1u_agreed + self.b1u_differed;
+            if seen >= 2 * UP_INTERVALS as u32 && 4 * self.b1u_differed > seen {
+                self.b1u.clear();
+            }
+        }
+        // What the symbol was: B1u's own while it is known, the slicer's
+        // decision after it, and nothing while the window is still filling
+        // with a line the fit was not made for.
+        let was = known.or_else(|| chosen.filter(|_| !settling).map(|(level, _)| level));
         // The feedback section subtracts in the line's own units, so the
         // decision goes back out of the measured gain on its way there.
-        let back = match chosen {
-            Some((level, _)) if self.gain > 0.0 => level / self.gain,
+        let back = match was {
+            Some(level) if self.gain > 0.0 => level / self.gain,
             _ => 0.0,
         };
         self.decided.push_back(back);
@@ -1454,7 +1658,9 @@ impl Receiver {
         // deliberately small and deliberately only on the feed-forward half:
         // the feedback section is the channel's, and a loop that adapted it
         // too would be re-designing the thing it is meant to be tracking.
-        self.track(value, chosen.map(|(level, _)| level));
+        if !settling {
+            self.track(value, was);
+        }
         self.events.push_back(Heard::Symbol(Symbol {
             index,
             raw: self.count,
@@ -1933,11 +2139,9 @@ impl Receiver {
 
     /// Fit the Phase 4 equaliser on TRN2u itself.
     ///
-    /// 8.7.6: TRN2u is scrambled binary ones, so every symbol of it is known --
+    /// 8.7.6: TRN2u is scrambled binary ones, so every symbol of it is known:
     /// the magnitude from one scrambler bit, the sign from the running XOR of
-    /// the other -- up to the global sign the far end's differential seed chose,
-    /// and up to which of the two bits in a symbol is which. Four hypotheses,
-    /// and the fit itself says which one the line is carrying.
+    /// the other, started from the sign E1u ended on ([`Self::set_trn2u_seed`]).
     ///
     /// This is the anchor Phase 4 should have been designed on all along. It is
     /// the constellation Phase 4 is read with rather than TRN1u's two levels, it
@@ -1965,9 +2169,9 @@ impl Receiver {
         // middle of TRN2d (the downstream the far end is acquiring on). The
         // far end's mapping is the spec's own: magnitude bit first and direct,
         // sign bit second and differential (`phase = 0`,
-        // `differential_magnitude = false`); the seed is a global sign the
-        // least-squares fit absorbs.
-        let Some(levels) = trn2u_levels(&bits, length, 0, 0, false) else {
+        // `differential_magnitude = false`); and the seed is 8.7.6's, the
+        // last sign E1u sent (see `set_trn2u_seed`).
+        let Some(levels) = trn2u_levels(&bits, length, 0, usize::from(self.trn2u_seed), false) else {
             return false;
         };
         let base = self.history_base();
@@ -2063,6 +2267,151 @@ impl Receiver {
         true
     }
 
+    /// Fit the data-mode equaliser, while TRN2u is on the line, for the line
+    /// as the filters this end's CPd carries will leave it. Returns the fit's
+    /// signal to noise, or `None` if there was nothing to fit on.
+    ///
+    /// 9.6.1.1.6 has the receiver conditioned for B1u after E2u, and what B1u
+    /// arrives through is not what TRN2u arrived through. From B1u's first
+    /// symbol the analogue modem runs the whole of 6.4.2 with CPd's
+    /// coefficients: the precoder
+    /// `x(n) = u(n) + sum z1(k) u(n-k) + sum p1(k) x(n-k)`, the prefilter
+    /// `v(n) = sum z2(k) x(n-k) + sum p2(k) v(n-k)`, and the gain. An equaliser
+    /// fitted on TRN2u as it came inverts the line; held against a line the
+    /// prefilter has already inverted it inverts it a second time, and what
+    /// reaches the trellis decoder is not the constellation (between this
+    /// crate's two modems: B1u read as half ones).
+    ///
+    /// Nothing has been sent through those filters when the receiver has to be
+    /// ready for them, but nothing needs to be. The line and the prefilter are
+    /// both linear, so they commute: TRN2u through the line and *then* through
+    /// the prefilter is, sample for sample, what the line would have made of a
+    /// TRN2u the far end had prefiltered. That is the line the fit is given.
+    /// And the level it has to deliver is not the precoder's output x(n) but
+    /// the constellation point u(n) behind it, which the same equation read
+    /// backwards gives from any x:
+    /// `u(n) = x(n) - sum p1(k) x(n-k) - sum z1(k) u(n-k)`.
+    /// With TRN2u's own symbols standing for x, that is the reference, and
+    /// the decisions the feedback section is trained on.
+    ///
+    /// It is the same decision feedback fit Phase 4 is read with, and not a
+    /// scale and a delay, because the design is not exact: it is made against
+    /// an estimate of the line that begins at the line's largest tap
+    /// (`digital::Modem::design_upstream`, whose design comes out at a delay
+    /// of none), so what the line does *before* that tap is not in it, and
+    /// that is what is left here. A design that was exact would come out of
+    /// this fit as one tap; one made for the half of a line it was shown
+    /// comes out as [`DATA_FORWARD`] of them.
+    ///
+    /// `delay` is the design's own ([`Design::delay`](super::design::Design)):
+    /// the shaped line delivers x(n) that many symbols after the bare line
+    /// would have, so this equaliser's decisions come that much later than
+    /// those of the one that reads E2u, and the caller starts B1u's frame
+    /// count that many symbols after E2u's last.
+    pub fn train_for_data_mode(
+        &mut self,
+        window: usize,
+        trn2u_from: u64,
+        filters: &Filters,
+        delay: usize,
+    ) -> Option<f64> {
+        let length = self.history.len();
+        if length < 2 * TRAIN_TAPS || length < window.min(2 * PROBE) {
+            return None;
+        }
+        // TRN2u's own symbols, exactly as `train_on_trn2u` builds them: 8.7.6
+        // resets the scrambler at E1u, so the first is at `trn2u_from`.
+        let bits = reference_from(0, 2 * length + 4, self.reference_mode)?;
+        let levels = trn2u_levels(&bits, length, 0, usize::from(self.trn2u_seed), false)?;
+        let origin = trn2u_from.saturating_sub(self.history_base()) as usize;
+        let start = length.saturating_sub(window).max(PROBE);
+        let span = window.min(length - start);
+        // B1u is placed by E2u (9.6.1.1.6), and E2u is read by the equaliser
+        // in place now: so this one has to deliver its symbols as late as that
+        // one does, and then the design's delay later.
+        let lag = self.decision_lag(&levels, origin, start)? + delay as i64;
+        // The window has to be TRN2u, and so has everything the prefilter's
+        // memory holds when it reaches the window's first sample.
+        let skip = start as i64 - lag - origin as i64;
+        if skip < (filters.z2.len() + filters.p2.len()) as i64 || skip as usize + span > levels.len() {
+            return None;
+        }
+        // 6.4.2's prefilter over the line, and its precoder read backwards
+        // over the symbols: the same two objects the analogue modem transmits
+        // with, so that there is one account of the equations and not two.
+        let mut prefilter = Prefilter::new(filters);
+        let line: Vec<f64> = self.history.iter().map(|&sample| prefilter.step(sample)).collect();
+        let mut precoder = Precoder::new(filters);
+        let wanted: Vec<f64> = levels
+            .iter()
+            .map(|&x| {
+                let u = x - precoder.tail();
+                precoder.accept(u, x);
+                u
+            })
+            .collect();
+        let before = self.fitted();
+        let decided = self.decided.clone();
+        self.pending_line = Some(line);
+        self.pending_levels = Some(wanted);
+        let took = self.fit_at(start, span, skip as u64, DATA_FORWARD, sections_in_use().1);
+        self.pending_line = None;
+        self.pending_levels = None;
+        let found = self.fitted();
+        // The Phase 4 equaliser is still reading the exchange: it goes back
+        // exactly as it was, the decisions in its feedback section with it,
+        // and this one waits for B1u.
+        self.restore(&before);
+        self.decided = decided;
+        if !took {
+            return None;
+        }
+        let snr = found.snr();
+        self.data_fit = Some(found);
+        Some(snr)
+    }
+
+    /// How many symbols after `origin + k` the equaliser in place delivers
+    /// symbol k of `levels`, `origin` being the history index at which this
+    /// end began to read TRN2u.
+    ///
+    /// Measured, by running the feed-forward section over a stretch of TRN2u
+    /// and correlating what comes out against the sequence, because it is not
+    /// one number. The fit made on TRN2u is given [`CHANNEL_DELAY`]; the one
+    /// designed on TRN1u, which is what reads Phase 4 when that fit is
+    /// refused, is given whichever of nine alignments fitted best
+    /// ([`Self::design_phase_four_at`]); and `origin` is itself as late as
+    /// the Phase 3 equaliser that read E1u was, so the answer can be negative.
+    fn decision_lag(&self, levels: &[f64], origin: usize, from: usize) -> Option<i64> {
+        /// Symbols correlated over: a scrambled sequence scores about one in
+        /// sixteen at a wrong alignment of this many.
+        const STRETCH: usize = 256;
+        let width = self.forward.len();
+        if width == 0 || from < width || from + STRETCH > self.history.len() {
+            return None;
+        }
+        let out: Vec<f64> = (from..from + STRETCH)
+            .map(|i| self.forward.iter().enumerate().map(|(k, &tap)| tap * self.history[i - k]).sum())
+            .collect();
+        let power: f64 = out.iter().map(|value| value * value).sum();
+        let mut best: Option<(f64, i64)> = None;
+        let reach = 2 * TRAIN_TAPS as i64;
+        for lag in -reach..=reach {
+            let Ok(first) = usize::try_from(from as i64 - origin as i64 - lag) else { continue };
+            let Some(wanted) = levels.get(first..first + STRETCH) else { continue };
+            let together: f64 = out.iter().zip(wanted).map(|(a, b)| a * b).sum();
+            let norm: f64 = wanted.iter().map(|value| value * value).sum();
+            let share = together.abs() / (power * norm).sqrt().max(1e-12);
+            if best.is_none_or(|(most, _)| share > most) {
+                best = Some((share, lag));
+            }
+        }
+        // Half the stretch's energy at one alignment is the sequence; less is
+        // an equaliser that is not reading TRN2u at all, and no place to
+        // start a second one from.
+        best.filter(|&(share, _)| share > 0.5).map(|(_, lag)| lag)
+    }
+
     /// Fit the equaliser at an alignment that has already been verified, without
     /// the signal-to-noise gate [`Self::train_near`] applies.
     ///
@@ -2134,7 +2483,12 @@ impl Receiver {
             _ => reference_from(at_skip, span, self.reference_mode),
         };
         let Some(reference) = reference else { return false };
-        let received: Vec<f64> = self.history.iter().copied().collect();
+        // The line is the history's own unless the caller handed over another
+        // of the same length, sample for sample (`train_for_data_mode`).
+        let received: Vec<f64> = match self.pending_line.take() {
+            Some(line) if line.len() == self.history.len() => line,
+            _ => self.history.iter().copied().collect(),
+        };
         if received.len() < from + reference.len() {
             return false;
         }

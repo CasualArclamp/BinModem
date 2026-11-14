@@ -405,6 +405,14 @@ impl TwoPointReader {
         self.differential
     }
 
+    /// The sign of the last symbol fed, `true` for a negative voltage, or
+    /// `None` before the first. After E1u's last symbol this is what seeds
+    /// TRN2u's sign differential encoder (8.7.6), which is the one place the
+    /// sign itself, and not a change of sign, is something a receiver needs.
+    pub fn last_sign(&self) -> Option<bool> {
+        self.previous
+    }
+
     /// Feed one symbol's sign, and get the descrambled bit it carried.
     ///
     /// `None` only at the very first symbol of a differential reader, which
