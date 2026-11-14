@@ -257,6 +257,14 @@ impl Receiver {
         self.detector.carrier()
     }
 
+    /// How much signal there is in this channel's band: the magnitude of
+    /// the band-filtered line, which for a tone of amplitude A is A over two.
+    /// For telling a carrier from line noise against the whole line's level,
+    /// which the fixed threshold of [`Self::carrier`] cannot do.
+    pub fn band_level(&self) -> f64 {
+        self.detector.level()
+    }
+
     /// Decision margin at the last bit, which is what a scope plots.
     pub fn level(&self) -> f64 {
         self.level

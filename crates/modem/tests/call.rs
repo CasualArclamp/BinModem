@@ -2071,3 +2071,96 @@ fn a_fax_goes_in_jbig_unless_either_end_is_told_not_to() {
         assert_eq!(faxed.coding, want, "{case}");
     }
 }
+
+/// What each end's line said, as the window's transcript would have it.
+fn line_notes(p: &mut Pair) -> (Vec<String>, Vec<String>) {
+    (p.caller.take_line_notes(), p.host.take_line_notes())
+}
+
+#[test]
+fn v8_bis_chooses_the_mode_and_v8_follows_it() {
+    // +A8E's <v8b> puts a V.8 bis transaction in front of V.8 (V.8 bis 10.2):
+    // the answering end asks with CRe, the calling end asks back with CRd, is
+    // sent the answerer's list, chooses with MS and is acknowledged --
+    // transaction 12 of Table 7. Then ANSam and V.8 as ever (9.9.1), and the
+    // call is the one the MS named.
+    let mut p = Pair::new();
+    for modem in [&mut p.caller, &mut p.host] {
+        Pair::type_at(modem, "AT+MS=V34");
+        Pair::type_at(modem, "AT+A8E=,,,1");
+    }
+    p.run(0.05);
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    let (mut caller, mut host) = (Vec::new(), Vec::new());
+    for _ in 0..30 {
+        p.run(1.0);
+        let (c, h) = line_notes(&mut p);
+        caller.extend(c);
+        host.extend(h);
+        if p.caller.state() == State::Data && p.host.state() == State::Data {
+            break;
+        }
+    }
+    println!("caller: {caller:#?}\nhost: {host:#?}");
+    let bis = |notes: &[String]| -> Vec<String> {
+        notes
+            .iter()
+            .filter_map(|n| n.strip_prefix("V.8 bis: "))
+            .map(|n| n.split(" (").next().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(bis(&host), ["sent CRe", "heard CRd", "sent CL", "heard MS", "sent ACK(1)"]);
+    assert_eq!(bis(&caller), ["heard CRe", "sent CRd", "heard CL", "sent MS", "heard ACK(1)"]);
+    assert_eq!((p.caller.state(), p.host.state()), (State::Data, State::Data));
+    assert_eq!(p.caller.standard(), "V.34");
+    assert!(p.caller.error_controlled() && p.host.error_controlled());
+}
+
+#[test]
+fn a_caller_with_v8_bis_still_reaches_an_answerer_without_it() {
+    // 10.2.1: an answer tone before any V.8 bis signal, and the caller goes
+    // on with V.8 as though it had never been listening for anything else.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "AT+A8E=,,,1");
+    p.run(0.05);
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(12.0);
+    let (caller, _) = line_notes(&mut p);
+    assert_eq!((p.caller.state(), p.host.state()), (State::Data, State::Data), "{caller:?}");
+    assert!(caller.iter().any(|n| n.contains("no V.8 bis")), "{caller:?}");
+}
+
+#[test]
+fn an_answerer_with_v8_bis_still_takes_a_caller_without_it() {
+    // 10.2.2: nothing answers CRe, and the answering end gets on with its
+    // answer tone. The caller has waited through one request and three
+    // seconds of quiet, and V.8 goes ahead from there.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "AT+A8E=,,,1");
+    p.run(0.05);
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(18.0);
+    let (_, host) = line_notes(&mut p);
+    assert_eq!((p.caller.state(), p.host.state()), (State::Data, State::Data), "{host:?}");
+    assert!(host.iter().any(|n| n.contains("nothing at the far end answered")), "{host:?}");
+}
+
+#[test]
+fn the_v8_bis_switch_reads_back_and_refuses_what_it_cannot_do() {
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "AT+A8E?");
+    p.run(0.01);
+    assert!(p.caller_saw().contains("+A8E: 1,1,0,0"), "{:?}", p.caller_saw());
+    Pair::type_at(&mut p.caller, "AT+A8E=,,,1");
+    Pair::type_at(&mut p.caller, "AT+A8E?");
+    p.run(0.01);
+    assert!(p.caller_saw().contains("+A8E: 1,1,0,1"), "{:?}", p.caller_saw());
+    // V.8 originating under the DTE's control is not something this does.
+    p.at_caller.clear();
+    Pair::type_at(&mut p.caller, "AT+A8E=6,,,1");
+    p.run(0.01);
+    assert!(p.caller_saw().contains("ERROR"), "{:?}", p.caller_saw());
+}

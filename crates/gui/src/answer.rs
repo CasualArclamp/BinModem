@@ -50,6 +50,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
     let mut carrier = "V22B".to_owned();
     let mut banner = "*** THE DEAD ZONE BBS ***\n  24 hours - SysOp: nobody".to_owned();
     let mut account = Account::new("guest", "");
+    let mut v8bis = false;
 
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -58,13 +59,14 @@ pub fn run(args: Vec<String>) -> ExitCode {
             "--in" => input = Some(value()),
             "--out" => output = Some(value()),
             "--carrier" => carrier = value().to_ascii_uppercase(),
+            "--v8bis" => v8bis = true,
             "--banner" => banner = value(),
             "--user" => account.name = value(),
             "--password" => account.password = value(),
             "--help" | "-h" => {
                 println!(
                     "binmodem --answer --in <device> --out <device> \
-                     [--carrier B103|V21|V22B|V32|V34] [--banner <text>]\n\
+                     [--carrier B103|V21|V22B|V32|V34] [--v8bis] [--banner <text>]\n\
                      \x20                [--user <name>] [--password <password>]\n\
                      \n\
                      Answers calls on a virtual cable with a login prompt, so that\n\
@@ -102,6 +104,12 @@ pub fn run(args: Vec<String>) -> ExitCode {
     let mut host = Modem::new(FS);
     for b in format!("AT+MS={carrier}\r").bytes() {
         host.feed_dte(b);
+    }
+    if v8bis {
+        // V.8 bis in front of V.8: CRe on answering, and the caller's choice.
+        for b in b"AT+A8E=,,,1\r" {
+            host.feed_dte(*b);
+        }
     }
     host.take_dte();
     // Off hook and waiting. There is no ring on a virtual cable, so this
@@ -153,6 +161,11 @@ pub fn run(args: Vec<String>) -> ExitCode {
         if phase != last_phase {
             last_phase = phase;
             println!("[{:>6.2}s {phase}]", stamp());
+        }
+        // And what the line itself said on the way: each signal and message
+        // of a V.8 bis transaction, each CP and MP of a V.90 start-up.
+        for note in host.take_line_notes() {
+            println!("[{:>6.2}s   {note}]", stamp());
         }
 
         // The same trace for the layer above, so that a call which connects

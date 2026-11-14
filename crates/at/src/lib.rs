@@ -350,6 +350,8 @@ pub struct Interpreter {
     pub v44: V44,
     /// What `+FCLASS` last selected: a modem or a fax.
     pub service_class: ServiceClass,
+    /// `+A8E`'s `<v8b>`: whether V.8 bis runs in front of V.8.
+    pub v8bis: bool,
     state: LineState,
     body: Vec<u8>,
     last_body: Vec<u8>,
@@ -391,6 +393,7 @@ impl Interpreter {
             compression: Compression::default(),
             v44: V44::default(),
             service_class: ServiceClass::default(),
+            v8bis: false,
             state: LineState::Idle,
             body: Vec::new(),
             last_body: Vec::new(),
@@ -773,6 +776,47 @@ impl Interpreter {
         }
     }
 
+    /// `+A8E=<v8o>,<v8a>,<v8cf>,<v8b>`: V.8 and V.8 bis operation controls.
+    ///
+    /// The command is V.251's, which V.8 bis clause 11 names as where the
+    /// DTE's side of it is specified. Only `<v8b>` is acted on: 0 for no
+    /// V.8 bis and 1 for V.8 bis run by the DCE. The others are taken at the
+    /// values this DCE already works at -- V.8 originating and answering
+    /// both under the DCE's control, which is 1 and 1 -- and anything else in
+    /// them is refused rather than accepted and ignored. V.8 itself is
+    /// turned off with `+MS`'s automode, as it always was.
+    fn v8_controls(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
+        match op {
+            ExtOp::Read => {
+                let text = format!("+A8E: 1,1,0,{}", u8::from(self.v8bis));
+                self.fmt.info(&text, &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Test => {
+                self.fmt.info("+A8E: (1),(1),(0),(0,1)", &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Set(value) => {
+                let mut parts = value.split(',').map(str::trim);
+                let fixed = |p: Option<&str>, only: &str| matches!(p, None | Some("")) || p == Some(only);
+                if !fixed(parts.next(), "1") || !fixed(parts.next(), "1") {
+                    return Err(ResultCode::Error);
+                }
+                // <v8cf> is the call function, which for this DCE is always
+                // data; whatever is there is left alone.
+                parts.next();
+                match parts.next() {
+                    None | Some("") => {}
+                    Some("0") => self.v8bis = false,
+                    Some("1") => self.v8bis = true,
+                    Some(_) => return Err(ResultCode::Error),
+                }
+                Ok(None)
+            }
+            ExtOp::Execute => Err(ResultCode::Error),
+        }
+    }
+
     /// `+ER` and `+DR` — reporting parameters (V.250 6.5.5, 6.6.3).
     ///
     /// Identical in shape: one numeric parameter, 0 or 1, off by default. What
@@ -995,6 +1039,7 @@ impl Interpreter {
             "ES" => return self.error_control_select(op),
             "DS" => return self.compression_select(op),
             "DS44" => return self.v44_select(op),
+            "A8E" => return self.v8_controls(op),
             // V.250 6.5.5 and 6.6.3. The same parameter twice over: one bit,
             // defaulting to off, saying whether the DCE should report what it
             // negotiated with the far end before it says CONNECT.

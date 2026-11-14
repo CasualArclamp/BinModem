@@ -412,6 +412,14 @@ pub struct Station {
     notes: Vec<String>,
     /// Whether an escape signal has been heard and its message has not.
     escaped: bool,
+    /// Whether any signal or message has arrived at all.
+    heard: bool,
+    /// Whether the far end's V.21 carrier was there on the last sample:
+    /// its channel's band measured against everything on the line.
+    carrier: bool,
+    /// The line's mean square, to measure the channel against.
+    power: f64,
+    alpha: f64,
 }
 
 impl Station {
@@ -440,6 +448,10 @@ impl Station {
             status: Status::Running,
             notes: Vec::new(),
             escaped: false,
+            heard: false,
+            carrier: false,
+            power: 0.0,
+            alpha: 1.0 - (-1.0 / (0.008 * fs)).exp(),
         }
     }
 
@@ -458,6 +470,19 @@ impl Station {
     /// waits to hear what the answering station opens with.
     pub fn calling(capabilities: Message, fs: f64) -> Self {
         Self::new(Side::Responding, capabilities, fs)
+    }
+
+    /// Send the opening request once and not twice: for a modem, which has
+    /// an answer tone to get on with if nothing comes back.
+    pub fn once(mut self) -> Self {
+        self.openings = 1;
+        self
+    }
+
+    /// Whether anything of V.8 bis has been heard from the far end: a first
+    /// segment standing now, or a signal or message before.
+    pub fn heard_anything(&self) -> bool {
+        self.heard || self.ear.pair_standing().is_some_and(|side| side != self.side)
     }
 
     /// What to answer a mode request and a capabilities request with.
@@ -514,12 +539,39 @@ impl Station {
             if let Some((signal, _)) = self.ear.feed(sample).filter(|(_, side)| *side != self.side) {
                 self.heard_signal(signal);
             }
-            if let Some(bit) = self.rx.feed(sample)
+            let bit = self.rx.feed(sample);
+            // Bits are only bits while the far end's channel is most of what
+            // is on the line. The demodulator hands up a bit every bit time
+            // whatever it is listening to, and line noise is a stream of
+            // them with a flag in it sooner or later: a frame of nothing,
+            // which 9.8 would have answered with NAK(1). And a carrier that
+            // has stopped takes whatever was half read with it -- the last
+            // flag of a message leaves the decoder inside a frame, and what
+            // the dying carrier turned into stayed there until the next
+            // message's preamble, a hundred milliseconds of ones, arrived on
+            // top of it and read as an abort. That was an ACK answered with
+            // NAK(1), on a real line and on no clean one.
+            self.power += self.alpha * (sample * sample - self.power);
+            // Measured: the channel's band holds 0.67 of the line's level
+            // while a message is all there is on it, 0.46 or more with this
+            // end's own message echoing beside it, and under 0.29 of noise.
+            let carrier = self.power > 1e-8 && self.rx.band_level() > 0.38 * self.power.sqrt();
+            if self.carrier && !carrier {
+                self.decoder = Decoder::new(Fcs::Bits16);
+            }
+            self.carrier = carrier;
+            if let Some(bit) = bit.filter(|_| carrier)
                 && let Some(frame) = self.decoder.feed(bit)
             {
-                match information(frame, &self.decoder).and_then(|octets| Message::decode(&octets)) {
-                    Some(message) => self.heard_message(message),
-                    None => self.heard_rubbish(),
+                match frame {
+                    // Seven ones in a row is a sender giving a frame up, or
+                    // no frame at all; either way it is not one of 7.2.9's
+                    // invalid frames and nothing is owed for it.
+                    Err(FrameError::Aborted) => {}
+                    frame => match information(frame, &self.decoder).and_then(|octets| Message::decode(&octets)) {
+                        Some(message) => self.heard_message(message),
+                        None => self.heard_rubbish(),
+                    },
                 }
             }
             self.keep_time();
@@ -584,6 +636,9 @@ impl Station {
                     self.in_state = (BEFORE_OPENING * self.fs) as usize;
                 }
             }
+            // Back at the start after a transaction that went wrong, with
+            // the far end gone quiet: nothing more is coming.
+            State::Initial if self.heard && seconds >= STATE_LIMIT => self.fail("the transaction was not finished"),
             State::Initial | State::Opening | State::Done => {}
             _ if seconds >= STATE_LIMIT => self.fail("the far end stopped part of the way through"),
             _ => {}
@@ -591,6 +646,7 @@ impl Station {
     }
 
     fn heard_signal(&mut self, signal: Signal) {
+        self.heard = true;
         self.note(format!("heard {}", signal.name()));
         match (&self.state, signal) {
             // An escape says a message is coming and nothing more.
@@ -640,6 +696,7 @@ impl Station {
     }
 
     fn heard_message(&mut self, message: Message) {
+        self.heard = true;
         self.note(format!("heard {}", describe(&message)));
         self.escaped = false;
         match (self.state.clone(), message.kind) {
@@ -762,6 +819,16 @@ fn describe(message: &Message) -> String {
     text
 }
 
+/// What a list says its station can do, in words, for a panel.
+pub fn capabilities(message: &Message) -> String {
+    let mut text = message.data_mode().map_or_else(|| "no data mode".to_owned(), |data| list_of(&data));
+    let id = message.identify();
+    if id.network.is_some_and(|n| n.digital) {
+        text.push_str(", on a digital line");
+    }
+    text
+}
+
 fn list_of(data: &Data) -> String {
     let named = [
         (data.v92_digital, "V.92 digital"),
@@ -804,12 +871,33 @@ mod tests {
 
     /// Two stations on a line with `delay` seconds each way, run until both
     /// are finished or `seconds` have gone. What each heard and sent.
-    fn run(mut a: Station, mut b: Station, delay: f64, seconds: f64) -> (Station, Station, Vec<String>, Vec<String>) {
+    fn run(a: Station, b: Station, delay: f64, seconds: f64) -> (Station, Station, Vec<String>, Vec<String>) {
+        run_noisy(a, b, delay, seconds, 0.0, 1)
+    }
+
+    /// The same with noise of amplitude `noise` on the line each way.
+    fn run_noisy(
+        mut a: Station,
+        mut b: Station,
+        delay: f64,
+        seconds: f64,
+        noise: f64,
+        seed: u64,
+    ) -> (Station, Station, Vec<String>, Vec<String>) {
         let n = ((delay * FS) as usize).max(1);
         let (mut to_b, mut to_a) = (VecDeque::from(vec![0.0; n]), VecDeque::from(vec![0.0; n]));
         let (mut said_a, mut said_b) = (Vec::new(), Vec::new());
+        // xorshift64*, as the other tests here use: uniform in -1..1.
+        let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut hiss = move || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            let x = state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 11;
+            noise * (x as f64 / (1u64 << 52) as f64 - 1.0)
+        };
         for _ in 0..(seconds * FS) as usize {
-            let (heard_a, heard_b) = (to_a.pop_front().unwrap(), to_b.pop_front().unwrap());
+            let (heard_a, heard_b) = (to_a.pop_front().unwrap() + hiss(), to_b.pop_front().unwrap() + hiss());
             to_b.push_back(a.step(heard_a));
             to_a.push_back(b.step(heard_b));
             said_a.extend(a.take_notes());
@@ -995,6 +1083,25 @@ mod tests {
         assert_eq!(a.status(), Status::Failed("nothing at the far end answered"));
         assert_eq!(sent.iter().filter(|s| *s == "sent CRe").count(), 2, "{sent:?}");
         assert!((6.0..8.5).contains(&seconds), "gave up after {seconds:.1} s");
+    }
+
+    /// Noise on the line, 25 dB under the signals, at twenty different
+    /// delays. A carrier that ends in noise leaves a few bits of nothing
+    /// behind it, and those used to be read as the start of a frame that the
+    /// next message's preamble then aborted -- which was answered with NAK(1)
+    /// and ended the transaction with the mode already chosen.
+    #[test]
+    fn noise_at_the_end_of_a_carrier_is_not_a_frame() {
+        for seed in 1..=20u64 {
+            let a = Station::answering(server(), Signal::CRe, FS);
+            let b = Station::calling(caller(), FS);
+            let delay = 0.004 + seed as f64 * 0.0013;
+            let (a, b, said_a, said_b) = run_noisy(a, b, delay, 9.0, 0.02, seed);
+            assert!(
+                matches!((a.status(), b.status()), (Status::Selected(_), Status::Selected(_))),
+                "seed {seed}:\nanswering: {said_a:#?}\ncalling: {said_b:#?}"
+            );
+        }
     }
 
     /// A round trip of a second, which is what a call over a trunk has, and

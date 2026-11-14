@@ -35,6 +35,7 @@ mod faxcall;
 pub use faxcall::FaxCall;
 
 use datapump::v8 as v8line;
+use datapump::v8bis;
 use v8::{Access, CallFunction, Modulation, Modulations, Pcm, PcmRole};
 use ec::stack::Phase;
 use ec::xid::Compression;
@@ -868,6 +869,14 @@ pub struct Modem {
     /// conversation that settles it, and it has to finish before there is a
     /// pump to build.
     negotiation: Option<v8line::Modem>,
+    /// V.8 bis, where `+A8E` has turned it on: the transaction that goes in
+    /// front of V.8 and says what the call is to be.
+    bis: Option<Box<v8bis::Station>>,
+    /// What the far end's V.8 bis list said, for the panel.
+    bis_far: Option<v8::bis::Message>,
+    /// Which half of a PCM pair this end is: the one that goes with how the
+    /// call was placed, whichever end V.8 bis then made the answering modem.
+    pcm_end: Role,
     /// The fax call, when `+FCLASS=1` made this a fax rather than a modem.
     ///
     /// Beside the data pump rather than inside it. A fax call shares nothing
@@ -973,6 +982,9 @@ impl Modem {
             line_notes: Vec::new(),
             pinned_rate: None,
             negotiation: None,
+            bis: None,
+            bis_far: None,
+            pcm_end: Role::Calling,
             fax: None,
             fax_result: None,
             fax_offer: fax::call::OUR_MODULATIONS.to_vec(),
@@ -1012,7 +1024,7 @@ impl Modem {
     /// ending a session it has already said goodbye to has no reason to wait
     /// for that, and nothing it sends after the goodbye would be data.
     pub fn hang_up(&mut self) {
-        if self.pump.is_some() || self.negotiation.is_some() || self.fax.is_some() {
+        if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() {
             self.end_call(Ended::LocalRequest);
         }
     }
@@ -1030,7 +1042,7 @@ impl Modem {
     /// carrier to lose -- the call ends in a BYE, somewhere above the samples
     /// -- so the thing that knows has to say so.
     pub fn carrier_lost(&mut self) {
-        if self.pump.is_some() || self.negotiation.is_some() || self.fax.is_some() {
+        if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() {
             self.end_call(Ended::CarrierLost);
         }
     }
@@ -1070,6 +1082,9 @@ impl Modem {
     pub fn line_phase(&self) -> &'static str {
         if let Some(fax) = self.fax.as_ref() {
             return fax.phase_name();
+        }
+        if let Some(bis) = self.bis.as_ref() {
+            return bis.phase();
         }
         if let Some(negotiation) = self.negotiation.as_ref() {
             return negotiation.phase();
@@ -1236,6 +1251,9 @@ impl Modem {
         if let Some(fax) = self.fax.as_ref() {
             return fax.standard();
         }
+        if self.bis.is_some() {
+            return "V.8 bis";
+        }
         if self.negotiation.is_some() {
             return "V.8";
         }
@@ -1258,7 +1276,7 @@ impl Modem {
         // the far end picks up, and a front panel that showed the lamp out
         // until a pump existed would show it out for the loudest three seconds
         // of the call.
-        self.pump.is_some() || self.negotiation.is_some() || self.fax.is_some()
+        self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some()
     }
 
     /// Whether the modem is a fax rather than a modem just now (V.250 6.1.10).
@@ -1342,6 +1360,11 @@ impl Modem {
 
     pub fn distant(&self) -> Vec<(&'static str, String)> {
         let mut rows = Vec::new();
+        // What the far end's V.8 bis list said, where there was one: it comes
+        // before V.8's menu and says more.
+        if let Some(far) = self.bis_far.as_ref() {
+            rows.push(("V.8 bis", v8bis::capabilities(far)));
+        }
         if let Some(menu) = self.far_menu {
             // What the call is for, which the menu has always carried and this
             // panel never showed. 6.2: a far end answering a data call says
@@ -1648,6 +1671,10 @@ impl Modem {
 
         if self.fax.is_some() {
             return self.carry_fax(line);
+        }
+
+        if self.bis.is_some() {
+            return self.select_mode(line);
         }
 
         if self.negotiation.is_some() {
@@ -2293,7 +2320,7 @@ impl Modem {
                     self.place_call(Role::Answering);
                 }
                 Action::HangUp => {
-                    if self.pump.is_some() || self.negotiation.is_some() || self.fax.is_some() {
+                    if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() {
                         self.drop_call();
                     }
                 }
@@ -2313,7 +2340,7 @@ impl Modem {
                     // so nothing from before it survives. Anything on the
                     // line goes, because a fax call and a data call have no
                     // state in common to carry across.
-                    if self.pump.is_some() || self.negotiation.is_some() || self.fax.is_some() {
+                    if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() {
                         self.drop_call();
                     }
                 }
@@ -2322,7 +2349,7 @@ impl Modem {
                 Action::SelectModulation(_) | Action::SelectCompression(_) | Action::SelectV44(_) => {}
                 Action::SelectErrorControl(e) => self.want_error_control = e.wanted(),
                 Action::ResetProfile(_) | Action::FactoryDefaults(_) => {
-                    if self.pump.is_some() || self.negotiation.is_some() || self.fax.is_some() {
+                    if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() {
                         self.drop_call();
                     }
                 }
@@ -2386,9 +2413,39 @@ impl Modem {
         // rather than by each guessing and hoping, so that is what automode
         // means here. With it off, the modulation named is the modulation
         // used and there is nothing to negotiate.
+        self.bis = None;
+        self.bis_far = None;
+        self.pcm_end = role;
+        self.pump = None;
+        self.negotiation = None;
+        if self.at.v8bis && self.at.modulation.automode && !self.offered().is_empty() {
+            // V.8 bis first (10.2). The answering station asks what the
+            // caller can do, with CRe; the calling one answers with CRd, to
+            // be told what the answerer can do and choose itself -- which is
+            // transaction 12 of Table 7, and leaves the station that answered
+            // the call as the answering modem.
+            let ours = self.bis_capabilities();
+            self.bis = Some(Box::new(match role {
+                Role::Calling => v8bis::Station::calling(ours, self.fs).replying(v8bis::OnMr::Ms, v8bis::OnCr::Crd),
+                Role::Answering => v8bis::Station::answering(ours, v8::bis::Signal::CRe, self.fs).once(),
+            }));
+            // The answering end's V.8 waits for the transaction: ANSam is
+            // what follows the ACK (9.9.1). The calling end's starts now and
+            // listens underneath, since what answers may have no V.8 bis and
+            // go straight to its answer tone (10.2.1).
+            if role == Role::Answering {
+                return;
+            }
+        }
+        self.open_v8();
+    }
+
+    /// Start V.8, or with automode off the modulation itself, as whichever
+    /// end `self.role` now is.
+    fn open_v8(&mut self) {
         let offered = self.offered();
         if self.at.modulation.automode && !offered.is_empty() {
-            let role = match role {
+            let role = match self.role {
                 Role::Calling => v8line::Role::Calling,
                 Role::Answering => v8line::Role::Answering,
             };
@@ -2409,11 +2466,11 @@ impl Modem {
             // to the digital network as a sound card gets.
             // A V.92 server takes the line at the start of V.8's handover
             // silence; a V.90 one at the end of it, as it always has.
-            if self.at.modulation.carrier == "V92" && self.role == Role::Answering {
+            if self.at.modulation.carrier == "V92" && self.pcm_end == Role::Answering {
                 negotiation = negotiation.handing_over_early();
             }
             if matches!(self.at.modulation.carrier.as_str(), "V90" | "V92") {
-                negotiation = match self.role {
+                negotiation = match self.pcm_end {
                     Role::Calling => negotiation.offering_pcm(Pcm::ANALOGUE),
                     Role::Answering => negotiation.offering_pcm_on(
                         Pcm { digital: true, ..Pcm::default() },
@@ -2538,6 +2595,101 @@ impl Modem {
             .as_mut()
             .and_then(FaxCall::take_received)
             .or_else(|| self.fax_result.as_mut().and_then(FaxCall::take_received))
+    }
+
+    /// What this end tells a V.8 bis far end it can do: the data mode, the
+    /// modulations `+MS` allows, and V.42 if error control is wanted.
+    fn bis_capabilities(&self) -> v8::bis::Message {
+        use v8::bis::{Data, Identification, Kind, Message, Network};
+        let carrier = self.at.modulation.carrier.as_str();
+        let server = self.pcm_end == Role::Answering;
+        let pcm = |name: &str| carrier == name || (name == "V90" && carrier == "V92");
+        let at_least = |names: &[&str]| names.contains(&carrier);
+        let data = Data {
+            transparent: true,
+            v42: self.want_error_control,
+            v42bis: self.want_error_control && self.at.compression.wanted(),
+            v34: at_least(&["V34", "V90", "V92"]),
+            v32bis: at_least(&["V32B", "V34", "V90", "V92"]),
+            v32: at_least(&["V32", "V32B", "V34", "V90", "V92"]),
+            v22bis: at_least(&["V22B", "V32", "V32B", "V34", "V90", "V92"]),
+            v90_analogue: pcm("V90") && !server,
+            v90_digital: pcm("V90") && server,
+            v92_analogue: pcm("V92") && !server,
+            v92_digital: pcm("V92") && server,
+            ..Data::default()
+        };
+        let identification = Identification {
+            // V.8 follows the transaction (9.9.1): its menus say the rest.
+            v8: true,
+            ack1: true,
+            // Table 5-2: a digital modem is not on an analogue line.
+            network: (server && pcm("V90")).then_some(Network { digital: true, ..Network::default() }),
+            ..Identification::default()
+        };
+        Message::data(Kind::Cl, identification, data)
+    }
+
+    /// Carry the V.8 bis transaction one sample further, and V.8 underneath
+    /// it where this end placed the call.
+    fn select_mode(&mut self, line: f64) -> f64 {
+        let bis = self.bis.as_mut().expect("checked by the caller");
+        let out = bis.step(line);
+        for note in bis.take_notes() {
+            self.line_notes.push(format!("V.8 bis: {note}"));
+        }
+        if let Some(far) = bis.far_capabilities() {
+            self.bis_far = Some(far.clone());
+        }
+        let status = bis.status();
+        let spoke = bis.heard_anything();
+        // 10.2.1: "If ANS or ANSam is detected before any V.8 bis initiating
+        // signal, the calling station shall exit from the Initial V.8 bis
+        // State and proceed in accordance with ITU-T V.25 or V.8". The V.8
+        // underneath is silent until it has heard one, so it is simply
+        // listened to; once it has, the line is its own.
+        //
+        // And an answer tone *after* V.8 bis signals says the same thing a
+        // little later: the far end has finished with the transaction,
+        // whatever this end made of its last message, and is answering.
+        if let Some(negotiation) = self.negotiation.as_mut() {
+            let below = negotiation.step(line);
+            if negotiation.heard_answer() && status == v8bis::Status::Running {
+                self.line_notes.push(
+                    if spoke {
+                        "V.8 bis: the far end is answering; on with V.8"
+                    } else {
+                        "V.8 bis: an answer tone and no V.8 bis; on with V.8"
+                    }
+                    .to_owned(),
+                );
+                self.bis = None;
+                return below;
+            }
+        }
+        match status {
+            v8bis::Status::Running => {}
+            v8bis::Status::Selected(selection) => {
+                self.bis = None;
+                // 9.9: "the station which receives the MS message shall
+                // configure its modem as the answer modem irrespective of
+                // which station originated the call."
+                let answering = if selection.answer { Role::Answering } else { Role::Calling };
+                if answering != self.role || self.negotiation.is_none() {
+                    self.role = answering;
+                    self.open_v8();
+                }
+            }
+            v8bis::Status::Failed(_) => {
+                // The line goes on without it: V.8, as though V.8 bis had
+                // never been tried.
+                self.bis = None;
+                if self.negotiation.is_none() {
+                    self.open_v8();
+                }
+            }
+        }
+        out
     }
 
     /// Carry the negotiation one sample further, and build the pump when it
@@ -2755,6 +2907,7 @@ impl Modem {
         }
         self.pump = None;
         self.negotiation = None;
+        self.bis = None;
         self.rate = 0;
         self.transmit_rate = 0;
         self.ec = None;
