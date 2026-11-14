@@ -28,6 +28,7 @@
 #![forbid(unsafe_code)]
 
 pub mod ansam;
+pub mod bis;
 pub mod quick;
 
 pub use ansam::AnswerTone;
