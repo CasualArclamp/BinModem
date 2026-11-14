@@ -822,6 +822,9 @@ pub struct Receiver {
     /// The Phase 4 fit, designed while the second TRN1u is still on the line
     /// and put in place when TRN2u begins (see [`Self::prepare_phase_four`]).
     phase_four: Option<Fitted>,
+    /// Whether the far end has stepped its transmitter since the fit in place
+    /// was made (see [`Receiver::far_end_stepped`]).
+    stale: bool,
     /// The data-mode fit, made while TRN2u is on the line and put in place
     /// when B1u begins (see [`Self::train_for_data_mode`]). `None` when this
     /// end's CPd asks the far end for no shaping, and the Phase 4 equaliser is
@@ -914,6 +917,7 @@ impl Receiver {
             pending_levels: None,
             pending_line: None,
             phase_four: None,
+            stale: false,
             data_fit: None,
             settling: 0,
             b1u: VecDeque::new(),
@@ -1324,7 +1328,9 @@ impl Receiver {
         Fitted {
             forward: self.forward.clone(),
             feedback: self.feedback.clone(),
-            snr_db: self.snr_db,
+            // A score from before the far end stepped is no score at all
+            // (see [`Self::far_end_stepped`]): anything fitted since beats it.
+            snr_db: if self.stale { f64::NEG_INFINITY } else { self.snr_db },
             trained: self.trained,
             at: self.trained_at,
         }
@@ -1339,7 +1345,14 @@ impl Receiver {
         self.forward.clone_from(&fitted.forward);
         self.feedback.clone_from(&fitted.feedback);
         self.decided.clear();
-        self.snr_db = fitted.snr_db;
+        // Putting back a fit from before the step puts back its staleness,
+        // and leaves the figure it last measured for whatever reads one.
+        if fitted.snr_db.is_finite() {
+            self.snr_db = fitted.snr_db;
+            self.stale = false;
+        } else {
+            self.stale = true;
+        }
         self.trained = fitted.trained;
         self.trained_at = fitted.at;
         // What the equaliser *is*, not just how well it fitted. Two runs of the
@@ -2422,8 +2435,46 @@ impl Receiver {
     /// therefore measures about 15 dB on a real line and 13 on a harness with a
     /// 3.4 kHz filter. What the refit needs is *when*, and the caller has just
     /// said when: see [`Self::align_trn1u`].
+    /// The far end has just stepped its transmitter -- the S-bar-u of
+    /// 9.5.2.1.8, (24 + epsilon)T -- so every fit made before now is for a
+    /// sampling phase that has gone.
+    ///
+    /// The taps stay, because until the refit they are all there is; what is
+    /// dropped is their *score*. Each later fit is taken only if it measures
+    /// near or above the one in place (the refit's gate, the Phase 4 design's,
+    /// TRN2u's), and a score from before the step is a measurement of a line
+    /// that no longer exists. On a band-limited line it was low enough that
+    /// nobody noticed; between two of this project's ends at 48 kHz the first
+    /// Phase 4 design measured 77 dB at the old phase, the one on the second
+    /// TRN1u 55 at the new, and the stale one was kept and read every CPu
+    /// wrong. The Phase 4 design made before the step goes for the same
+    /// reason.
+    pub fn far_end_stepped(&mut self) {
+        self.stale = true;
+        self.phase_four = None;
+    }
+
     pub fn train_verified(&mut self, from: u64, window: usize) -> bool {
-        if !self.fit_window(from as usize, window) {
+        self.train_verified_ahead(from, window, 0)
+    }
+
+    /// The same, with the equaliser looking `ahead` symbols past the one it
+    /// decides.
+    ///
+    /// The equaliser is causal: tap `k` is the sample `k` symbols before the
+    /// one whose symbol it is deciding. Fitted at the sequence's first symbol,
+    /// as [`Self::align_trn1u`] finds it, it has nothing of the line after
+    /// that symbol, and whatever the line put there -- the pre-cursor half of
+    /// every symbol -- is left in the error. On a telephone line the
+    /// two-point stream's figure is low anyway, and nobody notices; between
+    /// two of this project's ends at 48 kHz the first fit, which searches its
+    /// start and settled 14 symbols in, measured 44.8 dB, and the refit at
+    /// the alignment 22.5 -- which the refit's own gate then refused.
+    ///
+    /// A whole number of data frames keeps [`Self::interval`] right, which
+    /// counts symbols as they arrive and not as they are decided.
+    pub fn train_verified_ahead(&mut self, from: u64, window: usize, ahead: u64) -> bool {
+        if !self.fit_at((from + ahead) as usize, window, 0, TRAIN_TAPS, 0) {
             return false;
         }
         // 9.5.2.1.9's refinement reaches the Phase 4 receiver as well as the
@@ -2650,6 +2701,7 @@ impl Receiver {
         let signal = signal / count;
         let noise = noise / count;
         self.snr_db = if noise > 0.0 { 10.0 * (signal / noise).log10() } else { f64::INFINITY };
+        self.stale = false;
         self.snr_db.is_finite() && self.snr_db > 0.0
     }
 }

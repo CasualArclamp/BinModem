@@ -383,6 +383,19 @@ impl Settings {
     }
 }
 
+/// The CPt an end that asked for no DIL sends: 48 000 bit/s (drn 16) on
+/// Ucodes 16 to 47 in every interval.
+///
+/// With no DIL nothing has been measured, so this is a guess, and a careful
+/// one: Ucodes below 16 are a few LSBs of the codec apart and a resampler's
+/// noise alone confuses them, and 32 points carry drn 16's six bits a symbol
+/// with room to spare (Table 14/V.90).
+#[must_use]
+pub fn readable_cpt() -> Cp {
+    let mask = (16..=47u8).fold(0u128, |mask, u| mask | 1 << u);
+    Cp { drn: 16, constellations: vec![mask], ..Cp::default() }
+}
+
 /// How the start-up is going.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {

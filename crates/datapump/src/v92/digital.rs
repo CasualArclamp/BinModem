@@ -175,6 +175,13 @@ const REFIT_WINDOW: usize = 600;
 /// at about `1/sqrt(`[`ALIGN_WINDOW`]`)` = 0.04. Half is far past that.
 const REFIT_QUALITY: f64 = 0.5;
 
+/// How far past the symbol it decides the refit's equaliser looks: one data
+/// frame, so that the 12-symbol count is undisturbed (see
+/// `Receiver::train_verified_ahead`). The first fit's search settles a dozen
+/// or so symbols in on its own; the refit is taken at the alignment the
+/// correlation found, and without this has no look-ahead at all.
+const REFIT_AHEAD: u64 = 12;
+
 /// How much worse than the fit already in place a refit may be, in decibels,
 /// and still be taken for the alignment's sake. The two-point stream's figure
 /// is set by what the line has at 4000 Hz rather than by the timing, so a
@@ -1791,7 +1798,7 @@ impl Modem {
                     self.trn2_from = Some(base + aligned);
                     // 9.6.1.1.1's design is scheduled here: see `design_at`.
                     self.design_at = self.trn2_from.map(|at| at + DESIGN_AFTER);
-                    let taken = self.rx.train_verified(aligned, TRAIN_WINDOW);
+                    let taken = self.rx.train_verified_ahead(aligned, TRAIN_WINDOW, REFIT_AHEAD);
                     if tracing() {
                         eprintln!(
                             "V92TRACE: refit at {aligned}, quality {quality:.3} -> {taken} at {:.1} dB (was {baseline:.1})",
@@ -2878,6 +2885,10 @@ impl Modem {
                 self.cp_len = 0;
                 self.cp_pos = 0;
                 self.e1u_zeroes = 0;
+                // The far end has stepped by epsilon on this reversal, and by
+                // half a symbol on the one before: whatever was fitted and
+                // scored before now was scored at a phase that has gone.
+                self.rx.far_end_stepped();
                 self.note("V.92: second S-bar-u, 107 on".into());
             }
             _ => {}

@@ -4899,7 +4899,12 @@ fn family(modulation: &str) -> (Color32, Option<u32>, &'static str) {
             "Trellis-coded QAM at 2400 baud, both ways on the one 1800 Hz carrier, told apart by echo cancelling.",
         ),
         "V.34" => (V34, None, "V.34: the symbol rate and carrier are chosen by probing the line, each way separately."),
-        "V.90" | "V.92" => (PCM, Some(8000), "PCM downstream, a codeword a network sample; V.34 upstream."),
+        "V.90" => (PCM, Some(8000), "PCM downstream, a codeword a network sample; V.34 upstream."),
+        "V.92" => (
+            PCM,
+            Some(8000),
+            "PCM both ways: a codeword a network sample down, and up a level on each of the server's A/D instants.",
+        ),
         "V.17" | "V.29" => (FAX, Some(2400), "A fax page modulation at 2400 baud."),
         "V.27ter" => (FAX, None, "A fax page modulation: 1600 baud at 4800 bit/s, 1200 at 2400."),
         _ if name.starts_with("V.8") => (V34, None, "V.8: the two modems saying what they have."),
