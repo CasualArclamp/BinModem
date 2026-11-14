@@ -51,6 +51,11 @@ pub fn run(args: Vec<String>) -> ExitCode {
     let mut banner = "*** THE DEAD ZONE BBS ***\n  24 hours - SysOp: nobody".to_owned();
     let mut account = Account::new("guest", "");
     let mut v8bis = false;
+    // A line a second of what the sound card did and what arrived, and every
+    // sample that arrived written to a file: for a call that will not come
+    // up, the two things that say whether it is the line or the modem.
+    let mut stats = false;
+    let mut record: Option<String> = None;
 
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -60,13 +65,16 @@ pub fn run(args: Vec<String>) -> ExitCode {
             "--out" => output = Some(value()),
             "--carrier" => carrier = value().to_ascii_uppercase(),
             "--v8bis" => v8bis = true,
+            "--stats" => stats = true,
+            "--record" => record = Some(value()),
             "--banner" => banner = value(),
             "--user" => account.name = value(),
             "--password" => account.password = value(),
             "--help" | "-h" => {
                 println!(
                     "binmodem --answer --in <device> --out <device> \
-                     [--carrier B103|V21|V22B|V32|V34] [--v8bis] [--banner <text>]\n\
+                     [--carrier B103|V21|V22B|V32|V34|V90|V92] [--v8bis] [--banner <text>]\n\
+                     \x20                [--stats] [--record <file of f32 samples>]\n\
                      \x20                [--user <name>] [--password <password>]\n\
                      \n\
                      Answers calls on a virtual cable with a login prompt, so that\n\
@@ -135,6 +143,18 @@ pub fn run(args: Vec<String>) -> ExitCode {
     let mut last_phase = "";
     let mut last_ec = "";
     let mut owed_ms = 0.0f64;
+    // `--stats`: the second last told, samples taken in all, and since then
+    // how many were exactly zero, their energy and their count.
+    let (mut stats_at, mut taken) = (u64::MAX, 0u64);
+    let (mut silent, mut energy, mut counted) = (0u64, 0.0f64, 0u64);
+    // `--record`: little-endian f32 at the modem's rate, as it arrived.
+    let mut recording = record.and_then(|path| match std::fs::File::create(&path) {
+        Ok(file) => Some(std::io::BufWriter::new(file)),
+        Err(e) => {
+            eprintln!("could not record to {path}: {e}");
+            None
+        }
+    });
     let started = std::time::Instant::now();
     let stamp = || started.elapsed().as_secs_f64();
 
@@ -157,6 +177,35 @@ pub fn run(args: Vec<String>) -> ExitCode {
         let ms = owed_ms as u32;
         owed_ms -= f64::from(ms);
 
+        if let Some(file) = recording.as_mut() {
+            use std::io::Write;
+            for &x in &from_line {
+                let _ = file.write_all(&x.to_le_bytes());
+            }
+        }
+        if stats {
+            for &x in &from_line {
+                counted += 1;
+                energy += f64::from(x) * f64::from(x);
+                silent += u64::from(x == 0.0);
+            }
+            taken += from_line.len() as u64;
+            let second = stamp() as u64;
+            if second != stats_at {
+                stats_at = second;
+                let n = counted.max(1);
+                println!(
+                    "[{:>6.2}s line: {} in dropped, {} out dropped, {} underruns, {taken} taken, {}% silent, rms {:.4}]",
+                    stamp(),
+                    audio.dropped_in(),
+                    audio.dropped_out(),
+                    audio.underruns(),
+                    100 * silent / n,
+                    (energy / n as f64).sqrt()
+                );
+                (silent, energy, counted) = (0, 0.0, 0);
+            }
+        }
         let phase = host.line_phase();
         if phase != last_phase {
             last_phase = phase;

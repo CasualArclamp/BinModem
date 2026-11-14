@@ -586,6 +586,12 @@ impl Digital {
         self.v92.is_some()
     }
 
+    /// What V.92's Phases 3 and 4 have done since this was last asked, a
+    /// line each for the transcript.
+    pub fn take_notes(&mut self) -> Vec<String> {
+        self.v92.as_mut().map(pcm::Modem::take_notes).unwrap_or_default()
+    }
+
     pub fn round_trip(&self) -> Option<f64> {
         self.v34.phase2().round_trip()
     }

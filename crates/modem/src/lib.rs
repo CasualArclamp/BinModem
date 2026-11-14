@@ -1701,6 +1701,10 @@ impl Modem {
             // pump put away on this same sample still has its last lines told.
             self.line_notes.extend(m.take_notes());
         }
+        if let Pump::V90Server(m) = pump {
+            // The server's V.92 Phases 3 and 4 tell their steps the same way.
+            self.line_notes.extend(m.modem_mut().take_notes());
+        }
 
         match self.state {
             State::Handshaking => self.advance_handshake(),
@@ -2071,9 +2075,20 @@ impl Modem {
 
     /// Whether what goes to the line has to arrive at the far encoder at
     /// exactly the level it leaves at: V.90's digital modem, whose samples
-    /// are codewords. Anything that scales the line should leave them alone.
+    /// are codewords, and V.92's analogue modem from Phase 3, whose levels are
+    /// in LU (3.8) and are read against the server's codec's own. Anything
+    /// that scales the line should leave them alone.
+    ///
+    /// The second was learnt the hard way: a window's drive of a tenth put
+    /// the PCM upstream at a mean square of 1e-4 at the server, just under
+    /// what its receiver counts as a signal at all, and every Ja was read as
+    /// silence while the TRN1u in front of it trained.
     pub fn exact_levels(&self) -> bool {
-        matches!(self.pump, Some(Pump::V90Server(_)))
+        match &self.pump {
+            Some(Pump::V90Server(_)) => true,
+            Some(Pump::V90(m)) => m.is_v92(),
+            _ => false,
+        }
     }
 
     /// Ask the data pump to go back through its start-up (V.32bis 7).

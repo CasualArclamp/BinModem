@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 
 use modem::{Modem, State};
 
-const FS: f64 = 48_000.0;
+const FS: f64 = 16_000.0;
 
 /// Both ends and the two wires between them.
 struct Pair {
@@ -107,5 +107,32 @@ fn two_of_these_connect_on_v92_with_pcm_upstream_and_carry_text() {
         assert!(host_saw.contains("from the caller"), "{up}/{down}: the server saw {host_saw:?}\n{notes}");
         let caller_saw = String::from_utf8_lossy(&pair.caller_said).into_owned();
         assert!(caller_saw.contains("from the server"), "{up}/{down}: the caller saw {caller_saw:?}\n{notes}");
+    }
+}
+
+/// What a live answerer heard, played into a fresh one: `V92_REPLAY` names a
+/// file of little-endian f32 samples at 16 kHz, as
+/// `binmodem --answer --record` writes them.
+#[test]
+#[ignore = "needs a recording"]
+fn replay_what_an_answerer_heard() {
+    let Some(path) = std::env::var_os("V92_REPLAY") else { return };
+    let bytes = std::fs::read(path).expect("no recording");
+    let mut host = Modem::new(16_000.0);
+    host.set_pcm_upstream(true);
+    Pair::type_at(&mut host, "AT+MS=V92");
+    Pair::type_at(&mut host, "ATA");
+    let mut last = "";
+    for (n, chunk) in bytes.as_chunks::<4>().0.iter().enumerate() {
+        let x = f32::from_le_bytes(*chunk);
+        host.step(f64::from(x));
+        let phase = host.line_phase();
+        if phase != last {
+            last = phase;
+            println!("{:.2}s {phase}", n as f64 / 16_000.0);
+        }
+        for note in host.take_line_notes() {
+            println!("{:.2}s   {note}", n as f64 / 16_000.0);
+        }
     }
 }
