@@ -42,11 +42,11 @@ window, and Open joins them into one two-wire line. Changing either box moves
 the call onto the new device.
 
 The terminal in the window is the modem's DTE. Type `AT` and it answers `OK`;
-`AT+MS=B103` or `V22B` or `V32` chooses the modulation; `ATD` originates, `ATA`
-answers and `+++` escapes back to command state. The buttons above do exactly
-those and nothing else — the modem has one interface, and a button that reached
-past it would be able to ask for things a terminal could not. The scopes show
-the call as it happens rather than a recording of somebody else's.
+`AT+MS=B103`, `V21`, `V22B` or `V32` chooses the modulation; `ATD` originates,
+`ATA` answers and `+++` escapes back to command state. The buttons above do
+exactly those and nothing else — the modem has one interface, and a button
+that reached past it would be able to ask for things a terminal could not. The
+scopes show the call as it happens rather than a recording of somebody else's.
 
 An ordinary `ATD` now negotiates before it starts. V.250 6.4.1 names the
 mechanism — `<automode>` "enables or disables automatic modulation negotiation
@@ -353,6 +353,17 @@ it: 1728 pels across, at 3.85 or 7.7 lines per millimetre, thresholded or
 dithered. The panel says what that page comes to and how long it takes at each
 rate before anything is dialled.
 
+**Browse** takes a PDF as well, and every page of it goes in the one call, a
+page to a sheet. Each is drawn at the size it is printed, straight onto the
+fax's pels: A4 comes out A4, with the 215 mm line a little wider than the
+paper, and a page too big for the line is shrunk until it fits across and down
+an A4 sheet. A page wider than it is tall and too wide for the line -- A4 or
+Letter on its side -- is turned a quarter turn anticlockwise, as a printer set
+to landscape turns it, so that it fills the sheet. **<** and **>** under the
+preview step through the pages, and the **coded** row and the times are for
+all of them together. A fax takes the first 50 pages of a document; a PDF
+locked with a password does not load.
+
 **Send fax** types `AT+FCLASS=1` and then `ATD` with the number in the box. On
 a softphone, place the call there first and press it once the far end has
 answered; the calling tone goes out, the far end says what it is, and the page
@@ -365,9 +376,11 @@ slow-scan television is, under **page arriving**. The view follows the newest
 line, with a green line marking it; scrolling up to look at the top stops it
 following until it is scrolled back down. With error correction the page draws
 a block's frames at a time, and waits at a damaged frame until it has been sent
-again. **Save as PNG** writes out the page, or as much of it as has arrived,
-with each scan line drawn tall enough to make the pels square, which they are
-not. **page to send** and **page arriving** both fold away, for a window that
+again. **Save** writes out the page, or as much of it as has arrived, as a PDF
+or a PNG, whichever the name ends in. A PDF's sheet is the size the page was
+scanned at, with the page on it in T.6, the coding it came in under error
+correction; a PNG draws each scan line tall enough to make the pels square,
+which they are not. **page to send** and **page arriving** both fold away, for a window that
 is taller than the screen.
 
 The **offer** boxes are what this end will use. V.29 carries a page at 9600 and
@@ -411,10 +424,11 @@ whether or not a page follows.
 
 A call can bring any number of pages. Each is drawn as it arrives, the heading
 and the progress line say which page it is, and **<** and **>** go back through
-the pages of the call that came before it. **Save as PNG** writes the page in
-view; **Save all** writes every page of the call to its own file, the name
-chosen with the page's number after it: `fax-1.png`, `fax-2.png` and so on.
-The window sends one page to a call.
+the pages of the call that came before it. **Save** writes the page in view;
+**Save all** writes every page of the call into one PDF, a page to a sheet, or,
+given a name ending in `.png`, each to its own picture with the page's number
+after the name: `fax-1.png`, `fax-2.png` and so on. A fax saved as a PDF loads
+back into **Browse** as the same pages, to send on.
 
 The modem stays in fax class after a call, as V.250 asks, so `AT+FCLASS=0`
 makes it a modem again before dialling a board.

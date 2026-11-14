@@ -10,8 +10,8 @@
 //!
 //! Bell 103 is the North American 300 bps standard; ITU-T V.21 is the
 //! equivalent elsewhere and differs only in tone assignment (980/1180 and
-//! 1650/1850), so the same receiver and transmitter serve both once given the
-//! other pair of tones.
+//! 1650/1850) and in answering with V.25's tone first, so the same modem
+//! serves both once given the other `Plan`: `v21::DATA`.
 //!
 //! There is almost nothing else to it, and that is why it is worth having.
 //! Separate bands mean no echo canceller. A discriminator means no carrier
@@ -22,6 +22,7 @@
 use dsp::FskDetector;
 
 use crate::framing::{AsyncBits, AsyncFramer};
+use crate::v21::{self, Tone};
 
 /// Which end of the call this modem is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,22 +34,61 @@ pub enum Role {
 impl Role {
     /// The band this role transmits in, as `(space, mark)`.
     pub fn transmit_tones(self) -> (f64, f64) {
-        match self {
-            Role::Originate => (1070.0, 1270.0),
-            Role::Answer => (2025.0, 2225.0),
-        }
+        BELL_103.transmit_tones(self)
     }
 
     /// The band this role listens to: whatever the far end transmits.
     pub fn receive_tones(self) -> (f64, f64) {
-        match self {
-            Role::Originate => Role::Answer.transmit_tones(),
-            Role::Answer => Role::Originate.transmit_tones(),
-        }
+        BELL_103.receive_tones(self)
     }
 }
 
 pub const BAUD: f64 = 300.0;
+
+/// The two bands a 300 bit/s modem divides the line into, and how the
+/// answering end announces itself.
+///
+/// Bell 103 and V.21 are one modem with different numbers in it, so the
+/// numbers are what changes and the modem is written once.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Plan {
+    /// What to call it.
+    pub name: &'static str,
+    /// What the calling end sends, as `(space, mark)`.
+    pub originate: (f64, f64),
+    /// What the answering end sends, as `(space, mark)`.
+    pub answer: (f64, f64),
+    /// Whether the answering end opens with V.25's procedure -- silence,
+    /// then the 2100 Hz answering tone, then silence again -- before its
+    /// carrier. A Bell 103 answers with its own mark and nothing else.
+    pub answer_tone: bool,
+}
+
+impl Plan {
+    /// The band `role` transmits in, as `(space, mark)`.
+    pub fn transmit_tones(&self, role: Role) -> (f64, f64) {
+        match role {
+            Role::Originate => self.originate,
+            Role::Answer => self.answer,
+        }
+    }
+
+    /// The band `role` listens to: whatever the far end transmits.
+    pub fn receive_tones(&self, role: Role) -> (f64, f64) {
+        match role {
+            Role::Originate => self.answer,
+            Role::Answer => self.originate,
+        }
+    }
+}
+
+/// Bell 103's tones, and its answer: a mark a moment after picking up.
+pub const BELL_103: Plan = Plan {
+    name: "Bell 103",
+    originate: (1070.0, 1270.0),
+    answer: (2025.0, 2225.0),
+    answer_tone: false,
+};
 
 /// A streaming Bell 103 receiver: line samples in, characters out.
 #[derive(Debug)]
@@ -154,6 +194,8 @@ impl Bell103Tx {
         Self::with_tones(space, mark, fs)
     }
 
+    /// Build a transmitter for an explicit tone pair, for V.21 or for the
+    /// V.8 and T.30 messages that ride on it.
     pub fn with_tones(space: f64, mark: f64, fs: f64) -> Self {
         Self {
             space,
@@ -233,6 +275,13 @@ mod timing {
     /// not a mark. A modem that waited only for carrier would start talking
     /// over three seconds of answer tone.
     pub const MARK_HELD: f64 = 0.2;
+    /// V.25 4.3: off hook, then silence "for a period between 1.8 and
+    /// 2.5 s" before the answering tone. The middle of it.
+    pub const V25_SILENCE: f64 = 2.15;
+    /// V.25 2.2 note 1: the answering tone lasts 3.3 plus or minus 0.7 s.
+    pub const V25_TONE: f64 = 3.3;
+    /// V.25 4.4: "a silent period for 75 +/- 20 ms" after the tone.
+    pub const V25_GAP: f64 = 0.075;
     /// Nothing recognisable for this long and the attempt is abandoned.
     pub const PATIENCE: f64 = 60.0;
 }
@@ -241,6 +290,10 @@ mod timing {
 enum Phase {
     /// Answering: off hook and quiet, letting the line settle.
     Waiting,
+    /// Answering under V.25: the 2100 Hz answering tone.
+    AnswerTone,
+    /// Answering under V.25: the silence between the tone and the carrier.
+    AfterTone,
     /// Originating: listening for the answering modem, saying nothing.
     Listening,
     /// Carrier up, waiting for the far end to settle to idle mark.
@@ -249,7 +302,7 @@ enum Phase {
     Failed,
 }
 
-/// A complete Bell 103 modem: one end of a 300 bit/s call.
+/// A complete 300 bit/s modem, Bell 103 or V.21: one end of a call.
 ///
 /// There is very little to it, which is the point of starting here. The two
 /// directions are in different bands, so no echo canceller; the tones are
@@ -259,10 +312,13 @@ enum Phase {
 /// whistles back.
 #[derive(Debug)]
 pub struct Modem {
+    plan: Plan,
     tx: Bell103Tx,
     rx: Bell103Rx,
     phase: Phase,
     fs: f64,
+    /// V.25's answering tone, for a plan that opens with it.
+    tone: Tone,
     /// Samples in the current phase, and since the call began.
     elapsed: f64,
     total: f64,
@@ -275,15 +331,25 @@ pub struct Modem {
 }
 
 impl Modem {
+    /// A Bell 103 modem.
     pub fn new(role: Role, fs: f64) -> Self {
+        Self::with_plan(BELL_103, role, fs)
+    }
+
+    /// A 300 bit/s modem on another set of tones: V.21's, for one.
+    pub fn with_plan(plan: Plan, role: Role, fs: f64) -> Self {
+        let (tx_space, tx_mark) = plan.transmit_tones(role);
+        let (rx_space, rx_mark) = plan.receive_tones(role);
         Self {
-            tx: Bell103Tx::new(role, fs),
-            rx: Bell103Rx::new(role, fs),
+            plan,
+            tx: Bell103Tx::with_tones(tx_space, tx_mark, fs),
+            rx: Bell103Rx::with_tones(rx_space, rx_mark, fs),
             phase: match role {
                 Role::Originate => Phase::Listening,
                 Role::Answer => Phase::Waiting,
             },
             fs,
+            tone: Tone::new(v21::ANSWER_TONE, fs),
             elapsed: 0.0,
             total: 0.0,
             held: 0.0,
@@ -300,7 +366,16 @@ impl Modem {
             self.received.push(byte);
         }
         self.advance();
-        self.tx.next_sample()
+        let sample = self.tx.next_sample();
+        if self.phase == Phase::AnswerTone {
+            return self.tone.next_sample();
+        }
+        sample
+    }
+
+    /// Which modem this is.
+    pub fn standard(&self) -> &'static str {
+        self.plan.name
     }
 
     fn advance(&mut self) {
@@ -313,8 +388,30 @@ impl Modem {
         let idle = carrier && self.rx.level() > 0.5;
 
         match self.phase {
+            Phase::Waiting if self.plan.answer_tone => {
+                if self.elapsed >= timing::V25_SILENCE {
+                    self.enter(Phase::AnswerTone);
+                }
+            }
             Phase::Waiting => {
                 if self.elapsed >= timing::ANSWER_DELAY {
+                    self.tx.set_transmitting(true);
+                    self.enter(Phase::Marking);
+                }
+            }
+            Phase::AnswerTone => {
+                // The far end's carrier may already be up -- a calling
+                // modem answers the tone with its own -- but that does not
+                // cut the tone short. V.25 4.3's early end is for "a calling
+                // station response", and 1.1 makes that provision "only
+                // applicable to [DCEs] for which the relevant V-Series
+                // Recommendation specifically calls for" it. V.21 does not.
+                if self.elapsed >= timing::V25_TONE {
+                    self.enter(Phase::AfterTone);
+                }
+            }
+            Phase::AfterTone => {
+                if self.elapsed >= timing::V25_GAP {
                     self.tx.set_transmitting(true);
                     self.enter(Phase::Marking);
                 }
@@ -364,6 +461,8 @@ impl Modem {
     pub fn line_phase(&self) -> &'static str {
         match self.phase {
             Phase::Waiting => "waiting",
+            Phase::AnswerTone => "answer tone",
+            Phase::AfterTone => "after tone",
             Phase::Listening => "listening",
             Phase::Marking => "mark",
             Phase::Connected => "connected",

@@ -1,6 +1,8 @@
 # BinModem
 
-<img width="1314" height="892" alt="image" src="https://github.com/user-attachments/assets/f07ab50e-662e-4474-bae8-eda9861fb87a" />
+If you've found this worth your time, please consider [donating via PayPal](https://www.paypal.me/Arclamp).
+
+![BinModem on a V.34 call at 33 600: the faceplate, the call card and the scopes](docs/images/releases/v3.0.0/scopes-v34.png)
 
 A dial-up softmodem in Rust. Everything a modem does — the tones, the
 handshakes, the error control, the compression — is code, and the line is a
@@ -65,7 +67,7 @@ been checked three other ways: two documents, two methods, one table.
 
 | | |
 |---|---|
-| **Modulations** | Bell 103 (300), V.22 (1200), V.22bis (1200/2400), V.32 (4800/9600, both codings), V.32bis (7200/12000/14400), V.34 (4800 to 33600: shell mapping, 16/32/64-state 4D trellis codes, precoding, non-linear encoding), V.90 analogue and digital modems (28000 to 56000 PCM down, V.34 up: DIL analysis, modulus encoding, spectral shaping, rate renegotiation; the digital one answers through a softphone) |
+| **Modulations** | Bell 103 (300), V.21 (300), V.22 (1200), V.22bis (1200/2400), V.32 (4800/9600, both codings), V.32bis (7200/12000/14400), V.34 (4800 to 33600: shell mapping, 16/32/64-state 4D trellis codes, precoding, non-linear encoding), V.90 analogue and digital modems (28000 to 56000 PCM down, V.34 up: DIL analysis, modulus encoding, spectral shaping, rate renegotiation; the digital one answers through a softphone) |
 | **Negotiation** | V.8 CM/JM/CI/CJ and ANSam; V.25 answer tone told apart from it |
 | **Error control** | V.42 LAPM — detection, HDLC, XID, REJ/SREJ, mod-128 |
 | **Compression** | V.44 (LZJH) and V.42bis (BTLZ), both offered in one XID and the far end picks; V.42bis also followed in band |
@@ -73,15 +75,16 @@ been checked three other ways: two documents, two methods, one table.
 | **Terminal** | ANSI/CP437 with mouse reporting; telnet (RFC 854) to use it alone |
 | **Settings** | remembered between runs, so the modem comes back where it was left |
 | **Files** | ZMODEM send and receive |
-| **Fax** | T.30 group 3, sending and receiving; V.17 (7200 to 14 400), V.29 (4800/7200/9600) and V.27 ter (2400/4800); Super G3 -- V.8, then T.30 Annex F on V.34's half-duplex mode at up to 33 600; T.4 Modified Huffman and Modified READ, T.6 MMR, T.85 JBIG; T.30 Annex A error correction mode; any number of pages in a call, each drawn as it arrives |
+| **Fax** | T.30 group 3, sending and receiving; V.17 (7200 to 14 400), V.29 (4800/7200/9600) and V.27 ter (2400/4800); Super G3 -- V.8, then T.30 Annex F on V.34's half-duplex mode at up to 33 600; T.4 Modified Huffman and Modified READ, T.6 MMR, T.85 JBIG; T.30 Annex A error correction mode; any number of pages in a call, each drawn as it arrives; a PDF sent a page to a sheet at its printed size, and the pages received saved as a PDF |
 | **Network** | PPP (RFC 1661/1662) with LCP, PAP and CHAP, and IPCP, Van Jacobson header compression (RFC 1144), and a ping over it; a dial-in login prompt, and a login script for dialling out |
 | **Internet** | our own TCP (RFC 9293) and an HTTP/HTTPS proxy (RFC 9112): pages straight to the internet through a provider, or through a far BinModem that has it |
 | **Line** | full-duplex sound card, or a WAV to replay |
 
 It is a fax machine as well. A picture loaded in the Fax window becomes a
-group 3 page and goes out under T.30; a public fax service over the same VoIP
+group 3 page, and a PDF becomes one for each of its pages, drawn at their
+printed size; they go out under T.30. A public fax service over the same VoIP
 trunk accepts the training check and confirms the page, and a page it sends
-back arrives and saves as a PNG. V.29 carries it at 9600 and 7200, falling back
+back arrives and saves as a PDF or a PNG. V.29 carries it at 9600 and 7200, falling back
 to V.27 ter at 4800 and 2400, and every point and training sequence of both was
 read off the figures -- the extracted text turns the square root of two into
 "2". What finally let a real machine's page in was twenty milliseconds of
@@ -133,8 +136,15 @@ loopback.
 Connected six seconds into the call, network phase at seven, a page back at
 2400 bit/s — and it runs without a sound card.
 
-The window around it is a scope: waterfall, spectrum, constellation, LED
-faceplate, decoded transcript, and a log of every frame both ends sent. What
+The window is a modem's faceplate: the lamps, the level, the rate it connected
+at, and the keys that dial and answer. Under it are the terminal, with a strip
+that says how far the call has got and how long each step took, a transcript
+of every frame both ends sent, and the scopes: a card that names what the
+receiver is slicing and its margin and then goes down the receive chain a
+stage at a time, beside the constellation, an oscilloscope, a waterfall and a
+spectrum that label their own peak, noise floor and occupied band. A recording
+of somebody else's call replays through the same scopes, as far as one tap on
+the line lets it be followed. What
 the echo canceller is taking out, and where on the line it found the
 reflection, are on the panel too — on a two-wire pair that decides everything
 and is otherwise invisible, since a constellation full of noise looks the same
@@ -176,8 +186,7 @@ OS-specific code — but only built and run on Windows so far.
 
 ## Next
 
-V.33 -- the same trellis code as V.32bis again, on a leased line -- and more
-than one page to send from the fax window.
+V.33 -- the same trellis code as V.32bis again, on a leased line.
 
 V.92, on a branch. Eighteen agents read the Recommendation clause by clause off
 the rendered pages, with V.8, V.8 bis and V.250's `+P` commands beside it, and

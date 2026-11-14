@@ -10,7 +10,9 @@ use egui::{Color32, RichText};
 use fax::coding::Coding;
 use fax::page::{Grey, Halftone, Page, Resolution};
 use fax::t30;
+use std::sync::Arc;
 
+use crate::document;
 use crate::live::Arriving;
 
 /// What the window is holding.
@@ -23,13 +25,16 @@ pub struct Fax {
     /// Where the picture came from, and what went wrong if it did not.
     pub path: String,
     pub trouble: Option<String>,
-    /// The picture, kept so that the page can be made again when the
-    /// resolution or the halftone changes without going back to the file.
-    source: Option<Grey>,
-    source_size: (usize, usize),
-    page: Option<Page>,
-    /// How long the page codes to in each coding -- MH, MR, MMR and JBIG --
-    /// worked out once when it is made.
+    /// The picture or the PDF, kept so that the pages can be made again when
+    /// the resolution or the halftone changes without going back to the file.
+    source: Option<Source>,
+    /// What the file is, for the panel: a picture and its size, or a
+    /// document and its pages.
+    source_said: (&'static str, String),
+    /// The pages to send, in order: a picture's one, or a document's.
+    pages: Vec<Page>,
+    /// How long the pages code to in each coding -- MH, MR, MMR and JBIG --
+    /// all of them together, worked out once when they are made.
     ///
     /// Coding a full page is two to four milliseconds, and the panel wants
     /// the figures once for itself and again for each rate it could go out
@@ -37,7 +42,9 @@ pub struct Fax {
     /// of a call is tens of milliseconds a frame spent recomputing numbers
     /// that cannot have changed.
     coded_bits: [usize; 4],
-    /// A small copy of the page for the window to draw.
+    /// Which of the pages the preview is of.
+    showing: usize,
+    /// A small copy of that page for the window to draw.
     preview: Option<egui::TextureHandle>,
     pub resolution: Resolution,
     pub halftone: Halftone,
@@ -95,6 +102,15 @@ pub struct Fax {
     looking: Option<(usize, Scan)>,
     /// What was said about saving the last page.
     pub saved: Option<String>,
+}
+
+/// What the pages to send are made from.
+enum Source {
+    /// A picture: grey with square pixels, fitted to the paper as one page.
+    Picture(Grey),
+    /// A PDF, kept as the file it came in: its pages are drawn onto the paper
+    /// again for another resolution, which is quicker than keeping them drawn.
+    Document(Arc<Vec<u8>>),
 }
 
 /// What a page is carried in: its coding, the modulation under it and its
@@ -383,6 +399,16 @@ fn write_page(lines: &[Vec<bool>], resolution: Resolution, path: &std::path::Pat
     image.save(path).map_err(|e| format!("{e}"))
 }
 
+/// Write pages out as one PDF, each on a sheet the size it was scanned at.
+fn write_pdf(pages: &[fax::pdf::Sheet<'_>], path: &std::path::Path) -> Result<(), String> {
+    std::fs::write(path, fax::pdf::document(pages)).map_err(|e| format!("{e}"))
+}
+
+/// Whether a name chosen to save to asks for a PDF.
+fn names_pdf(path: &std::path::Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+}
+
 impl Fax {
     pub fn new() -> Self {
         Self {
@@ -419,45 +445,88 @@ impl Fax {
         out
     }
 
-    /// Read a picture off the disc and keep it as grey.
+    /// Read a picture or a PDF off the disc.
     ///
-    /// Everything becomes luminance and then ink: a fax has one bit per pel
-    /// and no notion of colour at all, so the sooner the colour goes the
-    /// fewer places there are to get it wrong.
+    /// A picture is kept as grey. Everything becomes luminance and then ink:
+    /// a fax has one bit per pel and no notion of colour at all, so the
+    /// sooner the colour goes the fewer places there are to get it wrong. A
+    /// PDF is kept as the file, and its pages drawn onto the paper from it.
     pub fn load(&mut self, path: &std::path::Path) {
         self.trouble = None;
-        self.page = None;
+        self.source = None;
+        self.pages.clear();
+        self.showing = 0;
         self.preview = None;
-        let decoded = match image::open(path) {
-            Ok(image) => image,
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
             Err(e) => {
                 self.trouble = Some(format!("{e}"));
-                self.source = None;
                 return;
             }
         };
-        let grey = decoded.to_luma8();
-        let (w, h) = (grey.width() as usize, grey.height() as usize);
-        self.source_size = (w, h);
-        self.source = Some(Grey {
-            width: w,
-            height: h,
-            // Ink, so a white page is nothing and a black one is everything.
-            // The image is the other way round, which is the only reason this
-            // subtraction exists.
-            ink: grey.pixels().map(|p| 1.0 - f32::from(p.0[0]) / 255.0).collect(),
-        });
+        if document::is_pdf(&bytes) {
+            self.source = Some(Source::Document(Arc::new(bytes)));
+        } else {
+            let decoded = match image::load_from_memory(&bytes) {
+                Ok(image) => image,
+                Err(e) => {
+                    self.trouble = Some(format!("{e}"));
+                    return;
+                }
+            };
+            let grey = decoded.to_luma8();
+            let (w, h) = (grey.width() as usize, grey.height() as usize);
+            self.source_said = ("picture", format!("{w} by {h}"));
+            self.source = Some(Source::Picture(Grey {
+                width: w,
+                height: h,
+                // Ink, so a white page is nothing and a black one is
+                // everything. The image is the other way round, which is the
+                // only reason this subtraction exists.
+                ink: grey.pixels().map(|p| 1.0 - f32::from(p.0[0]) / 255.0).collect(),
+            }));
+        }
         self.path = path.display().to_string();
         self.render();
+        if self.pages.is_empty() {
+            self.source = None;
+        }
     }
 
-    /// Make the page from the picture already loaded.
+    /// Make the pages from the picture or the PDF already loaded.
     pub fn render(&mut self) {
         let Some(source) = self.source.as_ref() else { return };
-        let page = fax::page::render(source, self.resolution, self.halftone);
-        self.coded_bits = [Coding::ModifiedHuffman, Coding::ModifiedRead, Coding::Mmr, Coding::Jbig]
-            .map(|coding| coding.encode(&page.lines, page.resolution, 0).len());
-        self.page = Some(page);
+        let pages = match source {
+            Source::Picture(grey) => vec![fax::page::render(grey, self.resolution, self.halftone)],
+            Source::Document(bytes) => match document::read(bytes, self.resolution, self.halftone) {
+                Ok((pages, all)) => {
+                    self.source_said = (
+                        "document",
+                        match all {
+                            1 => "1 page".to_owned(),
+                            _ if all > pages.len() => {
+                                format!("the first {} of its {all} pages", pages.len())
+                            }
+                            _ => format!("{all} pages"),
+                        },
+                    );
+                    pages
+                }
+                Err(e) => {
+                    self.trouble = Some(e);
+                    Vec::new()
+                }
+            },
+        };
+        self.coded_bits = [0; 4];
+        for page in &pages {
+            let codings = [Coding::ModifiedHuffman, Coding::ModifiedRead, Coding::Mmr, Coding::Jbig];
+            for (total, coding) in self.coded_bits.iter_mut().zip(codings) {
+                *total += coding.encode(&page.lines, page.resolution, 0).len();
+            }
+        }
+        self.showing = self.showing.min(pages.len().saturating_sub(1));
+        self.pages = pages;
         self.preview = None;
     }
 
@@ -478,9 +547,11 @@ impl Fax {
             for rx in 0..PREVIEW_WIDTH {
                 let mut ink = 0usize;
                 let mut n = 0usize;
-                for y in ry * across..((ry + 1) * across).min(page.height()) {
-                    for x in rx * across..((rx + 1) * across).min(fax::page::WIDTH) {
-                        ink += usize::from(page.lines[y][x]);
+                let down = ry * across..((ry + 1) * across).min(page.height());
+                let along = rx * across..((rx + 1) * across).min(fax::page::WIDTH);
+                for line in &page.lines[down] {
+                    for &pel in &line[along.clone()] {
+                        ink += usize::from(pel);
                         n += 1;
                     }
                 }
@@ -497,7 +568,7 @@ impl Fax {
 
     fn texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
         if self.preview.is_none() {
-            let page = self.page.as_ref()?;
+            let page = self.pages.get(self.showing)?;
             let image = Self::thumbnail(page);
             self.preview =
                 Some(ctx.load_texture("fax-page", image, egui::TextureOptions::LINEAR));
@@ -543,9 +614,9 @@ impl Fax {
         }
     }
 
-    /// The page that is ready to send, if one is.
-    pub fn page(&self) -> Option<&Page> {
-        self.page.as_ref()
+    /// The pages that are ready to send, in order.
+    pub fn pages(&self) -> &[Page] {
+        &self.pages
     }
 
     /// A page has arrived.
@@ -635,17 +706,22 @@ impl Fax {
     /// grid it came in on, a standard-resolution page is half the height it
     /// should be and everything on it looks squashed.
     ///
+    /// A name ending in `.pdf` saves a PDF instead, whose sheet is the size
+    /// the page was scanned at, so the lines need no drawing twice.
+    ///
     /// A page still arriving saves as far as it has got, which is also what
     /// is left of a call that ended part way down the page.
     pub fn save(&mut self, path: &std::path::Path) {
-        let said = match self.in_view() {
-            Some((_, lines, resolution)) => match write_page(lines, resolution, path) {
-                Ok(()) => format!("saved to {}", path.display()),
-                Err(e) => e,
-            },
-            None => return,
+        let Some((_, lines, resolution)) = self.in_view() else { return };
+        let written = if names_pdf(path) {
+            write_pdf(&[(lines, resolution)], path)
+        } else {
+            write_page(lines, resolution, path)
         };
-        self.saved = Some(said);
+        self.saved = Some(match written {
+            Ok(()) => format!("saved to {}", path.display()),
+            Err(e) => e,
+        });
     }
 
     /// The page in view: an earlier one being looked at, or the last to
@@ -666,7 +742,8 @@ impl Fax {
         }
     }
 
-    /// Every page of the call, each to its own file: `fax.png` becomes
+    /// Every page of the call: in one PDF if the name ends in `.pdf`, a page
+    /// to a sheet, and otherwise each to its own picture -- `fax.png` becomes
     /// `fax-1.png`, `fax-2.png` and so on, by the page's number in the call.
     pub fn save_all(&mut self, path: &std::path::Path) {
         let stem = path.file_stem().map_or_else(|| "fax".into(), |s| s.to_string_lossy());
@@ -682,6 +759,15 @@ impl Fax {
                 None if !scan.lines.is_empty() => pages.push((scan.sheet, &scan.lines, scan.resolution)),
                 None => {}
             }
+        }
+        if names_pdf(path) {
+            let sheets: Vec<fax::pdf::Sheet<'_>> =
+                pages.iter().map(|(_, lines, resolution)| (*lines, *resolution)).collect();
+            self.saved = Some(match write_pdf(&sheets, path) {
+                Ok(()) => format!("{} pages saved to {}", sheets.len(), path.display()),
+                Err(e) => e,
+            });
+            return;
         }
         let mut written = 0;
         let mut trouble = None;
@@ -709,15 +795,23 @@ impl Fax {
             .default_width(620.0)
             .show(ui.ctx(), |ui| {
                 ui.horizontal(|ui| {
-                    if ui.button("Browse").clicked()
+                    if ui
+                        .button("Browse")
+                        .on_hover_text(
+                            "A picture, sent as one page, or a PDF, sent a page to a sheet \
+                             at the size it is printed -- up to 50 of its pages",
+                        )
+                        .clicked()
                         && let Some(chosen) = rfd::FileDialog::new()
+                            .add_filter("pictures and PDFs", &["png", "jpg", "jpeg", "bmp", "gif", "pdf"])
+                            .add_filter("PDFs", &["pdf"])
                             .add_filter("pictures", &["png", "jpg", "jpeg", "bmp", "gif"])
                             .pick_file()
                     {
                         self.load(&chosen);
                     }
                     let shown = if self.path.is_empty() {
-                        "no picture".to_owned()
+                        "no picture or PDF".to_owned()
                     } else {
                         self.path.clone()
                     };
@@ -784,44 +878,67 @@ impl Fax {
 
                 ui.separator();
                 let texture = self.texture(ui.ctx());
-                let heading = match self.page.as_ref() {
-                    Some(page) => format!(
+                let count = self.pages.len();
+                let heading = match self.pages.as_slice() {
+                    [] => "page to send".to_owned(),
+                    [page] => format!(
                         "page to send: {} lines, {}",
                         page.height(),
                         page.resolution.name()
                     ),
-                    None => "page to send".to_owned(),
+                    _ => format!("{count} pages to send, {}", self.resolution.name()),
                 };
+                let mut step = 0isize;
                 egui::CollapsingHeader::new(RichText::new(heading).color(dim))
                     .id_salt("fax-send")
                     .default_open(true)
                     .show(ui, |ui| {
                         ui.horizontal_top(|ui| {
-                            if let Some(texture) = texture {
-                                let size = texture.size_vec2();
-                                let height = (size.y * 260.0 / size.x).min(340.0);
-                                ui.add(
-                                    egui::Image::new(&texture)
-                                        .fit_to_exact_size(egui::vec2(260.0, height)),
-                                );
-                            } else {
-                                ui.label(
-                                    RichText::new("Nothing to send yet.")
-                                        .small()
-                                        .color(dim),
-                                );
-                            }
                             ui.vertical(|ui| {
-                                if let Some(page) = self.page.as_ref() {
+                                if let Some(texture) = texture {
+                                    let size = texture.size_vec2();
+                                    let height = (size.y * 260.0 / size.x).min(340.0);
+                                    ui.add(
+                                        egui::Image::new(&texture)
+                                            .fit_to_exact_size(egui::vec2(260.0, height)),
+                                    );
+                                } else {
+                                    ui.label(
+                                        RichText::new("Nothing to send yet.")
+                                            .small()
+                                            .color(dim),
+                                    );
+                                }
+                                if count > 1 {
+                                    ui.horizontal(|ui| {
+                                        if ui
+                                            .add_enabled(self.showing > 0, egui::Button::new("<"))
+                                            .on_hover_text("the page before")
+                                            .clicked()
+                                        {
+                                            step = -1;
+                                        }
+                                        ui.label(
+                                            RichText::new(format!("page {} of {count}", self.showing + 1))
+                                                .monospace()
+                                                .color(bright),
+                                        );
+                                        if ui
+                                            .add_enabled(self.showing + 1 < count, egui::Button::new(">"))
+                                            .on_hover_text("the page after")
+                                            .clicked()
+                                        {
+                                            step = 1;
+                                        }
+                                    });
+                                }
+                            });
+                            ui.vertical(|ui| {
+                                if let Some(page) = self.pages.get(self.showing) {
                                     let [mh, mr, mmr, jbig] = self.coded_bits;
+                                    let (what, said) = &self.source_said;
                                     let rows = [
-                                        (
-                                            "picture",
-                                            format!(
-                                                "{} by {}",
-                                                self.source_size.0, self.source_size.1
-                                            ),
-                                        ),
+                                        (*what, said.clone()),
                                         (
                                             "page",
                                             format!("{} by {} pels", page.width(), page.height()),
@@ -850,7 +967,13 @@ impl Fax {
                                                             .color(coding_colour(name)),
                                                     );
                                                 }
-                                                ui.label(RichText::new("bits").monospace().color(dim));
+                                                // The figures and the times under
+                                                // them are for the whole fax.
+                                                let whole = match count {
+                                                    1 => "bits".to_owned(),
+                                                    _ => format!("bits, all {count} pages"),
+                                                };
+                                                ui.label(RichText::new(whole).monospace().color(dim));
                                             });
                                             ui.end_row();
                                             // What it costs at each rate this end is
@@ -901,6 +1024,10 @@ impl Fax {
                             });
                         });
                     });
+                if step != 0 {
+                    self.showing = self.showing.saturating_add_signed(step).min(count.saturating_sub(1));
+                    self.preview = None;
+                }
 
                 ui.separator();
                 ui.horizontal(|ui| {
@@ -1292,9 +1419,10 @@ impl Fax {
                         );
                     }
                     save = ui
-                        .button("Save as PNG")
+                        .button("Save")
                         .on_hover_text(
-                            "The page as far as it has got, if it is still \
+                            "This page, as a PDF or a PNG, whichever the name \
+                             ends in -- as far as it has got, if it is still \
                              arriving or the call ended part way down it",
                         )
                         .clicked();
@@ -1302,8 +1430,9 @@ impl Fax {
                         save_all = ui
                             .button(format!("Save all {pages}"))
                             .on_hover_text(
-                                "Every page of the call, each to its own file: \
-                                 the name chosen with the page's number after it",
+                                "Every page of the call: in one PDF, a page to a \
+                                 sheet, or each to its own PNG with the page's \
+                                 number after the name chosen",
                             )
                             .clicked();
                     }
@@ -1322,10 +1451,11 @@ impl Fax {
         }
         if save
             && let Some(chosen) = rfd::FileDialog::new()
-                .add_filter("pictures", &["png"])
+                .add_filter("PDF", &["pdf"])
+                .add_filter("PNG picture", &["png"])
                 .set_file_name(match self.in_view() {
-                    Some((sheet, _, _)) if pages > 1 => format!("fax-{sheet}.png"),
-                    _ => "fax.png".to_owned(),
+                    Some((sheet, _, _)) if pages > 1 => format!("fax-{sheet}.pdf"),
+                    _ => "fax.pdf".to_owned(),
                 })
                 .save_file()
         {
@@ -1333,8 +1463,9 @@ impl Fax {
         }
         if save_all
             && let Some(chosen) = rfd::FileDialog::new()
-                .add_filter("pictures", &["png"])
-                .set_file_name("fax.png")
+                .add_filter("PDF, every page in one", &["pdf"])
+                .add_filter("PNG pictures, a page each", &["png"])
+                .set_file_name("fax.pdf")
                 .save_file()
         {
             self.save_all(&chosen);
@@ -1756,5 +1887,111 @@ mod tests {
         frame.fax_progress = None;
         fax.observe(&frame);
         assert_eq!(fax.carried, Some(page), "lost in the turnaround after the page");
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join("binmodem-faxwin-pdf");
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join(name)
+    }
+
+    #[test]
+    fn a_pdf_goes_a_page_to_a_sheet_and_a_picture_as_one() {
+        let pages: Vec<Page> = (0..3).map(|n| page_of(300 + 100 * n)).collect();
+        let sheets: Vec<fax::pdf::Sheet<'_>> =
+            pages.iter().map(|p| (p.lines.as_slice(), p.resolution)).collect();
+        let path = scratch("three.pdf");
+        std::fs::write(&path, fax::pdf::document(&sheets)).unwrap();
+        let mut fax = Fax::new();
+        fax.load(&path);
+        assert_eq!(fax.trouble, None);
+        assert_eq!(fax.source_said, ("document", "3 pages".to_owned()));
+        let heights: Vec<usize> = fax.pages().iter().map(Page::height).collect();
+        assert_eq!(heights, [300, 400, 500], "the pages are not the lengths they were");
+
+        // Fine: every page drawn again, with twice the lines.
+        fax.showing = 2;
+        fax.resolution = Resolution::Fine;
+        fax.render();
+        let heights: Vec<usize> = fax.pages().iter().map(Page::height).collect();
+        assert_eq!(heights, [600, 800, 1000]);
+        assert_eq!(fax.showing, 2, "the preview went back to the first page");
+        let codings = [Coding::ModifiedHuffman, Coding::ModifiedRead, Coding::Mmr, Coding::Jbig];
+        for (total, coding) in fax.coded_bits.into_iter().zip(codings) {
+            let each: usize = fax.pages().iter().map(|p| coding.encode(&p.lines, p.resolution, 0).len()).sum();
+            assert_eq!(total, each, "{coding:?} is not the whole fax");
+        }
+
+        // A picture is one page, whatever came before it.
+        let picture = scratch("square.png");
+        image::GrayImage::from_pixel(40, 40, image::Luma([0])).save(&picture).unwrap();
+        fax.load(&picture);
+        assert_eq!(fax.pages().len(), 1);
+        assert_eq!(fax.showing, 0);
+        assert_eq!(fax.source_said, ("picture", "40 by 40".to_owned()));
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&picture);
+    }
+
+    #[test]
+    fn a_received_page_saved_as_a_pdf_loads_back_as_the_same_page() {
+        // Forwarding a fax: what arrived, saved, and put in to go out again.
+        let page = page_of(700);
+        let mut fax = Fax::new();
+        fax.arrived(1, page.clone());
+        let path = scratch("forward.pdf");
+        fax.save(&path);
+        assert!(fax.saved.as_deref().is_some_and(|s| s.starts_with("saved to")), "{:?}", fax.saved);
+        fax.load(&path);
+        assert_eq!(fax.trouble, None);
+        assert_eq!(fax.pages().len(), 1);
+        let back = &fax.pages()[0];
+        let wrong = back.lines.iter().flatten().zip(page.lines.iter().flatten()).filter(|(a, b)| a != b).count();
+        assert_eq!(back.height(), page.height());
+        assert_eq!(wrong, 0, "{wrong} pels came back different");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn every_page_of_a_call_saves_into_one_pdf() {
+        let pages: Vec<Page> = (0..3).map(|n| page_of(10 + n)).collect();
+        let mut fax = Fax::new();
+        for (n, page) in pages.iter().enumerate() {
+            fax.arrived(n + 1, page.clone());
+        }
+        let path = scratch("call.pdf");
+        fax.save_all(&path);
+        assert!(fax.saved.as_deref().is_some_and(|s| s.starts_with("3 pages saved to")), "{:?}", fax.saved);
+        let pdf = std::fs::read(&path).unwrap();
+        let text = String::from_utf8_lossy(&pdf);
+        assert_eq!(text.matches("/Type /Page ").count(), 3);
+        assert!(!scratch("call-1.png").exists(), "it wrote pictures as well");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_document_longer_than_a_fax_goes_as_far_as_it_can() {
+        let lines = lines_of(4, true);
+        let sheets: Vec<fax::pdf::Sheet<'_>> =
+            (0..document::MOST_PAGES + 7).map(|_| (lines.as_slice(), Resolution::Standard)).collect();
+        let path = scratch("long.pdf");
+        std::fs::write(&path, fax::pdf::document(&sheets)).unwrap();
+        let mut fax = Fax::new();
+        fax.load(&path);
+        assert_eq!(fax.pages().len(), document::MOST_PAGES);
+        assert_eq!(fax.source_said.1, format!("the first 50 of its {} pages", document::MOST_PAGES + 7));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_file_that_is_neither_says_so_and_leaves_nothing_to_send() {
+        let path = scratch("broken.pdf");
+        std::fs::write(&path, b"%PDF-1.4\nnot really").unwrap();
+        let mut fax = Fax::new();
+        fax.load(&path);
+        assert!(fax.trouble.is_some());
+        assert!(fax.pages().is_empty());
+        assert!(fax.source.is_none());
+        let _ = std::fs::remove_file(&path);
     }
 }

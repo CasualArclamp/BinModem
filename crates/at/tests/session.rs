@@ -382,12 +382,10 @@ fn modulation_selection_accepts_what_it_advertises() {
 #[test]
 fn a_modulation_that_is_not_offered_is_refused() {
     // Accepting one and then using something else is how a terminal ends up
-    // believing a connection is something it is not. V21 is the pointed case:
-    // the 300 bit/s tones implemented here are Bell 103's, and a modem that
-    // answered to V21 and then whistled at 1270 Hz would be lying to whoever
-    // asked.
+    // believing a connection is something it is not. V23 and V26 are simply
+    // not implemented at all.
     let mut it = quiet_dce();
-    for refused in ["V21"] {
+    for refused in ["V23", "V26"] {
         let (out, actions) = send(&mut it, &format!("AT+MS={refused}{CR}"));
         assert!(out.contains("ERROR"), "+MS={refused} answered {out:?}");
         assert!(actions.is_empty());
@@ -398,7 +396,7 @@ fn a_modulation_that_is_not_offered_is_refused() {
     // V.90 with V.92's phase 2, which is built, and PCM upstream, which Data
     // mode does not reach yet: it is offered because the exchange it names is
     // real.
-    for offered in ["B103", "V22B", "V32", "V34", "V90", "V92"] {
+    for offered in ["B103", "V21", "V22B", "V32", "V34", "V90", "V92"] {
         let (out, _) = send(&mut it, &format!("AT+MS={offered}{CR}"));
         assert!(out.contains("OK"), "+MS={offered} answered {out:?}");
     }

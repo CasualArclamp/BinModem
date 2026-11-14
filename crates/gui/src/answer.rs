@@ -64,7 +64,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
             "--help" | "-h" => {
                 println!(
                     "binmodem --answer --in <device> --out <device> \
-                     [--carrier B103|V22B|V32|V34] [--banner <text>]\n\
+                     [--carrier B103|V21|V22B|V32|V34] [--banner <text>]\n\
                      \x20                [--user <name>] [--password <password>]\n\
                      \n\
                      Answers calls on a virtual cable with a login prompt, so that\n\

@@ -37,7 +37,7 @@
     nothing to be offered the ones there are.
 
 .PARAMETER Carrier
-    Modulation for a live call: B103, V22B or V32. Both ends have to agree, so
+    Modulation for a live call: B103, V21, V22B or V32. Both ends have to agree, so
     this sets it for the board as well.
 
 .EXAMPLE
@@ -63,7 +63,7 @@ param(
     [Parameter()] [AllowEmptyString()]
     [string] $Telnet,
     [switch] $TelnetOnly,
-    [ValidateSet("B103", "V22B", "V32")]
+    [ValidateSet("B103", "V21", "V22B", "V32")]
     [string] $Carrier = "V22B"
 )
 

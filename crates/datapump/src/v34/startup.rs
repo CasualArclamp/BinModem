@@ -161,6 +161,12 @@ impl Modem {
         self.training.as_ref().map(training::Modem::constellation_size)
     }
 
+    /// Signal to noise of the decisions being made, in decibels, once phase 3
+    /// has trained the receiver.
+    pub fn snr_db(&self) -> Option<f64> {
+        self.training.as_ref().map(training::Modem::snr)
+    }
+
     /// The largest coordinate those points reach, in the units of
     /// [`Self::constellation_point`].
     pub fn constellation_peak(&self) -> Option<f64> {

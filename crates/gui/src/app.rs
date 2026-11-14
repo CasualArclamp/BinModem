@@ -201,6 +201,7 @@ impl Modulation {
             // V.32bis 2.3: the two V.32 rates and the three it adds, all at
             // the same 2400 baud.
             3 => &[4800, 7200, 9600, 12_000, 14_400],
+            6 => &[300],
             // V.34 5.1: "2400 bit/s to 33 600 bit/s in multiples of 2400".
             _ => &[
                 2400, 4800, 7200, 9600, 12_000, 14_400, 16_800, 19_200, 21_600, 24_000, 26_400,
@@ -260,11 +261,40 @@ impl Modulation {
 enum Tab {
     Terminal,
     Transcript,
+    /// The signal path, drawn: not there for a socket, which has none.
+    Scopes,
 }
+
+/// The colours of the faceplate, said once.
+const DIM: Color32 = Color32::from_rgb(140, 150, 165);
+const BRIGHT: Color32 = Color32::from_rgb(220, 225, 235);
+const GOOD: Color32 = Color32::from_rgb(90, 220, 130);
+const BAD: Color32 = Color32::from_rgb(235, 100, 90);
+const WARN: Color32 = Color32::from_rgb(240, 180, 90);
+const PLATE: Color32 = Color32::from_rgb(35, 38, 45);
+const BEZEL: Color32 = Color32::from_rgb(58, 62, 72);
+const READOUT: Color32 = Color32::from_rgb(7, 11, 8);
+const READOUT_EDGE: Color32 = Color32::from_rgb(44, 70, 52);
+const READOUT_LIT: Color32 = Color32::from_rgb(125, 255, 163);
+const READOUT_UNLIT: Color32 = Color32::from_rgb(52, 92, 66);
+const HANG_UP: Color32 = Color32::from_rgb(112, 46, 42);
+
+/// How tall the faceplate is: the lamps, the level under them, and the
+/// readout beside both.
+const FACE_H: f32 = 116.0;
+
+/// One of the keys a call is made with. Large, because they are the ones
+/// reached for without looking.
+const FACE_KEY: egui::Vec2 = egui::vec2(116.0, 36.0);
+
+/// One of the keys under them, which open things rather than do things.
+const SMALL_KEY: egui::Vec2 = egui::vec2(92.0, 24.0);
 
 const WATERFALL_W: usize = 720;
 const WATERFALL_H: usize = 260;
-const PANEL_W: f32 = 280.0;
+
+/// Height of the strip under the terminal that says how far the call has got.
+const TIMELINE_H: f32 = 74.0;
 
 /// Width of the panel holding the far end's account of itself.
 const DISTANT_W: f32 = 250.0;
@@ -372,6 +402,10 @@ pub struct ScopeApp {
     network_open: bool,
     /// The constellation drawn large, in a window of its own.
     constellation_open: bool,
+    /// Whether the line's own row is showing: which line, its devices and
+    /// levels. Shown regardless while there is no line, since that row is
+    /// the only way to get one.
+    setup_open: bool,
     /// Whether the window has asked for a stream of echoes rather than one.
     ping_repeatedly: bool,
     /// And whether it has asked for web traffic to be carried.
@@ -399,6 +433,25 @@ pub struct ScopeApp {
     tab: Tab,
     font_size: f32,
     last_repaint: std::time::Instant,
+    /// The highest each spectrum bin has been lately, falling slowly.
+    hold: Vec<f32>,
+    /// How long a waterfall row lasts, measured from the frames arriving,
+    /// and when the last one did.
+    row_secs: f32,
+    last_row: Option<std::time::Instant>,
+    /// When the call reached data, for how long it has been there.
+    connected_at: Option<std::time::Instant>,
+    /// The byte counts a few moments ago, for a rate: when, received, sent.
+    marks: std::collections::VecDeque<(std::time::Instant, u64, u64)>,
+    /// Lines still to be typed at the modem by `--type`, and when the next
+    /// is due.
+    script: std::collections::VecDeque<String>,
+    script_due: Option<std::time::Instant>,
+    /// Whether the terminal's type is sized to the room it has.
+    fit: bool,
+    /// When the call first reached each step of the timeline, by the step's
+    /// number; nought, on hook, is never timed.
+    step_at: [Option<std::time::Instant>; 6],
     /// What was written out last, so that a frame which changed nothing does
     /// not rewrite the file sixty times a second.
     remembered: String,
@@ -487,6 +540,7 @@ impl ScopeApp {
             protection_open: false,
             network_open: false,
             constellation_open: false,
+            setup_open: false,
             ping_repeatedly: false,
             carry_web: false,
             compress_headers: true,
@@ -500,11 +554,25 @@ impl ScopeApp {
             tab: Tab::Terminal,
             font_size: 14.0,
             last_repaint: std::time::Instant::now(),
+            hold: vec![-120.0; SPECTRUM_BINS],
+            row_secs: 1.0 / 30.0,
+            last_row: None,
+            connected_at: None,
+            marks: std::collections::VecDeque::new(),
+            script: std::collections::VecDeque::new(),
+            script_due: None,
+            fit: true,
+            step_at: [None; 6],
             remembered: String::new(),
         };
         // Before anything is drawn, so the first frame shows what the modem
         // will actually be set to rather than the defaults it never used.
         app.recall();
+        // A capture is there to be looked at, and the scopes are what there
+        // is to look at.
+        if !app.source.is_line() {
+            app.tab = Tab::Scopes;
+        }
         app.load_accounts();
         app
     }
@@ -685,7 +753,10 @@ impl ScopeApp {
     }
 
     /// Modulations the modem will accept, in the order the box shows them.
-    const CARRIERS: [(&'static str, &'static str); 6] = [
+    ///
+    /// Positions are what the rate lists, the ceilings and the default go by,
+    /// so a new one goes on the end rather than where it might read best.
+    const CARRIERS: [(&'static str, &'static str); 7] = [
         ("B103", "Bell 103 - 300 bit/s"),
         ("V22B", "V.22bis - 1200 or 2400"),
         ("V32", "V.32 - 4800 or 9600"),
@@ -698,6 +769,7 @@ impl ScopeApp {
             "V90",
             "V.90 - up to 56000 from an ISP's server and 33600 back. A far end that is no V.90 server gets V.34",
         ),
+        ("V21", "V.21 - 300 bit/s, Bell 103's counterpart outside North America"),
     ];
 
     /// Boards to start from, because a text box on its own is a box nobody
@@ -805,7 +877,7 @@ impl ScopeApp {
             {
                 session.set_logging(logging);
             }
-            ui.add(egui::Slider::new(&mut self.font_size, 9.0..=22.0).text("font"));
+            self.font_controls(ui);
         });
     }
 
@@ -867,6 +939,11 @@ impl ScopeApp {
         }
         self.line_was_open = state.open;
 
+        self.masthead(ui, Some(&state));
+        // No line, or a line with something wrong with it, and this row is
+        // where both are dealt with: hiding it then would hide the way out.
+        let show_setup = self.setup_open || !state.open || state.error.is_some();
+        if show_setup {
         ui.horizontal_wrapped(|ui| {
             let dim = Color32::from_rgb(140, 150, 165);
             ui.label(RichText::new("line").monospace().color(dim));
@@ -960,22 +1037,6 @@ impl ScopeApp {
             if state.open {
                 if ui.button("Close").on_hover_text("Put the line down").clicked() {
                     session.close();
-                }
-                // Both directions, kept apart. What makes a call worth
-                // keeping is usually not obvious until it has gone wrong.
-                let recording = session.recording();
-                let label = match state.recording {
-                    Some(secs) => format!("Stop  {secs:.0} s"),
-                    None => "Record".to_owned(),
-                };
-                if ui
-                    .selectable_label(recording, label)
-                    .on_hover_text(
-                        "Keep the call as a stereo file: what arrived on one channel, what was sent on the other, so it can be run through a receiver again afterwards",
-                    )
-                    .clicked()
-                {
-                    session.set_recording(!recording);
                 }
             } else if ui
                 .add_enabled(
@@ -1221,83 +1282,26 @@ impl ScopeApp {
             }
         });
 
-        ui.horizontal_wrapped(|ui| {
-            let dim = Color32::from_rgb(140, 150, 165);
-            ui.label(RichText::new("call").monospace().color(dim));
+        self.monitor_row(ui);
+        }
 
-            // Watched by what was clicked rather than by what the value is
-            // afterwards, so that the advanced window can set the same field
-            // without this row deciding a command needs sending.
-            let mut picked = None;
-            egui::ComboBox::from_id_salt("carrier")
-                .width(180.0)
-                .selected_text(Self::CARRIERS[self.carrier].1)
-                .show_ui(ui, |ui| {
-                    for (i, (_, label)) in Self::CARRIERS.iter().enumerate() {
-                        if ui.selectable_label(self.carrier == i, *label).clicked() {
-                            picked = Some(i);
-                        }
-                    }
-                });
-            if let Some(i) = picked {
-                self.carrier = i;
-                self.modulation.fit(i);
-                // Every subparameter, not just the carrier. A bare +MS leaves
-                // the rest to V.250 6.4.1's defaults -- which include automode
-                // on -- so choosing a modulation here used to switch V.8 back
-                // on behind the button beside it, while the button went on
-                // saying it was off. Picking V.22bis and being handed V.32 is
-                // not a surprise anybody should have to work out from a
-                // recording afterwards.
-                session.type_bytes(
-                    format!("{}\r", self.modulation.command(Self::CARRIERS[i].0))
-                        .as_bytes(),
-                );
-            }
-            // V.250 6.4.1 makes this one setting, and it is the one that
-            // belongs on the face of the window rather than behind a button:
-            // with it on, the box to the left is where the call starts rather
-            // than where it ends up.
+        ui.add_space(4.0);
+        self.faceplate(ui);
+        ui.add_space(6.0);
+
+        let online = self.frame.state == telemetry::CallState::Connected;
+        let on_hook = self.frame.state == telemetry::CallState::Idle;
+        // A call on a line made of packets can outlive the modem being on
+        // hook -- the modem hangs up, the trunk does not hear about it,
+        // and the call goes on. Force hang up is the way out of that, so
+        // it must not be greyed out by the very condition it exists to
+        // rescue.
+        let call_up = state.sip.as_ref().is_some_and(|p| p.media);
+
+        // The keys a call is made with.
+        ui.horizontal(|ui| {
             if ui
-                .selectable_label(self.modulation.automode, "V.8")
-                .on_hover_text(
-                    "Negotiate the modulation with the far end before starting \
-                     it. Both modems then enter the same one instead of each \
-                     guessing, which is the one thing no modem start-up can \
-                     arrange for itself. Off means the box to the left and \
-                     nothing else",
-                )
-                .clicked()
-            {
-                // Not `fit`. This toggle is about whether to negotiate and
-                // about nothing else: fitting would pin the range to the
-                // modulation named beside it, and a range that names V.22bis's
-                // rates is a range V.8 can never negotiate its way out of.
-                self.modulation.automode = !self.modulation.automode;
-                let command =
-                    self.modulation.command(Self::CARRIERS[self.carrier].0);
-                session.type_bytes(format!("{command}\r").as_bytes());
-            }
-            if ui
-                .selectable_label(self.advanced, "Advanced")
-                .on_hover_text("the rest of AT+MS: the range of line rates")
-                .clicked()
-            {
-                self.advanced = !self.advanced;
-                self.modulation.fit(self.carrier);
-            }
-            if ui
-                .selectable_label(self.network_open, "Network")
-                .on_hover_text(
-                    "PPP over the call: log in, give the two ends addresses, \
-                     ping between them, and answer calls with a login prompt",
-                )
-                .clicked()
-            {
-                self.network_open = !self.network_open;
-            }
-            if ui
-                .selectable_label(self.dial_open, "Dial")
+                .add(face_key("Dial").selected(self.dial_open))
                 .on_hover_text(
                     "The keypad, and the trunk the call goes out over: a number \
                      to dial, whether the account is registered, and the \
@@ -1308,45 +1312,7 @@ impl ScopeApp {
                 self.dial_open = !self.dial_open;
             }
             if ui
-                .selectable_label(self.transfer_open, "Files")
-                .on_hover_text(
-                    "ZMODEM: send a file to the far end, or take one it offers",
-                )
-                .clicked()
-            {
-                self.transfer_open = !self.transfer_open;
-            }
-            if ui
-                .selectable_label(self.fax.open, "Fax")
-                .on_hover_text(
-                    "T.30: send a picture as a fax, and see what the machine answering can do",
-                )
-                .clicked()
-            {
-                self.fax.open = !self.fax.open;
-            }
-            if ui
-                .selectable_label(self.protection_open, "Error control")
-                .on_hover_text(
-                    "AT+ES and AT+DS: V.42 error control and V.44 or V.42bis compression, \
-                     and whether the modem should report what it negotiated",
-                )
-                .clicked()
-            {
-                self.protection_open = !self.protection_open;
-            }
-
-            let online = self.frame.state == telemetry::CallState::Connected;
-            let on_hook = self.frame.state == telemetry::CallState::Idle;
-            // A call on a line made of packets can outlive the modem being on
-            // hook -- the modem hangs up, the trunk does not hear about it,
-            // and the call goes on. Force hang up is the way out of that, so
-            // it must not be greyed out by the very condition it exists to
-            // rescue.
-            let call_up = state.sip.as_ref().is_some_and(|p| p.media);
-
-            if ui
-                .add_enabled(on_hook, egui::Button::new("Originate"))
+                .add_enabled(on_hook, face_key("Originate"))
                 .on_hover_text(
                     "ATD - be the calling modem. The softphone places the call; \
                      this only decides which end of it this is",
@@ -1356,19 +1322,19 @@ impl ScopeApp {
                 session.type_bytes(b"ATD\r");
             }
             if ui
-                .add_enabled(on_hook, egui::Button::new("Answer"))
+                .add_enabled(on_hook, face_key("Answer"))
                 .on_hover_text("ATA - be the answering modem, and go first")
                 .clicked()
             {
                 session.type_bytes(b"ATA\r");
             }
-            // Two steps out of data state, and the button says which one it is
+            // Two steps out of data state, and the key says which one it is
             // on. A modem in data state is not listening for commands at all:
             // the escape has to come first, and it wants a second of quiet
-            // either side, so this is deliberately two clicks and not one.
+            // either side, so this is deliberately two presses and not one.
             if online {
                 if ui
-                    .button("Escape")
+                    .add(face_key("Escape"))
                     .on_hover_text(
                         "+++ - back to command state without dropping the call. \
                          Wants a second of quiet either side, so give it a moment",
@@ -1378,19 +1344,135 @@ impl ScopeApp {
                     session.type_bytes(b"+++");
                 }
             } else if ui
-                .add_enabled(!on_hook, egui::Button::new("Hang up"))
+                .add_enabled(!on_hook, face_key("Hang up").fill(HANG_UP))
                 .on_hover_text("ATH - put the line down")
                 .clicked()
             {
                 session.type_bytes(b"ATH\r");
             }
-            // One click, in any state. The two above go through the command
+
+            // How fast at most, and the three things that are on or off: one
+            // box where there were two rows.
+            let mode = Self::CEILINGS
+                .iter()
+                .find(|(rate, carrier, _)| {
+                    self.carrier == *carrier && self.modulation.max_rate == *rate
+                })
+                .map_or_else(
+                    || Self::CARRIERS[self.carrier].0.to_owned(),
+                    |(_, _, label)| format!("up to {label}"),
+                );
+            ui.scope(|ui| {
+                ui.spacing_mut().interact_size.y = FACE_KEY.y;
+                egui::ComboBox::from_id_salt("mode")
+                    .width(220.0)
+                    .height(460.0)
+                    .selected_text(RichText::new(format!("mode  {mode}")).monospace())
+                    // Three of the things in it are ticked rather than
+                    // chosen, and a box that shut on every tick would have to
+                    // be opened three times.
+                    .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                    .show_ui(ui, |ui| self.call_settings(ui))
+                    .response
+                    .on_hover_text(
+                        "The fastest rate to offer, and whether to negotiate, \
+                         correct errors and compress",
+                    );
+            });
+        });
+
+        // And the ones that open something.
+        ui.horizontal_wrapped(|ui| {
+            if small_key(ui, self.tab == Tab::Scopes, "Scopes")
+                .on_hover_text(
+                    "The waterfall, the spectrum, the constellation, and the \
+                     numbers the receiver has for the call, where the terminal \
+                     is. Again for the terminal back",
+                )
+                .clicked()
+            {
+                self.toggle_scopes();
+            }
+            if small_key(ui, self.transfer_open, "Files")
+                .on_hover_text("ZMODEM: send a file to the far end, or take one it offers")
+                .clicked()
+            {
+                self.transfer_open = !self.transfer_open;
+            }
+            if small_key(ui, self.fax.open, "Fax")
+                .on_hover_text(
+                    "T.30: send a picture as a fax, and see what the machine answering can do",
+                )
+                .clicked()
+            {
+                self.fax.open = !self.fax.open;
+            }
+            if small_key(ui, self.network_open, "Network")
+                .on_hover_text(
+                    "PPP over the call: log in, give the two ends addresses, \
+                     ping between them, and answer calls with a login prompt",
+                )
+                .clicked()
+            {
+                self.network_open = !self.network_open;
+            }
+            if small_key(ui, self.protection_open, "Error control")
+                .on_hover_text(
+                    "AT+ES and AT+DS: V.42 error control and V.44 or V.42bis compression, \
+                     and whether the modem should report what it negotiated",
+                )
+                .clicked()
+            {
+                self.protection_open = !self.protection_open;
+            }
+            if small_key(ui, self.advanced, "Advanced")
+                .on_hover_text(
+                    "the rest of AT+MS: a modulation by name, and the range of line rates",
+                )
+                .clicked()
+            {
+                self.advanced = !self.advanced;
+                self.modulation.fit(self.carrier);
+            }
+            ui.separator();
+            if state.open {
+                // Both directions, kept apart. What makes a call worth
+                // keeping is usually not obvious until it has gone wrong.
+                let recording = session.recording();
+                let label = match state.recording {
+                    Some(secs) => format!("Stop  {secs:.0} s"),
+                    None => "Record".to_owned(),
+                };
+                if small_key(ui, recording, &label)
+                    .on_hover_text(
+                        "Keep the call as a stereo file: what arrived on one channel, what was sent on the other, so it can be run through a receiver again afterwards",
+                    )
+                    .clicked()
+                {
+                    session.set_recording(!recording);
+                }
+            }
+            let listening = self.monitor.is_some();
+            if small_key(ui, listening, if listening { "Listening" } else { "Listen" })
+                .on_hover_text(
+                    "Play the line audio through an output device. Which one, \
+                     and how loud, are under Setup",
+                )
+                .clicked()
+            {
+                self.set_listening(!listening);
+            }
+            ui.separator();
+            // One press, in any state. The keys above go through the command
             // interpreter, which a modem in data state is not listening to
             // until the escape has had its second of quiet either side -- and
             // a call whose far end has gone, or whose error control is still
             // sending, is exactly the one that never gives it that.
             if ui
-                .add_enabled(!on_hook || call_up, egui::Button::new("Force hang up"))
+                .add_enabled(
+                    !on_hook || call_up,
+                    egui::Button::new("Force hang up").min_size(SMALL_KEY),
+                )
                 .on_hover_text(
                     "Put the line down now, whatever the modem is doing: no escape, \
                      no ATH, nothing more sent to the far end. For a call that will not end",
@@ -1398,28 +1480,6 @@ impl ScopeApp {
                 .clicked()
             {
                 session.hang_up();
-            }
-            ui.label(
-                RichText::new(self.frame.state.label())
-                    .monospace()
-                    .color(if online {
-                        Color32::from_rgb(90, 220, 130)
-                    } else {
-                        dim
-                    }),
-            );
-            // Which start-up, and where inside it. A call that will not come
-            // up is always stuck somewhere particular, and "negotiating" on
-            // its own says nothing whatever about where.
-            if !on_hook && self.frame.line_phase != "-" {
-                ui.label(
-                    RichText::new(format!(
-                        "{}: {}",
-                        self.frame.modulation, self.frame.line_phase
-                    ))
-                    .monospace()
-                    .color(Color32::from_rgb(120, 210, 255)),
-                );
             }
         });
 
@@ -1464,7 +1524,7 @@ impl ScopeApp {
                 session.set_fax_error_correction(self.fax.error_correction);
                 session.set_fax_jbig(self.fax.jbig);
                 session.set_fax_v34(self.fax.v34);
-                session.set_fax_page(self.fax.page().cloned());
+                session.set_fax_pages(self.fax.pages().to_vec());
                 session.type_bytes(crate::faxwin::Fax::commands(&start).as_bytes());
             }
         }
@@ -3121,6 +3181,283 @@ impl ScopeApp {
         self.protection_open = open;
     }
 
+    /// The name on the box, and beside it which line there is and how it is.
+    ///
+    /// The line's whole row used to be the top of the window. Most of it is
+    /// set once and then left, so what stays here is the answer to the one
+    /// question asked of it afterwards -- is there a line -- and the key that
+    /// brings the rest back.
+    fn masthead(&mut self, ui: &mut egui::Ui, state: Option<&live::LineState>) {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("BINMODEM").monospace().size(16.0).strong().color(BRIGHT));
+            ui.label(RichText::new("56K softmodem").monospace().color(DIM));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let Some(state) = state else {
+                    ui.label(RichText::new("a capture, replayed").monospace().color(DIM));
+                    return;
+                };
+                if ui
+                    .add(egui::Button::new("Setup").selected(self.setup_open))
+                    .on_hover_text(
+                        "Which line, its devices, how hard it is driven, and \
+                         what the monitor and the scopes are set to",
+                    )
+                    .clicked()
+                {
+                    self.setup_open = !self.setup_open;
+                }
+                // Right to left, so the last thing added is the first read.
+                let (what, how, colour) = match (&state.sip, state.open) {
+                    (_, false) => (String::new(), "no line open", WARN),
+                    (Some(progress), true) => (
+                        format!("SIP {}", progress.account),
+                        if progress.registered { "registered" } else { "not registered" },
+                        if progress.registered { GOOD } else { BAD },
+                    ),
+                    (None, true) => ("sound card".to_owned(), "open", GOOD),
+                };
+                ui.label(RichText::new(how).monospace().color(colour));
+                if !what.is_empty() {
+                    ui.label(RichText::new(what).monospace().color(BRIGHT));
+                }
+                ui.label(RichText::new("line").monospace().color(DIM));
+            });
+        });
+    }
+
+    /// The lamps, the level arriving, and the rate in figures large enough
+    /// to read from across the room.
+    fn faceplate(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let gap = ui.spacing().item_spacing.x;
+            let total = ui.available_width();
+            let readout_w = (total * 0.36).clamp(280.0, 440.0);
+            let plate_w = (total - readout_w - gap).max(240.0);
+
+            ui.allocate_ui_with_layout(
+                egui::vec2(plate_w, FACE_H),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    egui::Frame::new()
+                        .fill(PLATE)
+                        .stroke(egui::Stroke::new(1.0, BEZEL))
+                        .corner_radius(6.0)
+                        .inner_margin(10.0)
+                        .show(ui, |ui| {
+                            ui.set_width(plate_w - 22.0);
+                            ui.set_height(FACE_H - 22.0);
+                            scopes::faceplate(ui, &self.frame.leds);
+                            ui.add_space(6.0);
+                            ui.label(RichText::new("receive level").monospace().small().color(DIM));
+                            scopes::level_meter(ui, self.frame.rx_level_db);
+                        });
+                },
+            );
+            self.readout(ui, egui::vec2(readout_w, FACE_H));
+        });
+    }
+
+    /// The rate, and above and below it what the call is doing.
+    ///
+    /// The receive rate is the large one because it is the one a call is
+    /// spoken of by; V.34 settles the two directions separately, so the other
+    /// goes underneath rather than being assumed the same.
+    fn readout(&self, ui: &mut egui::Ui, size: egui::Vec2) {
+        let f = &self.frame;
+        let connected = f.state == telemetry::CallState::Connected;
+        let on_hook = f.state == telemetry::CallState::Idle;
+
+        let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+        let painter = ui.painter_at(rect);
+        painter.rect_filled(rect, 6.0, READOUT);
+        painter.rect_stroke(
+            rect,
+            6.0,
+            egui::Stroke::new(1.0, READOUT_EDGE),
+            egui::StrokeKind::Inside,
+        );
+        let left = rect.left() + 14.0;
+
+        let state = if connected { "CONNECT".to_owned() } else { f.state.label().to_uppercase() };
+        painter.text(
+            egui::pos2(left, rect.top() + 9.0),
+            egui::Align2::LEFT_TOP,
+            state,
+            FontId::monospace(12.0),
+            if on_hook { READOUT_UNLIT } else { READOUT_LIT },
+        );
+
+        // A rate only while there is a call for it to be the rate of. One
+        // left over from the last call would be a number about nothing.
+        let (figures, colour) = match f.bit_rate {
+            Some(rate) if connected => (rate.to_string(), READOUT_LIT),
+            _ => ("-----".to_owned(), READOUT_UNLIT),
+        };
+        painter.text(
+            egui::pos2(left, rect.center().y + 2.0),
+            egui::Align2::LEFT_CENTER,
+            figures,
+            FontId::monospace(44.0),
+            colour,
+        );
+
+        let under = if connected {
+            match f.tx_bit_rate {
+                Some(tx) => format!("{}  tx {tx}", f.modulation),
+                None => f.modulation.to_owned(),
+            }
+        } else if !on_hook && f.line_phase != "-" {
+            // Which start-up, and where inside it. A call that will not come
+            // up is always stuck somewhere particular.
+            format!("{}: {}", f.modulation, f.line_phase)
+        } else if self.source.is_live() {
+            self.modulation.command(Self::CARRIERS[self.carrier].0)
+        } else {
+            f.modulation.to_owned()
+        };
+        painter.text(
+            egui::pos2(left, rect.bottom() - 9.0),
+            egui::Align2::LEFT_BOTTOM,
+            under,
+            FontId::monospace(12.0),
+            if on_hook { READOUT_UNLIT } else { Color32::from_rgb(90, 168, 115) },
+        );
+    }
+
+    /// What the monitor plays through and how loud, and what the scopes take
+    /// for their floor and ceiling. Set once, so under Setup with the line.
+    fn monitor_row(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("monitor").monospace().color(DIM));
+            self.audio_controls(ui);
+            ui.separator();
+            self.scope_range(ui);
+        });
+    }
+
+    fn scope_range(&mut self, ui: &mut egui::Ui) {
+        ui.add(
+            egui::Slider::new(&mut self.waterfall.floor_db, -140.0..=-40.0)
+                .text("floor")
+                .suffix(" dB"),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.waterfall.ceiling_db, -60.0..=0.0)
+                .text("ceiling")
+                .suffix(" dB"),
+        );
+    }
+
+    /// The Scopes key: to the scopes, and from them back to the terminal.
+    fn toggle_scopes(&mut self) {
+        self.tab = if self.tab == Tab::Scopes { Tab::Terminal } else { Tab::Scopes };
+    }
+
+    /// The scopes and the receiver's own numbers, as a tab beside the
+    /// terminal.
+    ///
+    /// They were the main window, and the faceplate is now. Everything that
+    /// was there is here: the constellation, the status grid with the V.90
+    /// rate menu in it, the retrain, the waterfall and the spectrum.
+    fn scopes_pane(&mut self, ui: &mut egui::Ui) {
+        const CARD_W: f32 = 420.0;
+        let measured = scopes::measure(&self.frame.spectrum_db, self.frame.hz_per_bin);
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(CARD_W);
+                egui::ScrollArea::vertical()
+                    .id_salt("call-card")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        // Clear of the scroll bar, which egui floats over
+                        // the content.
+                        ui.set_width(CARD_W - 14.0);
+                        self.call_card(ui, measured);
+                        ui.add_space(8.0);
+                        self.symbol_row(ui);
+                        self.distant(ui);
+                    });
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                let caption = |ui: &mut egui::Ui, name: &str, about: String| {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(name).strong());
+                        ui.label(RichText::new(about).small().color(DIM));
+                    });
+                };
+                caption(
+                    ui,
+                    "waterfall",
+                    format!(
+                        "0 - 4000 Hz · newest at the top · {:.0} s deep · {:.0} rows a second",
+                        WATERFALL_H as f32 * self.row_secs,
+                        1.0 / self.row_secs
+                    ),
+                );
+                let available = (ui.available_height() - 50.0).max(140.0);
+                self.waterfall
+                    .paint(ui, available * 0.58, self.frame.modulation, self.row_secs);
+                ui.add_space(4.0);
+                caption(
+                    ui,
+                    "spectrum",
+                    format!(
+                        "{FFT_SIZE}-point FFT · {:.1} Hz a bin · faint trace: the peak, held",
+                        self.frame.hz_per_bin
+                    ),
+                );
+                scopes::spectrum(
+                    ui,
+                    (available * 0.42).max(90.0),
+                    scopes::Trace {
+                        bins: &self.frame.spectrum_db,
+                        hold: &self.hold,
+                        hz_per_bin: self.frame.hz_per_bin,
+                        floor: self.waterfall.floor_db,
+                        ceiling: self.waterfall.ceiling_db,
+                        modulation: self.frame.modulation,
+                        measured,
+                    },
+                );
+            });
+        });
+    }
+
+    /// The symbol scope and, beside it, the line as an oscilloscope has it.
+    fn symbol_row(&mut self, ui: &mut egui::Ui) {
+        const SIDE: f32 = 190.0;
+        ui.horizontal_top(|ui| {
+            let label = self.symbol_label();
+            let scope = ui
+                .allocate_ui(egui::vec2(SIDE, SIDE), |ui| {
+                    scopes::symbol_scope(
+                        ui,
+                        &self.frame.symbols,
+                        scopes::Constellation {
+                            points: &self.frame.constellation,
+                            tones: self.frame.tones,
+                            peak: self.frame.constellation_peak,
+                            pairs: self.frame.symbol_label == "PCM",
+                        },
+                        &label,
+                        self.frame.symbol_quality(),
+                        SIDE,
+                    )
+                })
+                .inner;
+            if scope.on_hover_text("Click to draw it large").clicked() {
+                self.constellation_open = !self.constellation_open;
+            }
+            scopes::oscilloscope(
+                ui,
+                &self.frame.waveform,
+                self.frame.sample_rate,
+                egui::vec2(ui.available_width(), SIDE),
+            );
+        });
+    }
+
     fn audio_controls(&mut self, ui: &mut egui::Ui) {
         let listening = self.monitor.is_some();
         if ui
@@ -3175,13 +3512,255 @@ impl ScopeApp {
         }
     }
 
+    /// What `--type` and `--scopes` asked for: lines to type at the modem
+    /// once its line is open, and the scopes as the tab to open on.
+    pub fn script(&mut self, typed: Vec<String>, scopes: bool) {
+        self.script = typed.into();
+        if scopes && !self.source.is_telnet() {
+            self.tab = Tab::Scopes;
+        }
+    }
+
+    /// Type the next scripted line when it is due: the first a second and a
+    /// half after the line opens, and one a second after that, which is
+    /// longer than the modem takes to answer any command but a dial.
+    fn run_script(&mut self) {
+        let Source::Live(session) = &self.source else { return };
+        if self.script.is_empty() || !session.state().open {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let due = *self.script_due.get_or_insert(now + std::time::Duration::from_millis(1500));
+        if now >= due
+            && let Some(line) = self.script.pop_front()
+        {
+            session.type_bytes(format!("{line}\r").as_bytes());
+            self.script_due = Some(now + std::time::Duration::from_secs(1));
+        }
+    }
+
+    /// The type's size: fitted to the room, or set by hand.
+    fn font_controls(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.fit, "fit")
+            .on_hover_text("Size the type so the whole screen fills the room there is for it");
+        ui.add_enabled(
+            !self.fit,
+            egui::Slider::new(&mut self.font_size, 9.0..=22.0).text("font"),
+        );
+    }
+
+    /// How far the call has got, as the timeline numbers it: on hook, off
+    /// hook, negotiating, training, connected, and connected with error
+    /// control running.
+    fn step(&self) -> usize {
+        use telemetry::CallState as S;
+        match self.frame.state {
+            S::Idle => 0,
+            S::OffHook | S::Dialling | S::Ringing | S::Disconnecting => 1,
+            // The modem calls the whole start-up negotiating. On the
+            // timeline that is V.8 only; once a modulation has been agreed
+            // and its own start-up is running, the call is training.
+            S::Negotiating if self.frame.modulation.starts_with("V.8") => 2,
+            S::Negotiating | S::Training => 3,
+            S::Connected if self.frame.leds.ec => 5,
+            S::Connected => 4,
+        }
+    }
+
+    /// The strip under the terminal: the call as five steps in a row, each
+    /// lit when it is done, with what it settled and how long it took.
+    ///
+    /// A call that is not coming up is stuck at one of these, and from the
+    /// terminal alone there is no telling which: the screen shows nothing
+    /// until the last of them is over. This is the same question the scopes'
+    /// card answers at length, in the one line there is room for here.
+    fn timeline(&self, ui: &mut egui::Ui) {
+        use telemetry::CallState as S;
+        let f = &self.frame;
+        let step = self.step();
+        let grey = Color32::from_rgb(110, 115, 130);
+        let now = std::time::Instant::now();
+        let phase = if f.line_phase == "-" { "" } else { f.line_phase };
+
+        let line = match f.state {
+            S::Idle => "on hook".to_owned(),
+            S::Dialling => "dialling".to_owned(),
+            S::Ringing => "ringing".to_owned(),
+            S::Disconnecting => "hanging up".to_owned(),
+            _ => "off hook".to_owned(),
+        };
+        let agreed = match step {
+            0 | 1 => "–".to_owned(),
+            2 => f.modulation.to_owned(),
+            _ => format!("agreed {}", f.modulation),
+        };
+        let training = match step {
+            3 if !phase.is_empty() => phase.to_owned(),
+            3 => "training".to_owned(),
+            4 | 5 => "done".to_owned(),
+            _ => "–".to_owned(),
+        };
+        let rate = match (step, f.bit_rate, f.tx_bit_rate) {
+            (4 | 5, Some(rx), Some(tx)) if rx != tx => format!("{rx} in, {tx} out"),
+            (4 | 5, Some(rx), _) => format!("{rx} bit/s"),
+            (4 | 5, None, _) => "connected".to_owned(),
+            _ => "–".to_owned(),
+        };
+        let control = match step {
+            5 => "running".to_owned(),
+            4 => "none".to_owned(),
+            _ => "–".to_owned(),
+        };
+        let steps: [(&str, String); 5] = [
+            ("Line", line),
+            ("Negotiate", agreed),
+            ("Train", training),
+            ("Connect", rate),
+            ("Error control", control),
+        ];
+
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), TIMELINE_H - 8.0),
+            egui::Sense::hover(),
+        );
+        let painter = ui.painter_at(rect);
+        let cell = rect.width() / steps.len() as f32;
+        let y = rect.top() + 16.0;
+        let dot_x = |i: usize| rect.left() + cell * i as f32 + 12.0;
+        for (i, (name, about)) in steps.iter().enumerate() {
+            let k = i + 1;
+            // Connected is where a call stays, so reaching it is having done
+            // it; every other step is done once the call is past it.
+            let done = step > k || (k >= 4 && step == k);
+            let current = step == k && !done;
+            let colour = if done {
+                GOOD
+            } else if current {
+                WARN
+            } else {
+                grey
+            };
+            // The rule to the next step, lit once this one is behind.
+            if i + 1 < steps.len() {
+                painter.line_segment(
+                    [egui::pos2(dot_x(i) + 9.0, y), egui::pos2(dot_x(i + 1) - 9.0, y)],
+                    egui::Stroke::new(2.0, if step > k { GOOD.gamma_multiply(0.6) } else { BEZEL }),
+                );
+            }
+            let centre = egui::pos2(dot_x(i), y);
+            if current {
+                // A slow pulse on the step the call is at.
+                let beat = (ui.input(|i| i.time) * 3.0).sin() as f32 * 0.5 + 0.5;
+                painter.circle_filled(centre, 7.0 + 3.0 * beat, colour.gamma_multiply(0.25));
+            }
+            if done || current {
+                painter.circle_filled(centre, 6.0, colour);
+            } else {
+                painter.circle_stroke(centre, 5.5, egui::Stroke::new(1.5, colour));
+            }
+
+            // Its name over the rule's start, cut to its own cell so a long
+            // phase does not write over the next step.
+            let cut = egui::Rect::from_min_max(
+                egui::pos2(rect.left() + cell * i as f32, rect.top()),
+                egui::pos2(rect.left() + cell * (i + 1) as f32 - 6.0, rect.bottom()),
+            );
+            let inside = painter.with_clip_rect(cut);
+            // How long it took, or has taken so far.
+            let took = self.step_at[k].and_then(|from| {
+                let until = self.step_at[k + 1..].iter().flatten().next().copied();
+                match until {
+                    Some(until) => Some(until - from),
+                    None if current => Some(now - from),
+                    None => None,
+                }
+            });
+            let title = match took {
+                Some(took) if k == 2 || k == 3 => format!("{name}  {:.1} s", took.as_secs_f32()),
+                _ => (*name).to_owned(),
+            };
+            inside.text(
+                egui::pos2(centre.x - 6.0, y + 12.0),
+                egui::Align2::LEFT_TOP,
+                title,
+                FontId::proportional(13.0),
+                if done || current { BRIGHT } else { grey },
+            );
+            inside.text(
+                egui::pos2(centre.x - 6.0, y + 29.0),
+                egui::Align2::LEFT_TOP,
+                about,
+                FontId::proportional(11.5),
+                if done || current { DIM } else { grey.gamma_multiply(0.7) },
+            );
+        }
+    }
+
+    /// How long the call has been up, and the byte counts of the last few
+    /// seconds for a rate to be taken from.
+    fn keep_time(&mut self) {
+        let now = std::time::Instant::now();
+        if self.frame.state == telemetry::CallState::Connected {
+            self.connected_at.get_or_insert(now);
+        } else {
+            self.connected_at = None;
+        }
+        let (rx, tx) = (self.frame.rx_bytes, self.frame.tx_bytes);
+        // Counts that went backwards are a new call's.
+        // The timeline's clock: each step timed from when the call first
+        // reached it. Back on hook forgets the lot, and a call that goes
+        // back a step -- a retrain -- times what follows afresh.
+        let step = self.step();
+        for (k, at) in self.step_at.iter_mut().enumerate() {
+            if k == 0 || k > step {
+                *at = None;
+            } else {
+                at.get_or_insert(now);
+            }
+        }
+        if self.marks.back().is_some_and(|m| rx < m.1 || tx < m.2) {
+            self.marks.clear();
+        }
+        if self.marks.back().is_none_or(|m| (now - m.0).as_secs_f32() >= 0.25) {
+            self.marks.push_back((now, rx, tx));
+        }
+        while self.marks.front().is_some_and(|m| (now - m.0).as_secs_f32() > 3.0) {
+            self.marks.pop_front();
+        }
+    }
+
+    /// Bytes a second each way over the last few seconds: received, sent.
+    fn byte_rates(&self) -> (f64, f64) {
+        match (self.marks.front(), self.marks.back()) {
+            (Some(a), Some(b)) if b.0 > a.0 => {
+                let secs = (b.0 - a.0).as_secs_f64();
+                ((b.1 - a.1) as f64 / secs, (b.2 - a.2) as f64 / secs)
+            }
+            _ => (0.0, 0.0),
+        }
+    }
+
     /// Pull whatever the engine has published since the last repaint.
     fn poll(&mut self) {
         if self.rx.read(&mut self.frame) && self.frame.seq != self.last_seq {
             self.last_seq = self.frame.seq;
             self.waterfall
                 .push_row(&self.frame.spectrum_db, self.frame.hz_per_bin);
+            // A row's length, smoothed; a gap of a second is a pause, not a
+            // slow row.
+            let now = std::time::Instant::now();
+            if let Some(before) = self.last_row.replace(now) {
+                let gap = (now - before).as_secs_f32();
+                if gap < 1.0 {
+                    self.row_secs += (gap - self.row_secs) * 0.05;
+                }
+            }
+            for (held, &now) in self.hold.iter_mut().zip(&self.frame.spectrum_db) {
+                *held = (*held - 0.15).max(now);
+            }
         }
+        self.keep_time();
+        self.run_script();
         // Only the final line can still be growing, so re-read from there
         // rather than treating everything already copied as settled.
         let tail = self.rx.log_after(self.frozen_seq);
@@ -3241,71 +3820,62 @@ impl ScopeApp {
     }
 
     fn controls(&mut self, ui: &mut egui::Ui) {
-        // The line and the call come first: on a live window they are the
-        // controls that matter and the rest is instrumentation.
-        self.line_controls(ui);
         if self.source.is_telnet() {
-            // Nothing below is about a socket. There is no capture to pause,
-            // no audio to monitor, and no spectrum to set a floor on.
+            // Nothing else is about a socket. There is no line to open, no
+            // audio to monitor, and no lamps for a modem that is not there.
             self.net_controls(ui);
             return;
         }
-        ui.horizontal_wrapped(|ui| {
-            // A live line cannot be paused, restarted or slowed down. It is
-            // happening, at the rate the sound card is happening at, and a
-            // control that pretended otherwise would be lying about it.
-            if self.source.is_live() {
-                ui.label(
-                    RichText::new("live line")
-                        .monospace()
-                        .color(Color32::from_rgb(90, 220, 130)),
-                );
-            } else {
-                let running = self.control.running.load(Ordering::Relaxed);
-                if ui.button(if running { "Pause" } else { "Play" }).clicked() {
-                    self.control.running.store(!running, Ordering::Relaxed);
-                }
-                if ui.button("Restart").clicked() {
-                    self.control.restart.store(true, Ordering::Relaxed);
-                    self.control.running.store(true, Ordering::Relaxed);
-                    self.log.clear();
-                }
+        if self.source.is_live() {
+            // The line and the call: on a live window they are the controls
+            // that matter and the rest is instrumentation.
+            self.line_controls(ui);
+            return;
+        }
 
-                ui.separator();
-                let mut speed =
-                    self.control.speed_pct.load(Ordering::Relaxed) as f32 / 100.0;
-                if ui
-                    .add(
-                        egui::Slider::new(&mut speed, 0.1..=4.0)
-                            .logarithmic(true)
-                            .text("speed")
-                            .suffix("x"),
-                    )
-                    .changed()
-                {
-                    self.control
-                        .speed_pct
-                        .store((speed * 100.0) as u32, Ordering::Relaxed);
-                }
+        self.masthead(ui, None);
+        ui.add_space(4.0);
+        self.faceplate(ui);
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            // A capture can be paused, restarted and slowed down, which a
+            // live line cannot: that one is happening, at the rate the sound
+            // card is happening at.
+            let running = self.control.running.load(Ordering::Relaxed);
+            if ui.button(if running { "Pause" } else { "Play" }).clicked() {
+                self.control.running.store(!running, Ordering::Relaxed);
+            }
+            if ui.button("Restart").clicked() {
+                self.control.restart.store(true, Ordering::Relaxed);
+                self.control.running.store(true, Ordering::Relaxed);
+                self.log.clear();
             }
 
             ui.separator();
-            self.audio_controls(ui);
+            let mut speed = self.control.speed_pct.load(Ordering::Relaxed) as f32 / 100.0;
+            if ui
+                .add(
+                    egui::Slider::new(&mut speed, 0.1..=4.0)
+                        .logarithmic(true)
+                        .text("speed")
+                        .suffix("x"),
+                )
+                .changed()
+            {
+                self.control
+                    .speed_pct
+                    .store((speed * 100.0) as u32, Ordering::Relaxed);
+            }
 
             ui.separator();
-            ui.add(
-                egui::Slider::new(&mut self.waterfall.floor_db, -140.0..=-40.0)
-                    .text("floor")
-                    .suffix(" dB"),
-            );
-            ui.add(
-                egui::Slider::new(&mut self.waterfall.ceiling_db, -60.0..=0.0)
-                    .text("ceiling")
-                    .suffix(" dB"),
-            );
+            if small_key(ui, self.tab == Tab::Scopes, "Scopes").clicked() {
+                self.toggle_scopes();
+            }
+            ui.separator();
+            self.audio_controls(ui);
+            ui.separator();
+            self.scope_range(ui);
         });
-
-        self.call_settings(ui);
     }
 
     /// Every ceiling this modem will offer, as rate, modulation and label.
@@ -3353,8 +3923,8 @@ impl ScopeApp {
         let session = Arc::clone(session);
         let dim = Color32::from_rgb(140, 150, 165);
 
-        ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("up to").monospace().color(dim));
+        ui.vertical(|ui| {
+            ui.label(RichText::new("fastest rate to offer").monospace().color(dim));
 
             let mut picked = None;
             for (rate, carrier, label) in Self::CEILINGS {
@@ -3454,122 +4024,481 @@ impl ScopeApp {
         });
     }
 
-    /// The status grid, and above its rates the V.90 rate menu: what was
-    /// chosen from it, a drn or None for the DIL's own choice.
-    fn status(&self, ui: &mut egui::Ui) -> Option<Option<u8>> {
+    /// The call's card, laid out as DecSAT lays out a DVB carrier's.
+    ///
+    /// A title bar in the modulation's colour -- lit on a call that is up,
+    /// half lit while it is coming up, grey with no call -- naming the
+    /// modulation and the state, with the symbol rate and the bit rate at the
+    /// right. Under it what the receiver is slicing, large, and beside that
+    /// how much it has in hand; a bar of the same; and then the receive
+    /// chain, a line a stage with a health dot, on a rule down the left.
+    fn call_card(&self, ui: &mut egui::Ui, measured: Option<scopes::Measured>) {
         let f = &self.frame;
-        let dim = Color32::from_rgb(140, 150, 165);
-        let bright = Color32::from_rgb(220, 225, 235);
-        let mut pressed = None;
-        egui::Grid::new("status")
-            .num_columns(2)
-            .spacing([12.0, 4.0])
+        let grey = Color32::from_rgb(110, 115, 130);
+        let connected = f.state == telemetry::CallState::Connected;
+        let coming_up = matches!(
+            f.state,
+            telemetry::CallState::Negotiating | telemetry::CallState::Training
+        );
+        let (standard, baud, about) = family(f.modulation);
+        let colour = match f.state {
+            telemetry::CallState::Connected => standard,
+            telemetry::CallState::Idle => grey,
+            _ => standard.gamma_multiply(0.55),
+        };
+
+        // ---- the title bar
+        let title = if f.modulation == "-" {
+            f.state.label().to_owned()
+        } else {
+            format!("{} · {}", f.modulation, f.state.label())
+        };
+        let bar = egui::Frame::new()
+            .fill(colour.gamma_multiply(0.15))
+            .inner_margin(egui::Margin { left: 8, right: 8, top: 3, bottom: 3 })
             .show(ui, |ui| {
-                let row = |ui: &mut egui::Ui, k: &str, v: String, colour: Color32| {
-                    ui.label(RichText::new(k).monospace().color(dim));
-                    ui.label(RichText::new(v).monospace().color(colour));
-                    ui.end_row();
+                ui.set_min_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(title).monospace().size(14.0).strong().color(colour));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(RichText::new("bit/s").size(11.0).color(DIM));
+                        ui.label(
+                            RichText::new(f.bit_rate.map_or("–".to_owned(), |r| r.to_string()))
+                                .monospace()
+                                .size(20.0)
+                                .color(BRIGHT),
+                        );
+                        if let Some(baud) = baud {
+                            ui.add_space(10.0);
+                            ui.label(RichText::new("Bd").size(11.0).color(DIM));
+                            ui.label(
+                                RichText::new(baud.to_string()).monospace().size(16.0).color(BRIGHT),
+                            );
+                        }
+                    });
+                });
+            })
+            .response;
+        ui.painter()
+            .hline(bar.rect.x_range(), bar.rect.bottom(), egui::Stroke::new(2.0, colour));
+        if !about.is_empty() {
+            bar.on_hover_text(about);
+        }
+        ui.add_space(4.0);
+
+        // ---- what is being sliced, and how much there is in hand.
+        //
+        // The reading is how far the receiver misses by against the gap
+        // between points, and this modem gives a rate up at a quarter: so
+        // the margin is the reading against that quarter, in decibels, and
+        // means the same at 4800 as at 33 600. FSK has no such reading and
+        // shows its slicer's quality out of a hundred.
+        //
+        // PCM has neither: what it has is the rate menu, which says of every
+        // downstream rate whether the levels the line probe found carry it
+        // with room. So its bar is the rate in use along the rates on offer,
+        // ticked at the fastest one predicted clean.
+        let pcm = match &self.source {
+            Source::Live(session) if f.modulation == "V.90" => session.rate_menu(),
+            _ => None,
+        }
+        .and_then(|menu| {
+            use datapump::v90::analogue::Outlook;
+            let now = menu.current?;
+            let rate = |drn: u8| menu.rates.iter().find(|r| r.0 == drn).map(|r| r.1);
+            let carried = |o: &Outlook| matches!(o, Outlook::Good | Outlook::Bad);
+            let slowest = menu.rates.iter().find(|r| carried(&r.2))?.1;
+            let fastest = menu.rates.iter().rfind(|r| carried(&r.2))?.1;
+            let clean = menu.rates.iter().rfind(|r| r.2 == Outlook::Good).map(|r| r.1);
+            Some((rate(now)?, menu.outlook(now)?, slowest, fastest, clean))
+        });
+        let (merit, merit_colour, fill, tick, left, right) = match (f.reception, f.symbol_quality()) {
+            _ if pcm.is_some() => {
+                use datapump::v90::analogue::Outlook;
+                let (rate, outlook, slowest, fastest, clean) = pcm.unwrap_or((0, Outlook::Good, 0, 1, None));
+                let along = |r: u32| {
+                    (r.saturating_sub(slowest) as f32 / fastest.saturating_sub(slowest).max(1) as f32)
+                        .clamp(0.0, 1.0)
                 };
-                row(ui, "state", f.state.label().into(), bright);
-                row(ui, "modulation", f.modulation.into(), bright);
-                row(ui, "phase", f.line_phase.into(), dim);
-                // Both directions, because they need not match: V.34 settles
-                // each separately, from what each end's receiver asked for.
-                let bps = |r: Option<u32>| r.map(|r| format!("{r} bps")).unwrap_or_else(|| "-".into());
-                // V.90's rate by hand, above the rate it moves: every rate,
-                // green where the DIL -- and data mode since -- predict it
-                // reads cleanly and red where they predict it will not, and
-                // any of them to be had. In data mode a choice is a rate
-                // renegotiation (9.6); before it, the rate the next start-ups
-                // ask for, which is the only way to try a rate on a far end
-                // that never lets a call reach data mode at the one it was
-                // given.
-                if let Source::Live(session) = &self.source {
-                    let v90 = f.modulation == "V.90";
-                    let connected = f.state == telemetry::CallState::Connected;
-                    if v90 || !connected {
-                        ui.label(RichText::new("V.90 rate").monospace().color(dim));
-                        pressed = Self::rate_menu(ui, session, v90 && connected);
-                        ui.end_row();
-                    }
-                }
-                row(ui, "rx rate", bps(f.bit_rate), bright);
-                row(ui, "tx rate", bps(f.tx_bit_rate), bright);
-                row(
-                    ui,
-                    "carrier",
-                    if f.carrier { "detected" } else { "none" }.into(),
-                    if f.carrier { Color32::from_rgb(90, 220, 130) } else { dim },
-                );
-                // How far the receiver is missing by, against the distance
-                // between the points it is choosing between. It is the number
-                // 7's retrain decides on, and the only one that means the same
-                // thing at 4800 and at 14 400: a tenth is a clean lock,
-                // a quarter is where this modem gives up on the rate, and a
-                // half is a coin flip.
-                if let Some(miss) = f.reception {
-                    row(
-                        ui,
-                        "reading",
-                        format!("{miss:.2} of the gap"),
-                        if miss < 0.25 {
-                            Color32::from_rgb(90, 220, 130)
-                        } else {
-                            Color32::from_rgb(230, 140, 90)
-                        },
-                    );
+                let (word, c) = match (outlook, clean) {
+                    (Outlook::Good, Some(clean)) if clean > rate => ("room above", GOOD),
+                    (Outlook::Good, _) => ("clean", GOOD),
+                    _ => ("tight", WARN),
+                };
+                (
+                    Some(word.to_owned()),
+                    c,
+                    along(rate),
+                    clean.map(along),
+                    format!("{rate} of {slowest} - {fastest} bit/s"),
+                    match clean {
+                        Some(_) => "tick: fastest clean",
+                        None => "none predicted clean",
+                    },
+                )
+            }
+            (Some(miss), _) if miss > 0.0 => {
+                let db = 20.0 * (0.25 / miss).log10();
+                let c = if db < 0.0 {
+                    BAD
+                } else if db < 3.0 {
+                    WARN
                 } else {
-                    row(
-                        ui,
-                        "quality",
-                        f.symbol_quality()
-                            .map(|q| q.to_string())
-                            .unwrap_or_else(|| "-".into()),
-                        bright,
-                    );
+                    GOOD
+                };
+                (
+                    Some(format!("{db:+5.1} dB")),
+                    c,
+                    (1.0 - miss / 0.5).clamp(0.0, 1.0) as f32,
+                    Some(0.5),
+                    format!("missing by {miss:.2} of the gap between points"),
+                    "retrains at 0.25",
+                )
+            }
+            (_, Some(q)) => {
+                let c = if q >= 80 {
+                    GOOD
+                } else if q >= 50 {
+                    WARN
+                } else {
+                    BAD
+                };
+                (
+                    Some(format!("Q {q}")),
+                    c,
+                    q as f32 / 100.0,
+                    None,
+                    format!("slicer margin {q} of 100"),
+                    "0 is a coin flip",
+                )
+            }
+            // Neither, but the receiver's own error against its decisions:
+            // as decibels, so a tighter constellation is a larger number.
+            _ if f.snr_db.is_some() => {
+                let db = f.snr_db.unwrap_or(0.0);
+                let c = if db >= 20.0 {
+                    GOOD
+                } else if db >= 12.0 {
+                    WARN
+                } else {
+                    BAD
+                };
+                (
+                    Some(format!("{db:.1} dB")),
+                    c,
+                    (db / 60.0).clamp(0.0, 1.0),
+                    None,
+                    format!("decisions {db:.1} dB clear of the error"),
+                    "scale 0 - 60 dB",
+                )
+            }
+            _ => {
+                let left = match f.state {
+                    telemetry::CallState::Idle => "no call".to_owned(),
+                    _ if f.line_phase != "-" => f.line_phase.to_owned(),
+                    state => format!("{}…", state.label()),
+                };
+                (None, grey, 0.0, None, left, "")
+            }
+        };
+        let has_symbols = f.symbol_label != "-";
+        // V.34 calls its modulation QAM and no more, since the size is
+        // whatever the rate needs: said with the size, as the others are.
+        let shape = if f.symbol_label == "QAM" {
+            format!("{}QAM", f.tones)
+        } else if f.symbol_label == "PCM" {
+            // The same for PCM: how many levels the rate in use is sent on.
+            format!("{}PCM", f.tones)
+        } else {
+            f.symbol_label.to_owned()
+        };
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(if has_symbols { shape.as_str() } else { "–" })
+                    .monospace()
+                    .size(26.0)
+                    .color(if has_symbols { colour } else { grey }),
+            );
+            if let Some(merit) = &merit {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(merit).monospace().size(18.0).color(merit_colour));
+                });
+            }
+        })
+        .response
+        .on_hover_text(
+            "Left: what the receiver is slicing. Right: what it has in hand. On a \
+             constellation that is the margin: how far it misses by, against the quarter \
+             of the gap between points at which this modem gives the rate up, in decibels. \
+             Under 0 dB it retrains; within 3 dB a burst of noise will make it.",
+        );
+
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 10.0), egui::Sense::hover());
+        let p = ui.painter();
+        p.rect_filled(rect, 0.0, READOUT);
+        if fill > 0.0 {
+            let lit = egui::Rect::from_min_max(
+                rect.min,
+                egui::pos2(rect.left() + rect.width() * fill, rect.bottom()),
+            );
+            p.rect_filled(lit, 0.0, merit_colour);
+        }
+        if let Some(t) = tick {
+            let x = rect.left() + rect.width() * t;
+            p.rect_filled(
+                egui::Rect::from_min_max(
+                    egui::pos2(x - 1.0, rect.top() - 3.0),
+                    egui::pos2(x + 1.0, rect.bottom() + 3.0),
+                ),
+                0.0,
+                BRIGHT,
+            );
+        }
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(left).size(12.0).color(DIM));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new(right).size(12.0).color(DIM));
+            });
+        });
+
+        // ---- the receive chain
+        ui.add_space(6.0);
+        let chain = ui.horizontal(|ui| {
+            ui.add_space(10.0);
+            ui.vertical(|ui| {
+                // The line: what is arriving, before anything is made of it.
+                let level = f.rx_level_db;
+                let wave = scopes::wave(&f.waveform);
+                let clipped = wave.map_or(0, |w| w.clipped);
+                let mut text = format!("{level:.1} dBFS");
+                if let Some(w) = wave.filter(|w| w.rms_db > -100.0) {
+                    text.push_str(&format!(
+                        " · peaks {:.1} · crest {:.1} dB",
+                        w.peak_db,
+                        w.peak_db - w.rms_db
+                    ));
                 }
+                let health = if clipped > 0 {
+                    text.push_str(&format!(" · {clipped} clipped"));
+                    BAD
+                } else if level > -3.0 {
+                    text.push_str(" · too hot");
+                    BAD
+                } else if level > -12.0 {
+                    text.push_str(" · hot");
+                    WARN
+                } else if level < -70.0 {
+                    text.push_str(" · silent");
+                    grey
+                } else {
+                    GOOD
+                };
+                stage(ui, health, "Line", text).on_hover_text(
+                    "The received level, the largest sample and the crest factor of the \
+                     last eighth of a second. A modem receiving above -10 dBFS is almost \
+                     certainly clipping somewhere upstream.",
+                );
+
+                // The carrier, and what the spectrum says is there.
+                let seen = measured.map(|m| {
+                    format!(
+                        "strongest at {:.0} Hz, {:.0} dB over the floor\n{:.0} - {:.0} Hz occupied",
+                        m.peak_hz,
+                        m.peak_db - m.floor_db,
+                        m.low_hz,
+                        m.high_hz
+                    )
+                });
+                match (f.carrier, seen) {
+                    (true, Some(seen)) => stage(ui, GOOD, "Carrier", format!("detected · {seen}")),
+                    (true, None) => stage(ui, GOOD, "Carrier", "detected\nnothing over the noise to measure".into()),
+                    (false, Some(seen)) => stage(ui, grey, "Carrier", format!("none · {seen}")),
+                    (false, None) => stage(ui, grey, "Carrier", "none\nnothing over the noise".into()),
+                };
+
+                // Where the start-up has got to.
+                let phase = if f.line_phase == "-" { "\n–".to_owned() } else { format!("\n{}", f.line_phase) };
+                match self.connected_at {
+                    Some(since) if connected => {
+                        let secs = since.elapsed().as_secs();
+                        stage(
+                            ui,
+                            GOOD,
+                            "Start-up",
+                            format!("done · {}:{:02} in data{phase}", secs / 60, secs % 60),
+                        )
+                    }
+                    _ if coming_up => stage(ui, WARN, "Start-up", format!("{}{phase}", f.state.label())),
+                    _ => stage(ui, grey, "Start-up", format!("{}{phase}", f.state.label())),
+                };
+
+                // The demodulator: what it slices and how well.
+                let shown = f.symbols.len() + f.constellation.len();
+                if has_symbols {
+                    // PCM's are levels and samples: there is no plane for
+                    // them to be points on.
+                    let pcm = f.symbol_label == "PCM";
+                    let mut text = format!(
+                        "{shape} · {} {}",
+                        f.tones,
+                        if pcm { "levels" } else { "points" }
+                    );
+                    text.push_str(&format!(
+                        "\n{shown} {} on the scope",
+                        if pcm { "samples" } else { "symbols" }
+                    ));
+                    let health = match (f.reception, f.symbol_quality()) {
+                        (Some(miss), _) => {
+                            text.push_str(&format!(" · reading {miss:.2} of the gap"));
+                            if miss < 0.25 { GOOD } else { WARN }
+                        }
+                        (None, Some(q)) => {
+                            text.push_str(&format!(" · quality {q}"));
+                            if q >= 50 { GOOD } else { WARN }
+                        }
+                        _ if f.snr_db.is_some() => {
+                            let db = f.snr_db.unwrap_or(0.0);
+                            text.push_str(&format!(" · error {db:.1} dB down"));
+                            if db >= 12.0 { GOOD } else { WARN }
+                        }
+                        _ if shown > 0 => GOOD,
+                        _ => grey,
+                    };
+                    stage(ui, health, "Demodulator", text);
+                } else {
+                    stage(ui, grey, "Demodulator", "no symbols\n–".into());
+                }
+
                 // What the echo canceller is doing, which on a two-wire pair
                 // decides everything and is otherwise invisible: a
                 // constellation full of noise looks the same whether the noise
                 // is the line or this modem listening to itself.
                 if let Some(db) = f.echo_loss_db {
-                    row(
+                    let found = match f.echo_at {
+                        Some((delay, strength)) => format!(
+                            "reflection at {:.0} ms, {strength:.2} strong",
+                            delay as f64 * 1000.0 / f.sample_rate
+                        ),
+                        None => "reflection not found".into(),
+                    };
+                    stage(
                         ui,
-                        "echo out",
-                        format!("{db:.1} dB"),
-                        if db >= 6.0 {
-                            Color32::from_rgb(90, 220, 130)
-                        } else {
-                            Color32::from_rgb(230, 140, 90)
-                        },
-                    );
-                    row(
-                        ui,
-                        "echo at",
-                        match f.echo_at {
-                            Some((delay, strength)) => format!(
-                                "{:.0} ms, {:.2}",
-                                delay as f64 * 1000.0 / f.sample_rate,
-                                strength
-                            ),
-                            None => "not found".into(),
-                        },
-                        if f.echo_at.is_some() { dim } else { Color32::from_rgb(230, 140, 90) },
+                        if db >= 6.0 && f.echo_at.is_some() { GOOD } else { WARN },
+                        "Echo canceller",
+                        format!("taking out {db:.1} dB\n{found}"),
                     );
                 }
-                row(ui, "rx bytes", f.rx_bytes.to_string(), bright);
-                row(ui, "tx bytes", f.tx_bytes.to_string(), bright);
-                row(ui, "dropped", self.rx.dropped_frames().to_string(), dim);
+
+                // The rates, both ways: V.34 settles each separately.
+                let bps = |r: Option<u32>| r.map_or("–".to_owned(), |r| r.to_string());
+                stage(
+                    ui,
+                    if f.bit_rate.is_some() { GOOD } else { grey },
+                    "Rates",
+                    format!("receiving {} · sending {} bit/s", bps(f.bit_rate), bps(f.tx_bit_rate)),
+                );
+
+                stage(
+                    ui,
+                    if f.leds.ec { GOOD } else { grey },
+                    "Error control",
+                    if f.leds.ec {
+                        "running: frames checked and resent".into()
+                    } else if connected {
+                        "none: bytes go as the line delivers them".into()
+                    } else {
+                        "not up".into()
+                    },
+                );
+
+                let (rx_rate, tx_rate) = self.byte_rates();
+                stage(
+                    ui,
+                    if connected { GOOD } else { grey },
+                    "Data",
+                    format!(
+                        "{} bytes in at {rx_rate:.0} a second · {} out at {tx_rate:.0}",
+                        f.rx_bytes, f.tx_bytes
+                    ),
+                );
+
+                if let Some(phase) = f.fax_phase {
+                    let mut text = phase.to_owned();
+                    if f.fax_rate > 0 {
+                        text.push_str(&format!(" · {} bit/s", f.fax_rate));
+                    }
+                    if f.fax_sheet > 0 {
+                        text.push_str(&format!(" · page {} of {}", f.fax_sheet, f.fax_sheets.max(f.fax_sheet)));
+                    }
+                    if f.fax_lines > 0 {
+                        text.push_str(&format!(" · {} lines", f.fax_lines));
+                    }
+                    if f.fax_coding != "-" {
+                        text.push_str(&format!(" · {}", f.fax_coding));
+                    }
+                    if f.fax_error_correction {
+                        text.push_str(" · ECM");
+                    }
+                    match &f.fax_trouble {
+                        Some(trouble) => stage(ui, BAD, "Fax", format!("{text} · {trouble}")),
+                        None => stage(ui, GOOD, "Fax", text),
+                    };
+                }
+
+                let dropped = self.rx.dropped_frames();
+                let mut text = format!(
+                    "{:.0} spectra a second · {:.0} Hz · {dropped} frame{} dropped",
+                    1.0 / self.row_secs,
+                    f.sample_rate,
+                    if dropped == 1 { "" } else { "s" }
+                );
                 if self.monitor.is_some() {
-                    row(
-                        ui,
-                        "audio u/o",
-                        format!("{} / {}", self.sink.underruns(), self.sink.overruns()),
-                        dim,
-                    );
+                    text.push_str(&format!(
+                        "\nmonitor {} underruns, {} overruns",
+                        self.sink.underruns(),
+                        self.sink.overruns()
+                    ));
+                }
+                stage(ui, grey, "Display", text);
+            });
+        });
+        let r = chain.response.rect;
+        ui.painter().vline(r.left() + 2.0, r.y_range(), egui::Stroke::new(2.0, BEZEL));
+
+        // V.90's rate by hand: every rate, green where the DIL -- and data
+        // mode since -- predict it reads cleanly and red where they predict
+        // it will not, and any of them to be had. In data mode a choice is a
+        // rate renegotiation (9.6); before it, the rate the next start-ups
+        // ask for, which is the only way to try a rate on a far end that
+        // never lets a call reach data mode at the one it was given.
+        //
+        // And a retrain by hand beside it. V.34's is the full one (11.5),
+        // back through phase 2; the button is there only on a V.34 call that
+        // is up, since that is the only place a retrain means anything.
+        if let Source::Live(session) = &self.source {
+            let v90 = f.modulation == "V.90";
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if v90 || !connected {
+                    ui.label(RichText::new("V.90 rate").color(DIM));
+                    if let Some(drn) = Self::rate_menu(ui, session, v90 && connected) {
+                        session.choose_rate(drn);
+                    }
+                }
+                if ui
+                    .add_enabled(connected && f.modulation == "V.34", egui::Button::new("Retrain"))
+                    .on_hover_text(
+                        "V.34 11.5: send the retrain tone and go back through \
+                         phase 2, measuring the line again and training on \
+                         what it will carry now -- on the same call",
+                    )
+                    .clicked()
+                {
+                    session.retrain();
                 }
             });
-        pressed
+        }
     }
 
     /// The V.90 rate menu: the fastest rate first, each coloured and worded
@@ -3685,6 +4614,9 @@ impl ScopeApp {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.tab, Tab::Terminal, "terminal");
             ui.selectable_value(&mut self.tab, Tab::Transcript, "transcript");
+            if !self.source.is_telnet() {
+                ui.selectable_value(&mut self.tab, Tab::Scopes, "scopes");
+            }
             ui.separator();
             // A socket has no command state to be in, so saying which one it
             // was in would be answering a question nobody asked.
@@ -3737,7 +4669,7 @@ impl ScopeApp {
             // In telnet mode this sits up with the host box instead, where
             // there is room for it.
             if self.tab == Tab::Terminal && !self.source.is_telnet() {
-                ui.add(egui::Slider::new(&mut self.font_size, 9.0..=22.0).text("font"));
+                self.font_controls(ui);
             }
         });
         ui.separator();
@@ -3746,16 +4678,27 @@ impl ScopeApp {
                 // A socket has no far end that describes itself, so there is
                 // nothing to put here and the terminal takes the room.
                 if !self.source.is_telnet() {
+                    egui::Panel::bottom("timeline")
+                        .resizable(false)
+                        .exact_size(TIMELINE_H)
+                        .show(ui, |ui| self.timeline(ui));
                     egui::Panel::right("distant")
                         .resizable(false)
                         .exact_size(DISTANT_W)
                         .show(ui, |ui| self.distant(ui));
+                }
+                if self.fit {
+                    // A little short of the room, so that a rounding of the
+                    // last row does not bring the scroll bars out.
+                    let room = ui.available_size() - egui::vec2(4.0, 4.0);
+                    self.font_size = console::fit(ui, &self.console.term, room);
                 }
                 egui::ScrollArea::both()
                     .auto_shrink([false, false])
                     .show(ui, |ui| self.terminal_pane(ui));
             }
             Tab::Transcript => self.transcript(ui),
+            Tab::Scopes => self.scopes_pane(ui),
         }
     }
 
@@ -3937,6 +4880,60 @@ fn from_remembered(
     (carrier, m, p)
 }
 
+/// A modulation's colour on the call card, its symbol rate where it has
+/// only the one, and what it is in a sentence.
+fn family(modulation: &str) -> (Color32, Option<u32>, &'static str) {
+    const FSK: Color32 = Color32::from_rgb(240, 230, 90);
+    const QAM: Color32 = Color32::from_rgb(110, 220, 110);
+    const V34: Color32 = Color32::from_rgb(100, 170, 255);
+    const PCM: Color32 = Color32::from_rgb(200, 150, 255);
+    const FAX: Color32 = Color32::from_rgb(245, 180, 70);
+    // "V.34 (no receiver)" is V.34 for this.
+    let name = modulation.split(" (").next().unwrap_or(modulation);
+    match name {
+        "Bell 103" | "V.21" => (FSK, Some(300), "Frequency-shift keying: a pair of tones each way, 300 bit/s."),
+        "V.22bis" => (QAM, Some(600), "QAM at 600 baud on two carriers, 1200 Hz calling and 2400 Hz answering."),
+        "V.32" | "V.32bis" => (
+            QAM,
+            Some(2400),
+            "Trellis-coded QAM at 2400 baud, both ways on the one 1800 Hz carrier, told apart by echo cancelling.",
+        ),
+        "V.34" => (V34, None, "V.34: the symbol rate and carrier are chosen by probing the line, each way separately."),
+        "V.90" | "V.92" => (PCM, Some(8000), "PCM downstream, a codeword a network sample; V.34 upstream."),
+        "V.17" | "V.29" => (FAX, Some(2400), "A fax page modulation at 2400 baud."),
+        "V.27ter" => (FAX, None, "A fax page modulation: 1600 baud at 4800 bit/s, 1200 at 2400."),
+        _ if name.starts_with("V.8") => (V34, None, "V.8: the two modems saying what they have."),
+        _ => (BRIGHT, None, ""),
+    }
+}
+
+/// One stage of the call card's chain: a health dot, the stage, and what it
+/// is doing in words.
+///
+/// The words come as lines, split at each newline, and a line is cut short
+/// rather than wrapped. Wrapping is what made the card jump: the figures
+/// change width as they change, a line that just fitted stops fitting, and
+/// everything under it moves down a row and back up again several times a
+/// second. A stage that always gives the same number of lines stays put.
+fn stage(ui: &mut egui::Ui, health: Color32, name: &str, text: String) -> egui::Response {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 1.0;
+        for (row, line) in text.split('\n').enumerate() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 5.0;
+                let (dot, _) = ui.allocate_exact_size(egui::vec2(10.0, 14.0), egui::Sense::hover());
+                if row == 0 {
+                    ui.painter().circle_filled(dot.center(), 4.0, health);
+                    ui.label(RichText::new(name).strong().color(BRIGHT));
+                }
+                ui.add(egui::Label::new(RichText::new(line).color(DIM)).truncate());
+            });
+        }
+        ui.add_space(2.0);
+    })
+    .response
+}
+
 impl eframe::App for ScopeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll();
@@ -3959,90 +4956,9 @@ impl eframe::App for ScopeApp {
             return;
         }
 
-        egui::Panel::left("panel")
-            .resizable(false)
-            .exact_size(PANEL_W)
-            .show(ui, |ui| {
-                ui.add_space(6.0);
-                ui.label(RichText::new("front panel").strong());
-                scopes::faceplate(ui, &self.frame.leds);
-
-                ui.add_space(8.0);
-                ui.label(RichText::new("symbols").strong());
-                let label = self.symbol_label();
-                let scope = scopes::symbol_scope(
-                    ui,
-                    &self.frame.symbols,
-                    scopes::Constellation {
-                        points: &self.frame.constellation,
-                        tones: self.frame.tones,
-                        peak: self.frame.constellation_peak,
-                        pairs: self.frame.symbol_label == "PCM",
-                    },
-                    &label,
-                    self.frame.symbol_quality(),
-                    PANEL_W - 20.0,
-                );
-                if scope.on_hover_text("Click to draw it large").clicked() {
-                    self.constellation_open = !self.constellation_open;
-                }
-
-                ui.add_space(8.0);
-                ui.label(RichText::new("receive level").strong());
-                scopes::level_meter(ui, self.frame.rx_level_db);
-
-                ui.add_space(10.0);
-                if let Some(drn) = self.status(ui)
-                    && let Source::Live(session) = &self.source
-                {
-                    session.choose_rate(drn);
-                }
-
-                // A retrain by hand, under the rate it would change. V.34's is
-                // the full one (11.5), back through phase 2; the button is
-                // there only on a V.34 call that is up, since that is the only
-                // place a retrain means anything.
-                if let Source::Live(session) = &self.source {
-                    let connected = self.frame.state == telemetry::CallState::Connected;
-                    let v34 = self.frame.modulation == "V.34";
-                    ui.add_space(6.0);
-                    if ui
-                        .add_enabled(connected && v34, egui::Button::new("Retrain"))
-                        .on_hover_text(
-                            "V.34 11.5: send the retrain tone and go back through \
-                             phase 2, measuring the line again and training on \
-                             what it will carry now -- on the same call",
-                        )
-                        .clicked()
-                    {
-                        session.retrain();
-                    }
-                }
-            });
-
         self.constellation_window(ui);
 
-        egui::Panel::bottom("lower")
-            .resizable(true)
-            .default_size(420.0)
-            .show(ui, |ui| self.lower(ui));
-
-        egui::CentralPanel::default().show(ui, |ui| {
-            ui.label(RichText::new("waterfall  (0 - 4000 Hz)").strong());
-            let available = (ui.available_height() - 60.0).max(140.0);
-            self.waterfall.paint(ui, available * 0.60, self.frame.modulation);
-            ui.add_space(6.0);
-            ui.label(RichText::new("spectrum").strong());
-            scopes::spectrum(
-                ui,
-                &self.frame.spectrum_db,
-                self.frame.hz_per_bin,
-                (available * 0.40).max(90.0),
-                self.waterfall.floor_db,
-                self.waterfall.ceiling_db,
-                self.frame.modulation,
-            );
-        });
+        egui::CentralPanel::default().show(ui, |ui| self.lower(ui));
     }
 }
 
@@ -4175,6 +5091,14 @@ fn unused_name(accounts: &[sip::Account]) -> String {
 }
 
 /// A small filled circle, for a state that should be seen before it is read.
+fn face_key(text: &str) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(text).size(15.0)).min_size(FACE_KEY)
+}
+
+fn small_key(ui: &mut egui::Ui, lit: bool, text: &str) -> egui::Response {
+    ui.add(egui::Button::new(text.to_owned()).selected(lit).min_size(SMALL_KEY))
+}
+
 fn dot(ui: &mut egui::Ui, colour: Color32) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
     ui.painter().circle_filled(rect.center(), 4.0, colour);
@@ -4509,7 +5433,9 @@ mod modulation_tests {
         // downstream is whatever the route allows, and +MS does not name it.
         assert_eq!(ScopeApp::CARRIERS[5].0, "V90");
         assert_eq!(Modulation::rates(5), Modulation::rates(4));
-        assert_eq!(ScopeApp::CARRIERS.len(), 6);
+        assert_eq!(ScopeApp::CARRIERS[6].0, "V21");
+        assert_eq!(Modulation::rates(6), &[300]);
+        assert_eq!(ScopeApp::CARRIERS.len(), 7);
     }
 
     /// The two V.32 carriers are two ceilings on one modulation, and the

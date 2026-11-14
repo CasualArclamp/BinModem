@@ -25,6 +25,7 @@ use at::result::ResultCode;
 use at::{Action, Interpreter};
 use datapump::AsyncBits;
 use datapump::bell103;
+use datapump::v21;
 use datapump::v22bis;
 use datapump::v32;
 use datapump::v34;
@@ -108,7 +109,8 @@ enum Pump {
     /// V.32: both directions in the whole band at once, 4800 or 9600 bit/s,
     /// with the echo canceller that makes that possible.
     V32(Box<v32::startup::Modem>),
-    /// Bell 103: 300 bit/s, two tones a direction, and nothing else at all.
+    /// Bell 103 or V.21: 300 bit/s, two tones a direction, and nothing else
+    /// at all. Which of the two is in the modem's `Plan`.
     Bell103(Box<bell103::Modem>),
     /// V.34: the line probed and ranged in phase 2, both receivers trained
     /// and data mode's parameters exchanged in phases 3 and 4, and data after.
@@ -341,7 +343,10 @@ impl Pump {
         match self {
             Self::V22bis(m) => Some(m.residual_error()),
             Self::V32(m) => Some(m.residual_error()),
-            Self::Bell103(_) | Self::V34(_) | Self::V90(_) | Self::V90Server(_) => None,
+            // V.34 keeps its error as a power in decibels; as a distance it
+            // is the root of that.
+            Self::V34(m) => m.snr_db().map(|db| 10f64.powf(-db / 20.0)),
+            Self::Bell103(_) | Self::V90(_) | Self::V90Server(_) => None,
         }
     }
 
@@ -441,7 +446,7 @@ impl Pump {
                 v32::startup::Status::Connected(rate) if rate > 9600 => "V.32bis",
                 _ => "V.32",
             },
-            Self::Bell103(_) => "Bell 103",
+            Self::Bell103(m) => m.standard(),
             Self::V34(_) => "V.34",
             // V.90 until phase 2 says the far end is not a server.
             Self::V90(m) if m.is_v90() || m.v34().training().is_none() => "V.90",
@@ -901,12 +906,13 @@ pub struct Modem {
     /// what it was: the tones of clause 5, and a V.34 caller's call menu
     /// overheard and answered without V.34.
     pub fax_v34: bool,
-    /// The page waiting to be sent, taken by the next fax call that dials.
+    /// The pages waiting to be sent, in order, taken by the next fax call
+    /// that dials.
     ///
     /// Taken rather than borrowed, so that a second call does not send the
-    /// first one again by accident: putting a page in is a deliberate act and
-    /// so is putting the same one in twice.
-    pub fax_page: Option<fax::page::Page>,
+    /// first one's again by accident: putting pages in is a deliberate act
+    /// and so is putting the same ones in twice.
+    pub fax_pages: Vec<fax::page::Page>,
     /// What this end calls itself in a fax call, sent as a TSI.
     ///
     /// Twenty characters of digits, spaces and a plus, and blank is legal:
@@ -973,7 +979,7 @@ impl Modem {
             fax_error_correction: true,
             fax_jbig: true,
             fax_v34: true,
-            fax_page: None,
+            fax_pages: Vec::new(),
             fax_identification: String::new(),
             far_menu: None,
             v34_report: None,
@@ -1240,6 +1246,7 @@ impl Modem {
                 "V32B" => "V.32bis",
                 "V32" => "V.32",
                 "B103" => "Bell 103",
+                "V21" => "V.21",
                 _ => "V.22bis",
             },
         }
@@ -2339,7 +2346,8 @@ impl Modem {
             // operator put it in and asked for a number.
             let call = match role {
                 Role::Calling => {
-                    FaxCall::originate(self.fs, &self.fax_identification, self.fax_page.take())
+                    let pages = std::mem::take(&mut self.fax_pages);
+                    FaxCall::originate_pages(self.fs, &self.fax_identification, pages)
                 }
                 Role::Answering => FaxCall::answer(self.fs, &self.fax_identification),
             };
@@ -2433,7 +2441,10 @@ impl Modem {
             // V.90 rides on V.34's bit, with the PCM category beside it, and
             // V.92 on V.90's: there is no separate V.8 code for it.
             "V34" | "V90" | "V92" => Some(Modulation::V34Duplex),
-            "B103" => None,
+            // V.8 does have a bit for V.21 (Table 4). But this modem's V.21
+            // answers with V.25's tone, as a V.21 modem does, rather than
+            // ANSam, and nothing after V.8 has been taught to skip it.
+            "B103" | "V21" => None,
             _ => Some(Modulation::V22bis),
         }) else {
             return Modulations::NONE;
@@ -2675,6 +2686,13 @@ impl Modem {
                     Role::Answering => bell103::Role::Answer,
                 };
                 Pump::Bell103(Box::new(bell103::Modem::new(hs_role, self.fs)))
+            }
+            "V21" => {
+                let hs_role = match role {
+                    Role::Calling => bell103::Role::Originate,
+                    Role::Answering => bell103::Role::Answer,
+                };
+                Pump::Bell103(Box::new(bell103::Modem::with_plan(v21::DATA, hs_role, self.fs)))
             }
             _ => {
                 let hs_role = match role {

@@ -782,6 +782,47 @@ fn a_bell_103_call_carries_a_bbs_session() {
 }
 
 #[test]
+fn a_v21_call_carries_a_bbs_session() {
+    // Bell 103's call with V.21's tones, which is how the same board was
+    // reached from anywhere outside North America. The difference that shows
+    // from here is the time: the answering end goes through V.25 before its
+    // carrier, two seconds of silence and three of 2100 Hz.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "AT+MS=V21");
+    Pair::type_at(&mut p.caller, "AT+MS=V21");
+    p.run(0.01);
+    assert!(p.caller_saw().contains("OK"), "{:?}", p.caller_saw());
+
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(8.0);
+
+    assert_eq!(p.caller.state(), State::Data, "the V.21 caller never connected");
+    assert_eq!(p.host.state(), State::Data, "the V.21 host never connected");
+    assert_eq!(p.caller.standard(), "V.21");
+    assert_eq!(p.caller.rate(), Some(300));
+    assert!(!p.caller.error_controlled());
+
+    let banner = "\r\nThe Dead Zone BBS\r\nLogin: ";
+    for b in banner.bytes() {
+        p.host.feed_dte(b);
+    }
+    Pair::type_at(&mut p.caller, "guest");
+    p.run(3.0);
+
+    assert!(
+        p.caller_saw().contains(banner),
+        "the banner did not come through: {:?}",
+        p.caller_saw()
+    );
+    assert!(
+        p.host_saw().contains("guest\r"),
+        "the login did not go down the line: {:?}",
+        p.host_saw()
+    );
+}
+
+#[test]
 fn a_scope_can_see_what_the_modem_is_doing() {
     // Everything the live window puts on screen comes through these, and none
     // of it is visible from the terminal side, which sees a CONNECT and a rate
@@ -1805,7 +1846,7 @@ fn one_modem_faxes_a_page_to_another_over_at_commands() {
     let mut caller = Modem::new(FS);
     caller.fax_identification = "61399990000".to_owned();
     let page = a_test_page(10);
-    caller.fax_page = Some(page.clone());
+    caller.fax_pages = vec![page.clone()];
     Pair::type_at(&mut caller, "AT+FCLASS=1");
     Pair::type_at(&mut caller, "ATD61388880000");
 
@@ -1954,7 +1995,7 @@ fn a_fax_goes_at_9600_unless_it_is_told_not_to() {
     ] {
         let page = a_test_page(6);
         let mut caller = Modem::new(FS);
-        caller.fax_page = Some(page.clone());
+        caller.fax_pages = vec![page.clone()];
         caller.fax_offer = offer.clone();
         caller.fax_v34 = false;
         Pair::type_at(&mut caller, "AT+FCLASS=1");
@@ -1982,7 +2023,7 @@ fn a_fax_uses_error_correction_unless_either_end_is_told_not_to() {
     {
         let page = a_test_page(6);
         let mut caller = Modem::new(FS);
-        caller.fax_page = Some(page.clone());
+        caller.fax_pages = vec![page.clone()];
         caller.fax_error_correction = at_caller;
         caller.fax_v34 = false;
         Pair::type_at(&mut caller, "AT+FCLASS=1");
@@ -2013,7 +2054,7 @@ fn a_fax_goes_in_jbig_unless_either_end_is_told_not_to() {
     ] {
         let page = a_test_page(6);
         let mut caller = Modem::new(FS);
-        caller.fax_page = Some(page.clone());
+        caller.fax_pages = vec![page.clone()];
         caller.fax_jbig = at_caller;
         Pair::type_at(&mut caller, "AT+FCLASS=1");
         Pair::type_at(&mut caller, "ATD1");
