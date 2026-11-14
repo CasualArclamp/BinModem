@@ -436,6 +436,11 @@ pub struct Session {
     rate_pinned: Mutex<Option<u8>>,
     /// What the modem predicts of each V.90 rate, once a DIL has been read.
     rate_menu: Mutex<Option<datapump::v90::analogue::RateMenu>>,
+    /// A choice from the V.92 upstream menu not yet handed to the modem, and
+    /// the rate V.92 start-ups ask for going up, as the modem last said: a
+    /// drn of 6.1's ladder, or None for the server's own choice.
+    up_request: Mutex<Option<Option<u8>>>,
+    up_pinned: Mutex<Option<u8>>,
     /// A transfer the window has asked for, until the line thread takes it.
     transfer_request: Mutex<Option<TransferRequest>>,
     /// What the transfer is doing, for the window to read.
@@ -531,6 +536,8 @@ impl Default for Session {
             rate_request: Mutex::default(),
             rate_pinned: Mutex::default(),
             rate_menu: Mutex::default(),
+            up_request: Mutex::default(),
+            up_pinned: Mutex::default(),
         }
     }
 }
@@ -686,6 +693,25 @@ impl Session {
 
     fn take_rate_request(&self) -> Option<Option<u8>> {
         self.rate_request.lock().ok().and_then(|mut r| r.take())
+    }
+
+    /// A choice from the V.92 upstream menu: a drn of 6.1's ladder (1 is
+    /// 24 000 bit/s, 19 is 48 000), or None for the server's own choice. A
+    /// V.92 call that is up retrains to take it.
+    pub fn choose_upstream(&self, drn: Option<u8>) {
+        if let Ok(mut request) = self.up_request.lock() {
+            *request = Some(drn);
+        }
+    }
+
+    fn take_up_request(&self) -> Option<Option<u8>> {
+        self.up_request.lock().ok().and_then(|mut r| r.take())
+    }
+
+    /// The upstream rate V.92 start-ups ask for, as its drn; None for the
+    /// server's own choice.
+    pub fn up_pinned(&self) -> Option<u8> {
+        self.up_pinned.lock().ok().and_then(|p| *p)
     }
 
     /// The rate V.90 start-ups ask for, as its drn; None for the DIL's own.
@@ -944,6 +970,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     let mut audio: Option<Wire> = None;
     let mut modem = Modem::new(FS);
     modem.set_pinned_rate(session.rate_pinned());
+    modem.choose_upstream(session.up_pinned());
     // The rate menu, looked at a few times a second: working it out after a
     // DIL or a fall-back is a choice at every rate.
     let mut menu_looked = Instant::now();
@@ -1423,7 +1450,28 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     "V.90 rate menu: not now -- a renegotiation is under way, or that rate is in use or not offered",
                 ),
                 modem::RateChosen::Renegotiating => {}
+                modem::RateChosen::Retraining(pinned) => {
+                    if let Ok(mut p) = session.rate_pinned.lock() {
+                        *p = pinned;
+                    }
+                    tx.log(Direction::Note, format!("{}; retraining to take it", pinned_said(pinned)));
+                }
             }
+        }
+        if let Some(drn) = session.take_up_request() {
+            let (pinned, retraining) = match modem.choose_upstream(drn) {
+                modem::RateChosen::Retraining(pinned) => (pinned, true),
+                modem::RateChosen::Pinned(pinned) => (pinned, false),
+                _ => (drn, false),
+            };
+            if let Ok(mut p) = session.up_pinned.lock() {
+                *p = pinned;
+            }
+            let said = match pinned {
+                Some(drn) => format!("V.92 start-ups will ask for {} bit/s going up", datapump::v92::up_rate(drn)),
+                None => "V.92 start-ups will leave the upstream rate to the server".to_owned(),
+            };
+            tx.log(Direction::Note, if retraining { format!("{said}; retraining to take it") } else { said });
         }
         if menu_looked.elapsed() >= Duration::from_millis(250) {
             menu_looked = Instant::now();

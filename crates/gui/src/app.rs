@@ -4478,12 +4478,19 @@ impl ScopeApp {
         // is up, since that is the only place a retrain means anything.
         if let Source::Live(session) = &self.source {
             let v90 = f.modulation == "V.90";
+            let v92 = f.modulation == "V.92";
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if v90 || !connected {
-                    ui.label(RichText::new("V.90 rate").color(DIM));
+                if v90 || v92 || !connected {
+                    ui.label(RichText::new("PCM down").color(DIM));
                     if let Some(drn) = Self::rate_menu(ui, session, v90 && connected) {
                         session.choose_rate(drn);
+                    }
+                }
+                if v92 || !connected {
+                    ui.label(RichText::new("up").color(DIM));
+                    if let Some(drn) = Self::upstream_menu(ui, session) {
+                        session.choose_upstream(drn);
                     }
                 }
                 if ui
@@ -4499,6 +4506,43 @@ impl ScopeApp {
                 }
             });
         }
+    }
+
+    /// The V.92 upstream menu: 6.1's ladder, the fastest rung first, and the
+    /// one pinned selected. Nothing is predicted of any of them -- the server
+    /// judges the line's noise only when it is left to choose -- so trying one
+    /// is how to find out.
+    fn upstream_menu(ui: &mut egui::Ui, session: &live::Session) -> Option<Option<u8>> {
+        use datapump::v92::{UP_RATES, up_rate};
+        let pinned = session.up_pinned();
+        let shown = match pinned {
+            Some(drn) => format!("{} pinned", up_rate(drn)),
+            None => "auto".to_owned(),
+        };
+        let mut chosen = None;
+        egui::ComboBox::from_id_salt("v92_up_rate")
+            .selected_text(RichText::new(shown).monospace())
+            .width(120.0)
+            .height(420.0)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(pinned.is_none(), RichText::new("auto: the server chooses").monospace()).clicked() {
+                    chosen = Some(None);
+                }
+                for drn in (1..=UP_RATES as u8).rev() {
+                    let text = format!("{:>5}", up_rate(drn));
+                    if ui.selectable_label(pinned == Some(drn), RichText::new(text).monospace()).clicked() {
+                        chosen = Some(Some(drn));
+                    }
+                }
+            })
+            .response
+            .on_hover_text(
+                "V.92's PCM upstream rate, 24000 to 48000 bit/s. Either end may choose: the server \
+                 asks for exactly that rate, the caller allows no other. Left on auto, the server \
+                 picks the fastest the line's noise allows. On a V.92 call that is up, choosing \
+                 retrains the line to take it, which is some twenty seconds",
+            );
+        chosen
     }
 
     /// The V.90 rate menu: the fastest rate first, each coloured and worded

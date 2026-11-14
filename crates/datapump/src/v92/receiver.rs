@@ -1191,6 +1191,19 @@ impl Receiver {
         self.b1u_differed = 0;
     }
 
+    /// What the Phase 4 design in hand measured, in decibels: the decision
+    /// feedback fit on the second TRN1u (see [`Self::design_phase_four_at`]),
+    /// before TRN2u has replaced it. `None` when there is none.
+    ///
+    /// It is the one reading of the line's noise there is when CPd has to be
+    /// designed. The linear fit's figure is mostly the 4000 Hz a two-point
+    /// stream has and the line does not; with the decisions fed back that
+    /// part is predicted and what is left is noise.
+    #[must_use]
+    pub fn phase_four_snr(&self) -> Option<f64> {
+        self.phase_four.as_ref().map(Fitted::snr)
+    }
+
     /// How many points the slicer is deciding between, both signs counted:
     /// two, four or eight in training, and twice the levels CPd's set holds
     /// in data mode. Nought when nothing is decided here.

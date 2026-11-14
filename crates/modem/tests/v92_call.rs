@@ -136,3 +136,113 @@ fn replay_what_an_answerer_heard() {
         }
     }
 }
+
+/// A V.92 pair with PCM upstream wanted at both ends, not yet dialled.
+fn v92_pair() -> Pair {
+    let mut pair = Pair::new(1203, 917);
+    pair.caller.set_pcm_upstream(true);
+    pair.host.set_pcm_upstream(true);
+    Pair::type_at(&mut pair.host, "AT+MS=V92");
+    Pair::type_at(&mut pair.caller, "AT+MS=V92");
+    pair.run(0.05);
+    pair
+}
+
+/// Dial, and run until both ends are in data mode or `seconds` have gone.
+fn connect(pair: &mut Pair, seconds: u32) -> String {
+    Pair::type_at(&mut pair.host, "ATA");
+    Pair::type_at(&mut pair.caller, "ATD5551234");
+    settle(pair, seconds)
+}
+
+/// Run until both ends are in data mode with no retrain under way.
+fn settle(pair: &mut Pair, seconds: u32) -> String {
+    let mut notes = String::new();
+    for _ in 0..seconds {
+        pair.run(1.0);
+        notes.push_str(&pair.notes());
+        notes.push_str(&format!(
+            "  caller {:?} {}, host {:?} {}
+",
+            pair.caller.state(),
+            pair.caller.line_phase(),
+            pair.host.state(),
+            pair.host.line_phase()
+        ));
+        let up = |m: &Modem| m.state() == State::Data && !m.retraining() && m.standard() == "V.92";
+        if up(&pair.caller) && up(&pair.host) {
+            break;
+        }
+    }
+    notes
+}
+
+/// Text both ways, or say what arrived instead.
+fn carries_text(pair: &mut Pair, what: &str, notes: &str) {
+    pair.run(2.0);
+    pair.caller_said.clear();
+    pair.host_said.clear();
+    for b in b"from the caller" {
+        pair.caller.feed_dte(*b);
+    }
+    for b in b"from the server" {
+        pair.host.feed_dte(*b);
+    }
+    pair.run(3.0);
+    let host_saw = String::from_utf8_lossy(&pair.host_said).into_owned();
+    assert!(host_saw.contains("from the caller"), "{what}: the server saw {host_saw:?}\n{notes}");
+    let caller_saw = String::from_utf8_lossy(&pair.caller_said).into_owned();
+    assert!(caller_saw.contains("from the server"), "{what}: the caller saw {caller_saw:?}\n{notes}");
+}
+
+fn rates(pair: &Pair) -> (u32, u32) {
+    (pair.caller.rate().unwrap_or(0), pair.caller.transmit_rate().unwrap_or(0))
+}
+
+/// On a line with nothing on it but the two modems, the server measures as
+/// much while the caller is silent under TRN1d, and asks for the top of 6.1's
+/// ladder rather than the bottom.
+#[test]
+fn a_quiet_line_gets_the_fastest_upstream() {
+    let mut pair = v92_pair();
+    let notes = connect(&mut pair, 40);
+    assert_eq!(rates(&pair), (48_000, 48_000), "{notes}");
+    carries_text(&mut pair, "the top rung", &notes);
+}
+
+/// A rate chosen by hand is the rate the call comes up at, from either end:
+/// the server puts it in its CPd, the caller allows no other in its Ja, and
+/// the downstream rate is the caller's CPt's.
+#[test]
+fn a_pinned_rate_is_the_rate_the_call_gets() {
+    for (who, up, down) in [("server", 7u8, None), ("caller", 13, None), ("caller", 4, Some(22u8)), ("caller", 1, Some(10))] {
+        let mut pair = v92_pair();
+        let chooser = if who == "server" { &mut pair.host } else { &mut pair.caller };
+        assert_eq!(chooser.choose_upstream(Some(up)), modem::RateChosen::Pinned(Some(up)));
+        if down.is_some() {
+            pair.caller.choose_rate(down);
+        }
+        let notes = connect(&mut pair, 40);
+        let wanted_up = (u32::from(up) + 17) * 8000 / 6;
+        let wanted_down = down.map_or(48_000, |drn| (u32::from(drn) + 20) * 8000 / 6);
+        assert_eq!(rates(&pair), (wanted_down, wanted_up), "{who} pinned {up} up, {down:?} down\n{notes}");
+        carries_text(&mut pair, &format!("{who} pinned {up} up, {down:?} down"), &notes);
+    }
+}
+
+/// And with the call up: the choice sends it back through its start-up, and
+/// it comes back at the new rate still carrying data.
+#[test]
+fn a_rate_chosen_during_a_call_retrains_to_it() {
+    for who in ["server", "caller"] {
+        let mut pair = v92_pair();
+        let mut notes = connect(&mut pair, 40);
+        assert_eq!(rates(&pair).1, 48_000, "{who}\n{notes}");
+        let chooser = if who == "server" { &mut pair.host } else { &mut pair.caller };
+        assert_eq!(chooser.choose_upstream(Some(7)), modem::RateChosen::Retraining(Some(7)), "{who}");
+        pair.run(1.0);
+        notes.push_str(&settle(&mut pair, 60));
+        assert_eq!(rates(&pair), (48_000, 32_000), "{who}\n{notes}");
+        carries_text(&mut pair, who, &notes);
+    }
+}

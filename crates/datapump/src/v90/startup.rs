@@ -69,6 +69,9 @@ pub struct Analogue {
     v92: Option<Box<pcm_line::Line>>,
     /// PCM-upstream start-ups that have failed in a row.
     failed_v92: u32,
+    /// The upstream rate V.92 start-ups allow, as its drn, or None for every
+    /// one: Ja's rate mask is then that rate alone (Table 20).
+    pinned_up: Option<u8>,
 }
 
 impl Analogue {
@@ -87,7 +90,15 @@ impl Analogue {
             pinned: None,
             v92: None,
             failed_v92: 0,
+            pinned_up: None,
         }
+    }
+
+    /// The upstream rate V.92 start-ups are to allow, as its drn (1 is
+    /// 24 000 bit/s, 19 is 48 000), or None for every one. It goes in Ja's
+    /// rate mask, so it takes effect at the next start-up or retrain.
+    pub fn set_pinned_upstream(&mut self, drn: Option<u8>) {
+        self.pinned_up = drn.filter(|d| (1..=19).contains(d));
     }
 
     /// Offer V.92 from this end: INFO0a's capability bit (Table 16/V.92), and
@@ -459,7 +470,12 @@ impl Analogue {
             // No DIL: the CPt is `readable_cpt`'s careful guess, and SCR
             // stands in for the DIL (9.5.2.1.10). Every upstream rate of 6.1
             // is offered, and the digital modem's CPd chooses.
-            let mut settings = pcm_up::Settings::new(Descriptor::none(), 0x7ffff, pcm_up::readable_cpt());
+            // A rate somebody pinned is asked for as it is: downstream by a
+            // CPt of just the levels it needs, upstream by a Ja that allows
+            // no other.
+            let cpt = self.pinned.map_or_else(pcm_up::readable_cpt, pcm_up::cpt_for);
+            let rates = self.pinned_up.map_or(0x7ffff, |drn| 1 << (drn - 1));
+            let mut settings = pcm_up::Settings::new(Descriptor::none(), rates, cpt);
             settings.md_length = asked.md_length;
             settings.uinfo = asked.uinfo;
             settings.limits = FilterLimits::from_info1a(asked.sections, asked.ltot_code, asked.lmax_code);
@@ -517,6 +533,12 @@ pub struct Digital {
     /// Whether data mode has been reached, after which a start-up is a
     /// retrain or a renegotiation rather than the call being placed.
     connected_once: bool,
+    /// The upstream rate V.92's CPd is to ask for, as its drn, or None for
+    /// what the line's noise allows (see `pcm::Modem::set_pinned_upstream`).
+    pinned_up: Option<u8>,
+    /// Lines for the transcript kept from a V.92 modem that has been put
+    /// away.
+    notes: Vec<String>,
 }
 
 impl Digital {
@@ -537,6 +559,18 @@ impl Digital {
             renegotiations: 0,
             habits: digital::Habits::default(),
             connected_once: false,
+            pinned_up: None,
+            notes: Vec::new(),
+        }
+    }
+
+    /// The upstream rate V.92's CPd is to ask for, as its drn (1 is 24 000
+    /// bit/s, 19 is 48 000), or None for this end's own choice. This
+    /// start-up's too, if its CPd has not been designed yet.
+    pub fn set_pinned_upstream(&mut self, drn: Option<u8>) {
+        self.pinned_up = drn;
+        if let Some(m) = self.v92.as_mut() {
+            m.set_pinned_upstream(drn);
         }
     }
 
@@ -606,7 +640,9 @@ impl Digital {
     /// What V.92's Phases 3 and 4 have done since this was last asked, a
     /// line each for the transcript.
     pub fn take_notes(&mut self) -> Vec<String> {
-        self.v92.as_mut().map(pcm::Modem::take_notes).unwrap_or_default()
+        let mut notes = std::mem::take(&mut self.notes);
+        notes.extend(self.v92.as_mut().map(pcm::Modem::take_notes).unwrap_or_default());
+        notes
     }
 
     pub fn round_trip(&self) -> Option<f64> {
@@ -808,6 +844,15 @@ impl Digital {
     pub fn step(&mut self, input: f64) -> f64 {
         if let Some(m) = self.v92.as_mut() {
             let out = m.step(input);
+            if m.take_retrain() {
+                // 9.7.1.2: the analogue modem's Tone A, and Phase 2 again.
+                // Its notes are taken first, or the line that says why is
+                // lost with the modem.
+                self.notes.extend(m.take_notes());
+                self.v92 = None;
+                self.v34.restart_phase2();
+                return out;
+            }
             let failed = matches!(m.status(), pcm::Status::Failed(_));
             if matches!(m.status(), pcm::Status::Connected { .. }) {
                 self.failed_starts = 0;
@@ -860,7 +905,9 @@ impl Digital {
             let wide = p2.far_capabilities().is_some_and(|f| f.constellation_1664);
             let mut settings = pcm::Settings::new(self.law, &asked, p2.round_trip().unwrap_or(0.0), wide);
             settings.habits = pcm::Habits::LIVE;
-            self.v92 = Some(pcm::Modem::new(settings));
+            let mut modem = pcm::Modem::new(settings);
+            modem.set_pinned_upstream(self.pinned_up);
+            self.v92 = Some(modem);
         }
         if p2.status() == phase2::Status::Done
             && self.v34.training().is_none()

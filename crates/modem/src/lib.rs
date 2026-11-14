@@ -816,6 +816,9 @@ pub enum RateChosen {
     NotNow,
     /// Start-ups from now on ask for this rate, or choose their own.
     Pinned(Option<u8>),
+    /// The same, and a V.92 call that was up has gone back through its
+    /// start-up to take it.
+    Retraining(Option<u8>),
 }
 
 /// One modem.
@@ -873,6 +876,10 @@ pub struct Modem {
     /// Whether V.92 calls are to have PCM upstream: `BINMODEM_V92_PCM_UP` when
     /// the modem is made, and [`Self::set_pcm_upstream`] after.
     pcm_upstream: bool,
+    /// The upstream rate V.92 start-ups ask for, as its drn (see
+    /// [`Self::choose_upstream`]); None for the server's own choice. Kept
+    /// from call to call.
+    pinned_upstream: Option<u8>,
     /// The V.8 negotiation, while one is running.
     ///
     /// It comes before the data pump and instead of it. Every modem
@@ -994,6 +1001,7 @@ impl Modem {
             line_notes: Vec::new(),
             pinned_rate: None,
             pcm_upstream: v92_pcm_upstream_wanted(),
+            pinned_upstream: None,
             negotiation: None,
             bis: None,
             bis_far: None,
@@ -2134,7 +2142,45 @@ impl Modem {
             return if m.renegotiate_to(drn) { RateChosen::Renegotiating } else { RateChosen::NotNow };
         }
         self.set_pinned_rate(drn);
-        RateChosen::Pinned(drn)
+        // A V.92 call takes its downstream rate from the CPt, which goes out
+        // in Phase 3: so a call that is up goes back through its start-up to
+        // send another (9.7.2.1). V.92's own rate renegotiation is not built.
+        if self.retrain_v92() { RateChosen::Retraining(drn) } else { RateChosen::Pinned(drn) }
+    }
+
+    /// A choice from the window's V.92 upstream menu: a rate as its drn (1 is
+    /// 24 000 bit/s, 19 is 48 000; 6.1), or None for what the server makes of
+    /// the line's noise. Either end may choose. The server asks for exactly
+    /// that rung in its CPd; the caller's Ja allows no other (Table 20). A
+    /// V.92 call that is up retrains to take it; otherwise it is what V.92
+    /// start-ups from now on ask for.
+    pub fn choose_upstream(&mut self, drn: Option<u8>) -> RateChosen {
+        self.pinned_upstream = drn.filter(|d| (1..=19).contains(d));
+        let pinned = self.pinned_upstream;
+        match self.pump.as_mut() {
+            Some(Pump::V90(m)) => m.set_pinned_upstream(pinned),
+            Some(Pump::V90Server(m)) => m.modem_mut().set_pinned_upstream(pinned),
+            _ => {}
+        }
+        if self.retrain_v92() { RateChosen::Retraining(pinned) } else { RateChosen::Pinned(pinned) }
+    }
+
+    /// See [`Self::choose_upstream`].
+    pub fn pinned_upstream(&self) -> Option<u8> {
+        self.pinned_upstream
+    }
+
+    /// Send a V.92 call that is in data mode back through its start-up.
+    /// False, and nothing done, for anything else.
+    fn retrain_v92(&mut self) -> bool {
+        if !matches!(self.state, State::Data | State::OnlineCommand) {
+            return false;
+        }
+        match self.pump.as_mut() {
+            Some(Pump::V90(m)) if m.is_v92() => m.retrain(),
+            Some(Pump::V90Server(m)) if m.modem().is_v92() => m.modem_mut().retrain(),
+            _ => false,
+        }
     }
 
     /// Whether a V.92 call is to have PCM upstream: offered in INFO1d by a
@@ -2835,10 +2881,10 @@ impl Modem {
             "V90S" => Pump::V90Server(Box::new(v90::server::Line::new(self.fs, v90::server::ours(), lead_in))),
             "V92S" => {
                 let pcm_upstream = self.pcm_upstream;
-                Pump::V90Server(Box::new(
-                    v90::server::Line::new(self.fs, v90::server::ours(), lead_in)
-                        .with_v92(v90::server::wish(pcm_upstream)),
-                ))
+                let mut line =
+                    v90::server::Line::new(self.fs, v90::server::ours(), lead_in).with_v92(v90::server::wish(pcm_upstream));
+                line.modem_mut().set_pinned_upstream(self.pinned_upstream);
+                Pump::V90Server(Box::new(line))
             }
             // The analogue half of V.92: its INFO0a says V.92, and its INFO1a
             // asks for PCM upstream (Table 18) when the server's INFO1d
@@ -2853,6 +2899,7 @@ impl Modem {
                 };
                 let mut analogue = v90::startup::Analogue::new(self.fs, lead_in).with_v92(wish, lead_in);
                 analogue.set_pinned(self.pinned_rate);
+                analogue.set_pinned_upstream(self.pinned_upstream);
                 Pump::V90(Box::new(analogue))
             }
             "V34" => {
