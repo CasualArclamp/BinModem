@@ -1917,6 +1917,16 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 f.tx_bytes = tx_bytes;
                 f.echo_loss_db = modem.echo_return_loss_now();
                 f.reception = modem.reception();
+                f.pcm = modem.pcm_levels().map(|(levels, sending, (slowest, fastest))| telemetry::PcmLevels {
+                    count: levels.count,
+                    lowest: levels.lowest,
+                    highest: levels.highest,
+                    dbm0: levels.dbm0,
+                    training_dbm0: levels.training_dbm0,
+                    sending,
+                    slowest,
+                    fastest,
+                });
                 f.fax_class = modem.is_fax_class();
                 if let Some(call) = modem.fax_call() {
                     f.fax_phase = Some(call.phase_name());

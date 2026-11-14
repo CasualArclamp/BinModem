@@ -50,7 +50,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
     let mut carrier = "V22B".to_owned();
     let mut banner = "*** THE DEAD ZONE BBS ***\n  24 hours - SysOp: nobody".to_owned();
     let mut account = Account::new("guest", "");
-    let mut v8bis = false;
+    let mut v8bis = true;
     // A line a second of what the sound card did and what arrived, and every
     // sample that arrived written to a file: for a call that will not come
     // up, the two things that say whether it is the line or the modem.
@@ -65,6 +65,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
             "--out" => output = Some(value()),
             "--carrier" => carrier = value().to_ascii_uppercase(),
             "--v8bis" => v8bis = true,
+            "--no-v8bis" => v8bis = false,
             "--stats" => stats = true,
             "--record" => record = Some(value()),
             "--banner" => banner = value(),
@@ -73,7 +74,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
             "--help" | "-h" => {
                 println!(
                     "binmodem --answer --in <device> --out <device> \
-                     [--carrier B103|V21|V22B|V32|V34|V90|V92] [--v8bis] [--banner <text>]\n\
+                     [--carrier B103|V21|V22B|V32|V34|V90|V92] [--no-v8bis] [--banner <text>]\n\
                      \x20                [--stats] [--record <file of f32 samples>]\n\
                      \x20                [--user <name>] [--password <password>]\n\
                      \n\

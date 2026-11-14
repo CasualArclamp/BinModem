@@ -246,3 +246,18 @@ fn a_rate_chosen_during_a_call_retrains_to_it() {
         carries_text(&mut pair, who, &notes);
     }
 }
+
+/// V.8 bis in front of it all (`AT+A8E=,,,1` at both ends): the transaction
+/// chooses the mode, V.8 follows it, and the call is V.92 with PCM both ways
+/// as it is without.
+#[test]
+fn v8_bis_in_front_of_a_v92_call() {
+    let mut pair = v92_pair();
+    Pair::type_at(&mut pair.host, "AT+A8E=,,,1");
+    Pair::type_at(&mut pair.caller, "AT+A8E=,,,1");
+    pair.run(0.05);
+    let notes = connect(&mut pair, 50);
+    assert!(notes.contains("V.8 bis"), "no V.8 bis on the line:\n{notes}");
+    assert_eq!(rates(&pair), (48_000, 48_000), "{notes}");
+    carries_text(&mut pair, "after V.8 bis", &notes);
+}

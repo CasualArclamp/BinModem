@@ -26,6 +26,11 @@ use super::{analogue, digital};
 /// asks for V.34 instead.
 const V90_RETRAINS: u32 = 2;
 
+/// The downstream rate a V.92 start-up asks for when nobody has chosen one, as
+/// its drn: 48 000 bit/s. With no DIL nothing has been measured, and six bits
+/// a symbol on thirty-two levels is a rate a clean line reads without help.
+const DEFAULT_DOWN_DRN: u8 = 16;
+
 /// Failed PCM-upstream start-ups in a row before the analogue modem asks for
 /// V.90's Table 10 instead, keeping PCM downstream: the rung above
 /// [`V90_RETRAINS`] on the ladder (see `phase2::Modem::decline_pcm_upstream`).
@@ -139,6 +144,12 @@ impl Analogue {
             Some(m) => m.points(),
             None => self.v90.as_ref().map_or(2, analogue::Modem::points),
         }
+    }
+
+    /// V.92's downstream levels and their power, once a constellation is on
+    /// the line.
+    pub fn down_levels(&self) -> Option<crate::v92::DownLevels> {
+        self.v92()?.down_levels()
     }
 
     /// How many bits one upstream data frame takes, for a caller keeping the
@@ -473,7 +484,7 @@ impl Analogue {
             // A rate somebody pinned is asked for as it is: downstream by a
             // CPt of just the levels it needs, upstream by a Ja that allows
             // no other.
-            let cpt = self.pinned.map_or_else(pcm_up::readable_cpt, pcm_up::cpt_for);
+            let cpt = pcm_up::cpt_for(self.pinned.unwrap_or(DEFAULT_DOWN_DRN));
             let rates = self.pinned_up.map_or(0x7ffff, |drn| 1 << (drn - 1));
             let mut settings = pcm_up::Settings::new(Descriptor::none(), rates, cpt);
             settings.md_length = asked.md_length;
@@ -562,6 +573,12 @@ impl Digital {
             pinned_up: None,
             notes: Vec::new(),
         }
+    }
+
+    /// V.92's downstream levels and their power, once the analogue modem has
+    /// said which.
+    pub fn down_levels(&self) -> Option<crate::v92::DownLevels> {
+        self.v92.as_ref()?.down_levels()
     }
 
     /// The upstream rate V.92's CPd is to ask for, as its drn (1 is 24 000

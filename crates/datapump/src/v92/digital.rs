@@ -1608,6 +1608,18 @@ impl Modem {
         self.outbound.extend(bits.iter().copied());
     }
 
+    /// The downstream's levels and their power, once the analogue modem has
+    /// said which: its CPt's through Phase 4, its CPu's in data mode.
+    #[must_use]
+    pub fn down_levels(&self) -> Option<crate::v92::DownLevels> {
+        let cp = match self.status {
+            Status::Connected { .. } => self.cpu.as_ref()?,
+            Status::Phase4 => self.cpt.as_ref()?,
+            _ => return None,
+        };
+        crate::v92::down_levels(self.settings.law, self.settings.uinfo, cp)
+    }
+
     /// The upstream rate CPd is to ask for whatever the line's noise says, as
     /// its drn (1 is 24 000 bit/s, 19 is 48 000; 6.1), or `None` for this
     /// end's own choice. Read when CPd is designed, during the second TRN1u.

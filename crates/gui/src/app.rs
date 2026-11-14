@@ -394,6 +394,10 @@ pub struct ScopeApp {
     /// The `AT+MS` subparameters the advanced window is composing, and whether
     /// it is open.
     modulation: Modulation,
+    /// `+A8E` `<v8b>`: whether a call opens with a V.8 bis transaction in
+    /// front of V.8 (V.251). On unless turned off in the modulation window;
+    /// the modem's own factory setting is off.
+    v8bis: bool,
     advanced: bool,
     /// The same, for `AT+ES` and `AT+DS`.
     protection: Protection,
@@ -535,6 +539,7 @@ impl ScopeApp {
             sip_restore: None,
             carrier: 1,
             modulation: Modulation::default(),
+            v8bis: true,
             advanced: false,
             protection: Protection::default(),
             protection_open: false,
@@ -2533,6 +2538,13 @@ impl ScopeApp {
                         );
                         ui.end_row();
 
+                        ui.label(RichText::new("V.8 bis").monospace().color(dim));
+                        ui.checkbox(&mut self.v8bis, "open the call with a V.8 bis transaction, in front of V.8")
+                            .on_hover_text(
+                                "AT+A8E=,,,1 (V.251). The answering end asks what the caller can do, the caller chooses a mode, and V.8 then follows that choice. A far end with no V.8 bis is heard answering and gets V.8 as before; answering one, this end tries three times first, which is some seconds before its answer tone",
+                            );
+                        ui.end_row();
+
                         ui.label(RichText::new("line rate").monospace().color(dim));
                         ui.horizontal(|ui| {
                             // Only the rates this modulation has. They are not
@@ -2715,6 +2727,7 @@ impl ScopeApp {
     fn settings(&self) -> Vec<String> {
         let mut out = vec!["AT&F".to_owned()];
         out.push(self.modulation.command(Self::CARRIERS[self.carrier].0));
+        out.push(format!("AT+A8E=,,,{}", u8::from(self.v8bis)));
         out.extend(self.protection.commands());
         out
     }
@@ -4112,7 +4125,27 @@ impl ScopeApp {
             let clean = menu.rates.iter().rfind(|r| r.2 == Outlook::Good).map(|r| r.1);
             Some((rate(now)?, menu.outlook(now)?, slowest, fastest, clean))
         });
+        // V.92 has no rate menu's predictions, and no DIL to make them from:
+        // its bar is the rate this end is receiving along the rates it could
+        // be sent at, the downstream's ladder for a caller and the upstream's
+        // for a server.
+        let v92 = f.pcm.filter(|_| f.modulation == "V.92").zip(f.bit_rate);
         let (merit, merit_colour, fill, tick, left, right) = match (f.reception, f.symbol_quality()) {
+            _ if v92.is_some() => {
+                let (levels, rate) = v92.unwrap_or_default();
+                let along = (rate.saturating_sub(levels.slowest) as f32
+                    / levels.fastest.saturating_sub(levels.slowest).max(1) as f32)
+                    .clamp(0.0, 1.0);
+                let top = rate >= levels.fastest;
+                (
+                    Some(if top { "top rate" } else { "PCM" }.to_owned()),
+                    GOOD,
+                    along,
+                    None,
+                    format!("{rate} of {} - {} bit/s", levels.slowest, levels.fastest),
+                    if levels.sending { "PCM coming up" } else { "PCM coming down" },
+                )
+            }
             _ if pcm.is_some() => {
                 use datapump::v90::analogue::Outlook;
                 let (rate, outlook, slowest, fastest, clean) = pcm.unwrap_or((0, Outlook::Good, 0, 1, None));
@@ -4398,6 +4431,27 @@ impl ScopeApp {
                     "Rates",
                     format!("receiving {} · sending {} bit/s", bps(f.bit_rate), bps(f.tx_bit_rate)),
                 );
+
+                // PCM's power is the constellation's and not a setting: data
+                // can be a long way quieter than the training before it, and
+                // this says by how much and why.
+                if let Some(levels) = f.pcm {
+                    let change = levels.dbm0 - levels.training_dbm0;
+                    stage(
+                        ui,
+                        GOOD,
+                        "PCM level",
+                        format!(
+                            "{} {:.1} dBm0 · {:+.1} dB on training\n{} levels, Ucode {} to {}",
+                            if levels.sending { "sending down at" } else { "downstream at" },
+                            levels.dbm0,
+                            change,
+                            levels.count,
+                            levels.lowest,
+                            levels.highest
+                        ),
+                    );
+                }
 
                 stage(
                     ui,

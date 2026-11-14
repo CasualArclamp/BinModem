@@ -243,6 +243,41 @@ impl FilterSections {
     }
 }
 
+/// The downstream's levels and how loud they are, for a panel: PCM's power is
+/// not a setting but a property of the constellation, and a call's data can
+/// be a long way quieter than the training that came before it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DownLevels {
+    /// Levels either side of nought, and the Ucodes of the quietest and the
+    /// loudest of them.
+    pub count: usize,
+    pub lowest: u8,
+    pub highest: u8,
+    /// The mean power of the constellation with every level as likely as the
+    /// next, in dBm0 (a full-scale sine is +3.17).
+    pub dbm0: f64,
+    /// And of the two-point training at U_INFO, for comparison.
+    pub training_dbm0: f64,
+}
+
+/// What `cp`'s first constellation is, on a codec of `law` trained at `uinfo`.
+#[must_use]
+pub fn down_levels(law: crate::v90::ucode::Law, uinfo: u8, cp: &crate::v90::sequences::Cp) -> Option<DownLevels> {
+    use crate::v90::ucode::level;
+    let points = cp.points(0);
+    let (&lowest, &highest) = (points.first()?, points.last()?);
+    let mean = points.iter().map(|&u| level(law, u).powi(2)).sum::<f64>() / points.len() as f64;
+    // Against a full-scale sine's mean square of a half, which is +3.17 dBm0.
+    let dbm0 = |mean_square: f64| 10.0 * (mean_square.max(1e-12) / 0.5).log10() + 3.17;
+    Some(DownLevels {
+        count: points.len(),
+        lowest,
+        highest,
+        dbm0: dbm0(mean),
+        training_dbm0: dbm0(level(law, uinfo).powi(2)),
+    })
+}
+
 /// The last two symbols a PCM receiver equalised, each against the one after
 /// it, for a scope: there is no plane to plot PCM in, but a sample set
 /// against the next lays the levels out on a grid of its own (as

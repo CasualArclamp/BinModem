@@ -396,9 +396,15 @@ pub fn readable_cpt() -> Cp {
     Cp { drn: 16, constellations: vec![mask], ..Cp::default() }
 }
 
-/// A CPt for a downstream rate somebody chose, as its drn (1 is 28 000 bit/s,
-/// 22 is 56 000; Table 14/V.90): just enough levels to carry it, spread evenly
-/// over Ucodes 16 to 79, the same in every interval.
+/// A CPt for a downstream rate, as its drn (1 is 28 000 bit/s, 22 is 56 000;
+/// Table 14/V.90): just enough levels to carry it, spread evenly over Ucodes
+/// 16 to 95, the same in every interval.
+///
+/// The spread is what sets the downstream's power, since PCM has no gain to
+/// turn: thirty-two levels over that range come to -14.6 dBm0, a little under
+/// the -12 dBm0 a server's INFO0d allows and the two-point training runs at.
+/// The same thirty-two packed into Ucodes 16 to 47 carry the same bits at
+/// -30 dBm0, eighteen decibels nearer the line's noise for nothing.
 ///
 /// A rate of (drn + 20) x 8000/6 is (drn + 20)/6 bits a symbol, one of them
 /// the sign, so the levels wanted are 2^((drn + 14)/6) rounded up: six at
@@ -408,7 +414,7 @@ pub fn readable_cpt() -> Cp {
 #[must_use]
 pub fn cpt_for(drn: u8) -> Cp {
     const LOWEST: u32 = 16;
-    const SPAN: u32 = 64;
+    const SPAN: u32 = 80;
     let drn = drn.clamp(1, DOWNSTREAM_RATES as u8);
     let levels = (2f64.powf((f64::from(drn) + 14.0) / 6.0) - 1e-9).ceil().clamp(2.0, f64::from(SPAN)) as u32;
     let mask = (0..levels).fold(0u128, |mask, k| mask | 1 << (LOWEST + k * SPAN / levels));
@@ -1247,6 +1253,18 @@ impl Modem {
     #[must_use]
     pub fn pair(&self) -> Option<(f64, f64)> {
         self.scope.pair()
+    }
+
+    /// The downstream's levels and their power, once there is a constellation
+    /// on the line: the CPt's through Phase 4, the CPu's in data mode.
+    #[must_use]
+    pub fn down_levels(&self) -> Option<crate::v92::DownLevels> {
+        let cp = match self.status {
+            Status::Connected { .. } => self.cpu()?,
+            Status::Phase4 => &self.settings.cpt,
+            _ => return None,
+        };
+        crate::v92::down_levels(self.settings.law, self.settings.uinfo, cp)
     }
 
     /// How many points the downstream is being read against, both signs

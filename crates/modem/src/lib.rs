@@ -2165,6 +2165,19 @@ impl Modem {
         if self.retrain_v92() { RateChosen::Retraining(pinned) } else { RateChosen::Pinned(pinned) }
     }
 
+    /// A V.92 call's downstream levels and their power, whether this end is
+    /// the one sending them (the server), and the slowest and fastest rate
+    /// this end can be sent at, in bit/s: the downstream's ladder for a
+    /// caller (Table 14/V.90), the upstream's for a server (6.1/V.92). None
+    /// outside V.92's Phase 4 and data mode.
+    pub fn pcm_levels(&self) -> Option<(datapump::v92::DownLevels, bool, (u32, u32))> {
+        match self.pump.as_ref()? {
+            Pump::V90(m) => Some((m.down_levels()?, false, (28_000, 56_000))),
+            Pump::V90Server(m) => Some((m.modem().down_levels()?, true, (datapump::v92::up_rate(1), datapump::v92::up_rate(19)))),
+            _ => None,
+        }
+    }
+
     /// See [`Self::choose_upstream`].
     pub fn pinned_upstream(&self) -> Option<u8> {
         self.pinned_upstream
