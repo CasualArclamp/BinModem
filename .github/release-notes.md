@@ -20,13 +20,14 @@ binmodem.exe --capture        replay the golden capture
 - **The calling side, on a sound card.** The analogue modem reads the downstream one sample a symbol on the phase the server's Sd gives it, and sends its upstream through a transmitter that takes S-bar-u's half symbol and Jp's epsilon as the steps they are.
 - **The upstream rate is chosen from the line.** The calling modem is silent while the server sends TRN1d, and what arrives then is the noise the upstream will have against it: the server asks for the fastest of 6.1's nineteen rates that stands clear of it. Behind a codec it stays at 24 000, which is where it used to stay always.
 - **A ladder to choose from.** The window has *PCM down* and *up* menus: any downstream rate from 28 000 to 56 000 and any upstream rate from 24 000 to 48 000, from either end. Chosen during a V.92 call, the line retrains to take it.
+- **The call card has V.92's figures.** The bar is the rate this end receives along the rates it could be sent at, and a *PCM level* row gives the downstream's power in dBm0 and which levels it is made of. PCM has no gain to turn, so the power is the constellation's: 32 levels spread over Ucodes 16 to 93 come to -14.6 dBm0.
 - **Both scopes have something to draw.** PCM has no plane, so each symbol is set against the next: the calling end shows the downstream's grid, the answering end the upstream's.
 
 ![The calling end of the same call: 64 levels coming down](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/releases/v4.0.0/v92-caller.png)
 
 ### V.8 bis
 
-- **Signals, messages and transactions** (ITU-T V.8 bis, 11/2000): MRe, MRd, CRe, CRd, ESi and ESr as their tone pairs, and MS, CL, CLR, ACK and NAK as HDLC frames on V.21, with the capabilities tree coded both ways. `AT+A8E=,,,1` turns it on (V.251).
+- **Signals, messages and transactions** (ITU-T V.8 bis, 11/2000): MRe, MRd, CRe, CRd, ESi and ESr as their tone pairs, and MS, CL, CLR, ACK and NAK as HDLC frames on V.21, with the capabilities tree coded both ways. The window turns it on with its other settings (`AT+A8E=,,,1`, V.251), with a box in the modulation window to turn it off; the modem's own factory setting is off.
 - **A call that starts with it.** The answering end sends CRe, the caller answers with its capabilities or a mode, and the mode selected is the one the call then trains in. A far end with no V.8 bis is heard answering and gets V.8 as before, and the answering end tries three times before it gives up on it.
 
 ### Also
