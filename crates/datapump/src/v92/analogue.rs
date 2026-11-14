@@ -358,6 +358,11 @@ pub struct Settings {
     /// What INFO1a bits 12:17 said this end's precoder and prefilter can hold
     /// (Table 18). A CPd asking for more is one this end cannot obey.
     pub limits: FilterLimits,
+    /// Whether the CPu's rate is to come from how well TRN1d trained this
+    /// end's receiver (see [`fastest_down`]), where [`Self::cpu`] names none:
+    /// the fastest [`cpt_for`] whose levels stand clear of the noise. Clear,
+    /// the CPu asks for what the CPt's own constellations carry.
+    pub rate_from_line: bool,
 }
 
 impl Settings {
@@ -379,8 +384,41 @@ impl Settings {
             law: Law::Mu,
             uinfo: UINFO,
             limits: FilterLimits::from_info1a(0, 0, 0),
+            rate_from_line: false,
         }
     }
+}
+
+/// Decibels taken off the trained receiver's figure before the downstream
+/// rate is chosen against it, and the standard deviations a level must stand
+/// from its nearest decision boundary (the upstream's `upchoice::MARGIN`).
+const DOWN_MARGIN_DB: f64 = 6.0;
+const DOWN_SIGMAS: f64 = 4.5;
+
+/// The fastest downstream rate, as its drn, whose [`cpt_for`] levels a
+/// receiver that trained on TRN1d at `snr_db` reads cleanly.
+///
+/// With no DIL this is the one measurement of the downstream there is. The
+/// fit is of two points at U_INFO, so what it leaves is the noise at that
+/// level, sigma = level(U_INFO) x 10^(-snr/20); a constellation is readable
+/// when its two closest levels -- the quietest pair, on a companded codec, or
+/// the two either side of nought -- are [`DOWN_SIGMAS`] of that from the
+/// boundary between them. On a line with nothing on it that is every rate up
+/// to 56 000. On a telephone line the two-point fit reads low, for the 4000
+/// Hz the line has not got, and the answer is a slow rate: a careful one,
+/// which a DIL would improve on and a guess would not.
+#[must_use]
+pub fn fastest_down(law: Law, uinfo: u8, snr_db: f64) -> u8 {
+    let sigma = ucode::level(law, uinfo) * 10f64.powf(-(snr_db - DOWN_MARGIN_DB) / 20.0);
+    (1..=DOWNSTREAM_RATES as u8)
+        .rev()
+        .find(|&drn| {
+            let levels: Vec<f64> = cpt_for(drn).points(0).iter().map(|&u| ucode::level(law, u)).collect();
+            let across_nought = 2.0 * levels.first().copied().unwrap_or(0.0);
+            let closest = levels.windows(2).map(|pair| pair[1] - pair[0]).fold(across_nought, f64::min);
+            closest / 2.0 >= DOWN_SIGMAS * sigma
+        })
+        .unwrap_or(1)
 }
 
 /// The CPt an end that asked for no DIL sends: 48 000 bit/s (drn 16) on
@@ -1630,8 +1668,20 @@ impl Modem {
         let jd = self.far_jd;
         let enabled = |drn: u8| jd.is_none_or(|jd| jd.enables(drn));
         let carries = |cp: &Cp| CodeMapping::from_cp(cp).is_some_and(|mapping| mapping.valid());
-        let asked = self.settings.cpu.is_some();
-        let mut cpu = self.settings.cpu.clone().unwrap_or_else(|| self.settings.cpt.clone());
+        // With nothing asked for and the line to go by, the rate is the
+        // fastest its noise allows and the constellation the one for that
+        // rate; the CPt's stays what Phase 4 is trained on (V.90 8.6.5).
+        let measured = (self.settings.cpu.is_none() && self.settings.rate_from_line).then(|| {
+            let snr = self.rx.snr_db();
+            let drn = fastest_down(self.settings.law, self.settings.uinfo, snr);
+            self.notes.push(format!(
+                "TRN1d trained at {snr:.0} dB: downstream {} bit/s",
+                crate::v90::sequences::data_rate(drn).unwrap_or(0)
+            ));
+            cpt_for(drn)
+        });
+        let asked = self.settings.cpu.is_some() || measured.is_some();
+        let mut cpu = measured.or_else(|| self.settings.cpu.clone()).unwrap_or_else(|| self.settings.cpt.clone());
         cpu.data_mode = true; // Table 23 bits 19:20: "CPu denoted by 1"
         cpu.acknowledge = false;
         cpu.a_law = matches!(self.settings.law, Law::A); // bit 35
@@ -3929,5 +3979,28 @@ mod phase4_tests {
         let cpu = call.far.cpus()[0].1.clone();
         assert_eq!((cpu.drn, &cpu.constellations), (22, &data.constellations), "the CPu is the data half of the choice");
         assert_eq!(call.modem.status(), Status::Connected { downstream: 56_000, upstream: 24_000 });
+    }
+}
+
+#[cfg(test)]
+mod rate_tests {
+    use super::*;
+
+    /// The downstream rate taken from the trained receiver: everything on a
+    /// line with nothing on it, less as the fit gets worse and never more,
+    /// and the slowest rate rather than none when nothing stands clear.
+    #[test]
+    fn the_downstream_rate_follows_how_well_trn1d_trained() {
+        assert_eq!(fastest_down(Law::Mu, UINFO, 79.5), DOWNSTREAM_RATES as u8);
+        assert_eq!(fastest_down(Law::Mu, UINFO, 13.0), 1);
+        let mut last = DOWNSTREAM_RATES as u8;
+        let mut seen = std::collections::BTreeSet::new();
+        for snr in (10..=80).rev() {
+            let drn = fastest_down(Law::Mu, UINFO, f64::from(snr));
+            assert!(drn <= last, "{snr} dB asks for drn {drn} after {last}");
+            last = drn;
+            seen.insert(drn);
+        }
+        assert!(seen.len() > 4, "only {seen:?} between 10 and 80 dB");
     }
 }

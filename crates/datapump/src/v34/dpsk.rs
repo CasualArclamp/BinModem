@@ -289,6 +289,14 @@ const PHASES: usize = 8;
 /// indifferent to.
 const FILL_HEARD: usize = 2;
 
+/// Where on the scope's unit box a clean DPSK symbol is drawn, how much of
+/// the strongest instant's hold is left a sample later, and what counts as a
+/// symbol at all: a share of the channel's smoothed level, and a level.
+const SCOPE_RADIUS: f64 = 0.8;
+const SCOPE_HOLD: f64 = 0.97;
+const SCOPE_AUDIBLE: f64 = 0.5;
+const SCOPE_FLOOR: f64 = 1e-4;
+
 /// One way of sampling the stream: an instant within the symbol, and the bits
 /// that instant has decided.
 #[derive(Debug, Clone)]
@@ -332,6 +340,10 @@ pub struct Receiver {
     level_step: f64,
     /// What is looked for beyond a full V.34 or V.90 phase 2.
     expecting: Expecting,
+    /// The last symbol against the one before it, for a scope, and how strong
+    /// the sampling instant that gave it was (see [`Self::scope_point`]).
+    scope: Option<(f64, f64)>,
+    scope_strength: f64,
 }
 
 /// What a receiver listens for beyond the sequences of a full V.34 or V.90
@@ -388,6 +400,8 @@ impl Receiver {
             level: 0.0,
             level_step: 1.0 - (-1.0 / (0.020 * fs)).exp(),
             expecting: Expecting::default(),
+            scope: None,
+            scope_strength: 0.0,
         }
     }
 
@@ -431,6 +445,16 @@ impl Receiver {
 
     /// Feed one line sample. Yields a sequence the moment its CRC checks -- or
     /// an INFO0 in half-duplex a little after (`FILL_HEARD`).
+    /// The last symbol set against the one before it, for a scope: differential
+    /// phase shift keying has no absolute phase to plot, so what is drawn is
+    /// what is decided on -- near (+r, 0) for a symbol that did not turn and
+    /// (-r, 0) for one that did, a 0 and a 1, with the line's noise as the
+    /// spread about them. An unmodulated Tone A or B sits at +r, and its
+    /// phase reversal is one point at -r. `None` until something has arrived.
+    pub fn scope_point(&self) -> Option<(f64, f64)> {
+        self.scope
+    }
+
     pub fn feed(&mut self, sample: f64) -> Option<Info> {
         let (cos, sin) = self.nco.step();
         let selected = self.select.process((sample * cos, sample * -sin));
@@ -450,6 +474,20 @@ impl Receiver {
                     previous.1 + mu * (filtered.1 - previous.1),
                 );
                 branch.next += self.sps;
+                // For a scope: this symbol turned against the last, which is
+                // what the decision below is made on. Of the instants being
+                // tried, the one nearest the middle of the symbol has the
+                // most of it, so the strongest lately is the one shown.
+                let (re, im) = branch.previous_symbol;
+                let strength = ((at.0 * at.0 + at.1 * at.1) * (re * re + im * im)).sqrt();
+                self.scope_strength *= SCOPE_HOLD;
+                if strength >= self.scope_strength && strength.sqrt() > SCOPE_AUDIBLE * self.level && self.level > SCOPE_FLOOR {
+                    self.scope_strength = strength;
+                    self.scope = Some((
+                        SCOPE_RADIUS * (at.0 * re + at.1 * im) / strength,
+                        SCOPE_RADIUS * (at.1 * re - at.0 * im) / strength,
+                    ));
+                }
                 if found.is_none() {
                     found = decide(branch, at, self.side, self.half_duplex, self.expecting);
                 }

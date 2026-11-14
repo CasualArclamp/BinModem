@@ -727,6 +727,12 @@ impl Modem {
         self.tone_b_level
     }
 
+    /// The far end's last DPSK symbol against the one before it, for a scope
+    /// (see `dpsk::Receiver::scope_point`), while phase 2 is running.
+    pub fn scope_point(&self) -> Option<(f64, f64)> {
+        (self.status() == Status::Running).then(|| self.rx.scope_point()).flatten()
+    }
+
     /// The INFO1a asking for PCM upstream (Table 18/V.92), if one went or
     /// came. At most one of this and [`Self::info1a_pcm`] is ever set.
     pub fn info1a_pcm_up(&self) -> Option<Info1aPcmUp> {

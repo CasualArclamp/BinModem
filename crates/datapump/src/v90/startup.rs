@@ -492,6 +492,8 @@ impl Analogue {
             settings.limits = FilterLimits::from_info1a(asked.sections, asked.ltot_code, asked.lmax_code);
             settings.round_trip = p2.round_trip().unwrap_or(0.0);
             settings.law = if server.a_law { Law::A } else { Law::Mu };
+            // Nobody chose a downstream rate: the line does.
+            settings.rate_from_line = self.pinned.is_none();
             self.notes.push(format!(
                 "V.92: PCM upstream (Table 18), U_INFO {}, {}-law",
                 asked.uinfo,

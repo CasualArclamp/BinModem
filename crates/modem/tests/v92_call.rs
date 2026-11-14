@@ -199,14 +199,16 @@ fn rates(pair: &Pair) -> (u32, u32) {
     (pair.caller.rate().unwrap_or(0), pair.caller.transmit_rate().unwrap_or(0))
 }
 
-/// On a line with nothing on it but the two modems, the server measures as
+/// On a line with nothing on it but the two modems, each end measures as much
+/// and takes the top of its ladder: the caller reads it off how TRN1d trained
+/// its receiver, and asks for 56 000 down; the server measures as
 /// much while the caller is silent under TRN1d, and asks for the top of 6.1's
 /// ladder rather than the bottom.
 #[test]
 fn a_quiet_line_gets_the_fastest_upstream() {
     let mut pair = v92_pair();
     let notes = connect(&mut pair, 40);
-    assert_eq!(rates(&pair), (48_000, 48_000), "{notes}");
+    assert_eq!(rates(&pair), (56_000, 48_000), "{notes}");
     carries_text(&mut pair, "the top rung", &notes);
 }
 
@@ -224,7 +226,7 @@ fn a_pinned_rate_is_the_rate_the_call_gets() {
         }
         let notes = connect(&mut pair, 40);
         let wanted_up = (u32::from(up) + 17) * 8000 / 6;
-        let wanted_down = down.map_or(48_000, |drn| (u32::from(drn) + 20) * 8000 / 6);
+        let wanted_down = down.map_or(56_000, |drn| (u32::from(drn) + 20) * 8000 / 6);
         assert_eq!(rates(&pair), (wanted_down, wanted_up), "{who} pinned {up} up, {down:?} down\n{notes}");
         carries_text(&mut pair, &format!("{who} pinned {up} up, {down:?} down"), &notes);
     }
@@ -242,7 +244,7 @@ fn a_rate_chosen_during_a_call_retrains_to_it() {
         assert_eq!(chooser.choose_upstream(Some(7)), modem::RateChosen::Retraining(Some(7)), "{who}");
         pair.run(1.0);
         notes.push_str(&settle(&mut pair, 60));
-        assert_eq!(rates(&pair), (48_000, 32_000), "{who}\n{notes}");
+        assert_eq!(rates(&pair), (56_000, 32_000), "{who}\n{notes}");
         carries_text(&mut pair, who, &notes);
     }
 }
@@ -258,6 +260,6 @@ fn v8_bis_in_front_of_a_v92_call() {
     pair.run(0.05);
     let notes = connect(&mut pair, 50);
     assert!(notes.contains("V.8 bis"), "no V.8 bis on the line:\n{notes}");
-    assert_eq!(rates(&pair), (48_000, 48_000), "{notes}");
+    assert_eq!(rates(&pair), (56_000, 48_000), "{notes}");
     carries_text(&mut pair, "after V.8 bis", &notes);
 }
