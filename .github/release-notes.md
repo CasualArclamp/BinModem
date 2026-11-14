@@ -34,6 +34,7 @@ binmodem.exe --capture        replay the golden capture
 
 ### Also
 
+- **No console window behind the program's own** when it is opened from Explorer or a shortcut. From a shell it still prints to that shell, but the shell no longer waits for it: `start /wait binmodem ...` does.
 - **`binmodem --answer --stats`** prints the line's counters, the share of exact silence and the level each second, and **`--record <file>`** writes what arrived, which an ignored test replays into a fresh answerer: how a call that would not come up was found to be the window's own drive setting scaling the PCM upstream to nothing.
 - **The answering end's start-up is in its transcript** for V.92, a line a step, as the calling end's always was.
 

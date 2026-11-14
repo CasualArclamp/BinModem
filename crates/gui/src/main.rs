@@ -31,6 +31,10 @@
 //! the speakers are plugged into, and a handshake played through speakers is
 //! no use to anyone.
 
+// No console window behind the program's own when it is opened from Explorer;
+// `parent_console` gives back the output a shell expects.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod answer;
 mod app;
 mod crashlog;
@@ -42,6 +46,7 @@ mod engine;
 mod live;
 mod net;
 mod network;
+mod parent_console;
 mod remembered;
 mod scopes;
 mod speed;
@@ -225,6 +230,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Before anything at all, so that whatever goes wrong next leaves a line
     // behind saying where. Nothing else in here writes anything down.
     crashlog::install();
+    parent_console::attach();
 
     // The answering modem is a different program in the same file. It owns the
     // process rather than sharing it -- there is no window, and what it prints
