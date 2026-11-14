@@ -646,8 +646,13 @@ pub fn symbol_scope(
     // of thirty-two symbols would be almost invisible beside a V.34 cloud.
     let mut mesh = eframe::egui::Mesh::default();
     let crowded = m > 200;
-    let side = (radius / 180.0).clamp(1.0, 2.5) * if crowded { 1.0 } else { 1.7 };
-    let colour = Color32::from_rgba_unmultiplied(120, 220, 160, if crowded { 110 } else { 150 });
+    // Two or four points -- phase 2's DPSK, a training signal's four -- are a
+    // handful of places, and on a clean line every symbol lands on exactly
+    // the same pixel of each: a square a pixel or two across, on an axis
+    // line, is a scope that looks empty. Those are drawn large and solid.
+    let few = tones <= 4;
+    let side = if few { (radius / 14.0).clamp(5.0, 9.0) } else { (radius / 180.0).clamp(1.0, 2.5) * if crowded { 1.0 } else { 1.7 } };
+    let colour = Color32::from_rgba_unmultiplied(120, 220, 160, if few { 255 } else if crowded { 110 } else { 150 });
     for &(re, im) in constellation {
         mesh.add_colored_rect(Rect::from_center_size(at(re, im), vec2(side, side)), colour);
     }

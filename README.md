@@ -188,7 +188,10 @@ OS-specific code — but only built and run on Windows so far.
 
 V.33 -- the same trellis code as V.32bis again, on a leased line.
 
-V.92, on a branch. Eighteen agents read the Recommendation clause by clause off
+V.92 carries data between two of these modems: `AT+MS=V92` at both ends with
+`BINMODEM_V92_PCM_UP=1`, PCM both ways, 48 000 up and up to 56 000 down over a
+pair of virtual cables. It has not carried a call with a real V.92 modem yet,
+and the calling side still wants a line with no echo and one clock. Eighteen agents read the Recommendation clause by clause off
 the rendered pages, with V.8, V.8 bis and V.250's `+P` commands beside it, and
 four more read what the V.90 code here already does; the notes they wrote and
 the plan built from them are in [docs/design/v92](docs/design/v92) -- 62 work

@@ -232,6 +232,11 @@ pub struct PcmTransmitter {
     shifts: u8,
     /// The loudest sample so far, for measuring against [`PEAK`].
     peak: f64,
+    /// Shifts handed in with levels and refused.
+    refused: u32,
+    /// Steps handed in with levels, waiting for their symbol's instant: the
+    /// line time and the step in symbols.
+    jumps: VecDeque<(f64, f64)>,
 }
 
 impl PcmTransmitter {
@@ -256,7 +261,15 @@ impl PcmTransmitter {
             times: VecDeque::with_capacity(KEPT),
             shifts: 0,
             peak: 0.0,
+            refused: 0,
+            jumps: VecDeque::new(),
         }
+    }
+
+    /// Shifts handed in with levels (see [`Self::next_sample_stepped`]) that
+    /// were refused.
+    pub fn refused(&self) -> u32 {
+        self.refused
     }
 
     /// LU, as a fraction of full scale: what a level of 1 leaves at (3.8).
@@ -351,7 +364,27 @@ impl PcmTransmitter {
         if !(0.0..1.0).contains(&fraction_of_t) {
             return Err("a one-off shift is from 0 to 1 symbol");
         }
-        self.next_at += fraction_of_t * self.period;
+        self.shift(fraction_of_t)
+    }
+
+    /// The same one-off shift, either way: positive is later, negative
+    /// earlier.
+    ///
+    /// Which way S-bar-u's half symbol and epsilon move the transmitter is a
+    /// reading of Table 22, not something the text settles, and this project
+    /// names its reading in `v92::epsilon::EXTENDS_LATE`; what the analogue
+    /// modem records in `Modem::delays` is the size, and the owner multiplies
+    /// by `epsilon::step_direction`. An earlier symbol is still after the one
+    /// before it -- the step is less than a period -- so the reconstruction
+    /// carries it as it carries any other instant.
+    pub fn shift(&mut self, symbols: f64) -> Result<(), &'static str> {
+        if self.shifts >= SHIFTS {
+            return Err("the upstream has already taken both of s-bar-u's shifts");
+        }
+        if !(symbols > -1.0 && symbols < 1.0) {
+            return Err("a one-off shift is less than a symbol either way");
+        }
+        self.next_at += symbols * self.period;
         self.shifts += 1;
         Ok(())
     }
@@ -365,12 +398,49 @@ impl PcmTransmitter {
     /// phase this transmitter is at is the digital modem's business to measure
     /// off Su and to correct in Jp (8.6.3).
     pub fn next_sample(&mut self, clock: SymbolClock, mut next: impl FnMut() -> f64) -> f64 {
+        self.next_sample_stepped(clock, || (next(), 0.0))
+    }
+
+    /// The same, with each level carrying a one-off step (zero for none) to
+    /// take as that level reaches the line, so that it lands on exactly the
+    /// symbol it was asked for with, whatever is queued between the modem and
+    /// here. A step refused is counted in [`Self::refused`] and otherwise
+    /// ignored.
+    ///
+    /// Unlike [`Self::shift`], which respaces the next symbol and leaves its
+    /// neighbours where they were, this moves the whole waveform at once when
+    /// the symbol's instant comes: every symbol the reconstruction still
+    /// reaches, before and after, steps together. Respacing one symbol by a
+    /// fraction of a period puts it somewhere the kernel's other symbols do
+    /// not expect, and the far end's equaliser sees that across the kernel's
+    /// whole reach; a jump is one disturbed sample and a clean grid after it,
+    /// which is what a transmitter that "delays every later symbol" does.
+    pub fn next_sample_stepped(&mut self, clock: SymbolClock, mut next: impl FnMut() -> (f64, f64)) -> f64 {
         self.follow(clock);
         let t = self.taken as f64;
         let ahead = t + REACH as f64 * self.period;
         while self.next_at <= ahead {
-            let level = next() * self.lu;
-            self.place(level);
+            let (level, step) = next();
+            if step != 0.0 {
+                if self.shifts >= SHIFTS || !(step > -1.0 && step < 1.0) {
+                    self.refused += 1;
+                } else {
+                    self.shifts += 1;
+                    self.jumps.push_back((self.next_at, step));
+                }
+            }
+            self.place(level * self.lu);
+        }
+        while let Some(&(due, step)) = self.jumps.front() {
+            if t < due {
+                break;
+            }
+            let by = step * self.period;
+            for at in &mut self.times {
+                *at += by;
+            }
+            self.next_at += by;
+            self.jumps.pop_front();
         }
         let sample = self.at(t);
         self.taken += 1;

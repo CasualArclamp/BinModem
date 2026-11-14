@@ -58,6 +58,7 @@ pub mod digital;
 pub mod down_source;
 pub mod epsilon;
 pub mod exchange;
+pub mod line;
 pub mod hold;
 pub mod memo;
 pub mod modulus;
@@ -239,6 +240,76 @@ impl FilterSections {
     /// Back to the two bits, for an INFO1a this end sends.
     pub fn code(self) -> u8 {
         u8::from(self.z1) | (u8::from(self.p2) << 1)
+    }
+}
+
+/// The downstream's levels and how loud they are, for a panel: PCM's power is
+/// not a setting but a property of the constellation, and a call's data can
+/// be a long way quieter than the training that came before it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DownLevels {
+    /// Levels either side of nought, and the Ucodes of the quietest and the
+    /// loudest of them.
+    pub count: usize,
+    pub lowest: u8,
+    pub highest: u8,
+    /// The mean power of the constellation with every level as likely as the
+    /// next, in dBm0 (a full-scale sine is +3.17).
+    pub dbm0: f64,
+    /// And of the two-point training at U_INFO, for comparison.
+    pub training_dbm0: f64,
+}
+
+/// What `cp`'s first constellation is, on a codec of `law` trained at `uinfo`.
+#[must_use]
+pub fn down_levels(law: crate::v90::ucode::Law, uinfo: u8, cp: &crate::v90::sequences::Cp) -> Option<DownLevels> {
+    use crate::v90::ucode::level;
+    let points = cp.points(0);
+    let (&lowest, &highest) = (points.first()?, points.last()?);
+    let mean = points.iter().map(|&u| level(law, u).powi(2)).sum::<f64>() / points.len() as f64;
+    // Against a full-scale sine's mean square of a half, which is +3.17 dBm0.
+    let dbm0 = |mean_square: f64| 10.0 * (mean_square.max(1e-12) / 0.5).log10() + 3.17;
+    Some(DownLevels {
+        count: points.len(),
+        lowest,
+        highest,
+        dbm0: dbm0(mean),
+        training_dbm0: dbm0(level(law, uinfo).powi(2)),
+    })
+}
+
+/// The last two symbols a PCM receiver equalised, each against the one after
+/// it, for a scope: there is no plane to plot PCM in, but a sample set
+/// against the next lays the levels out on a grid of its own (as
+/// `v90::analogue::Modem::pair` does for V.90's downstream).
+///
+/// The scale is the loudest symbol of the last second or so, held and let
+/// fall slowly, so that two points, four and a data constellation each fill
+/// the box without anyone having to say which is on the line.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScopePair {
+    last: [f64; 2],
+    peak: f64,
+    any: bool,
+}
+
+impl ScopePair {
+    /// How much of the held peak is left a symbol later: half in 0.9 s.
+    const HOLD: f64 = 0.9999;
+
+    /// One equalised symbol.
+    pub fn feed(&mut self, value: f64) {
+        self.last = [self.last[1], value];
+        self.peak = (self.peak * Self::HOLD).max(value.abs());
+        self.any = true;
+    }
+
+    /// The last symbol but one against the last, scaled so the loudest is
+    /// one. `None` before any symbol has been read.
+    #[must_use]
+    pub fn pair(&self) -> Option<(f64, f64)> {
+        let scale = self.peak.max(1e-9);
+        self.any.then(|| (self.last[0] / scale, self.last[1] / scale))
     }
 }
 

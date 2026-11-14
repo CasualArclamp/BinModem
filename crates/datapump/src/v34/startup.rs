@@ -150,9 +150,13 @@ impl Modem {
         self.training.as_ref().is_some_and(training::Modem::carrier)
     }
 
-    /// The far end's last symbol, once phase 3 has trained the receiver.
+    /// The far end's last symbol: phase 2's DPSK, each symbol against the
+    /// one before, and from phase 3 on what the trained receiver decided on.
     pub fn constellation_point(&self) -> Option<(f64, f64)> {
-        self.training.as_ref().and_then(training::Modem::constellation_point)
+        match self.training.as_ref() {
+            Some(training) => training.constellation_point(),
+            None => self.phase2.scope_point(),
+        }
     }
 
     /// Points in the constellation the far end is read against, once phase 3

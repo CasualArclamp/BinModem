@@ -71,6 +71,26 @@ impl CallState {
     }
 }
 
+/// A V.92 call's PCM downstream, as a panel wants it: how many levels, which,
+/// and how loud -- which for PCM is the constellation's doing and nobody's
+/// setting -- with the rates this end can be sent at.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PcmLevels {
+    /// Levels either side of nought in the downstream's constellation, and
+    /// the Ucodes of the quietest and the loudest.
+    pub count: usize,
+    pub lowest: u8,
+    pub highest: u8,
+    /// The downstream's mean power in data, and the training's, in dBm0.
+    pub dbm0: f64,
+    pub training_dbm0: f64,
+    /// Whether this end is the one sending the downstream.
+    pub sending: bool,
+    /// The slowest and the fastest rate this end can be sent at, in bit/s.
+    pub slowest: u32,
+    pub fastest: u32,
+}
+
 /// One snapshot of the signal path, sized once and then written in place.
 #[derive(Debug, Clone)]
 pub struct Frame {
@@ -148,6 +168,8 @@ pub struct Frame {
     /// between neighbouring constellation points. Half is where a decision is
     /// as likely to be wrong as right.
     pub reception: Option<f64>,
+    /// A V.92 call's PCM levels, once there is a constellation on the line.
+    pub pcm: Option<PcmLevels>,
     /// Where a fax call has got to, what the far end calls itself, and the
     /// capability field it sent, raw. Raw because reading it belongs to the
     /// fax crate and the panel is downstream of that.
@@ -213,6 +235,7 @@ impl Frame {
             rx_bytes: 0,
             echo_loss_db: None,
             reception: None,
+            pcm: None,
             fax_phase: None,
             fax_identity: String::new(),
             fax_capabilities: None,

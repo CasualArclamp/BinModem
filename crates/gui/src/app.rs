@@ -394,6 +394,10 @@ pub struct ScopeApp {
     /// The `AT+MS` subparameters the advanced window is composing, and whether
     /// it is open.
     modulation: Modulation,
+    /// `+A8E` `<v8b>`: whether a call opens with a V.8 bis transaction in
+    /// front of V.8 (V.251). On unless turned off in the modulation window;
+    /// the modem's own factory setting is off.
+    v8bis: bool,
     advanced: bool,
     /// The same, for `AT+ES` and `AT+DS`.
     protection: Protection,
@@ -535,6 +539,7 @@ impl ScopeApp {
             sip_restore: None,
             carrier: 1,
             modulation: Modulation::default(),
+            v8bis: true,
             advanced: false,
             protection: Protection::default(),
             protection_open: false,
@@ -2533,6 +2538,13 @@ impl ScopeApp {
                         );
                         ui.end_row();
 
+                        ui.label(RichText::new("V.8 bis").monospace().color(dim));
+                        ui.checkbox(&mut self.v8bis, "open the call with a V.8 bis transaction, in front of V.8")
+                            .on_hover_text(
+                                "AT+A8E=,,,1 (V.251). The answering end asks what the caller can do, the caller chooses a mode, and V.8 then follows that choice. A far end with no V.8 bis is heard answering and gets V.8 as before; answering one, this end tries three times first, which is some seconds before its answer tone",
+                            );
+                        ui.end_row();
+
                         ui.label(RichText::new("line rate").monospace().color(dim));
                         ui.horizontal(|ui| {
                             // Only the rates this modulation has. They are not
@@ -2715,6 +2727,7 @@ impl ScopeApp {
     fn settings(&self) -> Vec<String> {
         let mut out = vec!["AT&F".to_owned()];
         out.push(self.modulation.command(Self::CARRIERS[self.carrier].0));
+        out.push(format!("AT+A8E=,,,{}", u8::from(self.v8bis)));
         out.extend(self.protection.commands());
         out
     }
@@ -4112,7 +4125,27 @@ impl ScopeApp {
             let clean = menu.rates.iter().rfind(|r| r.2 == Outlook::Good).map(|r| r.1);
             Some((rate(now)?, menu.outlook(now)?, slowest, fastest, clean))
         });
+        // V.92 has no rate menu's predictions, and no DIL to make them from:
+        // its bar is the rate this end is receiving along the rates it could
+        // be sent at, the downstream's ladder for a caller and the upstream's
+        // for a server.
+        let v92 = f.pcm.filter(|_| f.modulation == "V.92").zip(f.bit_rate);
         let (merit, merit_colour, fill, tick, left, right) = match (f.reception, f.symbol_quality()) {
+            _ if v92.is_some() => {
+                let (levels, rate) = v92.unwrap_or_default();
+                let along = (rate.saturating_sub(levels.slowest) as f32
+                    / levels.fastest.saturating_sub(levels.slowest).max(1) as f32)
+                    .clamp(0.0, 1.0);
+                let top = rate >= levels.fastest;
+                (
+                    Some(if top { "top rate" } else { "PCM" }.to_owned()),
+                    GOOD,
+                    along,
+                    None,
+                    format!("{rate} of {} - {} bit/s", levels.slowest, levels.fastest),
+                    if levels.sending { "PCM coming up" } else { "PCM coming down" },
+                )
+            }
             _ if pcm.is_some() => {
                 use datapump::v90::analogue::Outlook;
                 let (rate, outlook, slowest, fastest, clean) = pcm.unwrap_or((0, Outlook::Good, 0, 1, None));
@@ -4399,6 +4432,27 @@ impl ScopeApp {
                     format!("receiving {} · sending {} bit/s", bps(f.bit_rate), bps(f.tx_bit_rate)),
                 );
 
+                // PCM's power is the constellation's and not a setting: data
+                // can be a long way quieter than the training before it, and
+                // this says by how much and why.
+                if let Some(levels) = f.pcm {
+                    let change = levels.dbm0 - levels.training_dbm0;
+                    stage(
+                        ui,
+                        GOOD,
+                        "PCM level",
+                        format!(
+                            "{} {:.1} dBm0 · {:+.1} dB on training\n{} levels, Ucode {} to {}",
+                            if levels.sending { "sending down at" } else { "downstream at" },
+                            levels.dbm0,
+                            change,
+                            levels.count,
+                            levels.lowest,
+                            levels.highest
+                        ),
+                    );
+                }
+
                 stage(
                     ui,
                     if f.leds.ec { GOOD } else { grey },
@@ -4478,12 +4532,19 @@ impl ScopeApp {
         // is up, since that is the only place a retrain means anything.
         if let Source::Live(session) = &self.source {
             let v90 = f.modulation == "V.90";
+            let v92 = f.modulation == "V.92";
             ui.add_space(6.0);
             ui.horizontal(|ui| {
-                if v90 || !connected {
-                    ui.label(RichText::new("V.90 rate").color(DIM));
+                if v90 || v92 || !connected {
+                    ui.label(RichText::new("PCM down").color(DIM));
                     if let Some(drn) = Self::rate_menu(ui, session, v90 && connected) {
                         session.choose_rate(drn);
+                    }
+                }
+                if v92 || !connected {
+                    ui.label(RichText::new("up").color(DIM));
+                    if let Some(drn) = Self::upstream_menu(ui, session) {
+                        session.choose_upstream(drn);
                     }
                 }
                 if ui
@@ -4499,6 +4560,43 @@ impl ScopeApp {
                 }
             });
         }
+    }
+
+    /// The V.92 upstream menu: 6.1's ladder, the fastest rung first, and the
+    /// one pinned selected. Nothing is predicted of any of them -- the server
+    /// judges the line's noise only when it is left to choose -- so trying one
+    /// is how to find out.
+    fn upstream_menu(ui: &mut egui::Ui, session: &live::Session) -> Option<Option<u8>> {
+        use datapump::v92::{UP_RATES, up_rate};
+        let pinned = session.up_pinned();
+        let shown = match pinned {
+            Some(drn) => format!("{} pinned", up_rate(drn)),
+            None => "auto".to_owned(),
+        };
+        let mut chosen = None;
+        egui::ComboBox::from_id_salt("v92_up_rate")
+            .selected_text(RichText::new(shown).monospace())
+            .width(120.0)
+            .height(420.0)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(pinned.is_none(), RichText::new("auto: the server chooses").monospace()).clicked() {
+                    chosen = Some(None);
+                }
+                for drn in (1..=UP_RATES as u8).rev() {
+                    let text = format!("{:>5}", up_rate(drn));
+                    if ui.selectable_label(pinned == Some(drn), RichText::new(text).monospace()).clicked() {
+                        chosen = Some(Some(drn));
+                    }
+                }
+            })
+            .response
+            .on_hover_text(
+                "V.92's PCM upstream rate, 24000 to 48000 bit/s. Either end may choose: the server \
+                 asks for exactly that rate, the caller allows no other. Left on auto, the server \
+                 picks the fastest the line's noise allows. On a V.92 call that is up, choosing \
+                 retrains the line to take it, which is some twenty seconds",
+            );
+        chosen
     }
 
     /// The V.90 rate menu: the fastest rate first, each coloured and worded
@@ -4899,7 +4997,12 @@ fn family(modulation: &str) -> (Color32, Option<u32>, &'static str) {
             "Trellis-coded QAM at 2400 baud, both ways on the one 1800 Hz carrier, told apart by echo cancelling.",
         ),
         "V.34" => (V34, None, "V.34: the symbol rate and carrier are chosen by probing the line, each way separately."),
-        "V.90" | "V.92" => (PCM, Some(8000), "PCM downstream, a codeword a network sample; V.34 upstream."),
+        "V.90" => (PCM, Some(8000), "PCM downstream, a codeword a network sample; V.34 upstream."),
+        "V.92" => (
+            PCM,
+            Some(8000),
+            "PCM both ways: a codeword a network sample down, and up a level on each of the server's A/D instants.",
+        ),
         "V.17" | "V.29" => (FAX, Some(2400), "A fax page modulation at 2400 baud."),
         "V.27ter" => (FAX, None, "A fax page modulation: 1600 baud at 4800 bit/s, 1200 at 2400."),
         _ if name.starts_with("V.8") => (V34, None, "V.8: the two modems saying what they have."),
