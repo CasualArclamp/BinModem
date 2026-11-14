@@ -12,8 +12,10 @@
 //! V.34's INFO1a in that phase 2 instead, and the call goes on as V.34.
 
 use crate::v34::info::Info0d;
-use crate::v34::phase2::{self, Pcm};
+use crate::v34::phase2::{self, Pcm, V92Wish};
 use crate::v34::startup as v34;
+
+use crate::v92::digital as pcm;
 
 use super::ucode::Law;
 use super::{analogue, digital};
@@ -58,10 +60,10 @@ pub struct Analogue {
 
 impl Analogue {
     /// From the 75 ms of silence that end phase 1.
-    pub fn new(fs: f64) -> Self {
+    pub fn new(fs: f64, lead_in: f64) -> Self {
         Self {
             fs,
-            v34: v34::Modem::with_phase2(phase2::Modem::v90(Pcm::Analogue, fs), fs),
+            v34: v34::Modem::with_phase2(phase2::Modem::v90(Pcm::Analogue, fs, lead_in), fs),
             v90: None,
             failed_starts: 0,
             connected_once: false,
@@ -104,6 +106,12 @@ impl Analogue {
     /// Whether V.90 is what the call came to.
     pub fn is_v90(&self) -> bool {
         self.v90.is_some()
+    }
+
+    /// Whether the far end asked for PCM upstream (Table 18/V.92) in the
+    /// phase 2 that has just finished, if one has.
+    pub fn pcm_upstream_asked(&self) -> bool {
+        self.v34.phase2().info1a_pcm_up().is_some()
     }
 
     /// V.34's start-up, which holds phase 2 and a V.34 call if that is what
@@ -325,6 +333,15 @@ pub struct Digital {
     law: Law,
     v34: v34::Modem,
     v90: Option<digital::Modem>,
+    /// V.92's Phase 3 and 4, when the analogue modem asked for PCM upstream
+    /// with a Table 18 INFO1a (9.5, 9.6). At most one of this and `v90` is
+    /// ever built.
+    v92: Option<pcm::Modem>,
+    /// What this end said in ITS INFO0d, and what it wants of V.92: phase 2
+    /// is rebuilt from these when V.92 is asked for (see [`Self::with_v92`]).
+    info0d: Info0d,
+    lead_in: f64,
+    wish: V92Wish,
     /// Phase 2 goes out through the codec like anything else, at the power
     /// INFO0d names; so does V.34, if that is what the call became.
     phase2_gain: f64,
@@ -339,14 +356,18 @@ pub struct Digital {
 }
 
 impl Digital {
-    pub fn new(info0d: Info0d) -> Self {
+    pub fn new(info0d: Info0d, lead_in: f64) -> Self {
         let law = if info0d.a_law { Law::A } else { Law::Mu };
         // A full-scale sine is +3.17 dBm0 in G.711.
         let phase2_gain = 10f64.powf((info0d.nominal_dbm0() - 3.17) / 20.0);
         Self {
             law,
-            v34: v34::Modem::with_phase2(phase2::Modem::v90(Pcm::Digital(info0d), digital::FS), digital::FS),
+            v34: v34::Modem::with_phase2(phase2::Modem::v90(Pcm::Digital(info0d), digital::FS, lead_in), digital::FS),
             v90: None,
+            v92: None,
+            info0d,
+            lead_in,
+            wish: V92Wish::default(),
             phase2_gain,
             failed_starts: 0,
             renegotiations: 0,
@@ -361,6 +382,40 @@ impl Digital {
         self
     }
 
+    /// Offer V.92: INFO0d's two capability bits as Table 15/V.92 lays them
+    /// out, and whether PCM upstream is wanted if the analogue modem asks
+    /// for it with a Table 18 INFO1a.
+    ///
+    /// Phase 2 is rebuilt with V.92's INFO0 in it, so that the exchange is
+    /// V.92's from the first INFO0d out. Everything after phase 2 follows
+    /// what the analogue modem then asks for: a Table 10 INFO1a is V.90 and
+    /// unchanged, a Table 18 one is PCM upstream, which is
+    /// [`crate::v92::digital`]'s (9.5, 9.6).
+    ///
+    /// Call this before the call is placed; it throws the start-up away,
+    /// which at that point is only the empty phase 2.
+    pub fn with_v92(mut self, wish: V92Wish) -> Self {
+        self.wish = wish;
+        // The far ends this is for take a quarter of a second to turn round
+        // to TRN1d, which the short one is over before (see `digital::TRN1D`).
+        self.habits = digital::Habits::PATIENT;
+        self.v34 = v34::Modem::with_phase2(
+            phase2::Modem::v90(Pcm::DigitalV92(self.info0d, wish), digital::FS, self.lead_in),
+            digital::FS,
+        );
+        self
+    }
+
+    /// What this end wants of V.92.
+    pub fn wish(&self) -> V92Wish {
+        self.wish
+    }
+
+    /// Whether both modems have shown V.92 capability (9.3).
+    pub fn both_v92(&self) -> bool {
+        self.v34.phase2().both_v92()
+    }
+
     pub fn v34(&self) -> &v34::Modem {
         &self.v34
     }
@@ -369,9 +424,19 @@ impl Digital {
         self.v90.as_ref()
     }
 
+    /// V.92's Phase 3 and 4, once PCM upstream is what the call came to.
+    pub fn v92(&self) -> Option<&pcm::Modem> {
+        self.v92.as_ref()
+    }
+
     /// Whether V.90 is what the call came to.
     pub fn is_v90(&self) -> bool {
-        self.v90.is_some()
+        self.v90.is_some() || self.v92.is_some()
+    }
+
+    /// Whether V.92's PCM upstream is what the call came to.
+    pub fn is_v92(&self) -> bool {
+        self.v92.is_some()
     }
 
     pub fn round_trip(&self) -> Option<f64> {
@@ -380,6 +445,11 @@ impl Digital {
 
     /// Whether there is anything to send bits into.
     pub fn accepts_bits(&self) -> bool {
+        if self.v92.is_some() {
+            // PCM inbound data mode is not built yet: Phase 4 stops at TRN2d
+            // (see [`pcm::Modem`]), and nothing hands bits over before it.
+            return matches!(self.v92.as_ref().map(pcm::Modem::status), Some(pcm::Status::Connected { .. }));
+        }
         match self.v90.as_ref() {
             Some(m) => matches!(m.status(), digital::Status::Connected { .. }),
             None => self.v34.accepts_bits(),
@@ -388,6 +458,9 @@ impl Digital {
 
     /// Whether the far end's data signal is there.
     pub fn carrier(&self) -> bool {
+        if let Some(m) = self.v92.as_ref() {
+            return !matches!(m.status(), pcm::Status::Failed(_) | pcm::Status::ClearedDown);
+        }
         match self.v90.as_ref() {
             Some(m) => m.carrier(),
             None => self.v34.carrier(),
@@ -407,6 +480,9 @@ impl Digital {
 
     /// The analogue modem's last upstream symbol, for a scope.
     pub fn constellation_point(&self) -> Option<(f64, f64)> {
+        if self.v92.is_some() {
+            return None;
+        }
         match self.v90.as_ref() {
             Some(m) => m.last_point(),
             None => self.v34.constellation_point(),
@@ -416,6 +492,9 @@ impl Digital {
     /// The largest coordinate the upstream's points reach, in the units of
     /// [`Self::constellation_point`].
     pub fn constellation_peak(&self) -> Option<f64> {
+        if self.v92.is_some() {
+            return None;
+        }
         match self.v90.as_ref() {
             Some(m) => Some(m.upstream_peak()),
             None => self.v34.constellation_peak(),
@@ -424,6 +503,9 @@ impl Digital {
 
     /// Points the upstream is read against.
     pub fn constellation_size(&self) -> Option<usize> {
+        if self.v92.is_some() {
+            return None;
+        }
         match self.v90.as_ref() {
             Some(m) => Some(m.upstream_points()),
             None => self.v34.constellation_size(),
@@ -431,6 +513,15 @@ impl Digital {
     }
 
     pub fn status(&self) -> Status {
+        if let Some(m) = self.v92.as_ref() {
+            return match m.status() {
+                pcm::Status::Running | pcm::Status::Phase4 if self.connected_once => Status::Retraining,
+                pcm::Status::Running | pcm::Status::Phase4 => Status::Running,
+                pcm::Status::Failed(why) => Status::Failed(why),
+                pcm::Status::ClearedDown => Status::ClearedDown,
+                pcm::Status::Connected { downstream, upstream } => Status::Connected { transmit: downstream, receive: upstream },
+            };
+        }
         match self.v90.as_ref().map(digital::Modem::status) {
             Some(digital::Status::Connected { downstream, upstream }) => {
                 Status::Connected { transmit: downstream, receive: upstream }
@@ -455,6 +546,9 @@ impl Digital {
     }
 
     pub fn phase(&self) -> &'static str {
+        if let Some(m) = self.v92.as_ref() {
+            return m.phase();
+        }
         match self.v90.as_ref() {
             Some(m) => m.phase(),
             None if self.v34.training().is_none() => "V.90 phase 2",
@@ -463,6 +557,9 @@ impl Digital {
     }
 
     pub fn take_bits(&mut self) -> Vec<bool> {
+        if let Some(m) = self.v92.as_mut() {
+            return m.take_bits();
+        }
         match self.v90.as_mut() {
             Some(m) => m.take_bits(),
             None => self.v34.take_bits(),
@@ -470,6 +567,10 @@ impl Digital {
     }
 
     pub fn send_bits(&mut self, bits: &[bool]) {
+        if let Some(m) = self.v92.as_mut() {
+            m.send_bits(bits);
+            return;
+        }
         match self.v90.as_mut() {
             Some(m) => m.send_bits(bits),
             None => self.v34.send_bits(bits),
@@ -477,14 +578,31 @@ impl Digital {
     }
 
     pub fn pending_bits(&self) -> usize {
+        if let Some(m) = self.v92.as_ref() {
+            return m.pending_bits();
+        }
         match self.v90.as_ref() {
             Some(m) => m.pending_bits(),
             None => self.v34.pending_bits(),
         }
     }
 
+    /// How many bits one downstream fill can take, for a caller keeping the
+    /// queue fed (see [`pcm::Modem::fill_bits`]). Zero when there is no V.92
+    /// data mode, whose fills are the ones that take more than a handful.
+    pub fn fill_bits(&self) -> usize {
+        self.v92.as_ref().map_or(0, pcm::Modem::fill_bits)
+    }
+
     /// Start a full retrain (9.5.1.1).
     pub fn retrain(&mut self) -> bool {
+        if self.v92.is_some() {
+            // 9.7.1.1: back through V.92's Phase 2, which for this end is
+            // V.34's phase 2 with V.90's INFO sequences in it.
+            self.v92 = None;
+            self.v34.restart_phase2();
+            return true;
+        }
         match self.v90.as_mut() {
             Some(m) => {
                 m.start_retrain();
@@ -497,6 +615,9 @@ impl Digital {
     /// Renegotiate from data mode (9.6.1.1), asking the analogue modem to
     /// send no faster than `upstream`, a multiple of 2400.
     pub fn renegotiate(&mut self, upstream: u8) -> bool {
+        if self.v92.is_some() {
+            return false;
+        }
         match self.v90.as_mut() {
             Some(m) => m.renegotiate(upstream),
             None => self.v34.renegotiate(upstream),
@@ -513,6 +634,21 @@ impl Digital {
 
     /// One network sample in, one out.
     pub fn step(&mut self, input: f64) -> f64 {
+        if let Some(m) = self.v92.as_mut() {
+            let out = m.step(input);
+            let failed = matches!(m.status(), pcm::Status::Failed(_));
+            if matches!(m.status(), pcm::Status::Connected { .. }) {
+                self.failed_starts = 0;
+                self.connected_once = true;
+            }
+            if failed && self.failed_starts < V90_RETRAINS {
+                // 9.7.1.1: back through Phase 2 for another go.
+                self.failed_starts += 1;
+                self.v92 = None;
+                self.v34.restart_phase2();
+            }
+            return out;
+        }
         if let Some(m) = self.v90.as_mut() {
             let out = m.step(input);
             let failed = matches!(m.status(), digital::Status::Failed(_));
@@ -534,6 +670,26 @@ impl Digital {
             self.connected_once = true;
         }
         let p2 = self.v34.phase2();
+        if std::env::var_os("PHASE2_TRACE").is_some() && p2.status() == phase2::Status::Done {
+            eprintln!(
+                "P2TRACE data mode: both_v92 {} far_flags {:?} table18 {:?} table10 {:?}",
+                p2.both_v92(),
+                p2.far_pcm_flags(),
+                p2.info1a_pcm_up().is_some(),
+                p2.info1a_pcm().is_some()
+            );
+        }
+        // V.92 first: a Table 18 INFO1a is PCM upstream, and only one of the
+        // two modems is ever built (9.5, 9.6).
+        if p2.status() == phase2::Status::Done
+            && self.v34.training().is_none()
+            && let Some(asked) = p2.info1a_pcm_up()
+        {
+            let wide = p2.far_capabilities().is_some_and(|f| f.constellation_1664);
+            let mut settings = pcm::Settings::new(self.law, &asked, p2.round_trip().unwrap_or(0.0), wide);
+            settings.habits = pcm::Habits::LIVE;
+            self.v92 = Some(pcm::Modem::new(settings));
+        }
         if p2.status() == phase2::Status::Done
             && self.v34.training().is_none()
             && let (Some(asked), Some(info1d)) = (p2.info1a_pcm(), p2.info1c())

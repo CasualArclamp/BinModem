@@ -35,7 +35,7 @@ fn probe_replay_v90() {
     let wav = line::wav::read(&path).expect("could not read the capture");
     assert_eq!(f64::from(wav.sample_rate), FS, "the modem is built for 16 kHz");
     let arrived = wav.channel(0);
-    let mut modem = Analogue::new(FS);
+    let mut modem = Analogue::new(FS, 0.0);
     let mut last = None;
     // The V.90 modem as it was a sample ago, near the end of the DIL: one
     // whose choice ends in a fallback is gone the moment it has chosen.

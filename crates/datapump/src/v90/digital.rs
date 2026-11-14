@@ -82,10 +82,29 @@ pub enum Status {
     Failed(&'static str),
 }
 
+/// TRN1d, in seconds: "a minimum of 2040T" (9.3.1.4), with Jd to follow
+/// "within 4000 ms".
+///
+/// The minimum is not enough, and it is the analogue modem that says so. It
+/// does not start reading TRN1d when TRN1d starts; it starts when it has
+/// detected the S-to-S̄d transition (9.3.2.4), and only then spends "the first
+/// 2040T of signal TRN1d" training its equaliser before it is ready for Jd
+/// (9.3.2.5, 9.3.2.6). An Agere SV92PP took 266 ms to make that turn -- its
+/// Ja was still going out that long after our S̄d -- so a TRN1d of 2040T
+/// (255 ms) was over before the engine was listening: it read no TRN1d, never
+/// armed its Jd receiver, timed out and retrained twice into V.34. Two
+/// seconds of it was read whole, and the same call then ran to data mode.
+///
+/// Two seconds is also what a live server sends, to within the second
+/// [`Habits::LIVE_SERVER`] measured, and it keeps Jd inside both deadlines
+/// that reach it: 4000 ms from the start of TRN1d (9.3.1.4) and 4500 ms from
+/// the end of the analogue modem's Ja (9.3.2.7).
+const TRN1D: f64 = 2.0;
+
 /// How a digital modem goes about the parts the Recommendation leaves open.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Habits {
-    /// TRN1d, in seconds: "a minimum of 2040T", and Jd "within 4000 ms".
+    /// TRN1d, in seconds; see [`TRN1D`].
     pub trn1d: f64,
     /// Whether 9.3.1.5's wait for S has the round trip added to it.
     pub s_wait_counts_round_trip: bool,
@@ -94,6 +113,12 @@ pub struct Habits {
 impl Habits {
     /// Short TRN1d, and the Recommendation's wait for S.
     pub const PROMPT: Self = Self { trn1d: 0.3, s_wait_counts_round_trip: true };
+
+    /// TRN1d long enough for a far end to turn round (see [`TRN1D`]), and the
+    /// Recommendation's wait for S. What a server that offers V.92 uses: the
+    /// modems that needed it were V.92 ones. A plain V.90 server keeps
+    /// [`Self::PROMPT`], which every V.90 call measured here was tuned on.
+    pub const PATIENT: Self = Self { trn1d: TRN1D, s_wait_counts_round_trip: true };
 
     /// What a live server did: four seconds of TRN1d, and a wait for S that
     /// did not allow for a second-long round trip.
@@ -535,6 +560,8 @@ pub struct Modem {
     /// The upstream no faster than this, as a multiple of 2400, from a
     /// renegotiation this end began.
     upstream_cap: Option<u8>,
+    /// What goes out and when, on stderr, when `V90_TRACE` is set.
+    trace: bool,
 }
 
 impl Modem {
@@ -579,6 +606,7 @@ impl Modem {
             clearing: false,
             renegotiations: 0,
             upstream_cap: None,
+            trace: std::env::var_os("V90_TRACE").is_some(),
         };
         // 9.4.1: B1 "within 15 s plus 5 round-trip delays after receiving
         // INFO1a".
@@ -775,7 +803,15 @@ impl Modem {
             self.wants_retrain = true;
         }
         self.stage_step();
-        self.source.next()
+        let before = (self.stage, self.source.out);
+        let out = self.source.next();
+        if self.trace && (self.stage, self.source.out) != before {
+            eprintln!(
+                "[v90 {:8.3}] digital {:?} -> {:?}, line {:?} -> {:?}, s_heard {}",
+                self.now as f64 / FS, before.0, self.stage, before.1, self.source.out, self.s_heard,
+            );
+        }
+        out
     }
 
     /// From data mode to Rd (9.6.1.1.1, 9.6.1.2.2), and phase 4 after it.
@@ -1048,6 +1084,9 @@ impl Modem {
     }
 
     fn heard_cp(&mut self, cp: Cp) {
+        if std::env::var_os("PHASE2_TRACE").is_some() {
+            eprintln!("P2TRACE heard_cp {cp:?}");
+        }
         if !cp.data_mode {
             if self.stage == Stage::Phase4Cpt {
                 // 9.4.1.2: "send signal R-bar-i for 24T followed by TRN2d".

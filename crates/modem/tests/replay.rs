@@ -236,3 +236,112 @@ fn probe_replay_frames() {
     }
     println!();
 }
+
+/// Replay a raw s16le capture through the whole modem, and keep what its DTE
+/// was handed.
+///
+/// The interop rigs write the far end's own transmit stream as raw s16le at
+/// 8000 Hz (`agr-tx.raw`), and the bench's own DTE log is the answer this has
+/// to reproduce: a call whose bytes are wrong on the bench is a call that can
+/// be run again here in a second instead of forty, with the waveform held
+/// still while the decoder is changed underneath it.
+///
+/// ```text
+/// MODEM_RAW=/tmp/agr-v90-interop/<run>/agr-tx.raw \
+///     cargo test -p modem --test replay -- --ignored --nocapture probe_replay_raw
+/// ```
+#[test]
+#[ignore = "needs a capture; see the module comment"]
+fn probe_replay_raw() {
+    let Ok(path) = std::env::var("MODEM_RAW") else {
+        println!("set MODEM_RAW to a raw s16le capture to run this");
+        return;
+    };
+    let fs: f64 = std::env::var("MODEM_FS").ok().and_then(|s| s.parse().ok()).unwrap_or(8000.0);
+    let bytes = std::fs::read(&path).expect("could not read the capture");
+    let line: Vec<f64> = bytes
+        .as_chunks::<2>().0.iter()
+        .map(|c| f64::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0)
+        .collect();
+    println!("\n{path}: {:.1} s at {fs} Hz", line.len() as f64 / fs);
+
+    let ms = std::env::var("MODEM_MS").unwrap_or_else(|_| "V92".to_owned());
+    // When this end went off-hook, which the rig holds back so that the caller
+    // has finished dialling (`--answer-delay`, 3.4 s by default). A replay that
+    // answers at once puts its ANSam in before the far end's V.8 has begun.
+    let answer_at: f64 = std::env::var("MODEM_ANSWER_AT").ok().and_then(|s| s.parse().ok()).unwrap_or(3.4);
+    let mut modem = Modem::new(fs);
+    let say = |modem: &mut Modem, bytes: &[u8]| {
+        for b in bytes {
+            modem.feed_dte(*b);
+        }
+        let _ = modem.take_dte();
+    };
+    say(&mut modem, format!("AT+MS={ms}\r").as_bytes());
+
+    let mut dte: Vec<u8> = Vec::new();
+    let (mut state, mut phase) = (modem.state(), String::new());
+    let mut shown = 0usize;
+    let mut ec_said = String::new();
+    let mut answered = false;
+    for (i, &s) in line.iter().enumerate() {
+        if !answered && i as f64 / fs >= answer_at {
+            answered = true;
+            say(&mut modem, b"ATA\r");
+        }
+        modem.step(s);
+        dte.extend(modem.take_dte());
+        for text in modem.take_line_notes() {
+            println!("  {:>7.3}  {text}", i as f64 / fs);
+        }
+        let now = (modem.state(), modem.line_phase().to_owned());
+        let ec_now = modem.error_control_phase();
+        if ec_now != ec_said.as_str() {
+            ec_said = ec_now.to_owned();
+            println!(
+                "  {:>7.3}  error control: phase {:?}, negotiated {}, connected {}, compression {:?}, {:?}",
+                i as f64 / fs,
+                ec_now,
+                modem.error_control_negotiated(),
+                modem.error_controlled(),
+                modem.compression_name(),
+                modem.state()
+            );
+        }
+        if now != (state, phase.clone()) {
+            let rate = modem.rate().map_or_else(|| "-".to_owned(), |r| r.to_string());
+            let up = modem.transmit_rate().map_or_else(|| "-".to_owned(), |r| r.to_string());
+            println!(
+                "  {:>7.3}  {:?} {} {} down {rate} / up {up}",
+                i as f64 / fs,
+                now.0,
+                modem.standard(),
+                now.1
+            );
+            (state, phase) = now;
+        }
+        // As it arrives, in window, so that a decoder that repeats says so.
+        if dte.len() >= shown + 16 {
+            let tail = &dte[shown..dte.len().min(shown + 16)];
+            let hex: String = tail.iter().map(|b| format!("{b:02x}")).collect();
+            println!("  {:>7.3}  dte {shown}: {hex}", i as f64 / fs);
+            shown = dte.len();
+        }
+    }
+    // The end of the question, in one line: a call whose V.42 detection went
+    // transparent, or whose XID never agreed a compressor, carries the DTE's
+    // characters over a link with nothing protecting them -- and, when the
+    // physical layer is what is wrong, carries somebody else's.
+    println!(
+        "\n  error control at the end: {:?}, V.44 {:?}, V.42 {:?}",
+        modem.error_control_phase(),
+        modem.compression_name(),
+        modem.error_control_detail()
+    );
+    println!("  {} bytes to the DTE", dte.len());
+    if let Ok(out) = std::env::var("MODEM_DTE_OUT") {
+        let _ = std::fs::write(&out, &dte);
+        println!("  written to {out}");
+    }
+    println!("  ended in {:?}, {} damaged frames\n", modem.state(), modem.damaged_frames());
+}

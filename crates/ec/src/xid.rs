@@ -95,6 +95,31 @@ const N401_DEFAULT: u16 = crate::lapm::DEFAULT_N401 as u16;
 /// The window size when nobody proposes one (V.42 9.2.4).
 const K_DEFAULT: u8 = crate::lapm::DEFAULT_K;
 
+/// The HDLC optional functions mask as it goes on the wire.
+///
+/// V.42 Table 11a Note 1 fixes this parameter at "4 octets (i.e. PL = 4)", and
+/// names bit positions 3, 14, 17 and 24 and no further. Sending all four is
+/// what this end did, and one far end reads it as a whole information field it
+/// cannot walk: the Agere SV92PP's XID parser takes PL = 3 for this parameter
+/// and, on anything else, abandons the rest of the field rather than skipping
+/// the item (its `LapmProcessXID` calls a routine that returns as soon as
+/// `PL != 3` at PI 3, at 0x661bb in `agrmodemlib.o`). Everything after it --
+/// the V.42bis private subfield and the V.44 user data subfield among them --
+/// was then never read, so the far end answered "no compression" and its own
+/// log said "LAPM compression disabled" on every call, whatever either end had
+/// offered.
+///
+/// Three octets carry every bit the note gives a meaning to, and that is what
+/// every real modem sends: the Agere's own XID, the Conexant pair captured in
+/// `tests/vectors/v22bis-2400.wav`, and the mask this end's decoder already
+/// accepts in one, two or three octets. The fourth is sent only if a bit above
+/// position 24 is ever set, which nothing here sets today.
+fn mask_octets(mask: u32) -> ([u8; 4], usize) {
+    let octets = mask.to_le_bytes();
+    let len = if octets[3] != 0 { 4 } else { 3 };
+    (octets, len)
+}
+
 /// Bits of the HDLC optional functions mask that V.42 12.2.2 Note 1 names.
 ///
 /// Bit 1 is the low-order bit of the first octet and is transmitted first.
@@ -301,7 +326,8 @@ impl Xid {
 
         // Parameter negotiation subfield.
         let mut params = Vec::new();
-        push_param(&mut params, pi::HDLC_OPTIONAL, &self.hdlc_mask(kind).to_le_bytes());
+        let (mask, mask_len) = mask_octets(self.hdlc_mask(kind));
+        push_param(&mut params, pi::HDLC_OPTIONAL, &mask[..mask_len]);
         // V.42 12.2.2 Note 3: N401 is in octets, but negotiated in bits.
         if let Some(n) = self.n401_transmit {
             push_param(&mut params, pi::N401_TRANSMIT, &(n * 8).to_be_bytes());

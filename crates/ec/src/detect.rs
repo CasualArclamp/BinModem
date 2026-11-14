@@ -164,7 +164,10 @@ pub enum Outcome {
     /// answerer that only knew about the first two would wait out T400 and
     /// then decline error control to a modem that is already establishing it.
     ProtocolStarted,
-    /// T400 elapsed with nothing recognised (V.42 7.2.1.2, 7.2.1.3).
+    /// A detection timer expired with nothing left to wait for: T400 for a
+    /// caller still waiting on an ADP (7.2.1.2), ten of them for an answerer
+    /// that has heard nothing, or has answered and been answered by silence
+    /// (7.2.1.3; see [`Answerer::tick`]).
     TimedOut,
     /// The far end is sending its terminal's characters: it is not doing V.42,
     /// and has already given its terminal the go-ahead (Appendix I.3).
@@ -460,6 +463,18 @@ pub struct Answerer {
     flag_run: u32,
     /// Whether the originator has begun the protocol phase (7.2.1.3).
     flags: bool,
+    /// Whether anything in the line has looked like a detection pattern yet.
+    ///
+    /// Kept apart from `heard`: bits are heard from the moment this end's
+    /// receiver is up, which on V.92 is two seconds before the far end's data
+    /// mode exists.
+    detecting: bool,
+    /// Whether the clock has run out on a pattern that was being repeated
+    /// for an originator whose flags never came.
+    expired: bool,
+    /// Whether the far end may be late: ten T400s of patience where there
+    /// would be one. See [`Self::prompt`].
+    wide: bool,
     /// Characters of plain text in a row, and everything heard while
     /// detecting.
     text: u32,
@@ -490,7 +505,24 @@ impl Answerer {
             flags: false,
             text: 0,
             heard: Vec::new(),
+            detecting: false,
+            expired: false,
+            wide: true,
         }
+    }
+
+    /// One T400 of patience and not ten, for a call whose two directions
+    /// reach data mode together.
+    ///
+    /// The wide bound is for a far end that is not listening yet when this
+    /// end starts (see [`Self::tick`]): V.92, whose two data modes do not
+    /// begin together. On every other modulation both ends connect within a
+    /// few symbols of each other, T400 is the whole of the wait V.42 7.2.1.3
+    /// has in mind, and nine more of them is seven seconds of nothing before
+    /// a caller without error control is given its CONNECT.
+    pub fn prompt(mut self) -> Self {
+        self.wide = false;
+        self
     }
 
     /// Everything the line brought while the detection phase ran: the far
@@ -516,14 +548,32 @@ impl Answerer {
     /// Ten repetitions is the floor 7.2.1.3 sets. Past that the answerer keeps
     /// going until the originator's flags arrive, which is Appendix III.1's
     /// advice and costs nothing, because there is nothing else for the line to
-    /// be carrying in the meantime. The clock bounds it for the case where the
-    /// flags never come at all -- a far end that heard the ODP out of noise it
-    /// made itself, and is not in fact a modem doing V.42.
+    /// be carrying in the meantime.
+    ///
+    /// The flags are the only thing that ends it, and that is the clause's own
+    /// wording: "Receipt of continuous flags ... indicates that the answerer
+    /// detection pattern has been received and that the start of the protocol
+    /// phase has begun." A clock of this end's own used to end it as well, at
+    /// T400 after the ODP was recognised, and on a V.92 call that clock
+    /// measures the wrong interval. The two ends do not enter data mode
+    /// together: this end's comes up to three quarters of a second before the
+    /// Agere's (its "Tx Data Mode Active" is at 26.9 s against this end's
+    /// 23.7 s in the interop log), and the far end's V.42 detector does not
+    /// exist until its own data mode does. A pattern that stopped at T400 from
+    /// the ODP could therefore stop before the far end had begun to listen for
+    /// it -- on exactly the calls where the two ends' establishing are
+    /// furthest apart.
+    ///
+    /// What bounds it is [`Self::tick`] and not this: ten T400s, the bound a
+    /// line that stays silent is given, and for the same reason -- a far end
+    /// that heard the ODP out of noise it made itself, and is not in fact a
+    /// modem doing V.42, should not hold the terminal for ever.
     fn said_enough(&self) -> bool {
-        // Nothing to say when nothing was asked.
-        self.outcome == Outcome::ProtocolStarted
-            || (self.repeats >= ADP_REPEATS
-                && (self.flags || self.elapsed >= self.t400_ms))
+        // Nothing to say when nothing was asked, and nothing more to say once
+        // the clock has given up on the far end.
+        matches!(self.outcome, Outcome::ProtocolStarted | Outcome::TimedOut)
+            || self.expired
+            || (self.repeats >= ADP_REPEATS && self.flags)
     }
 
     fn queue_adp(&mut self) {
@@ -535,6 +585,24 @@ impl Answerer {
         push_character(&mut self.out, ADP_E);
         push_character(&mut self.out, second);
         self.repeats += 1;
+    }
+
+    /// Whether the far end has started a detection phase at all: either the
+    /// ODP has been recognised, or flags have.
+    ///
+    /// A *partial* DC1 run is deliberately not evidence. The line a V.92 call
+    /// gives the answerer before the far end's own data mode exists decodes to
+    /// something that frames a character every ten bits or so, and 2 of the
+    /// 256 characters are DC1s: at 24000 bit/s that is a DC1 every 70 ms, so
+    /// within T400 the first one always arrives and the run of four never
+    /// does. Arming T400 on that made the answerer declare the far end
+    /// non-V.42 750 ms after entering data mode -- 2 seconds before the Agere
+    /// at the other end starts its own V.42 at all (its log reaches "V44
+    /// Compressed mode active, Framer mode 1" 3.2 s after this end's B1u).
+    /// V.42 7.2.1.3 measures T400 from the establishment of the connection,
+    /// and on V.92 the two ends' establishing are not simultaneous.
+    fn someone_is_detecting(&self) -> bool {
+        self.detecting || self.flags
     }
 
     /// Feed one received bit.
@@ -592,6 +660,7 @@ impl Answerer {
             }
             self.last_parity = Some(c);
             if self.dc1_run >= 4 {
+                self.detecting = true;
                 self.outcome = Outcome::OriginatorDetected;
                 // The clock restarts, so that the bound on how long the
                 // pattern is repeated is a bound on the repeating rather than
@@ -607,12 +676,58 @@ impl Answerer {
     }
 
     pub fn tick(&mut self, dt_ms: u32) -> Outcome {
+        // 7.2.1.3 gives the answerer no deadline for the ODP -- it "shall
+        // transmit 1-bits" until it detects one -- so T400 bounds the exchange
+        // that follows the ODP, not the wait for it. Expiring it on a quiet
+        // line sent a V.92 call transparent two seconds before the far end had
+        // even entered data mode (its B1d and this end's B1u are not
+        // simultaneous), and the ODP it was waiting for then repeated
+        // unanswered for the rest of the call.
+        //
+        // A line that stays silent is still given up on, at a bound wide
+        // enough to hold that asymmetry: a far end that is never going to say
+        // anything should not hold the terminal for ever.
+        //
+        // The same bound governs the pattern that follows the ODP. 7.2.1.3
+        // ends that pattern on the originator's continuous flags and on
+        // nothing else, and those flags cannot come before the far end's own
+        // data mode exists; T400 measured from the ODP therefore measured
+        // something that is not a wait for the far end at all. See
+        // [`Self::said_enough`]. What is left for a clock to do here is to
+        // give up on a far end that says nothing at all, and that is the same
+        // ten T400s either way.
+        //
+        // Except for a refusal, which is the one answer nothing follows: a far
+        // end told `E NUL` does not start a protocol phase, so once the
+        // refusal is being given there are no flags to wait for and no reason
+        // to hold the line. Before it is -- before anything has been heard --
+        // the wide bound still applies, because the ODP it is refusing may
+        // still be on its way.
         self.elapsed += dt_ms;
-        if self.outcome != Outcome::Pending {
+        // `OriginatorDetected` is a state the clock still has business with,
+        // because the pattern that answer queues keeps going out until the
+        // originator's flags arrive (see [`Self::said_enough`]) and the far end
+        // may simply not be there.
+        if !matches!(self.outcome, Outcome::Pending | Outcome::OriginatorDetected) {
             return self.outcome;
         }
-        if self.elapsed >= self.t400_ms {
-            self.outcome = Outcome::TimedOut;
+        let patience = match self.answer {
+            Answer::None if self.someone_is_detecting() => self.t400_ms,
+            _ if self.wide => self.t400_ms.saturating_mul(10),
+            _ => self.t400_ms,
+        };
+        if self.elapsed >= patience {
+            if self.outcome == Outcome::OriginatorDetected {
+                // The pattern has been repeated for as long as it is going to
+                // be, but an originator was heard, and that is still what
+                // happened: a far end that sent an ODP does V.42, and the
+                // protocol phase is what follows it whether or not its flags
+                // were seen. Calling this a timeout would send the call
+                // transparent against a modem known to want error control.
+                self.expired = true;
+            } else {
+                self.outcome = Outcome::TimedOut;
+            }
         }
         self.outcome
     }
@@ -625,6 +740,26 @@ impl Answerer {
     /// be, and the last repetition is out.
     pub fn finished_sending(&self) -> bool {
         self.outcome != Outcome::Pending && self.out.is_empty() && self.said_enough()
+    }
+
+    /// Whether the answering pattern still has bits to put on the line.
+    ///
+    /// [`Self::transmit`] cannot say so itself: what it gives back when there
+    /// is nothing left to send is a mark, and a mark is a perfectly good bit
+    /// that a caller cannot tell from a pattern's own. That does not matter to
+    /// a caller with nothing else to say, which is what the detection phase
+    /// is -- but it matters to one that is already framing LAPM and is only
+    /// answering an ODP that should never have arrived ([`crate::Stack`] after
+    /// V.92 9.2.5), because there the choice on every bit is between this
+    /// pattern and a frame.
+    ///
+    /// The queue on its own is not the answer either. [`Self::transmit`] fills
+    /// it a repetition at a time, so it runs empty between them, and a caller
+    /// that stopped there would cut Table 3's pattern into pieces with flags
+    /// in the gaps -- and 7.2.1.2 wants "at least two adjacent ADPs".
+    pub fn sending(&self) -> bool {
+        !self.out.is_empty()
+            || (self.outcome == Outcome::OriginatorDetected && !self.said_enough())
     }
 
     /// Whether the originator has started the protocol phase.
@@ -841,10 +976,58 @@ mod tests {
         }
     }
 
+    /// V.42 7.2.1.3 and 7.2.1.2: an answerer with nothing to say transmits
+    /// marks, and a caller that has something else for the line has to be able
+    /// to tell the two apart -- and to be told across the gap between one
+    /// repetition and the next, because "at least two adjacent ADPs" is what
+    /// the originator is waiting for.
+    #[test]
+    fn an_answerer_says_whether_its_pattern_still_has_bits_to_go() {
+        let mut a = Answerer::default();
+        assert!(!a.sending(), "nothing has been asked yet");
+
+        let mut o = Originator::default();
+        for _ in 0..400 {
+            a.receive(o.transmit());
+        }
+        assert_eq!(a.outcome(), Outcome::OriginatorDetected);
+        assert!(a.sending(), "the ODP was heard and nothing has gone back");
+
+        // Every bit of it is claimed, including the joins between repetitions:
+        // `transmit` fills its queue one repetition at a time, so a caller
+        // that read an empty queue as "done" would put a flag in a gap that
+        // Table 3 fills with ones.
+        for bits in 0..20_000 {
+            assert!(a.sending(), "the pattern let go after {bits} bits");
+            a.transmit();
+        }
+
+        // The originator's flags end it, and then the line is the caller's
+        // again.
+        for byte in [FLAG; 4] {
+            for i in (0..8).rev() {
+                a.receive(byte & (1 << i) != 0);
+            }
+        }
+        let mut tail = 0;
+        while a.sending() {
+            a.transmit();
+            tail += 1;
+            assert!(tail < 1000, "the last repetition never finished");
+        }
+        assert!(a.finished_sending());
+        for _ in 0..200 {
+            assert!(a.transmit(), "mark once the pattern is done");
+        }
+    }
+
     #[test]
     fn an_originator_that_never_speaks_does_not_hold_the_answerer_for_ever() {
         // The far end heard an ODP out of noise it made itself and is not in
-        // fact a V.42 modem. The clock is what ends that.
+        // fact a V.42 modem. The clock is what ends that -- and it is not T400,
+        // which 7.2.1.3 measures from the establishment of the connection and
+        // not from the ODP the answerer happened to recognise: it is the same
+        // ten T400s a line that stays silent is given.
         let mut a = Answerer::default();
         let mut o = Originator::default();
         for _ in 0..400 {
@@ -854,11 +1037,65 @@ mod tests {
             a.transmit();
         }
         assert!(!a.finished_sending());
-        a.tick(DEFAULT_T400_MS);
+        a.tick(DEFAULT_T400_MS * 2);
+        for _ in 0..2000 {
+            a.transmit();
+        }
+        assert!(
+            !a.finished_sending(),
+            "the pattern stopped well inside the far end's chance to answer"
+        );
+        a.tick(DEFAULT_T400_MS * 8);
         for _ in 0..2000 {
             a.transmit();
         }
         assert!(a.finished_sending());
+    }
+
+    /// The call this went out on: an answerer's data mode comes up before the
+    /// far end's does, so an answerer that stops repeating at T400 from the
+    /// ODP stops before the far end -- whose own V.42 detector is created with
+    /// its data mode and not before -- has begun to listen. 7.2.1.3 ends the
+    /// pattern on the originator's continuous flags, which cannot arrive
+    /// before then.
+    ///
+    /// Nothing here is a detection made up to avoid a timeout: the late far
+    /// end reads the answerer's own characters, two adjacent ADPs of them,
+    /// and has to reach `ErrorControl` on its own.
+    #[test]
+    fn an_adp_waits_for_a_far_end_that_is_not_listening_yet() {
+        let mut a = Answerer::default();
+        let mut early = Originator::default();
+        // The ODP, and only the ODP: the far end has sent everything it is
+        // going to send before its own data mode exists.
+        for _ in 0..400 {
+            a.receive(early.transmit());
+        }
+        assert_eq!(a.outcome(), Outcome::OriginatorDetected);
+
+        // Two seconds of pattern on the line with nobody reading it, which is
+        // well past T400 and inside the bound a silent line gets.
+        for _ in 0..2000 {
+            assert!(a.sending(), "the pattern let go before the far end listened");
+            a.transmit();
+            a.tick(1);
+        }
+        assert_eq!(a.outcome(), Outcome::OriginatorDetected);
+
+        // Now the far end's data mode comes up and its detector starts on
+        // whatever is on the line.
+        let mut late = Originator::default();
+        for _ in 0..4000 {
+            late.receive(a.transmit());
+            if late.outcome() != Outcome::Pending {
+                break;
+            }
+        }
+        assert_eq!(
+            late.outcome(),
+            Outcome::Answered(Answer::ErrorControl),
+            "the far end heard no answer at all"
+        );
     }
 
     #[test]
@@ -869,6 +1106,40 @@ mod tests {
         let mut a = Answerer::new(DEFAULT_T400_MS, Answer::Reserved(0x07));
         exchange(&mut o, &mut a, 4000);
         assert_eq!(o.outcome(), Outcome::Answered(Answer::Reserved(0x07)));
+    }
+
+    /// The ODP as an Agere SV92PP actually sends it, recorded bit for bit off
+    /// a V.92 call: start bit, DC1 with even parity, ten ones, start bit, DC1
+    /// with odd parity, ten ones, and round again -- forty bits a repetition.
+    ///
+    /// It came from `V92_EC_RX` on the answering side of a call whose upstream
+    /// was separately proved bit-exact against the far end's own framer, so it
+    /// is the far end's pattern and not a decoding of it. Two repetitions are
+    /// in it, and a third is fed on the end of the test: 7.2.1.3 wants four
+    /// DC1s of alternating parity before the ODP counts as received.
+    const SV92PP_ODP: &str = "0100010001111111111101000100111111111111";
+
+    #[test]
+    fn the_odp_a_real_agere_sends_is_recognised() {
+        let mut a = Answerer::default();
+        for k in 0..3 {
+            for bit in SV92PP_ODP.bytes() {
+                a.receive(bit == b'1');
+            }
+            assert_ne!(a.outcome(), Outcome::Text, "after {k} repetitions");
+        }
+        assert_eq!(a.outcome(), Outcome::OriginatorDetected, "the ODP was not recognised");
+        // And what goes back is Table 3's answer, as characters: the pattern
+        // is only worth sending if the far end can frame it.
+        let mut scanner = CharacterScanner::default();
+        let mut sent = Vec::new();
+        for _ in 0..200 {
+            if let Some(c) = scanner.feed(a.transmit()) {
+                sent.push(c);
+            }
+        }
+        assert_eq!(sent.first().copied(), Some(ADP_E), "sent {sent:?}");
+        assert_eq!(sent.get(1).copied(), Some(ADP_C), "sent {sent:?}");
     }
 
     #[test]
@@ -890,7 +1161,10 @@ mod tests {
             a.transmit();
             a.receive(true);
         }
-        assert_eq!(a.tick(DEFAULT_T400_MS), Outcome::TimedOut);
+        // Mark and nothing else: no ODP, so 7.2.1.3's wait is not on a clock.
+        // Ten T400s of steady mark is a line that is not going to speak.
+        assert_eq!(a.tick(DEFAULT_T400_MS), Outcome::Pending);
+        assert_eq!(a.tick(DEFAULT_T400_MS * 9), Outcome::TimedOut);
     }
 
     #[test]
@@ -1080,6 +1354,24 @@ mod tests {
             a.receive(b);
         }
         assert_eq!(a.outcome(), Outcome::Text);
+    }
+
+    /// The pattern an Agere SV92PP puts on the line as a V.92 originator:
+    /// Table 3's ten bits per character, where the tenth is the stop bit and
+    /// the ninth is the parity bit that tells the two DC1s apart.
+    #[test]
+    fn the_originators_odp_is_recognised() {
+        let mut a = Answerer::new(DEFAULT_T400_MS, Answer::ErrorControl);
+        let mut bits = VecDeque::new();
+        for _ in 0..6 {
+            push_character(&mut bits, ODP_EVEN);
+            push_character(&mut bits, ODP_ODD);
+        }
+        let mut outcome = Outcome::Pending;
+        for bit in bits {
+            outcome = a.receive(bit);
+        }
+        assert_eq!(outcome, Outcome::OriginatorDetected);
     }
 
     #[test]

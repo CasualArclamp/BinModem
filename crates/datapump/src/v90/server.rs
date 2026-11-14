@@ -28,6 +28,7 @@ use std::collections::VecDeque;
 use dsp::Resampler;
 
 use crate::v34::info::{Info0, Info0d};
+use crate::v34::phase2::V92Wish;
 
 use super::digital;
 use super::startup::{Digital, Status};
@@ -50,6 +51,15 @@ pub fn ours() -> Info0d {
     }
 }
 
+/// What this server wants of V.92, for [`Line::with_v92`]: capable, and PCM
+/// upstream if the analogue modem asks for it with a Table 18 INFO1a.
+///
+/// Short phase 2 stays off until its own stages are built, and is the only
+/// thing this leaves out: it buys a second or two of start-up, not a rate.
+pub fn wish(pcm_upstream: bool) -> V92Wish {
+    V92Wish { capable: true, short_phase2: false, pcm_upstream, ..V92Wish::default() }
+}
+
 /// The digital modem, at the line's rate.
 #[derive(Debug, Clone)]
 pub struct Line {
@@ -63,15 +73,26 @@ pub struct Line {
 
 impl Line {
     /// From the end of V.8, with INFO0d saying `info0d`.
-    pub fn new(fs: f64, info0d: Info0d) -> Self {
+    pub fn new(fs: f64, info0d: Info0d, lead_in: f64) -> Self {
         Self {
-            modem: Digital::new(info0d),
+            modem: Digital::new(info0d, lead_in),
             down: Resampler::new(fs, digital::FS),
             up: Resampler::new(digital::FS, fs),
             arrived: Vec::with_capacity(4),
             made: Vec::with_capacity(8),
             out: VecDeque::from(vec![0.0; SLACK]),
         }
+    }
+
+    /// Offer V.92 from this server: INFO0d's capability bits and what this
+    /// end wants of PCM upstream (see [`Digital::with_v92`]).
+    ///
+    /// A V.92 digital modem is a V.90 one with more to say in phase 2 --
+    /// "the digital modem ... is as defined in clause 5 of V.90" (5/V.92) --
+    /// so everything here stays as it was and only what is *said* changes.
+    pub fn with_v92(mut self, wish: V92Wish) -> Self {
+        self.modem = self.modem.with_v92(wish);
+        self
     }
 
     pub fn modem(&self) -> &Digital {

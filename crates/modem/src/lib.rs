@@ -40,6 +40,20 @@ use ec::stack::Phase;
 use ec::xid::Compression;
 use ec::{Params, Role as EcRole, Stack};
 
+/// Whether a V.92 server offers PCM upstream in its INFO1d, which is what
+/// lets the analogue modem ask for it with a Table 18 INFO1a (9.3).
+///
+/// Off by default while Phase 3 of V.92 is being built: with bit 70 clear the
+/// analogue modem sends V.90's Table 10 instead and the call is V.90 in every
+/// particular. `BINMODEM_V92_PCM_UP=1` turns the offer on, which is how the
+/// PCM-upstream path is exercised against a live analogue modem.
+fn v92_pcm_upstream_wanted() -> bool {
+    match std::env::var("BINMODEM_V92_PCM_UP") {
+        Ok(v) => matches!(v.trim(), "1" | "yes" | "on" | "true"),
+        Err(_) => false,
+    }
+}
+
 /// Which end of the call this modem is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -239,6 +253,28 @@ impl Pump {
             Self::V90(m) => m.accepts_bits(),
             Self::V90Server(m) => m.modem().accepts_bits(),
             Self::V22bis(_) | Self::V32(_) | Self::Bell103(_) => true,
+        }
+    }
+
+    /// How much the pump wants queued before it has enough to be going on
+    /// with.
+    ///
+    /// 64 bits is enough for every pump whose transmitter takes one bit at a
+    /// time, and it is what bounds how far ahead of the line the stack above
+    /// runs. The V.92 downstream does not take one at a time: one fill encodes
+    /// eight data frames of six symbols, so it wants 272 bits at 45333 bit/s
+    /// at once, and a queue that is only 64 deep is refilled with the idle
+    /// pattern for the other 208 (see `v92::digital::Modem::fill_bits`). The
+    /// stack is never told, so the bits it handed down arrive on the line in
+    /// 64-bit pieces with 208 bits of ones between them -- and a V.42 ADP,
+    /// which has to arrive as a run of async characters, arrives as no
+    /// pattern at all. No far end can detect that, and this one did not.
+    fn fill_bits(&self) -> usize {
+        /// The queue depth every pump but V.92's downstream wants.
+        const REFILL_BITS: usize = 64;
+        match self {
+            Self::V90Server(m) => m.modem().fill_bits().max(REFILL_BITS),
+            _ => REFILL_BITS,
         }
     }
 
@@ -1021,6 +1057,16 @@ impl Modem {
     }
 
     /// Which step of the handshake the line is on.
+    /// The V.34 phase 2 stage under a V.90 server, for bring-up against
+    /// another maker's modem: the phase name above is coarse, and a stall in
+    /// phase 2 has no other way of saying which signal it is waiting for.
+    pub fn phase2_stage(&self) -> Option<&'static str> {
+        match self.pump.as_ref()? {
+            Pump::V90Server(m) => Some(m.modem().v34().phase2().phase()),
+            _ => None,
+        }
+    }
+
     pub fn line_phase(&self) -> &'static str {
         if let Some(fax) = self.fax.as_ref() {
             return fax.phase_name();
@@ -1677,7 +1723,20 @@ impl Modem {
         // also the honest answer to what a character typed into that gap
         // means: 5.6.1's instruction to give up on the call, because from the
         // terminal's side there is not yet a call.
-        if self.announce.is_some() {
+        // Whether this call is supposed to have error control at all. An
+        // answering modem that has been told not to (`AT\N0`) still owes the
+        // caller its Answerer Detection Pattern, so "answering" counts as a
+        // reason on its own.
+        let wants_ec = (self.want_error_control || self.role == Role::Answering)
+            && !matches!(self.pump, Some(Pump::Bell103(_)));
+        // Announced but no stack yet: the CONNECT went out before the pump
+        // reported connected, and returning here would skip the arm below that
+        // builds the error-control stack. A V.92 call does exactly that -- its
+        // CONNECT comes from the connect announcement while phase 4 is still
+        // running -- and the stack then never existed at all: the line carried
+        // nothing but mark, the far end repeated its ODP until the call ended,
+        // and no amount of fixing the demodulator could have helped.
+        if self.announce.is_some() && !(self.ec.is_none() && wants_ec) {
             // The line can change its rates in that gap. A V.34 far end
             // renegotiated a second after data mode began in
             // live-1789546478, while the detection phase was still running,
@@ -1703,6 +1762,15 @@ impl Modem {
             // handshake it means nothing.
             Progress::Negotiating | Progress::Retraining => {}
             Progress::Connected { receive: rate, transmit } => {
+                if std::env::var_os("V92_EC_TRACE").is_some() {
+                    eprintln!(
+                        "V92EC connected arm at {:.2}s, announce={} ec={} wants_ec={}",
+                        self.call_samples as f64 / self.fs,
+                        self.announce.is_some(),
+                        self.ec.is_some(),
+                        wants_ec
+                    );
+                }
                 self.rate = rate;
                 self.transmit_rate = transmit;
                 if let Some(m) = self.pump.as_ref().and_then(Pump::v34) {
@@ -1779,6 +1847,12 @@ impl Modem {
                     if let Some(ms) = round_trip {
                         stack = stack.over_a_round_trip(ms);
                     }
+                    // V.92's data modes do not start together, so its
+                    // answerer waits longer for the originator's pattern;
+                    // every other call keeps V.42's one T400.
+                    if matches!(self.pump.as_ref(), Some(Pump::V90Server(m)) if m.modem().is_v92()) {
+                        stack = stack.waiting_for_a_late_far_end();
+                    }
                     if !self.want_error_control {
                         stack = stack.declining();
                     }
@@ -1819,6 +1893,9 @@ impl Modem {
                         // transmitted". 6.4 then takes the lower of the two
                         // ends' proposals, so these are ceilings twice over.
                         stack.offer_dictionary(c.max_dict, c.max_string);
+                    }
+                    if std::env::var_os("V92_EC_TRACE").is_some() {
+                        eprintln!("V92EC created at {:.2}s", self.call_samples as f64 / self.fs);
                     }
                     self.ec = Some(stack);
                 }
@@ -2064,7 +2141,27 @@ impl Modem {
     }
 
     fn carry_data(&mut self) {
+        /// Upstream bits handed to the error-control stack, for the traces.
+        static RX_BITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let Some(pump) = self.pump.as_ref() else { return };
+        if std::env::var_os("V92_EC_TRACE").is_some() {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static LAST: AtomicU64 = AtomicU64::new(0);
+            let now = self.call_samples;
+            let prev = LAST.load(Ordering::Relaxed);
+            if now.saturating_sub(prev) >= 8 * 2000 {
+                LAST.store(now, Ordering::Relaxed);
+                eprintln!(
+                    "V92CARRY state={:?} accepts={} pending={} received={} ec={} role={:?}",
+                    self.state,
+                    pump.accepts_bits(),
+                    pump.pending_bits(),
+                    RX_BITS.load(std::sync::atomic::Ordering::Relaxed),
+                    self.ec.as_ref().map(|e| format!("{:?}", e.phase())).unwrap_or_else(|| "none".into()),
+                    self.role
+                );
+            }
+        }
         // A carrier that has gone is only news when one was supposed to be
         // there, and through a retrain there are stretches where one is not.
         // The training segment of 5.2.3 is the plainest: each end sends its
@@ -2101,6 +2198,9 @@ impl Modem {
             // something already, a banner or a prompt, by the time this end
             // stops listening for a pattern.
             if let Some(mut ec) = self.ec.take() {
+                if std::env::var_os("V92_EC_TRACE").is_some() {
+                    eprintln!("V92EC dropped as transparent at {:.2}s, phase {:?}", self.call_samples as f64 / self.fs, ec.phase());
+                }
                 for bit in ec.take_unclaimed() {
                     if let Some(c) = self.async_bits.feed(bit) {
                         self.recovered.push(c);
@@ -2117,8 +2217,23 @@ impl Modem {
                 // frames what goes out and unframes what comes back, and the
                 // line is never idle because a synchronous link always carries
                 // something.
-                for bit in pump.take_bits() {
-                    ec.feed_bit(bit);
+                {
+                    /// What the stack above actually heard, for the traces.
+                    static RX_LOG: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> =
+                        std::sync::OnceLock::new();
+                    let file = RX_LOG.get_or_init(|| {
+                        let path = std::env::var_os("V92_EC_RX")?;
+                        Some(std::sync::Mutex::new(std::fs::File::create(path).ok()?))
+                    });
+                    let mut logged = file.as_ref().and_then(|f| f.lock().ok());
+                    for bit in pump.take_bits() {
+                        RX_BITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if let Some(f) = logged.as_mut() {
+                            use std::io::Write;
+                            let _ = f.write_all(if bit { b"1" } else { b"0" });
+                        }
+                        ec.feed_bit(bit);
+                    }
                 }
                 if !self.outbound.is_empty() && ec.is_connected() {
                     let queued = std::mem::take(&mut self.outbound);
@@ -2134,7 +2249,11 @@ impl Modem {
                 // never fills: this asked for one for ever, and threw away
                 // every frame the error control handed over on the way. The
                 // frames wait instead, and go when data mode is back.
-                while pump.accepts_bits() && pump.pending_bits() < 64 {
+                // What is queued has to cover a whole fill: the pump takes
+                // its bits in blocks, and a block it cannot fill from the
+                // queue it fills with the idle pattern (see `fill_bits`).
+                let refill = pump.fill_bits();
+                while pump.accepts_bits() && pump.pending_bits() < refill {
                     let bit = ec.next_bit();
                     pump.send_bits(&[bit]);
                 }
@@ -2288,7 +2407,12 @@ impl Modem {
             // digital half from the end that answers. Over a VoIP call the
             // answering end's samples reach a G.711 encoder, which is as near
             // to the digital network as a sound card gets.
-            if self.at.modulation.carrier == "V90" {
+            // A V.92 server takes the line at the start of V.8's handover
+            // silence; a V.90 one at the end of it, as it always has.
+            if self.at.modulation.carrier == "V92" && self.role == Role::Answering {
+                negotiation = negotiation.handing_over_early();
+            }
+            if matches!(self.at.modulation.carrier.as_str(), "V90" | "V92") {
                 negotiation = match self.role {
                     Role::Calling => negotiation.offering_pcm(Pcm::ANALOGUE),
                     Role::Answering => negotiation.offering_pcm_on(
@@ -2325,8 +2449,9 @@ impl Modem {
             "V32" | "V32B" => Some(Modulation::V32bis),
             // Offered first, and V.32bis and V.22bis beside it below: a far end
             // without V.34 picks one of those, and the call goes ahead on it.
-            // V.90 rides on V.34's bit, with the PCM category beside it.
-            "V34" | "V90" => Some(Modulation::V34Duplex),
+            // V.90 rides on V.34's bit, with the PCM category beside it, and
+            // V.92 on V.90's: there is no separate V.8 code for it.
+            "V34" | "V90" | "V92" => Some(Modulation::V34Duplex),
             // V.8 does have a bit for V.21 (Table 4). But this modem's V.21
             // answers with V.25's tone, as a V.21 modem does, rather than
             // ANSam, and nothing after V.8 has been taught to skip it.
@@ -2424,10 +2549,22 @@ impl Modem {
             v8line::Status::Negotiating => {}
             v8line::Status::Agreed(modulation) => {
                 self.declared_lapm = negotiation.lapm();
+                if std::env::var_os("V92_EC_TRACE").is_some() {
+                    eprintln!(
+                        "V8 agreed: declared_lapm={} far_protocol={:?}",
+                        self.declared_lapm,
+                        negotiation.far_menu().map(|m| m.protocol)
+                    );
+                }
                 self.far_menu = negotiation.far_menu();
                 self.pcm_role = negotiation.pcm_role();
+                // The menu is agreed at the start of V.8's handover silence,
+                // not at its end: what follows has to be listening from the
+                // start and silent until the end (9.2.1.1.1/V.90 conditions
+                // the receiver during exactly those 75 ms).
+                let lead_in = negotiation.handover_remaining();
                 self.negotiation = None;
-                self.start_pump(Some(modulation));
+                self.start_pump_with(Some(modulation), lead_in);
             }
             // 8.1.1: a far end that sent the plain answering tone of V.25 does
             // not speak V.8, and the call goes on "in accordance with Annex
@@ -2453,12 +2590,29 @@ impl Modem {
     /// `chosen` is what V.8 agreed, where it ran. Without one the modulation
     /// is whichever `+MS` named.
     fn start_pump(&mut self, chosen: Option<Modulation>) {
+        self.start_pump_with(chosen, 0.0);
+    }
+
+    /// Build the pump with V.8's handover silence still to run.
+    fn start_pump_with(&mut self, chosen: Option<Modulation>, lead_in: f64) {
         let role = self.role;
         let carrier = match chosen {
             // V.8's joint menu named a V.90 server for this end to be the
             // analogue half of (9.1.1/V.90).
-            Some(Modulation::V34Duplex) if self.pcm_role == Some(PcmRole::Analogue) => "V90".to_owned(),
-            Some(Modulation::V34Duplex) if self.pcm_role == Some(PcmRole::Digital) => "V90S".to_owned(),
+            // What V.8 agreed is V.34's bit either way; which V.90-family
+            // modulation this end asked to be is what +MS said.
+            Some(Modulation::V34Duplex) if self.pcm_role == Some(PcmRole::Analogue) => {
+                match self.at.modulation.carrier.as_str() {
+                    "V92" => "V92".to_owned(),
+                    _ => "V90".to_owned(),
+                }
+            }
+            Some(Modulation::V34Duplex) if self.pcm_role == Some(PcmRole::Digital) => {
+                match self.at.modulation.carrier.as_str() {
+                    "V92" => "V92S".to_owned(),
+                    _ => "V90S".to_owned(),
+                }
+            }
             Some(Modulation::V34Duplex) => "V34".to_owned(),
             // V.8 cannot tell the two apart, so what it agreed does not
             // change which of them was asked for. Anything else -- a far end
@@ -2474,17 +2628,32 @@ impl Modem {
             // whose far end answered with a plain ANS on to V.32bis's own
             // start-up, and so does a V.8 that was turned off.
             _ => match self.at.modulation.carrier.as_str() {
-                "V34" | "V90" => "V32B".to_owned(),
+                "V34" | "V90" | "V92" => "V32B".to_owned(),
                 other => other.to_owned(),
             },
         };
         self.pump = Some(match carrier.as_str() {
             "V90" => {
-                let mut analogue = v90::startup::Analogue::new(self.fs);
+                let mut analogue = v90::startup::Analogue::new(self.fs, lead_in);
                 analogue.set_pinned(self.pinned_rate);
                 Pump::V90(Box::new(analogue))
             }
-            "V90S" => Pump::V90Server(Box::new(v90::server::Line::new(self.fs, v90::server::ours()))),
+            "V90S" => Pump::V90Server(Box::new(v90::server::Line::new(self.fs, v90::server::ours(), lead_in))),
+            "V92S" => {
+                let pcm_upstream = v92_pcm_upstream_wanted();
+                Pump::V90Server(Box::new(
+                    v90::server::Line::new(self.fs, v90::server::ours(), lead_in)
+                        .with_v92(v90::server::wish(pcm_upstream)),
+                ))
+            }
+            // The analogue half of V.92 is not built yet; a caller that asked
+            // for it is the analogue half of V.90, which is what its INFO0a
+            // then says.
+            "V92" => {
+                let mut analogue = v90::startup::Analogue::new(self.fs, lead_in);
+                analogue.set_pinned(self.pinned_rate);
+                Pump::V90(Box::new(analogue))
+            }
             "V34" => {
                 let role = match role {
                     Role::Calling => v34::phase2::Role::Call,
@@ -2561,6 +2730,9 @@ impl Modem {
 
     /// End the call and tell the terminal why.
     fn end_call(&mut self, why: Ended) {
+        if std::env::var_os("MODEM_TRACE").is_some() {
+            eprintln!("[modem] end_call: {why:?} in {:?}", self.state);
+        }
         self.drop_call();
         self.at.emit(match why {
             Ended::LocalRequest => ResultCode::Ok,

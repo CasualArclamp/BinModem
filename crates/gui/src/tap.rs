@@ -415,9 +415,14 @@ impl V34Tap {
                     self.fs,
                 )));
             }
-            // Half duplex and V.90 have their own start-ups, which this does
+            // Half duplex, V.90 and V.92 have their own start-ups, which this does
             // not follow.
-            Info::InfoH(_) | Info::Info0d(_) | Info::Info1aPcm(_) => {
+            Info::InfoH(_)
+            | Info::Info0d(_)
+            | Info::Info1aPcm(_)
+            | Info::Info1aPcmUp(_)
+            | Info::Info1aV34Up(_)
+            | Info::Mh(_) => {
                 self.notes.push(format!("the {who} modem sent an INFO sequence of another start-up"));
             }
         }

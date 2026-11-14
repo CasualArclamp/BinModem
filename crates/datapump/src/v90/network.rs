@@ -57,6 +57,13 @@ const DOWN_REACH: i64 = 20;
 /// seconds of line: long, since the upstream's band runs close to 4 kHz.
 const UP_REACH: f64 = 0.008;
 
+/// The upstream anti-alias filter's cutoff, in hertz: the gentle loop codec's.
+///
+/// A transcoding gateway's is sharper, and the V.92 upstream constellation
+/// lives right against that edge, which is why it is a knob on the route
+/// ([`Network::with_upstream_cutoff`]).
+pub const UP_CUTOFF: f64 = 3700.0;
+
 /// A slip's length, in codewords: one twenty-millisecond packet.
 pub const SLIP: usize = 160;
 
@@ -98,6 +105,12 @@ pub struct Network {
     /// delivers a modem's -9 to -12 dBm to the codec well inside its range;
     /// this is where that happens.
     up_gain: f64,
+    /// The upstream anti-alias filter's cutoff, in hertz.
+    up_cutoff: f64,
+    /// Where the codec's A/D takes its sample, as a fraction of a symbol
+    /// after the analogue modem's own sample instants (8.6.3, Table 22 bits
+    /// 18:33).
+    up_phase: f64,
     /// Downstream slips: how often, and whether audio is made up or lost;
     /// or one, at a given codeword. `slip_length` codewords go or come.
     slips: Option<(u64, bool)>,
@@ -226,6 +239,8 @@ impl Network {
             pad: 1.0,
             quantised: true,
             up_gain: 0.25,
+            up_cutoff: UP_CUTOFF,
+            up_phase: 0.0,
             slips: None,
             slip_at: None,
             slip_length: SLIP,
@@ -306,9 +321,43 @@ impl Network {
         self
     }
 
+    /// A digital pad on each direction, in decibels: a scale applied to the
+    /// codeword the route is carrying, and then requantised, since a pad in
+    /// the network is a digital one and its output is a codeword again.
+    pub fn with_pads(mut self, down_db: f64, up_db: f64) -> Self {
+        self.pad = 10f64.powf(-down_db / 20.0);
+        self.up_gain = 10f64.powf(-up_db / 20.0);
+        self
+    }
+
     /// The analogue modem's level at the codec, against its own.
     pub fn with_upstream_gain(mut self, gain: f64) -> Self {
         self.up_gain = gain;
+        self
+    }
+
+    /// The upstream anti-alias filter's cutoff, in hertz.
+    ///
+    /// The default, [`UP_CUTOFF`], is a gentle one. A transcoding gateway is
+    /// not: the upstream constellation of V.92 lives right against that edge,
+    /// which is why the sharp end of it is a knob (CD 7.6).
+    pub fn with_upstream_cutoff(mut self, hz: f64) -> Self {
+        self.up_cutoff = hz;
+        self
+    }
+
+    /// Where the codec's A/D takes its sample, as a fraction of a symbol
+    /// after the analogue modem's own sample instants.
+    ///
+    /// 8.6.3: "The digital modem is not capable of changing the sampling
+    /// phase of the central office A/D. Hence, it shall use signal Jp to
+    /// indicate its desire to the analogue modem to adjust its transmitter
+    /// phase from [0, 1) symbol" -- Table 22's bits 18:33. With the default
+    /// zero, an `fs` that is a multiple of 8000 and no skew, every A/D instant
+    /// lands on a line sample, so that fraction would always come out zero and
+    /// Su and Jp would never be exercised.
+    pub fn with_upstream_phase(mut self, fraction_of_t: f64) -> Self {
+        self.up_phase = fraction_of_t;
         self
     }
 
@@ -590,10 +639,10 @@ impl Network {
         let per = self.fs / ((1.0 + self.skew) * NETWORK_FS);
         let reach = UP_REACH * self.fs;
         let lag = DOWN_REACH as f64 + 2.0 + UP_REACH * NETWORK_FS;
-        let t = (self.up_next - lag).max(0.0) * per;
+        let t = (self.up_next - lag).max(0.0) * per + self.up_phase * per;
         self.up_next += 1.0;
         let centre = t.floor() as i64;
-        let cutoff = 3700.0 / self.fs;
+        let cutoff = self.up_cutoff / self.fs;
         let mut sum = 0.0;
         for j in centre - reach as i64..=centre + reach as i64 {
             let index = j as f64 - self.up_first;

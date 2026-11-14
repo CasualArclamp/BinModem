@@ -380,8 +380,9 @@ impl Interpreter {
             // 9600 and V32B at 14 400. A far end that will not hold the faster
             // rates is asked for the slower carrier and gets exactly it. V90 is
             // the analogue half of V.90 only: this modem dials a server, and
-            // is not one.
-            modulations: ["V90", "V34", "V32B", "V32", "V22B", "V21", "B103"]
+            // is not one. V92 is V.90 with V.92's phase 2 in it, and with PCM
+            // upstream when the far end offers it (V.92 9.3).
+            modulations: ["V92", "V90", "V34", "V32B", "V32", "V22B", "V21", "B103"]
                 .iter()
                 .map(|s| (*s).to_owned())
                 .collect(),

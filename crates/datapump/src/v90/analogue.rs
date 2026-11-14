@@ -3348,7 +3348,7 @@ mod tests {
     /// start-up it hands its level to.
     fn first_phase_2(line: &[f32], start: f64) -> crate::v90::startup::Analogue {
         const FS: f64 = 16_000.0;
-        let mut modem = crate::v90::startup::Analogue::new(FS);
+        let mut modem = crate::v90::startup::Analogue::new(FS, 0.0);
         let from = (start * FS).round() as usize;
         for &x in &line[from..(from + (20.0 * FS) as usize).min(line.len())] {
             modem.step(f64::from(x));

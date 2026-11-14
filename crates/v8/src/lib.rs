@@ -28,6 +28,7 @@
 #![forbid(unsafe_code)]
 
 pub mod ansam;
+pub mod quick;
 
 pub use ansam::AnswerTone;
 
@@ -662,6 +663,10 @@ pub fn sequence(signal: Signal, menu: &Menu) -> Vec<u8> {
 /// mistaken for one.
 pub const CJ: [u8; 3] = [0, 0, 0];
 
+/// CJ's last octet as a far end whose carrier stops inside it leaves it: all
+/// seven low bits zero and the last data bit read as mark. See [`Decoder::feed`].
+pub const DAMAGED_ZERO: u8 = 0x80;
+
 /// Reads V.8 sequences out of a stream of framed octets.
 ///
 /// Fed whatever the asynchronous framer recovers. It finds a synchronisation
@@ -697,7 +702,16 @@ impl Decoder {
     pub fn feed(&mut self, octet: u8) -> Option<Heard> {
         // CJ first, and regardless of what is being gathered: it is three
         // zeros wherever it lands, and it means the conversation is over.
-        self.zeros = if octet == 0 { self.zeros + 1 } else { 0 };
+        //
+        // The third one is allowed to arrive as 0x80. A shipping V.92 engine
+        // stops its V.21 carrier half a bit into the last octet of CJ and
+        // starts the next signal straight away, and the discriminator reads
+        // that last data bit as mark: a received 00 00 80 is 00 00 00 with
+        // nothing else wrong with it. Only the *last* octet of the run gets
+        // this, because the same misreading of a lone octet turns a stretch of
+        // noise into a CI, and a CI is what short Phase 1 is made of.
+        let damaged_zero = octet == DAMAGED_ZERO && self.zeros + 1 == CJ.len();
+        self.zeros = if octet == 0 || damaged_zero { self.zeros + 1 } else { 0 };
         if self.zeros >= CJ.len() {
             self.zeros = 0;
             // A CI sync is also a zero octet, so a run of them is only a CJ if
@@ -792,6 +806,22 @@ impl Decoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 3.5: CJ is three zero octets, and a far end that stops its carrier
+    /// inside the last one leaves it as 0x80 on the line. The call has to end
+    /// there, and only there: one such octet out of nowhere is not a CJ.
+    #[test]
+    fn a_cj_whose_last_octet_lost_its_top_data_bit_still_counts() {
+        let mut d = Decoder::new();
+        assert!(d.feed(0).is_none());
+        assert!(d.feed(0).is_none());
+        assert_eq!(d.feed(DAMAGED_ZERO), Some(Heard::Cj), "a torn last octet lost the CJ");
+
+        let mut d = Decoder::new();
+        assert!(d.feed(DAMAGED_ZERO).is_none(), "one damaged octet is not a CJ");
+        assert!(d.feed(DAMAGED_ZERO).is_none());
+        assert!(d.feed(DAMAGED_ZERO).is_none());
+    }
 
     fn data_menu(list: &[Modulation]) -> Menu {
         Menu {

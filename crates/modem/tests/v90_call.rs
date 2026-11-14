@@ -58,7 +58,7 @@ impl Server {
                 v8line::Status::Agreed(_) => {
                     assert_eq!(v8.pcm_role(), Some(PcmRole::Digital), "V.8 did not settle on V.90");
                     self.v8 = None;
-                    self.startup = Some(Digital::new(Self::info0d()));
+                    self.startup = Some(Digital::new(Self::info0d(), 0.0));
                 }
                 other => panic!("V.8 came to {other:?}"),
             }

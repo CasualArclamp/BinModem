@@ -167,8 +167,8 @@ impl FullCall {
     fn new(net: Network, server: Info0d) -> Self {
         Self {
             net,
-            analogue: datapump::v90::startup::Analogue::new(FS),
-            digital: datapump::v90::startup::Digital::new(server),
+            analogue: datapump::v90::startup::Analogue::new(FS, 0.0),
+            digital: datapump::v90::startup::Digital::new(server, 0.0),
             up: Vec::new(),
             ticks: 0,
         }
@@ -629,7 +629,7 @@ fn a_server_that_sends_jd_at_the_last_moment_hears_s_in_time() {
     for delay in [0.3, 0.6] {
         let net = Network::new(Law::Mu, FS).with_delay(delay, FS).with_noise(1e-5);
         let mut call = FullCall::new(net, server());
-        call.digital = datapump::v90::startup::Digital::new(server()).with_habits(Habits::LIVE_SERVER);
+        call.digital = datapump::v90::startup::Digital::new(server(), 0.0).with_habits(Habits::LIVE_SERVER);
         let ok = call.run(40.0);
         println!("{delay} s each way: {:?}, {} retrains, {:?}", call.analogue.status(), call.analogue.retrains(), call.analogue.last_failure());
         assert!(ok, "{delay} s each way: {} / {}", call.analogue.phase(), call.digital.phase());
@@ -647,7 +647,7 @@ fn a_cut_in_the_training_stretch_is_trained_past() {
     let net = || Network::new(Law::Mu, FS).with_delay(0.3, FS).with_noise(1e-5);
     // Where TRN1d begins, in the network's own time.
     let mut call = FullCall::new(net(), server());
-    call.digital = datapump::v90::startup::Digital::new(server()).with_habits(Habits::LIVE_SERVER);
+    call.digital = datapump::v90::startup::Digital::new(server(), 0.0).with_habits(Habits::LIVE_SERVER);
     while call.digital.phase() != "V.90 phase 3: Jd" {
         call.run_until_seconds((call.ticks + 8) as f64 / 8000.0);
     }
@@ -655,7 +655,7 @@ fn a_cut_in_the_training_stretch_is_trained_past() {
     let cut = call.ticks as f64 / 8000.0 + 0.054 + 0.1;
     for inserted in [false, true] {
         let mut call = FullCall::new(net().with_slip_at(cut, inserted), server());
-        call.digital = datapump::v90::startup::Digital::new(server()).with_habits(Habits::LIVE_SERVER);
+        call.digital = datapump::v90::startup::Digital::new(server(), 0.0).with_habits(Habits::LIVE_SERVER);
         let ok = call.run(40.0);
         println!("inserted {inserted}: {:?}, {} retrains, {:?}", call.analogue.status(), call.analogue.retrains(), call.analogue.last_failure());
         assert_eq!(call.net.slips(), 1);

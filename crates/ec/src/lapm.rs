@@ -237,6 +237,8 @@ pub struct Lapm {
     /// restarts: what is wanted is how long the acknowledgement really took,
     /// across however many attempts it took to get one.
     awaiting_ms: Option<u32>,
+    /// Whether the error correction procedure is suspended (V.42 7.10.2).
+    suspended: bool,
 }
 
 /// The most T401 will be allowed to grow to.
@@ -268,7 +270,46 @@ impl Lapm {
             timer: None,
             retries: 0,
             awaiting_ms: None,
+            suspended: false,
         }
+    }
+
+    /// Freeze the timers, without touching anything else (V.42 7.10.2).
+    ///
+    /// "Upon receipt of an L-SUSPEND request primitive during the protocol
+    /// establishment phase or after an error correction connection has been
+    /// established, the error control function shall freeze timer T401 and, if
+    /// implemented, timers T402 and T403." T402 and T403 are not implemented
+    /// here, which the module documentation says and which leaves T401 as the
+    /// whole of it.
+    ///
+    /// Freezing rather than stopping: the timer keeps whatever it had left, so
+    /// a link that comes back from a modem-on-hold has exactly as long to hear
+    /// its acknowledgement as it had before the line went away. Stopping it
+    /// would lose a SABME or an I frame that was already outstanding, because
+    /// nothing else in 8.5.3 ever asks again.
+    ///
+    /// [`Self::t401_ms`]'s own measurement goes with it. `stop_timer` sizes
+    /// T401 from how long an acknowledgement really took, and an
+    /// acknowledgement with a hold in the middle of it did not take that long
+    /// -- it took the line's round trip plus however many minutes the call was
+    /// somewhere else, and a T401 grown to fit that would never fire again.
+    pub fn suspend(&mut self) {
+        self.suspended = true;
+    }
+
+    /// Unfreeze what [`Self::suspend`] froze (V.42 7.11).
+    ///
+    /// "Upon receipt of an L-RESUME request primitive from its control
+    /// function, the error control function shall unfreeze previously frozen
+    /// timers."
+    pub fn resume(&mut self) {
+        self.suspended = false;
+    }
+
+    /// Whether the timers are frozen.
+    pub fn suspended(&self) -> bool {
+        self.suspended
     }
 
     /// Change the retransmission limit before anything has been established.
@@ -372,6 +413,12 @@ impl Lapm {
 
     /// Advance timers by `dt_ms` (V.42 8.3.2.2, 8.7.3, 8.4.8).
     pub fn tick(&mut self, dt_ms: u32) {
+        // 7.10.2's freeze, and the only thing suspension does here. Time is
+        // the caller's to supply, so the way to stop a timer is to stop giving
+        // it any.
+        if self.suspended {
+            return;
+        }
         if let Some(waited) = self.awaiting_ms {
             self.awaiting_ms = Some(waited.saturating_add(dt_ms));
         }
