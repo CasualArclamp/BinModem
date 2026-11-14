@@ -250,6 +250,9 @@ pub struct Exchange {
     hold_until: Option<u64>,
     /// When E may go out, after holding SUVd' (see [`E_HOLD`]).
     e_hold_until: Option<u64>,
+    /// How long that hold is, in the owner's samples: [`E_HOLD`] unless the
+    /// owner says otherwise ([`Exchange::hold_before_e`]).
+    e_hold: u64,
     /// The kind in flight and the acknowledge bit it went out with.
     sending: Option<(SequenceKind, bool)>,
     /// The peer's last SUV asked for or granted a silent period.
@@ -284,6 +287,7 @@ impl Exchange {
             wait_for_cp: false,
             hold_until: None,
             e_hold_until: None,
+            e_hold: E_HOLD,
             sending: None,
             peer_silence: false,
             peer_asked_silence: false,
@@ -382,6 +386,17 @@ impl Exchange {
         self.repeat_gap = gap;
     }
 
+    /// How long SUVs are held on the line after E has become due, in the
+    /// owner's samples, in place of [`E_HOLD`].
+    ///
+    /// [`E_HOLD`] is the digital modem's habit, and its reasons are with the
+    /// constant. The analogue modem has no such room: 9.6.2.1.4 has it
+    /// "complete sending the current CPu sequence and transmit E2u", so it
+    /// asks for zero and E2u follows the sequence in flight.
+    pub fn hold_before_e(&mut self, samples: u64) {
+        self.e_hold = samples;
+    }
+
     // -- what we send --------------------------------------------------------
 
     /// What should go next, asked at a sequence boundary, `now` being that
@@ -396,13 +411,11 @@ impl Exchange {
             return SequenceKind::B1;
         }
         if self.sent_ack && self.peer_acked {
-            // Hold SUVd' a little longer before Ed (see [`E_HOLD`]).
-            match self.e_hold_until {
-                None => self.e_hold_until = Some(now.saturating_add(E_HOLD)),
-                Some(until) if now >= until => return SequenceKind::E,
-                Some(_) => {}
-            }
-            return SequenceKind::Suv;
+            // Hold SUVd' a little longer before Ed (see [`E_HOLD`]). The hold
+            // is armed the first time E becomes due, and an owner that asked
+            // for none gets E at that same boundary.
+            let until = *self.e_hold_until.get_or_insert(now.saturating_add(self.e_hold));
+            return if now >= until { SequenceKind::E } else { SequenceKind::Suv };
         }
         if self.cp_due(now) {
             return SequenceKind::Cp;
@@ -1329,5 +1342,36 @@ mod tests {
         exchange.sequence_ended(SequenceKind::E, 36);
         assert!(exchange.finished());
         assert_eq!(exchange.next_sequence(36), SequenceKind::B1);
+    }
+
+    /// 9.6.2.1.4: once an acknowledged sequence has been both sent and
+    /// received the analogue modem is to "complete sending the current CPu
+    /// sequence and transmit E2u", so an owner that asks for no hold gets E at
+    /// the boundary where it first falls due, and one that asks for nothing
+    /// gets [`E_HOLD`] of SUV first.
+    #[test]
+    fn an_owner_that_asks_for_no_hold_gets_e_where_it_falls_due() {
+        for hold in [Some(0), None] {
+            let mut exchange = Exchange::new(Context::Training, 0.0, FS);
+            if let Some(hold) = hold {
+                exchange.hold_before_e(hold);
+            }
+            // SUV, the peer's SUV, our one CP, and the peer's CP' during it.
+            assert!(!exchange.sequence_started(SequenceKind::Suv));
+            exchange.peer_suv(PeerSuv::default(), 10);
+            exchange.sequence_ended(SequenceKind::Suv, 36);
+            assert_eq!(exchange.next_sequence(36), SequenceKind::Cp);
+            assert!(!exchange.sequence_started(SequenceKind::Cp));
+            exchange.peer_cp(PeerCp { ack: true }, 150);
+            exchange.sequence_ended(SequenceKind::Cp, 200);
+            // Nothing acknowledged has been *sent* yet, so one SUV' goes.
+            assert_eq!(exchange.next_sequence(200), SequenceKind::Suv);
+            assert!(exchange.sequence_started(SequenceKind::Suv));
+            exchange.sequence_ended(SequenceKind::Suv, 236);
+            let wanted = if hold == Some(0) { SequenceKind::E } else { SequenceKind::Suv };
+            assert_eq!(exchange.next_sequence(236), wanted, "with a hold of {hold:?}");
+            // And the default hold lets E go once it has run out.
+            assert_eq!(exchange.next_sequence(236 + E_HOLD), SequenceKind::E);
+        }
     }
 }

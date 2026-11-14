@@ -615,7 +615,9 @@ pub struct Source {
 }
 
 impl Source {
-    fn new(settings: &Settings) -> Self {
+    /// Crate-visible so that the analogue modem's tests can be played the
+    /// digital modem's own downstream, signal for signal, from a script.
+    pub(crate) fn new(settings: &Settings) -> Self {
         Self {
             law: settings.law,
             uinfo: settings.uinfo,
@@ -643,6 +645,28 @@ impl Source {
     #[must_use]
     pub fn out(&self) -> Out {
         self.out
+    }
+
+    /// The Jp the next repetition carries (Table 22): epsilon, and the size of
+    /// the upstream training constellation in bit 48.
+    pub(crate) fn set_jp(&mut self, jp: &Jp) {
+        self.jp = jp.to_bits();
+    }
+
+    /// The DIL the analogue modem's Ja asked for (8.6.1): its symbols, and
+    /// where each DIL-segment ends, which is where the sequence may be cut
+    /// (V.90 8.4.1).
+    pub(crate) fn set_dil(&mut self, descriptor: &Descriptor) {
+        self.dil = descriptor.symbols().collect();
+        let mut end = 0;
+        self.dil_ends = descriptor
+            .ucodes
+            .iter()
+            .map(|&u| {
+                end += descriptor.segment_length(u);
+                end
+            })
+            .collect();
     }
 
     /// Whether Phase 4's TRN2d has begun.
@@ -1677,7 +1701,7 @@ impl Modem {
             // constellation this end was not reading left Phase 4 waiting for
             // an SUVu' that could not arrive.
             let jp = Jp { epsilon, eight_in_training: false, eight_in_renegotiation: false };
-            self.source.jp = jp.to_bits();
+            self.source.set_jp(&jp);
             // "shall finish the current Jd and then send Jp" (9.5.1.1.8). The
             // S-bar-u that answers Jp is (24 + epsilon)T (9.5.2.1.8), so the
             // step the next reversal takes is exactly what was just asked for.
@@ -2708,16 +2732,7 @@ impl Modem {
 
     fn heard_ja(&mut self, descriptor: Descriptor) {
         // 9.5.1.1.3: "may wait for up to 500 ms and shall then transmit Sd".
-        self.source.dil = descriptor.symbols().collect();
-        let mut end = 0;
-        self.source.dil_ends = descriptor
-            .ucodes
-            .iter()
-            .map(|&u| {
-                end += descriptor.segment_length(u);
-                end
-            })
-            .collect();
+        self.source.set_dil(&descriptor);
         self.note(format!(
             "V.92: Ja read, {} DIL segments, upstream rates {:05x}",
             descriptor.ucodes.len(),

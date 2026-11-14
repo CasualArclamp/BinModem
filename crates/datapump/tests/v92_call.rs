@@ -8,8 +8,10 @@
 //! S-bar-d, TRN1d and Jd, measures Su, answers with Jp, reads CPt, sends Ri, Ri
 //! gone round and reaches Phase 4.
 //!
-//! Phase 4's exchange and the PCM upstream carrying bytes are V92-35/V92-39/
-//! V92-41: what is here stops at E1u on one side and TRN2d on the other.
+//! Phase 4's exchange between the two of them and the PCM upstream carrying
+//! bytes are V92-41: what is here stops where both ends have reached Phase 4,
+//! TRN2u going up on one side and TRN2d coming down on the other. Each end's
+//! own Phase 4 is tested beside it, against a scripted far end.
 
 use datapump::v90::sequences::{Cp, Descriptor};
 use datapump::v90::ucode::Law;
@@ -271,7 +273,7 @@ fn phase_3_completes_and_the_digital_end_reaches_phase_4() {
     let reached = call.run_until(
         |call| {
             call.digital.status() == digital::Status::Phase4
-                && call.analogue.status() == analogue::Status::Phase3Done
+                && call.analogue.status() == analogue::Status::Phase4
         },
         DEFAULT_STEPS,
     );
@@ -311,7 +313,7 @@ fn phase_3_completes_with_md() {
     let reached = call.run_until(
         |call| {
             call.digital.status() == digital::Status::Phase4
-                && call.analogue.status() == analogue::Status::Phase3Done
+                && call.analogue.status() == analogue::Status::Phase4
         },
         DEFAULT_STEPS,
     );
@@ -387,7 +389,7 @@ fn the_call_survives_a_far_end_that_is_a_fraction_of_a_symbol_out() {
         let reached = call.run_until(
             |call| {
                 call.digital.status() == digital::Status::Phase4
-                    && call.analogue.status() == analogue::Status::Phase3Done
+                    && call.analogue.status() == analogue::Status::Phase4
             },
             DEFAULT_STEPS,
         );
@@ -436,7 +438,7 @@ fn the_refit_follows_the_phase_step_the_s_bar_u_left() {
     let reached = call.run_until(
         |call| {
             call.digital.status() == digital::Status::Phase4
-                && call.analogue.status() == analogue::Status::Phase3Done
+                && call.analogue.status() == analogue::Status::Phase4
         },
         DEFAULT_STEPS,
     );

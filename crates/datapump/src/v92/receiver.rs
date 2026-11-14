@@ -556,6 +556,17 @@ pub enum Slicer {
     EightPoint,
     /// The levels CPd's constellation set holds, in ascending order.
     Levels(Vec<f64>),
+    /// Nothing is decided here: the equaliser's output is handed over as it
+    /// is, for a reader that slices it itself.
+    ///
+    /// The analogue modem's Phase 4 downstream is this. What arrives is V.90
+    /// 5.4's encoder on six constellations, one for each data frame interval
+    /// (V.90 8.6.5), and which of the six a symbol belongs to is the reader's
+    /// to know, not this receiver's. With no decisions there is nothing for
+    /// the level anchor to measure against either, so the gain stays where
+    /// training left it -- a two-point anchor held against a PCM constellation
+    /// would follow the data instead of the line.
+    Unsliced,
 }
 
 impl Slicer {
@@ -579,6 +590,7 @@ impl Slicer {
                 nearest(&set, value)
             }
             Self::Levels(levels) => nearest(levels, value),
+            Self::Unsliced => None,
         }
     }
 
@@ -596,6 +608,8 @@ impl Slicer {
                 }
                 if closest.is_finite() { closest / 2.0 } else { 0.5 }
             }
+            // No decisions, so no span to hold their errors against.
+            Self::Unsliced => 1.0,
         }
     }
 }
@@ -987,6 +1001,15 @@ impl Receiver {
         self.gain = 1.0;
     }
 
+    /// Stop deciding and hand the equaliser's output over as it is
+    /// ([`Slicer::Unsliced`]), keeping the equaliser and the gain training
+    /// left: the analogue modem's reader of the Phase 4 downstream slices
+    /// each symbol against its own interval's constellation (V.90 8.6.5).
+    pub fn hand_over_unsliced(&mut self) {
+        self.slicer = Slicer::Unsliced;
+        self.decided.clear();
+    }
+
     /// Recondition the slicer for B1u (9.6.1.1.6), and keep the equaliser.
     ///
     /// 6.4.2 puts the equalisation at the transmitter: the analogue modem runs
@@ -1355,7 +1378,11 @@ impl Receiver {
         // is over (9.6.1.1.4) -- into ones, and the call never left Phase 3.
         let width = self.forward.len();
         let power: f64 = self.history.iter().rev().take(width).map(|&x| x * x).sum::<f64>() / width as f64;
-        if !(power > AUDIBLE) {
+        // That is a guard on the feedback loop, so it is not applied when
+        // nothing is decided ([`Slicer::Unsliced`]): there is no loop, and a
+        // PCM constellation's quietest points are real symbols that sit below
+        // the level a silent line is told from.
+        if !(power > AUDIBLE) && self.slicer != Slicer::Unsliced {
             self.decided.clear();
             let index = self.origin.map_or(self.count, |origin| self.count.saturating_sub(origin));
             self.events.push_back(Heard::Symbol(Symbol { index, raw: self.count, value: 0.0, decided: None }));
