@@ -107,7 +107,9 @@ fn upstream(noise: f64, trellis: Trellis) -> (Option<u8>, usize, usize, f64) {
             bit
         });
         line.rotate_right(1);
-        line[0] = symbol.v;
+        // What goes on the wire is G x v (8.8.3), which the decoder divides
+        // back by G; `v` alone is the pre-gain level and not a line signal.
+        line[0] = symbol.out;
         let mut seen = 0.0;
         for (k, &tap) in taps.iter().enumerate() {
             seen += tap * line[k];
@@ -153,7 +155,6 @@ fn upstream(noise: f64, trellis: Trellis) -> (Option<u8>, usize, usize, f64) {
 /// The gate itself: at a codec-like noise level, the designed chain carries the
 /// upper half of the ladder with no errors at all.
 #[test]
-#[ignore = "half the bits wrong at sixteen points since the design's ridge and scale changed (c701e49); PCM upstream is unfinished and off by default"]
 fn the_designed_chain_carries_the_upper_ladder_over_a_loop() {
     // Noise of 1e-5 is a signal-to-noise ratio of 50 dB at unit power, which
     // is a good local loop.
