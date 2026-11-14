@@ -6,10 +6,10 @@ license.workspace    = true
 
 [dependencies]
 dsp = { path = "../dsp" }
+ec  = { path = "../ec" }
 v8  = { path = "../v8" }
 
 [dev-dependencies]
-ec = { path = "../ec" }
 line = { path = "../line" }
 
 [lints]

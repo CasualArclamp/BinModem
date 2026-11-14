@@ -14,6 +14,7 @@ pub mod v29;
 pub mod v32;
 pub mod v34;
 pub mod v8;
+pub mod v8bis;
 pub mod v90;
 pub mod v92;
 
