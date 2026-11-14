@@ -397,9 +397,11 @@ pub struct Station {
     capabilities: Message,
     on_mr: OnMr,
     on_cr: OnCr,
-    /// The signal an answering station opens with, and how many times it has.
+    /// The signal an answering station opens with, how many times it has,
+    /// and how many times it will.
     opening: Option<Signal>,
     openings: u32,
+    attempts: u32,
     ear: Ear,
     rx: v21::Receiver,
     decoder: Decoder,
@@ -438,6 +440,7 @@ impl Station {
             on_cr: OnCr::Crd,
             opening: None,
             openings: 0,
+            attempts: 2,
             ear: Ear::new(fs),
             rx: v21::Receiver::on(hears, fs),
             decoder: Decoder::new(Fcs::Bits16),
@@ -472,10 +475,11 @@ impl Station {
         Self::new(Side::Responding, capabilities, fs)
     }
 
-    /// Send the opening request once and not twice: for a modem, which has
-    /// an answer tone to get on with if nothing comes back.
-    pub fn once(mut self) -> Self {
-        self.openings = 1;
+    /// How many times to send the opening request before giving the line
+    /// up, each with three seconds to be answered in (10.2.2: "may retransmit
+    /// MRe or CRe or clear down the line"). Twice unless told.
+    pub fn attempts(mut self, attempts: u32) -> Self {
+        self.attempts = attempts.max(1);
         self
     }
 
@@ -626,10 +630,10 @@ impl Station {
                 self.enter(if signal == Signal::MRe { State::SentMr } else { State::SentCr });
             }
             // "the answering station may retransmit MRe or CRe or clear down
-            // the line" (10.2.2): once more, and then the line is given to
-            // whatever comes after V.8 bis.
+            // the line" (10.2.2): as many times as it was told to, and then
+            // the line is given to whatever comes after V.8 bis.
             State::SentMr | State::SentCr if self.opening.is_some() && seconds >= OPENING_PATIENCE && !self.mouth.busy() => {
-                if self.openings >= 2 {
+                if self.openings >= self.attempts {
                     self.fail("nothing at the far end answered");
                 } else {
                     self.enter(State::Opening);
@@ -1068,21 +1072,50 @@ mod tests {
     }
 
     /// 10.2.2: an answering station that hears nothing sends its request
-    /// once more and then lets the line go, so that an answer tone can
-    /// follow for a caller with no V.8 bis.
+    /// again, as many times as it was told to, and then lets the line go so
+    /// that an answer tone can follow for a caller with no V.8 bis.
     #[test]
     fn a_silent_far_end_is_given_up_on() {
-        let mut a = Station::answering(server(), Signal::CRe, FS);
-        let mut sent = Vec::new();
-        let mut seconds = 0.0;
-        while a.status() == Status::Running && seconds < 20.0 {
-            a.step(0.0);
-            sent.extend(a.take_notes());
-            seconds += 1.0 / FS;
+        for (attempts, about) in [(1, 3.4), (2, 6.4), (3, 9.4)] {
+            let mut a = Station::answering(server(), Signal::CRe, FS).attempts(attempts);
+            let mut sent = Vec::new();
+            let mut seconds = 0.0;
+            while a.status() == Status::Running && seconds < 20.0 {
+                a.step(0.0);
+                sent.extend(a.take_notes());
+                seconds += 1.0 / FS;
+            }
+            assert_eq!(a.status(), Status::Failed("nothing at the far end answered"));
+            assert_eq!(sent.iter().filter(|s| *s == "sent CRe").count(), attempts as usize, "{sent:?}");
+            // The first after 0.4 s of quiet, and three seconds from each
+            // request to the next or to giving up.
+            assert!((seconds - about).abs() < 0.3, "{attempts} attempts gave up after {seconds:.1} s");
         }
-        assert_eq!(a.status(), Status::Failed("nothing at the far end answered"));
-        assert_eq!(sent.iter().filter(|s| *s == "sent CRe").count(), 2, "{sent:?}");
-        assert!((6.0..8.5).contains(&seconds), "gave up after {seconds:.1} s");
+    }
+
+    /// The far end answers the third request and not the first two: a
+    /// caller that was not on the line yet, say. The transaction is whole.
+    #[test]
+    fn a_request_answered_on_the_third_try_is_answered() {
+        let mut a = Station::answering(server(), Signal::CRe, FS).attempts(3);
+        let mut b = Station::calling(caller(), FS);
+        let (mut said_a, mut said_b) = (Vec::new(), Vec::new());
+        let mut to_a = 0.0;
+        for n in 0..(16.0 * FS) as usize {
+            let to_b = a.step(to_a);
+            // The caller's end of the line is not connected for 5 s, which
+            // is the first two requests, at 0.4 and 3.4 s; the third is at 6.4.
+            let joined = n as f64 / FS > 5.0;
+            to_a = if joined { b.step(to_b) } else { 0.0 };
+            said_a.extend(a.take_notes());
+            said_b.extend(b.take_notes());
+            if a.status() != Status::Running && b.status() != Status::Running {
+                break;
+            }
+        }
+        assert_eq!(said_a.iter().filter(|s| *s == "sent CRe").count(), 3, "{said_a:?}");
+        assert_eq!(selection(&a).modulation(), Some(Modulation::V92), "{said_a:?} {said_b:?}");
+        assert_eq!(selection(&a).ms, selection(&b).ms);
     }
 
     /// Noise on the line, 25 dB under the signals, at twenty different

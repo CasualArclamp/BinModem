@@ -2135,17 +2135,18 @@ fn a_caller_with_v8_bis_still_reaches_an_answerer_without_it() {
 #[test]
 fn an_answerer_with_v8_bis_still_takes_a_caller_without_it() {
     // 10.2.2: nothing answers CRe, and the answering end gets on with its
-    // answer tone. The caller has waited through one request and three
-    // seconds of quiet, and V.8 goes ahead from there.
+    // answer tone. The caller has waited through three requests, three
+    // seconds of quiet after each, and V.8 goes ahead from there.
     let mut p = Pair::new();
     Pair::type_at(&mut p.host, "AT+A8E=,,,1");
     p.run(0.05);
     Pair::type_at(&mut p.host, "ATA");
     Pair::type_at(&mut p.caller, "ATD5551234");
-    p.run(18.0);
+    p.run(26.0);
     let (_, host) = line_notes(&mut p);
     assert_eq!((p.caller.state(), p.host.state()), (State::Data, State::Data), "{host:?}");
     assert!(host.iter().any(|n| n.contains("nothing at the far end answered")), "{host:?}");
+    assert_eq!(host.iter().filter(|n| n.ends_with("sent CRe")).count(), 3, "{host:?}");
 }
 
 #[test]

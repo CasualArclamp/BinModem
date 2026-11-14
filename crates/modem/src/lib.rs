@@ -2427,7 +2427,9 @@ impl Modem {
             let ours = self.bis_capabilities();
             self.bis = Some(Box::new(match role {
                 Role::Calling => v8bis::Station::calling(ours, self.fs).replying(v8bis::OnMr::Ms, v8bis::OnCr::Crd),
-                Role::Answering => v8bis::Station::answering(ours, v8::bis::Signal::CRe, self.fs).once(),
+                // Three times, three seconds apart (10.2.2): a caller is not
+                // always on the line the moment a call is answered.
+                Role::Answering => v8bis::Station::answering(ours, v8::bis::Signal::CRe, self.fs).attempts(3),
             }));
             // The answering end's V.8 waits for the transaction: ANSam is
             // what follows the ACK (9.9.1). The calling end's starts now and
