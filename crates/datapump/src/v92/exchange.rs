@@ -675,6 +675,12 @@ mod tests {
             if side == Side::Digital {
                 exchange.repeat_between_suvs(REPEAT_GAP_IN_TESTS);
             }
+            // The figures draw Ed and E2u straight after the acknowledged
+            // sequence, which is 9.6.1.1.4 and 9.6.2.1.4 as they are written,
+            // so a scripted side holds nothing first. [`E_HOLD`] is this
+            // crate's digital modem's habit, and the test that is about it
+            // asks for it by name.
+            exchange.hold_before_e(0);
             Self {
                 side,
                 exchange,
@@ -822,7 +828,6 @@ mod tests {
     /// 24 symbols, the CPs at 96, and 0.75 ms each way, which is what puts the
     /// crossings where the figure draws them.
     #[test]
-    #[ignore = "written for Ed straight after the acknowledgement; 9ece7eb holds SUVd' before Ed for real modems and these expectations were not reworked"]
     fn figure_12_crossing_cps_end_in_ed_and_e2u() {
         let rtd = 12.0 / FS;
         let digital = Scripted::new(Side::Digital, Context::Training, rtd, 36, 96, 0);
@@ -836,6 +841,37 @@ mod tests {
         );
     }
 
+    /// The two ends of this crate are not alike: the analogue modem sends E2u
+    /// where 9.6.2.1.4 puts it, and the digital modem holds SUVd' for
+    /// [`E_HOLD`] before its Ed. The exchange still ends, and in the order
+    /// Figure 12 draws: E2u is in 9.6.1.1.4's list beside an acknowledged
+    /// sequence, so the side that is still holding has lost nothing by the
+    /// other's having stopped sending SUVu', and its Ed goes when the hold is
+    /// up.
+    #[test]
+    fn a_side_that_holds_before_e_ends_against_one_that_does_not() {
+        let rtd = 12.0 / FS;
+        let mut digital = Scripted::new(Side::Digital, Context::Training, rtd, 36, 96, 0);
+        digital.exchange.hold_before_e(E_HOLD);
+        let analogue = Scripted::new(Side::Analogue, Context::Training, rtd, 24, 96, 12);
+        let mut line = Line::new(digital, analogue, 6);
+        line.run(8000);
+        // The analogue side is Figure 12's to the sequence.
+        assert_eq!(
+            line.trace(1),
+            ["SUVu", "SUVu", "CPu", "SUVu", "SUVu'", "SUVu'", "E2u"]
+        );
+        // The digital side's is too, with a longer run of SUVd' in it.
+        let digital = runs(&line.trace(0));
+        let labels: Vec<&str> = digital.iter().map(|(label, _)| label.as_str()).collect();
+        assert_eq!(labels, ["SUVd", "CPd", "SUVd'", "Ed"]);
+        // Figure 12's two SUVd' before the hold began, the hold, and the
+        // rest of the SUVd' in flight when it ran out.
+        let held = digital[2].1 as u64 * 36;
+        assert!((E_HOLD..=E_HOLD + 3 * 36).contains(&held), "SUVd' was held for {held} symbols");
+        assert!(line.ends[0].exchange.finished() && line.ends[1].exchange.finished());
+    }
+
     /// Figure 13/V.92, "final training where CPu is sent earlier than CPd":
     /// the analogue modem's SUVu carries Table 27 bit 26, so the digital
     /// modem holds its CPd back, the CPu arrives first, and the single CPd is
@@ -846,7 +882,6 @@ mod tests {
     /// while its SUVd repeat -- and it is scripted here as `cp_ready`, the
     /// same drawing slack P4P reads into Figure 14's late switch to SUVu'.
     #[test]
-    #[ignore = "written for Ed straight after the acknowledgement; 9ece7eb holds SUVd' before Ed for real modems and these expectations were not reworked"]
     fn figure_13_a_cpu_heard_first_makes_the_single_cpd_a_cpd_prime() {
         let rtd = 12.0 / FS;
         let mut digital = Scripted::new(Side::Digital, Context::Training, rtd, 24, 48, 0);
@@ -878,7 +913,6 @@ mod tests {
     /// unacknowledged sequences come out 68 and 76 rather than 1 and 4. The
     /// instant the repeat starts is asserted against the clause below.
     #[test]
-    #[ignore = "written for Ed straight after the acknowledgement; 9ece7eb holds SUVd' before Ed for real modems and these expectations were not reworked"]
     fn figure_14_a_lost_cpu_is_repeated_after_100_ms_and_a_round_trip() {
         let rtd = 48.0 / FS;
         let digital = Scripted::new(Side::Digital, Context::Training, rtd, 12, 36, 0);
@@ -1034,9 +1068,10 @@ mod tests {
     /// 9.6.1.1.4 lists E2u beside an acknowledged sequence: "it has received a
     /// CPu or SUVu sequence with the acknowledgement bit set or E2u".
     #[test]
-    #[ignore = "written for Ed straight after the acknowledgement; 9ece7eb holds SUVd' before Ed for real modems and these expectations were not reworked"]
     fn an_e_counts_as_an_acknowledgement() {
         let mut exchange = Exchange::new(Context::Training, 0.0, FS);
+        // As the clause is written: E at the boundary where it falls due.
+        exchange.hold_before_e(0);
         exchange.peer_suv(PeerSuv::default(), 0);
         exchange.sequence_started(SequenceKind::Suv);
         exchange.sequence_ended(SequenceKind::Suv, 24);
@@ -1237,7 +1272,6 @@ mod tests {
     /// then sends nothing cannot hold us past one repeat window
     /// ([`HONOUR_WAIT_FOR_CP`]).
     #[test]
-    #[ignore = "written for Ed straight after the acknowledgement; 9ece7eb holds SUVd' before Ed for real modems and these expectations were not reworked"]
     fn a_peer_that_asks_us_to_wait_for_its_cp_delays_our_cp() {
         let asked = PeerSuv { wait_for_cp: true, ..PeerSuv::default() };
 
@@ -1271,6 +1305,7 @@ mod tests {
 
         // And an SUV, an E or a B1 is never held back by the bit.
         let mut ending = Exchange::new(Context::Training, 0.0, FS);
+        ending.hold_before_e(0);
         ending.peer_suv(PeerSuv { ack: true, ..asked }, 0);
         ending.peer_cp(PeerCp { ack: true }, 10);
         assert!(ending.sequence_started(SequenceKind::Suv));
@@ -1319,7 +1354,6 @@ mod tests {
     /// parameter exchange (9.6.2.1.5), and CPd bit 29 offered only in initial
     /// training (P4D Q5).
     #[test]
-    #[ignore = "written for Ed straight after the acknowledgement; 9ece7eb holds SUVd' before Ed for real modems and these expectations were not reworked"]
     fn the_context_says_what_surrounds_the_exchange() {
         assert_eq!(Context::Training.modulation(), Modulation::Trn2);
         assert_eq!(Context::Renegotiation.modulation(), Modulation::Trn2);
@@ -1333,6 +1367,7 @@ mod tests {
         assert!(!Context::Training.defines_silence());
 
         let mut exchange = Exchange::new(Context::FastExchange, 0.0, FS);
+        exchange.hold_before_e(0);
         exchange.peer_suv(PeerSuv { ack: true, ..PeerSuv::default() }, 0);
         exchange.peer_cp(PeerCp { ack: true }, 10);
         exchange.sequence_started(SequenceKind::Suv);

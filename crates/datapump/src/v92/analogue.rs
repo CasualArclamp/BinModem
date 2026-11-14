@@ -47,7 +47,7 @@
 //!   (V.90 8.6.1). They are read six symbols at a time with V.90's own
 //!   decoder.
 //!
-//! Three things are deliberately not this module's:
+//! Four things are deliberately not this module's:
 //!
 //! * **The fraction of a symbol.** S-bar-u is 24.5T the first time and 24T plus
 //!   epsilon the second (9.5.2.1.7-9.5.2.1.8), and 8.5.6 wants Su and S-bar-u to
@@ -60,15 +60,22 @@
 //!   DIL is, and while it arrives this end sends TRN1u. What the symbols *mean*
 //!   -- which codewords the network robs, how far apart the levels are -- is the
 //!   reading `v90::dil` does for V.90; the values are kept in [`Modem::dil`]
-//!   exactly as the equaliser produced them, and whoever has read them hands
-//!   the constellations it chose back in [`Settings::cpu`]. Without one the
-//!   CPu offers the CPt's own constellations at the fastest rate they carry.
+//!   exactly as the equaliser produced them. An owner that reads them sets
+//!   [`Settings::choice_follows_dil`], and TRN1u then runs on past the DIL
+//!   until [`Modem::choose`] hands over the CPt and the CPu it chose
+//!   (9.5.2.1.11 gives it 5000 ms). Without that the CPt is the one the
+//!   modem was built with, and the CPu offers the CPt's own constellations
+//!   at the fastest rate they carry.
 //! * **The retrain itself.** A deadline missed, a CPd that cannot be obeyed and
 //!   the digital modem's Tone B all end in [`Status::Retrain`] with the line
 //!   silent, circuit 106 OFF and circuit 104 clamped, which is where 9.7.2.1
 //!   and 9.7.2.2 both begin. The 70 ms of silence, Tone A and the Phase 2 that
 //!   follow are V.34's signals at the line rate, and this module works a
 //!   symbol at a time; its owner sends them.
+//! * **Clearing the call down.** A CPd of drn 0 is obeyed (Table 30, 9.11).
+//!   Sending a CPu of drn 0 is the DTE's decision and nothing here takes it:
+//!   an exchange this end cannot complete ends in a retrain (9.6.2.2), which
+//!   leaves the owner the choice.
 //!
 //! The one thing here that is not a sequence is the sample phase. Jp's epsilon
 //! and the half-symbol shift both exist because the digital modem cannot move
@@ -168,11 +175,46 @@ const B1D_FRAMES: usize = 48;
 ///
 /// The Recommendation gives no figure: it has circuit 104 unclamped "after
 /// receiving B1d" and says nothing of a B1d that arrives damaged. Three
-/// quarters lets a burst through, and a far end that started its coding a
-/// frame or two late, without calling a line that decodes to noise a data
-/// mode. Fewer than this is B1d not received, and 9.6.2.2.1's watchdog is
-/// what answers that.
+/// quarters lets a burst through without calling a line that decodes to
+/// noise a data mode. It is not what places B1d's first frame: that is
+/// [`B1D_LOCK_FRAMES`]. Fewer than this is B1d not received, and B1d is sent
+/// once, so the answer is a retrain (9.6.2.2) [`B1D_GRACE`] later and not a
+/// wait for 9.6.2.2.1's watchdog.
 const B1D_CLEAN: usize = 36;
+
+/// Whole frames of ones, read from zeroed memories, that say B1d began on the
+/// first of them.
+///
+/// "The symbols in the first data frame of B1d shall have the magnitudes
+/// resulting from mapping the first D scrambled ones after initializing the
+/// scrambler to zero" (V.90 8.6.1): so a reader with a zeroed descrambler and
+/// a zeroed differential decoder reads D ones from B1d's first frame and from
+/// no other place. Started a frame early or late its descrambler is twenty-
+/// three bits behind the scrambler's state, and the frame comes out as
+/// something else. Two frames are at least forty-two bits (D is 21 at the
+/// slowest rate of Table 2/V.90), which nothing else on the line makes by
+/// chance.
+const B1D_LOCK_FRAMES: usize = 2;
+
+/// How long after a B1d that did not read as one the retrain is asked for.
+///
+/// What took B1d's place may be the digital modem's Tone B, and 9.7.2.2
+/// makes "more than 50 ms" of it the detection: its forty-eight frames are
+/// 36 ms, so the count can fail before the tone has stood long enough to be
+/// known for what it is. An eighth of a second lets the better-informed
+/// reason arrive first; the retrain it asks for is the same either way.
+const B1D_GRACE: f64 = 0.125;
+
+/// Frames after an Ed that was read by its zeros (8.8.2) in which B1d's own
+/// first frame is still looked for, before the frame after Ed is taken to be
+/// it whatever it read as.
+///
+/// With a far end that keeps 8.8.2 the two agree and the question does not
+/// arise. It arises when B1d's first frames are damaged, where the place Ed
+/// gave is the only one there is; and when Ed was longer than its two frames
+/// or had a frame of fill in front of it, where B1d's own start is found a
+/// frame or two later and wins.
+const B1D_HUNT_FRAMES: usize = 6;
 
 /// Descrambled ones, in whole data frames one after another, that say where
 /// TRN2d's six-symbol frames fall.
@@ -261,6 +303,14 @@ pub struct Settings {
     /// The DIL descriptor Ja asks the digital modem for (Table 20, 8.5.4).
     /// [`Descriptor::none`] asks for no DIL, and 9.5.2.1.10 then replaces the
     /// DIL with SCR.
+    ///
+    /// One thing is asked of it. This end has to answer Tone B in Phase 3
+    /// (9.5.2.2), so a DIL must not be one: a sign pattern that repeats every
+    /// twenty symbols is a square wave at 400 Hz, whose third harmonic is
+    /// 1200 Hz, and a DIL-segment of it longer than 50 ms would be taken for
+    /// the tone. The patterns "are restarted at the beginning of each
+    /// DIL-segment" (V.90 8.4.1), so segments shorter than that are safe
+    /// whatever their pattern.
     pub descriptor: Descriptor,
     /// The upstream rate mask that rides with it (Table 20 bit 188+P): the
     /// nineteen rates of 6.1 this end's PCM transmitter can send.
@@ -272,14 +322,25 @@ pub struct Settings {
     /// The CPt this end will send: the downstream rates it can receive.
     pub cpt: Cp,
     /// The data mode constellations and shaping the CPu is to ask for (8.7.3,
-    /// Table 23), when something has read the DIL and chosen them: the `data`
-    /// half of a `v90::dil::choose`. Its rate is kept if Jd enabled it and its
+    /// Table 23), when they are known before the call: the `data` half of a
+    /// `v90::dil::choose`. Its rate is kept if Jd enabled it and its
     /// constellations carry it; otherwise the CPu asks for the fastest rate
     /// that both allow.
     ///
     /// `None` offers the CPt's own constellations for data mode, which is all
-    /// an end that asked for no DIL has measured.
+    /// an end that asked for no DIL has measured. A choice made from this
+    /// call's own DIL arrives later, through [`Modem::choose`].
     pub cpu: Option<Cp>,
+    /// Whether the CPt and the CPu are to come from this call's DIL
+    /// (9.5.2.1.11: CPt "indicates to the digital modem that the analogue
+    /// modem has received enough of the DIL sequence").
+    ///
+    /// Set, the TRN1u that covers the DIL runs on, in whole twelve-symbol
+    /// frames, until the owner has read [`Modem::dil`] and called
+    /// [`Modem::choose`]; the 5000 ms of 9.5.2.1.11 is what bounds the wait.
+    /// Clear, CPt follows the DIL at once and is [`Self::cpt`]. With no DIL
+    /// asked for there is nothing to wait for and this changes nothing.
+    pub choice_follows_dil: bool,
     /// The round trip, from Phase 2's ranging: the deadlines that carry an RTD
     /// term use it.
     pub round_trip: f64,
@@ -312,6 +373,7 @@ impl Settings {
             md_length: 0,
             cpt,
             cpu: None,
+            choice_follows_dil: false,
             round_trip: 0.0,
             since_info1a: 0.0,
             law: Law::Mu,
@@ -331,13 +393,12 @@ pub enum Status {
     /// (9.6.2.1.5), and B1d has been received, so circuit 104 is unclamped and
     /// 109 is ON (9.6.2.1.6). The rates are in bit/s.
     Connected { downstream: u32, upstream: u32 },
-    /// The digital modem's CPd said drn 0 (Table 30, 9.11), or this end's own
-    /// CPu had to.
+    /// The digital modem's CPd said drn 0 (Table 30, 9.11).
     ClearedDown,
     /// This end has to retrain, and why: circuit 106 is OFF, circuit 104 is
     /// clamped and the line is silent, which is where 9.7.2.1 (this end's own
-    /// reasons) and 9.7.2.2 (the digital modem's Tone B) both begin. The
-    /// owner sends the rest.
+    /// reasons) and 9.7.2.2 (the digital modem's Tone B) both begin. Circuit
+    /// 109 is as it was: neither clause moves it. The owner sends the rest.
     Retrain(&'static str),
     /// A Phase 3 deadline went by. A live modem retrains here as well
     /// (9.5.2.2); it is kept apart because nothing of Phase 4 had started.
@@ -495,8 +556,12 @@ impl Source {
             }
             Up::E1u => self.sender.next_symbol().unwrap_or(0.0),
             Up::Trn2u => self.trn2u.as_mut().map_or(0.0, Trn2uSender::next_symbol),
-            // 8.8.3: what goes on the line is the prefilter output times G,
-            // which is `out`, in the LU units TRN1u and TRN2u are in.
+            // 6.4.2: "Finally the output v(n) is multiplied by a gain, G",
+            // which is `out`. It is in the LU units TRN1u and TRN2u are in
+            // because 8.8.3 has the digital modem choose G "assuming that,
+            // when the prefilter output multiplied by G has a mean-square
+            // value of 1, the analogue modem will transmit at the desired
+            // power" (3.8).
             Up::B1u => self.b1u.pop_front().unwrap_or(0.0),
             Up::Data => {
                 let outbound = &mut self.outbound;
@@ -531,7 +596,10 @@ struct FrameReader {
     /// fractions of full scale (Table 1/V.90).
     points: [Vec<(u8, f64)>; INTERVALS],
     decoder: CodeDecoder,
-    /// GPC, 1 + x^-18 + x^-23: the digital modem's polynomial (6.3).
+    /// GPC, 1 + x^-18 + x^-23: the digital modem's polynomial. Clause 5 makes
+    /// its scrambler "the same as those given in clause 5/V.90", and
+    /// 5.3/V.90 names "the generating polynomial, GPC, in equation
+    /// 7-1/V.34".
     descrambler: Scrambler,
     ucodes: [u8; INTERVALS],
     positive: [bool; INTERVALS],
@@ -584,6 +652,53 @@ impl FrameReader {
     }
 }
 
+/// A reader started from zero on a frame boundary, on the chance that B1d
+/// begins there (V.90 8.6.1).
+#[derive(Debug, Clone)]
+struct Probe {
+    reader: FrameReader,
+    /// Which frame since TRN2d was found this one's first is.
+    born: usize,
+    /// Whole frames read so far, and how many of them were all ones.
+    frames: usize,
+    clean: usize,
+    /// Whether this is the frame after an Ed that was read by its zeros, which
+    /// is kept whatever it reads as: it is the only place there is for a B1d
+    /// whose first frames are damaged ([`B1D_HUNT_FRAMES`]).
+    after_ed: bool,
+}
+
+impl Probe {
+    /// Whether every frame so far has been ones, from the first.
+    fn unbroken(&self) -> bool {
+        self.clean == self.frames
+    }
+}
+
+/// TRN2d has been found, and what follows it is being read.
+#[derive(Debug, Clone)]
+struct Training {
+    /// SUVd, CPd and Ed ride TRN2d's modulation and its scrambler (8.8.2,
+    /// 8.8.3, 8.8.5), so one reader carries on through all of them.
+    reader: FrameReader,
+    finder: DownFinder,
+    /// Whether a CPd has been read. Ed follows an acknowledged sequence in
+    /// each direction (9.6.1.1.4), and this end acknowledges nothing before
+    /// it has a CPd (9.6.2.1.2), so before one there is no B1d to look for.
+    cpd_read: bool,
+    /// Whether the frame before this one ended a sequence, or was a frame of
+    /// zeros that followed one.
+    boundary: bool,
+    /// Frames of zeros counted from that boundary.
+    zeros: usize,
+    /// Whole frames read since TRN2d was found.
+    frames: usize,
+    /// The frame after Ed, once Ed has been read by its zeros.
+    after_ed: Option<usize>,
+    /// The places B1d might have begun.
+    probes: Vec<Probe>,
+}
+
 /// Where the downstream reader has got to.
 #[derive(Debug, Clone)]
 enum DownState {
@@ -591,23 +706,14 @@ enum DownState {
     /// place a six-symbol frame could begin, each with the descrambled ones
     /// it has read in whole frames without a break.
     Hunting(Vec<(FrameReader, usize)>),
-    /// TRN2d found. SUVd, CPd and Ed ride the same modulation and the same
-    /// scrambler (8.8.2, 8.8.3, 8.8.5), so one reader carries on through all
-    /// of them.
-    Training {
-        reader: Box<FrameReader>,
-        finder: DownFinder,
-        /// Whether the frame before this one ended a sequence, or was a frame
-        /// of zeros that followed one: the only place Ed can begin.
-        boundary: bool,
-        /// Frames of zeros counted from that boundary.
-        zeros: usize,
-    },
-    /// Ed has been received: B1d, on the CPu's constellations (9.6.2.1.6).
+    /// TRN2d found: SUVd, CPd, Ed, and the first frames of B1d.
+    Training(Box<Training>),
+    /// B1d's first frame has been placed: the rest of it, on the CPu's
+    /// constellations (9.6.2.1.6).
     B1d { reader: Box<FrameReader>, frames: usize, clean: usize },
     /// B1d has gone by: data.
     Data(Box<FrameReader>),
-    /// Nothing more can be read: the CPu named no rate.
+    /// What the state is while it is being worked on, and never otherwise.
     Lost,
 }
 
@@ -618,8 +724,12 @@ enum DownEvent {
     Found,
     /// A CRC-good SUVd or CPd.
     Sequence(Box<DownFamily>),
-    /// Ed (8.8.2).
+    /// Ed, read as its two frames of zeros where a sequence ended (8.8.2).
     Ed,
+    /// B1d's first frame has been placed. `ed_read` is whether Ed had been
+    /// reported before it, and `late` how many frames after that Ed's two it
+    /// began.
+    B1dBegun { ed_read: bool, late: usize },
     /// B1d's forty-eight frames have gone by, this many of them scrambled
     /// ones.
     B1d { clean: usize },
@@ -630,29 +740,115 @@ enum DownEvent {
 /// The downstream from TRN2d on (9.6.2.1.1, 9.6.2.1.6).
 #[derive(Debug, Clone)]
 struct Downstream {
-    law: Law,
-    /// The CPu this end sends, which is what B1d and the data are read with.
-    cpu: Cp,
+    /// A reader for B1d with every memory zero, on the constellations of the
+    /// CPu this end sends: what each [`Probe`] starts as.
+    fresh: FrameReader,
     state: DownState,
 }
 
 impl Downstream {
-    /// A reader looking for TRN2d on the constellations of `cpt`. `None` if
-    /// the CPt's rate is more than its own constellations carry, which leaves
+    /// A reader looking for TRN2d on the constellations of `cpt`, which will
+    /// read B1d and the data on those of `cpu`. `None` if either names a
+    /// rate its own constellations do not carry (5.4.3/V.90), which leaves
     /// Phase 4 with nothing that can be read.
-    fn hunting(cpt: &Cp, cpu: Cp, law: Law) -> Option<Self> {
+    fn hunting(cpt: &Cp, cpu: &Cp, law: Law) -> Option<Self> {
         // TRN2d begins on a frame boundary 24T after the Ri-to-R-bar-i
         // reversal (V.90 8.6.4: R-bar-i is four repetitions of six symbols),
         // but the reversal is only placed to within a period, which is one
         // whole frame: so every one of the six alignments is tried.
         let candidates: Option<Vec<_>> =
             (0..INTERVALS).map(|skip| FrameReader::new(cpt, law, skip).map(|reader| (reader, 0))).collect();
-        Some(Self { law, cpu, state: DownState::Hunting(candidates?) })
+        Some(Self { fresh: FrameReader::new(cpu, law, 0)?, state: DownState::Hunting(candidates?) })
     }
 
     /// Whether TRN2d's frames have been found.
     fn found(&self) -> bool {
         !matches!(self.state, DownState::Hunting(_))
+    }
+
+    /// One symbol of what follows TRN2d, until B1d's first frame is placed.
+    ///
+    /// Two things are read side by side, because 9.6.2.1.6's "after receiving
+    /// Ed, the analogue modem shall condition its receiver to receive B1d"
+    /// leaves no symbol between them and Ed is two frames long:
+    ///
+    /// * **Ed**, on the CPt's constellations, as 8.8.2's "2 data frames of
+    ///   scrambled binary zeros" in the place where a sequence ended. Only
+    ///   there, because a CPd holds runs of zeros longer than a frame -- a
+    ///   filter section of no coefficients is a word of them. That makes it
+    ///   depend on the sequence before Ed having been read, and the digital
+    ///   modem sends exactly one more after the acknowledgement (9.6.1.1.4).
+    /// * **B1d**, on the CPu's, from every frame boundary: V.90 8.6.1 zeroes
+    ///   the scrambler and the differential encoder before its first frame,
+    ///   so a reader that starts from zero reads D ones there and nowhere
+    ///   else ([`B1D_LOCK_FRAMES`]). This needs nothing of Ed, so one damaged
+    ///   sequence does not cost the call; and it is B1d's own evidence of
+    ///   where B1d begins, so an Ed of the wrong length does not move it.
+    fn feed_training(&self, mut training: Box<Training>, level: f64) -> (DownState, Option<DownEvent>) {
+        let frame = training.reader.feed(level);
+        // Every probe began on a frame boundary of this reader's, so they all
+        // finish a frame on the symbol it does.
+        for probe in &mut training.probes {
+            if let Some(bits) = probe.reader.feed(level) {
+                probe.frames += 1;
+                probe.clean += usize::from(bits.iter().all(|&bit| bit));
+            }
+        }
+        let Some(bits) = frame else {
+            return (DownState::Training(training), None);
+        };
+        training.frames += 1;
+        training.probes.retain(|probe| probe.unbroken() || probe.after_ed);
+        // B1d's own first frame, if one of them has found it; failing that,
+        // the frame after Ed, once it has had its chance.
+        let begun = training
+            .probes
+            .iter()
+            .position(|probe| probe.unbroken() && probe.frames >= B1D_LOCK_FRAMES)
+            .or_else(|| training.probes.iter().position(|probe| probe.after_ed && probe.frames >= B1D_HUNT_FRAMES));
+        if let Some(k) = begun {
+            let probe = training.probes.swap_remove(k);
+            let late = training.after_ed.map_or(0, |after_ed| probe.born.saturating_sub(after_ed));
+            let state = DownState::B1d { reader: Box::new(probe.reader), frames: probe.frames, clean: probe.clean };
+            return (state, Some(DownEvent::B1dBegun { ed_read: training.after_ed.is_some(), late }));
+        }
+        let mut event = None;
+        // Whether the frame that starts on the next symbol is the one after
+        // an Ed read by its zeros.
+        let mut after_ed = false;
+        if training.after_ed.is_none() {
+            let mut found = None;
+            for &bit in &bits {
+                if let Some(family) = training.finder.feed(bit) {
+                    found = Some(family);
+                }
+            }
+            if let Some(family) = found {
+                // The finder answers at the sequence's own fill bit (Tables
+                // 30 and 31), and the fill after it runs "to the next
+                // multiple of 6 symbols": so the sequence ends with the frame
+                // that fill bit is in, which is this one.
+                training.cpd_read |= matches!(family, DownFamily::Cpd(_));
+                training.boundary = true;
+                training.zeros = 0;
+                event = Some(DownEvent::Sequence(Box::new(family)));
+            } else if training.boundary && bits.iter().all(|&bit| !bit) {
+                training.zeros += 1;
+                if training.zeros >= ED_FRAMES && training.cpd_read {
+                    training.after_ed = Some(training.frames);
+                    after_ed = true;
+                    event = Some(DownEvent::Ed);
+                }
+            } else {
+                training.boundary = false;
+                training.zeros = 0;
+            }
+        }
+        if training.cpd_read {
+            let born = training.frames;
+            training.probes.push(Probe { reader: self.fresh.clone(), born, frames: 0, clean: 0, after_ed });
+        }
+        (DownState::Training(training), event)
     }
 
     /// One symbol, as a signed fraction of full scale.
@@ -671,62 +867,25 @@ impl Downstream {
                 match found {
                     Some(k) => {
                         let (reader, _) = candidates.swap_remove(k);
-                        let training = DownState::Training {
-                            reader: Box::new(reader),
+                        let training = Training {
+                            reader,
                             // The seventeen ones a frame sync is made of are
                             // TRN2d's own, however long it has been running:
                             // the finder takes the last seventeen of any run.
                             finder: DownFinder::new(),
+                            cpd_read: false,
                             boundary: false,
                             zeros: 0,
+                            frames: 0,
+                            after_ed: None,
+                            probes: Vec::new(),
                         };
-                        (training, Some(DownEvent::Found))
+                        (DownState::Training(Box::new(training)), Some(DownEvent::Found))
                     }
                     None => (DownState::Hunting(candidates), None),
                 }
             }
-            DownState::Training { mut reader, mut finder, boundary, zeros } => match reader.feed(level) {
-                None => (DownState::Training { reader, finder, boundary, zeros }, None),
-                Some(bits) => {
-                    let mut found = None;
-                    for &bit in &bits {
-                        if let Some(family) = finder.feed(bit) {
-                            found = Some(family);
-                        }
-                    }
-                    if let Some(family) = found {
-                        // The finder answers at the sequence's own fill bit
-                        // (Tables 30 and 31), and the fill after it runs "to
-                        // the next multiple of 6 symbols": so the sequence
-                        // ends with the frame that fill bit is in, which is
-                        // this one.
-                        let training = DownState::Training { reader, finder, boundary: true, zeros: 0 };
-                        (training, Some(DownEvent::Sequence(Box::new(family))))
-                    } else if boundary && bits.iter().all(|&bit| !bit) {
-                        // 8.8.2: "2 data frames of scrambled binary zeros",
-                        // counted from where a sequence ended and from nowhere
-                        // else. A CPd holds runs of zeros longer than a frame
-                        // -- a filter section of no coefficients is a word of
-                        // them -- and a sequence begins with seventeen ones,
-                        // so only here is a frame of zeros Ed.
-                        if zeros + 1 < ED_FRAMES {
-                            (DownState::Training { reader, finder, boundary, zeros: zeros + 1 }, None)
-                        } else {
-                            // 9.6.2.1.6: "After receiving Ed, the analogue
-                            // modem shall condition its receiver to receive
-                            // B1d", which starts from zero on the data mode
-                            // constellations (V.90 8.6.1).
-                            let next = match FrameReader::new(&self.cpu, self.law, 0) {
-                                Some(reader) => DownState::B1d { reader: Box::new(reader), frames: 0, clean: 0 },
-                                None => DownState::Lost,
-                            };
-                            (next, Some(DownEvent::Ed))
-                        }
-                    } else {
-                        (DownState::Training { reader, finder, boundary: false, zeros: 0 }, None)
-                    }
-                }
-            },
+            DownState::Training(training) => self.feed_training(training, level),
             DownState::B1d { mut reader, frames, clean } => match reader.feed(level) {
                 None => (DownState::B1d { reader, frames, clean }, None),
                 Some(bits) => {
@@ -794,7 +953,8 @@ pub struct Modem {
     /// What the digital modem is saying, sliced as two points.
     rx: Receiver,
     /// Jd, Jp and Jp' come off one differential stream, descrambled with GPC:
-    /// they are the digital modem's sequences and it sends them (6.3).
+    /// "The digital modem shall use the polynomial, GPC, in equation
+    /// 7-1/V.34 when generating signals Jd, Jp, Jp', SCR and TRN1d" (8.6).
     reader: TwoPointReader,
     /// The last seventy-two decoded bits, because Jd and Jp are framed
     /// sequences that arrive with no marker in front of them.
@@ -805,6 +965,13 @@ pub struct Modem {
     jp_prime: bool,
     dil_left: usize,
     dil: Vec<f64>,
+    /// Whether [`Modem::choose`] has handed over the CPt and the CPu
+    /// ([`Settings::choice_follows_dil`]).
+    chosen: bool,
+    /// Whether Ri has been heard with no DIL asked for, so that CPt is due
+    /// at the next twelve-symbol boundary of the TRN1u on the line
+    /// (9.5.2.1.9, 9.5.2.1.10).
+    ri_heard: bool,
     source: Source,
     stage: Stage,
     /// Where TRN1d began, in the receiver's own symbol count.
@@ -863,12 +1030,20 @@ pub struct Modem {
     downstream: u32,
     /// Tone B, 1200 Hz, which is the digital modem retraining (9.6.2.2).
     retrain_watch: RetrainWatch,
-    /// Circuit 106: ON once B1u has been sent (9.6.2.1.5).
+    /// Circuit 106: ON once B1u has been sent (9.6.2.1.5), OFF again for a
+    /// retrain (9.7.2.1, 9.7.2.2).
     circuit106: bool,
-    /// Circuit 109, and circuit 104 let go: ON once B1d has been received
-    /// (9.6.2.1.6). They change together in every clause that mentions them
-    /// (Table 1), so one flag is both.
+    /// Whether circuit 104 has been let go. It is unclamped once B1d has been
+    /// received (9.6.2.1.6) and clamped to binary one again for a retrain
+    /// (9.7.2.1, 9.7.2.2).
+    circuit104: bool,
+    /// Circuit 109: ON once B1d has been received (9.6.2.1.6). It is not
+    /// 104's shadow: 9.7.2.1 and 9.7.2.2 clamp 104 and say nothing of 109,
+    /// so a retrain leaves it as it was.
     circuit109: bool,
+    /// When a B1d that did not read as B1d went by, which is answered with a
+    /// retrain a little later ([`B1D_GRACE`]).
+    b1d_failed: Option<u64>,
     /// Data bits received since circuit 104 was unclamped, for whoever asks.
     recovered: Vec<bool>,
     status: Status,
@@ -880,8 +1055,8 @@ impl Modem {
     #[must_use]
     pub fn new(settings: Settings) -> Self {
         let mut rx = Receiver::new();
-        // The digital modem's TRN1d is generated with GPC, not the GPA an
-        // analogue modem's own TRN1u uses (6.3, 9.5.1.1.2).
+        // The digital modem's TRN1d is generated with GPC (8.6), not the GPA
+        // an analogue modem's own TRN1u uses (6.3, 8.5.7).
         rx.set_reference_mode(Mode::Call);
         // A3 asks for Sd and its reversal, and Sd is Su's shape the other way
         // up (V.90 8.4.4): between the 70 ms of silence and the DIL nothing
@@ -910,7 +1085,9 @@ impl Modem {
             // the far end has.
             retrain_watch: RetrainWatch::new(Role::Call, FS),
             circuit106: false,
+            circuit104: false,
             circuit109: false,
+            b1d_failed: None,
             recovered: Vec::new(),
             source: Source::new(&settings),
             settings,
@@ -921,6 +1098,8 @@ impl Modem {
             jp_prime: false,
             dil_left: 0,
             dil: Vec::new(),
+            chosen: false,
+            ri_heard: false,
             stage: Stage::Opening,
             trn_from: None,
             rus: 0,
@@ -953,6 +1132,14 @@ impl Modem {
     /// What is on the line, for the transcript.
     #[must_use]
     pub fn phase(&self) -> &'static str {
+        // Once the line has been given up nothing of Phase 3 or Phase 4 is on
+        // it, whatever stage the start-up had reached.
+        match self.status {
+            Status::Retrain(_) => return "V.92: silent, for a retrain",
+            Status::ClearedDown => return "V.92: cleared down",
+            Status::Failed(_) => return "V.92 phase 3: failed",
+            Status::Running | Status::Phase4 | Status::Connected { .. } => {}
+        }
         match self.stage {
             Stage::Opening => "V.92 phase 3: Ru, TRN1u and Ja",
             Stage::Ja => "V.92 phase 3: Ja",
@@ -990,12 +1177,12 @@ impl Modem {
         self.parameters.as_ref()
     }
 
-    /// Whether circuit 104 has been let go: before B1d has been received it
+    /// Whether circuit 104 has been let go. Before B1d has been received it
     /// is clamped to binary one and nothing received reaches the DTE
-    /// (9.6.2.1.6, Table 1).
+    /// (9.6.2.1.6), and a retrain clamps it again (9.7.2.1, 9.7.2.2).
     #[must_use]
     pub fn circuit104(&self) -> bool {
-        self.circuit109
+        self.circuit104
     }
 
     /// Whether circuit 106 is ON, which it is once B1u has been sent
@@ -1006,7 +1193,9 @@ impl Modem {
     }
 
     /// Whether circuit 109 is ON, which it is once B1d has been received
-    /// (9.6.2.1.6).
+    /// (9.6.2.1.6). A retrain does not turn it OFF: 9.7.2.1 and 9.7.2.2 name
+    /// circuits 106 and 104 only. A cleardown does, because the call and its
+    /// line signal are over (9.11 names no circuit; this is the reading).
     #[must_use]
     pub fn circuit109(&self) -> bool {
         self.circuit109
@@ -1030,7 +1219,7 @@ impl Modem {
     #[must_use]
     pub fn fill_bits(&self) -> usize {
         match (self.stage, self.source.encoder.as_ref()) {
-            (Stage::Data, Some(encoder)) => encoder.frame_bits() as usize,
+            (Stage::Data, Some(encoder)) if !self.stopped() => encoder.frame_bits() as usize,
             _ => 0,
         }
     }
@@ -1074,10 +1263,47 @@ impl Modem {
     }
 
     /// The DIL's symbols as the equaliser produced them, for whoever reads
-    /// the route out of them (see [`Settings::cpu`]).
+    /// the route out of them (see [`Self::choose`]).
     #[must_use]
     pub fn dil(&self) -> &[f64] {
         &self.dil
+    }
+
+    /// Whether a whole pass of the DIL that Ja asked for has arrived, which
+    /// is when [`Self::dil`] is worth reading. Never true with no DIL asked
+    /// for.
+    #[must_use]
+    pub fn dil_received(&self) -> bool {
+        !self.settings.descriptor.is_empty() && self.dil_complete()
+    }
+
+    /// Hand over the CPt and the CPu chosen from this call's DIL: the
+    /// `training` and `data` halves of a `v90::dil::choose`.
+    ///
+    /// 9.5.2.1.11 has CPt say "that the analogue modem has received enough of
+    /// the DIL sequence", so it is the first thing the choice is needed for,
+    /// and the CPu is the same reading's data mode half (8.7.3). They are
+    /// taken until CPt's first symbol has gone out. After that the series on
+    /// the line is that CPt and has to stay it: the digital modem builds
+    /// TRN2d from whichever repetition it read (V.90 8.6.5).
+    ///
+    /// False, and nothing changed, if CPt has begun, or if `training` names
+    /// a rate its own constellations do not carry (5.4.3/V.90): TRN2d could
+    /// not then be read.
+    pub fn choose(&mut self, training: Cp, data: Cp) -> bool {
+        let before_cpt = matches!(
+            self.stage,
+            Stage::Opening | Stage::Ja | Stage::Training | Stage::Jd | Stage::Su | Stage::AfterJp | Stage::Dil
+        );
+        if !before_cpt || self.stopped() || CodeMapping::from_cp(&training).is_none() {
+            return false;
+        }
+        // One bit a symbol (8.5.1), filled to whole twelve-symbol frames.
+        self.source.cpt_bits = training.to_bits_in(Layout::V92, UP_INTERVALS);
+        self.settings.cpt = training;
+        self.settings.cpu = Some(data);
+        self.chosen = true;
+        true
     }
 
     /// How long this modem has been running, in symbols.
@@ -1121,13 +1347,19 @@ impl Modem {
         matches!(self.status, Status::Failed(_) | Status::Retrain(_) | Status::ClearedDown)
     }
 
-    /// 9.6.2.2: "If Tone B is detected during Phase 4, the analogue modem
-    /// shall respond to retrain according to 9.7.2.2", and 9.7.2.2 makes
-    /// "more than 50 ms" of it the detection. Data mode is watched the same
-    /// way: the digital modem's retrain begins with the same tone whenever it
-    /// begins (9.7.1.1).
+    /// 9.5.2.2: "If Tone B is detected during Phase 3, the analogue modem
+    /// shall respond to retrain according to 9.7.2.2", 9.6.2.2 says the same
+    /// of Phase 4, and 9.7.2.2 makes "more than 50 ms" of it the detection.
+    /// Data mode is watched the same way: the digital modem's retrain begins
+    /// with the same tone whenever it begins (9.7.1.1).
+    ///
+    /// Of what the digital modem sends in Phase 3, Sd and Ri are six-symbol
+    /// patterns, 1333 Hz, which is one of the two neighbours the watch holds
+    /// the tone against; and TRN1d, Jd, Jp and SCR are scrambled and fill
+    /// the band. The DIL is whatever this end's own descriptor made it, and
+    /// [`Settings::descriptor`] says what it must not be.
     fn watch_for_tone_b(&mut self, sample: f64) {
-        if !matches!(self.stage, Stage::Phase4 | Stage::Data) || self.stopped() {
+        if self.stopped() {
             return;
         }
         if self.retrain_watch.feed(sample, FS) {
@@ -1141,6 +1373,12 @@ impl Modem {
 
     /// Where each signal ends, and what follows it (9.5.2.1's A1-A11).
     fn advance(&mut self) {
+        // A line that has been given up stays silent: 9.7.2.1's 70 ms is the
+        // owner's to time, and the opening's own 70 ms of silence must not be
+        // taken for it and followed by Ru.
+        if self.stopped() {
+            return;
+        }
         match self.source.up {
             Up::Silence => {
                 // A1: 70 ms of silence opens Phase 3.
@@ -1177,13 +1415,30 @@ impl Modem {
                     if self.source.count >= TRN1U_MINIMUM {
                         self.begin_ja();
                     }
-                } else if self.source.count >= self.trn1u_over_dil() && self.dil_complete() {
-                    // A9-A11: the TRN1u that covers the DIL runs until the DIL
-                    // has arrived and 2040T have gone by; both bounds are
-                    // multiples of twelve, so the segment is one too (8.5.7).
-                    // With no DIL asked for it does not end here: A10 has it
-                    // run until Ri, and Ri is what starts the CPt.
-                    if !self.zero_dil_a10() {
+                } else if self.source.count.is_multiple_of(UP_INTERVALS as u64) {
+                    // A9-A11. "The length for this segment of TRN1u shall be
+                    // in multiple of 12 symbols" (9.5.2.1.9, and 8.5.7 of
+                    // every segment), and the digital modem keeps "data frame
+                    // interval alignment from the first symbol of the second
+                    // TRN1u signal" (8.5.7), which Phase 4 is built on: so
+                    // whatever ends this segment, it ends on a twelfth
+                    // symbol. What ends it arrives when it arrives -- the
+                    // DIL's last symbol, the owner's choice, Ri -- and is
+                    // acted on here, at the next boundary.
+                    let due = if self.zero_dil_a10() {
+                        // A10: no DIL was asked for, and Ri is what starts
+                        // the CPt (9.5.2.1.10). No length is asked of this
+                        // segment but the twelves.
+                        self.ri_heard
+                    } else {
+                        // A11: "at least 2040T of TRN1u followed by CPt"
+                        // (9.5.2.1.11), once the DIL has arrived and, if the
+                        // CPt is to come from it, has been read.
+                        self.source.count >= self.trn1u_over_dil()
+                            && self.dil_complete()
+                            && (self.chosen || !self.settings.choice_follows_dil)
+                    };
+                    if due {
                         self.begin_cpt();
                     }
                 }
@@ -1254,6 +1509,7 @@ impl Modem {
     /// of the constellation is Jp bit 48's to say (Table 22); bit 49 is for a
     /// rate renegotiation.
     fn begin_phase4(&mut self) {
+        let Some(cpu) = self.settled_cpu() else { return };
         let size = Trn2uSize::from_jp_bit(self.jp.is_some_and(|jp| jp.eight_in_training));
         // The bit that chose E1u's last symbol, where one is negative
         // (8.5.7), which is what Tables 28 and 29 call a sign bit of one too.
@@ -1263,7 +1519,6 @@ impl Modem {
         self.stage = Stage::Phase4;
         self.status = Status::Phase4;
         self.in_flight = None;
-        let cpu = self.data_cp();
         self.notes.push("E1u sent, phase 3 done".into());
         self.notes.push(format!(
             "TRN2u on {} points; the CPu will ask for drn {}, {} bit/s",
@@ -1281,15 +1536,23 @@ impl Modem {
     /// Table 21) that the constellations carry (5.4.3/V.90: 2^K is no more
     /// than the product of their sizes) and that Table 2/V.90 defines for
     /// this S, so the rate asked for is kept if it is all three and otherwise
-    /// replaced by the fastest that is. With none, drn is 0, which Table 23
-    /// reads as cleardown. Its look-ahead is no more than Jd bits 49:50 allow.
+    /// replaced by the fastest that is. Its look-ahead is no more than Jd bits
+    /// 49:50 allow.
     ///
-    /// Bits 36:48 are V.90's upstream rate mask, and V.92 has none there: the
-    /// PCM upstream's mask went up in Ja (Table 20), and
-    /// [`Layout::V92`] writes the zeros Table 23 asks for.
-    fn data_cp(&mut self) -> Cp {
+    /// `None` if no rate is all three. Table 23's only word for that is drn
+    /// 0, "indicates cleardown", and ending the call is not a thing to do
+    /// unasked (9.11 leaves when to the modem that "sends a rate sequence",
+    /// and has no rule that makes one mandatory): the caller retrains
+    /// instead, which 9.5.2.2 and 9.6.2.2 allow "at any time" and which
+    /// leaves the owner free to ask for another DIL, fall back or hang up.
+    ///
+    /// Bits 36:48 are V.90's upstream rate mask, and in V.92 they are
+    /// "reserved for the ITU ... set to 0 by the analogue modem" (Table 23):
+    /// the PCM upstream's mask went up in Ja (Table 20). The mask is cleared
+    /// here so that what [`Modem::cpu`] reports is what the line carries.
+    fn data_cp(&mut self) -> Option<Cp> {
         if let Some(cpu) = &self.cpu {
-            return cpu.clone();
+            return Some(cpu.clone());
         }
         let jd = self.far_jd;
         let enabled = |drn: u8| jd.is_none_or(|jd| jd.enables(drn));
@@ -1299,17 +1562,26 @@ impl Modem {
         cpu.data_mode = true; // Table 23 bits 19:20: "CPu denoted by 1"
         cpu.acknowledge = false;
         cpu.a_law = matches!(self.settings.law, Law::A); // bit 35
+        cpu.upstream_rates = 0; // bits 36:48
         if let Some(jd) = jd {
             cpu.lookahead = cpu.lookahead.min(jd.lookahead); // bits 49:50
         }
         if !(asked && enabled(cpu.drn) && carries(&cpu)) {
             cpu.drn = (1..=DOWNSTREAM_RATES as u8)
                 .rev()
-                .find(|&drn| enabled(drn) && carries(&Cp { drn, ..cpu.clone() }))
-                .unwrap_or(0);
+                .find(|&drn| enabled(drn) && carries(&Cp { drn, ..cpu.clone() }))?;
         }
         self.downstream = CodeMapping::from_cp(&cpu).map_or(0, |mapping| mapping.rate());
         self.cpu = Some(cpu.clone());
+        Some(cpu)
+    }
+
+    /// The CPu, or a retrain if there is none to send ([`Self::data_cp`]).
+    fn settled_cpu(&mut self) -> Option<Cp> {
+        let cpu = self.data_cp();
+        if cpu.is_none() {
+            self.retrain("no downstream rate that Jd enabled fits the constellations");
+        }
         cpu
     }
 
@@ -1327,20 +1599,11 @@ impl Modem {
         match self.in_flight.take() {
             Some(kind) => {
                 self.exchange.sequence_ended(kind, now);
-                match kind {
-                    // 9.6.2.1.5: "After sending the E2u sequence, the analogue
-                    // modem shall send ... B1u", on the very next symbol.
-                    SequenceKind::E => {
-                        self.begin_b1u();
-                        return;
-                    }
-                    // A CPu of drn 0 said cleardown (Table 23), and it has
-                    // now been said.
-                    SequenceKind::Cp if self.cpu.as_ref().is_some_and(|cpu| cpu.drn == 0) => {
-                        self.clear_down("no downstream rate that Jd enabled fits: the CPu said drn 0");
-                        return;
-                    }
-                    _ => {}
+                // 9.6.2.1.5: "After sending the E2u sequence, the analogue
+                // modem shall send ... B1u", on the very next symbol.
+                if kind == SequenceKind::E {
+                    self.begin_b1u();
+                    return;
                 }
             }
             None => {
@@ -1419,7 +1682,7 @@ impl Modem {
         };
         match UpEncoder::new(&parameters) {
             Ok(mut encoder) => {
-                // 8.8.3: the line carries the prefilter output times G.
+                // 6.4.2: the line carries v(n) "multiplied by a gain, G".
                 self.source.b1u = encoder.b1u().iter().map(|symbol| symbol.out).collect();
                 self.source.encoder = Some(encoder);
                 self.source.start(Up::B1u);
@@ -1444,7 +1707,7 @@ impl Modem {
     /// 109 after the digital modem's B1d, which are two separate events
     /// (9.6.2.1.5, 9.6.2.1.6).
     fn connect(&mut self) {
-        if !(self.circuit106 && self.circuit109) || self.stopped() {
+        if !(self.circuit106 && self.circuit104 && self.circuit109) || self.stopped() {
             return;
         }
         let upstream = self.parameters.as_ref().map_or(0, Parameters::rate);
@@ -1456,18 +1719,31 @@ impl Modem {
     // Phase 4, coming down (9.6.2.1.1, 9.6.2.1.6)
     // -----------------------------------------------------------------------
 
-    /// TRN2d follows R-bar-i (V.90 8.6.4, 8.6.5), so the reversal is where
-    /// the downstream reader starts looking for it.
+    /// TRN2d follows R-bar-i -- the digital modem is to "transmit R-bar-i and
+    /// then proceed to Phase 4" (9.5.1.1.12, 9.5.1.1.13), where it "shall
+    /// transmit TRN2d for at least 2040T" (9.6.1.1.1) -- so the reversal is
+    /// where the downstream reader starts looking for it.
+    ///
+    /// And the only place. Before the reversal the line carries Ri, one level
+    /// in every symbol, which through the CPt's mapping is the same D bits
+    /// frame after frame: whether that descrambles to ones is a property of
+    /// the CPt and U_INFO and not of chance, so it is nothing a run of ones
+    /// should be looked for in. And with no DIL asked for a missed R-bar-i
+    /// leaves CPt with nothing to end it (9.5.2.1.10), which no search for
+    /// TRN2d mends. A reversal that was not heard is what 9.6.2.2.1's timer
+    /// is for.
     fn begin_downstream(&mut self) {
         if self.down.is_some() {
             return;
         }
-        let cpu = self.data_cp();
+        let Some(cpu) = self.settled_cpu() else { return };
         // V.90 8.6.5: "The constellation set to be used is passed in CPt",
         // which is the one this end sent.
-        self.down = Downstream::hunting(&self.settings.cpt, cpu, self.settings.law);
+        self.down = Downstream::hunting(&self.settings.cpt, &cpu, self.settings.law);
         if self.down.is_none() {
-            self.notes.push("the CPt's rate is more than its constellations carry: phase 4 cannot be read".into());
+            // Nothing of Phase 4 can be read, so nothing of it can be
+            // answered: 9.5.2.2 and 9.6.2.2 allow the retrain at any time.
+            self.retrain("the CPt's rate is more than its constellations carry");
             return;
         }
         // Everything Phase 3 read was two points, and the receiver decided
@@ -1500,22 +1776,34 @@ impl Modem {
                 self.exchange.peer_e(now);
                 self.notes.push("Ed, reading for B1d".into());
             }
+            DownEvent::B1dBegun { ed_read, late } => {
+                if !ed_read {
+                    // Ed is the two frames in front of B1d whether or not
+                    // they were read as it (8.8.2, 9.6.1.1.5), and 9.6.2.1.4
+                    // counts it beside an acknowledged sequence.
+                    self.exchange.peer_e(now);
+                    self.notes.push("B1d found; the Ed before it was not read".into());
+                } else if late > 0 {
+                    self.notes.push(format!("B1d began {late} frames after Ed's two"));
+                }
+            }
             DownEvent::B1d { clean } => {
                 self.notes.push(format!("B1d, {clean} of {B1D_FRAMES} frames scrambled ones"));
                 if clean < B1D_CLEAN {
-                    // Not B1d, so circuit 104 stays clamped. What ends the
-                    // wait is the digital modem's Tone B, if that is what
-                    // took B1d's place, or 9.6.2.2.1's watchdog.
+                    // Not B1d, so circuit 104 stays clamped, and B1d is not
+                    // sent twice: `timers` asks for the retrain.
+                    self.b1d_failed = Some(now);
                     return;
                 }
                 // 9.6.2.1.6: "After receiving B1d, the analogue modem shall
                 // unclamp circuit 104, turn on circuit 109, and begin
                 // demodulating data."
+                self.circuit104 = true;
                 self.circuit109 = true;
                 self.connect();
             }
             DownEvent::Data(bits) => {
-                if self.circuit109 {
+                if self.circuit104 {
                     self.recovered.extend(bits);
                 }
             }
@@ -1599,19 +1887,26 @@ impl Modem {
         self.notes.push(format!("V.92 analogue: cleardown, {why}"));
         self.status = Status::ClearedDown;
         self.stop();
+        // The call is over and so is its line signal. 9.11 names no circuit;
+        // 109 OFF is what a DTE is owed when there is no carrier left.
+        self.circuit109 = false;
     }
 
-    /// Silence on the line, circuit 106 OFF, and circuits 104 and 109 back
-    /// where they were before B1d.
+    /// Silence on the line, circuit 106 OFF and circuit 104 clamped (9.7.2.1,
+    /// 9.7.2.2). Circuit 109 is the caller's to decide: a retrain leaves it.
     fn stop(&mut self) {
         self.source.start(Up::Silence);
         self.in_flight = None;
         self.down = None;
         self.circuit106 = false;
-        self.circuit109 = false;
+        self.circuit104 = false;
+        self.b1d_failed = None;
         // Circuit 104 is clamped to binary one from here, so what was
-        // received and not yet taken does not reach the DTE: the last of it
-        // is whatever the data decoder made of the tone that ended the call.
+        // received and not yet taken does not reach the DTE. That is all the
+        // clamp can do: Tone B is only known for what it is after "more than
+        // 50 ms" (9.7.2.2), and what the data decoder made of those 50 ms
+        // went to a DTE that took its bits as they came. Telling that from
+        // data is the error control's business above this.
         self.recovered.clear();
     }
 
@@ -1835,10 +2130,12 @@ impl Modem {
                 self.source.stop = true;
                 self.notes.push(format!("Ri at {at}, CPt ends"));
             }
-            // A10's order: Ri is what *starts* CPt, and R-bar-i ends it.
-            Stage::Dil if self.zero_dil_a10() => {
-                self.begin_cpt();
-                self.notes.push(format!("Ri at {at}, CPt"));
+            // A10's order: Ri is what *starts* CPt, and R-bar-i ends it. It
+            // starts where the TRN1u on the line reaches a twelfth symbol
+            // (9.5.2.1.9), which `advance` sees to.
+            Stage::Dil if self.zero_dil_a10() && !self.ri_heard => {
+                self.ri_heard = true;
+                self.notes.push(format!("Ri at {at}, CPt at the next twelfth symbol"));
             }
             _ => {}
         }
@@ -1903,10 +2200,19 @@ impl Modem {
             self.fail("no CPt within 5000 ms of the S-bar-u after Jp");
             return;
         }
+        // A B1d that did not read as one will not be sent again, and 9.6.2.2
+        // allows the retrain at any time ([`B1D_GRACE`]).
+        if let Some(at) = self.b1d_failed
+            && self.now > at + (B1D_GRACE * FS) as u64
+        {
+            self.retrain("what followed Ed was not B1d");
+            return;
+        }
         // 9.6.2.2.1: no B1d "within 20 s plus 6 round-trip delays from the end
         // of sending INFO1a" is a retrain according to 9.7.2.1. It runs
-        // through Phase 3 and Phase 4 alike, and only B1d stops it.
-        if !self.circuit109 && self.now > self.start_up_by {
+        // through Phase 3 and Phase 4 alike, and only B1d stops it: circuit
+        // 104 is let go when B1d has been received and not before.
+        if !self.circuit104 && self.now > self.start_up_by {
             self.retrain("no B1d within 20 s and six round trips");
         }
     }
@@ -1977,6 +2283,33 @@ mod tests {
         assert_eq!(modem.trn1u_over_dil(), TRN1U_MINIMUM, "a short DIL still costs 2040T");
     }
 
+    /// 9.5.2.1.9: "The length for this segment of TRN1u shall be in multiple
+    /// of 12 symbols". With no DIL asked for, what ends it is Ri (9.5.2.1.10),
+    /// and Ri is heard on whichever symbol it is heard on: CPt waits for the
+    /// twelfth.
+    #[test]
+    fn ri_ends_the_second_trn1u_on_a_twelfth_symbol() {
+        for heard_after in 1..=24u64 {
+            let mut modem = Modem::new(settings(Descriptor::none()));
+            modem.begin_trn1u_over_dil();
+            let mut sent = 0u64;
+            while modem.source.up == Up::Trn1u {
+                assert!(sent < 48, "Ri after {heard_after} symbols never started CPt");
+                if sent == heard_after {
+                    modem.ri(0);
+                    assert_eq!(modem.source.up, Up::Trn1u, "Ri alone does not cut TRN1u");
+                }
+                modem.advance();
+                if modem.source.up == Up::Trn1u {
+                    modem.source.next();
+                    sent += 1;
+                }
+            }
+            assert_eq!(modem.source.up, Up::Cpt);
+            assert_eq!(sent, heard_after.div_ceil(12) * 12, "Ri after {heard_after} symbols of TRN1u");
+        }
+    }
+
     /// Table 22 bits 18:33: epsilon is a "16-bit unsigned integer covering the
     /// range [0, 1) symbol", so the fraction is the field over 65 536, and
     /// nothing here turns it into extra symbols.
@@ -2020,6 +2353,7 @@ mod tests {
 mod phase4_tests {
     use super::*;
     use crate::v90::encoder::Encoder as CodeEncoder;
+    use crate::v90::sequences::CpFinder;
     use crate::v92::decoder::Decoder as UpDecoder;
     use crate::v92::digital::{self, Out};
     use crate::v92::sequences::{CpFamily, Suvd, UpFinder};
@@ -2103,9 +2437,16 @@ mod phase4_tests {
     enum Item {
         /// SUVd, CPd or Ed, as bits.
         Sequence(Out, Vec<bool>),
+        /// The same, with one symbol of its first data frame turned over on
+        /// the line: a sequence whose frame sync does not survive.
+        Spoiled(Out, Vec<bool>),
         /// B1d and the data after it, as octets.
         Codes(Vec<u8>),
     }
+
+    /// Which symbol of a spoiled sequence is turned over, counted from its
+    /// first: inside the seventeen ones of its frame sync whatever D is.
+    const SPOILED_SYMBOL: usize = 3;
 
     /// The digital modem, as far as the analogue modem can tell.
     struct Far {
@@ -2113,11 +2454,22 @@ mod phase4_tests {
         queue: VecDeque<Item>,
         /// Whether the source has been handed something it has not started.
         armed: bool,
+        /// Whether what it was handed is to be spoiled, and the symbols still
+        /// to go before the one that is turned over.
+        spoil_next: bool,
+        spoil_in: Option<usize>,
+        /// What a sequence is filled to, in bits: D, the bits of a data frame
+        /// on TRN2d's modulation, which is Tables 30 and 31's "next multiple
+        /// of 6 symbols".
+        unit: usize,
         /// The analogue modem's TRN2u, SUVu, CPu and E2u, read as 8.7.6 says.
         reader: Trn2uReader,
         finder: UpFinder,
+        /// Bits to a symbol of that: two on four points, three on eight
+        /// (Tables 28 and 29).
+        width: usize,
         /// Every descrambled bit of it. The reader takes TRN2u's first symbol
-        /// as its reference, so bit `b` came from symbol `1 + b / 2`.
+        /// as its reference, so bit `b` came from symbol `1 + b / width`.
         bits: Vec<bool>,
         /// The sequences found, with the index of the bit that completed each.
         heard: Vec<(usize, CpFamily)>,
@@ -2132,12 +2484,17 @@ mod phase4_tests {
             assert!(source.set_cpt(&settings.cpt), "a CPt its own constellations carry");
             source.set_dil(&settings.descriptor);
             source.set_jp(&Jp { eight_in_training: eight, ..Jp::default() });
+            let unit = source.fill_unit();
             Self {
                 source,
                 queue: VecDeque::new(),
                 armed: false,
+                spoil_next: false,
+                spoil_in: None,
+                unit,
                 reader: Trn2uReader::new(Trn2uSize::from_jp_bit(eight)),
                 finder: UpFinder::new(trn2u_unit(eight)),
+                width: Trn2uSize::from_jp_bit(eight).bits(),
                 bits: Vec::new(),
                 heard: Vec::new(),
             }
@@ -2149,10 +2506,23 @@ mod phase4_tests {
         /// which is 9.6.1.1.1's "SUVd repeatedly".
         fn next(&mut self) -> f64 {
             let was = self.source.out();
-            let level = self.source.next();
+            let mut level = self.source.next();
             let ended = self.source.take_finished().is_some();
             if self.armed && (ended || (was == Out::Trn2d && self.source.out() != Out::Trn2d)) {
+                // What was handed over has started, and `level` is its first
+                // symbol.
                 self.armed = false;
+                if std::mem::take(&mut self.spoil_next) {
+                    self.spoil_in = Some(SPOILED_SYMBOL);
+                }
+            }
+            match self.spoil_in {
+                Some(0) => {
+                    level = -level;
+                    self.spoil_in = None;
+                }
+                Some(left) => self.spoil_in = Some(left - 1),
+                None => {}
             }
             // Nothing of Phase 4 is asked for before TRN2d is on the line: the
             // source holds one request at a time, and until then that one is
@@ -2163,6 +2533,10 @@ mod phase4_tests {
             {
                 match item {
                     Item::Sequence(out, bits) => self.source.send(out, bits),
+                    Item::Spoiled(out, bits) => {
+                        self.source.send(out, bits);
+                        self.spoil_next = true;
+                    }
                     Item::Codes(octets) => self.source.send_codes(octets),
                 }
                 self.armed = true;
@@ -2171,17 +2545,32 @@ mod phase4_tests {
         }
 
         fn suvd(&mut self, ack: bool) {
-            self.queue.push_back(Item::Sequence(Out::Suvd, Suvd { silence: false, ack }.to_bits(INTERVALS)));
+            self.queue.push_back(Item::Sequence(Out::Suvd, Suvd { silence: false, ack }.to_bits(self.unit)));
+        }
+
+        /// An SUVd whose frame sync is damaged on the line.
+        fn spoiled_suvd(&mut self, ack: bool) {
+            self.queue.push_back(Item::Spoiled(Out::Suvd, Suvd { silence: false, ack }.to_bits(self.unit)));
         }
 
         fn cpd(&mut self, cpd: &Cpd) {
-            self.queue.push_back(Item::Sequence(Out::Cpd, cpd.to_bits(INTERVALS)));
+            self.queue.push_back(Item::Sequence(Out::Cpd, cpd.to_bits(self.unit)));
+        }
+
+        /// Ed: "2 data frames of scrambled binary zeros" (8.8.2).
+        fn ed(&mut self) {
+            self.queue.push_back(Item::Sequence(Out::Ed, self.source.ed_bits()));
         }
 
         /// Ed, then B1d and `data` on the constellations `cpu` asked for, then
         /// the idle ones of a data mode with nothing to send (V.90 8.6.1).
         fn ed_b1d_and_data(&mut self, cpu: &Cp, data: &[bool]) {
-            self.queue.push_back(Item::Sequence(Out::Ed, self.source.ed_bits()));
+            self.ed();
+            self.b1d_and_data(cpu, data);
+        }
+
+        /// B1d and what follows it, behind whatever is queued already.
+        fn b1d_and_data(&mut self, cpu: &Cp, data: &[bool]) {
             let mapping = CodeMapping::from_cp(cpu).expect("a CPu its own constellations carry");
             let mut encoder = CodeEncoder::new(mapping, Law::Mu);
             let mut scrambler = Scrambler::new(Mode::Call);
@@ -2228,7 +2617,8 @@ mod phase4_tests {
         }
     }
 
-    /// The symbol a bit of the upstream stream came from (see [`Far::bits`]).
+    /// The symbol a bit of the four-point upstream stream came from (see
+    /// [`Far::bits`]).
     fn symbol_of(bit: usize) -> usize {
         1 + bit / 2
     }
@@ -2237,8 +2627,9 @@ mod phase4_tests {
     /// (Table 27: bit 51).
     const SUVU_TO_FILL: usize = 51;
 
-    /// An SUVu on four points: fifty-two bits filled to seventy-two, which is
-    /// thirty-six symbols (Table 27 with Table 28).
+    /// An SUVu: fifty-two bits filled to seventy-two, which is thirty-six
+    /// symbols on four points and twenty-four on eight (Table 27 with Tables
+    /// 28 and 29; both are whole twelves).
     const SUVU_BITS: usize = 72;
 
     /// The two ends and the wire between them, which is perfect: this is a
@@ -2259,6 +2650,26 @@ mod phase4_tests {
         /// When set, Tone B is on the line in place of the far end's signal,
         /// and this many samples of it have gone.
         tone: Option<u64>,
+        /// When set, nothing of Phase 4 arrives: the line is dead from
+        /// TRN2d's first symbol.
+        mute: bool,
+        /// Symbols of B1d, counted from its first, that arrive as nothing:
+        /// a dropout.
+        dropout: std::ops::Range<usize>,
+        /// Symbols of B1d and the data behind it that the far end has sent.
+        b1d_sent: usize,
+        /// Symbols of the TRN1u that covers the DIL (9.5.2.1.9), and symbols
+        /// from its first to TRN2u's first.
+        trn1u: u64,
+        grid: u64,
+        /// The CPt series, read off the line the way a digital modem reads
+        /// it: one bit a symbol, differential, GPA (8.5.1).
+        cpt_reader: TwoPointReader,
+        cpt_finder: CpFinder,
+        cpts: Vec<Cp>,
+        /// The CPt and CPu an owner chose from the DIL, and how many symbols
+        /// after the DIL's last it takes to choose them.
+        choice: Option<(Cp, Cp, u32)>,
         notes: Vec<String>,
     }
 
@@ -2269,6 +2680,10 @@ mod phase4_tests {
 
         fn with_jp_bit_48(settings: Settings, eight: bool) -> Self {
             let far = Far::new(&settings, eight);
+            Self::against(settings, far)
+        }
+
+        fn against(settings: Settings, far: Far) -> Self {
             Self {
                 modem: Modem::new(settings),
                 far,
@@ -2278,6 +2693,15 @@ mod phase4_tests {
                 up: Vec::new(),
                 b1u_from: None,
                 tone: None,
+                mute: false,
+                dropout: 0..0,
+                b1d_sent: 0,
+                trn1u: 0,
+                grid: 0,
+                cpt_reader: TwoPointReader::differential_with(Mode::Answer),
+                cpt_finder: CpFinder::v92(UP_INTERVALS),
+                cpts: Vec::new(),
+                choice: None,
                 notes: Vec::new(),
             }
         }
@@ -2320,7 +2744,7 @@ mod phase4_tests {
                         self.act = if no_dil { 5 } else { 4 };
                     }
                 }
-                // With a DIL, R-bar-i answers E1u (9.5.1.1.13), which has gone
+                // With a DIL, R-bar-i answers E1u (9.5.1.1.12), which has gone
                 // by when TRN2u is on the line.
                 4 if self.modem.status() == Status::Phase4 => {
                     self.far.source.change(Out::RiBar);
@@ -2332,13 +2756,45 @@ mod phase4_tests {
 
         fn tick(&mut self) {
             self.phase3();
+            // An owner that reads the DIL takes a while over it, and then
+            // hands over what it chose.
+            if self.modem.dil_received()
+                && let Some((training, data, left)) = self.choice.take()
+            {
+                if left == 0 {
+                    assert!(self.modem.choose(training, data), "a choice made before CPt is taken");
+                } else {
+                    self.choice = Some((training, data, left - 1));
+                }
+            }
             let mut down = self.far.next();
+            if self.far.source.out() == Out::B1d {
+                if self.dropout.contains(&self.b1d_sent) {
+                    down = 0.0;
+                }
+                self.b1d_sent += 1;
+            }
+            if self.mute && self.far.source.in_phase4() {
+                down = 0.0;
+            }
             if let Some(n) = self.tone.as_mut() {
                 // Tone B is 1200 Hz (9.7.1.1), a tenth of full scale here.
                 down = 0.1 * (std::f64::consts::TAU * 1200.0 * *n as f64 / FS).sin();
                 *n += 1;
             }
             let up = self.modem.step(down);
+            // `phase` names the signal the symbol just sent belongs to.
+            let phase = self.modem.phase();
+            let over_dil = phase == "V.92 phase 3: TRN1u over the DIL";
+            self.trn1u += u64::from(over_dil);
+            if self.modem.status() == Status::Running && (over_dil || self.grid > 0) {
+                self.grid += 1;
+                if let Some(bit) = self.cpt_reader.feed(up)
+                    && let Some(cp) = self.cpt_finder.feed(bit)
+                {
+                    self.cpts.push(cp);
+                }
+            }
             if self.up.is_empty() && self.modem.status() == Status::Running {
                 self.before = up;
             } else {
@@ -2380,6 +2836,13 @@ mod phase4_tests {
         /// once the CPu has been read, and Ed, B1d and data once an
         /// acknowledged SUVu has arrived.
         fn exchange(&mut self, parameters: &Parameters, data: &[bool]) {
+            let cpu = self.acknowledged(parameters);
+            self.far.ed_b1d_and_data(&cpu, data);
+        }
+
+        /// The same as far as the acknowledgements: SUVd, the CPd, SUVd' once
+        /// the CPu has been read, and an SUVu' back. Returns that CPu.
+        fn acknowledged(&mut self, parameters: &Parameters) -> Cp {
             self.far.suvd(false);
             assert!(
                 self.run_until(|call| !call.far.suvus().is_empty(), SOON),
@@ -2396,8 +2859,25 @@ mod phase4_tests {
                 "no SUVu': {:#?}",
                 self.notes
             );
-            let cpu = self.far.cpus()[0].1.clone();
-            self.far.ed_b1d_and_data(&cpu, data);
+            self.far.cpus()[0].1.clone()
+        }
+
+        /// Data mode is reached, and `down` arrives behind B1d from its first
+        /// bit (V.90 8.6.1).
+        fn connects_and_reads(&mut self, down: &[bool]) {
+            let connected = self.run_until(|call| matches!(call.modem.status(), Status::Connected { .. }), SOON);
+            assert!(connected, "{:?} at {}: {:#?}", self.modem.status(), self.modem.phase(), self.notes);
+            let mut taken = Vec::new();
+            for _ in 0..down.len() + 600 {
+                self.tick();
+                taken.extend(self.modem.take_bits());
+            }
+            assert!(taken.len() >= down.len(), "{} bits came down: {:#?}", taken.len(), self.notes);
+            assert!(taken[..down.len()] == down[..], "the data after B1d, bit for bit: {:#?}", self.notes);
+        }
+
+        fn noted(&self, text: &str) -> bool {
+            self.notes.iter().any(|note| note == text)
         }
 
         /// Where on the line E2u and B1u are, from the line alone: E2u is the
@@ -2407,9 +2887,10 @@ mod phase4_tests {
             let (at, last) = *self.far.suvus().last().expect("an SUVu went out");
             assert!(last.ack, "the sequence before E2u carries the acknowledge bit (9.6.2.1.4)");
             let e2u = at - SUVU_TO_FILL + SUVU_BITS;
-            let zeros = &self.far.bits[e2u..e2u + 2 * e2u_symbols];
+            let width = self.far.width;
+            let zeros = &self.far.bits[e2u..e2u + width * e2u_symbols];
             assert!(zeros.iter().all(|&bit| !bit), "E2u is scrambled zeros (8.7.2): {zeros:?}");
-            symbol_of(e2u) + e2u_symbols
+            1 + e2u / width + e2u_symbols
         }
     }
 
@@ -2486,7 +2967,7 @@ mod phase4_tests {
         assert_eq!(call.modem.fill_bits(), up_bits(7) as usize, "K bits a data frame (6.4.1)");
     }
 
-    /// 9.5.2.1.11 and 9.5.1.1.13: with a DIL, this end sends E1u on Ri, and
+    /// 9.5.2.1.11 and 9.5.1.1.12: with a DIL, this end sends E1u on Ri, and
     /// R-bar-i and TRN2d only arrive once TRN2u is already on the line. The
     /// call comes up the same way.
     #[test]
@@ -2547,6 +3028,22 @@ mod phase4_tests {
         for (at, _) in &suvus {
             assert_eq!((at - SUVU_TO_FILL + 3) % 36, 0, "an SUVu begins on a twelve-symbol boundary");
         }
+        // 8.7.2: E2u is a data frame on "the corresponding TRN2u modulation",
+        // so twelve symbols of eight points, thirty-six zero bits; and B1u
+        // begins on the symbol after them (8.7.1), where a decoder that
+        // starts its interval 0 reads its 48 frames of ones.
+        call.run(600);
+        let b1u = call.b1u_on_the_line(E2U_SYMBOLS);
+        assert_eq!(Some(b1u), call.b1u_from, "B1u begins on the symbol after E2u's twelfth");
+        assert_eq!(b1u % UP_INTERVALS, 0, "which is on the grid TRN2u kept");
+        let mut decoder = UpDecoder::new(&as_sent(&wanted));
+        let mut back = Vec::new();
+        for &level in &call.up[b1u..] {
+            decoder.feed(level);
+            back.extend(decoder.take_bits());
+        }
+        let ones = 48 * up_bits(1) as usize;
+        assert!(back.len() >= ones && back[..ones].iter().all(|&bit| bit), "B1u's 48 frames read as ones");
     }
 
     /// 8.7.6: TRN2u begins on the symbol after E1u's last, its scrambler is
@@ -2677,6 +3174,24 @@ mod phase4_tests {
         // during the one after.
         assert!((1..=3).contains(&acked), "{acked} SUVu' went out before E2u");
         assert_eq!(Some(call.b1u_on_the_line(E2U_SYMBOLS)), call.b1u_from);
+
+        // 9.6.2.1.5 and 9.6.2.1.6 are two events. B1u's last symbol turns
+        // circuit 106 ON whatever has come down; circuit 104 stays clamped
+        // and 109 OFF until B1d has, and with neither Ed nor B1d on the line
+        // that is where they stay.
+        assert!(call.run_until(|call| call.modem.circuit106(), SOON), "{:#?}", call.notes);
+        assert_eq!(call.up.len() - call.b1u_from.unwrap(), 48 * UP_INTERVALS + 1, "106 comes ON as B1u ends");
+        call.run(2000);
+        assert!(call.modem.circuit106() && !call.modem.circuit104() && !call.modem.circuit109());
+        assert_eq!(call.modem.status(), Status::Phase4, "one direction is not a connection");
+        assert_eq!(call.modem.fill_bits(), up_bits(1) as usize, "but the DTE's bits are taken (9.6.2.1.5)");
+        assert!(call.modem.take_bits().is_empty(), "and none are handed to it");
+        // Then Ed and B1d, and the other three follow.
+        let cpu = call.far.cpus()[0].1.clone();
+        call.far.ed_b1d_and_data(&cpu, &[]);
+        assert!(call.run_until(|call| call.modem.circuit104(), SOON), "{:#?}", call.notes);
+        assert!(call.modem.circuit109());
+        assert!(matches!(call.modem.status(), Status::Connected { .. }));
     }
 
     /// 8.7.2: "E2u shall be extended by a single symbol if bit 29 of CPd is
@@ -2728,7 +3243,7 @@ mod phase4_tests {
         assert_eq!(frames.len(), 48 * UP_INTERVALS, "48 data frames of twelve symbols");
         for (n, symbol) in frames.iter().enumerate() {
             let sent = call.up[from + n];
-            // 8.8.3: the line carries the prefilter output times G.
+            // 6.4.2: the line carries v(n) "multiplied by a gain, G".
             assert!((sent - symbol.out).abs() < 1e-12, "B1u symbol {n}: sent {sent}, the CPd predicts {}", symbol.out);
         }
         // And the data mode that follows carries on from B1u's memories: an
@@ -2749,7 +3264,7 @@ mod phase4_tests {
         // six sign bits is D = 36: drn 16, 48 000 bit/s.
         let mut modem = Modem::new(settings());
         modem.far_jd = Some(Jd { rates: Jd::ALL_RATES, lookahead: 1, ..Jd::default() });
-        let cpu = modem.data_cp();
+        let cpu = modem.data_cp().expect("a rate fits");
         assert!(cpu.data_mode);
         assert_eq!(cpu.drn, 16, "the fastest the constellations carry");
         assert_eq!(modem.downstream, 48_000);
@@ -2757,37 +3272,50 @@ mod phase4_tests {
         // A Jd that stops at 40 000 (drn 10) is obeyed.
         let mut modem = Modem::new(settings());
         modem.far_jd = Some(Jd { rates: (1 << 10) - 1, lookahead: 1, ..Jd::default() });
-        assert_eq!(modem.data_cp().drn, 10, "the fastest the Jd enabled");
+        assert_eq!(modem.data_cp().map(|cpu| cpu.drn), Some(10), "the fastest the Jd enabled");
 
         // A rate asked for is kept when Jd enabled it, and replaced when not.
         let asked = Cp { drn: 12, data_mode: true, lookahead: 3, ..cpt() };
         let mut modem = Modem::new(Settings { cpu: Some(asked.clone()), ..settings() });
         modem.far_jd = Some(Jd { rates: Jd::ALL_RATES, lookahead: 2, ..Jd::default() });
-        let cpu = modem.data_cp();
+        let cpu = modem.data_cp().expect("a rate fits");
         assert_eq!(cpu.drn, 12);
         assert_eq!(cpu.lookahead, 2, "no more look-ahead than Jd bits 49:50 allow");
         let mut modem = Modem::new(Settings { cpu: Some(asked), ..settings() });
         modem.far_jd = Some(Jd { rates: 0b111, lookahead: 1, ..Jd::default() });
-        assert_eq!(modem.data_cp().drn, 3, "drn 12 was not enabled; 30 666 was");
+        assert_eq!(modem.data_cp().map(|cpu| cpu.drn), Some(3), "drn 12 was not enabled; 30 666 was");
 
-        // And a Jd that enables nothing the constellations carry leaves drn
-        // 0, which Table 23 reads as cleardown.
+        // And a Jd that enables nothing the constellations carry leaves no
+        // CPu to send: drn 0 would be a cleardown (Table 23), and that is
+        // not this modem's to decide.
         let mut modem = Modem::new(settings());
         modem.far_jd = Some(Jd { rates: 1 << 21, lookahead: 1, ..Jd::default() });
-        assert_eq!(modem.data_cp().drn, 0);
+        assert_eq!(modem.data_cp(), None);
+        assert_eq!(modem.cpu(), None);
 
         // On the line: the CPu a digital modem reads is that CPu, with the
-        // V.92 header -- type 1 -- and no acknowledge before a CPd.
-        let mut call = Call::new(settings());
+        // V.92 header -- type 1 -- and no acknowledge before a CPd. The CPt
+        // it is made from is given a V.90 upstream rate mask here, to show
+        // that none of it reaches the line.
+        let mut call = Call::new(Settings { cpt: Cp { upstream_rates: 0x1abc, ..cpt() }, ..settings() });
         call.reach_phase4();
         call.far.suvd(false);
         assert!(call.run_until(|call| !call.far.cpus().is_empty(), SOON));
-        let sent = call.far.cpus()[0].1.clone();
+        let (at, sent) = call.far.cpus()[0].clone();
         assert_eq!(Some(&sent), call.modem.cpu());
         assert_eq!(sent.drn, 16, "the script's Jd enables every rate");
         assert_eq!(sent.constellations, cpt().constellations);
-        // Table 23 bits 36:48 are reserved in V.92: the rate mask went in Ja.
-        assert_eq!(sent.upstream_rates, 0);
+        // Table 23 bits 36:48: "Reserved for the ITU: These bits are set to 0
+        // by the analogue modem". The rate mask went up in Ja (Table 20).
+        // Read where they are on the line, because a V.92 reader does not
+        // interpret them and so cannot say what they were.
+        let length = sent.to_bits_in(Layout::V92, trn2u_unit(false)).len();
+        let first = at + 1 - length;
+        let on_the_line = &call.far.bits[first..=at];
+        assert!(on_the_line[..17].iter().all(|&bit| bit) && !on_the_line[17], "the CPu's frame sync and start bit");
+        assert!(on_the_line[19] && !on_the_line[20], "type 1, a CPu (bits 19:20)");
+        assert!(on_the_line[36..=48].iter().all(|&bit| !bit), "bits 36:48 went out as zeros");
+        assert_eq!(call.modem.settings().cpt.upstream_rates, 0x1abc, "though the CPt it came from had some set");
     }
 
     /// Table 30 bits 22:26: "drn = 0 shall indicate cleardown" (and 9.11).
@@ -2873,12 +3401,26 @@ mod phase4_tests {
         assert!(call.up[from + 1..].iter().all(|&x| x == 0.0), "silence (9.7.2.1)");
     }
 
-    /// Put Tone B on the line and say how many symbols went by before the
-    /// modem asked for a retrain, checking what 9.7.2.2 requires of it.
+    /// Put Tone B on the line and check what 9.7.2.2 requires of the modem.
+    ///
+    /// The DTE here takes its bits as they come, a tick at a time. What it is
+    /// handed while the tone has not yet stood for "more than 50 ms" is what
+    /// the data decoder made of the tone, and no clamp can take that back;
+    /// what is required, and checked, is that nothing arrives once circuit
+    /// 104 has been clamped.
     fn tone_b_is_answered(call: &mut Call, during: &str) {
+        let carrier = call.modem.circuit109();
         call.tone = Some(0);
         let before = call.modem.elapsed();
-        let asked = call.run_until(|call| matches!(call.modem.status(), Status::Retrain(_)), 1600);
+        let mut asked = false;
+        for _ in 0..1600 {
+            call.tick();
+            call.modem.take_bits();
+            if matches!(call.modem.status(), Status::Retrain(_)) {
+                asked = true;
+                break;
+            }
+        }
         assert!(asked, "{during}: no retrain, {:?} at {}", call.modem.status(), call.modem.phase());
         assert_eq!(
             call.modem.status(),
@@ -2890,13 +3432,59 @@ mod phase4_tests {
         let took = call.modem.elapsed() - before;
         assert!((400..=800).contains(&took), "{during}: answered after {took} symbols of tone B");
         // "turn OFF circuit 106, clamp circuit 104 to binary one and transmit
-        // silence".
+        // silence". Circuit 109 is not in the sentence, and stays where it
+        // was.
         assert!(!call.modem.circuit106(), "{during}: 106 is OFF");
-        assert!(!call.modem.circuit104() && !call.modem.circuit109(), "{during}: 104 is clamped");
+        assert!(!call.modem.circuit104(), "{during}: 104 is clamped");
+        assert_eq!(call.modem.circuit109(), carrier, "{during}: 109 is as it was");
+        assert_eq!(call.modem.fill_bits(), 0, "{during}: nothing is taken from the DTE");
+        assert_eq!(call.modem.phase(), "V.92: silent, for a retrain");
         let from = call.up.len();
-        call.run(600);
-        assert!(call.up[from + 1..].iter().all(|&x| x == 0.0), "{during}: the line is silent");
-        assert!(call.modem.take_bits().is_empty(), "{during}: nothing reaches the DTE");
+        for _ in 0..600 {
+            call.tick();
+            assert!(call.modem.take_bits().is_empty(), "{during}: nothing reaches the DTE once 104 is clamped");
+        }
+        assert!(call.up[from..].iter().all(|&x| x == 0.0), "{during}: the line is silent");
+    }
+
+    /// 9.5.2.2: "If Tone B is detected during Phase 3, the analogue modem
+    /// shall respond to retrain according to 9.7.2.2" -- while TRN1d is
+    /// training this end, and while this end's own TRN1u is on the line.
+    #[test]
+    fn tone_b_during_phase_3_asks_for_a_retrain() {
+        for during in ["V.92 phase 3: TRN1d", "V.92 phase 3: TRN1u over the DIL"] {
+            let mut call = Call::new(settings());
+            let reached = call.run_until(|call| call.modem.phase() == during, 60_000);
+            assert!(reached, "never reached {during}: {:#?}", call.notes);
+            call.run(200);
+            assert_eq!(call.modem.status(), Status::Running, "{during} is phase 3");
+            tone_b_is_answered(&mut call, during);
+        }
+    }
+
+    /// And nothing of an ordinary Phase 3 is taken for Tone B. Sd, TRN1d, Jd,
+    /// Jp, SCR and Ri are held against the watch by every test here that
+    /// reaches Phase 4; this is the DIL that comes nearest the tone.
+    #[test]
+    fn a_dil_in_short_segments_is_not_taken_for_tone_b() {
+        // A sign pattern with a period of twenty symbols is a square wave at
+        // 400 Hz: a line at 1200 Hz, its third harmonic, and nothing at 1050
+        // or 1350. But "the patterns are restarted at the beginning of each
+        // DIL-segment" (V.90 8.4.1), and a segment of ninety-six symbols is
+        // 12 ms and not a whole number of periods, so the line turns at
+        // every boundary and never stands for the 50 ms of 9.7.2.2.
+        let mut signs = vec![true; 10];
+        signs.extend([false; 10]);
+        let descriptor = Descriptor {
+            signs,
+            training: vec![true],
+            h: [15; 8],
+            refs: [UINFO; 8],
+            ucodes: vec![0x20, 0x48, 0x28, 0x50, 0x30, 0x58, 0x38, 0x60, 0x40, 0x68],
+        };
+        let mut call = Call::new(Settings { descriptor, ..settings() });
+        call.reach_phase4();
+        assert_eq!(call.modem.status(), Status::Phase4);
     }
 
     /// 9.6.2.2: "If Tone B is detected during Phase 4, the analogue modem
@@ -2940,6 +3528,332 @@ mod phase4_tests {
         let taken = call.modem.take_bits();
         assert!(taken.len() > 1000 && taken[..] == down[..taken.len()], "data was crossing");
         assert!(matches!(call.modem.status(), Status::Connected { .. }), "and no retrain without a tone");
+        assert!(call.modem.circuit109(), "109 is ON in data mode, and the retrain is to leave it");
         tone_b_is_answered(&mut call, "data mode");
+    }
+
+    /// A DIL of four segments, `h + 1` six-symbol repetitions each: a
+    /// reference at U_INFO and a training symbol (V.90 8.4.1).
+    fn dil(h: u8) -> Descriptor {
+        Descriptor {
+            signs: vec![true, false],
+            training: vec![false, true],
+            h: [h; 8],
+            refs: [UINFO; 8],
+            ucodes: vec![0x30, 0x38, 0x40, 0x48],
+        }
+    }
+
+    /// 9.5.2.1.9: "The length for this segment of TRN1u shall be in multiple
+    /// of 12 symbols", and 8.5.7: "The digital modem shall keep data frame
+    /// interval alignment from the first symbol of the second TRN1u signal."
+    /// Everything from there to B1u is whole twelves -- the twenty-four ones,
+    /// each CPt, E1u, TRN2u, SUVu, CPu, E2u -- so that 8.7.1's "the first
+    /// symbol of B1u shall begin data frame interval 0" is the interval 0
+    /// the digital modem has been counting to.
+    ///
+    /// What ends that TRN1u does not arrive on a twelfth symbol: Ri when no
+    /// DIL was asked for (9.5.2.1.10), and the DIL's own last symbol when one
+    /// longer than 2040T was (9.5.2.1.11).
+    #[test]
+    fn the_second_trn1u_is_whole_twelves_and_so_is_everything_up_to_b1u() {
+        let long = dil(127);
+        assert!(long.len() > TRN1U_MINIMUM as usize, "a DIL of {} symbols outlasts 2040T", long.len());
+        for descriptor in [Descriptor::none(), long] {
+            let asked = descriptor.len() as u64;
+            let mut call = Call::new(Settings { descriptor, ..settings() });
+            call.reach_phase4();
+            assert!(call.trn1u >= asked.max(12), "TRN1u covered the DIL: {} symbols", call.trn1u);
+            if asked > 0 {
+                assert!(call.trn1u >= TRN1U_MINIMUM, "at least 2040T with a DIL (9.5.2.1.9)");
+            }
+            assert_eq!(call.trn1u % 12, 0, "a DIL of {asked}: TRN1u ran {} symbols", call.trn1u);
+            assert_eq!(call.grid % 12, 0, "a DIL of {asked}: {} symbols from TRN1u's first to TRN2u's", call.grid);
+            // And on through Phase 4: `up` begins at TRN2u's first symbol.
+            call.exchange(&parameters(1, false), &[]);
+            assert!(call.run_until(|call| call.b1u_from.is_some(), SOON), "{:#?}", call.notes);
+            assert_eq!(call.b1u_from.unwrap() % 12, 0, "a DIL of {asked}: B1u's first symbol is interval 0");
+        }
+    }
+
+    /// Table 23: the only thing a CPu can say with no rate to ask for is drn
+    /// 0, "indicates cleardown". That ends the call, which nothing asked this
+    /// modem to do; 9.5.2.2 and 9.6.2.2 let it retrain "at any time", and
+    /// that is what it does, with no CPu sent at all.
+    #[test]
+    fn no_downstream_rate_is_a_retrain_and_not_a_cleardown() {
+        // Four points an interval carry twelve bits a frame, eighteen with
+        // the six signs: enough for a CPt at D = 16 (Table 17/V.90) and for
+        // no data mode rate, the slowest of which is D = 21 (Table 2/V.90).
+        let mask = [20u8, 28, 36, 44].iter().fold(0u128, |mask, &u| mask | 1 << u);
+        let sparse = Cp { drn: 8, constellations: vec![mask], ..Cp::default() };
+        let mut call = Call::new(Settings::new(Descriptor::none(), JA_MASK_ALL, sparse));
+        let stopped = call.run_until(|call| call.modem.status() != Status::Running, 60_000);
+        assert!(stopped, "phase 3 stopped at {}: {:#?}", call.modem.phase(), call.notes);
+        assert_eq!(
+            call.modem.status(),
+            Status::Retrain("no downstream rate that Jd enabled fits the constellations")
+        );
+        assert_eq!(call.modem.cpu(), None);
+        let from = call.up.len();
+        call.run(3000);
+        assert!(call.up[from..].iter().all(|&x| x == 0.0), "silence (9.7.2.1)");
+        assert!(call.far.cpus().is_empty() && call.far.suvus().is_empty(), "and nothing of an exchange");
+    }
+
+    /// 9.6.2.1.6 has B1d follow Ed, and 9.6.1.1.4 has the digital modem send
+    /// exactly one more sequence between the acknowledgement and Ed. If that
+    /// one arrives damaged, Ed cannot be told from the zeros a CPd is full
+    /// of -- but B1d can still be told from everything, by starting from
+    /// zero as V.90 8.6.1 says it does.
+    #[test]
+    fn b1d_is_found_behind_a_sequence_that_arrived_damaged() {
+        let down = pattern(1500, 0x5eed);
+        let mut call = Call::new(settings());
+        call.reach_phase4();
+        let cpu = call.acknowledged(&parameters(1, false));
+        call.far.spoiled_suvd(true);
+        call.far.ed_b1d_and_data(&cpu, &down);
+        call.connects_and_reads(&down);
+        assert!(call.noted("B1d found; the Ed before it was not read"), "{:#?}", call.notes);
+        assert!(!call.noted("Ed, reading for B1d"), "Ed was read after all: {:#?}", call.notes);
+        assert!(call.noted("B1d, 48 of 48 frames scrambled ones"), "{:#?}", call.notes);
+    }
+
+    /// B1d begins where B1d begins. 8.8.2 makes Ed two data frames, and
+    /// Tables 30 and 31 fill a sequence "to the next multiple of 6 symbols";
+    /// a far end that sends Ed twice over, or a frame of fill too many, moves
+    /// the place Ed points at by whole frames, and the forty-eight frames of
+    /// ones would hide that and hand the difference to the DTE as data.
+    #[test]
+    fn b1d_is_placed_by_its_own_first_frame_and_not_by_the_length_of_ed() {
+        // Ed twice: four frames of zeros.
+        let down = pattern(1500, 0xed2);
+        let mut call = Call::new(settings());
+        call.reach_phase4();
+        let cpu = call.acknowledged(&parameters(1, false));
+        call.far.ed();
+        call.far.ed_b1d_and_data(&cpu, &down);
+        call.connects_and_reads(&down);
+        assert!(call.noted("B1d began 2 frames after Ed's two"), "{:#?}", call.notes);
+        assert!(call.noted("B1d, 48 of 48 frames scrambled ones"), "{:#?}", call.notes);
+
+        // A frame of fill too many. With D = 26 an SUVd's fifty-two bits are
+        // two frames exactly; filled to six *bits* first and then to a frame
+        // they are three, the third all zeros, and Ed's first frame then
+        // looks like its second.
+        let mut call = Call::new(Settings::new(Descriptor::none(), JA_MASK_ALL, Cp { drn: 18, ..cpt() }));
+        assert_eq!(call.far.unit, 26, "D of a CPt with drn 18 (Table 23)");
+        call.far.unit = INTERVALS;
+        call.reach_phase4();
+        let cpu = call.acknowledged(&parameters(1, false));
+        call.far.ed_b1d_and_data(&cpu, &down);
+        call.connects_and_reads(&down);
+        assert!(call.noted("B1d began 1 frames after Ed's two"), "{:#?}", call.notes);
+        assert!(call.noted("B1d, 48 of 48 frames scrambled ones"), "{:#?}", call.notes);
+
+        // And the same D with the fill Table 31 asks for: Ed and B1d agree.
+        let mut call = Call::new(Settings::new(Descriptor::none(), JA_MASK_ALL, Cp { drn: 18, ..cpt() }));
+        call.reach_phase4();
+        call.exchange(&parameters(1, false), &down);
+        call.connects_and_reads(&down);
+        assert!(call.noted("Ed, reading for B1d"), "{:#?}", call.notes);
+        assert!(!call.notes.iter().any(|note| note.starts_with("B1d began")), "{:#?}", call.notes);
+    }
+
+    /// A B1d whose first frames are lost has no first frame to be found by.
+    /// The frame after Ed is then the only place there is, and three quarters
+    /// of the forty-eight frames reading as ones is what makes it B1d.
+    #[test]
+    fn a_b1d_whose_first_frames_are_lost_is_placed_by_ed() {
+        let down = pattern(1500, 0xd0);
+        let mut call = Call::new(settings());
+        call.reach_phase4();
+        // Three data frames of nothing.
+        call.dropout = 0..3 * INTERVALS;
+        call.exchange(&parameters(1, false), &down);
+        call.connects_and_reads(&down);
+        assert!(call.noted("Ed, reading for B1d"), "{:#?}", call.notes);
+        let counted = call.notes.iter().find(|note| note.starts_with("B1d, ")).expect("B1d was counted");
+        assert!(counted != "B1d, 48 of 48 frames scrambled ones", "the dropout cost nothing: {counted}");
+    }
+
+    /// 9.6.2.1.6 unclamps circuit 104 "after receiving B1d". What follows Ed
+    /// and is not B1d leaves it clamped, and since B1d is sent once the
+    /// answer is a retrain (9.6.2.2) well inside the twenty seconds.
+    #[test]
+    fn what_follows_ed_and_is_not_b1d_asks_for_a_retrain() {
+        let mut call = Call::new(settings());
+        call.reach_phase4();
+        // The line goes dead as B1d begins and stays dead.
+        call.dropout = 0..usize::MAX;
+        call.exchange(&parameters(1, false), &[]);
+        assert!(call.run_until(|call| call.noted("Ed, reading for B1d"), SOON), "{:#?}", call.notes);
+        let ed = call.modem.elapsed();
+        let asked = call.run_until(|call| matches!(call.modem.status(), Status::Retrain(_)), SOON);
+        assert!(asked, "{:?}: {:#?}", call.modem.status(), call.notes);
+        assert_eq!(call.modem.status(), Status::Retrain("what followed Ed was not B1d"));
+        // Forty-eight frames to count, and an eighth of a second in case it
+        // was Tone B that took their place.
+        let took = call.modem.elapsed() - ed;
+        assert!((1288..=1300).contains(&took), "asked {took} symbols after Ed");
+        assert!(!call.modem.circuit104() && !call.modem.circuit109() && !call.modem.circuit106());
+        assert!(call.modem.take_bits().is_empty(), "nothing was handed to the DTE");
+    }
+
+    /// A CPd this end cannot obey is not acknowledged: acknowledging it
+    /// promises a B1u made with it (9.6.2.1.2, 9.6.2.1.5). The rate has to be
+    /// one Ja offered (Table 20), the filters ones INFO1a said this end can
+    /// hold (Table 18 bits 12:17), and the moduli have to carry the rate's K
+    /// bits (6.4.1). 9.6.2.2 is the retrain.
+    #[test]
+    fn a_cpd_that_cannot_be_obeyed_asks_for_a_retrain() {
+        let good = parameters(7, false);
+        // INFO1a's code 0 offers neither optional section, so a precoder
+        // feed-forward section is one this end never said it had.
+        let unoffered = Parameters {
+            filters: Filters { z1: vec![0.25], ..good.filters.clone() },
+            ..good.clone()
+        };
+        // Twelve intervals of modulus 2 carry twelve bits; drn 7 is K = 48.
+        let small = Parameters { moduli: [2; UP_INTERVALS], ..good.clone() };
+        let cases = [
+            // Every rate but drn 7's 32 000.
+            (JA_MASK_ALL & !(1 << 6), &good, "the CPd asks for an upstream rate Ja did not offer"),
+            (JA_MASK_ALL, &unoffered, "the precoder has a feed-forward section this end did not offer"),
+            (JA_MASK_ALL, &small, "the data frame carries more bits than the moduli can hold"),
+        ];
+        for (mask, asked, why) in cases {
+            let mut call = Call::new(Settings::new(Descriptor::none(), mask, cpt()));
+            call.reach_phase4();
+            call.far.suvd(false);
+            assert!(call.run_until(|call| !call.far.suvus().is_empty(), SOON));
+            call.far.cpd(&Cpd::from(asked));
+            call.far.suvd(false);
+            let stopped = call.run_until(|call| matches!(call.modem.status(), Status::Retrain(_)), SOON);
+            assert!(stopped, "{why}: {:?}: {:#?}", call.modem.status(), call.notes);
+            assert_eq!(call.modem.status(), Status::Retrain(why));
+            assert_eq!(call.modem.parameters(), None, "{why}: nothing of it was kept");
+            assert!(call.far.suvus().iter().all(|(_, suvu)| !suvu.ack), "{why}: and it was never acknowledged");
+            assert!(call.far.cpus().iter().all(|(_, cpu)| !cpu.acknowledge));
+        }
+    }
+
+    /// 8.8.3: a part that is absent has its bits "removed from the CPd
+    /// sequence", and the reading here is that it stands as the CPd before
+    /// said. The other half of that is that a part which *is* there replaces
+    /// the one before: a second CPd with a new rate and new moduli, and no
+    /// filters or constellations, is those moduli on the first one's filters
+    /// and sets, and B1u is sent with exactly that.
+    #[test]
+    fn a_later_cpd_replaces_the_parts_it_carries_and_keeps_the_rest() {
+        let first = parameters(7, false);
+        // K = 36 on moduli of 8, which the first CPd's sixteen-level sets
+        // still hold a class for (6.4.2).
+        let merged = Parameters { drn: 1, moduli: [8; UP_INTERVALS], ..first.clone() };
+        let mut second = Cpd::from(&merged);
+        // It comes after the CPu has been read, so it is a CPd' (9.6.1.1.2).
+        (second.filters, second.sets, second.ack) = (None, None, true);
+        let mut call = Call::new(settings());
+        call.reach_phase4();
+        call.far.suvd(false);
+        assert!(call.run_until(|call| !call.far.suvus().is_empty(), SOON));
+        call.far.cpd(&Cpd::from(&first));
+        call.far.suvd(false);
+        assert!(call.run_until(|call| call.modem.parameters().is_some(), SOON), "{:#?}", call.notes);
+        assert_eq!(call.modem.parameters(), Some(&as_sent(&first)));
+        call.far.cpd(&second);
+        call.far.suvd(true);
+        assert!(call.run_until(|call| call.modem.circuit106(), SOON), "{:?}: {:#?}", call.modem.status(), call.notes);
+        let wire = as_sent(&merged);
+        assert_eq!(call.modem.parameters(), Some(&wire), "the new rate and moduli on the old filters and sets");
+        assert_eq!(call.modem.cpd().map(|cpd| (cpd.drn, cpd.moduli)), Some((1, Some([8; UP_INTERVALS]))));
+        // And that is what B1u was sent with.
+        call.run(600);
+        let from = call.b1u_on_the_line(E2U_SYMBOLS);
+        let mut decoder = UpDecoder::new(&wire);
+        let mut back = Vec::new();
+        for &level in &call.up[from..] {
+            decoder.feed(level);
+            back.extend(decoder.take_bits());
+        }
+        let ones = 48 * up_bits(1) as usize;
+        assert!(back.len() >= ones && back[..ones].iter().all(|&bit| bit), "B1u reads as ones at the second CPd's rate");
+    }
+
+    /// 9.6.2.1.1: SUVu waits for "ready to receive a CPd sequence" as well as
+    /// for the 12000T, and an end that has not found TRN2d's frames could not
+    /// read a CPd if one came. So with nothing coming down, TRN2u goes on.
+    #[test]
+    fn trn2u_goes_on_past_12000t_while_trn2d_has_not_been_found() {
+        // With a DIL, R-bar-i and TRN2d come after E1u (9.5.1.1.12), so the
+        // line can go dead between them.
+        let mut call = Call::new(Settings { descriptor: dil(3), ..settings() });
+        call.mute = true;
+        call.reach_phase4();
+        call.run(TRN2U_MINIMUM + 2000);
+        assert!(call.modem.down.as_ref().is_some_and(|down| !down.found()), "R-bar-i was heard and TRN2d was not");
+        assert_eq!(call.modem.phase(), "V.92 phase 4: TRN2u");
+        assert!(call.far.suvus().is_empty(), "no SUVu from an end that could not read a CPd");
+        assert!(call.far.bits[64..].iter().all(|&bit| bit), "TRN2u, scrambled ones, all the way (8.7.6)");
+        assert_eq!(call.modem.status(), Status::Phase4, "until 9.6.2.2.1's timer says otherwise");
+    }
+
+    /// 9.6.2.2.1's timer counts "from the end of sending INFO1a", so it is
+    /// running all through Phase 3; and what it starts is 9.7.2.1, which is
+    /// silence. The 70 ms of silence that opens Phase 3 is not that silence,
+    /// and must not be followed by Ru again.
+    #[test]
+    fn the_start_up_timer_runs_in_phase_3_and_leaves_the_line_silent() {
+        // All but a tenth of a second of the twenty had gone when this modem
+        // was built: the timer runs out 800 symbols in, during Ru.
+        let mut modem = Modem::new(Settings { since_info1a: 19.9, ..settings() });
+        let sent: Vec<f64> = (0..6000).map(|_| modem.step(0.0)).collect();
+        assert_eq!(modem.status(), Status::Retrain("no B1d within 20 s and six round trips"));
+        assert!(sent[..560].iter().all(|&x| x == 0.0), "70 ms of silence (9.5.2.1.1)");
+        assert!(sent[560..800].iter().all(|&x| x != 0.0), "then Ru");
+        assert!(sent[801..].iter().all(|&x| x == 0.0), "and nothing after the timer: no second Ru, no TRN1u");
+        assert_eq!(modem.phase(), "V.92: silent, for a retrain");
+        assert!(!modem.circuit106() && !modem.circuit104());
+    }
+
+    /// The CPt says "that the analogue modem has received enough of the DIL
+    /// sequence" (9.5.2.1.11), so an owner that chooses its constellations
+    /// from the DIL has to be able to choose them after it: TRN1u runs on, in
+    /// whole twelves, until it has, and the CPt and the CPu that then go out
+    /// are the ones it chose.
+    #[test]
+    fn the_cpt_and_the_cpu_can_be_chosen_once_the_dil_has_arrived() {
+        // What the owner will choose: a CPt at D = 20, and sixty-four points
+        // an interval for data, which with the six signs is D = 42, drn 22.
+        let training = Cp { drn: 12, ..cpt() };
+        let points = (16..=79u8).fold(0u128, |mask, u| mask | 1 << u);
+        let data = Cp { drn: 22, data_mode: true, constellations: vec![points], ..Cp::default() };
+        // What the modem is built with is a CPt it will never send.
+        let settings = Settings {
+            descriptor: dil(3),
+            choice_follows_dil: true,
+            ..Settings::new(Descriptor::none(), JA_MASK_ALL, Cp { drn: 8, ..cpt() })
+        };
+        // The digital modem reads the CPt that is sent.
+        let far = Far::new(&Settings { cpt: training.clone(), ..settings.clone() }, false);
+        let mut call = Call::against(settings, far);
+        // Reading a DIL takes a while: three thousand symbols of it here.
+        call.choice = Some((training.clone(), data.clone(), 3000));
+        assert!(!call.modem.dil_received());
+        call.reach_phase4();
+        assert!(call.trn1u > 3000, "TRN1u waited for the choice: {} symbols", call.trn1u);
+        assert_eq!(call.trn1u % 12, 0, "in whole twelves (9.5.2.1.9)");
+        let sent = call.cpts.first().expect("a CPt was read off the line");
+        assert_eq!((sent.drn, &sent.constellations), (training.drn, &training.constellations));
+        assert!(call.cpts.iter().all(|cpt| cpt == sent), "and every repetition of it was that one");
+        assert!(!call.modem.choose(training, data.clone()), "a choice after CPt has begun is refused");
+
+        let down = pattern(2000, 0xd11);
+        call.exchange(&parameters(1, false), &down);
+        call.connects_and_reads(&down);
+        let cpu = call.far.cpus()[0].1.clone();
+        assert_eq!((cpu.drn, &cpu.constellations), (22, &data.constellations), "the CPu is the data half of the choice");
+        assert_eq!(call.modem.status(), Status::Connected { downstream: 56_000, upstream: 24_000 });
     }
 }

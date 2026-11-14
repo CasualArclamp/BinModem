@@ -8,10 +8,12 @@
 //! S-bar-d, TRN1d and Jd, measures Su, answers with Jp, reads CPt, sends Ri, Ri
 //! gone round and reaches Phase 4.
 //!
-//! Phase 4's exchange between the two of them and the PCM upstream carrying
-//! bytes are V92-41: what is here stops where both ends have reached Phase 4,
-//! TRN2u going up on one side and TRN2d coming down on the other. Each end's
-//! own Phase 4 is tested beside it, against a scripted far end.
+//! And Phase 4 between the two of them, as far as it goes: TRN2u and TRN2d, the
+//! SUV/CP/E exchange, E2u placed where it stands and Ed sent once, B1u and B1d,
+//! both ends in data mode and the downstream carrying data. The PCM upstream
+//! carrying bytes is the rest of V92-41 and is the one test here that is
+//! ignored, with the reason beside it. Each end's own Phase 4 is tested beside
+//! it, against a scripted far end.
 
 use datapump::v90::sequences::{Cp, Descriptor};
 use datapump::v90::ucode::Law;
@@ -62,6 +64,12 @@ struct Call {
     line: Line,
     /// How many of the analogue's asked-for delays the line has taken.
     applied: usize,
+    /// Ticks so far, which is both ends' own count of symbols.
+    ticks: u64,
+    /// The tick the analogue end sent B1u's first symbol on (8.7.1), and the
+    /// tick the digital end said it had read E2u on (9.6.1.1.6).
+    b1u_at: Option<u64>,
+    e2u_at: Option<u64>,
     digital_notes: Vec<String>,
     analogue_notes: Vec<String>,
 }
@@ -224,6 +232,9 @@ impl Call {
             up: 0.0,
             line,
             applied: 0,
+            ticks: 0,
+            b1u_at: None,
+            e2u_at: None,
             digital_notes: Vec::new(),
             analogue_notes: Vec::new(),
         }
@@ -249,7 +260,15 @@ impl Call {
         }
         self.applied = delays.len();
         self.up = self.line.step(sent);
-        self.digital_notes.append(&mut self.digital.take_notes());
+        self.ticks += 1;
+        if self.b1u_at.is_none() && self.analogue.phase() == "V.92 phase 4: B1u" {
+            self.b1u_at = Some(self.ticks);
+        }
+        let mut said = self.digital.take_notes();
+        if self.e2u_at.is_none() && said.iter().any(|note| note == "V.92: E2u") {
+            self.e2u_at = Some(self.ticks);
+        }
+        self.digital_notes.append(&mut said);
         self.analogue_notes.append(&mut self.analogue.take_notes());
     }
 
@@ -302,6 +321,181 @@ fn phase_3_completes_and_the_digital_end_reaches_phase_4() {
     let epsilon = call.analogue.epsilon().expect("Jp carried an epsilon");
     assert_eq!(delays.get(1), Some(&epsilon), "the analogue applied what Jp said");
     assert!((0.0..1.0).contains(&epsilon), "a fraction of a symbol: {epsilon}");
+}
+
+/// A CPt for 32 000 bit/s on thirty-two points, Ucodes 16 to 47: none of them
+/// the zero level, whose sign no receiver can read, so that what the digital
+/// end sends through V.90 5.4's encoder in Phase 4 is something the analogue
+/// end can decode.
+fn readable_cpt() -> Cp {
+    let mask = (16..=47u8).fold(0u128, |mask, u| mask | 1 << u);
+    Cp { drn: 16, constellations: vec![mask], ..Cp::default() }
+}
+
+/// A DIL of four segments of twenty-four symbols, each a reference at U_INFO
+/// and a training symbol (V.90 8.4.1): enough to put 9.5.2.1.11's order in
+/// force, in which Ri answers the CPt and R-bar-i the E1u.
+fn a_dil() -> Descriptor {
+    Descriptor {
+        signs: vec![true, false],
+        training: vec![false, true],
+        h: [3; 8],
+        refs: [79; 8],
+        ucodes: vec![0x30, 0x38, 0x40, 0x48],
+    }
+}
+
+/// A deterministic bit pattern, for the data.
+fn pattern(length: usize, seed: u64) -> Vec<bool> {
+    let mut state = seed | 1;
+    (0..length)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state >> 63 == 0
+        })
+        .collect()
+}
+
+/// Both modems of this crate from the end of Phase 2 until each says it is in
+/// data mode, on the line every test here uses: a perfect wire down, and up a
+/// 3.4 kHz passband with the analogue end's own sub-symbol delays.
+fn connected_call(descriptor: Descriptor) -> Call {
+    let analogue = analogue::Settings::new(descriptor, 0x7ffff, readable_cpt());
+    let mut call = Call::new(digital_settings(0), analogue);
+    let connected = call.run_until(
+        |call| {
+            matches!(call.digital.status(), digital::Status::Connected { .. })
+                && matches!(call.analogue.status(), analogue::Status::Connected { .. })
+        },
+        150_000,
+    );
+    assert!(
+        connected,
+        "digital {:?} at {:?}, analogue {:?} at {:?}\n{:#?}\n{:#?}",
+        call.digital.status(),
+        call.digital.phase(),
+        call.analogue.status(),
+        call.analogue.phase(),
+        call.digital_notes,
+        call.analogue_notes
+    );
+    call
+}
+
+/// Where `wanted` is in `stream`, if it is there whole.
+fn found(stream: &[bool], wanted: &[bool]) -> Option<usize> {
+    stream.windows(wanted.len()).position(|window| window == wanted)
+}
+
+/// Phase 4 between the two modems of this crate (9.6.1.1 against 9.6.2.1),
+/// with no DIL asked for and with one: both reach data mode, by an exchange
+/// in which each thing the Recommendation places is where it places it, and
+/// the downstream then carries data.
+///
+/// * **TRN2u is read from its first symbol** in either order. With no DIL the
+///   digital modem sends R-bar-i on the CPt (9.5.1.1.13), before the analogue
+///   modem's E1u, and still has to read that E1u, because TRN2u's scrambler is
+///   reset on the symbol after it (8.7.6).
+/// * **E2u is found where it stands**, after the sequence 9.6.2.1.4 has the
+///   analogue modem complete, whether or not Ed has gone out yet; and the
+///   digital modem conditions for B1u on the symbol after it (9.6.1.1.6).
+/// * **Ed is two data frames** (8.8.2), so the B1d that follows it begins on
+///   the frame the analogue modem's count of Ed's zeros says it does.
+#[test]
+fn phase_4_completes_between_the_two_modems_and_the_downstream_carries_data() {
+    for descriptor in [Descriptor::none(), a_dil()] {
+        let asked = descriptor.len();
+        let mut call = connected_call(descriptor);
+        let digital_said = |text: &str| call.digital_notes.iter().filter(|note| note.starts_with(text)).count();
+        let analogue_said = |text: &str| call.analogue_notes.iter().filter(|note| note.starts_with(text)).count();
+        let said = format!("a DIL of {asked}:\n{:#?}\n{:#?}", call.digital_notes, call.analogue_notes);
+
+        // 8.7.6: the upstream reader starts at E1u, and its fit on TRN2u is
+        // made against TRN2u.
+        assert_eq!(digital_said("V.92: E1u"), 1, "{said}");
+        assert_eq!(digital_said("V.92: phase 4 receiver fitted on TRN2u"), 1, "{said}");
+        assert_eq!(digital_said("V.92: no phase 4 fit"), 0, "{said}");
+
+        // 9.6.1.1.2 and 9.6.2.1.2: a CPd and a CPu each way, and the rates
+        // they named are the rates each end says it is at.
+        assert!(digital_said("V.92: CPu drn 16") >= 1 && analogue_said("CPd for drn") >= 1, "{said}");
+        let upstream = call.analogue.parameters().map(datapump::v92::Parameters::rate).expect("a CPd was obeyed");
+        assert_eq!(call.digital.status(), digital::Status::Connected { downstream: 48_000, upstream }, "{said}");
+        assert_eq!(call.analogue.status(), analogue::Status::Connected { downstream: 48_000, upstream }, "{said}");
+
+        // 9.6.1.1.6: E2u, once, and where it is. Its last symbol left the
+        // analogue modem on the tick before B1u's first; the line is 55
+        // samples long (its 31-tap filter and the interpolator's forty), and
+        // the digital modem's equaliser is no longer than its 48 taps.
+        assert_eq!(digital_said("V.92: E2u"), 1, "{said}");
+        let (b1u, e2u) = (call.b1u_at.expect("B1u went out"), call.e2u_at.expect("E2u was read"));
+        assert!((b1u + 55..=b1u + 55 + 48).contains(&e2u), "B1u's first symbol at {b1u}, E2u read at {e2u}: {said}");
+
+        // 8.8.2: one Ed, of two frames, so the analogue modem's B1d begins on
+        // the frame after the Ed it read, and all forty-eight frames are ones.
+        assert_eq!(digital_said("V.92: Ed out"), 1, "{said}");
+        assert_eq!(analogue_said("Ed, reading for B1d"), 1, "{said}");
+        assert_eq!(analogue_said("B1d began"), 0, "{said}");
+        assert_eq!(analogue_said("B1d, 48 of 48 frames scrambled ones"), 1, "{said}");
+        assert!(call.analogue.circuit104() && call.analogue.circuit106() && call.analogue.circuit109());
+
+        // And the downstream carries data: what the far DTE sends arrives bit
+        // for bit, behind nothing but the ones of an idle line (V.90 8.6.1).
+        let down = pattern(4000, 0xd0);
+        call.digital.send_bits(&down);
+        let mut came_down = Vec::new();
+        for _ in 0..3000 {
+            call.tick();
+            came_down.extend(call.analogue.take_bits());
+        }
+        let at = found(&came_down, &down).unwrap_or_else(|| panic!("the downstream data did not arrive: {said}"));
+        assert!(came_down[..at].iter().all(|&bit| bit), "something other than idle ones came first");
+        assert!(came_down[at + down.len()..].iter().all(|&bit| bit), "and something other than idle ones after");
+    }
+}
+
+/// V92-41's milestone in full: the PCM upstream carrying data as well.
+///
+/// Everything up to B1u's first symbol is in place and is what the test above
+/// holds. What is not is the digital modem's reading of what follows it. Its
+/// CPd asks the analogue modem for a precoder and prefilter that undo the
+/// line (6.4.2, designed in `v92::design` against a channel estimate taken
+/// from TRN1u), and its own receiver then goes on equalising with the taps it
+/// fitted on TRN2u, so the line is undone twice and what the trellis decoder
+/// is given is not the constellation: the bits that come out are half ones.
+///
+/// That this is the whole of it is measured, not supposed. Run with
+/// `V92_PRE=none` in the environment, which has the digital modem send a CPd
+/// asking for no filtering at all (a prefilter of one tap), this test passes
+/// as it stands: B1u reads as ones from the symbol after E2u and the data
+/// behind it arrives bit for bit, both ways. `tests/v92_upstream.rs` carries
+/// the designed filters instead, at 48 000 bit/s, by handing the decoder the
+/// line's own samples, scaled, from the design's delay on, with no equaliser
+/// behind them. Which of the two the digital modem's data mode is to be --
+/// equalise here and ask for nothing, or ask for the design and not equalise
+/// -- is V92-41's to settle, in `v92::digital` and `v92::receiver`.
+#[test]
+#[ignore = "V92-41: the digital modem equalises a line its own CPd's prefilter has already equalised; passes with V92_PRE=none"]
+fn a_v92_call_connects_with_pcm_both_ways_and_carries_data() {
+    let mut call = connected_call(Descriptor::none());
+    let down = pattern(4000, 0xd0);
+    let up = pattern(3000, 0x0b);
+    call.digital.send_bits(&down);
+    call.analogue.send_bits(&up);
+    let (mut came_down, mut went_up) = (Vec::new(), Vec::new());
+    for _ in 0..12_000 {
+        call.tick();
+        came_down.extend(call.analogue.take_bits());
+        went_up.extend(call.digital.take_bits());
+    }
+    assert!(found(&came_down, &down).is_some(), "the downstream data did not arrive");
+    // How far from it the upstream is, for whoever takes this up: B1u and an
+    // idle DTE are both ones, so a block of what came up should be all ones.
+    let ones: Vec<usize> =
+        went_up.chunks(360).take(20).map(|block| block.iter().filter(|&&bit| bit).count()).collect();
+    assert!(found(&went_up, &up).is_some(), "the upstream data did not arrive; ones in each 360 bits: {ones:?}");
 }
 
 /// The same call with an MD in it: this end announces 3 x 276 = 828 symbols in

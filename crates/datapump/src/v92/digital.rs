@@ -54,7 +54,7 @@ use crate::v92::epsilon;
 use crate::v92::exchange::{Context, Exchange};
 use crate::v92::receiver::{ALIGN_WINDOW, Heard, Receiver, Slicer, Symbol, TRAIN_WINDOW};
 use crate::v92::sequences::{
-    CpFamily, Cpd, J, JP_PRIME_BITS, Jp, Suvd, UpFinder, trn2u_unit,
+    CpFamily, Cpd, J, JP_PRIME_BITS, Jp, SHORT_BITS, Suvd, UpFinder, trn2u_unit,
 };
 use crate::v92::up_signals::{Trn2uReader, Trn2uSize, TwoPointReader};
 use crate::v92::upchoice::choose;
@@ -728,6 +728,18 @@ impl Source {
         self.phase4.as_ref().map_or(0, |p| p.coder.frame_bits())
     }
 
+    /// What an SUVd or a CPd is filled to, in bits: "the next multiple of 6
+    /// symbols" (Tables 30 and 31), which on TRN2d's modulation is one data
+    /// frame of D bits. With no CPt installed the fallback is one bit a
+    /// symbol, and six symbols are six bits.
+    #[must_use]
+    pub fn fill_unit(&self) -> usize {
+        match self.phase4_frame_bits() {
+            0 => INTERVALS,
+            d => d,
+        }
+    }
+
     /// 8.8.2: Ed is "2 data frames of scrambled binary zeroes".
     #[must_use]
     pub fn ed_bits(&self) -> Vec<bool> {
@@ -1211,6 +1223,19 @@ impl Source {
     }
 }
 
+/// How many fill bits of an upstream sequence are still to come when
+/// [`UpFinder`] reports it, `unit` being what twelve symbols carry.
+///
+/// A short sequence is found at its fifty-second bit, "Fill bit: 0", and is
+/// filled from there "to the next multiple of 12 symbols" (Tables 24 and 27);
+/// a long one is found at the last bit of that fill (Table 23).
+fn fill_left(family: &CpFamily, unit: usize) -> u32 {
+    match family {
+        CpFamily::Suvu(_) | CpFamily::Cpus(_) => (SHORT_BITS.next_multiple_of(unit.max(1)) - SHORT_BITS) as u32,
+        CpFamily::Cpu(_) | CpFamily::Cpt(_) => 0,
+    }
+}
+
 /// Where the Phase 3 state machine has got to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -1353,11 +1378,27 @@ pub struct Modem {
     /// The analogue modem's CPu, once it has arrived: the downstream's data
     /// mode parameters (9.6.1.1.5).
     cpu: Option<Cp>,
-    /// Zero bits since Ed went out, for E2u: twelve (or thirteen) descrambled
-    /// zeros are what tells it from anything else (8.5.2, 8.7.2).
+    /// Zero bits, with no one among them, since the last SUVu or CPu was
+    /// read: what E2u is counted in (8.7.2).
     e2u_zeroes: u32,
-    /// Whether Ed has gone out, which is the only time E2u can be expected.
-    awaiting_e2u: bool,
+    /// How many of those zeros make E2u, counted from the bit that completed
+    /// the last sequence read: the rest of that sequence's fill, and then
+    /// E2u's own data frame. `None` once a one has arrived, because then
+    /// what follows the sequence is another sequence's frame sync.
+    ///
+    /// E2u is zeros, and so is a good part of every sequence: an SUVu ends
+    /// in twenty-one of them (Table 27's fill) and a CPu has whole words of
+    /// them. So it is not looked for as a run of zeros anywhere, but as the
+    /// zeros that stand where the next frame sync would have, which is the
+    /// one place 9.6.2.1.4 can put it ("complete sending the current CPu
+    /// sequence and transmit E2u").
+    e2u_target: Option<u32>,
+    /// Whether Ed has been asked of the source, which is asked once: "Ed
+    /// consists of 2 data frames" (8.8.2), not of as many as it takes the
+    /// exchange to notice.
+    ed_asked: bool,
+    /// Whether B1d has been put behind Ed (9.6.1.1.5).
+    b1d_queued: bool,
     /// Whether the receiver is still waiting for the symbol B1u starts on.
     /// 9.6.1.1.6 conditions it for B1u *after* E2u, and E2u ends one symbol
     /// before B1u's frame interval 0 -- which is the only symbol that says how
@@ -1459,7 +1500,9 @@ impl Modem {
             parameters: None,
             cpu: None,
             e2u_zeroes: 0,
-            awaiting_e2u: false,
+            e2u_target: None,
+            ed_asked: false,
+            b1d_queued: false,
             b1u_pending: false,
             b1u_deadline: None,
             upstream_bits: 0,
@@ -1954,27 +1997,49 @@ impl Modem {
                 self.begin_data();
             }
         }
+        // Ed is asked of the source once (8.8.2: two data frames). What is
+        // left is 9.6.1.1.5's "After sending the Ed sequence, the digital
+        // modem shall send B1d": on the symbol after Ed's last, so B1d has to
+        // be waiting behind Ed before Ed's bits run out. Asking the exchange
+        // again here is what used to put a second Ed on the line: the
+        // sequence in flight when Ed was asked for ends as Ed begins, and an
+        // exchange told that a sequence had ended answered "E" once more.
+        if self.ed_asked {
+            if self.source.out() == Out::Ed && !self.b1d_queued {
+                self.queue_b1d();
+            }
+            return;
+        }
         let Some(exchange) = self.exchange.as_mut() else { return };
         if exchange.sending().is_some() || self.source.out() == Out::B1d {
             return;
         }
         let kind = exchange.next_sequence(now);
         let ack = exchange.sequence_started(kind);
+        // "Fill bits: 0s to extend the ... sequence length to the next
+        // multiple of 6 symbols" (Tables 30 and 31): six symbols are one data
+        // frame of TRN2d's modulation, so the unit is that frame's D bits.
+        // Filling to six *bits* first, which is what this did, leaves a
+        // sequence that is already whole frames with a frame of zeros behind
+        // it whenever D is not a multiple of six -- an SUVd is fifty-two bits,
+        // two frames exactly at D = 26 -- and a frame of zeros where a
+        // sequence has just ended is the first half of an Ed.
+        let unit = self.source.fill_unit();
         match kind {
             SequenceKind::Suv => {
-                let bits = Suvd { silence: false, ack }.to_bits(INTERVALS);
+                let bits = Suvd { silence: false, ack }.to_bits(unit);
                 self.source.send(Out::Suvd, bits);
             }
             SequenceKind::Cp => {
                 let Some(mut cpd) = self.cpd.clone() else {
                     // Nothing to declare yet: keep the SUVs going rather than
                     // send a CPd that says nothing (9.6.1.1.2 allows the wait).
-                    let bits = Suvd { silence: false, ack }.to_bits(INTERVALS);
+                    let bits = Suvd { silence: false, ack }.to_bits(unit);
                     self.source.send(Out::Suvd, bits);
                     return;
                 };
                 cpd.ack = ack;
-                let bits = cpd.to_bits(INTERVALS);
+                let bits = cpd.to_bits(unit);
                 // What the far end's detector will make of it: the sequence is
                 // a 17-one sync, a start bit and sixteen bits per word, then a
                 // start bit and sixteen CRC bits -- so the data bytes it counts
@@ -1993,8 +2058,7 @@ impl Modem {
             // 8.8.2: Ed is two data frames of scrambled zeros, at CPt's rate.
             SequenceKind::E => {
                 self.source.send(Out::Ed, self.source.ed_bits());
-                self.e2u_zeroes = 0;
-                self.awaiting_e2u = true;
+                self.ed_asked = true;
                 self.note("V.92: Ed".into());
             }
             _ => {}
@@ -2057,7 +2121,8 @@ impl Modem {
         let kind = exchange.next_sequence(now);
         let ack = exchange.sequence_started(kind);
         if kind == SequenceKind::Suv {
-            let bits = Suvd { silence: false, ack }.to_bits(INTERVALS);
+            // Filled to a data frame's D bits (Table 31): see `phase4_out`.
+            let bits = Suvd { silence: false, ack }.to_bits(self.source.fill_unit());
             self.source.send(Out::Suvd, bits);
         }
     }
@@ -2313,7 +2378,14 @@ impl Modem {
     /// and the upstream's decoder from this end's own CPd.
     fn begin_data(&mut self) {
         self.note("V.92: Ed out".into());
+        // B1d was put behind Ed while Ed was going out; an Ed that reached
+        // its end without that is one this was never asked to send, and B1d
+        // then follows as soon as it can.
+        if !self.b1d_queued {
+            self.queue_b1d();
+        }
         let upstream = self.parameters.as_ref().map_or(0, Parameters::rate);
+        let downstream = self.downstream.as_ref().map_or(0, |encoder| encoder.mapping().rate());
         // The receiver is *not* reconditioned here. 9.6.1.1.6 has it done
         // "after receiving E2u", and that is not pedantry: E2u is a data frame
         // of TRN2u's four points (8.7.2), so it still needs the equaliser
@@ -2324,9 +2396,30 @@ impl Modem {
         // mode's constellation, and started B1u's frame count at a symbol
         // some hundreds early -- a whole number of symbols the far end never
         // agreed to.
-        self.b1u_pending = self.parameters.is_some();
+        //
+        // E2u may have come already: the analogue modem sends it as soon as
+        // it has an acknowledged sequence each way (9.6.2.1.4), and this end
+        // holds SUVd' for a while before Ed. Then the receiver is B1u's
+        // already and there is nothing left to wait for.
+        self.b1u_pending = self.parameters.is_some() && self.upstream_data.is_none();
         self.b1u_deadline = self.b1u_pending.then_some(self.now + (B1U_WAIT * FS) as u64);
-        let mut downstream = 0;
+        // Data mode is on the line now (9.6.1.1.5-6): the stack above starts
+        // handing DTE bits down and taking recovered bits up from here.
+        self.status = Status::Connected { downstream, upstream };
+        self.stage = Stage::Phase4;
+        self.fill_downstream();
+    }
+
+    /// 9.6.1.1.5: "After sending the Ed sequence, the digital modem shall
+    /// send B1d at the negotiated data signalling rate using the data mode
+    /// constellation parameters it received in CPu."
+    ///
+    /// Called while Ed is going out, so that B1d's first symbol is the one
+    /// after Ed's last: the source changes signal where the one on the line
+    /// ends, and with nothing asked for by then it repeats what it has, which
+    /// for Ed is four frames of zeros where 8.8.2 has two.
+    fn queue_b1d(&mut self) {
+        self.b1d_queued = true;
         if let Some(cpu) = self.cpu.as_ref()
             && let Some(mapping) = crate::v90::encoder::Mapping::from_cp(cpu)
         {
@@ -2346,7 +2439,7 @@ impl Modem {
                         .collect::<Vec<_>>()
                 );
             }
-            downstream = mapping.rate();
+            let downstream = mapping.rate();
             self.downstream = Some(crate::v90::encoder::Encoder::new(mapping, self.settings.law));
             // 8.6.1: the data-mode scrambler starts afresh at B1d, and B1d is
             // 48 data frames of scrambled ones before the data starts.
@@ -2356,10 +2449,6 @@ impl Modem {
         } else {
             self.note("V.92: no CPu yet, B1d waits".into());
         }
-        // Data mode is on the line now (9.6.1.1.5-6): the stack above starts
-        // handing DTE bits down and taking recovered bits up from here.
-        self.status = Status::Connected { downstream, upstream };
-        self.stage = Stage::Phase4;
         self.source.change(Out::B1d);
         self.fill_downstream();
     }
@@ -2399,20 +2488,26 @@ impl Modem {
                 self.b1u_skip
             );
         }
-        // Where B1u's frame interval 0 is, in symbols after the one E2u's zero
-        // run completed in.
+        // Where B1u's frame interval 0 is, in symbols after E2u's last: none.
+        // "The first symbol of B1u shall begin data frame interval 0" (8.7.1)
+        // and B1u follows E2u with nothing between (9.6.2.1.5), so the symbol
+        // after the one that carried E2u's last zero is n = 0 of the whole
+        // 6.4 chain.
         //
-        // 8.7.1 makes B1u's contents known -- "48 data frames of scrambled
-        // binary ones" -- which is the one place upstream where the receiver
-        // can be told what it should have read, and a capture of an Agere
-        // SV92PP says the answer is not zero. Read from the completion symbol,
-        // all twelve phases of the frame origin give a stream of random bits;
-        // from one symbol later B1u comes out all ones, and so does the far
-        // end's whole idle stretch after it. The likeliest reason is that the
-        // phase-4 reader's differential decode reports a zero run one symbol
-        // after the symbol that carried its last zero; what is implemented is
-        // the measurement. See `crates/datapump/examples/v92_b1u_search.rs`.
-        const B1U_ORIGIN_AFTER_E2U: usize = 1;
+        // This was 1, from a capture of an Agere SV92PP read with the E2u
+        // detector this module had then: twelve zero *bits* in a row, looked
+        // for only once Ed had been asked for. That is six symbols of four
+        // points, and a run that long ends every SUVu (Table 27's fill), so
+        // where it fired said nothing of where E2u ended, and the 1 was a
+        // measurement of that capture and that detector, not of the clause.
+        // E2u is now placed by where it stands (see `e2u_target`), and the
+        // origin is the Recommendation's. Against this crate's analogue
+        // modem, whose B1u is checked symbol for symbol against 8.7.1, zero
+        // is what reads B1u as ones and the data behind it bit for bit
+        // (`tests/v92_call.rs`, with a CPd that asks for no filtering). It
+        // wants measuring again on the bench against the modems the 1 came
+        // from.
+        const B1U_ORIGIN_AFTER_E2U: usize = 0;
         // Data frames of B1u the decoder is not given, while the equaliser
         // settles onto the data-mode constellation.
         //
@@ -2578,29 +2673,45 @@ impl Modem {
             if let Some(finder) = self.up_finder.as_mut()
                 && let Some(family) = finder.feed(bit)
             {
+                // Where E2u would end if it is what follows this sequence:
+                // the rest of the sequence's fill, and then "a data frame of
+                // scrambled, differentially encoded zeroes ... transmitted
+                // using the corresponding TRN2u modulation", "extended by a
+                // single symbol if bit 29 of CPd is set" (8.7.2). A data
+                // frame is twelve symbols (8.7.1), at this constellation's
+                // bits a symbol.
+                let width = self.upstream_size.bits() as u32;
+                let extended = self.parameters.as_ref().is_some_and(|p| p.extend_e2u);
+                let e2u = width * (UP_INTERVALS as u32 + u32::from(extended));
+                self.e2u_target = Some(fill_left(&family, trn2u_unit(self.upstream_size == Trn2uSize::Eight)) + e2u);
+                self.e2u_zeroes = 0;
                 self.up_sequence(family);
+                continue;
             }
-            // 8.7.2: E2u is a data frame of scrambled *zeros*, so twelve
-            // descrambled zeros after Ed is what it is. 9.6.1.1.4 terminates
-            // the exchange on it, and 9.6.1.1.6 conditions for B1u.
-            if self.awaiting_e2u {
-                if bit {
-                    self.e2u_zeroes = 0;
-                } else {
-                    self.e2u_zeroes += 1;
-                    // 8.7.2: E2u "shall be extended by a single symbol if bit
-                    // 29 of CPd is set", and either way it is whole symbols.
-                    let e2u = UP_INTERVALS as u32
-                        + u32::from(self.parameters.as_ref().is_some_and(|p| p.extend_e2u));
-                    if self.e2u_zeroes >= e2u {
-                        let now = self.now;
-                        if let Some(exchange) = self.exchange.as_mut() {
-                            exchange.peer_e(now);
-                        }
-                        self.awaiting_e2u = false;
-                        self.note("V.92: E2u".into());
-                        started = true;
+            // 9.6.1.1.4 and 9.6.1.1.6: E2u ends the exchange and is what B1u
+            // is placed by, whenever it comes. The analogue modem sends it
+            // once it has sent an acknowledged sequence and received one
+            // (9.6.2.1.4), which can be long before this end's own Ed. It
+            // cannot be before this end has sent an acknowledged sequence,
+            // and zeros that stand there before then are not taken for it.
+            let Some(target) = self.e2u_target else { continue };
+            if bit {
+                // A one where the fill and E2u would be: the frame sync of
+                // the next SUVu or CPu.
+                self.e2u_target = None;
+                continue;
+            }
+            self.e2u_zeroes += 1;
+            if self.e2u_zeroes == target {
+                self.e2u_target = None;
+                let now = self.now;
+                let acknowledged = self.exchange.as_ref().is_some_and(Exchange::sent_ack);
+                if acknowledged && self.upstream_data.is_none() {
+                    if let Some(exchange) = self.exchange.as_mut() {
+                        exchange.peer_e(now);
                     }
+                    self.note("V.92: E2u".into());
+                    started = true;
                 }
             }
         }
@@ -2721,6 +2832,17 @@ impl Modem {
                 }
             }
             Stage::Dil | Stage::Ri | Stage::RiBar => {
+                let Some(bit) = self.reader.feed(symbol.value) else {
+                    return;
+                };
+                self.cpt_bit(bit);
+            }
+            // With no DIL asked for, R-bar-i answers the CPt and not the E1u
+            // (9.5.1.1.13), and the analogue modem only then finishes its
+            // current CPt and sends E1u (9.5.2.1.10): so E1u arrives with
+            // TRN2d already going out, and it still has to be read, because
+            // TRN2u begins on the symbol after it (8.7.6).
+            Stage::Phase4 if self.upstream.is_none() && self.exchange.is_none() && self.no_dil() => {
                 let Some(bit) = self.reader.feed(symbol.value) else {
                     return;
                 };
@@ -2851,7 +2973,15 @@ impl Modem {
             // one repetition of it, plus the twelve, is as long ago as the last
             // CRC hit can be. Silence is not E1u.
             let fresh = self.since_cpt <= self.cp_len + E1U_ZEROES;
-            if self.e1u_zeroes == E1U_ZEROES
+            // With a DIL, E1u is what R-bar-i answers (9.5.1.1.12). With
+            // none, R-bar-i has gone out already, on the CPt (9.5.1.1.13),
+            // and E1u is only where TRN2u begins.
+            let after_r_bar =
+                self.no_dil() && matches!(self.stage, Stage::RiBar | Stage::Phase4) && self.upstream.is_none();
+            if self.e1u_zeroes == E1U_ZEROES && fresh && self.cpt.is_some() && after_r_bar {
+                self.note("V.92: E1u".into());
+                self.begin_upstream();
+            } else if self.e1u_zeroes == E1U_ZEROES
                 && fresh
                 && self.cpt.is_some()
                 && self.stage == Stage::Ri
