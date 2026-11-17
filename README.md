@@ -193,7 +193,11 @@ V.33 -- the same trellis code as V.32bis again, on a leased line.
 V.92 carries data between two of these modems: `AT+MS=V92` at both ends with
 `BINMODEM_V92_PCM_UP=1`, PCM both ways, 48 000 up and up to 56 000 down over a
 pair of virtual cables. It has not carried a call with a real V.92 modem yet,
-and the calling side still wants a line with no echo and one clock. Eighteen agents read the Recommendation clause by clause off
+and the calling side still wants a line with no echo and one clock. A second
+V.92 call to the same number starts up the short way (9.2 and 9.4, "quick
+connect"): QC1a and QCA1d in place of V.8's menus, a Phase 2 with no line
+probe, and no ODP/ADP, which takes about three seconds off the sixteen;
+`BINMODEM_V92_QC=0` turns it off and `always` asks every server. Eighteen agents read the Recommendation clause by clause off
 the rendered pages, with V.8, V.8 bis and V.250's `+P` commands beside it, and
 four more read what the V.90 code here already does; the notes they wrote and
 the plan built from them are in [docs/design/v92](docs/design/v92) -- 62 work
