@@ -1460,12 +1460,28 @@ impl ScopeApp {
             let listening = self.monitor.is_some();
             if small_key(ui, listening, if listening { "Listening" } else { "Listen" })
                 .on_hover_text(
-                    "Play the line audio through an output device. Which one, \
-                     and how loud, are under Setup",
+                    "Play the line audio through an output device. Which one \
+                     is under Setup",
                 )
                 .clicked()
             {
                 self.set_listening(!listening);
+            }
+            // How loud, beside the key that turns it on: the same setting as
+            // the slider under Setup, short and without its number so that it
+            // costs the row no more than a key does.
+            let mut volume = self.sink.volume();
+            let width = ui.spacing().slider_width;
+            ui.spacing_mut().slider_width = 70.0;
+            let slid = ui
+                .add(egui::Slider::new(&mut volume, 0.0..=1.0).show_value(false))
+                .on_hover_text(format!(
+                    "Monitor volume, {:.0}%. How loud the line plays in the room; the line itself is not affected",
+                    volume * 100.0
+                ));
+            ui.spacing_mut().slider_width = width;
+            if slid.changed() {
+                self.sink.set_volume(volume);
             }
             ui.separator();
             // One press, in any state. The keys above go through the command
