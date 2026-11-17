@@ -12,10 +12,12 @@
 
 use dsp::filter::OnePole;
 use dsp::Nco;
+use v8::quick::{AnspcmLevel, Kind, Qc, SYNC_QC};
 use v8::{Access, CallFunction, Decoder, Heard, Menu, Modulation, Modulations, Pcm, PcmRole, Protocol, Signal};
 
 use crate::bell103::{Bell103Rx, Bell103Tx};
 use crate::framing::AsyncBits;
+use crate::v92::anspcm::{AnspcmWatch, TONEQ_MINIMUM};
 
 /// V.8's signals are all at 300 bit/s (3.1, 3.4, 3.5, 3.6).
 pub const BAUD: f64 = 300.0;
@@ -171,6 +173,102 @@ pub enum Status {
     NoNegotiation,
     /// Nothing in common, or nothing heard at all.
     Failed,
+    /// V.92's short Phase 1 took V.8's place (9.2/V.92): no menus were
+    /// exchanged, and the two ends are a V.92 pair going to Phase 2.
+    Quick(Quick),
+}
+
+/// What a quick connect settled, which is everything the menus would have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Quick {
+    /// Which half of the pair this end is.
+    pub role: PcmRole,
+    /// Whether both sequences set P (9.2.5/V.92): LAPM, with no ODP/ADP.
+    pub lapm: bool,
+    /// The Ucode QTS is built on, which the analogue modem's QC1a asked for
+    /// (Table 2/V.92).
+    pub uqts: u8,
+    /// The level the digital modem's QCA1d named for ANSpcm (Table 13/V.92).
+    pub level: AnspcmLevel,
+}
+
+/// The timings of V.92's short Phase 1, in seconds.
+pub mod quick_timing {
+    /// The longest two characters of a QC can be apart and still be one
+    /// frame after the other: a character is 33.3 ms at 300 bit/s.
+    pub const ADJACENT: f64 = 0.050;
+
+    /// The ten ONEs between a QC's two copies, as the gap they leave between
+    /// the end of one character and the end of the next but one: 66.7 ms,
+    /// give or take what a jitter buffer does to it. This gap is what makes
+    /// a QC of four octets that could otherwise be the inside of a CM.
+    pub const BETWEEN_COPIES: (f64, f64) = (0.055, 0.090);
+
+    /// How long ANSpcm has to have been gone before it is gone. Its phase
+    /// reversals dip a narrow detector for a couple of milliseconds each.
+    pub const ANSPCM_GONE: f64 = 0.012;
+
+    /// The quietest 2100 Hz worth calling ANSpcm, as a fraction of full
+    /// scale: the answer tone detector's own floor.
+    pub const AUDIBLE: f64 = 0.002;
+
+    /// How long 2100 Hz has to stand behind a QTS burst before it is
+    /// ANSpcm. Nothing else follows QTS-bar (Figure 3/V.92), so this is only
+    /// long enough not to be the burst's own splatter.
+    pub const ANSPCM_HELD: f64 = 0.050;
+
+    /// How long after the QTS reversal a 2100 Hz tone is ANSpcm whatever
+    /// the answer tone detector makes of it: the step from QTS into a tone
+    /// reads as modulated for a few hundred milliseconds.
+    pub const AFTER_QTS: f64 = 1.0;
+
+    /// How long the analogue modem waits after QCA1d for QTS and ANSpcm
+    /// before it sends CM anyway. The digital modem gives up after 2 s and
+    /// sends ANSam (9.2.4.3), which this end acts on when it hears it; this
+    /// is for the ANSam that never comes.
+    pub const WAIT: f64 = 3.0;
+
+    /// The longest TONEq goes on with ANSpcm still there. The digital modem
+    /// stops ANSpcm when it hears TONEq, so this is a far end that never
+    /// did.
+    pub const TONEQ: f64 = 2.0;
+}
+
+/// The ear for a QC or a QCA, on framed octets and when each arrived.
+///
+/// `v8::quick::BitWatcher` anchors a sequence to its ten ONEs, which a start-
+/// stop framer does not hand on: between characters it reports nothing. What
+/// it does give is when each character ended, and the ONEs are there as
+/// time: the second synchronisation ends two character times after the first
+/// information octet, not one. A `55` inside a CM has an octet hard behind
+/// it, so that gap is what a CM can never show.
+#[derive(Debug, Clone, Default)]
+struct QcEar {
+    /// The last four octets and when each ended, oldest first.
+    last: [(u8, f64); 4],
+    filled: usize,
+}
+
+impl QcEar {
+    fn feed(&mut self, octet: u8, at: f64) -> Option<Qc> {
+        self.last.rotate_left(1);
+        self.last[3] = (octet, at);
+        self.filled = (self.filled + 1).min(4);
+        if self.filled < 4 {
+            return None;
+        }
+        let [(a, ta), (b, tb), (c, tc), (d, td)] = self.last;
+        if a != SYNC_QC || c != SYNC_QC || b != d {
+            return None;
+        }
+        let (least, most) = quick_timing::BETWEEN_COPIES;
+        if tb - ta > quick_timing::ADJACENT || td - tc > quick_timing::ADJACENT || !(least..=most).contains(&(tc - tb)) {
+            return None;
+        }
+        let qc = Qc::from_octet(b)?;
+        self.filled = 0;
+        Some(qc)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,6 +291,13 @@ enum State {
     SendingJm,
     /// The 75 ms of nothing before the chosen modulation starts.
     Handover,
+    /// The digital modem's QCA1d, in answer to a QC1a (9.2.4.1/V.92).
+    SendingQca,
+    /// The analogue modem after a QCA1d: silent, listening for QTS and
+    /// ANSpcm (9.2.1.1/V.92).
+    QuickWait,
+    /// The analogue modem's TONEq, until ANSpcm stops (9.2.1.3/V.92).
+    QuickTone,
     Done(Status),
 }
 
@@ -261,6 +366,26 @@ pub struct Modem {
     /// Whether a call menu for any call function but this end's own goes
     /// unanswered.
     own_function_only: bool,
+    /// The QC1a a calling analogue modem sends ahead of its CM, if it is to
+    /// ask for a quick connect (see [`Self::offering_quick`]).
+    quick_offer: Option<Qc>,
+    /// The level an answering digital modem names for ANSpcm when a QC1a
+    /// arrives, if it is to answer one (see [`Self::answering_quick`]).
+    quick_answer: Option<AnspcmLevel>,
+    /// Whether a QC1a has gone out on this call.
+    quick_offered: bool,
+    qc_ear: QcEar,
+    /// What a quick connect settled, once one has.
+    quick: Option<Quick>,
+    /// The analogue modem's ear for QTS and ANSpcm.
+    anspcm: AnspcmWatch,
+    /// 2100 Hz as it is this instant, the most it has been, and how long it
+    /// has been gone: for the end of ANSpcm, which the answer tone
+    /// detector's averages report a third of a second late.
+    tone_now: dsp::ToneDetector,
+    tone_peak: f64,
+    tone_gone: f64,
+    tone_held: f64,
 }
 
 impl Modem {
@@ -304,7 +429,60 @@ impl Modem {
             sent_jm: None,
             ansam_seconds: timing::ANSAM,
             own_function_only: false,
+            quick_offer: None,
+            quick_answer: None,
+            quick_offered: false,
+            qc_ear: QcEar::default(),
+            quick: None,
+            anspcm: AnspcmWatch::new(fs),
+            tone_now: dsp::ToneDetector::new(v8::ansam::ANSWER_TONE, 300.0, fs),
+            tone_peak: 0.0,
+            tone_gone: 0.0,
+            tone_held: 0.0,
         }
+    }
+
+    /// As the calling analogue modem, ask for V.92's short Phase 1: QC1a
+    /// ahead of the CM, naming the Ucode QTS is wanted at (9.2.1.1/V.92).
+    ///
+    /// Safe to send to anything that answers with ANSam. Table 1/V.8 keeps
+    /// QC's synchronisation for V.92, so a modem that has never heard of it
+    /// ignores the sequence and reads the CM that follows; this end then
+    /// hears a JM and the call is V.8's as though nothing had been asked.
+    /// P is set when this end's menu asks for LAPM.
+    ///
+    /// Only for an end that also offers the analogue half of a PCM pair
+    /// ([`Self::offering_pcm`]): a QCA1d commits both ends to V.92. Call it
+    /// after [`Self::offering_lapm`].
+    pub fn offering_quick(mut self, uqts: v8::quick::Uqts) -> Self {
+        self.quick_offer = Some(Qc::qc1a(uqts, self.menu.protocol == Protocol::Lapm));
+        self
+    }
+
+    /// As the answering digital modem, answer a QC1a with QCA1d naming
+    /// `level` for ANSpcm (9.2.4.1/V.92), and leave V.8 there: the status is
+    /// then [`Status::Quick`], and QTS and ANSpcm are the pump's.
+    ///
+    /// P in the QCA1d is set when this end's menu asks for LAPM.
+    pub fn answering_quick(mut self, level: AnspcmLevel) -> Self {
+        self.quick_answer = Some(level);
+        self
+    }
+
+    /// Begin at ANSam, with no silence first and no quick connect: for a
+    /// digital modem whose ANSpcm went unanswered, which 9.2.4.3/V.92 sends
+    /// back to "transmit ANSam and proceed according to ITU-T V.8".
+    pub fn resuming_at_ansam(mut self) -> Self {
+        self.quick_answer = None;
+        self.state = State::Ansam;
+        self
+    }
+
+    /// Whether this end asked for a quick connect and the far end went on
+    /// by V.8 instead: a QC1a was offered, and what came back was a JM or
+    /// nothing.
+    pub fn quick_declined(&self) -> bool {
+        self.quick_offered && self.quick.is_none()
     }
 
     /// An answering end that has sent, or is sending, some other answer tone,
@@ -378,6 +556,9 @@ impl Modem {
             | State::SendingCj
             | State::Ansam
             | State::SendingJm
+            | State::SendingQca
+            | State::QuickWait
+            | State::QuickTone
             | State::Handover => true,
         }
     }
@@ -494,6 +675,10 @@ impl Modem {
             // Only V.90 has something to do with the silence: 9.2.1.1.1
             // conditions its receiver during it. Everything else is told at
             // the end of the silence, as before.
+            // A quick connect's analogue modem listens through the silence
+            // too: the digital modem's Phase 2 begins when TONEq is heard,
+            // which is before this end has noticed ANSpcm stop.
+            State::Handover if self.quick.is_some() => self.quick.map_or(Status::Negotiating, Status::Quick),
             State::Handover => match self.chosen {
                 Some(modulation)
                     if self.pcm_role() == Some(PcmRole::Analogue)
@@ -538,6 +723,9 @@ impl Modem {
             State::Overhearing => "listening for CM",
             State::SendingJm => "JM",
             State::Handover => "handover",
+            State::SendingQca => "QCA1d",
+            State::QuickWait => "listening for ANSpcm",
+            State::QuickTone => "TONEq",
             State::Done(_) => "done",
         }
     }
@@ -584,6 +772,15 @@ impl Modem {
         // milliseconds on a real call.
         self.ansam_held = if self.answer.is_ansam() { self.ansam_held + dt } else { 0.0 };
         self.plain_held = if self.answer.is_plain() { self.plain_held + dt } else { 0.0 };
+        if matches!(self.state, State::QuickWait | State::QuickTone) {
+            self.anspcm.feed(line);
+            self.tone_now.feed(line);
+            let now = self.tone_now.amplitude();
+            self.tone_peak = self.tone_peak.max(now);
+            let there = now > quick_timing::AUDIBLE && now >= 0.25 * self.tone_peak;
+            self.tone_gone = if there { 0.0 } else { self.tone_gone + dt };
+            self.tone_held = if there { self.tone_held + dt } else { 0.0 };
+        }
         let octet = self.rx.feed(line);
         // A character whose stop bit was not a mark. Clause 5 runs a sequence
         // octet against octet with nothing between them, so a framing error
@@ -600,6 +797,9 @@ impl Modem {
             if Self::tracing() {
                 eprintln!("v8[{:?}]: octet {octet:02x} at {:.3}s",
                           self.role, (self.total - 1.0) / self.fs);
+            }
+            if let Some(qc) = self.qc_ear.feed(octet, self.total) {
+                self.heard_quick(qc);
             }
             self.heard(octet);
         }
@@ -693,6 +893,71 @@ impl Modem {
             }
             Heard::Jm(_) => {}
         }
+    }
+
+    /// A QC or a QCA came off the line whole.
+    fn heard_quick(&mut self, qc: Qc) {
+        if std::env::var_os("V8_TRACE").is_some() {
+            eprintln!("v8[{:?}]: {} ({:02x}) at {:.3}s", self.role, qc.kind.name(), qc.octet(), self.total);
+        }
+        match (self.state, qc.kind, qc.field) {
+            // 9.2.4.1/V.92: "If QC1a is detected, the modem shall transmit
+            // QCA1d". Only for a QC1a that names a Ucode -- 1111 is a
+            // cleardown from a hold this end never granted -- and only from
+            // an end that is the digital half of a pair.
+            (State::Ansam, Kind::Qc1a, v8::quick::Field::Uqts(uqts)) => {
+                let (Some(level), Some(ucode)) = (self.quick_answer, uqts.ucode()) else { return };
+                if !self.menu.pcm.is_some_and(|p| p.digital) {
+                    return;
+                }
+                let ours = self.menu.protocol == Protocol::Lapm;
+                self.quick = Some(Quick { role: PcmRole::Digital, lapm: ours && qc.lapm, uqts: ucode, level });
+                self.outgoing.clear();
+                self.tx.abandon();
+                self.tx.set_transmitting(true);
+                self.tx.push_bits(&Qc::qca1d(level, ours).bits());
+                // One more mark, so that the queue running empty means the
+                // sequence's own last bit has gone and not merely begun.
+                self.tx.push_bits(&[true]);
+                self.enter(State::SendingQca);
+            }
+            // 9.2.1.1/V.92: "If QCA1d is detected, the modem shall stop
+            // transmitting CM without completing the current octet and
+            // transmit silence and condition itself to detect QTS and QTS-bar
+            // followed by ANSpcm".
+            (State::SendingCm, Kind::Qca1d, v8::quick::Field::Level(level)) => {
+                let Some(ours) = self.quick_offer else { return };
+                let v8::quick::Field::Uqts(uqts) = ours.field else { return };
+                let Some(ucode) = uqts.ucode() else { return };
+                self.quick = Some(Quick { role: PcmRole::Analogue, lapm: ours.lapm && qc.lapm, uqts: ucode, level });
+                self.outgoing.clear();
+                self.tx.abandon();
+                self.tx.set_transmitting(false);
+                self.anspcm.reset();
+                self.tone_peak = 0.0;
+                self.tone_gone = 0.0;
+                self.tone_held = 0.0;
+                self.enter(State::QuickWait);
+            }
+            // QCA1a is a second analogue modem, and 9.2.1.4 sends that call
+            // to V.34 by way of TONEq; QC1d is a digital modem calling.
+            // Neither is answered: the CM that is going out, or the one that
+            // follows the QC1d, carries the call on by V.8.
+            _ => {}
+        }
+    }
+
+    /// Back to V.8 from a quick connect nobody followed up: CM, as though
+    /// the QC1a had never been sent.
+    fn quick_abandoned(&mut self) {
+        self.quick = None;
+        self.quick_offer = None;
+        self.last = None;
+        self.last_octets.clear();
+        self.repeats = 0;
+        let cm = v8::sequence(Signal::Cm, &self.menu);
+        self.send_sequence(cm);
+        self.enter(State::SendingCm);
     }
 
     /// Whether the far end has said the same thing twice, as 7.4 and 8.1.2
@@ -793,6 +1058,14 @@ impl Modem {
             State::Waiting => {
                 // 8.1.1: silence for Te, "prior to transmitting signal CM".
                 if self.elapsed >= timing::TE {
+                    // 9.2.1.1/V.92: "the analogue modem shall transmit
+                    // signal QC1a followed by CM". The QC's sixty bits go
+                    // first and the CM's own ten ONEs close them.
+                    if let Some(qc) = self.quick_offer {
+                        self.tx.set_transmitting(true);
+                        self.tx.push_bits(&qc.bits());
+                        self.quick_offered = true;
+                    }
                     let cm = v8::sequence(Signal::Cm, &self.menu);
                     self.send_sequence(cm);
                     self.enter(State::SendingCm);
@@ -861,8 +1134,57 @@ impl Modem {
                 }
             }
 
+            State::SendingQca => {
+                if self.tx.pending_bits() == 0 {
+                    self.tx.set_transmitting(false);
+                    let quick = self.quick.expect("set with the state");
+                    self.enter(State::Done(Status::Quick(quick)));
+                }
+            }
+
+            State::QuickWait => {
+                // Since the QTS reversal, if there has been one.
+                let since_qts = self
+                    .anspcm
+                    .qts_reversal()
+                    .map(|at| (self.anspcm.qts().at() as f64 - at) / self.fs);
+                let behind_qts = since_qts.is_some_and(|s| s <= quick_timing::AFTER_QTS);
+                if self.anspcm.is_anspcm() || (behind_qts && self.tone_held >= quick_timing::ANSPCM_HELD) {
+                    // 9.2.1.3/V.92: "if ANSam was already detected for 1 s
+                    // in 9.2.1.1, TONEq may be transmitted upon detection of
+                    // ANSpcm". V.21(L)'s mark is 980 Hz, so TONEq is this
+                    // channel with nothing to say.
+                    self.tx.abandon();
+                    self.tx.set_transmitting(true);
+                    self.enter(State::QuickTone);
+                } else if (self.elapsed >= 0.3 && !behind_qts && self.ansam_held >= timing::ANSAM_HELD)
+                    || self.elapsed >= quick_timing::WAIT
+                {
+                    // The digital modem gave up on TONEq and is sending
+                    // ANSam again (9.2.4.3/V.92).
+                    self.quick_abandoned();
+                }
+            }
+
+            State::QuickTone => {
+                // "When ANSpcm is no longer detected, the modem shall
+                // terminate TONEq and transmit silence for 75 +/- 5 ms and
+                // proceed to Phase 2" -- after "a minimum of 50 ms".
+                if self.elapsed >= TONEQ_MINIMUM && self.tone_gone >= quick_timing::ANSPCM_GONE {
+                    self.tx.set_transmitting(false);
+                    self.enter(State::Handover);
+                } else if self.elapsed >= quick_timing::TONEQ {
+                    self.tx.set_transmitting(false);
+                    self.quick_abandoned();
+                }
+            }
+
             State::Handover => {
                 if self.elapsed >= timing::HANDOVER {
+                    if let Some(quick) = self.quick {
+                        self.enter(State::Done(Status::Quick(quick)));
+                        return;
+                    }
                     self.enter(State::Done(match self.chosen {
                         Some(m) => Status::Agreed(m),
                         // 8.1.2 and 8.2.3 both allow disconnecting when the
@@ -1877,5 +2199,157 @@ mod tests {
         assert!(loudest < 1.0e-6, "answered a call that was not for a fax");
         assert!(!modem.has_the_line());
         assert_eq!(modem.status(), Status::Negotiating);
+    }
+
+    // ---------------------------------------------------------------------
+    // V.92's short Phase 1 (9.2/V.92)
+    // ---------------------------------------------------------------------
+
+    use crate::v90::server::{self, Line};
+    use v8::quick::Uqts;
+
+    fn quick_caller(ask: bool) -> Modem {
+        let m = Modem::new(Role::Calling, CallFunction::Data, Modulations::of(&[Modulation::V34Duplex]), FS)
+            .offering_lapm()
+            .offering_pcm(Pcm::ANALOGUE);
+        if ask { m.offering_quick(Uqts::from_ucode(79).unwrap()) } else { m }
+    }
+
+    fn quick_answerer(answer: bool) -> Modem {
+        let m = Modem::new(Role::Answering, CallFunction::Data, Modulations::of(&[Modulation::V34Duplex]), FS)
+            .offering_lapm()
+            .offering_pcm_on(Pcm { digital: true, ..Pcm::default() }, Access { digital: true, ..Access::default() });
+        if answer { m.answering_quick(AnspcmLevel::Minus12) } else { m }
+    }
+
+    /// What a quick connect came to: the caller's status and when it had it,
+    /// the answerer's, when the digital modem's Phase 2 had the line, and
+    /// whether the digital modem gave up.
+    struct QuickRun {
+        calling: Status,
+        calling_at: f64,
+        answering: Status,
+        phase2_at: Option<f64>,
+        gave_up: bool,
+    }
+
+    /// The two ends against each other, the answering one handing the line
+    /// to the digital pump on [`Status::Quick`] as the modem above does. With
+    /// `deaf`, nothing the pump sends reaches the caller, so no TONEq comes
+    /// back and the answerer has to go back to ANSam.
+    fn quick_call(mut calling: Modem, mut answering: Modem, deaf: bool, seconds: f64) -> QuickRun {
+        let mut pump: Option<Line> = None;
+        let (mut to_calling, mut to_answering) = (0.0, 0.0);
+        let mut run = QuickRun {
+            calling: Status::Negotiating,
+            calling_at: 0.0,
+            answering: Status::Negotiating,
+            phase2_at: None,
+            gave_up: false,
+        };
+        for n in 0..(seconds * FS) as usize {
+            let t = n as f64 / FS;
+            let from_calling = if run.calling == Status::Negotiating {
+                let out = calling.step(to_calling);
+                run.calling = calling.status();
+                run.calling_at = t;
+                out
+            } else {
+                0.0
+            };
+            let from_answering = match pump.as_mut() {
+                Some(line) => {
+                    let out = line.step(to_answering);
+                    if run.phase2_at.is_none() && !line.modem().in_quick() {
+                        run.phase2_at = Some(t);
+                    }
+                    if line.modem().quick_gave_up() {
+                        // 9.2.4.3: ANSam again, and V.8.
+                        run.gave_up = true;
+                        pump = None;
+                        answering = quick_answerer(true).resuming_at_ansam();
+                    }
+                    if deaf { 0.0 } else { out }
+                }
+                None => {
+                    let out = answering.step(to_answering);
+                    run.answering = answering.status();
+                    if let Status::Quick(q) = run.answering {
+                        assert_eq!(q.role, PcmRole::Digital);
+                        pump = Some(Line::new(FS, server::ours(), timing::HANDOVER).after_quick(q.uqts, q.level));
+                    }
+                    out
+                }
+            };
+            to_calling = from_answering;
+            to_answering = from_calling;
+        }
+        run
+    }
+
+    /// QC1a, QCA1d, QTS, ANSpcm and TONEq, and both ends at Phase 2 well
+    /// inside the time a CM and a JM would have taken.
+    #[test]
+    fn a_quick_connect_takes_both_ends_to_phase_2() {
+        let run = quick_call(quick_caller(true), quick_answerer(true), false, 6.0);
+        let Status::Quick(far) = run.answering else { panic!("answerer: {:?}", run.answering) };
+        let Status::Quick(near) = run.calling else { panic!("caller: {:?}", run.calling) };
+        assert_eq!((near.role, far.role), (PcmRole::Analogue, PcmRole::Digital));
+        assert_eq!((near.uqts, far.uqts), (79, 79));
+        assert_eq!((near.level, far.level), (AnspcmLevel::Minus12, AnspcmLevel::Minus12));
+        assert!(near.lapm && far.lapm, "both sequences set P");
+        assert!(!run.gave_up);
+        let phase2 = run.phase2_at.expect("the digital modem never heard TONEq");
+        // The caller is told at the start of its 75 ms of silence, and the
+        // digital modem's own silence began when it heard TONEq, a little
+        // before: the two Phase 2s begin within a few tens of milliseconds.
+        assert!((run.calling_at - phase2).abs() < 0.060, "caller {:.3} s, digital {phase2:.3} s", run.calling_at);
+        // ANSam is believed at about 0.45 s and Te is a second; after that a
+        // quick connect is a QC1a, a QCA1d, QTS and as much ANSpcm as the
+        // answer tone detector takes to call it one.
+        assert!(run.calling_at < 3.2, "took {:.3} s", run.calling_at);
+    }
+
+    /// A caller that asks nothing gets V.8 from an answerer that would have
+    /// answered, and a caller that asks gets V.8 from one that does not
+    /// answer: the QC1a is ignored and the CM behind it is read.
+    #[test]
+    fn a_quick_connect_only_one_end_wants_is_plain_v8() {
+        for (ask, answer) in [(false, true), (true, false)] {
+            let caller = quick_caller(ask);
+            let run = quick_call(caller, quick_answerer(answer), false, 8.0);
+            assert_eq!(run.calling, Status::Agreed(Modulation::V34Duplex), "ask {ask} answer {answer}");
+            assert_eq!(run.answering, Status::Agreed(Modulation::V34Duplex), "ask {ask} answer {answer}");
+        }
+    }
+
+    /// 9.2.4.3: no TONEq in two seconds, and the digital modem sends ANSam
+    /// and goes on by V.8; the analogue modem hears it and sends its CM.
+    #[test]
+    fn an_unanswered_anspcm_goes_back_to_v8() {
+        let run = quick_call(quick_caller(true), quick_answerer(true), true, 14.0);
+        assert!(run.gave_up, "the digital modem never gave up");
+        assert_eq!(run.calling, Status::Agreed(Modulation::V34Duplex));
+        assert_eq!(run.answering, Status::Agreed(Modulation::V34Duplex));
+    }
+
+    /// A `55` inside a menu is an octet among octets, and four octets of a
+    /// CM are never a QC however they read.
+    #[test]
+    fn a_qc_is_told_from_a_menu_by_its_ones() {
+        let mut ear = QcEar::default();
+        let char_time = 10.0 / BAUD;
+        // 55 q 55 q hard against each other, as a menu would carry them.
+        for (n, octet) in [0x55u8, 0x84, 0x55, 0x84].into_iter().enumerate() {
+            assert!(ear.feed(octet, n as f64 * char_time).is_none());
+        }
+        // The same with the ten ONEs between the copies.
+        let mut ear = QcEar::default();
+        let times = [1.0, 2.0, 4.0, 5.0].map(|c| c * char_time);
+        let mut found = None;
+        for (octet, at) in [0x55u8, 0x84, 0x55, 0x84].into_iter().zip(times) {
+            found = ear.feed(octet, at);
+        }
+        assert_eq!(found, Some(Qc::qc1a(Uqts::from_ucode(62).unwrap(), true)));
     }
 }

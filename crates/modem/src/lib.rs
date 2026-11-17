@@ -30,6 +30,7 @@ use datapump::v22bis;
 use datapump::v32;
 use datapump::v34;
 use datapump::v90;
+pub use datapump::v92::memo::Recognized;
 mod faxcall;
 
 pub use faxcall::FaxCall;
@@ -53,6 +54,32 @@ fn v92_pcm_upstream_wanted() -> bool {
     match std::env::var("BINMODEM_V92_PCM_UP") {
         Ok(v) => matches!(v.trim(), "1" | "yes" | "on" | "true"),
         Err(_) => false,
+    }
+}
+
+/// When a V.92 call uses the short start-up (V.92 9.2 and 9.4; V.250's +PQC
+/// and +PSS say the same three things in two commands).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum QuickConnect {
+    /// Never: no QC1a is sent and none is answered.
+    Off,
+    /// On a recognised connection: a QC1a is answered, and one is sent when
+    /// a memo of an earlier V.92 call to the same place is in hand (see
+    /// [`Modem::set_quick_memo`]).
+    #[default]
+    Recognized,
+    /// A QC1a is sent on every V.92 call, memo or none.
+    Always,
+}
+
+/// `BINMODEM_V92_QC` when the modem is made: `0` or `off` for never,
+/// `always` for every call, anything else or nothing for recognised
+/// connections only.
+fn v92_quick_connect_wanted() -> QuickConnect {
+    match std::env::var("BINMODEM_V92_QC").as_deref().map(str::trim) {
+        Ok("0" | "off" | "no" | "false") => QuickConnect::Off,
+        Ok("always" | "2") => QuickConnect::Always,
+        _ => QuickConnect::Recognized,
     }
 }
 
@@ -885,6 +912,17 @@ pub struct Modem {
     /// [`Self::choose_upstream`]); None for the server's own choice. Kept
     /// from call to call.
     pinned_upstream: Option<u8>,
+    /// When V.92's short start-up is used: `BINMODEM_V92_QC` when the modem
+    /// is made, and [`Self::set_quick_connect`] after.
+    quick_connect: QuickConnect,
+    /// What an earlier V.92 call to the place about to be dialled taught,
+    /// from whoever keeps such things (see [`Self::set_quick_memo`]).
+    quick_memo: Option<Recognized>,
+    /// What this call's short Phase 1 settled, if it had one.
+    quick: Option<v8line::Quick>,
+    /// What this call has taught, once it is a V.92 call in data mode (see
+    /// [`Self::learned`]).
+    learned: Option<Recognized>,
     /// The V.8 negotiation, while one is running.
     ///
     /// It comes before the data pump and instead of it. Every modem
@@ -1009,6 +1047,10 @@ impl Modem {
             pinned_rate: None,
             pcm_upstream: v92_pcm_upstream_wanted(),
             pinned_upstream: None,
+            quick_connect: v92_quick_connect_wanted(),
+            quick_memo: None,
+            quick: None,
+            learned: None,
             negotiation: None,
             bis: None,
             bis_far: None,
@@ -1756,6 +1798,18 @@ impl Modem {
             self.line_notes.extend(m.modem_mut().take_notes());
             m.take_exact(&mut self.network_levels);
             self.network_exact = true;
+            if m.modem().quick_gave_up() {
+                // 9.2.4.3/V.92: "If TONEq is not detected during the 2 s
+                // following transmission of QCA1d, the digital modem shall
+                // transmit ANSam and proceed according to ITU-T V.8."
+                self.line_notes.push("V.92 quick connect: no TONEq; ANSam and V.8".to_owned());
+                self.pump = None;
+                self.quick = None;
+                self.declared_lapm = false;
+                self.pcm_role = None;
+                self.negotiation = self.v8_end().map(v8line::Modem::resuming_at_ansam);
+                return out;
+            }
         }
 
         match self.state {
@@ -1869,6 +1923,20 @@ impl Modem {
                 self.transmit_rate = transmit;
                 if let Some(m) = self.pump.as_ref().and_then(Pump::v34) {
                     self.v34_report = Some(V34Report::of(m));
+                }
+                // What a V.92 call that got this far has taught, for the
+                // next call to the same place (V.92 1 j).
+                if let Some(Pump::V90(m)) = self.pump.as_ref()
+                    && self.at.modulation.carrier == "V92"
+                    && m.is_v90()
+                {
+                    let p2 = m.v34().phase2();
+                    self.learned = Some(Recognized {
+                        uqts: self.quick_memo.map_or(datapump::v92::memo::DEFAULT_UQTS, |memo| memo.uqts),
+                        a_law: p2.far_info0d().is_some_and(|d| d.a_law),
+                        round_trip_ms: p2.round_trip().map_or(0, |s| (s * 1000.0).round() as u32),
+                        pcm_upstream: m.is_v92(),
+                    });
                 }
                 // Everything the receiver made of the handshake is thrown
                 // away. A demodulator that has not finished training still
@@ -2250,6 +2318,40 @@ impl Modem {
         self.pcm_upstream
     }
 
+    /// When V.92's short start-up is used, from the next call (see
+    /// [`QuickConnect`]).
+    pub fn set_quick_connect(&mut self, when: QuickConnect) {
+        self.quick_connect = when;
+    }
+
+    /// See [`Self::set_quick_connect`].
+    pub fn quick_connect(&self) -> QuickConnect {
+        self.quick_connect
+    }
+
+    /// What an earlier V.92 call to the place about to be dialled taught, or
+    /// None if there was none: set it before the D command, from whatever
+    /// [`Self::learned`] gave after that call. With one, a V.92 call opens
+    /// with QC1a (V.92 9.2.1.1); without, by V.8 as ever. It is kept until
+    /// it is set again.
+    pub fn set_quick_memo(&mut self, memo: Option<Recognized>) {
+        self.quick_memo = memo;
+    }
+
+    /// What this call has taught about the connection, once it is a V.92
+    /// call in data mode: for whoever keeps such things to store against
+    /// the number dialled and hand back with [`Self::set_quick_memo`]. None
+    /// on any other call, and on the answering end, which has no number.
+    pub fn learned(&self) -> Option<Recognized> {
+        self.learned
+    }
+
+    /// Whether this call began with V.92's short Phase 1, and if so whether
+    /// both ends' sequences called for LAPM (9.2.5).
+    pub fn quick_connected(&self) -> Option<bool> {
+        self.quick.map(|q| q.lapm)
+    }
+
     /// The rate V.90 start-ups are to ask for (see [`Self::choose_rate`]).
     pub fn set_pinned_rate(&mut self, drn: Option<u8>) {
         self.pinned_rate = drn;
@@ -2544,6 +2646,8 @@ impl Modem {
         self.far_ec.clear();
         self.recovered.clear();
         self.declared_lapm = false;
+        self.quick = None;
+        self.learned = None;
         self.announce = None;
         self.outbound.clear();
         self.async_bits.reset();
@@ -2586,13 +2690,24 @@ impl Modem {
     /// Start V.8, or with automode off the modulation itself, as whichever
     /// end `self.role` now is.
     fn open_v8(&mut self) {
+        if let Some(negotiation) = self.v8_end() {
+            self.pump = None;
+            self.pcm_role = None;
+            self.negotiation = Some(negotiation);
+            return;
+        }
+        self.start_pump(None);
+    }
+
+    /// This end of a V.8 negotiation as `+MS` and the rest have it, or None
+    /// with automode off, when there is nothing to negotiate.
+    fn v8_end(&self) -> Option<v8line::Modem> {
         let offered = self.offered();
         if self.at.modulation.automode && !offered.is_empty() {
             let role = match self.role {
                 Role::Calling => v8line::Role::Calling,
                 Role::Answering => v8line::Role::Answering,
             };
-            self.pump = None;
             let mut negotiation =
                 v8line::Modem::new(role, CallFunction::Data, offered, self.fs);
             // V.8 Table 6 has an octet for error control, and 7.3 says it is
@@ -2621,11 +2736,24 @@ impl Modem {
                     ),
                 };
             }
-            self.pcm_role = None;
-            self.negotiation = Some(negotiation);
-            return;
+            // V.92's short Phase 1 (9.2). The digital modem answers a QC1a
+            // whoever sends it; the analogue modem sends one to a place it
+            // has connected to as V.92 before, or to anywhere when told to.
+            // A far end that has never heard of it reads the CM behind the
+            // QC1a, so asking a stranger costs a fifth of a second.
+            if self.at.modulation.carrier == "V92" && self.quick_connect != QuickConnect::Off {
+                negotiation = match self.pcm_end {
+                    Role::Answering => negotiation.answering_quick(datapump::v92::memo::DEFAULT_LEVEL),
+                    Role::Calling => match (self.quick_memo, self.quick_connect) {
+                        (Some(memo), _) => negotiation.offering_quick(memo.qts()),
+                        (None, QuickConnect::Always) => negotiation.offering_quick(Recognized::unmeasured().qts()),
+                        (None, _) => negotiation,
+                    },
+                };
+            }
+            return Some(negotiation);
         }
-        self.start_pump(None);
+        None
     }
 
     /// What to put in a call menu.
@@ -2861,6 +2989,30 @@ impl Modem {
                 self.negotiation = None;
                 self.start_pump_with(Some(modulation), lead_in);
             }
+            // V.92's short Phase 1 in V.8's place (9.2/V.92): no menus, and
+            // the pair is a V.92 one by what the two sequences said.
+            v8line::Status::Quick(quick) => {
+                self.declared_lapm = quick.lapm;
+                self.quick = Some(quick);
+                self.pcm_role = Some(quick.role);
+                // The analogue modem is told at the start of the silence
+                // that follows TONEq. The digital modem is told when its
+                // QCA1d has gone, with QTS and ANSpcm still to send; the
+                // silence it keeps is the one after TONEq (9.2.4.3), which
+                // the pump begins when it hears it.
+                let lead_in = match quick.role {
+                    PcmRole::Analogue => negotiation.handover_remaining(),
+                    PcmRole::Digital => v8line::timing::HANDOVER,
+                };
+                self.line_notes.push(format!(
+                    "V.92 quick connect: QTS at Ucode {}, ANSpcm at {} dBm0{}",
+                    quick.uqts,
+                    quick.level.dbm0(),
+                    if quick.lapm { ", LAPM with no ODP/ADP" } else { "" }
+                ));
+                self.negotiation = None;
+                self.start_pump_with(Some(Modulation::V34Duplex), lead_in);
+            }
             // 8.1.1: a far end that sent the plain answering tone of V.25 does
             // not speak V.8, and the call goes on "in accordance with Annex
             // A/V.32 bis, ITU-T T.30, or other appropriate Recommendations" --
@@ -2938,6 +3090,11 @@ impl Modem {
                 let pcm_upstream = self.pcm_upstream;
                 let mut line =
                     v90::server::Line::new(self.fs, v90::server::ours(), lead_in).with_v92(v90::server::wish(pcm_upstream));
+                // After a QCA1d the rest of short Phase 1 is this pump's:
+                // QTS, ANSpcm and the wait for TONEq (9.2.4.3/V.92).
+                if let Some(quick) = self.quick.filter(|q| q.role == PcmRole::Digital) {
+                    line = line.after_quick(quick.uqts, quick.level);
+                }
                 line.modem_mut().set_pinned_upstream(self.pinned_upstream);
                 Pump::V90Server(Box::new(line))
             }

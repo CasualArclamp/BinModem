@@ -263,3 +263,104 @@ fn v8_bis_in_front_of_a_v92_call() {
     assert_eq!(rates(&pair), (56_000, 48_000), "{notes}");
     carries_text(&mut pair, "after V.8 bis", &notes);
 }
+
+// ---------------------------------------------------------------------------
+// Quick connect (V.92 9.2): the short Phase 1
+// ---------------------------------------------------------------------------
+
+/// Seconds from dialling to both ends in data mode on V.92, to a twentieth.
+fn timed_connect(pair: &mut Pair, what: &str) -> f64 {
+    Pair::type_at(&mut pair.host, "ATA");
+    Pair::type_at(&mut pair.caller, "ATD5551234");
+    let up = |m: &Modem| m.state() == State::Data && !m.retraining() && m.standard() == "V.92";
+    let mut notes = String::new();
+    for _ in 0..800 {
+        pair.run(0.05);
+        notes.push_str(&pair.notes());
+        if up(&pair.caller) && up(&pair.host) {
+            break;
+        }
+    }
+    assert_eq!((pair.caller.state(), pair.host.state()), (State::Data, State::Data), "{what}:
+{notes}");
+    assert_eq!((pair.caller.standard(), pair.host.standard()), ("V.92", "V.92"), "{what}:
+{notes}");
+    pair.caller.call_seconds()
+}
+
+fn hang_up(pair: &mut Pair) {
+    pair.caller.hang_up();
+    pair.host.hang_up();
+    pair.run(0.5);
+    pair.caller_said.clear();
+    pair.host_said.clear();
+}
+
+/// The first call to a place is the full start-up and leaves a memo; the
+/// second, handed the memo, opens with QC1a and is at data mode sooner, with
+/// V.42 up and text crossing as before.
+#[test]
+fn a_second_call_to_the_same_place_starts_up_the_short_way() {
+    let mut pair = v92_pair();
+    let first = timed_connect(&mut pair, "first call");
+    assert_eq!(pair.caller.quick_connected(), None, "nothing was known, so nothing was asked");
+    assert_eq!(pair.host.quick_connected(), None);
+    let memo = pair.caller.learned().expect("a V.92 call in data mode teaches something");
+    assert!(memo.pcm_upstream, "{memo:?}");
+    assert_eq!(pair.host.learned(), None, "the answering end has no number to remember");
+    hang_up(&mut pair);
+
+    pair.caller.set_quick_memo(Some(memo));
+    let second = timed_connect(&mut pair, "second call");
+    assert_eq!(pair.caller.quick_connected(), Some(true), "QC1a and QCA1d both called for LAPM");
+    assert_eq!(pair.host.quick_connected(), Some(true));
+    println!("full start-up {first:.2} s, with short Phase 1 {second:.2} s");
+    assert!(second < first - 0.5, "full {first:.2} s, short {second:.2} s");
+    carries_text(&mut pair, "after a quick connect", "");
+}
+
+/// A QC1a sent to a modem that does not answer one is ignored, and the CM
+/// behind it carries the call on by V.8.
+#[test]
+fn a_quick_connect_nobody_answers_is_a_full_start_up() {
+    let mut pair = v92_pair();
+    pair.caller.set_quick_connect(modem::QuickConnect::Always);
+    pair.host.set_quick_connect(modem::QuickConnect::Off);
+    timed_connect(&mut pair, "QC1a to a modem that does not answer it");
+    assert_eq!(pair.caller.quick_connected(), None);
+    assert_eq!(pair.host.quick_connected(), None);
+    carries_text(&mut pair, "after a QC1a nobody answered", "");
+}
+
+/// 9.2.4.3: the digital modem's ANSpcm goes unanswered -- here because the
+/// line to the caller is dead while it is sent -- so it sends ANSam again,
+/// the caller hears that and sends its CM, and the call is V.8's.
+#[test]
+fn an_unanswered_anspcm_falls_back_to_v8_and_connects() {
+    let mut pair = v92_pair();
+    pair.caller.set_quick_connect(modem::QuickConnect::Always);
+    Pair::type_at(&mut pair.host, "ATA");
+    Pair::type_at(&mut pair.caller, "ATD5551234");
+    let mut notes = String::new();
+    let mut cut = 0;
+    for _ in 0..(40.0 * FS) as usize {
+        let heard = pair.to_caller.pop_front().unwrap_or(0.0);
+        pair.to_host.push_back(pair.caller.step(heard));
+        let heard = pair.to_host.pop_front().unwrap_or(0.0);
+        let said = pair.host.step(heard);
+        // From the host's QCA1d silence on, nothing reaches the caller until
+        // the host has given up.
+        let quick = matches!(pair.host.line_phase(), "QCA1d silence" | "QTS" | "QTS-bar" | "ANSpcm");
+        cut += usize::from(quick);
+        pair.to_caller.push_back(if quick { 0.0 } else { said });
+        if pair.caller.state() == State::Data && pair.host.state() == State::Data {
+            break;
+        }
+    }
+    notes.push_str(&pair.notes());
+    assert!(cut > 0, "the host never answered the QC1a:\n{notes}");
+    assert!(notes.contains("no TONEq"), "{notes}");
+    assert_eq!((pair.caller.state(), pair.host.state()), (State::Data, State::Data), "{notes}");
+    assert_eq!((pair.caller.quick_connected(), pair.host.quick_connected()), (None, None));
+    assert_eq!((pair.caller.standard(), pair.host.standard()), ("V.92", "V.92"), "{notes}");
+}

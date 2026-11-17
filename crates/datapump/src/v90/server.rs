@@ -139,6 +139,14 @@ impl Line {
         self
     }
 
+    /// Begin with the rest of short Phase 1 after this end's QCA1d (see
+    /// [`Digital::after_quick`]). Build the line with V.8's handover silence
+    /// as its lead-in: it is the silence that follows TONEq.
+    pub fn after_quick(mut self, uqts: u8, level: v8::quick::AnspcmLevel) -> Self {
+        self.modem = self.modem.after_quick(uqts, level);
+        self
+    }
+
     pub fn modem(&self) -> &Digital {
         &self.modem
     }

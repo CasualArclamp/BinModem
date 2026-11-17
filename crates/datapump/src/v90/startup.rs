@@ -16,7 +16,7 @@ use crate::v34::phase2::{self, Pcm, V92Wish};
 use crate::v34::startup as v34;
 
 use crate::v92::digital as pcm;
-use crate::v92::{FilterLimits, analogue as pcm_up, line as pcm_line};
+use crate::v92::{FilterLimits, analogue as pcm_up, line as pcm_line, quick};
 
 use super::sequences::Descriptor;
 use super::ucode::Law;
@@ -552,6 +552,12 @@ pub struct Digital {
     /// Lines for the transcript kept from a V.92 modem that has been put
     /// away.
     notes: Vec<String>,
+    /// Short Phase 1 after this end's QCA1d, while it runs: QTS, ANSpcm and
+    /// the wait for TONEq (9.2.4.3/V.92). Phase 2 is not stepped until it
+    /// has been answered.
+    quick: Option<quick::Answer>,
+    /// Whether that wait ran out, and the line goes back to ANSam and V.8.
+    quick_gave_up: bool,
 }
 
 impl Digital {
@@ -574,7 +580,34 @@ impl Digital {
             connected_once: false,
             pinned_up: None,
             notes: Vec::new(),
+            quick: None,
+            quick_gave_up: false,
         }
+    }
+
+    /// Begin with the rest of short Phase 1: this end has just sent QCA1d in
+    /// answer to a QC1a that asked for QTS at Ucode `uqts`, naming `level`
+    /// for ANSpcm (9.2.4.1/V.92).
+    ///
+    /// Silence, QTS, QTS-bar and ANSpcm go out as the codewords they are,
+    /// and Phase 2 begins when TONEq has been heard -- with the 75 ms of
+    /// silence 9.2.4.3 puts before it, which is the lead-in this was built
+    /// with. With no TONEq in two seconds [`Self::quick_gave_up`] says so
+    /// and nothing more is sent: the line is V.8's again.
+    pub fn after_quick(mut self, uqts: u8, level: v8::quick::AnspcmLevel) -> Self {
+        self.quick = Some(quick::Answer::new(self.law, uqts, level));
+        self
+    }
+
+    /// Whether short Phase 1 went unanswered, so that whoever owns the line
+    /// sends ANSam again and carries on by V.8 (9.2.4.3/V.92).
+    pub fn quick_gave_up(&self) -> bool {
+        self.quick_gave_up
+    }
+
+    /// Whether short Phase 1 is still on the line.
+    pub fn in_quick(&self) -> bool {
+        self.quick.is_some()
     }
 
     /// V.92's downstream levels and their power, once the analogue modem has
@@ -773,6 +806,9 @@ impl Digital {
     }
 
     pub fn phase(&self) -> &'static str {
+        if let Some(q) = self.quick.as_ref() {
+            return q.phase();
+        }
         if let Some(m) = self.v92.as_ref() {
             return m.phase();
         }
@@ -861,6 +897,16 @@ impl Digital {
 
     /// One network sample in, one out.
     pub fn step(&mut self, input: f64) -> f64 {
+        if let Some(q) = self.quick.as_mut() {
+            // Codewords, at their own level: not Phase 2's gain.
+            let out = q.step(input);
+            match q.status() {
+                quick::Status::Running => {}
+                quick::Status::Answered => self.quick = None,
+                quick::Status::GaveUp => self.quick_gave_up = true,
+            }
+            return out;
+        }
         if let Some(m) = self.v92.as_mut() {
             let out = m.step(input);
             if m.take_retrain() {
