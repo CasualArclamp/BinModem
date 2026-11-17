@@ -9,36 +9,31 @@ binmodem.exe --capture        replay the golden capture
 
 [docs/usage.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/usage.md) has the setup.
 
-## What's new in 4.0.0
+## What's new in 4.1.0
 
-![A V.92 call between two instances, the answering end: PCM coming up at 48 000](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/releases/v4.0.0/v92-answerer.png)
+### Calls with somebody else's modem
 
-### V.92: PCM both ways
+This release was tested against [D-Modem](https://github.com/D-Modem/D-Modem), a softmodem written by other people from the same Recommendations, over SIP on one machine. None of its code is here; it is the far end.
 
-- **A whole V.92 call between two of these modems.** `AT+MS=V92` at both ends, with `BINMODEM_V92_PCM_UP=1` set for both: V.8, phase 2 with V.92's INFO sequences, a Table 18 INFO1a, V.92's Phases 3 and 4, and data with PCM going *up* the line as well as down. Over a pair of virtual cables it connects first time at 56 000 down and 48 000 up, with V.42 and V.44 on top.
-- **The server.** `AT+MS=V92` on the answering end is a V.92 digital modem: INFO0d's capability bits, PCM upstream offered in INFO1d, and the analogue modem's Ru, TRN1u, Ja, Su, CPt and E1u read and answered. The V.92 server was contributed by rgwan, and has taken a real Agere modem through Phase 3.
-- **The calling side, on a sound card.** The analogue modem reads the downstream one sample a symbol on the phase the server's Sd gives it, and sends its upstream through a transmitter that takes S-bar-u's half symbol and Jp's epsilon as the steps they are.
-- **The downstream rate is chosen from the line too.** With no DIL, what the caller has is how cleanly TRN1d trained its receiver: it asks for the fastest rate whose levels stand clear of that noise, 56 000 on a line with nothing on it and a slow, careful rate on one where the fit reads low.
-- **The upstream rate is chosen from the line.** The calling modem is silent while the server sends TRN1d, and what arrives then is the noise the upstream will have against it: the server asks for the fastest of 6.1's nineteen rates that stands clear of it. Behind a codec it stays at 24 000, which is where it used to stay always.
-- **A ladder to choose from.** The window has *PCM down* and *up* menus: any downstream rate from 28 000 to 56 000 and any upstream rate from 24 000 to 48 000, from either end. Chosen during a V.92 call, the line retrains to take it.
-- **The call card has V.92's figures.** The bar is the rate this end receives along the rates it could be sent at, and a *PCM level* row gives the downstream's power in dBm0 and which levels it is made of. PCM has no gain to turn, so the power is the constellation's: 32 levels spread over Ucodes 16 to 93 come to -14.6 dBm0.
-- **Phase 2's DPSK is on the scope**, for V.34 and V.90 as well: each INFO symbol set against the one before it, a 0 on one side and a 1 on the other. Constellations of two or four points are drawn large enough to see.
-- **Both scopes have something to draw.** PCM has no plane, so each symbol is set against the next: the calling end shows the downstream's grid, the answering end the upstream's.
+- **V.34, V.90 and V.92 connect in both directions**, with either modem dialling: 33 600 on V.34, 56 000 down on V.90, and on V.92 56 000 down with PCM upstream at about 41 000 when BinModem calls and 24 000 when it answers. A group 3 fax goes through as well.
+- **The server's codewords reach a SIP line exact.** A V.90 or V.92 server chooses its levels at the network's 8000 Hz, and they used to go up to the modem's rate and back down on the way out, which blurred them. They now go straight to the G.711 encoder, and what the network delivers comes straight back in the same way. A modem dialling in to BinModem over a trunk trains at 56 000 first time where it had fallen back to V.34.
+- **The V.92 server reads TRN2u in either bit order.** Tables 28 and 29 do not say which of a symbol's bits goes first; the fit tries both and the reader follows the one the line has.
+- **The V.92 server allows for the codec.** Handed the network's own levels it can see that they are codewords, and it asks for an upstream rate the A/D converter's rounding leaves room for.
+- **V.92 with no DIL no longer waits for ever.** The text has the server send Ri first and Figure 11 has the caller send CPt first; after 24 000 symbols of TRN1u with no Ri, the caller goes first.
+- **`run-dmodem.bat`** starts a D-Modem built beside this repository and dials it, and **`modem-sip`** is the same call without a window. `BINMODEM_V92_PAIR_OFFSET=0` reads 6.4.2's equivalence classes as printed, which D-Modem does; the default is the reading fitted to an Agere capture.
 
-![The calling end of the same call: 128 levels coming down at 56 000](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/releases/v4.0.0/v92-caller.png)
+### The window
 
-### V.8 bis
+- **A volume slider beside the Listen key.**
+- **The mode box lists modulations**, V.92 down to Bell 103, and names no rate: the modem finds the fastest the line carries. A ceiling set on purpose is under Advanced.
+- **On a SIP line the window follows the modem after a call ends.** A call the trunk refused left it on "negotiating" with the hook lamp lit, although the modem had said NO CARRIER; and the scopes kept the call's last moment. Both are put right, and the error is shown for three seconds and not for ever.
+- **The seconds down the side of the waterfall hold still**, and the call card names a start-up once.
+- **`binmodem --record`** starts the window already recording.
 
-- **Signals, messages and transactions** (ITU-T V.8 bis, 11/2000): MRe, MRd, CRe, CRd, ESi and ESr as their tone pairs, and MS, CL, CLR, ACK and NAK as HDLC frames on V.21, with the capabilities tree coded both ways. The window turns it on with its other settings (`AT+A8E=,,,1`, V.251), with a box in the modulation window to turn it off; the modem's own factory setting is off.
-- **A call that starts with it.** The answering end sends CRe, the caller answers with its capabilities or a mode, and the mode selected is the one the call then trains in. A far end with no V.8 bis is heard answering and gets V.8 as before, and the answering end tries three times before it gives up on it.
+### Linux
 
-### Also
-
-- **No console window behind the program's own** when it is opened from Explorer or a shortcut. From a shell it still prints to that shell, but the shell no longer waits for it: `start /wait binmodem ...` does.
-- **`binmodem --answer --stats`** prints the line's counters, the share of exact silence and the level each second, and **`--record <file>`** writes what arrived, which an ignored test replays into a fresh answerer: how a call that would not come up was found to be the window's own drive setting scaling the PCM upstream to nothing.
-- **The answering end's start-up is in its transcript** for V.92, a line a step, as the calling end's always was.
-
-The pictures are from a call between two instances over a pair of virtual audio cables, four-wire: no echo, no noise and no codec. 56 000 down and 48 000 up there is what the modems do on a clean line, not what a telephone route gives.
+- **Sound goes through PipeWire or PulseAudio** where there is one, so a device BinModem is using is not taken from everything else. `BINMODEM_AUDIO_HOST=alsa` opens the hardware as before. This has been built on Linux by CI and not yet run there by us: reports are welcome.
+- **The README has the build**, from the clone to the window. The release itself is still the Windows executable.
 
 ## Status
 
@@ -46,7 +41,7 @@ The pictures are from a call between two instances over a pair of virtual audio 
 - **V.32's round-trip measurement can still be halved by a lost packet.** On a V.32bis call over a trunk, the concealment brought the far end's alternation back inverted, and the reversal that came out of it stopped the clock at 706 ms on a line whose real round trip is 1.22 s. The call connects regardless; the bad reading still costs the echo canceller's tap placement.
 - **One ISP's V.90 pool sometimes stops dead** just as its modem takes up our constellation, at the end of phase 4 or in a renegotiation. Every CP we sent was checked against V.90 Table 14 bit for bit, and they are correct.
 - **Known:** after a V.90 call falls back to V.34, the V.34 retrain watch can still take the hang-up beep for tone B.
-- **V.92 has only carried data between two of these modems.** PCM upstream is off unless `BINMODEM_V92_PCM_UP=1` is set at both ends. Against a real V.92 modem the server has reached Phase 3 and no further. The calling side chooses its sample phase once and follows no clock, cancels no echo and asks for no DIL, so it wants a four-wire line with both ends on one clock, which a pair of virtual cables is and a telephone line is not. V.92's own rate renegotiation, cleardown, quick connect and modem on hold are not built.
+- **V.92 has only carried data between softmodems:** two of these, and one of these with D-Modem. PCM upstream is off unless `BINMODEM_V92_PCM_UP=1` is set. Against a real V.92 modem the server has reached Phase 3 and no further. Super G3 to D-Modem does not come up: it does not recognise our control channel's start. The calling side chooses its sample phase once and follows no clock, cancels no echo and asks for no DIL, so it wants a four-wire line with both ends on one clock, which a pair of virtual cables is and a telephone line is not. V.92's own rate renegotiation, cleardown, quick connect and modem on hold are not built.
 - **Not yet tried against real far ends:** V.17, and the V.29 and V.27 ter receivers, have been measured against our own modems and simulated lines only.
 
 Checksums are in `SHA256SUMS.txt`.
