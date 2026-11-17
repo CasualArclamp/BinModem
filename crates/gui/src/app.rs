@@ -452,6 +452,9 @@ pub struct ScopeApp {
     /// Whether choosing V.92 asks for PCM upstream as well (the tick under
     /// the mode list).
     pcm_up: bool,
+    /// Whether a second V.92 call to the same place may start up the short
+    /// way (the other tick under the mode list).
+    quick_connect: bool,
     blank_seq: Option<u64>,
     last_row: Option<std::time::Instant>,
     /// When the call reached data, for how long it has been there.
@@ -575,6 +578,10 @@ impl ScopeApp {
             row_measured: 1.0 / 30.0,
             sip_call_was_up: false,
             pcm_up: true,
+            quick_connect: !matches!(
+                std::env::var("BINMODEM_V92_QC").as_deref().map(str::trim),
+                Ok("0" | "off" | "no" | "false")
+            ),
             blank_seq: None,
             last_row: None,
             connected_at: None,
@@ -4056,6 +4063,21 @@ impl ScopeApp {
             {
                 self.pcm_up = pcm_up;
                 self.assert_pcm_upstream(&session);
+            }
+            // The short start-up is automatic: nothing has to be pressed for
+            // a second call to use it. The tick is the way to have the full
+            // one every time.
+            let mut quick = self.quick_connect;
+            if ui
+                .add_enabled(v92, egui::Checkbox::new(&mut quick, "Quick connect"))
+                .on_hover_text(
+                    "V.92 only: a call to somewhere a V.92 call has connected before starts up the short way, about three seconds sooner. Automatic: the first call to a place is always the full start-up. Off, every call is. Takes effect from the next call.",
+                )
+                .on_disabled_hover_text("Choose V.92 above to have quick connect")
+                .clicked()
+            {
+                self.quick_connect = quick;
+                session.set_quick_connect(quick);
             }
 
             ui.separator();

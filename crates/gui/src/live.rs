@@ -453,6 +453,9 @@ pub struct Session {
     /// Whether V.92 calls are to have PCM upstream, when the window has said:
     /// 0 for nothing said, 1 for off, 2 for on.
     pcm_upstream: std::sync::atomic::AtomicU8,
+    /// Whether V.92 calls may start up the short way, when the window has
+    /// said: 0 for nothing said, 1 for never, 2 for recognised connections.
+    quick_connect: std::sync::atomic::AtomicU8,
     /// Set when the window asks for a retrain: V.34 goes back through phase 2
     /// on the same call. The line thread asks the modem and clears it.
     retrain: AtomicBool,
@@ -561,6 +564,7 @@ impl Default for Session {
             asked_for_a_line: AtomicBool::new(false),
             hang_up: AtomicBool::new(false),
             pcm_upstream: std::sync::atomic::AtomicU8::new(0),
+            quick_connect: std::sync::atomic::AtomicU8::new(0),
             retrain: AtomicBool::new(false),
             rate_request: Mutex::default(),
             rate_pinned: Mutex::default(),
@@ -702,6 +706,20 @@ impl Session {
     /// whatever `BINMODEM_V92_PCM_UP` gave it.
     pub fn set_pcm_upstream(&self, on: bool) {
         self.pcm_upstream.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+    }
+
+    /// Whether V.92 calls from here on may use the short start-up on a
+    /// connection that has been made before (see `Modem::set_quick_connect`).
+    /// Until this is called the modem keeps what `BINMODEM_V92_QC` gave it.
+    pub fn set_quick_connect(&self, on: bool) {
+        self.quick_connect.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+    }
+
+    fn take_quick_connect(&self) -> Option<bool> {
+        match self.quick_connect.swap(0, Ordering::Relaxed) {
+            0 => None,
+            said => Some(said == 2),
+        }
     }
 
     fn take_pcm_upstream(&self) -> Option<bool> {
@@ -1483,6 +1501,13 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         }
         if let Some(on) = session.take_pcm_upstream() {
             modem.set_pcm_upstream(on);
+        }
+        if let Some(on) = session.take_quick_connect() {
+            modem.set_quick_connect(if on {
+                modem::QuickConnect::Recognized
+            } else {
+                modem::QuickConnect::Off
+            });
         }
         if session.take_retrain() {
             tx.log(Direction::Note, "retraining the line");
