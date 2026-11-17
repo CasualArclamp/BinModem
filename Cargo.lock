@@ -1494,6 +1494,7 @@ dependencies = [
  "login",
  "ppp",
  "proxy",
+ "sip",
  "transfer",
  "v8",
 ]

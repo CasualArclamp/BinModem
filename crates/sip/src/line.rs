@@ -167,6 +167,16 @@ impl Line {
         self.media.transmit(samples);
     }
 
+    /// Levels already at the network's 8000 Hz, one to an octet, with no
+    /// rate conversion: a digital modem's codewords (see
+    /// [`Media::transmit_exact`]).
+    pub fn transmit_exact(&self, levels: &[f32]) {
+        if !self.sending.load(Ordering::Relaxed) {
+            return;
+        }
+        self.media.transmit_exact(levels);
+    }
+
     /// Whether the description in force lets the modem's samples out. False
     /// during a hold, and while a far end has said `a=recvonly`.
     pub fn sending(&self) -> bool {

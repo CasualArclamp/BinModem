@@ -11,6 +11,8 @@ datapump = { path = "../datapump" }
 ec       = { path = "../ec" }
 line     = { path = "../line" }
 v8       = { path = "../v8" }
+# For modem-sip, the call over SIP with no window on it.
+sip      = { path = "../sip" }
 
 [dev-dependencies]
 datapump = { path = "../datapump" }

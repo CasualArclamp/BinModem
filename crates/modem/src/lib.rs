@@ -869,6 +869,11 @@ pub struct Modem {
     /// What the line's start-up has done that the transcript is told, a line
     /// each, not yet taken (see [`Self::take_line_notes`]).
     line_notes: Vec<String>,
+    /// The digital modem's levels at the network's 8000 Hz, not yet taken,
+    /// and whether the last sample stepped was its (see
+    /// [`Self::take_network_levels`]).
+    network_levels: Vec<f64>,
+    network_exact: bool,
     /// The rate V.90 start-ups ask for, as its drn, from the window's rate
     /// menu (see [`Self::choose_rate`]); None for the DIL's own choice. Kept
     /// from call to call.
@@ -999,6 +1004,8 @@ impl Modem {
             answer_request: false,
             call_samples: 0,
             line_notes: Vec::new(),
+            network_levels: Vec::new(),
+            network_exact: false,
             pinned_rate: None,
             pcm_upstream: v92_pcm_upstream_wanted(),
             pinned_upstream: None,
@@ -1679,8 +1686,30 @@ impl Modem {
         }
     }
 
+    /// What to put on a line that carries G.711 itself, for the samples
+    /// stepped since this was last called: `Some` while the V.90 or V.92
+    /// digital modem has the line, holding its levels at 8000 Hz exactly as
+    /// it chose them, and `None` the rest of the time.
+    ///
+    /// A digital modem's signal is its codewords, and the samples
+    /// [`Self::step`] returns are those levels converted up to this modem's
+    /// rate. A SIP line would convert them straight back down, and two
+    /// filters meeting at 4 kHz leave the far end a server it can barely
+    /// train on. So a line of that kind sends these instead of the samples
+    /// while there are any, one level to an octet. Call it once for each block
+    /// of samples stepped; a sound card never calls it and loses nothing.
+    pub fn take_network_levels(&mut self) -> Option<Vec<f64>> {
+        if self.network_exact {
+            Some(std::mem::take(&mut self.network_levels))
+        } else {
+            self.network_levels.clear();
+            None
+        }
+    }
+
     /// Advance the line by one sample, returning the sample to transmit.
     pub fn step(&mut self, line: f64) -> f64 {
+        self.network_exact = false;
         self.elapsed_samples += 1.0;
         self.call_samples += 1;
         let ms = 1000.0 / self.fs;
@@ -1714,6 +1743,8 @@ impl Modem {
         if let Pump::V90Server(m) = pump {
             // The server's V.92 Phases 3 and 4 tell their steps the same way.
             self.line_notes.extend(m.modem_mut().take_notes());
+            m.take_exact(&mut self.network_levels);
+            self.network_exact = true;
         }
 
         match self.state {

@@ -131,6 +131,9 @@ struct Args {
     /// whether to open on the scopes: for a call with nobody at the keyboard.
     typed: Vec<String>,
     scopes: bool,
+    /// Record the line from the start, as the window's Record key would: kept
+    /// in `captures` when the window closes or the key is pressed.
+    record: bool,
 }
 
 fn parse() -> Result<Option<Args>, String> {
@@ -144,6 +147,7 @@ fn parse() -> Result<Option<Args>, String> {
         telnet: None,
         typed: Vec::new(),
         scopes: false,
+        record: false,
     };
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut rest = raw.iter();
@@ -176,6 +180,7 @@ fn parse() -> Result<Option<Args>, String> {
             }
             "--type" => args.typed.push(value("--type")?),
             "--scopes" => args.scopes = true,
+            "--record" => args.record = true,
             "--in" => args.input = Some(value("--in")?),
             "--out" => args.output = Some(value("--out")?),
             "--devices" | "--list-devices" => {
@@ -187,6 +192,7 @@ fn parse() -> Result<Option<Args>, String> {
                     "binmodem                                   a modem, line chosen in the window\n\
                      binmodem --in <dev> --out <dev>            and opened straight away\n\
                      binmodem ... --type <line> [--scopes]      typed at the modem once the line is open\n\
+                     binmodem ... --record                      record the line from the start, into captures\n\
                      binmodem [path.wav]                        replay a capture\n\
                      binmodem --capture                         replay the Bell 103 golden vector\n\
                      binmodem --devices                         list audio devices\n\
@@ -275,6 +281,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (handle, Source::Telnet(session))
     } else if args.live {
         let session = Arc::new(live::Session::default());
+        session.set_recording(args.record);
         // Named devices open straight away; without them the window opens with
         // the modem on the desk and no line in it, and the line panel is where
         // one gets chosen.
