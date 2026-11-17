@@ -222,6 +222,62 @@ terminal, an answering board and a capture to replay, with nothing to install.
 [docs/usage.md](docs/usage.md) has the rest — the AT interface, the live-line
 setup, ZMODEM and the telnet terminal.
 
+## Building on Linux
+
+The releases are Windows executables and so is the CI, so this is the route
+rather than a tested promise: nothing in the code is Windows-only except the
+console handling of the packaged exe, but nobody has yet reported a Linux run.
+For Debian or Ubuntu; other distributions want the same things under their own
+names.
+
+What it needs: a Rust toolchain recent enough for the 2024 edition (1.85 or
+later), a C linker, and ALSA's headers for the sound card. The window comes up
+on X11 or Wayland through OpenGL, which a desktop install already has.
+
+```bash
+sudo apt install build-essential pkg-config libasound2-dev libxkbcommon0 libgl1
+```
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Open a new terminal so that `cargo` is on the path, then:
+
+```bash
+git clone https://github.com/CasualArclamp/BinModem.git
+```
+
+```bash
+cd BinModem
+```
+
+```bash
+cargo build --release -p gui
+```
+
+That leaves one file, `target/release/binmodem`. To see it work with no line
+and no sound card, replay the capture that comes with it:
+
+```bash
+./target/release/binmodem --capture
+```
+
+And then the real thing:
+
+```bash
+./target/release/binmodem --devices
+```
+
+```bash
+./target/release/binmodem
+```
+
+The first lists the audio devices the machine has; the second opens the modem
+on a line. `--telnet` is a board over a socket and `--sip <account>` a call
+over a SIP trunk, neither of which needs a sound card.
+[docs/usage.md](docs/usage.md) has every flag.
+
 ## Licence
 
 GPL-3.0-or-later. The ITU-T Recommendations themselves are not redistributed
