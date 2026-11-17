@@ -442,6 +442,14 @@ pub struct ScopeApp {
     /// How long a waterfall row lasts, measured from the frames arriving,
     /// and when the last one did.
     row_secs: f32,
+    /// The running measurement behind `row_secs`, which is only moved to it
+    /// when the two have come apart (see `poll`).
+    row_measured: f32,
+    /// Whether the SIP line had a call's audio the last time it was looked
+    /// at, and the frame the scopes were emptied on when it stopped (see
+    /// `clear_scopes`).
+    sip_call_was_up: bool,
+    blank_seq: Option<u64>,
     last_row: Option<std::time::Instant>,
     /// When the call reached data, for how long it has been there.
     connected_at: Option<std::time::Instant>,
@@ -561,6 +569,9 @@ impl ScopeApp {
             last_repaint: std::time::Instant::now(),
             hold: vec![-120.0; SPECTRUM_BINS],
             row_secs: 1.0 / 30.0,
+            row_measured: 1.0 / 30.0,
+            sip_call_was_up: false,
+            blank_seq: None,
             last_row: None,
             connected_at: None,
             marks: std::collections::VecDeque::new(),
@@ -761,7 +772,7 @@ impl ScopeApp {
     ///
     /// Positions are what the rate lists, the ceilings and the default go by,
     /// so a new one goes on the end rather than where it might read best.
-    const CARRIERS: [(&'static str, &'static str); 7] = [
+    const CARRIERS: [(&'static str, &'static str); 8] = [
         ("B103", "Bell 103 - 300 bit/s"),
         ("V22B", "V.22bis - 1200 or 2400"),
         ("V32", "V.32 - 4800 or 9600"),
@@ -775,6 +786,10 @@ impl ScopeApp {
             "V.90 - up to 56000 from an ISP's server and 33600 back. A far end that is no V.90 server gets V.34",
         ),
         ("V21", "V.21 - 300 bit/s, Bell 103's counterpart outside North America"),
+        (
+            "V92",
+            "V.92 - V.90's 56000 with V.92's own start-up. A server that is no V.92 server gets V.90",
+        ),
     ];
 
     /// Boards to start from, because a text box on its own is a box nobody
@@ -1302,6 +1317,13 @@ impl ScopeApp {
         // it must not be greyed out by the very condition it exists to
         // rescue.
         let call_up = state.sip.as_ref().is_some_and(|p| p.media);
+        // A call over SIP that has ended sends nothing more, not even
+        // silence, so the scopes would go on showing its last moment for as
+        // long as the window stayed open.
+        if self.sip_call_was_up && !call_up {
+            self.clear_scopes();
+        }
+        self.sip_call_was_up = call_up;
 
         // The keys a call is made with.
         ui.horizontal(|ui| {
@@ -1356,17 +1378,12 @@ impl ScopeApp {
                 session.type_bytes(b"ATH\r");
             }
 
-            // How fast at most, and the three things that are on or off: one
+            // Which modulation, and the three things that are on or off: one
             // box where there were two rows.
-            let mode = Self::CEILINGS
+            let mode = Self::MODES
                 .iter()
-                .find(|(rate, carrier, _)| {
-                    self.carrier == *carrier && self.modulation.max_rate == *rate
-                })
-                .map_or_else(
-                    || Self::CARRIERS[self.carrier].0.to_owned(),
-                    |(_, _, label)| format!("up to {label}"),
-                );
+                .find(|(carrier, _)| self.carrier == *carrier)
+                .map_or(Self::CARRIERS[self.carrier].0, |(_, label)| label);
             ui.scope(|ui| {
                 ui.spacing_mut().interact_size.y = FACE_KEY.y;
                 egui::ComboBox::from_id_salt("mode")
@@ -1380,7 +1397,7 @@ impl ScopeApp {
                     .show_ui(ui, |ui| self.call_settings(ui))
                     .response
                     .on_hover_text(
-                        "The fastest rate to offer, and whether to negotiate, \
+                        "The modulation to offer, and whether to negotiate, \
                          correct errors and compress",
                     );
             });
@@ -3338,7 +3355,13 @@ impl ScopeApp {
         } else if !on_hook && f.line_phase != "-" {
             // Which start-up, and where inside it. A call that will not come
             // up is always stuck somewhere particular.
-            format!("{}: {}", f.modulation, f.line_phase)
+            // A phase that already names its start-up ("V.8 bis: listening",
+            // "V.90 phase 3: DIL") is not given the name a second time.
+            if f.line_phase.starts_with(f.modulation) {
+                f.line_phase.to_owned()
+            } else {
+                format!("{}: {}", f.modulation, f.line_phase)
+            }
         } else if self.source.is_live() {
             self.modulation.command(Self::CARRIERS[self.carrier].0)
         } else {
@@ -3769,6 +3792,23 @@ impl ScopeApp {
         }
     }
 
+    /// Empty the waterfall, the spectrum and the scopes, until the engine
+    /// has something new to show: what a call's end looks like on a line
+    /// that goes quiet by stopping rather than by sending silence.
+    fn clear_scopes(&mut self) {
+        self.waterfall.clear();
+        self.hold.fill(-120.0);
+        self.blank_seq = Some(self.frame.seq);
+        self.blank_frame();
+    }
+
+    fn blank_frame(&mut self) {
+        self.frame.spectrum_db.fill(-120.0);
+        self.frame.waveform.fill(0.0);
+        self.frame.constellation.clear();
+        self.frame.symbols.clear();
+    }
+
     /// Pull whatever the engine has published since the last repaint.
     fn poll(&mut self) {
         if self.rx.read(&mut self.frame) && self.frame.seq != self.last_seq {
@@ -3781,12 +3821,26 @@ impl ScopeApp {
             if let Some(before) = self.last_row.replace(now) {
                 let gap = (now - before).as_secs_f32();
                 if gap < 1.0 {
-                    self.row_secs += (gap - self.row_secs) * 0.05;
+                    self.row_measured += (gap - self.row_measured) * 0.02;
+                    // What is drawn from it -- the seconds down the side of
+                    // the waterfall, and the figures in the captions -- stays
+                    // put until the measurement has really moved. Following
+                    // every repaint's worth of it had the labels trembling.
+                    if (self.row_measured - self.row_secs).abs() > 0.05 * self.row_secs {
+                        self.row_secs = self.row_measured;
+                    }
                 }
             }
             for (held, &now) in self.hold.iter_mut().zip(&self.frame.spectrum_db) {
                 *held = (*held - 0.15).max(now);
             }
+        }
+        // `read` copies the engine's frame whether or not it is a new one, so
+        // scopes that were emptied are emptied again until one is.
+        match self.blank_seq {
+            Some(seq) if seq == self.frame.seq => self.blank_frame(),
+            Some(_) => self.blank_seq = None,
+            None => {}
         }
         self.keep_time();
         self.run_script();
@@ -3907,33 +3961,21 @@ impl ScopeApp {
         });
     }
 
-    /// Every ceiling this modem will offer, as rate, modulation and label.
+    /// The modulations, fastest first, as the mode box lists them: which
+    /// carrier each is, and what it is called there.
     ///
-    /// One list rather than a modulation and a rate to be chosen separately,
-    /// because nobody wants "V.22bis" and "2400" as two decisions -- they want
-    /// 2400, and the modulation that reaches it follows from that.
-    /// Every ceiling worth one press, and which carrier each belongs to.
-    ///
-    /// Everything from 4800 up is V.32bis, including the two rates plain V.32
-    /// also has: V.32bis does them too, and offering the older carrier here
-    /// would only take 7200 away. Choosing V.32 on purpose -- which is worth
-    /// doing against a far end that claims V.32bis and cannot hold it -- is in
-    /// the Advanced window, where a deliberate choice belongs.
-    ///
-    /// 56 000 is V.90 with no rate named at all. `+MS`'s rates are the
-    /// sending direction's (V.250 6.4.1), which for V.90's analogue modem is
-    /// V.34's; the downstream is whatever the route carries.
-    const CEILINGS: [(u32, usize, &'static str); 10] = [
-        (300, 0, "300"),
-        (1200, 1, "1200"),
-        (2400, 1, "2400"),
-        (4800, 3, "4800"),
-        (7200, 3, "7200"),
-        (9600, 3, "9600"),
-        (12_000, 3, "12000"),
-        (14_400, 3, "14400"),
-        (33_600, 4, "33600"),
-        (0, 5, "56000"),
+    /// A modulation and nothing else. The rate is the modem's to find: every
+    /// one of these settles on the fastest the line will carry, and a ceiling
+    /// set on purpose is in the Advanced window with the rest of AT+MS.
+    const MODES: [(usize, &'static str); 8] = [
+        (7, "V.92"),
+        (5, "V.90"),
+        (4, "V.34"),
+        (3, "V.32bis"),
+        (2, "V.32"),
+        (1, "V.22bis"),
+        (6, "V.21"),
+        (0, "Bell 103"),
     ];
 
     /// How fast at most, and the three things that are simply on or off.
@@ -3953,29 +3995,25 @@ impl ScopeApp {
         let dim = Color32::from_rgb(140, 150, 165);
 
         ui.vertical(|ui| {
-            ui.label(RichText::new("fastest rate to offer").monospace().color(dim));
+            ui.label(RichText::new("modulation").monospace().color(dim));
 
             let mut picked = None;
-            for (rate, carrier, label) in Self::CEILINGS {
-                let chosen =
-                    self.carrier == carrier && self.modulation.max_rate == rate;
+            for (carrier, label) in Self::MODES {
                 if ui
-                    .radio(chosen, label)
+                    .radio(self.carrier == carrier, label)
                     .on_hover_text(Self::CARRIERS[carrier].1)
                     .clicked()
                 {
-                    picked = Some((rate, carrier));
+                    picked = Some(carrier);
                 }
             }
-            if let Some((rate, carrier)) = picked {
+            if let Some(carrier) = picked {
                 self.carrier = carrier;
-                self.modulation.fit(carrier);
-                // A ceiling and no floor. V.250 6.4.1 has an unspecified rate
-                // "determined by the modulation means selected", which is what
-                // is wanted underneath: as fast as this, and as slow as it
-                // takes.
+                // No rates named. V.250 6.4.1 has an unspecified rate
+                // "determined by the modulation means selected", which is
+                // the whole of what is wanted: the fastest the line carries.
                 self.modulation.min_rate = 0;
-                self.modulation.max_rate = rate;
+                self.modulation.max_rate = 0;
                 session.type_bytes(
                     format!(
                         "{}\r",
@@ -5554,7 +5592,10 @@ mod modulation_tests {
         assert_eq!(Modulation::rates(5), Modulation::rates(4));
         assert_eq!(ScopeApp::CARRIERS[6].0, "V21");
         assert_eq!(Modulation::rates(6), &[300]);
-        assert_eq!(ScopeApp::CARRIERS.len(), 7);
+        // V.92's are V.90's: the same V.34 upstream unless PCM upstream is on.
+        assert_eq!(ScopeApp::CARRIERS[7].0, "V92");
+        assert_eq!(Modulation::rates(7), Modulation::rates(4));
+        assert_eq!(ScopeApp::CARRIERS.len(), 8);
     }
 
     /// The two V.32 carriers are two ceilings on one modulation, and the
@@ -5567,14 +5608,10 @@ mod modulation_tests {
                 "V.32bis cannot do {rate}, which V.32 can"
             );
         }
-        // And the strip of ceilings only ever names a carrier that has the
-        // rate it is offering, or names none.
-        for (rate, carrier, _) in ScopeApp::CEILINGS {
-            assert!(
-                rate == 0 || Modulation::rates(carrier).contains(&rate),
-                "the ceiling {rate} names a carrier that has no such rate"
-            );
-        }
+        // And the mode box lists every carrier there is, once.
+        let mut listed: Vec<usize> = ScopeApp::MODES.iter().map(|m| m.0).collect();
+        listed.sort_unstable();
+        assert_eq!(listed, (0..ScopeApp::CARRIERS.len()).collect::<Vec<_>>());
     }
 
     #[test]
