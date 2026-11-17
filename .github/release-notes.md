@@ -11,6 +11,8 @@ binmodem.exe --capture        replay the golden capture
 
 ## What's new in 4.1.0
 
+![A V.92 call to D-Modem over SIP: 56 000 coming down, 41 333 going up, error control running](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/releases/v4.1.0/v92-dmodem.png)
+
 ### Calls with somebody else's modem
 
 This release was tested against [D-Modem](https://github.com/D-Modem/D-Modem), a softmodem written by other people from the same Recommendations, over SIP on one machine. None of its code is here; it is the far end.
@@ -26,9 +28,12 @@ This release was tested against [D-Modem](https://github.com/D-Modem/D-Modem), a
 
 - **A volume slider beside the Listen key.**
 - **The mode box lists modulations**, V.92 down to Bell 103, and names no rate: the modem finds the fastest the line carries. A ceiling set on purpose is under Advanced.
+- **V.92 in the mode box is V.92 with PCM upstream.** It used to want `BINMODEM_V92_PCM_UP=1` as well, and without it a V.92 call was V.90 in all but name. There is a tick under the list to have V.92 without it.
 - **On a SIP line the window follows the modem after a call ends.** A call the trunk refused left it on "negotiating" with the hook lamp lit, although the modem had said NO CARRIER; and the scopes kept the call's last moment. Both are put right, and the error is shown for three seconds and not for ever.
 - **The seconds down the side of the waterfall hold still**, and the call card names a start-up once.
 - **`binmodem --record`** starts the window already recording.
+
+The picture is a call from the window to D-Modem on the same machine, over SIP with G.711 between them: a codec, and no line. 56 000 down and 41 333 up there is what the two do with nothing in the way.
 
 ### Linux
 
@@ -41,7 +46,7 @@ This release was tested against [D-Modem](https://github.com/D-Modem/D-Modem), a
 - **V.32's round-trip measurement can still be halved by a lost packet.** On a V.32bis call over a trunk, the concealment brought the far end's alternation back inverted, and the reversal that came out of it stopped the clock at 706 ms on a line whose real round trip is 1.22 s. The call connects regardless; the bad reading still costs the echo canceller's tap placement.
 - **One ISP's V.90 pool sometimes stops dead** just as its modem takes up our constellation, at the end of phase 4 or in a renegotiation. Every CP we sent was checked against V.90 Table 14 bit for bit, and they are correct.
 - **Known:** after a V.90 call falls back to V.34, the V.34 retrain watch can still take the hang-up beep for tone B.
-- **V.92 has only carried data between softmodems:** two of these, and one of these with D-Modem. PCM upstream is off unless `BINMODEM_V92_PCM_UP=1` is set. Against a real V.92 modem the server has reached Phase 3 and no further. Super G3 to D-Modem does not come up: it does not recognise our control channel's start. The calling side chooses its sample phase once and follows no clock, cancels no echo and asks for no DIL, so it wants a four-wire line with both ends on one clock, which a pair of virtual cables is and a telephone line is not. V.92's own rate renegotiation, cleardown, quick connect and modem on hold are not built.
+- **V.92 has only carried data between softmodems:** two of these, and one of these with D-Modem. PCM upstream comes with V.92 chosen in the window; `AT+MS=V92` typed at a terminal still wants `BINMODEM_V92_PCM_UP=1`, and both ends have to ask for it. Against a real V.92 modem the server has reached Phase 3 and no further. Super G3 to D-Modem does not come up: it does not recognise our control channel's start. The calling side chooses its sample phase once and follows no clock, cancels no echo and asks for no DIL, so it wants a four-wire line with both ends on one clock, which a pair of virtual cables is and a telephone line is not. V.92's own rate renegotiation, cleardown, quick connect and modem on hold are not built.
 - **Not yet tried against real far ends:** V.17, and the V.29 and V.27 ter receivers, have been measured against our own modems and simulated lines only.
 
 Checksums are in `SHA256SUMS.txt`.
