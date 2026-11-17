@@ -316,6 +316,11 @@ fn a_second_call_to_the_same_place_starts_up_the_short_way() {
     assert_eq!(pair.host.quick_connected(), Some(true));
     println!("full start-up {first:.2} s, with short Phase 1 {second:.2} s");
     assert!(second < first - 0.5, "full {first:.2} s, short {second:.2} s");
+    // 9.2.5: both sequences called for LAPM, so there was no ODP and no ADP
+    // -- and LAPM is up all the same.
+    assert!(pair.caller.error_controlled() && pair.host.error_controlled());
+    let answered = |m: &Modem| m.distant().into_iter().find(|(what, _)| *what == "answered").map(|(_, said)| said);
+    assert_eq!(answered(&pair.caller).as_deref(), Some("nothing"), "an ADP came back: {:?}", pair.caller.distant());
     carries_text(&mut pair, "after a quick connect", "");
 }
 

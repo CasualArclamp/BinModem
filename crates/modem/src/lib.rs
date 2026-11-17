@@ -2026,6 +2026,17 @@ impl Modem {
                     // this is a request to disable V.42 Detection Phase".
                     if !self.at.error_control.detect() {
                         stack = stack.without_detection();
+                    } else if self.want_error_control && self.quick.is_some_and(|q| q.lapm) {
+                        // V.92 9.2.5: "If both modems have indicated LAPM
+                        // capability, the V.42 ODP/ADP exchange shall be
+                        // bypassed" -- P in the QC and in the QCA. The
+                        // originator goes straight to its XID; the answerer
+                        // stops waiting for an ODP, and still answers one
+                        // that comes.
+                        stack = match role {
+                            EcRole::Originator => stack.without_detection(),
+                            EcRole::Answerer => stack.bypassing_detection(),
+                        };
                     }
                     // Offer compression in both directions and let the far end
                     // decide. What runs is the intersection, so offering more
