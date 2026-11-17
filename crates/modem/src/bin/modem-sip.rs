@@ -137,7 +137,7 @@ fn test_page(sheet: usize) -> fax::page::Page {
         .map(|y| {
             (0..WIDTH)
                 .map(|x| {
-                    let frame = x < 8 || x >= WIDTH - 8 || y < 8 || y >= HEIGHT - 8;
+                    let frame = !(8..WIDTH - 8).contains(&x) || !(8..HEIGHT - 8).contains(&y);
                     let diagonal = (x as i64 - (y as i64) * 2).rem_euclid(432) < 6;
                     let bars = (100..220).contains(&y) && {
                         let period = 4usize << (x / 288);
@@ -155,6 +155,8 @@ fn test_page(sheet: usize) -> fax::page::Page {
     fax::page::Page { lines, resolution: fax::page::Resolution::Standard }
 }
 
+// One argument for each thing the command line can ask for.
+#[allow(clippy::too_many_arguments)]
 fn run(
     line: &sip::Line,
     typed: Vec<String>,
@@ -182,6 +184,7 @@ fn run(
     let mut next_line = Instant::now() + Duration::from_millis(500);
 
     let mut from_line: Vec<f32> = Vec::with_capacity(4096);
+    let mut from_network: Vec<f32> = Vec::with_capacity(2048);
     let mut to_line: Vec<f32> = Vec::with_capacity(4096);
     let mut was = State::Command;
     let mut phase = "";
@@ -198,14 +201,14 @@ fn run(
     loop {
         // The lines somebody would have typed, a second apart so that each
         // has its answer before the next begins.
-        if Instant::now() >= next_line {
-            if let Some(text) = typed.next() {
-                note(&format!("typed: {text}"));
-                for byte in text.bytes().chain(std::iter::once(b'\r')) {
-                    modem.feed_dte(byte);
-                }
-                next_line = Instant::now() + Duration::from_secs(1);
+        if Instant::now() >= next_line
+            && let Some(text) = typed.next()
+        {
+            note(&format!("typed: {text}"));
+            for byte in text.bytes().chain(std::iter::once(b'\r')) {
+                modem.feed_dte(byte);
             }
+            next_line = Instant::now() + Duration::from_secs(1);
         }
 
         // The call, which has to be placed before there is a line at all.
@@ -249,10 +252,15 @@ fn run(
 
         // The line is the clock, as it is with a sound card.
         from_line.clear();
-        line.receive(&mut from_line);
+        from_network.clear();
+        line.receive_both(&mut from_line, &mut from_network);
         if from_line.is_empty() {
             std::thread::sleep(Duration::from_millis(2));
         } else {
+            // A digital modem reads the network's own levels (it ignores them
+            // otherwise).
+            let levels: Vec<f64> = from_network.iter().map(|l| f64::from(*l)).collect();
+            modem.give_network_levels(&levels);
             to_line.clear();
             for &s in &from_line {
                 to_line.push(modem.step(f64::from(s)) as f32);

@@ -127,7 +127,7 @@ impl std::fmt::Debug for Duplex {
 
 /// Names of the available input devices, default first.
 pub fn input_devices() -> Vec<String> {
-    let host = cpal::default_host();
+    let host = crate::host();
     let default = host.default_input_device().map(|d| d.to_string());
     let mut names: Vec<String> = host
         .input_devices()
@@ -142,7 +142,7 @@ pub fn input_devices() -> Vec<String> {
 }
 
 fn find_input(want: Option<&str>) -> Result<cpal::Device, String> {
-    let host = cpal::default_host();
+    let host = crate::host();
     match want {
         Some(name) => host
             .input_devices()
@@ -156,7 +156,7 @@ fn find_input(want: Option<&str>) -> Result<cpal::Device, String> {
 }
 
 fn find_output(want: Option<&str>) -> Result<cpal::Device, String> {
-    let host = cpal::default_host();
+    let host = crate::host();
     match want {
         Some(name) => host
             .output_devices()

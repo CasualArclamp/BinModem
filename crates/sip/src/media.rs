@@ -502,6 +502,14 @@ impl Media {
     /// says goes back. Nothing here paces itself, because the far end's
     /// packets already do.
     pub fn receive(&self, into: &mut Vec<f32>) {
+        self.receive_both(into, None);
+    }
+
+    /// [`Self::receive`], and beside it the same audio as it came off the
+    /// network: one level for every octet, before the rate conversion. A
+    /// V.90 or V.92 digital modem's receiver wants those (see
+    /// `Modem::give_network_levels`).
+    pub fn receive_both(&self, into: &mut Vec<f32>, mut network: Option<&mut Vec<f32>>) {
         let law = self.law();
         let Ok(mut conversion) = self.conversion.lock() else {
             return;
@@ -517,6 +525,9 @@ impl Media {
         }
         conversion.at_network_rate.clear();
         g711::decode_into(law, &conversion.codewords, &mut conversion.at_network_rate);
+        if let Some(network) = network.as_mut() {
+            network.extend_from_slice(&conversion.at_network_rate);
+        }
         for &sample in conversion.at_network_rate.iter() {
             conversion.scratch.clear();
             conversion.up.process(f64::from(sample), &mut conversion.scratch);

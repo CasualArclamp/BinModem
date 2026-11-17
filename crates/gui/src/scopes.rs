@@ -116,6 +116,11 @@ impl Waterfall {
         }
     }
 
+    /// Empty it: every row back to the backdrop.
+    pub fn clear(&mut self) {
+        self.image.pixels.fill(BACKDROP);
+    }
+
     /// Push one spectrum row, resampling the bins across the display width.
     pub fn push_row(&mut self, bins: &[f32], hz_per_bin: f64) {
         let px = &mut self.image.pixels;

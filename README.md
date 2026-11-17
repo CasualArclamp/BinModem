@@ -224,11 +224,15 @@ setup, ZMODEM and the telnet terminal.
 
 ## Building on Linux
 
-The releases are Windows executables and so is the CI, so this is the route
-rather than a tested promise: nothing in the code is Windows-only except the
-console handling of the packaged exe, but nobody has yet reported a Linux run.
-For Debian or Ubuntu; other distributions want the same things under their own
-names.
+The releases are Windows executables; CI builds the Linux one on every change
+but does not run it, so reports from people who do are what this section is
+kept right by. For Debian or Ubuntu; other distributions want the same things
+under their own names.
+
+Sound goes through the sound server when there is one (PipeWire or
+PulseAudio), so a device BinModem is using stays usable by everything else.
+`BINMODEM_AUDIO_HOST=alsa` opens the hardware through ALSA instead, which takes
+the device for BinModem alone.
 
 What it needs: a Rust toolchain recent enough for the 2024 edition (1.85 or
 later), a C linker, and ALSA's headers for the sound card. The window comes up

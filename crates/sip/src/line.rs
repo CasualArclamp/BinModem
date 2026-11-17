@@ -26,11 +26,15 @@
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::account::Account;
 use crate::media::{Media, Stats};
 use crate::sdp::{Direction, Negotiated};
 use crate::ua::{Agent, Event, Status};
+
+/// How long [`Progress::last_error`] goes on saying what went wrong.
+pub const ERROR_SHOWN: Duration = Duration::from_secs(3);
 
 /// Where a call has got to, and everything worth showing about it.
 #[derive(Debug, Clone, Default)]
@@ -73,6 +77,9 @@ pub struct Progress {
     /// Octets of silence put in on purpose, to build the outgoing cushion
     /// back up after it has been spent. Deliberate, and still silence.
     pub cushioned: u64,
+    /// What last went wrong, for as long as it is news: [`ERROR_SHOWN`] and
+    /// then nothing, so that a call that failed a minute ago is not still
+    /// written across the window in red.
     pub last_error: Option<String>,
 }
 
@@ -92,7 +99,7 @@ pub struct Line {
     /// ends agreed to, which is this file's business; the media path knows
     /// about packets and has no idea what was said in the SDP.
     sending: AtomicBool,
-    error: Mutex<Option<String>>,
+    error: Mutex<Option<(String, Instant)>>,
     account: String,
 }
 
@@ -150,6 +157,12 @@ impl Line {
     /// Everything the far end has sent, at the modem's rate.
     pub fn receive(&self, into: &mut Vec<f32>) {
         self.media.receive(into);
+    }
+
+    /// The same, and beside it what arrived at the network's own 8000 Hz
+    /// (see [`Media::receive_both`]).
+    pub fn receive_both(&self, into: &mut Vec<f32>, network: &mut Vec<f32>) {
+        self.media.receive_both(into, Some(network));
     }
 
     /// And what the modem has to say.
@@ -429,7 +442,7 @@ impl Line {
 
     fn remember_error(&self, text: &str) {
         if let Ok(mut slot) = self.error.lock() {
-            *slot = Some(text.to_owned());
+            *slot = Some((text.to_owned(), Instant::now()));
         }
     }
 
@@ -471,7 +484,11 @@ impl Line {
             underruns: stats.underruns,
             underruns_mid_call: stats.underruns_mid_call,
             cushioned: stats.cushioned,
-            last_error: self.error.lock().ok().and_then(|e| e.clone()),
+            last_error: self
+                .error
+                .lock()
+                .ok()
+                .and_then(|e| e.as_ref().filter(|(_, at)| at.elapsed() < ERROR_SHOWN).map(|(text, _)| text.clone())),
         }
     }
 }

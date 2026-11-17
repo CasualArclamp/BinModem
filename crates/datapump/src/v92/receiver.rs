@@ -845,6 +845,10 @@ pub struct Receiver {
     /// The sign TRN2u's differential encoder starts from: whether the last
     /// symbol of E1u was negative (8.7.6). See [`Self::set_trn2u_seed`].
     trn2u_seed: bool,
+    /// Which of a TRN2u symbol's bits the far end sends first: false for the
+    /// magnitude (this project's reading, and an Agere SV92PP's), true for
+    /// the sign. See [`Self::trn2u_sign_first`].
+    trn2u_sign_first: bool,
     /// Training: the feed-forward and feedback sections of the decision
     /// feedback equaliser the fit designed.
     forward: Vec<f64>,
@@ -925,6 +929,7 @@ impl Receiver {
             b1u_agreed: 0,
             b1u_differed: 0,
             trn2u_seed: false,
+            trn2u_sign_first: false,
             forward: Vec::new(),
             feedback: Vec::new(),
             decided: VecDeque::with_capacity(DFE_FEEDBACK + 1),
@@ -1087,6 +1092,19 @@ impl Receiver {
     /// crate's two modems that was the upstream of every call in which a DIL
     /// had been asked for, whose E1u ends on the other sign from a call's
     /// without one.
+    /// Whether the TRN2u just fitted on had its sign bit first in time.
+    ///
+    /// Tables 28 and 29 say which bit of a symbol is the sign and nothing
+    /// says which goes through the scrambler first (see
+    /// `up_signals::TRN2U_SIGN_LAST`). TRN2u is a known sequence under either
+    /// reading, and only one of the two fits the line, so
+    /// [`Self::train_on_trn2u`] tries both and this is the one that fitted:
+    /// everything up to B1u is in the same modulation and is read the same
+    /// way. D-Modem's analogue modem sends the sign first.
+    pub fn trn2u_sign_first(&self) -> bool {
+        self.trn2u_sign_first
+    }
+
     pub fn set_trn2u_seed(&mut self, negative: bool) {
         self.trn2u_seed = negative;
     }
@@ -2211,13 +2229,10 @@ impl Receiver {
         // sign bit second and differential (`phase = 0`,
         // `differential_magnitude = false`); and the seed is 8.7.6's, the
         // last sign E1u sent (see `set_trn2u_seed`).
-        let Some(levels) = trn2u_levels(&bits, length, 0, usize::from(self.trn2u_seed), false) else {
-            return false;
-        };
         let base = self.history_base();
         let origin = trn2u_from.saturating_sub(base);
         let offset = p.saturating_sub(origin as usize);
-        if origin as usize > p || offset + window > levels.len() {
+        if origin as usize > p || offset + window > length {
             return false;
         }
         // One least-squares fit, at the channel's own decision lag. The
@@ -2227,11 +2242,26 @@ impl Receiver {
         let span = window.min(length - start);
         let lag = CHANNEL_DELAY.min(offset);
         let skip = start as i64 - lag as i64 - origin as i64;
+        // Once for each order the two bits of a symbol can come in (see
+        // `trn2u_sign_first`): this project's first, and the other only has
+        // the line if it fits better.
         let mut best: Option<Fitted> = None;
-        if skip >= 0 && skip as usize + span <= levels.len() {
+        let mut sign_first = false;
+        for order in [0usize, 1] {
+            let Some(levels) = trn2u_levels(&bits, length, order, usize::from(self.trn2u_seed), false) else {
+                continue;
+            };
+            if skip < 0 || skip as usize + span > levels.len() {
+                continue;
+            }
+            self.restore(&before);
             self.pending_levels = Some(levels);
             if self.fit_at(start, span, skip as u64, sections.0, sections.1) {
-                best = Some(self.fitted());
+                let found = self.fitted();
+                if best.as_ref().is_none_or(|kept| found.snr() > kept.snr() + 3.0) {
+                    best = Some(found);
+                    sign_first = order == 1;
+                }
             } else {
                 self.pending_levels = None;
             }
@@ -2247,6 +2277,7 @@ impl Receiver {
             Some(found) => {
                 self.restore(&before);
                 self.phase_four = Some(found);
+                self.trn2u_sign_first = sign_first;
                 true
             }
             None => {
@@ -2362,7 +2393,7 @@ impl Receiver {
         // TRN2u's own symbols, exactly as `train_on_trn2u` builds them: 8.7.6
         // resets the scrambler at E1u, so the first is at `trn2u_from`.
         let bits = reference_from(0, 2 * length + 4, self.reference_mode)?;
-        let levels = trn2u_levels(&bits, length, 0, usize::from(self.trn2u_seed), false)?;
+        let levels = trn2u_levels(&bits, length, usize::from(self.trn2u_sign_first), usize::from(self.trn2u_seed), false)?;
         let origin = trn2u_from.saturating_sub(self.history_base()) as usize;
         let start = length.saturating_sub(window).max(PROBE);
         let span = window.min(length - start);
