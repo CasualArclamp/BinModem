@@ -10,3 +10,12 @@ workspace = true
 [dependencies]
 cpal = "0.18.2"
 dsp  = { path = "../dsp" }
+
+# On Linux, go through the sound server where there is one. cpal's ALSA host
+# opens the hardware itself, which takes the device away from PipeWire or
+# PulseAudio and from every other program for as long as it is open; its
+# PulseAudio host talks to the server instead (PipeWire answers the same
+# protocol), in Rust with nothing more to install, and cpal falls back to ALSA
+# on a machine with no server. See `line::host`.
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { version = "0.18.2", features = ["pulseaudio"] }

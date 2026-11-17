@@ -43,3 +43,40 @@ jobs:
       # Bell 103 call decoded to its known plaintext.
       - name: Tests
         run: cargo test --workspace
+
+  # Nobody develops this on Linux and people run it there, so the least CI
+  # can do is say that it still builds: the window, with the audio it opens
+  # through the sound server (see crates/line/Cargo.toml). Clippy runs here
+  # too because code behind cfg(target_os = "linux") is invisible to the job
+  # above.
+  linux:
+    name: build on linux
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: What the build needs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libasound2-dev
+
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy
+          rustup default stable
+          rustc --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Clippy
+        run: cargo clippy -p line -p gui --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --release -p gui
