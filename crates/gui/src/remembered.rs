@@ -36,6 +36,13 @@ fn path() -> Option<PathBuf> {
     Some(base.join("BinModem"))
 }
 
+/// Where the V.92 connections that have connected before are kept, for the
+/// short start-up (see `modem::memos`): a file of its own beside the
+/// settings, so that it can be deleted without losing them.
+pub fn recognised_connections() -> Option<PathBuf> {
+    path().map(|dir| dir.join("v92-connections.txt"))
+}
+
 /// Settings read from the file, by name.
 #[derive(Debug, Default)]
 pub struct Remembered(BTreeMap<String, String>);

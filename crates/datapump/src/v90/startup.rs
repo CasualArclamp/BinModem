@@ -16,7 +16,7 @@ use crate::v34::phase2::{self, Pcm, V92Wish};
 use crate::v34::startup as v34;
 
 use crate::v92::digital as pcm;
-use crate::v92::{FilterLimits, analogue as pcm_up, line as pcm_line};
+use crate::v92::{FilterLimits, analogue as pcm_up, line as pcm_line, quick};
 
 use super::sequences::Descriptor;
 use super::ucode::Law;
@@ -77,6 +77,11 @@ pub struct Analogue {
     /// The upstream rate V.92 start-ups allow, as its drn, or None for every
     /// one: Ja's rate mask is then that rate alone (Table 20).
     pinned_up: Option<u8>,
+    /// The round trip an earlier call to the same place measured, in
+    /// seconds, for a start-up whose phase 2 was V.92's short one: its one
+    /// ranging exchange gives the round trip to the digital modem alone
+    /// (9.4.1.1.4/V.92).
+    remembered_round_trip: Option<f64>,
 }
 
 impl Analogue {
@@ -96,7 +101,16 @@ impl Analogue {
             v92: None,
             failed_v92: 0,
             pinned_up: None,
+            remembered_round_trip: None,
         }
+    }
+
+    /// The round trip an earlier call to the same place measured, in
+    /// seconds, to stand in for the one a short phase 2 does not measure at
+    /// this end. Needed by an end that asks for a short phase 2
+    /// ([`V92Wish::short_phase2`]), and used by no other.
+    pub fn set_remembered_round_trip(&mut self, seconds: Option<f64>) {
+        self.remembered_round_trip = seconds;
     }
 
     /// The upstream rate V.92 start-ups are to allow, as its drn (1 is
@@ -331,7 +345,8 @@ impl Analogue {
     }
 
     pub fn round_trip(&self) -> Option<f64> {
-        self.v34.phase2().round_trip()
+        let p2 = self.v34.phase2();
+        p2.round_trip().or(self.remembered_round_trip.filter(|_| p2.was_short()))
     }
 
     pub fn take_bits(&mut self) -> Vec<bool> {
@@ -490,7 +505,11 @@ impl Analogue {
             settings.md_length = asked.md_length;
             settings.uinfo = asked.uinfo;
             settings.limits = FilterLimits::from_info1a(asked.sections, asked.ltot_code, asked.lmax_code);
-            settings.round_trip = p2.round_trip().unwrap_or(0.0);
+            // A short phase 2 measured none here: the last call's stands.
+            settings.round_trip = p2.round_trip().or(self.remembered_round_trip).unwrap_or(0.0);
+            if p2.was_short() {
+                self.notes.push("V.92: short phase 2, no line probe".into());
+            }
             settings.law = if server.a_law { Law::A } else { Law::Mu };
             // Nobody chose a downstream rate: the line does.
             settings.rate_from_line = self.pinned.is_none();
@@ -552,6 +571,12 @@ pub struct Digital {
     /// Lines for the transcript kept from a V.92 modem that has been put
     /// away.
     notes: Vec<String>,
+    /// Short Phase 1 after this end's QCA1d, while it runs: QTS, ANSpcm and
+    /// the wait for TONEq (9.2.4.3/V.92). Phase 2 is not stepped until it
+    /// has been answered.
+    quick: Option<quick::Answer>,
+    /// Whether that wait ran out, and the line goes back to ANSam and V.8.
+    quick_gave_up: bool,
 }
 
 impl Digital {
@@ -574,7 +599,34 @@ impl Digital {
             connected_once: false,
             pinned_up: None,
             notes: Vec::new(),
+            quick: None,
+            quick_gave_up: false,
         }
+    }
+
+    /// Begin with the rest of short Phase 1: this end has just sent QCA1d in
+    /// answer to a QC1a that asked for QTS at Ucode `uqts`, naming `level`
+    /// for ANSpcm (9.2.4.1/V.92).
+    ///
+    /// Silence, QTS, QTS-bar and ANSpcm go out as the codewords they are,
+    /// and Phase 2 begins when TONEq has been heard -- with the 75 ms of
+    /// silence 9.2.4.3 puts before it, which is the lead-in this was built
+    /// with. With no TONEq in two seconds [`Self::quick_gave_up`] says so
+    /// and nothing more is sent: the line is V.8's again.
+    pub fn after_quick(mut self, uqts: u8, level: v8::quick::AnspcmLevel) -> Self {
+        self.quick = Some(quick::Answer::new(self.law, uqts, level));
+        self
+    }
+
+    /// Whether short Phase 1 went unanswered, so that whoever owns the line
+    /// sends ANSam again and carries on by V.8 (9.2.4.3/V.92).
+    pub fn quick_gave_up(&self) -> bool {
+        self.quick_gave_up
+    }
+
+    /// Whether short Phase 1 is still on the line.
+    pub fn in_quick(&self) -> bool {
+        self.quick.is_some()
     }
 
     /// V.92's downstream levels and their power, once the analogue modem has
@@ -773,6 +825,9 @@ impl Digital {
     }
 
     pub fn phase(&self) -> &'static str {
+        if let Some(q) = self.quick.as_ref() {
+            return q.phase();
+        }
         if let Some(m) = self.v92.as_ref() {
             return m.phase();
         }
@@ -861,6 +916,16 @@ impl Digital {
 
     /// One network sample in, one out.
     pub fn step(&mut self, input: f64) -> f64 {
+        if let Some(q) = self.quick.as_mut() {
+            // Codewords, at their own level: not Phase 2's gain.
+            let out = q.step(input);
+            match q.status() {
+                quick::Status::Running => {}
+                quick::Status::Answered => self.quick = None,
+                quick::Status::GaveUp => self.quick_gave_up = true,
+            }
+            return out;
+        }
         if let Some(m) = self.v92.as_mut() {
             let out = m.step(input);
             if m.take_retrain() {

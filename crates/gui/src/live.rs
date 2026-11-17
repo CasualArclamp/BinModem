@@ -1012,6 +1012,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // Windows a cpal stream is not Send and has to stay where it was made.
     let mut audio: Option<Wire> = None;
     let mut modem = Modem::new(FS);
+    // V.92 connections that have connected before, by the string dialled:
+    // the next call to one opens with the short start-up (V.92 9.2, 9.4).
+    modem.remember_connections(crate::remembered::recognised_connections().map(modem::memos::Memos::open));
     modem.set_pinned_rate(session.rate_pinned());
     modem.choose_upstream(session.up_pinned());
     // The rate menu, looked at a few times a second: working it out after a

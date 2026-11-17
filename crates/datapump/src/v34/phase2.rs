@@ -89,10 +89,12 @@ pub struct V92Wish {
     ///
     /// An analogue modem "shall only indicate the desire to use a short Phase
     /// 2 if it intends to connect in either PCM upstream or V.90 data mode"
-    /// (9.4), so this is not a capability but a promise about INFO1a. Nothing
-    /// in this module acts on the agreement yet -- short phase 2's own stages
-    /// are a later package -- and [`Modem::short_phase2_agreed`] is where the
-    /// four bits of 9.4 are read.
+    /// (9.4), so this is not a capability but a promise about INFO1a -- and
+    /// here a narrower one: the short phase 2 this module runs ends in a
+    /// Table 18 INFO1a, PCM upstream, and Table 19's V.34 upstream is not
+    /// built. So an analogue modem sets this only when it will ask for PCM
+    /// upstream, and a digital one only when it would grant it.
+    /// [`Modem::short_phase2_agreed`] is where the four bits of 9.4 are read.
     pub short_phase2: bool,
     /// Whether PCM upstream is wanted: `+PIG=0` at the analogue modem, and the
     /// digital modem's own verdict on the channel, which is what its INFO1d
@@ -287,6 +289,10 @@ pub(crate) const TONE_HELD: f64 = 0.020;
 /// tone B had.
 pub(crate) const TONE_B_FLOOR: f64 = 0.5;
 
+/// Every wait of V.92's short phase 2 (9.4.1.2.2, 9.4.1.2.3, 9.4.2.2.2), in
+/// seconds.
+const SHORT_WAIT: f64 = 2.5;
+
 /// No part of phase 2 takes this long, round trips and all.
 pub(crate) const GIVE_UP: f64 = 20.0;
 
@@ -309,6 +315,15 @@ enum Stage {
     AnswerProbeReversal,
     AnswerReadProbe,
     AnswerInfo1,
+    // V.92's short phase 2 (9.4): the digital modem, which is the call modem
+    // here, with tone B up and waiting for tone A; then its own reversal
+    // gone and waiting for tone A's.
+    CallShortTone,
+    CallShortRanging,
+    // And the analogue modem: tone A up and waiting for tone B's reversal;
+    // then its own reversal due, and INFO1a behind it.
+    AnswerShortTone,
+    AnswerShortReversal,
     // Both.
     Finished,
 }
@@ -323,6 +338,8 @@ impl Stage {
             Self::CallAwaitTone | Self::AnswerProbeReversal => "V.34 tones again",
             Self::CallSendProbe | Self::AnswerSendProbe => "V.34 sending the probe",
             Self::CallInfo1 | Self::AnswerInfo1 => "V.34 INFO1",
+            Self::CallShortTone | Self::AnswerShortTone => "V.92 short phase 2 tones",
+            Self::CallShortRanging | Self::AnswerShortReversal => "V.92 short phase 2 ranging",
             Self::Finished => "V.34 phase 2 done",
         }
     }
@@ -487,6 +504,9 @@ pub struct Modem {
     sent_pcm_upstream: bool,
     /// Why the last INFO1a was counted as not received, if one was.
     refused_info1a: Option<&'static str>,
+    /// Whether this phase 2 took V.92's short procedure (9.4), and has not
+    /// since been sent back to the full one.
+    short: bool,
 }
 
 impl Modem {
@@ -539,6 +559,7 @@ impl Modem {
             full_phase2_only: false,
             sent_pcm_upstream: false,
             refused_info1a: None,
+            short: false,
         }
     }
 
@@ -689,6 +710,12 @@ impl Modem {
     /// re-enters full phase 2 (9.7).
     pub fn short_phase2_agreed(&self) -> bool {
         !self.full_phase2_only && self.both_v92() && self.wish().short_phase2 && self.far_flags.short_phase2
+    }
+
+    /// Whether this phase 2 ran V.92's short procedure to its end: no line
+    /// probe, no INFO1d, and for the analogue modem no round trip measured.
+    pub fn was_short(&self) -> bool {
+        self.short && self.status == Status::Done
     }
 
     /// Whether V.42's ODP/ADP exchange is to be skipped (9.3.1): "If both
@@ -903,7 +930,11 @@ impl Modem {
         if self.presence.probing() {
             self.reversals.restart();
         }
-        let reversed = self.reversals.feed(line) && self.now >= self.ignore_reversals_until;
+        let raw_reversed = self.reversals.feed(line);
+        if raw_reversed && std::env::var_os("PHASE2_TRACE").is_some() {
+            eprintln!("P2TRACE {:?} raw reversal at now={} ignore_until={} stage={:?}", self.role, self.now, self.ignore_reversals_until, self.stage);
+        }
+        let reversed = raw_reversed && self.now >= self.ignore_reversals_until;
         // Where the reversal was on the line, as against where it was noticed.
         let reversal = reversed.then(|| self.now.saturating_sub(u64::from(self.reversals.latency())));
         if (self.read_from..self.read_until).contains(&self.now) {
@@ -1078,7 +1109,9 @@ impl Modem {
             // on, and P2P P15 counts it as not received rather than as a
             // reason to fail. The 9.2.1.2.6 recovery then runs on its own.
             (Role::Call, Info::Info1aPcmUp(asked)) if self.stage == Stage::CallInfo1 && self.pcm.is_some() => {
-                if self.both_v92() && self.sent_pcm_upstream {
+                // After a short phase 2 there was no INFO1d to carry bit 70,
+                // and asking for the short one was this end's offer of it.
+                if self.both_v92() && (self.sent_pcm_upstream || (self.short && self.wish().pcm_upstream)) {
                     self.info1a_pcm_up = Some(asked);
                     self.status = Status::Done;
                     self.enter(Stage::Finished);
@@ -1160,6 +1193,26 @@ impl Modem {
                 self.probe_at = self.reverse_at.map(|r| r + self.ms(AFTER_REVERSAL));
                 self.enter(Stage::AnswerSendProbe);
             }
+            // 9.4.1.1.4/V.92: tone A's reversal, which is the round trip --
+            // "the time interval between the appearance of the Tone B phase
+            // reversal at the digital modem line terminals and receiving the
+            // Tone A phase reversal at the line terminals minus 40 ms". Then
+            // silence, which this end is in already, and INFO1a.
+            Stage::CallShortRanging if self.reversed_at.is_some_and(|ours| at > ours) => {
+                let ours = self.reversed_at.expect("checked");
+                self.round_trip = Some((at - ours).saturating_sub(self.ms(TURN)));
+                self.enter(Stage::CallInfo1);
+                // 9.4.1.2.3: INFO1a "within 2500 ms from the transmission of
+                // Tone B phase reversal".
+                self.deadline = Some(ours + self.ms(SHORT_WAIT));
+            }
+            // 9.4.2.1.3/V.92: tone B's reversal, answered so that tone A's
+            // appears 40 ms after it was received; ten more milliseconds of
+            // tone A, and INFO1a.
+            Stage::AnswerShortTone => {
+                self.reverse_at = Some((at + self.ms(TURN)).max(self.now + 1));
+                self.enter(Stage::AnswerShortReversal);
+            }
             // 11.2.1.2.7: the call modem's reversal before its L1 and L2.
             Stage::AnswerProbeReversal => {
                 let l2 = at + self.ms(AFTER_REVERSAL + probe::L1_SECONDS);
@@ -1181,9 +1234,39 @@ impl Modem {
         match self.stage {
             Stage::CallInfo0 => {
                 // 11.2.1.1.2: INFO0a received, and INFO0c gone, so on to the
-                // reversals.
+                // reversals -- V.92's short ones if all four bits ask (9.4).
                 if self.far.is_some() && self.tx.pending() == 0 {
-                    self.enter(Stage::CallFirstReversal);
+                    if self.short_phase2_agreed() {
+                        self.short = true;
+                        self.enter(Stage::CallShortTone);
+                    } else {
+                        self.enter(Stage::CallFirstReversal);
+                    }
+                }
+            }
+            Stage::CallShortTone => {
+                // 9.4.1.1.3/V.92: "After Tone A has been detected and Tone B
+                // has been transmitted for at least 50 ms, the digital modem
+                // shall transmit a Tone B phase reversal. Tone B shall be
+                // transmitted for another 10 ms after the phase reversal",
+                // which is what a reversal here always does, and then
+                // silence.
+                if self.presence.stood(self.ms(TONE_HELD)) && now - self.since >= self.ms(TONE_A_FIRST) {
+                    self.reverse_at = Some(now + 1);
+                    self.enter(Stage::CallShortRanging);
+                    self.deadline = Some(now + self.ms(SHORT_WAIT));
+                    self.ignore_reversals_until = now + self.ms(TURN);
+                }
+            }
+            Stage::CallShortRanging => {
+                if self.deadline.is_some_and(|d| now > d) {
+                    // 9.4.1.2.2/V.92: no tone A reversal in 2500 ms. "Upon
+                    // detection of Tone A, the digital modem shall transmit
+                    // Tone B and condition its receiver to detect Tone A
+                    // phase reversal ... then proceed with the full Phase 2
+                    // procedure" -- which is where 11.2.2.1.3 leaves a call
+                    // modem, silent in the stage that waits for tone A.
+                    self.back_to_full_phase2();
                 }
             }
             Stage::CallFirstReversal => {
@@ -1307,6 +1390,18 @@ impl Modem {
                     self.fail_for_a_retrain("no tone A after this end's probing");
                 }
             }
+            Stage::CallInfo1 if self.short => {
+                if self.deadline.is_some_and(|d| now > d) {
+                    // 9.4.1.2.3/V.92: no INFO1a in 2500 ms. "The digital
+                    // modem shall send Tone B and condition its receiver to
+                    // detect Tone A. Upon detection of Tone A, the digital
+                    // modem shall condition its receiver to detect the Tone
+                    // A phase reversal and proceed with the full Phase 2
+                    // procedure."
+                    self.back_to_full_phase2();
+                    self.start_tone();
+                }
+            }
             Stage::CallInfo1 => {
                 if self.deadline.is_none() && self.tx.pending() == 0 {
                     // 11.2.2.1.6: INFO1a within 700 ms and a round trip. Not
@@ -1328,7 +1423,49 @@ impl Modem {
 
             Stage::AnswerInfo0 => {
                 if self.far.is_some() && self.tx.pending() == 0 {
-                    self.enter(Stage::AnswerAwaitTone);
+                    if self.short_phase2_agreed() && self.far_info0d.is_some() {
+                        self.short = true;
+                        self.enter(Stage::AnswerShortTone);
+                        // 9.4.2.2.2/V.92: the tone B reversal "within 2500 ms
+                        // from the end of INFO0a transmission".
+                        self.deadline = Some(now + self.ms(SHORT_WAIT));
+                        // The digital modem may reverse tone B fifty
+                        // milliseconds after INFO0d ends (9.4.1.1.3), and
+                        // INFO0d is reported some thirty after it ended: the
+                        // forty a full phase 2 then waits out, for the fill
+                        // bits at its tail, would cover the one reversal
+                        // there is. Those fill bits were on the line before
+                        // the sequence could be reported at all.
+                        self.ignore_reversals_until = self.ignore_reversals_until.min(now + self.ms(AFTER_REVERSAL));
+                    } else {
+                        self.enter(Stage::AnswerAwaitTone);
+                    }
+                }
+            }
+            Stage::AnswerShortTone => {
+                if self.deadline.is_some_and(|d| now > d) {
+                    // 9.4.2.2.2/V.92: "the analogue modem shall initiate a
+                    // retrain according to 9.7.2.1", and a retrain's phase 2
+                    // is the full one.
+                    self.fail_for_a_retrain("no tone B reversal in short phase 2");
+                }
+            }
+            Stage::AnswerShortReversal => {
+                // The reversal has gone and its ten milliseconds of tone A
+                // are up: 9.4.2.1.4/V.92, "Then, the analogue modem shall
+                // send INFO1a", straight on from the tone as one group with
+                // it. Table 18's, which is what asking for the short phase 2
+                // promised (see [`V92Wish::short_phase2`]).
+                if self.reversed_at.is_some_and(|at| now + 1 >= at + self.ms(AFTER_REVERSAL))
+                    && let Some(far) = self.far_info0d
+                {
+                    self.silence_at = None;
+                    let asked = self.settle_pcm_up(&far);
+                    self.tx.send(&asked.to_bits());
+                    self.tx.silence();
+                    self.speaking = Speaking::Carrier;
+                    self.info1a_pcm_up = Some(asked);
+                    self.enter(Stage::AnswerInfo1);
                 }
             }
             Stage::AnswerAwaitTone => {
@@ -1411,6 +1548,19 @@ impl Modem {
             }
             Stage::Finished => {}
         }
+    }
+
+    /// Leave V.92's short phase 2 for the full one, as the call modem
+    /// (9.4.1.2.2, 9.4.1.2.3): silent, and waiting for tone A and then its
+    /// reversal, which is the first thing the full procedure has it do.
+    fn back_to_full_phase2(&mut self) {
+        self.recoveries += 1;
+        self.short = false;
+        self.full_phase2_only = true;
+        self.first_reversal_at = None;
+        self.reversed_at = None;
+        self.round_trip = None;
+        self.enter(Stage::CallFirstReversal);
     }
 
     /// Whether this INFO1d and this call between them let the analogue modem
@@ -1918,10 +2068,8 @@ pub(crate) mod tests {
         UpCaps { sections: 3, ltot_code: 3, lmax_code: 3 }
     }
 
-    /// A V.92 analogue modem. It does not ask for a short phase 2: the four
-    /// bits of 9.4 are read here, but short phase 2's own stages are not in
-    /// this package, so a modem that asked for one and got it would be waiting
-    /// for a reversal the far end had already made.
+    /// A V.92 analogue modem that does not ask for a short phase 2, as one
+    /// with no memo of the connection does not.
     fn analogue_v92(pcm_upstream: bool) -> Pcm {
         Pcm::AnalogueV92(V92Wish { capable: true, short_phase2: false, pcm_upstream, up_caps: caps() })
     }
@@ -2082,6 +2230,87 @@ pub(crate) mod tests {
         // with its probing, an INFO1d with bit 70, and Table 18 again.
         assert!(analogue.reading().is_some(), "a full phase 2 probes");
         assert!(analogue.info1a_pcm_up().is_some() && digital.info1a_pcm_up().is_some());
+    }
+
+    fn asking_short(pcm: Pcm) -> Pcm {
+        match pcm {
+            Pcm::AnalogueV92(w) => Pcm::AnalogueV92(V92Wish { short_phase2: true, ..w }),
+            Pcm::DigitalV92(d, w) => Pcm::DigitalV92(d, V92Wish { short_phase2: true, ..w }),
+            other => other,
+        }
+    }
+
+    /// 9.4: all four bits set, so INFO0, one reversal each way and INFO1a --
+    /// no probe and no INFO1d -- and the digital modem has the round trip.
+    #[test]
+    fn a_v92_pair_that_both_ask_runs_the_short_phase_2() {
+        for one_way in [0.005, 0.030, 0.750] {
+            let mut line = Line::new(one_way, 10.0, 20.0, 50.0);
+            // INFO0 is about 0.1 s, the tones another 0.1 s and INFO1a 0.12 s:
+            // a second and four trips of the line is ample, and a fifth of
+            // what the full procedure takes.
+            let seconds = 1.0 + 4.0 * one_way;
+            let (digital, analogue) = run(
+                &mut line,
+                seconds,
+                Modem::v90(asking_short(digital_v92(true)), FS, 0.0),
+                Modem::v90(asking_short(analogue_v92(true)), FS, 0.0),
+            );
+            assert_eq!(digital.status(), Status::Done, "{one_way}: digital: {}", digital.phase());
+            assert_eq!(analogue.status(), Status::Done, "{one_way}: analogue: {}", analogue.phase());
+            assert!(digital.was_short() && analogue.was_short());
+            assert!(digital.reading().is_none() && analogue.reading().is_none(), "a short phase 2 does not probe");
+            assert!(analogue.info1c().is_none(), "nor is there an INFO1d");
+            let asked = analogue.info1a_pcm_up().expect("no Table 18 INFO1a");
+            assert_eq!(digital.info1a_pcm_up(), Some(asked));
+            // 9.4.1.1.4: RTDEd, to a millisecond or two. The analogue modem
+            // measures none, and brings its own from the call before.
+            let measured = digital.round_trip().expect("the digital modem has the round trip");
+            assert!((measured - 2.0 * one_way).abs() < 0.003, "{one_way}: measured {measured}");
+            assert_eq!(analogue.round_trip(), None);
+            assert_eq!(digital.recoveries() + analogue.recoveries(), 0);
+        }
+    }
+
+    /// "If both ... indicate ... the desire to shorten Phase 2": one end
+    /// asking is not both, and the procedure is the full one.
+    #[test]
+    fn a_short_phase_2_only_one_end_asks_for_is_the_full_one() {
+        for (digital, analogue) in [
+            (asking_short(digital_v92(true)), analogue_v92(true)),
+            (digital_v92(true), asking_short(analogue_v92(true))),
+        ] {
+            let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
+            let (digital, analogue) = pcm_call(&mut line, digital, analogue);
+            assert_eq!((digital.status(), analogue.status()), (Status::Done, Status::Done));
+            assert!(!digital.was_short() && !analogue.was_short());
+            assert!(analogue.reading().is_some(), "a full phase 2 probes");
+            assert!(analogue.info1a_pcm_up().is_some() && digital.info1a_pcm_up().is_some());
+        }
+    }
+
+    /// 9.4.1.2.2: the digital modem's reversal goes unanswered -- the line
+    /// to the analogue modem is dead for it -- so after 2500 ms it goes to
+    /// the full procedure; the analogue modem, with no reversal in its own
+    /// 2500 ms, asks for a retrain (9.4.2.2.2).
+    #[test]
+    fn a_short_phase_2_whose_reversal_is_lost_is_left_for_the_full_one() {
+        let mut digital = Modem::v90(asking_short(digital_v92(true)), FS, 0.0);
+        let mut analogue = Modem::v90(asking_short(analogue_v92(true)), FS, 0.0);
+        let (mut to_digital, mut to_analogue) = (0.0, 0.0);
+        for _ in 0..(4.0 * FS) as usize {
+            let from_digital = digital.step(to_digital);
+            let from_analogue = analogue.step(to_analogue);
+            // Tone B reaches the analogue modem until the digital modem is
+            // about to reverse it, and nothing does after.
+            let cut = matches!(digital.stage, Stage::CallShortRanging | Stage::CallFirstReversal);
+            to_analogue = if cut { 0.0 } else { from_digital };
+            to_digital = from_analogue;
+        }
+        assert_eq!(digital.stage, Stage::CallFirstReversal, "the full procedure's wait for tone A's reversal");
+        assert!(!digital.short_phase2_agreed() && digital.recoveries() == 1);
+        assert_eq!(analogue.status(), Status::Failed("no tone B reversal in short phase 2"));
+        assert!(analogue.asks_for_retrain());
     }
 
     /// P2P P1 and P2S N-3: V.34's Table 14 has the transmit clock source in

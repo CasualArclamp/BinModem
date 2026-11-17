@@ -1351,7 +1351,9 @@ impl FaxCall {
             // on that, and if it does not, the DIS is the right thing for it
             // to hear. Bit 6 stays clear: the V.8 the bit invites has just
             // been had.
-            v8line::Status::Agreed(_) | v8line::Status::Failed => {
+            // (A quick connect is V.92's, which no fax end here offers or
+            // answers; it is listed for the compiler.)
+            v8line::Status::Agreed(_) | v8line::Status::Failed | v8line::Status::Quick(_) => {
                 self.v8 = None;
                 if role == Role::Answerer {
                     self.call.set_v8_capable(false);

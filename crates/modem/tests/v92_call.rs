@@ -263,3 +263,165 @@ fn v8_bis_in_front_of_a_v92_call() {
     assert_eq!(rates(&pair), (56_000, 48_000), "{notes}");
     carries_text(&mut pair, "after V.8 bis", &notes);
 }
+
+// ---------------------------------------------------------------------------
+// Quick connect (V.92 9.2): the short Phase 1
+// ---------------------------------------------------------------------------
+
+/// Seconds from dialling to both ends in data mode on V.92, to a twentieth.
+fn timed_connect(pair: &mut Pair, what: &str) -> f64 {
+    Pair::type_at(&mut pair.host, "ATA");
+    Pair::type_at(&mut pair.caller, "ATD5551234");
+    let up = |m: &Modem| m.state() == State::Data && !m.retraining() && m.standard() == "V.92";
+    let mut notes = String::new();
+    for _ in 0..800 {
+        pair.run(0.05);
+        notes.push_str(&pair.notes());
+        if up(&pair.caller) && up(&pair.host) {
+            break;
+        }
+    }
+    assert_eq!((pair.caller.state(), pair.host.state()), (State::Data, State::Data), "{what}:
+{notes}");
+    assert_eq!((pair.caller.standard(), pair.host.standard()), ("V.92", "V.92"), "{what}:
+{notes}");
+    pair.caller.call_seconds()
+}
+
+fn hang_up(pair: &mut Pair) {
+    pair.caller.hang_up();
+    pair.host.hang_up();
+    pair.run(0.5);
+    pair.caller_said.clear();
+    pair.host_said.clear();
+}
+
+/// The first call to a place is the full start-up and leaves a memo; the
+/// second, handed the memo, opens with QC1a and is at data mode sooner, with
+/// V.42 up and text crossing as before.
+#[test]
+fn a_second_call_to_the_same_place_starts_up_the_short_way() {
+    let mut pair = v92_pair();
+    let first = timed_connect(&mut pair, "first call");
+    assert_eq!(pair.caller.quick_connected(), None, "nothing was known, so nothing was asked");
+    assert!(!pair.caller.short_phase2() && !pair.host.short_phase2(), "only the host asked for a short Phase 2");
+    assert_eq!(pair.host.quick_connected(), None);
+    let memo = pair.caller.learned().expect("a V.92 call in data mode teaches something");
+    assert!(memo.pcm_upstream, "{memo:?}");
+    assert_eq!(pair.host.learned(), None, "the answering end has no number to remember");
+    hang_up(&mut pair);
+
+    pair.caller.set_quick_memo(Some(memo));
+    let second = timed_connect(&mut pair, "second call");
+    assert_eq!(pair.caller.quick_connected(), Some(true), "QC1a and QCA1d both called for LAPM");
+    assert_eq!(pair.host.quick_connected(), Some(true));
+    // And Phase 2 was the short one at both ends: the memo says the last
+    // call had PCM upstream, so the caller asked, and the host always does.
+    assert!(pair.caller.short_phase2() && pair.host.short_phase2());
+    println!("full start-up {first:.2} s, with short Phases 1 and 2 {second:.2} s");
+    assert!(second < first - 2.0, "full {first:.2} s, short {second:.2} s");
+    // What the short call teaches is what the full one did: the round trip
+    // it could not measure is the one it was handed.
+    assert_eq!(pair.caller.learned(), Some(memo));
+    // 9.2.5: both sequences called for LAPM, so there was no ODP and no ADP
+    // -- and LAPM is up all the same.
+    assert!(pair.caller.error_controlled() && pair.host.error_controlled());
+    let answered = |m: &Modem| m.distant().into_iter().find(|(what, _)| *what == "answered").map(|(_, said)| said);
+    assert_eq!(answered(&pair.caller).as_deref(), Some("nothing"), "an ADP came back: {:?}", pair.caller.distant());
+    carries_text(&mut pair, "after a quick connect", "");
+}
+
+/// A QC1a sent to a modem that does not answer one is ignored, and the CM
+/// behind it carries the call on by V.8.
+#[test]
+fn a_quick_connect_nobody_answers_is_a_full_start_up() {
+    let mut pair = v92_pair();
+    pair.caller.set_quick_connect(modem::QuickConnect::Always);
+    pair.host.set_quick_connect(modem::QuickConnect::Off);
+    timed_connect(&mut pair, "QC1a to a modem that does not answer it");
+    assert_eq!(pair.caller.quick_connected(), None);
+    assert_eq!(pair.host.quick_connected(), None);
+    carries_text(&mut pair, "after a QC1a nobody answered", "");
+}
+
+/// 9.2.4.3: the digital modem's ANSpcm goes unanswered -- here because the
+/// line to the caller is dead while it is sent -- so it sends ANSam again,
+/// the caller hears that and sends its CM, and the call is V.8's.
+#[test]
+fn an_unanswered_anspcm_falls_back_to_v8_and_connects() {
+    let mut pair = v92_pair();
+    pair.caller.set_quick_connect(modem::QuickConnect::Always);
+    Pair::type_at(&mut pair.host, "ATA");
+    Pair::type_at(&mut pair.caller, "ATD5551234");
+    let mut notes = String::new();
+    let mut cut = 0;
+    for _ in 0..(40.0 * FS) as usize {
+        let heard = pair.to_caller.pop_front().unwrap_or(0.0);
+        pair.to_host.push_back(pair.caller.step(heard));
+        let heard = pair.to_host.pop_front().unwrap_or(0.0);
+        let said = pair.host.step(heard);
+        // From the host's QCA1d silence on, nothing reaches the caller until
+        // the host has given up.
+        let quick = matches!(pair.host.line_phase(), "QCA1d silence" | "QTS" | "QTS-bar" | "ANSpcm");
+        cut += usize::from(quick);
+        pair.to_caller.push_back(if quick { 0.0 } else { said });
+        if pair.caller.state() == State::Data && pair.host.state() == State::Data {
+            break;
+        }
+    }
+    notes.push_str(&pair.notes());
+    assert!(cut > 0, "the host never answered the QC1a:\n{notes}");
+    assert!(notes.contains("no TONEq"), "{notes}");
+    assert_eq!((pair.caller.state(), pair.host.state()), (State::Data, State::Data), "{notes}");
+    assert_eq!((pair.caller.quick_connected(), pair.host.quick_connected()), (None, None));
+    assert_eq!((pair.caller.standard(), pair.host.standard()), ("V.92", "V.92"), "{notes}");
+}
+
+/// A modem handed a file keeps the memos itself, by the string dialled: the
+/// second call to the same number is the short start-up with nobody having
+/// carried anything across, and a call to another number is not.
+#[test]
+fn a_modem_with_a_file_remembers_the_number_it_dialled() {
+    let file = std::env::temp_dir().join(format!("binmodem-v92-call-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&file);
+    let mut pair = v92_pair();
+    pair.caller.remember_connections(Some(modem::memos::Memos::open(&file)));
+    timed_connect(&mut pair, "first call");
+    assert_eq!(pair.caller.quick_connected(), None);
+    hang_up(&mut pair);
+    assert!(modem::memos::Memos::open(&file).get("5551234").is_some_and(|m| m.pcm_upstream));
+
+    timed_connect(&mut pair, "second call");
+    assert_eq!(pair.caller.quick_connected(), Some(true));
+    assert!(pair.caller.short_phase2() && pair.host.short_phase2());
+    hang_up(&mut pair);
+
+    // Another number: nothing is known of it.
+    Pair::type_at(&mut pair.host, "ATA");
+    Pair::type_at(&mut pair.caller, "ATD5559999");
+    settle(&mut pair, 40);
+    assert_eq!(pair.caller.state(), State::Data);
+    assert_eq!(pair.caller.quick_connected(), None);
+    hang_up(&mut pair);
+
+    // The first number again, and the far end is not a V.92 server any more:
+    // the QC1a goes unanswered, the call is V.34 by V.8, and the memo that
+    // was spent on it is gone.
+    Pair::type_at(&mut pair.host, "AT+MS=V34");
+    pair.run(0.05);
+    Pair::type_at(&mut pair.host, "ATA");
+    Pair::type_at(&mut pair.caller, "ATD5551234");
+    for _ in 0..40 {
+        pair.run(1.0);
+        if pair.caller.state() == State::Data && pair.host.state() == State::Data {
+            break;
+        }
+    }
+    assert_eq!((pair.caller.state(), pair.host.state()), (State::Data, State::Data));
+    assert_eq!(pair.caller.standard(), "V.34");
+    hang_up(&mut pair);
+    let kept = modem::memos::Memos::open(&file);
+    assert_eq!(kept.get("5551234"), None, "a memo that did not get its call to V.92 is not spent twice");
+    assert!(kept.get("5559999").is_some());
+    let _ = std::fs::remove_file(&file);
+}

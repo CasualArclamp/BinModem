@@ -63,6 +63,7 @@ pub mod hold;
 pub mod memo;
 pub mod modulus;
 pub mod precoder;
+pub mod quick;
 pub mod receiver;
 pub mod sequences;
 pub mod transmit;

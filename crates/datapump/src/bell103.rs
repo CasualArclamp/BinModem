@@ -232,6 +232,14 @@ impl Bell103Tx {
         self.pending.len()
     }
 
+    /// Drop everything queued and go back to mark, without finishing the
+    /// character on the line: what V.92 9.2.1.1 asks of a CM that a QCA has
+    /// just answered ("without completing the current octet").
+    pub fn abandon(&mut self) {
+        self.pending.clear();
+        self.current = true;
+    }
+
     pub fn next_sample(&mut self) -> f64 {
         if !self.transmitting {
             return 0.0;
