@@ -449,6 +449,9 @@ pub struct ScopeApp {
     /// at, and the frame the scopes were emptied on when it stopped (see
     /// `clear_scopes`).
     sip_call_was_up: bool,
+    /// Whether choosing V.92 asks for PCM upstream as well (the tick under
+    /// the mode list).
+    pcm_up: bool,
     blank_seq: Option<u64>,
     last_row: Option<std::time::Instant>,
     /// When the call reached data, for how long it has been there.
@@ -571,6 +574,7 @@ impl ScopeApp {
             row_secs: 1.0 / 30.0,
             row_measured: 1.0 / 30.0,
             sip_call_was_up: false,
+            pcm_up: true,
             blank_seq: None,
             last_row: None,
             connected_at: None,
@@ -2765,8 +2769,19 @@ impl ScopeApp {
         out
     }
 
+    /// V.92 chosen in the window means V.92 with PCM upstream unless the
+    /// tick beside it says otherwise. Said only while V.92 is the mode, so
+    /// that a terminal typing `AT+MS=V92` under another mode still gets what
+    /// `BINMODEM_V92_PCM_UP` set.
+    fn assert_pcm_upstream(&self, session: &Arc<live::Session>) {
+        if Self::CARRIERS[self.carrier].0 == "V92" {
+            session.set_pcm_upstream(self.pcm_up);
+        }
+    }
+
     /// Put the modem into the state the window is showing.
     fn assert_settings(&self, session: &Arc<live::Session>) {
+        self.assert_pcm_upstream(session);
         for command in self.settings() {
             session.type_bytes(format!("{command}\r").as_bytes());
         }
@@ -4014,6 +4029,7 @@ impl ScopeApp {
                 // the whole of what is wanted: the fastest the line carries.
                 self.modulation.min_rate = 0;
                 self.modulation.max_rate = 0;
+                self.assert_pcm_upstream(&session);
                 session.type_bytes(
                     format!(
                         "{}\r",
@@ -4021,6 +4037,25 @@ impl ScopeApp {
                     )
                     .as_bytes(),
                 );
+            }
+
+            // What makes V.92 more than V.90 with a quicker start. Both ends
+            // have to want it, and the calling side sends it without an echo
+            // canceller or a clock of its own to follow, so there is a way to
+            // have V.92 without it.
+            let v92 = Self::CARRIERS[self.carrier].0 == "V92";
+            let mut pcm_up = self.pcm_up;
+            if ui
+                .add_enabled(v92, egui::Checkbox::new(&mut pcm_up, "PCM upstream"))
+                .on_hover_text(
+                    "V.92 only: PCM going up the line as well as down. Both ends have to ask for it. \
+                     Off, a V.92 call sends V.34 upstream as V.90 does. Takes effect from the next call.",
+                )
+                .on_disabled_hover_text("Choose V.92 above to have PCM upstream")
+                .clicked()
+            {
+                self.pcm_up = pcm_up;
+                self.assert_pcm_upstream(&session);
             }
 
             ui.separator();

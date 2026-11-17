@@ -309,6 +309,13 @@ fn call_state(state: State, off_hook: bool) -> CallState {
 /// How often the window is told about a SIP line that has no audio on it.
 const QUIET_LINE_PUBLISH: Duration = Duration::from_millis(100);
 
+/// How long a SIP line has to have delivered nothing before it is called
+/// quiet. Packets are 20 ms apart and the loop goes round every two, so most
+/// turns of it during a call find nothing waiting: taking each of those for
+/// silence put an empty frame between every two real ones, which striped the
+/// waterfall and read the level as nothing in the middle of a call.
+const QUIET_LINE_AFTER: Duration = Duration::from_millis(500);
+
 /// What the line is doing, for the window to show.
 #[derive(Debug, Clone, Default)]
 pub struct LineState {
@@ -443,6 +450,9 @@ pub struct Session {
     /// the line -- a data call, a fax, a handshake. The line thread hangs up
     /// and clears it.
     hang_up: AtomicBool,
+    /// Whether V.92 calls are to have PCM upstream, when the window has said:
+    /// 0 for nothing said, 1 for off, 2 for on.
+    pcm_upstream: std::sync::atomic::AtomicU8,
     /// Set when the window asks for a retrain: V.34 goes back through phase 2
     /// on the same call. The line thread asks the modem and clears it.
     retrain: AtomicBool,
@@ -550,6 +560,7 @@ impl Default for Session {
             recording: AtomicBool::new(false),
             asked_for_a_line: AtomicBool::new(false),
             hang_up: AtomicBool::new(false),
+            pcm_upstream: std::sync::atomic::AtomicU8::new(0),
             retrain: AtomicBool::new(false),
             rate_request: Mutex::default(),
             rate_pinned: Mutex::default(),
@@ -684,6 +695,20 @@ impl Session {
     /// terminal to type `ATH` at -- a fax call in particular.
     pub fn hang_up(&self) {
         self.hang_up.store(true, Ordering::Relaxed);
+    }
+
+    /// Whether V.92 calls from here on are to have PCM upstream (see
+    /// `Modem::set_pcm_upstream`). Until this is called the modem keeps
+    /// whatever `BINMODEM_V92_PCM_UP` gave it.
+    pub fn set_pcm_upstream(&self, on: bool) {
+        self.pcm_upstream.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+    }
+
+    fn take_pcm_upstream(&self) -> Option<bool> {
+        match self.pcm_upstream.swap(0, Ordering::Relaxed) {
+            0 => None,
+            said => Some(said == 2),
+        }
     }
 
     fn take_hang_up(&self) -> bool {
@@ -1103,6 +1128,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
 
     let publish_every = Duration::from_millis(16);
     let mut next_publish = Instant::now();
+    let mut last_audio = Instant::now();
     // The same cadence for what the call is doing, which is published from
     // above the early exits rather than with the audio. Its own instant so
     // that neither can starve the other.
@@ -1452,6 +1478,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 sip.hang_up();
             }
         }
+        if let Some(on) = session.take_pcm_upstream() {
+            modem.set_pcm_upstream(on);
+        }
         if session.take_retrain() {
             tx.log(Direction::Note, "retraining the line");
             modem.retrain();
@@ -1674,7 +1703,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             // minutes after the modem had said NO CARRIER and gone back to
             // its command state. With no audio there is nothing on the line
             // either, and the scopes are told that as well.
-            if audio.sip().is_some() && Instant::now() >= next_publish {
+            if audio.sip().is_some() && last_audio.elapsed() >= QUIET_LINE_AFTER && Instant::now() >= next_publish {
                 next_publish = Instant::now() + QUIET_LINE_PUBLISH;
                 tx.publish(|f| {
                     f.state = call_state(modem.state(), modem.off_hook());
@@ -1705,6 +1734,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             continue;
         }
 
+        last_audio = Instant::now();
         to_line.clear();
         if !from_network.is_empty() {
             let levels: Vec<f64> = from_network.iter().map(|l| f64::from(*l)).collect();
