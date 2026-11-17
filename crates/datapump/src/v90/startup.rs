@@ -77,6 +77,11 @@ pub struct Analogue {
     /// The upstream rate V.92 start-ups allow, as its drn, or None for every
     /// one: Ja's rate mask is then that rate alone (Table 20).
     pinned_up: Option<u8>,
+    /// The round trip an earlier call to the same place measured, in
+    /// seconds, for a start-up whose phase 2 was V.92's short one: its one
+    /// ranging exchange gives the round trip to the digital modem alone
+    /// (9.4.1.1.4/V.92).
+    remembered_round_trip: Option<f64>,
 }
 
 impl Analogue {
@@ -96,7 +101,16 @@ impl Analogue {
             v92: None,
             failed_v92: 0,
             pinned_up: None,
+            remembered_round_trip: None,
         }
+    }
+
+    /// The round trip an earlier call to the same place measured, in
+    /// seconds, to stand in for the one a short phase 2 does not measure at
+    /// this end. Needed by an end that asks for a short phase 2
+    /// ([`V92Wish::short_phase2`]), and used by no other.
+    pub fn set_remembered_round_trip(&mut self, seconds: Option<f64>) {
+        self.remembered_round_trip = seconds;
     }
 
     /// The upstream rate V.92 start-ups are to allow, as its drn (1 is
@@ -331,7 +345,8 @@ impl Analogue {
     }
 
     pub fn round_trip(&self) -> Option<f64> {
-        self.v34.phase2().round_trip()
+        let p2 = self.v34.phase2();
+        p2.round_trip().or(self.remembered_round_trip.filter(|_| p2.was_short()))
     }
 
     pub fn take_bits(&mut self) -> Vec<bool> {
@@ -490,7 +505,11 @@ impl Analogue {
             settings.md_length = asked.md_length;
             settings.uinfo = asked.uinfo;
             settings.limits = FilterLimits::from_info1a(asked.sections, asked.ltot_code, asked.lmax_code);
-            settings.round_trip = p2.round_trip().unwrap_or(0.0);
+            // A short phase 2 measured none here: the last call's stands.
+            settings.round_trip = p2.round_trip().or(self.remembered_round_trip).unwrap_or(0.0);
+            if p2.was_short() {
+                self.notes.push("V.92: short phase 2, no line probe".into());
+            }
             settings.law = if server.a_law { Law::A } else { Law::Mu };
             // Nobody chose a downstream rate: the line does.
             settings.rate_from_line = self.pinned.is_none();

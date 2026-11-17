@@ -54,10 +54,18 @@ pub fn ours() -> Info0d {
 /// What this server wants of V.92, for [`Line::with_v92`]: capable, and PCM
 /// upstream if the analogue modem asks for it with a Table 18 INFO1a.
 ///
-/// Short phase 2 stays off until its own stages are built, and is the only
-/// thing this leaves out: it buys a second or two of start-up, not a rate.
+/// Short phase 2 is not asked for here; [`wish_short`] is the one that does.
 pub fn wish(pcm_upstream: bool) -> V92Wish {
     V92Wish { capable: true, short_phase2: false, pcm_upstream, ..V92Wish::default() }
+}
+
+/// The same, asking for V.92's short phase 2 (9.4) as well when PCM upstream
+/// is on offer: the short one built here ends in a Table 18 INFO1a and no
+/// other, so there is nothing to shorten for a caller that could not send
+/// one. It runs only if the analogue modem asks too, which it does on a
+/// connection it has a memo of.
+pub fn wish_short(pcm_upstream: bool) -> V92Wish {
+    V92Wish { short_phase2: pcm_upstream, ..wish(pcm_upstream) }
 }
 
 /// The digital modem, at the line's rate.

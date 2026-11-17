@@ -1934,7 +1934,7 @@ impl Modem {
                     self.learned = Some(Recognized {
                         uqts: self.quick_memo.map_or(datapump::v92::memo::DEFAULT_UQTS, |memo| memo.uqts),
                         a_law: p2.far_info0d().is_some_and(|d| d.a_law),
-                        round_trip_ms: p2.round_trip().map_or(0, |s| (s * 1000.0).round() as u32),
+                        round_trip_ms: m.round_trip().map_or(0, |s| (s * 1000.0).round() as u32),
                         pcm_upstream: m.is_v92(),
                     });
                 }
@@ -2355,6 +2355,16 @@ impl Modem {
     /// on any other call, and on the answering end, which has no number.
     pub fn learned(&self) -> Option<Recognized> {
         self.learned
+    }
+
+    /// Whether the start-up this call is on had V.92's short Phase 2 (9.4):
+    /// no line probe. False after a retrain, whose Phase 2 is the full one.
+    pub fn short_phase2(&self) -> bool {
+        match self.pump.as_ref() {
+            Some(Pump::V90(m)) => m.v34().phase2().was_short(),
+            Some(Pump::V90Server(m)) => m.modem().v34().phase2().was_short(),
+            _ => false,
+        }
     }
 
     /// Whether this call began with V.92's short Phase 1, and if so whether
@@ -3099,8 +3109,13 @@ impl Modem {
             "V90S" => Pump::V90Server(Box::new(v90::server::Line::new(self.fs, v90::server::ours(), lead_in))),
             "V92S" => {
                 let pcm_upstream = self.pcm_upstream;
-                let mut line =
-                    v90::server::Line::new(self.fs, v90::server::ours(), lead_in).with_v92(v90::server::wish(pcm_upstream));
+                // The short phase 2 is asked for along with the short phase
+                // 1 being answered, and runs if the caller asks as well.
+                let wish = match self.quick_connect {
+                    QuickConnect::Off => v90::server::wish(pcm_upstream),
+                    _ => v90::server::wish_short(pcm_upstream),
+                };
+                let mut line = v90::server::Line::new(self.fs, v90::server::ours(), lead_in).with_v92(wish);
                 // After a QCA1d the rest of short Phase 1 is this pump's:
                 // QTS, ANSpcm and the wait for TONEq (9.2.4.3/V.92).
                 if let Some(quick) = self.quick.filter(|q| q.role == PcmRole::Digital) {
@@ -3114,13 +3129,21 @@ impl Modem {
             // allows it and this end wants it; otherwise the call is V.90's
             // or V.34's exactly as before (9.3).
             "V92" => {
+                // A short phase 2 (9.4/V.92) on a connection whose last call
+                // had PCM upstream, which is the INFO1a asking for one
+                // promises; that call's round trip goes with it, since this
+                // end will not measure one.
+                let memo = self
+                    .quick_memo
+                    .filter(|memo| memo.pcm_upstream && self.pcm_upstream && self.quick_connect != QuickConnect::Off);
                 let wish = v34::phase2::V92Wish {
                     capable: true,
-                    short_phase2: false,
+                    short_phase2: memo.is_some(),
                     pcm_upstream: self.pcm_upstream,
                     ..v34::phase2::V92Wish::default()
                 };
                 let mut analogue = v90::startup::Analogue::new(self.fs, lead_in).with_v92(wish, lead_in);
+                analogue.set_remembered_round_trip(memo.map(|memo| f64::from(memo.round_trip_ms) / 1000.0));
                 analogue.set_pinned(self.pinned_rate);
                 analogue.set_pinned_upstream(self.pinned_upstream);
                 Pump::V90(Box::new(analogue))

@@ -304,6 +304,7 @@ fn a_second_call_to_the_same_place_starts_up_the_short_way() {
     let mut pair = v92_pair();
     let first = timed_connect(&mut pair, "first call");
     assert_eq!(pair.caller.quick_connected(), None, "nothing was known, so nothing was asked");
+    assert!(!pair.caller.short_phase2() && !pair.host.short_phase2(), "only the host asked for a short Phase 2");
     assert_eq!(pair.host.quick_connected(), None);
     let memo = pair.caller.learned().expect("a V.92 call in data mode teaches something");
     assert!(memo.pcm_upstream, "{memo:?}");
@@ -314,8 +315,14 @@ fn a_second_call_to_the_same_place_starts_up_the_short_way() {
     let second = timed_connect(&mut pair, "second call");
     assert_eq!(pair.caller.quick_connected(), Some(true), "QC1a and QCA1d both called for LAPM");
     assert_eq!(pair.host.quick_connected(), Some(true));
-    println!("full start-up {first:.2} s, with short Phase 1 {second:.2} s");
-    assert!(second < first - 0.5, "full {first:.2} s, short {second:.2} s");
+    // And Phase 2 was the short one at both ends: the memo says the last
+    // call had PCM upstream, so the caller asked, and the host always does.
+    assert!(pair.caller.short_phase2() && pair.host.short_phase2());
+    println!("full start-up {first:.2} s, with short Phases 1 and 2 {second:.2} s");
+    assert!(second < first - 2.0, "full {first:.2} s, short {second:.2} s");
+    // What the short call teaches is what the full one did: the round trip
+    // it could not measure is the one it was handed.
+    assert_eq!(pair.caller.learned(), Some(memo));
     // 9.2.5: both sequences called for LAPM, so there was no ODP and no ADP
     // -- and LAPM is up all the same.
     assert!(pair.caller.error_controlled() && pair.host.error_controlled());
