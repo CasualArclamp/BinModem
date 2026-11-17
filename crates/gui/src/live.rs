@@ -291,6 +291,24 @@ fn reconcile(state: Between) -> Reconcile {
     Reconcile::Nothing
 }
 
+/// The modem's state as the window's lamps and call card name it.
+fn call_state(state: State, off_hook: bool) -> CallState {
+    match state {
+        State::Command if off_hook => CallState::OffHook,
+        State::Command => CallState::Idle,
+        State::Handshaking => CallState::Negotiating,
+        State::Data => CallState::Connected,
+        // The call is still up; the terminal has stepped back to talking to
+        // the modem rather than through it. Off hook is exactly what that
+        // is, and keeping it separate from connected is what lets anything
+        // watching tell whether an escape has already happened.
+        State::OnlineCommand => CallState::OffHook,
+    }
+}
+
+/// How often the window is told about a SIP line that has no audio on it.
+const QUIET_LINE_PUBLISH: Duration = Duration::from_millis(100);
+
 /// What the line is doing, for the window to show.
 #[derive(Debug, Clone, Default)]
 pub struct LineState {
@@ -1648,6 +1666,41 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             networking.as_mut(),
             login.as_mut(),
         );
+            // And the modem's own state, on a line made of packets. The
+            // frame the window draws its lamps, its call card and its
+            // timeline from is published past this point, where the samples
+            // are -- so a call the trunk refused left the window on
+            // "negotiating" with the hook lamp lit and the clock running,
+            // minutes after the modem had said NO CARRIER and gone back to
+            // its command state. With no audio there is nothing on the line
+            // either, and the scopes are told that as well.
+            if audio.sip().is_some() && Instant::now() >= next_publish {
+                next_publish = Instant::now() + QUIET_LINE_PUBLISH;
+                tx.publish(|f| {
+                    f.state = call_state(modem.state(), modem.off_hook());
+                    f.carrier = modem.carrier();
+                    f.modulation = modem.standard();
+                    f.line_phase = modem.line_phase();
+                    f.bit_rate = modem.rate();
+                    f.tx_bit_rate = modem.transmit_rate();
+                    f.leds = Leds {
+                        mr: true,
+                        tr: true,
+                        sd: false,
+                        rd: false,
+                        cd: modem.carrier(),
+                        oh: modem.off_hook(),
+                        aa: modem.role() == Role::Answering,
+                        hs: modem.rate().is_some_and(|r| r >= 9600),
+                        ec: modem.error_controlled(),
+                    };
+                    f.rx_level_db = -120.0;
+                    f.spectrum_db.fill(-120.0);
+                    f.waveform.fill(0.0);
+                    f.constellation.clear();
+                    f.symbols.clear();
+                });
+            }
             thread::sleep(Duration::from_millis(2));
             continue;
         }
@@ -1914,18 +1967,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 f.hz_per_bin = FS / FFT_SIZE as f64;
                 f.rx_level_db = (20.0 * (level + 1e-9).log10()) as f32;
                 f.carrier = modem.carrier();
-                f.state = match state {
-                    State::Command if modem.off_hook() => CallState::OffHook,
-                    State::Command => CallState::Idle,
-                    State::Handshaking => CallState::Negotiating,
-                    State::Data => CallState::Connected,
-                    // The call is still up; the terminal has stepped back to
-                    // talking to the modem rather than through it. Off hook is
-                    // exactly what that is, and keeping it separate from
-                    // connected is what lets anything watching tell whether an
-                    // escape has already happened.
-                    State::OnlineCommand => CallState::OffHook,
-                };
+                f.state = call_state(state, modem.off_hook());
                 f.modulation = modem.standard();
                 f.line_phase = modem.line_phase();
                 f.distant.clear();
