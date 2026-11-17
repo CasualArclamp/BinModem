@@ -182,6 +182,7 @@ fn run(
     let mut next_line = Instant::now() + Duration::from_millis(500);
 
     let mut from_line: Vec<f32> = Vec::with_capacity(4096);
+    let mut from_network: Vec<f32> = Vec::with_capacity(2048);
     let mut to_line: Vec<f32> = Vec::with_capacity(4096);
     let mut was = State::Command;
     let mut phase = "";
@@ -249,10 +250,15 @@ fn run(
 
         // The line is the clock, as it is with a sound card.
         from_line.clear();
-        line.receive(&mut from_line);
+        from_network.clear();
+        line.receive_both(&mut from_line, &mut from_network);
         if from_line.is_empty() {
             std::thread::sleep(Duration::from_millis(2));
         } else {
+            // A digital modem reads the network's own levels (it ignores them
+            // otherwise).
+            let levels: Vec<f64> = from_network.iter().map(|l| f64::from(*l)).collect();
+            modem.give_network_levels(&levels);
             to_line.clear();
             for &s in &from_line {
                 to_line.push(modem.step(f64::from(s)) as f32);

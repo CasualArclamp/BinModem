@@ -152,6 +152,12 @@ impl Line {
         self.media.receive(into);
     }
 
+    /// The same, and beside it what arrived at the network's own 8000 Hz
+    /// (see [`Media::receive_both`]).
+    pub fn receive_both(&self, into: &mut Vec<f32>, network: &mut Vec<f32>) {
+        self.media.receive_both(into, Some(network));
+    }
+
     /// And what the modem has to say.
     ///
     /// Dropped on the floor while the description in force says the far end is

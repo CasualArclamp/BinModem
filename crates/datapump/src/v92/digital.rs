@@ -1807,6 +1807,15 @@ impl Modem {
             if self.rx.train_on_trn2u(TRAIN_WINDOW, self.trn2u_from) && self.rx.install_phase_four() {
                 let fit_ms = fit_started.elapsed().as_secs_f64() * 1000.0;
                 self.upstream_drop_until = self.now + TRN2U_DROP_AFTER_FIT;
+                if self.rx.trn2u_sign_first() {
+                    // The far end puts a symbol's sign bit first, where this
+                    // end's reading of Tables 28 and 29 has it last. The
+                    // reader starts again in that order; its descrambler
+                    // synchronises itself, and nothing has been read yet.
+                    let size = self.upstream_size;
+                    self.upstream = Some(Trn2uReader::new(size).with_bit_order(false));
+                    self.note("V.92: TRN2u fits with the sign bit first, reading it so".into());
+                }
                 self.note(format!(
                     "V.92: phase 4 receiver fitted on TRN2u in {fit_ms:.2} ms, {:.1} dB",
                     self.rx.snr_db()

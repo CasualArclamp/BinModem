@@ -1011,6 +1011,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     let mut dialled_at: Option<Instant> = None;
 
     let mut from_line: Vec<f32> = Vec::with_capacity(4096);
+    let mut from_network: Vec<f32> = Vec::with_capacity(2048);
     let mut to_line: Vec<f32> = Vec::with_capacity(4096);
     let mut rx_bytes = 0u64;
     let mut tx_bytes = 0u64;
@@ -1614,7 +1615,13 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         }
 
         from_line.clear();
-        audio.receive(&mut from_line);
+        from_network.clear();
+        // A SIP line also says what arrived at the network's own rate, which
+        // is what a digital modem's receiver reads (it ignores it otherwise).
+        match audio.sip() {
+            Some(sip) => sip.receive_both(&mut from_line, &mut from_network),
+            None => audio.receive(&mut from_line),
+        }
         if from_line.is_empty() {
             // Nothing has arrived, so nothing can be stepped: the line is the
             // clock. Still hand the terminal whatever the modem said in the
@@ -1646,6 +1653,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         }
 
         to_line.clear();
+        if !from_network.is_empty() {
+            let levels: Vec<f64> = from_network.iter().map(|l| f64::from(*l)).collect();
+            modem.give_network_levels(&levels);
+        }
         let drive = session.drive();
         // The PCM scope is every sample against the next, and a dense grid
         // of levels wants the full depth whatever the count of them.

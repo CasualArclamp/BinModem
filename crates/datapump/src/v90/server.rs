@@ -73,6 +73,9 @@ pub struct Line {
     /// yet taken: what a line that *is* the network wants instead of `out`
     /// (see [`Line::take_exact`]).
     exact: Vec<f64>,
+    /// What the network delivered, at its own rate and not yet used: see
+    /// [`Line::give_exact`].
+    exact_in: VecDeque<f64>,
 }
 
 impl Line {
@@ -86,6 +89,27 @@ impl Line {
             made: Vec::with_capacity(8),
             out: VecDeque::from(vec![0.0; SLACK]),
             exact: Vec::new(),
+            exact_in: VecDeque::new(),
+        }
+    }
+
+    /// What the network delivered, one level for every 8000 Hz sample, for
+    /// the samples [`Line::step`] is about to be given.
+    ///
+    /// The other half of [`Line::take_exact`]. The samples `step` takes are
+    /// the network's put up to the line's rate, and it brings them down again
+    /// with a filter of its own; on a line that carries G.711 itself that is
+    /// two filters between the codec and a receiver whose signal is the
+    /// codec's levels, and the second of them takes the top of the band with
+    /// it. Given these, `step` keeps its own conversion for the clock alone
+    /// and hands the digital modem the level that arrived. It also lets the
+    /// V.92 receiver see that what it hears are codewords, which is how it
+    /// knows there is an A/D converter's rounding to allow for.
+    pub fn give_exact(&mut self, levels: &[f64]) {
+        self.exact_in.extend(levels.iter().copied());
+        // The conversion's own delay is all that should ever stand here.
+        while self.exact_in.len() > 4096 {
+            self.exact_in.pop_front();
         }
     }
 
@@ -128,7 +152,8 @@ impl Line {
         self.arrived.clear();
         self.down.process(line, &mut self.arrived);
         for i in 0..self.arrived.len() {
-            let level = self.modem.step(self.arrived[i]);
+            let arrived = self.exact_in.pop_front().unwrap_or(self.arrived[i]);
+            let level = self.modem.step(arrived);
             self.exact.push(level);
             // Nobody taking them is the ordinary case on a sound card.
             if self.exact.len() > 4096 {

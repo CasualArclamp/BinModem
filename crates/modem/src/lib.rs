@@ -1707,6 +1707,17 @@ impl Modem {
         }
     }
 
+    /// What a line that carries G.711 itself received, at the network's
+    /// 8000 Hz, for the samples about to be stepped: the other direction of
+    /// [`Self::take_network_levels`], and kept only while the V.90 or V.92
+    /// digital modem has the line. Call it before stepping the block the
+    /// levels belong to.
+    pub fn give_network_levels(&mut self, levels: &[f64]) {
+        if let Some(Pump::V90Server(m)) = self.pump.as_mut() {
+            m.give_exact(levels);
+        }
+    }
+
     /// Advance the line by one sample, returning the sample to transmit.
     pub fn step(&mut self, line: f64) -> f64 {
         self.network_exact = false;
