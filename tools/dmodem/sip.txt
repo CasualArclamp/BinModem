@@ -1,0 +1,10 @@
+# An account for calling D-Modem's dmodemd on this machine: no registrar, no
+# real password, just an address to send the INVITE to. run-dmodem.bat points
+# BINMODEM_SIP_FILE here, so the user's own accounts are not touched.
+[dmodem]
+registrar  = 127.0.0.1:5070
+username   = binmodem
+password   = unused
+register   = no
+laws       = mu
+local_port = 5062

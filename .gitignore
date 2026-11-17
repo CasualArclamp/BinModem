@@ -7,3 +7,4 @@ __pycache__/
 docs/specs/*.pdf
 docs/specs/text/
 dist/
+tools/dmodem/state/

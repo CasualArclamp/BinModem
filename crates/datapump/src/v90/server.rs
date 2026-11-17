@@ -69,6 +69,10 @@ pub struct Line {
     arrived: Vec<f64>,
     made: Vec<f64>,
     out: VecDeque<f64>,
+    /// The levels the digital modem chose, at the network's own rate and not
+    /// yet taken: what a line that *is* the network wants instead of `out`
+    /// (see [`Line::take_exact`]).
+    exact: Vec<f64>,
 }
 
 impl Line {
@@ -81,7 +85,23 @@ impl Line {
             arrived: Vec::with_capacity(4),
             made: Vec::with_capacity(8),
             out: VecDeque::from(vec![0.0; SLACK]),
+            exact: Vec::new(),
         }
+    }
+
+    /// The digital modem's own levels since the last call, one for every
+    /// 8000 Hz sample it has made, appended to `into`.
+    ///
+    /// The samples [`Line::step`] returns are these put through a rate
+    /// conversion, for a line that runs at some other rate and has a
+    /// softphone's encoder beyond it. A line that carries G.711 itself has no
+    /// use for the conversion and every reason to avoid it: taken down to
+    /// 8000 Hz again by a second filter, the levels come back a little short
+    /// of what they were at the top of the band, which is where a PCM signal
+    /// keeps half of what it has to say. Handed these, the encoder turns each
+    /// level into exactly the codeword it was chosen to be.
+    pub fn take_exact(&mut self, into: &mut Vec<f64>) {
+        into.append(&mut self.exact);
     }
 
     /// Offer V.92 from this server: INFO0d's capability bits and what this
@@ -109,6 +129,11 @@ impl Line {
         self.down.process(line, &mut self.arrived);
         for i in 0..self.arrived.len() {
             let level = self.modem.step(self.arrived[i]);
+            self.exact.push(level);
+            // Nobody taking them is the ordinary case on a sound card.
+            if self.exact.len() > 4096 {
+                self.exact.drain(..2048);
+            }
             self.made.clear();
             self.up.process(level, &mut self.made);
             self.out.extend(self.made.iter().copied());

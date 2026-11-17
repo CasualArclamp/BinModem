@@ -309,6 +309,11 @@ impl Account {
     /// wrong -- that may be read-only, and this program is meant to be one
     /// file that can sit anywhere.
     pub fn default_path() -> Option<PathBuf> {
+        // A file named outright wins: a script calling a modem on the same
+        // machine wants its own accounts and none of the user's.
+        if let Some(file) = std::env::var_os("BINMODEM_SIP_FILE") {
+            return Some(PathBuf::from(file));
+        }
         let base = std::env::var_os("APPDATA")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))

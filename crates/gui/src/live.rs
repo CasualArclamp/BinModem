@@ -1687,7 +1687,15 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             spectrum.push(heard);
             waveform.push(s);
         }
-        audio.transmit(&to_line);
+        // On a SIP line a digital modem's codewords go as they are, with no
+        // rate conversion to blur them; see `Modem::take_network_levels`.
+        match (audio.sip(), modem.take_network_levels()) {
+            (Some(sip), Some(levels)) => {
+                let levels: Vec<f32> = levels.iter().map(|l| *l as f32).collect();
+                sip.transmit_exact(&levels);
+            }
+            _ => audio.transmit(&to_line),
+        }
         owed_ms += from_line.len() as f64 / FS * 1000.0;
 
         let recording_now = session.recording();

@@ -102,6 +102,30 @@ pub const TIE_TO_SMALLER_INDEX: bool = true;
 /// sign.
 pub const PAIR_FIRST_INDEX_OFFSET: i64 = 2;
 
+/// The offset in force: [`PAIR_FIRST_INDEX_OFFSET`], unless
+/// `BINMODEM_V92_PAIR_OFFSET` in the environment says otherwise.
+///
+/// A second far end does disagree. D-Modem's digital modem reads the classes
+/// as 6.4.2 prints them, eta_k = Ki + z_k Mi with nothing added, and a call to
+/// it settles the matter in one frame: with the offset at 2 its B1u comes out
+/// half zeros on clean points and it retrains; with
+/// `BINMODEM_V92_PAIR_OFFSET=0` it reads 2880 ones of 2880 and the call
+/// carries data at 40 000 up. So there are two measurements and they do not
+/// agree, and until a capture says which of them a real server shares, the
+/// one from the real modem stays the default and the other is a switch. Both
+/// ends of a call between two of these read the same switch, so either value
+/// connects them.
+pub fn pair_first_index_offset() -> i64 {
+    use std::sync::OnceLock;
+    static OFFSET: OnceLock<i64> = OnceLock::new();
+    *OFFSET.get_or_init(|| {
+        std::env::var("BINMODEM_V92_PAIR_OFFSET")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(PAIR_FIRST_INDEX_OFFSET)
+    })
+}
+
 /// Whether `k` is the first index of its 4D pair. 6.4.3's inverse map takes
 /// "the two pairs (y(0),y(1)) and (y(2),y(3))", so k = 0 and k = 2 open one
 /// each and k = 3 is the one that gives up half its freedom to the code.
@@ -301,7 +325,7 @@ impl Class {
         if k == TRELLIS_FRAME - 1 {
             Self { base: 2 * ki + i64::from(parity), step: 2 * modulus }
         } else if opens_a_pair(k) {
-            Self { base: ki + PAIR_FIRST_INDEX_OFFSET, step: modulus }
+            Self { base: ki + pair_first_index_offset(), step: modulus }
         } else {
             Self { base: ki, step: modulus }
         }
@@ -362,7 +386,7 @@ pub fn index_to_ki(eta: i32, modulus: u8, k: usize) -> u8 {
     } else if opens_a_pair(k) {
         // The pair's first index is measured from Ki + the offset the far end
         // uses; see `PAIR_FIRST_INDEX_OFFSET`.
-        (i32::try_from(i64::from(eta) - PAIR_FIRST_INDEX_OFFSET).unwrap_or(eta)
+        (i32::try_from(i64::from(eta) - pair_first_index_offset()).unwrap_or(eta)
             .rem_euclid(modulus)) as u8
     } else {
         eta.rem_euclid(modulus) as u8

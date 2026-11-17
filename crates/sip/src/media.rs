@@ -546,18 +546,43 @@ impl Media {
         }
         conversion.codewords.clear();
         g711::encode_into(law, &conversion.at_network_rate, &mut conversion.codewords);
+        self.queue(&conversion.codewords);
+    }
 
+    /// Samples for the line that are at the network's rate already: one in,
+    /// one octet out, and nothing between them but the encoder.
+    ///
+    /// For a V.90 or V.92 digital modem, whose levels are codewords it chose
+    /// one at a time. Through [`Self::transmit`] they would be filtered on
+    /// their way down from the modem's rate, and a level that has been
+    /// filtered encodes to its neighbour as often as to itself.
+    pub fn transmit_exact(&self, levels: &[f32]) {
+        if levels.is_empty() {
+            return;
+        }
+        let law = self.law();
+        let Ok(mut conversion) = self.conversion.lock() else {
+            return;
+        };
+        let conversion = &mut *conversion;
+        conversion.codewords.clear();
+        g711::encode_into(law, levels, &mut conversion.codewords);
+        self.queue(&conversion.codewords);
+    }
+
+    /// Octets for the pacer, oldest out first when there are too many.
+    fn queue(&self, codewords: &[u8]) {
         let limit = self.shared.packet_octets.load(Ordering::Relaxed) as usize * OUTGOING_LIMIT;
         let Ok(mut queue) = self.shared.outgoing.lock() else {
             return;
         };
-        if !conversion.codewords.is_empty() {
+        if !codewords.is_empty() {
             // The modem has said something on this call, so an underrun from
             // here on is a hole in what it was saying rather than the quiet
             // before it started.
             self.shared.spoke.store(true, Ordering::Relaxed);
         }
-        for &code in conversion.codewords.iter() {
+        for &code in codewords.iter() {
             if queue.len() >= limit {
                 queue.pop_front();
                 self.shared.dropped_out.fetch_add(1, Ordering::Relaxed);

@@ -255,6 +255,18 @@ const SU_WITHIN: f64 = 5.0;
 /// A11: CPt "shall start within 5000 ms of sending the S-bar-u of A8".
 const CPT_WITHIN: f64 = 5.0;
 
+/// How much of the second TRN1u goes out with no DIL asked for and no Ri heard
+/// before this end stops waiting for one and sends its CPt anyway.
+///
+/// 9.5.2.1.10 has the digital modem send Ri first, and an Agere server does.
+/// Figure 11 draws the other order -- CPt, then Ri -- and a digital modem
+/// built from the figure (D-Modem's is one) sends SCR until a CPt arrives,
+/// for as long as it takes. Against that the text's order is two modems each
+/// waiting for the other until the 5000 ms above runs out. Three seconds is
+/// longer than a server following the text has been seen to need, and leaves
+/// the CPt two seconds to start in.
+const RI_WAIT_SYMBOLS: u64 = 24_000;
+
 /// "If the analogue modem does not receive B1d within 20 s plus 6 round-trip
 /// delays from the end of sending INFO1a, the analogue modem shall initiate a
 /// retrain" (9.6.2.2.1): the timer that covers all of Phase 3 and Phase 4.
@@ -1048,6 +1060,9 @@ pub struct Modem {
     /// at the next twelve-symbol boundary of the TRN1u on the line
     /// (9.5.2.1.9, 9.5.2.1.10).
     ri_heard: bool,
+    /// No DIL was asked for and no Ri came in [`RI_WAIT_SYMBOLS`], so the call
+    /// goes on in A11's order: CPt first, and Ri ends it.
+    ri_given_up: bool,
     source: Source,
     stage: Stage,
     /// Where TRN1d began, in the receiver's own symbol count.
@@ -1179,6 +1194,7 @@ impl Modem {
             dil: Vec::new(),
             chosen: false,
             ri_heard: false,
+            ri_given_up: false,
             stage: Stage::Opening,
             trn_from: None,
             rus: 0,
@@ -1536,6 +1552,15 @@ impl Modem {
                     // symbol. What ends it arrives when it arrives -- the
                     // DIL's last symbol, the owner's choice, Ri -- and is
                     // acted on here, at the next boundary.
+                    if self.zero_dil_a10()
+                        && !self.ri_heard
+                        && self.source.count >= RI_WAIT_SYMBOLS
+                    {
+                        self.ri_given_up = true;
+                        self.notes.push(format!(
+                            "no Ri in {RI_WAIT_SYMBOLS}T of TRN1u: CPt first, as Figure 11 has it"
+                        ));
+                    }
                     let due = if self.zero_dil_a10() {
                         // A10: no DIL was asked for, and Ri is what starts
                         // the CPt (9.5.2.1.10). No length is asked of this
@@ -2285,7 +2310,7 @@ impl Modem {
     /// Whether this call is in A10's order: no DIL asked for, and that order
     /// taken (see [`ZERO_DIL_A10_ORDER`]).
     fn zero_dil_a10(&self) -> bool {
-        ZERO_DIL_A10_ORDER && self.settings.descriptor.is_empty()
+        ZERO_DIL_A10_ORDER && self.settings.descriptor.is_empty() && !self.ri_given_up
     }
 
     fn timers(&mut self) {
@@ -2432,6 +2457,34 @@ mod tests {
             assert_eq!(modem.source.up, Up::Cpt);
             assert_eq!(sent, heard_after.div_ceil(12) * 12, "Ri after {heard_after} symbols of TRN1u");
         }
+    }
+
+    /// A far end built from Figure 11 sends no Ri until it has a CPt, however
+    /// long it is waited for. After [`RI_WAIT_SYMBOLS`] of TRN1u the CPt goes
+    /// out unasked, still on a twelfth symbol, and from then on Ri ends the
+    /// CPt as it does when a DIL was asked for.
+    #[test]
+    fn no_ri_at_all_and_the_cpt_goes_first() {
+        let mut modem = Modem::new(settings(Descriptor::none()));
+        modem.begin_trn1u_over_dil();
+        // The Jp' that any far end has sent by now.
+        modem.jp_prime = true;
+        let mut sent = 0u64;
+        while modem.source.up == Up::Trn1u {
+            assert!(sent <= RI_WAIT_SYMBOLS + 12, "the CPt never started");
+            modem.advance();
+            if modem.source.up == Up::Trn1u {
+                modem.source.next();
+                sent += 1;
+            }
+        }
+        assert_eq!(modem.source.up, Up::Cpt);
+        assert_eq!(sent, RI_WAIT_SYMBOLS);
+        assert_eq!(sent % UP_INTERVALS as u64, 0);
+        assert!(!modem.zero_dil_a10(), "A11's order from here on");
+        // And Ri, when it comes, ends the CPt rather than starting one.
+        modem.ri(0);
+        assert!(modem.source.stop);
     }
 
     /// Table 22 bits 18:33: epsilon is a "16-bit unsigned integer covering the
