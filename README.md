@@ -1,5 +1,7 @@
 # BinModem
 
+[![release](https://img.shields.io/github/v/release/CasualArclamp/BinModem?logo=github&label=release)](https://github.com/CasualArclamp/BinModem/releases/latest) [![downloads](https://img.shields.io/github/downloads/CasualArclamp/BinModem/total?logo=github&label=downloads)](https://github.com/CasualArclamp/BinModem/releases)
+
 If you've found this worth your time, please consider [donating via PayPal](https://www.paypal.me/Arclamp).
 
 ![BinModem on a V.34 call at 33 600: the faceplate, the call card and the scopes](docs/images/releases/v3.0.0/scopes-v34.png)
