@@ -137,7 +137,7 @@ fn test_page(sheet: usize) -> fax::page::Page {
         .map(|y| {
             (0..WIDTH)
                 .map(|x| {
-                    let frame = x < 8 || x >= WIDTH - 8 || y < 8 || y >= HEIGHT - 8;
+                    let frame = !(8..WIDTH - 8).contains(&x) || !(8..HEIGHT - 8).contains(&y);
                     let diagonal = (x as i64 - (y as i64) * 2).rem_euclid(432) < 6;
                     let bars = (100..220).contains(&y) && {
                         let period = 4usize << (x / 288);
@@ -155,6 +155,8 @@ fn test_page(sheet: usize) -> fax::page::Page {
     fax::page::Page { lines, resolution: fax::page::Resolution::Standard }
 }
 
+// One argument for each thing the command line can ask for.
+#[allow(clippy::too_many_arguments)]
 fn run(
     line: &sip::Line,
     typed: Vec<String>,
@@ -199,14 +201,14 @@ fn run(
     loop {
         // The lines somebody would have typed, a second apart so that each
         // has its answer before the next begins.
-        if Instant::now() >= next_line {
-            if let Some(text) = typed.next() {
-                note(&format!("typed: {text}"));
-                for byte in text.bytes().chain(std::iter::once(b'\r')) {
-                    modem.feed_dte(byte);
-                }
-                next_line = Instant::now() + Duration::from_secs(1);
+        if Instant::now() >= next_line
+            && let Some(text) = typed.next()
+        {
+            note(&format!("typed: {text}"));
+            for byte in text.bytes().chain(std::iter::once(b'\r')) {
+                modem.feed_dte(byte);
             }
+            next_line = Instant::now() + Duration::from_secs(1);
         }
 
         // The call, which has to be placed before there is a line at all.
