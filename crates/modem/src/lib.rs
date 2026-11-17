@@ -32,6 +32,7 @@ use datapump::v34;
 use datapump::v90;
 pub use datapump::v92::memo::Recognized;
 mod faxcall;
+pub mod memos;
 
 pub use faxcall::FaxCall;
 
@@ -918,6 +919,12 @@ pub struct Modem {
     /// What an earlier V.92 call to the place about to be dialled taught,
     /// from whoever keeps such things (see [`Self::set_quick_memo`]).
     quick_memo: Option<Recognized>,
+    /// The connections recognised from earlier runs, if somebody keeps them
+    /// (see [`Self::remember_connections`]), the string this call dialled,
+    /// and whether the call is spending a memo out of them.
+    memos: Option<memos::Memos>,
+    dialled: Option<String>,
+    memo_spent: bool,
     /// What this call's short Phase 1 settled, if it had one.
     quick: Option<v8line::Quick>,
     /// What this call has taught, once it is a V.92 call in data mode (see
@@ -1049,6 +1056,9 @@ impl Modem {
             pinned_upstream: None,
             quick_connect: v92_quick_connect_wanted(),
             quick_memo: None,
+            memos: None,
+            dialled: None,
+            memo_spent: false,
             quick: None,
             learned: None,
             negotiation: None,
@@ -1937,6 +1947,12 @@ impl Modem {
                         round_trip_ms: m.round_trip().map_or(0, |s| (s * 1000.0).round() as u32),
                         pcm_upstream: m.is_v92(),
                     });
+                    if let (Some(memos), Some(number), Some(memo)) =
+                        (self.memos.as_mut(), self.dialled.as_ref(), self.learned)
+                        && self.role == Role::Calling
+                    {
+                        memos.put(number, memo);
+                    }
                 }
                 // Everything the receiver made of the handshake is thrown
                 // away. A demodulator that has not finished training still
@@ -2349,6 +2365,16 @@ impl Modem {
         self.quick_memo = memo;
     }
 
+    /// Keep what V.92 calls teach in `memos`, by the string dialled, and
+    /// spend it on the next call to the same string: the whole of
+    /// [`Self::set_quick_memo`] and [`Self::learned`], done here, for an
+    /// owner that has a file to offer and no wish to follow each call. A
+    /// call that spends a memo and does not reach data mode forgets it, so
+    /// that the one after is the full start-up.
+    pub fn remember_connections(&mut self, memos: Option<memos::Memos>) {
+        self.memos = memos;
+    }
+
     /// What this call has taught about the connection, once it is a V.92
     /// call in data mode: for whoever keeps such things to store against
     /// the number dialled and hand back with [`Self::set_quick_memo`]. None
@@ -2576,8 +2602,15 @@ impl Modem {
         for action in self.at.take_actions() {
             match action {
                 Action::Dial(number) => {
+                    if let Some(memos) = self.memos.as_ref() {
+                        self.quick_memo = memos.get(&number);
+                    }
+                    self.dialled = Some(number.clone());
                     self.dial_request = Some(number);
                     self.place_call(Role::Calling);
+                    self.memo_spent = self.quick_memo.is_some()
+                        && self.at.modulation.carrier == "V92"
+                        && self.quick_connect != QuickConnect::Off;
                 }
                 Action::Answer => {
                     self.answer_request = true;
@@ -3246,6 +3279,16 @@ impl Modem {
         // close the program. What it learned is kept for the window.
         if self.fax.is_some() {
             self.fax_result = self.fax.take();
+        }
+        // A memo that was spent on a call the far end answered, and that did
+        // not get the call to data mode, is not one to spend again.
+        let answered = self.pump.is_some() || self.negotiation.as_ref().is_some_and(v8line::Modem::heard_answer);
+        if std::mem::take(&mut self.memo_spent)
+            && answered
+            && self.learned.is_none()
+            && let (Some(memos), Some(number)) = (self.memos.as_mut(), self.dialled.as_ref())
+        {
+            memos.forget(number);
         }
         self.pump = None;
         self.negotiation = None;

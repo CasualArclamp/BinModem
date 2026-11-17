@@ -37,6 +37,7 @@ fn main() -> ExitCode {
     let mut fax: Option<Fax> = None;
     let mut record: Option<PathBuf> = None;
     let mut answer = false;
+    let mut memos: Option<PathBuf> = None;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut rest = args.iter();
@@ -65,6 +66,7 @@ fn main() -> ExitCode {
             "--record" => record = Some(PathBuf::from(value())),
             // The other way round: wait for a call and take it with ATA.
             "--answer" => answer = true,
+            "--memos" => memos = Some(PathBuf::from(value())),
             "--pages" => {
                 if let Some(f) = fax.as_mut() {
                     f.pages = value().parse().unwrap_or(1);
@@ -75,11 +77,14 @@ fn main() -> ExitCode {
                     "modem-sip [--accounts <file>] --account <name> --type <line>... \n\
                      \x20         [--send <text>] [--hold <s>] [--seconds <s>]\n\
                      \x20         [--fax g3|v34 [--pages <n>]] [--record <wav>] [--answer]\n\
+                     \x20         [--memos <file>]\n\
                      \n\
                      Opens the SIP account, types each line at the modem a second apart,\n\
                      and prints what comes back. Once connected it sends --send, stays up\n\
                      for --hold seconds and hangs up. --seconds bounds the whole run.\n\
                      Without --accounts the accounts are the window's own file.\n\
+                     --memos keeps what V.92 calls teach in a file, by the string dialled,\n\
+                     so that the next call to the same place starts up the short way.\n\
                      With --fax the modem is a fax machine with a test page to send:\n\
                      type AT+FCLASS=1 and the ATD, and it exits 0 if a page went."
                 );
@@ -118,7 +123,7 @@ fn main() -> ExitCode {
         }
     };
 
-    run(&line, typed, send, hold, seconds, fax, record, answer)
+    run(&line, typed, send, hold, seconds, fax, record, answer, memos)
 }
 
 /// A fax to send instead of a data call.
@@ -166,11 +171,17 @@ fn run(
     fax: Option<Fax>,
     record: Option<PathBuf>,
     answer: bool,
+    memos: Option<PathBuf>,
 ) -> ExitCode {
     let started = Instant::now();
     let note = |text: &str| eprintln!("[{:7.2}] {text}", started.elapsed().as_secs_f64());
 
     let mut modem = Modem::new(FS);
+    // V.92's recognised connections, by dial string: a second run with the
+    // same file and the same ATD starts up the short way.
+    if let Some(path) = memos {
+        modem.remember_connections(Some(modem::memos::Memos::open(path)));
+    }
     let faxing = fax.is_some();
     if let Some(fax) = &fax {
         modem.fax_identification = "BINMODEM".to_owned();
@@ -320,9 +331,11 @@ fn run(
             was = modem.state();
             let detail = match modem.rate() {
                 Some(r) => format!(
-                    ", {r} bit/s, {}{}",
+                    ", {r} bit/s, {}{}{}{}",
                     if modem.error_controlled() { "V.42" } else { "no error control" },
-                    if modem.compressing() { " with compression" } else { "" }
+                    if modem.compressing() { " with compression" } else { "" },
+                    if modem.quick_connected().is_some() { ", short phase 1" } else { "" },
+                    if modem.short_phase2() { ", short phase 2" } else { "" }
                 ),
                 None => String::new(),
             };

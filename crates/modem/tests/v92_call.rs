@@ -376,3 +376,52 @@ fn an_unanswered_anspcm_falls_back_to_v8_and_connects() {
     assert_eq!((pair.caller.quick_connected(), pair.host.quick_connected()), (None, None));
     assert_eq!((pair.caller.standard(), pair.host.standard()), ("V.92", "V.92"), "{notes}");
 }
+
+/// A modem handed a file keeps the memos itself, by the string dialled: the
+/// second call to the same number is the short start-up with nobody having
+/// carried anything across, and a call to another number is not.
+#[test]
+fn a_modem_with_a_file_remembers_the_number_it_dialled() {
+    let file = std::env::temp_dir().join(format!("binmodem-v92-call-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&file);
+    let mut pair = v92_pair();
+    pair.caller.remember_connections(Some(modem::memos::Memos::open(&file)));
+    timed_connect(&mut pair, "first call");
+    assert_eq!(pair.caller.quick_connected(), None);
+    hang_up(&mut pair);
+    assert!(modem::memos::Memos::open(&file).get("5551234").is_some_and(|m| m.pcm_upstream));
+
+    timed_connect(&mut pair, "second call");
+    assert_eq!(pair.caller.quick_connected(), Some(true));
+    assert!(pair.caller.short_phase2() && pair.host.short_phase2());
+    hang_up(&mut pair);
+
+    // Another number: nothing is known of it.
+    Pair::type_at(&mut pair.host, "ATA");
+    Pair::type_at(&mut pair.caller, "ATD5559999");
+    settle(&mut pair, 40);
+    assert_eq!(pair.caller.state(), State::Data);
+    assert_eq!(pair.caller.quick_connected(), None);
+    hang_up(&mut pair);
+
+    // The first number again, and the far end is not a V.92 server any more:
+    // the QC1a goes unanswered, the call is V.34 by V.8, and the memo that
+    // was spent on it is gone.
+    Pair::type_at(&mut pair.host, "AT+MS=V34");
+    pair.run(0.05);
+    Pair::type_at(&mut pair.host, "ATA");
+    Pair::type_at(&mut pair.caller, "ATD5551234");
+    for _ in 0..40 {
+        pair.run(1.0);
+        if pair.caller.state() == State::Data && pair.host.state() == State::Data {
+            break;
+        }
+    }
+    assert_eq!((pair.caller.state(), pair.host.state()), (State::Data, State::Data));
+    assert_eq!(pair.caller.standard(), "V.34");
+    hang_up(&mut pair);
+    let kept = modem::memos::Memos::open(&file);
+    assert_eq!(kept.get("5551234"), None, "a memo that did not get its call to V.92 is not spent twice");
+    assert!(kept.get("5559999").is_some());
+    let _ = std::fs::remove_file(&file);
+}
