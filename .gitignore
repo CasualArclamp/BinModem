@@ -8,3 +8,5 @@ docs/specs/*.pdf
 docs/specs/text/
 dist/
 tools/dmodem/state/
+# Notes for Claude Code sessions: local only
+CLAUDE.md
