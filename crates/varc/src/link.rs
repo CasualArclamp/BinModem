@@ -64,8 +64,10 @@ impl Table {
 /// What a receiver has to show for one block of octets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Arrived {
-    /// The octets as sliced, errors and all, and how they are laid out.
-    Octets { line: Vec<u8>, layout: Layout },
+    /// The octets as sliced, errors and all, and how they are laid out;
+    /// and, from a receiver that can tell, which of them never arrived at
+    /// all and are only there to keep the rest in their places.
+    Octets { line: Vec<u8>, layout: Layout, erased: Option<Vec<bool>> },
     /// A block went by that could not be read: sent with a table this end
     /// does not have, or missed.
     Lost,

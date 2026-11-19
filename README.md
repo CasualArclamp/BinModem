@@ -192,8 +192,10 @@ OS-specific code — but only built and run on Windows so far.
   Through a real stereo lead between a Realtek line output and its line
   input at 192 kHz the multicarrier mode measured a megabit a second each
   way with no octet wrong. `AT+MS=VARC` or the window's mode box selects it
-  and `ATD` and `ATA` place and answer the call. It has never been run
-  between two machines. See [docs/design/v-arc.md](docs/design/v-arc.md).
+  and `ATD` and `ATA` place and answer the call. Between two SIP accounts
+  that say `linear = yes` the call carries sixteen-bit samples exactly and
+  the samples are the data, at 200 kbit/s. It has never been run between two
+  machines. See [docs/design/v-arc.md](docs/design/v-arc.md).
 
 ## Next
 

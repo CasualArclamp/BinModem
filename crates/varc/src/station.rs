@@ -318,8 +318,8 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
         }
         while let Some(arrived) = self.rx.take() {
             match arrived {
-                Arrived::Octets { line, layout } => {
-                    let report = self.unpacker.take(&line, &layout, None);
+                Arrived::Octets { line, layout, erased } => {
+                    let report = self.unpacker.take(&line, &layout, erased.as_deref());
                     self.tally.blocks += 1;
                     self.tally.words += report.words as u64;
                     self.tally.failed += report.failed as u64;

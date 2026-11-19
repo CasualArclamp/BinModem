@@ -759,7 +759,7 @@ impl Rx {
             match table.and_then(|t| self.plan.layout(t)) {
                 Some(layout) => {
                     let line = self.writer.finish(layout.capacity());
-                    self.arrived.push_back(Arrived::Octets { line, layout });
+                    self.arrived.push_back(Arrived::Octets { line, layout, erased: None });
                 }
                 None => {
                     self.writer = BitWriter::default();
@@ -1041,7 +1041,7 @@ mod tests {
                 self.clock.feed(s, |y| rx.feed(y + sigma * noise.gaussian()));
                 while let Some(arrived) = self.rx.take() {
                     match arrived {
-                        Arrived::Octets { line, layout } => {
+                        Arrived::Octets { line, layout, .. } => {
                             let report = self.unpacker.take(&line, &layout, None);
                             self.failed += report.failed;
                             self.words += report.words;

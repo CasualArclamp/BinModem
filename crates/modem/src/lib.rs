@@ -1870,6 +1870,38 @@ impl Modem {
         self.varc.as_ref().map(|call| call.mode)
     }
 
+    /// Tell a V.ARC call that its line carries samples exactly as sent: a
+    /// SIP call that agreed on linear PCM. It then starts with no
+    /// modulation at all, the samples being the data, and gives that up for
+    /// the multicarrier mode only if the line turns out not to be exact.
+    pub fn varc_exact_line(&mut self, exact: bool) {
+        if let Some(call) = self.varc.as_mut() {
+            call.exact_line(exact);
+        }
+    }
+
+    /// A V.ARC call has turned out to be on a line that cannot carry it: a
+    /// SIP call that was answered in G.711. The call is not thrown away.
+    /// It carries on as an ordinary one, from V.8, as the same end it was,
+    /// with V.92 and everything below it on offer; `+MS` is left saying so.
+    pub fn varc_fall_back(&mut self) {
+        if self.varc.is_none() {
+            return;
+        }
+        self.line_notes.push(
+            "V.ARC: the call is G.711, not linear samples; an ordinary call instead, from V.92 down".to_owned(),
+        );
+        let role = self.role;
+        self.varc = None;
+        self.at.modulation.carrier = "V92".to_owned();
+        self.at.modulation.automode = true;
+        self.at.modulation.min_rate = 0;
+        self.at.modulation.max_rate = 0;
+        let notes = std::mem::take(&mut self.line_notes);
+        self.place_call(role);
+        self.line_notes = notes;
+    }
+
     /// One frame of a V.ARC call: a sample of each channel as the sound
     /// card heard it, at the card's own rate `fs`, and a sample of each to
     /// send. Silence out when there is no V.ARC call.
@@ -1887,6 +1919,9 @@ impl Modem {
         self.varc_owed_ms += 1000.0 / fs;
         if !look {
             return;
+        }
+        if let Some(note) = call.take_note() {
+            self.line_notes.push(note);
         }
         let phase = call.phase();
         if phase != self.varc_said {

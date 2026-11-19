@@ -191,3 +191,73 @@ fn nobody_there_is_no_answer_and_an_ordinary_step_is_silence_meanwhile() {
     assert!(Pair::said(&said).contains("NO ANSWER"), "{}", Pair::said(&said));
     assert_eq!(modem.varc_wanted(), None);
 }
+
+/// Two modems on a SIP call that carries linear samples: one channel at
+/// 16 kHz, every sample a sixteen-bit integer, and a gain on the way if the
+/// call is not as exact as it said.
+fn on_a_linear_call(gain: f64, seconds: f64) -> (Modem, Modem, String, String) {
+    let mut caller = Modem::new(16_000.0);
+    let mut host = Modem::new(16_000.0);
+    type_at(&mut caller, "AT+MS=VARC\r");
+    type_at(&mut host, "AT+MS=VARC\rATA\r");
+    type_at(&mut caller, "ATD100\r");
+    caller.varc_exact_line(true);
+    host.varc_exact_line(true);
+    let carry = |x: f64| ((x * 32768.0 * gain).round() / 32768.0).clamp(-1.0, 1.0);
+    let (mut from_caller, mut from_host) = ([0.0], [0.0]);
+    let (mut at_caller, mut at_host) = (Vec::new(), Vec::new());
+    let mut typed = false;
+    for _ in 0..(seconds * 16_000.0) as usize {
+        let (to_host, to_caller) = ([carry(from_caller[0])], [carry(from_host[0])]);
+        caller.varc_step(16_000.0, &to_caller, &mut from_caller);
+        host.varc_step(16_000.0, &to_host, &mut from_host);
+        at_caller.extend(caller.take_dte());
+        at_host.extend(host.take_dte());
+        if !typed && caller.state() == State::Data && host.state() == State::Data {
+            typed = true;
+            at_host.clear();
+            type_at(&mut caller, "samples that are the data");
+        }
+    }
+    (caller, host, Pair::said(&at_caller), Pair::said(&at_host))
+}
+
+#[test]
+fn on_a_call_of_exact_samples_the_samples_are_the_data() {
+    let (caller, host, told, got) = on_a_linear_call(1.0, 3.0);
+    assert_eq!(caller.standard(), "V.ARC/L16");
+    assert_eq!(host.varc_wanted(), Some(VarcMode::Linear));
+    assert!(told.contains("CONNECT 200434/VARC"), "{told}");
+    assert_eq!(got, "samples that are the data");
+}
+
+#[test]
+fn a_call_that_is_not_exact_after_all_carries_on_as_the_multicarrier_mode() {
+    // A tenth of a decibel of gain somewhere along the way.
+    let (mut caller, host, told, got) = on_a_linear_call(0.989, 16.0);
+    assert_eq!(caller.standard(), "V.ARC/DMT", "{told}");
+    assert_eq!(host.state(), State::Data);
+    assert!(told.contains("/VARC"), "{told}");
+    assert_eq!(got, "samples that are the data");
+    // Sixteen-bit samples are a clean line by any other measure.
+    assert!(caller.rate().unwrap_or(0) > 100_000, "{:?} bit/s", caller.rate());
+    assert!(caller.take_line_notes().iter().any(|n| n.contains("does not carry samples exactly")));
+}
+
+#[test]
+fn a_call_answered_in_g711_becomes_an_ordinary_call() {
+    let mut modem = Modem::new(16_000.0);
+    type_at(&mut modem, "AT+MS=VARC\rATD100\r");
+    assert_eq!(modem.varc_wanted(), Some(VarcMode::Dmt));
+    modem.varc_fall_back();
+    assert_eq!(modem.varc_wanted(), None);
+    // Still the same call, still being placed, now from V.8.
+    assert_eq!(modem.state(), State::Handshaking);
+    assert!(modem.off_hook());
+    assert_eq!(modem.standard(), "V.8");
+    assert_eq!(modem.modulation(), "V92");
+    assert!(modem.take_line_notes().iter().any(|n| n.contains("G.711")));
+    // It makes sound again through the ordinary door.
+    let loud = (0..16_000).map(|_| modem.step(0.0).abs()).fold(0.0, f64::max);
+    assert!(loud > 0.0 || modem.line_phase() == "quiet", "{}", modem.line_phase());
+}

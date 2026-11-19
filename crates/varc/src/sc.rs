@@ -872,7 +872,7 @@ impl Rx {
         match table.and_then(|t| self.shape.layout(t)) {
             Some(layout) => {
                 let line = self.writer.finish(layout.capacity());
-                self.arrived.push_back(Arrived::Octets { line, layout });
+                self.arrived.push_back(Arrived::Octets { line, layout, erased: None });
             }
             None => {
                 self.writer = BitWriter::default();

@@ -3,10 +3,10 @@
 BinModem's own wideband mode. Not an ITU recommendation and not compatible
 with anything: both ends have to be BinModem.
 
-Status: the three modulations, the framing and the link layer are built and
-run on real sound devices, from the `varc-link` tool and from the modem
-itself (`AT+MS=VARC`, `ATD`, `CONNECT .../VARC`, the window's mode box). Not
-built yet: the SIP (L16) path. See [What is not done](#what-is-not-done).
+Status: built and run on real sound devices, from the `varc-link` tool and
+from the modem itself (`AT+MS=VARC`, `ATD`, `CONNECT .../VARC`, the window's
+mode box), and over a SIP call between two of these on one machine. See
+[What is not done](#what-is-not-done) for what has not been tried.
 
 Code: `crates/varc`. Line: `crates/line/src/wide.rs`. The call:
 `crates/modem/src/varc.rs`. Tool: `crates/modem/src/bin/varc-link.rs`.
@@ -106,6 +106,38 @@ loops are equally happy a quarter turn round.
 
 Loading: `b = floor(log2(1 + SNR/gap))` for QAM, half that for PCM.
 
+## Over a SIP call: V.ARC/L16
+
+A fourth way of running, which is no modulation at all (`exact.rs`).
+
+An account with `linear = yes` offers `L16/16000` in its SDP ahead of PCMU
+and PCMA, and takes it when offered: sixteen-bit linear samples, two octets
+each, at 16 kHz (RFC 3551 4.5.11). Between two such accounts the call's
+samples arrive as the sixteen bits that were sent, so the samples are the
+data.
+
+- Superframe: a sync word of 64 known samples, then a block of 2000 samples
+  that are 4000 octets. Eight a second.
+- FEC: Reed-Solomon with 48 check octets a codeword.
+- A lost RTP packet is 320 samples of silence where data should be. Scrambled
+  data is never silence, so a run of 8 or more samples that are exactly zero
+  is taken as a hole and its octets are given to the decoder as erasures. One
+  lost packet in a block is 40 erasures a codeword and is rebuilt; two is not,
+  and the block is resent.
+- Rate: 256 kbit/s of samples, 200 434 bit/s of data.
+
+![The window as the caller on a V.ARC/L16 call over SIP](../images/v-arc/window-sip.png)
+
+What the call turns out to be decides what runs on it:
+
+| The call | What `AT+MS=VARC` becomes |
+|---|---|
+| L16, and the samples arrive exactly | V.ARC/L16 |
+| L16, but nothing is heard in 4 s, or the two ends have not agreed in 10 s | V.ARC/DMT at the call's 16 kHz |
+| G.711, because the far end answered with it | an ordinary call from V.8, with `+MS` set to `V92` |
+
+`VARCQ` and `VARCP` do not run on a SIP call: they need a multiple of 48 kHz.
+
 ## Octets on the line
 
 Same for all three (`frame.rs`). Each modulation offers room for so many
@@ -180,16 +212,19 @@ first finding below.
 The two ends differ in which known points they send, so one must dial and
 the other answer.
 
+On a SIP line the same commands are used and the account has to say
+`linear = yes`. The call is placed and answered as any SIP call is.
+
 The sound card: the rest of the modem runs at 16 kHz on one channel through
 `line::Duplex`. While a V.ARC call is up the window closes that and opens the
 same two devices with `line::Wide`, and steps `Modem::varc_step` with the
-card's own frames; when the call ends it puts the two-wire line back. A SIP
-line refuses a V.ARC call.
+card's own frames; when the call ends it puts the two-wire line back.
 
 During a V.ARC call the waterfall and the spectrum are taken from the left
 channel at the card's own rate and drawn from 0 Hz to half of it (24 kHz on a
 48 kHz card, 96 kHz at 192 kHz), with the ticks in kilohertz. On every other
-call they stay at 0 to 4000 Hz. The oscilloscope and the level meter were
+call they stay at 0 to 4000 Hz, except a V.ARC call on a SIP line, which is
+drawn to the call's 8 kHz. The oscilloscope and the level meter were
 built for the modem's 16 kHz and are still shown the left channel cut down to
 that without filtering, which shows that something is there and measures
 nothing.
@@ -204,6 +239,7 @@ octets" is against a known stream at the far end.
 | Path | Rate | Mode | SNR | Net rate each way | Wrong octets |
 |---|---|---|---|---|---|
 | Realtek, same lead, through the modem (`--modem`: `ATDLOOP`, both channels one way) | 192 kHz | DMT | 54 / 59 dB | 2146 kbit/s | 0 of 7.7 M |
+| SIP between two `modem-sip` on this machine, L16 | 16 kHz | L16 | exact | 200 / 200 kbit/s | a line of text only |
 | VB-Cable A | 48 kHz | DMT | 80 dB | 400 / 399 kbit/s | 0 of 699 k |
 | VB-Cable A | 48 kHz | QAM | 70 / 80 dB | 240 / 232 kbit/s | 0 of 607 k |
 | VB-Cable A | 48 kHz | PCM | 62 / 76 dB | 122 / 83 kbit/s | 0 of 298 k |
@@ -220,6 +256,11 @@ Notes on those numbers:
   The DMT run had none in about 20 000.
 - Both ends share one clock in every row (one device), so the clock recovery
   is exercised only in simulation, to +-150 ppm.
+- The SIP row is two processes calling each other over the loopback
+  interface: real SIP, SDP and RTP, no network and no lost packets. Both ends
+  said `CONNECT 200434/VARC` half a second after the answer and one line of
+  text crossed. No bulk transfer was measured on it. Erasure decoding of lost
+  packets is tested in simulation only.
 - The 192 kHz DMT figure uses carriers up to 82 kHz. SNR on the Realtek falls
   from about 66 dB below 48 kHz to about 51 dB at 78 kHz.
 - SNR for the single-carrier rows is at the slicer. For DMT it is the mean
@@ -255,9 +296,16 @@ Three faults that simulation with one clean wire each way did not show:
 
 ## What is not done
 
-- **SIP.** Offering L16 in SDP, a bit-exact tier (16 bits a sample at
-  16 kHz, 256 kbit/s, with lost RTP packets as erasures) and fallback to
-  G.711. The Reed-Solomon decoder already takes erasures for this.
+- **SIP beyond this machine.** Never run over a network, through a PBX, or
+  with packets really lost. Whether any PBX passes L16 at 16 kHz untouched
+  is not known.
+- **The G.711 fallback, to a connection.** A V.ARC call answered in G.711
+  does carry on as an ordinary call, and between two `modem-sip` on this
+  machine it trained to V.90 data and then never said `CONNECT`. A plain
+  `AT+MS=V92` call between the same two does exactly the same, and a plain
+  `AT+MS=V34` one ends in `NO CARRIER`, on `main` as well as here, so that is
+  not V.ARC's; but it means the fallback has not been seen to end in a
+  connection.
 - **Scopes for it.** The window has no constellation, SNR-by-carrier or bit
   table display for V.ARC; `varc-link --csv` is the only way to see those.
 - **The window beyond a loop.** The window has run V.ARC/DMT calls to itself
@@ -277,6 +325,14 @@ varc-link --in "CABLE-A Output" --out "CABLE-A Input" --loop
 varc-link --in "Line In" --out "Speakers" --loop --mode qam --seconds 60
 varc-link --in "Line In" --out "Speakers" --oneway --csv snr.csv
 varc-link --in "Line In" --out "Speakers" --modem
+```
+
+Over SIP, with two accounts that have `linear = yes` and point at each
+other:
+
+```text
+modem-sip --accounts FILE --account host --answer --type AT+MS=VARC
+modem-sip --accounts FILE --account caller --type AT+MS=VARC --type ATD100 --send hello
 ```
 
 `--modem` drives the lead through a whole modem as the window does

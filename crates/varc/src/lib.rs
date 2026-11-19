@@ -5,6 +5,7 @@
 #![allow(clippy::needless_range_loop)]
 
 pub mod dmt;
+pub mod exact;
 pub mod frame;
 pub mod interp;
 pub mod link;

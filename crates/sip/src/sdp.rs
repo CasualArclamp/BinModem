@@ -423,6 +423,13 @@ pub fn offer(address: &str, port: u16, laws: &[Law], ptime_ms: u32, dtmf: Option
     offer_with(address, port, laws, false, ptime_ms, dtmf)
 }
 
+impl Negotiated {
+    /// What the call's audio is coded as, by name.
+    pub fn coding(&self) -> &'static str {
+        if self.linear { "L16 at 16 kHz" } else { self.law.encoding_name() }
+    }
+}
+
 /// The payload type L16 is offered as. It has no static one at 16 kHz, so it
 /// is a dynamic number, and the first of them will do.
 pub const LINEAR_PAYLOAD_TYPE: u8 = 96;

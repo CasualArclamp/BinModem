@@ -225,7 +225,7 @@ impl Line {
                     // would leave us sending to the wrong place.
                     said.push(format!(
                         "sip: early media offered ({} from {}:{}), ignored until answer",
-                        negotiated.law.encoding_name(),
+                        negotiated.coding(),
                         negotiated.address,
                         negotiated.port
                     ));
@@ -256,7 +256,7 @@ impl Line {
                     Ok(remote) => {
                         said.push(format!(
                             "sip: answered; {} with {remote}, {} ms packets",
-                            negotiated.law.encoding_name(),
+                            negotiated.coding(),
                             negotiated.ptime_ms
                         ));
                         if negotiated.direction == Direction::ReceiveOnly {

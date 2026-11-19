@@ -13,8 +13,16 @@
 //! through its own door, [`crate::Modem::varc_step`], by whatever owns the
 //! sound card, with a frame of the card's own samples at a time. The modem
 //! says when it wants that, with [`crate::Modem::varc_wanted`].
+//!
+//! The other line it runs on is a SIP call that agreed on linear samples,
+//! where there is no sound card at all and every sample arrives as the
+//! sixteen bits that were sent. There the call starts with no modulation
+//! whatever ([`varc::exact`]), and if a few seconds show that the path is
+//! not exact after all it carries on as the multicarrier mode at the
+//! call's 16 kHz, which wants only that the path be clean.
 
 use varc::dmt::{self, Plan};
+use varc::exact;
 use varc::link::{Receiver, Sender};
 use varc::sc::{self, Shape};
 use varc::station::Station;
@@ -30,6 +38,10 @@ pub enum VarcMode {
     Qam,
     /// Levels at baseband, 16 000 baud.
     Pcm,
+    /// No modulation: the samples of a linear call are the data. Not one
+    /// `+MS` can ask for; it is what `VARC` becomes on a line that carries
+    /// samples exactly.
+    Linear,
 }
 
 impl VarcMode {
@@ -48,6 +60,7 @@ impl VarcMode {
             Self::Dmt => "V.ARC/DMT",
             Self::Qam => "V.ARC/QAM",
             Self::Pcm => "V.ARC/PCM",
+            Self::Linear => "V.ARC/L16",
         }
     }
 }
@@ -56,6 +69,12 @@ type End = Station<Box<dyn Sender>, Box<dyn Receiver>>;
 
 /// How often a call's line is looked over: every five milliseconds.
 const LOOKS_A_SECOND: f64 = 200.0;
+
+/// How long a line that should carry samples exactly is given to show that
+/// it does, in seconds: this long with nothing heard at all, or the longer
+/// with something heard and the two ends still not agreed.
+const EXACT_UNHEARD: f64 = 4.0;
+const EXACT_UNAGREED: f64 = 10.0;
 
 /// One V.ARC call.
 pub(crate) struct Call {
@@ -73,6 +92,12 @@ pub(crate) struct Call {
     first_loaded: Option<u64>,
     /// Samples until the line is next looked over.
     until_look: u32,
+    /// The line carries samples exactly: a linear SIP call, not a card.
+    exact_line: bool,
+    /// And was found not to after all, so that it is not tried again.
+    inexact: bool,
+    /// Something worth telling whoever is watching, once.
+    note: Option<String>,
 }
 
 impl std::fmt::Debug for Call {
@@ -91,14 +116,49 @@ impl Call {
             (false, Role::Calling) => (0, 8),
             (false, Role::Answering) => (8, 0),
         };
-        Self { mode, sends, hears, station: None, fs: 0.0, samples: 0, deaf: 0, first_loaded: None, until_look: 0 }
+        Self {
+            mode,
+            sends,
+            hears,
+            station: None,
+            fs: 0.0,
+            samples: 0,
+            deaf: 0,
+            first_loaded: None,
+            until_look: 0,
+            exact_line: false,
+            inexact: false,
+            note: None,
+        }
     }
 
-    fn build(&self, fs: f64, channels: usize) -> Result<End, String> {
+    /// Say that the line carries samples exactly, or does not. Before the
+    /// first frame, since it decides what the call starts as.
+    pub fn exact_line(&mut self, exact: bool) {
+        if self.exact_line != exact {
+            self.exact_line = exact;
+            self.station = None;
+        }
+    }
+
+    /// What there is to tell about the call since this was last asked.
+    pub fn take_note(&mut self) -> Option<String> {
+        self.note.take()
+    }
+
+    fn build(&mut self, fs: f64, channels: usize) -> Result<End, String> {
+        // On a line of exact samples the multicarrier mode gives way to no
+        // modulation at all, until that has been tried and failed.
+        if matches!(self.mode, VarcMode::Dmt | VarcMode::Linear) {
+            self.mode = if self.exact_line && !self.inexact { VarcMode::Linear } else { VarcMode::Dmt };
+        }
         let mut pairs: Vec<(Box<dyn Sender>, Box<dyn Receiver>)> = Vec::new();
         for c in 0..channels as u8 {
             let (sends, hears) = (self.sends + c, self.hears + c);
             match self.mode {
+                VarcMode::Linear => {
+                    pairs.push((Box::new(exact::Tx::new(fs)), Box::new(exact::Rx::new(fs))));
+                }
                 VarcMode::Dmt => {
                     let plan = Plan::for_rate(fs);
                     pairs.push((
@@ -152,6 +212,22 @@ impl Call {
         }
         if self.first_loaded.is_none() && station.channels.iter().any(|c| c.loaded()) {
             self.first_loaded = Some(self.samples);
+        }
+        // A line that was to carry samples exactly and has not: neither end
+        // can read the other, and both find that out at about the same
+        // time, so both give up on it at about the same time and start
+        // again as something that only wants the line to be clean.
+        if self.mode == VarcMode::Linear && self.first_loaded.is_none() {
+            let waited = self.samples as f64 / fs;
+            let heard = station.channels.iter().any(|c| c.rx.health().locked);
+            if (!heard && waited > EXACT_UNHEARD) || waited > EXACT_UNAGREED {
+                self.inexact = true;
+                self.note = Some(
+                    "V.ARC: the line does not carry samples exactly; carrying on as the multicarrier mode".to_owned(),
+                );
+                self.station = Some(self.build(fs, input.len())?);
+                self.deaf = 0;
+            }
         }
         Ok(true)
     }
@@ -214,7 +290,7 @@ impl Call {
     }
 
     pub fn phase(&self) -> &'static str {
-        let Some(station) = self.station.as_ref() else { return "V.ARC: waiting for the sound card" };
+        let Some(station) = self.station.as_ref() else { return "V.ARC: waiting for the line" };
         if station.channels.iter().any(|c| c.loaded()) {
             "V.ARC: loaded"
         } else if station.channels.iter().any(|c| c.rx.health().steady) {
