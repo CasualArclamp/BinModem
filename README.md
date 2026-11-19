@@ -191,9 +191,9 @@ OS-specific code — but only built and run on Windows so far.
   loaded a carrier at a time, and QAM and baseband levels at 16 000 baud.
   Through a real stereo lead between a Realtek line output and its line
   input at 192 kHz the multicarrier mode measured a megabit a second each
-  way with no octet wrong. It runs from `varc-link` only: nothing in the
-  modem or the window reaches it yet, and it has never been run between two
-  machines. See [docs/design/v-arc.md](docs/design/v-arc.md).
+  way with no octet wrong. `AT+MS=VARC` or the window's mode box selects it
+  and `ATD` and `ATA` place and answer the call. It has never been run
+  between two machines. See [docs/design/v-arc.md](docs/design/v-arc.md).
 
 ## Next
 

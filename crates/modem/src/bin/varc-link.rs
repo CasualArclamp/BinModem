@@ -16,6 +16,11 @@
 //! `--mode` is `dmt`, the multicarrier mode and the default, or `qam` or
 //! `pcm`, the two at 16 000 baud.
 //!
+//! `--modem` is the same lead driven the way the window drives it: one
+//! whole modem, typed at, with `AT+MS=VARC` and `ATDLOOP`, both channels
+//! together, and what is typed after the `CONNECT` checked as it comes
+//! back. It is the call rather than the modulation that is on trial.
+//!
 //! `--loop` is two ends in one program on one lead: one sends on the left
 //! channel and listens on the right, the other the reverse. It needs the
 //! lead to join each output channel to the same input channel, and it is a
@@ -29,6 +34,7 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use line::Wide;
+use modem::{Modem, State};
 use varc::dmt::{self, Plan};
 use varc::link::{Receiver, Sender};
 use varc::sc::{self, Shape};
@@ -146,9 +152,100 @@ fn describe(name: &str, end: &End) -> String {
     out
 }
 
+/// A call to oneself through a whole modem, as the window would place it.
+fn through_the_modem(audio: &Wide, mode: &str, seconds: f64) -> ExitCode {
+    let carrier = match mode {
+        "dmt" => "VARC",
+        "qam" => "VARCQ",
+        "pcm" => "VARCP",
+        _ => return usage(),
+    };
+    println!(
+        "in:  {} ({} ch)\nout: {} ({} ch)\nat {} Hz, AT+MS={carrier}, ATDLOOP",
+        audio.input_device, audio.input_channels, audio.output_device, audio.output_channels, audio.rate
+    );
+    let fs = f64::from(audio.rate);
+    let mut modem = Modem::new(16_000.0);
+    for b in format!("AT+MS={carrier}\rATDLOOP\r").bytes() {
+        modem.feed_dte(b);
+    }
+    let (mut source, mut check) = (Pattern(7), Pattern(7));
+    let (mut arrived, mut wrong, mut last, mut offered) = (0u64, 0u64, 0u64, 0u64);
+    let mut heard: Vec<f32> = Vec::new();
+    let mut send: Vec<f32> = Vec::new();
+    let started = Instant::now();
+    let mut reported = Instant::now();
+    let (mut peak, mut longest) = (0.0f32, Duration::ZERO);
+    let mut turn = Instant::now();
+    while started.elapsed().as_secs_f64() < seconds {
+        heard.clear();
+        audio.receive(&mut heard);
+        if heard.is_empty() {
+            std::thread::sleep(Duration::from_millis(1));
+            continue;
+        }
+        longest = longest.max(turn.elapsed());
+        turn = Instant::now();
+        send.clear();
+        let was = modem.state();
+        for frame in heard.as_chunks::<2>().0 {
+            peak = peak.max(frame[0].abs()).max(frame[1].abs());
+            let mut out = [0.0f64; 2];
+            modem.varc_step(fs, &[f64::from(frame[0]), f64::from(frame[1])], &mut out);
+            send.push(out[0] as f32);
+            send.push(out[1] as f32);
+        }
+        audio.transmit(&send);
+        for note in modem.take_line_notes() {
+            println!("{:6.2}s  -- {note}", started.elapsed().as_secs_f64());
+        }
+        let said = modem.take_dte();
+        if modem.state() == State::Data && was == State::Data {
+            for octet in said {
+                arrived += 1;
+                if octet != check.next() {
+                    wrong += 1;
+                }
+            }
+            // Keep a second or so on its way and no more.
+            let rate = u64::from(modem.rate().unwrap_or(0)) / 8;
+            while offered < arrived + rate {
+                modem.feed_dte(source.next());
+                offered += 1;
+            }
+        } else if !said.is_empty() {
+            println!("{:6.2}s  {}", started.elapsed().as_secs_f64(), String::from_utf8_lossy(&said).trim());
+        }
+        if modem.state() == State::Command && was != State::Command {
+            println!("{:6.2}s  the call ended", started.elapsed().as_secs_f64());
+            break;
+        }
+        if reported.elapsed() >= Duration::from_secs(1) {
+            let span = reported.elapsed().as_secs_f64();
+            reported = Instant::now();
+            println!(
+                "{:6.2}s  {} · {} · {} bit/s · {:.0} kbit/s back, {arrived} octets, {wrong} wrong · peak {peak:.3} · longest wait {:.0} ms · {} underruns, {} dropped",
+                started.elapsed().as_secs_f64(),
+                modem.standard(),
+                modem.line_phase(),
+                modem.rate().unwrap_or(0),
+                (arrived - last) as f64 * 8.0 / span / 1000.0,
+                longest.as_secs_f64() * 1000.0,
+                audio.underruns(),
+                audio.dropped_in(),
+            );
+            last = arrived;
+            peak = 0.0;
+            longest = Duration::ZERO;
+        }
+    }
+    println!("{arrived} octets came back, {wrong} wrong");
+    if arrived > 0 && wrong == 0 { ExitCode::SUCCESS } else { ExitCode::FAILURE }
+}
+
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: varc-link --list\n       varc-link --in NAME --out NAME (--loop | --oneway) [--mode dmt|qam|pcm] [--seconds N] [--level RMS] [--gap DB] [--csv FILE]"
+        "usage: varc-link --list\n       varc-link --in NAME --out NAME (--loop | --oneway | --modem) [--mode dmt|qam|pcm] [--seconds N] [--level RMS] [--gap DB] [--csv FILE]"
     );
     ExitCode::from(2)
 }
@@ -158,6 +255,7 @@ fn main() -> ExitCode {
     let mut input = None;
     let mut output = None;
     let mut oneway = None;
+    let mut as_modem = false;
     let mut seconds = 30.0;
     let mut level = None;
     let mut gap = None;
@@ -182,6 +280,7 @@ fn main() -> ExitCode {
             "--out" => output = value(),
             "--loop" => oneway = Some(false),
             "--oneway" => oneway = Some(true),
+            "--modem" => as_modem = true,
             "--csv" => csv = value(),
             "--mode" => match value() {
                 Some(name) => mode = name,
@@ -200,7 +299,9 @@ fn main() -> ExitCode {
             _ => return usage(),
         }
     }
-    let Some(oneway) = oneway else { return usage() };
+    if oneway.is_none() && !as_modem {
+        return usage();
+    }
 
     let audio = match Wide::open(input.as_deref(), output.as_deref()) {
         Ok(audio) => audio,
@@ -209,6 +310,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if as_modem {
+        return through_the_modem(&audio, &mode, seconds);
+    }
+    let oneway = oneway.unwrap_or(false);
     println!(
         "in:  {} ({} ch)\nout: {} ({} ch)\nat {} Hz",
         audio.input_device, audio.input_channels, audio.output_device, audio.output_channels, audio.rate

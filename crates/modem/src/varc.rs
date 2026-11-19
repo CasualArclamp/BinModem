@@ -54,6 +54,9 @@ impl VarcMode {
 
 type End = Station<Box<dyn Sender>, Box<dyn Receiver>>;
 
+/// How often a call's line is looked over: every five milliseconds.
+const LOOKS_A_SECOND: f64 = 200.0;
+
 /// One V.ARC call.
 pub(crate) struct Call {
     pub mode: VarcMode,
@@ -68,6 +71,8 @@ pub(crate) struct Call {
     deaf: u64,
     /// When the first channel came up loaded, in samples.
     first_loaded: Option<u64>,
+    /// Samples until the line is next looked over.
+    until_look: u32,
 }
 
 impl std::fmt::Debug for Call {
@@ -86,7 +91,7 @@ impl Call {
             (false, Role::Calling) => (0, 8),
             (false, Role::Answering) => (8, 0),
         };
-        Self { mode, sends, hears, station: None, fs: 0.0, samples: 0, deaf: 0, first_loaded: None }
+        Self { mode, sends, hears, station: None, fs: 0.0, samples: 0, deaf: 0, first_loaded: None, until_look: 0 }
     }
 
     fn build(&self, fs: f64, channels: usize) -> Result<End, String> {
@@ -116,24 +121,39 @@ impl Call {
         Ok(Station::new(fs, pairs))
     }
 
-    /// One frame of the card's samples in, one out.
-    pub fn step(&mut self, fs: f64, input: &[f64], output: &mut [f64]) -> Result<(), String> {
+    /// One frame of the card's samples in, one out. `Ok(true)` every few
+    /// milliseconds, when the line has been looked over and whoever is
+    /// running the call should look at it too.
+    ///
+    /// Not every sample, because a sample at 192 kHz is five microseconds
+    /// and nothing about a call changes in five microseconds: asking each
+    /// channel how it was getting on at every sample cost more than the
+    /// modulation did, and a sound card was left waiting a second at a time
+    /// for a program that was busy asking.
+    pub fn step(&mut self, fs: f64, input: &[f64], output: &mut [f64]) -> Result<bool, String> {
         if self.station.is_none() || self.fs != fs {
             self.station = Some(self.build(fs, input.len())?);
             self.fs = fs;
+            self.until_look = 0;
         }
         let station = self.station.as_mut().expect("just built");
         station.step(input, output);
         self.samples += 1;
+        if self.until_look > 0 {
+            self.until_look -= 1;
+            return Ok(false);
+        }
+        let every = (fs / LOOKS_A_SECOND) as u32;
+        self.until_look = every.saturating_sub(1);
         if station.channels.iter().any(|c| c.rx.health().locked) {
             self.deaf = 0;
         } else {
-            self.deaf += 1;
+            self.deaf += u64::from(every.max(1));
         }
         if self.first_loaded.is_none() && station.channels.iter().any(|c| c.loaded()) {
             self.first_loaded = Some(self.samples);
         }
-        Ok(())
+        Ok(true)
     }
 
     pub fn seconds(&self) -> f64 {

@@ -535,6 +535,10 @@ pub struct Rx {
     measured: f64,
     trained: usize,
     proposal: Option<Table>,
+    /// Bits a symbol in the table last proposed, and for how many sync
+    /// words in a row the line has looked good for more.
+    proposed: u8,
+    better: usize,
     gap_db: f64,
     remeasure: bool,
     /// The timing error at the last sync word, in samples.
@@ -594,6 +598,8 @@ impl Rx {
             measured: 0.0,
             trained: 0,
             proposal: None,
+            proposed: 0,
+            better: 0,
             gap_db: GAP_DB,
             remeasure: false,
             timing: 0.0,
@@ -633,6 +639,13 @@ impl Rx {
         let least = if self.shape.real { 1 } else { 2 };
         let bits = (bits.floor() as i64).clamp(least, i64::from(self.shape.max_bits())) as u8;
         Table { parity: LOADED_PARITY, bits: vec![bits] }
+    }
+
+    fn propose(&mut self) {
+        let table = self.load();
+        self.proposed = table.bits[0];
+        self.better = 0;
+        self.proposal = Some(table);
     }
 
     fn hunt_again(&mut self) {
@@ -804,7 +817,7 @@ impl Rx {
                 if self.trained == SETTLE + MEASURE {
                     self.noise = (self.measured / MEASURE as f64).max(1e-30);
                     self.stage = Stage::Steady;
-                    self.proposal = Some(self.load());
+                    self.propose();
                 }
             }
         } else if self.stage == Stage::Training {
@@ -941,6 +954,21 @@ impl Rx {
         };
         self.interp.nudge(now * offset);
         self.interp.adjust_step(slow * offset / (SUPER * self.shape.sps) as f64);
+
+        // The first measurement is taken as soon as the timing has come to
+        // rest, and an equaliser with this many taps can go on improving for
+        // seconds after that. A line that has looked good for more bits for
+        // two seconds running is asked for them.
+        if self.stage == Stage::Steady {
+            if self.load().bits[0] > self.proposed {
+                self.better += 1;
+                if self.better >= 8 {
+                    self.propose();
+                }
+            } else {
+                self.better = 0;
+            }
+        }
     }
 
     /// Turn the constellation the right way up, by the sync word.
@@ -1032,7 +1060,7 @@ impl Receiver for Rx {
     fn back_off(&mut self, db: f64) {
         self.gap_db += db;
         if self.stage == Stage::Steady {
-            self.proposal = Some(self.load());
+            self.propose();
         }
     }
 

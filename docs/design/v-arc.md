@@ -4,12 +4,14 @@ BinModem's own wideband mode. Not an ITU recommendation and not compatible
 with anything: both ends have to be BinModem.
 
 Status: the three modulations, the framing and the link layer are built and
-run on real sound devices through the `varc-link` tool. Not built yet: the
-SIP (L16) path, and any connection to the modem proper (AT commands, the
-window, `CONNECT .../VARC`). See [What is not done](#what-is-not-done).
+run on real sound devices, from the `varc-link` tool and from the modem
+itself (`AT+MS=VARC`, `ATD`, `CONNECT .../VARC`, the window's mode box). Not
+built yet: the SIP (L16) path. See [What is not done](#what-is-not-done).
 
-Code: `crates/varc`. Line: `crates/line/src/wide.rs`. Tool:
-`crates/modem/src/bin/varc-link.rs`.
+Code: `crates/varc`. Line: `crates/line/src/wide.rs`. The call:
+`crates/modem/src/varc.rs`. Tool: `crates/modem/src/bin/varc-link.rs`.
+
+![The window on a V.ARC/DMT call to itself through a real lead: Realtek line out to line in at 192 kHz, both channels](../images/v-arc/window-loop.png)
 
 ## What it is for
 
@@ -161,6 +163,37 @@ order by number.
 **Colours.** Each wire in a lead uses its own set of known points. See the
 first finding below.
 
+## In the modem
+
+| | |
+|---|---|
+| Choosing it | `AT+MS=VARC` (multicarrier), `AT+MS=VARCQ` (QAM), `AT+MS=VARCP` (PCM), or the window's mode box |
+| Calling | `ATD` with any number at one end, `ATA` at the other. No V.8, no tones |
+| A lead that comes straight back | `ATDLOOP`: the modem listens for its own signal and what is typed comes back |
+| Connected | `CONNECT <rate>/VARC`, the rate being what arrives, in bit/s of data, over the channels that loaded |
+| A lead with one channel wired | connects on that one after waiting 6 s for the other |
+| Nobody there | `NO ANSWER` after 60 s |
+| The far end gone | `NO CARRIER` after 5 s of hearing nothing |
+| `+++`, `ATH`, `ATO` | as on any call |
+| Error control | none of V.42's; the station's own retransmission. `+ES`, `+DS` are not consulted |
+
+The two ends differ in which known points they send, so one must dial and
+the other answer.
+
+The sound card: the rest of the modem runs at 16 kHz on one channel through
+`line::Duplex`. While a V.ARC call is up the window closes that and opens the
+same two devices with `line::Wide`, and steps `Modem::varc_step` with the
+card's own frames; when the call ends it puts the two-wire line back. A SIP
+line refuses a V.ARC call.
+
+During a V.ARC call the waterfall and the spectrum are taken from the left
+channel at the card's own rate and drawn from 0 Hz to half of it (24 kHz on a
+48 kHz card, 96 kHz at 192 kHz), with the ticks in kilohertz. On every other
+call they stay at 0 to 4000 Hz. The oscilloscope and the level meter were
+built for the modem's 16 kHz and are still shown the left channel cut down to
+that without filtering, which shows that something is there and measures
+nothing.
+
 ## Measured
 
 All with `varc-link --loop`: two ends in one program, one sending on the left
@@ -170,6 +203,7 @@ octets" is against a known stream at the far end.
 
 | Path | Rate | Mode | SNR | Net rate each way | Wrong octets |
 |---|---|---|---|---|---|
+| Realtek, same lead, through the modem (`--modem`: `ATDLOOP`, both channels one way) | 192 kHz | DMT | 54 / 59 dB | 2146 kbit/s | 0 of 7.7 M |
 | VB-Cable A | 48 kHz | DMT | 80 dB | 400 / 399 kbit/s | 0 of 699 k |
 | VB-Cable A | 48 kHz | QAM | 70 / 80 dB | 240 / 232 kbit/s | 0 of 607 k |
 | VB-Cable A | 48 kHz | PCM | 62 / 76 dB | 122 / 83 kbit/s | 0 of 298 k |
@@ -224,8 +258,13 @@ Three faults that simulation with one clean wire each way did not show:
 - **SIP.** Offering L16 in SDP, a bit-exact tier (16 bits a sample at
   16 kHz, 256 kbit/s, with lost RTP packets as erasures) and fallback to
   G.711. The Reed-Solomon decoder already takes erasures for this.
-- **The modem.** No AT command, no window, no `CONNECT`. V.ARC runs only
-  from `varc-link`.
+- **Scopes for it.** The window has no constellation, SNR-by-carrier or bit
+  table display for V.ARC; `varc-link --csv` is the only way to see those.
+- **The window beyond a loop.** The window has run V.ARC/DMT calls to itself
+  (`ATDLOOP`) through VB-Cable A and through the Realtek lead. Choosing it
+  from the mode box rather than typing `AT+MS`, the QAM and PCM modes in the
+  window, and a file or PPP over it have not been tried. The headless tools
+  (`modem-sip`, `--answer`) do not know about V.ARC.
 - **Two machines.** Never run between two sound cards with separate clocks.
 - **44.1 kHz** for the single-carrier modes (they need a multiple of 48 kHz).
 - **Compression** on top.
@@ -237,8 +276,11 @@ varc-link --list
 varc-link --in "CABLE-A Output" --out "CABLE-A Input" --loop
 varc-link --in "Line In" --out "Speakers" --loop --mode qam --seconds 60
 varc-link --in "Line In" --out "Speakers" --oneway --csv snr.csv
+varc-link --in "Line In" --out "Speakers" --modem
 ```
 
+`--modem` drives the lead through a whole modem as the window does
+(`AT+MS=VARC`, `ATDLOOP`) and checks what comes back.
 `--loop` needs each output channel joined to the same input channel.
 `--oneway` sends on both channels and returns the tables and
 acknowledgements inside the program. `--csv` writes SNR and bits per carrier.

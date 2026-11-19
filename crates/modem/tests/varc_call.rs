@@ -86,6 +86,7 @@ fn a_call_is_placed_answered_used_and_put_down() {
     assert!(rate > 500_000, "{rate} bit/s");
     assert_eq!(pair.host.transmit_rate(), Some(rate));
     assert!(pair.caller.carrier());
+    assert!(pair.caller.error_controlled());
 
     pair.at_caller.clear();
     pair.at_host.clear();

@@ -441,6 +441,10 @@ pub struct Rx {
     gap_db: f64,
     /// Measure the line again as soon as the starting table is heard.
     remeasure: bool,
+    /// The signal to noise ratio over the band in use, in decibels, as of
+    /// the last symbol. Kept because it is asked for far more often than it
+    /// changes, and is a logarithm a carrier to work out.
+    mean_snr_db: f64,
 
     re: Vec<f64>,
     im: Vec<f64>,
@@ -504,6 +508,7 @@ impl Rx {
             proposal: None,
             gap_db: GAP_DB,
             remeasure: false,
+            mean_snr_db: 0.0,
             re: vec![0.0; plan.n],
             im: vec![0.0; plan.n],
             timing: 0.0,
@@ -848,6 +853,11 @@ impl Rx {
             self.h[k] = self.h[k] * (Complex::ONE + lean * rate);
         }
 
+        if self.stage == Stage::Steady {
+            let top = self.plan.top();
+            self.mean_snr_db = (1..=top).map(|k| self.snr_db(k)).sum::<f64>() / top as f64;
+        }
+
         // A second-order loop about a hertz wide: most of each error is
         // taken out at once, and a fiftieth of it changes the rate.
         self.interp.nudge(0.2 * late);
@@ -936,12 +946,11 @@ impl Receiver for Rx {
     }
 
     fn health(&self) -> Health {
-        let top = self.plan.top();
         let steady = self.stage == Stage::Steady;
         Health {
             locked: matches!(self.stage, Stage::Training | Stage::Steady),
             steady,
-            snr_db: if steady { (1..=top).map(|k| self.snr_db(k)).sum::<f64>() / top as f64 } else { 0.0 },
+            snr_db: if steady { self.mean_snr_db } else { 0.0 },
             clock_ppm: self.clock_ppm(),
         }
     }

@@ -1442,7 +1442,11 @@ impl Modem {
 
     /// Whether error control is running on the current call.
     pub fn error_controlled(&self) -> bool {
-        self.ec.as_ref().is_some_and(Stack::is_connected)
+        // A V.ARC call has no V.42 over it and does not want one: its own
+        // frames are checked and sent again underneath. What the terminal
+        // and the window want to know is whether octets can arrive wrong,
+        // and they cannot.
+        self.ec.as_ref().is_some_and(Stack::is_connected) || (self.varc.is_some() && self.rate > 0)
     }
 
     /// Everything the far end has said about itself, as label and value.
@@ -1872,9 +1876,16 @@ impl Modem {
     pub fn varc_step(&mut self, fs: f64, input: &[f64], output: &mut [f64]) {
         output.fill(0.0);
         let Some(call) = self.varc.as_mut() else { return };
-        if let Err(why) = call.step(fs, input, output) {
-            self.line_notes.push(why);
-            self.end_call(Ended::CarrierLost);
+        let look = match call.step(fs, input, output) {
+            Ok(look) => look,
+            Err(why) => {
+                self.line_notes.push(why);
+                self.end_call(Ended::CarrierLost);
+                return;
+            }
+        };
+        self.varc_owed_ms += 1000.0 / fs;
+        if !look {
             return;
         }
         let phase = call.phase();
@@ -1885,7 +1896,6 @@ impl Modem {
             self.line_notes.push(format!("{phase}{with}"));
         }
 
-        self.varc_owed_ms += 1000.0 / fs;
         if self.varc_owed_ms >= 1.0 {
             let whole = self.varc_owed_ms as u32;
             self.varc_owed_ms -= f64::from(whole);
