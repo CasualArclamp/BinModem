@@ -33,6 +33,8 @@ use datapump::v90;
 pub use datapump::v92::memo::Recognized;
 mod faxcall;
 pub mod memos;
+mod varc;
+pub use varc::VarcMode;
 
 pub use faxcall::FaxCall;
 
@@ -1025,6 +1027,13 @@ pub struct Modem {
     /// into the gap is queued, and the far end is not listening for it yet
     /// either.
     announce: Option<u32>,
+    /// A V.ARC call, which is none of the above: it has no pump at this
+    /// modem's rate and is stepped through [`Self::varc_step`].
+    varc: Option<varc::Call>,
+    /// Milliseconds of a V.ARC call not yet handed to [`Self::tick`].
+    varc_owed_ms: f64,
+    /// What a V.ARC call's line was last noted as doing.
+    varc_said: &'static str,
 }
 
 impl Modem {
@@ -1080,6 +1089,9 @@ impl Modem {
             declared_lapm: false,
             pcm_role: None,
             announce: None,
+            varc: None,
+            varc_owed_ms: 0.0,
+            varc_said: "",
         }
     }
 
@@ -1104,7 +1116,7 @@ impl Modem {
     /// ending a session it has already said goodbye to has no reason to wait
     /// for that, and nothing it sends after the goodbye would be data.
     pub fn hang_up(&mut self) {
-        if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() {
+        if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some() {
             self.end_call(Ended::LocalRequest);
         }
     }
@@ -1122,7 +1134,7 @@ impl Modem {
     /// carrier to lose -- the call ends in a BYE, somewhere above the samples
     /// -- so the thing that knows has to say so.
     pub fn carrier_lost(&mut self) {
-        if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() {
+        if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some() {
             self.end_call(Ended::CarrierLost);
         }
     }
@@ -1160,6 +1172,9 @@ impl Modem {
     }
 
     pub fn line_phase(&self) -> &'static str {
+        if let Some(call) = self.varc.as_ref() {
+            return call.phase();
+        }
         if let Some(fax) = self.fax.as_ref() {
             return fax.phase_name();
         }
@@ -1187,6 +1202,9 @@ impl Modem {
 
     /// Seconds since the call was placed.
     pub fn call_seconds(&self) -> f64 {
+        if let Some(call) = self.varc.as_ref() {
+            return call.seconds();
+        }
         self.call_samples as f64 / self.fs
     }
 
@@ -1328,6 +1346,9 @@ impl Modem {
 
     /// The modulation in use, or the one the next call will use.
     pub fn standard(&self) -> &'static str {
+        if let Some(mode) = self.varc_wanted().or_else(|| VarcMode::from_carrier(&self.at.modulation.carrier)) {
+            return mode.name();
+        }
         if let Some(fax) = self.fax.as_ref() {
             return fax.standard();
         }
@@ -1356,7 +1377,7 @@ impl Modem {
         // the far end picks up, and a front panel that showed the lamp out
         // until a pump existed would show it out for the loudest three seconds
         // of the call.
-        self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some()
+        self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some()
     }
 
     /// Whether the modem is a fax rather than a modem just now (V.250 6.1.10).
@@ -1370,7 +1391,7 @@ impl Modem {
 
     /// Whether the far end's carrier is present.
     pub fn carrier(&self) -> bool {
-        self.pump.as_ref().is_some_and(Pump::carrier)
+        self.pump.as_ref().is_some_and(Pump::carrier) || self.varc.as_ref().is_some_and(varc::Call::hearing)
     }
 
     /// Whether this end placed the call or took it.
@@ -1421,7 +1442,11 @@ impl Modem {
 
     /// Whether error control is running on the current call.
     pub fn error_controlled(&self) -> bool {
-        self.ec.as_ref().is_some_and(Stack::is_connected)
+        // A V.ARC call has no V.42 over it and does not want one: its own
+        // frames are checked and sent again underneath. What the terminal
+        // and the window want to know is whether octets can arrive wrong,
+        // and they cannot.
+        self.ec.as_ref().is_some_and(Stack::is_connected) || (self.varc.is_some() && self.rate > 0)
     }
 
     /// Everything the far end has said about itself, as label and value.
@@ -1772,6 +1797,10 @@ impl Modem {
 
     /// Advance the line by one sample, returning the sample to transmit.
     pub fn step(&mut self, line: f64) -> f64 {
+        if self.varc.is_some() {
+            // A V.ARC call is not on this line at all. See `varc_step`.
+            return 0.0;
+        }
         self.network_exact = false;
         self.elapsed_samples += 1.0;
         self.call_samples += 1;
@@ -1831,6 +1860,132 @@ impl Modem {
             State::Command => {}
         }
         out
+    }
+
+    /// The V.ARC modulation a call is being placed or carried with, if one
+    /// is: the sign that whatever owns the sound card should open it as it
+    /// is, both channels at its own rate, and step [`Self::varc_step`]
+    /// rather than [`Self::step`] until this says otherwise.
+    pub fn varc_wanted(&self) -> Option<VarcMode> {
+        self.varc.as_ref().map(|call| call.mode)
+    }
+
+    /// Tell a V.ARC call that its line carries samples exactly as sent: a
+    /// SIP call that agreed on linear PCM. It then starts with no
+    /// modulation at all, the samples being the data, and gives that up for
+    /// the multicarrier mode only if the line turns out not to be exact.
+    pub fn varc_exact_line(&mut self, exact: bool) {
+        if let Some(call) = self.varc.as_mut() {
+            call.exact_line(exact);
+        }
+    }
+
+    /// A V.ARC call has turned out to be on a line that cannot carry it: a
+    /// SIP call that was answered in G.711. The call is not thrown away.
+    /// It carries on as an ordinary one, from V.8, as the same end it was,
+    /// with V.92 and everything below it on offer; `+MS` is left saying so.
+    pub fn varc_fall_back(&mut self) {
+        if self.varc.is_none() {
+            return;
+        }
+        self.line_notes.push(
+            "V.ARC: the call is G.711, not linear samples; an ordinary call instead, from V.92 down".to_owned(),
+        );
+        let role = self.role;
+        self.varc = None;
+        self.at.modulation.carrier = "V92".to_owned();
+        self.at.modulation.automode = true;
+        self.at.modulation.min_rate = 0;
+        self.at.modulation.max_rate = 0;
+        let notes = std::mem::take(&mut self.line_notes);
+        self.place_call(role);
+        self.line_notes = notes;
+    }
+
+    /// One frame of a V.ARC call: a sample of each channel as the sound
+    /// card heard it, at the card's own rate `fs`, and a sample of each to
+    /// send. Silence out when there is no V.ARC call.
+    pub fn varc_step(&mut self, fs: f64, input: &[f64], output: &mut [f64]) {
+        output.fill(0.0);
+        let Some(call) = self.varc.as_mut() else { return };
+        let look = match call.step(fs, input, output) {
+            Ok(look) => look,
+            Err(why) => {
+                self.line_notes.push(why);
+                self.end_call(Ended::CarrierLost);
+                return;
+            }
+        };
+        self.varc_owed_ms += 1000.0 / fs;
+        if !look {
+            return;
+        }
+        if let Some(note) = call.take_note() {
+            self.line_notes.push(note);
+        }
+        let phase = call.phase();
+        if phase != self.varc_said {
+            self.varc_said = phase;
+            let snr: Vec<String> = call.snr_db().iter().filter(|s| **s > 0.0).map(|s| format!("{s:.1} dB")).collect();
+            let with = if snr.is_empty() { String::new() } else { format!(" ({})", snr.join(", ")) };
+            self.line_notes.push(format!("{phase}{with}"));
+        }
+
+        if self.varc_owed_ms >= 1.0 {
+            let whole = self.varc_owed_ms as u32;
+            self.varc_owed_ms -= f64::from(whole);
+            self.tick(whole);
+        }
+        let Some(call) = self.varc.as_mut() else { return };
+        match self.state {
+            State::Handshaking => {
+                if call.ready() {
+                    let (rx, tx) = call.rates();
+                    let (loaded, of) = call.channels();
+                    self.rate = rx;
+                    self.transmit_rate = tx;
+                    self.state = State::Data;
+                    self.escape.reset();
+                    self.line_notes.push(format!(
+                        "{}: {rx} bit/s arriving, {tx} going, on {loaded} of {of} channels",
+                        call.mode.name()
+                    ));
+                    // The rate, as every CONNECT here carries it, and what
+                    // kind of connection it is: nothing else in the result
+                    // says that this one is no Recommendation's.
+                    let code = if self.at.config.x == 0 {
+                        ResultCode::Connect
+                    } else {
+                        ResultCode::ConnectText(format!("{rx}/VARC"))
+                    };
+                    self.at.emit(code);
+                } else if self.since_dial_ms > VARC_WAIT_MS {
+                    self.end_call(Ended::NoAnswer);
+                }
+            }
+            State::Data | State::OnlineCommand => {
+                // Retransmission is the station's, so there is no V.42 over
+                // the top and the terminal's octets go as they are. Not
+                // without limit: what the terminal offers faster than the
+                // line carries is held here, where `queued` can see it.
+                if !self.outbound.is_empty() && call.pending() < VARC_BACKLOG {
+                    call.write(&self.outbound);
+                    self.outbound.clear();
+                }
+                self.recovered.extend(call.read());
+                // The tables are remade when the line changes, and the
+                // rates with them.
+                let (rx, tx) = call.rates();
+                if rx > 0 && tx > 0 {
+                    self.rate = rx;
+                    self.transmit_rate = tx;
+                }
+                if call.deaf_seconds() > VARC_DEAF_SECONDS {
+                    self.end_call(Ended::CarrierLost);
+                }
+            }
+            State::Command => {}
+        }
     }
 
     /// Time passing, which drives the escape guard and V.42's timers.
@@ -2617,7 +2772,7 @@ impl Modem {
                     self.place_call(Role::Answering);
                 }
                 Action::HangUp => {
-                    if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() {
+                    if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some() {
                         self.drop_call();
                     }
                 }
@@ -2637,7 +2792,7 @@ impl Modem {
                     // so nothing from before it survives. Anything on the
                     // line goes, because a fax call and a data call have no
                     // state in common to carry across.
-                    if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() {
+                    if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some() {
                         self.drop_call();
                     }
                 }
@@ -2646,7 +2801,7 @@ impl Modem {
                 Action::SelectModulation(_) | Action::SelectCompression(_) | Action::SelectV44(_) => {}
                 Action::SelectErrorControl(e) => self.want_error_control = e.wanted(),
                 Action::ResetProfile(_) | Action::FactoryDefaults(_) => {
-                    if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() {
+                    if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some() {
                         self.drop_call();
                     }
                 }
@@ -2656,6 +2811,36 @@ impl Modem {
 
     fn place_call(&mut self, role: Role) {
         self.role = role;
+        self.varc = None;
+        if let Some(mode) = VarcMode::from_carrier(&self.at.modulation.carrier)
+            && self.at.service_class != at::ServiceClass::Fax
+        {
+            // No V.8 and no tones: the far end is another of these or it is
+            // nothing. A number with LOOP in it is a lead that comes
+            // straight back to this machine.
+            let looped = role == Role::Calling
+                && self.dialled.as_ref().is_some_and(|n| n.to_ascii_uppercase().contains("LOOP"));
+            self.since_dial_ms = 0;
+            self.call_samples = 0;
+            self.line_notes.clear();
+            self.rate = 0;
+            self.transmit_rate = 0;
+            self.ec = None;
+            self.pump = None;
+            self.negotiation = None;
+            self.bis = None;
+            self.announce = None;
+            self.far_menu = None;
+            self.v34_report = None;
+            self.far_ec.clear();
+            self.recovered.clear();
+            self.outbound.clear();
+            self.varc_owed_ms = 0.0;
+            self.varc_said = "";
+            self.state = State::Handshaking;
+            self.varc = Some(varc::Call::new(mode, role, looped));
+            return;
+        }
         // A fax call goes nowhere near any of this. There is no modulation to
         // select, nothing to negotiate, and V.8 in particular must not run:
         // a group 3 fax has never heard of it, and answers the 2100 Hz tone
@@ -3291,6 +3476,7 @@ impl Modem {
             memos.forget(number);
         }
         self.pump = None;
+        self.varc = None;
         self.negotiation = None;
         self.bis = None;
         self.rate = 0;
@@ -3304,6 +3490,16 @@ impl Modem {
         self.state = State::Command;
     }
 }
+
+/// How long a V.ARC call waits to hear another end before giving up.
+const VARC_WAIT_MS: u32 = 60_000;
+
+/// How long a V.ARC call that was up may hear nothing before it is over.
+const VARC_DEAF_SECONDS: f64 = 5.0;
+
+/// Octets a V.ARC call will hold unacknowledged before it stops taking more
+/// from the terminal.
+const VARC_BACKLOG: usize = 256 * 1024;
 
 /// Scale a recording so that it fits, and report what it was scaled by.
 ///

@@ -268,22 +268,44 @@ fn run(
         if from_line.is_empty() {
             std::thread::sleep(Duration::from_millis(2));
         } else {
-            // A digital modem reads the network's own levels (it ignores them
-            // otherwise).
-            let levels: Vec<f64> = from_network.iter().map(|l| f64::from(*l)).collect();
-            modem.give_network_levels(&levels);
-            to_line.clear();
-            for &s in &from_line {
-                to_line.push(modem.step(f64::from(s)) as f32);
+            // A V.ARC call wants a call that carries linear samples. On
+            // one, the network's own samples are the modem's line and what
+            // it says goes back untouched; on any other it is an ordinary
+            // call after all.
+            if modem.varc_wanted().is_some() && !line.linear() {
+                modem.varc_fall_back();
             }
-            // A digital modem's codewords go as they are; everything else
-            // is a waveform and goes through the rate conversion.
-            match modem.take_network_levels() {
-                Some(levels) => {
-                    let levels: Vec<f32> = levels.iter().map(|l| *l as f32).collect();
-                    line.transmit_exact(&levels);
+            let levels: Vec<f64> = from_network.iter().map(|l| f64::from(*l)).collect();
+            to_line.clear();
+            if modem.varc_wanted().is_some() {
+                modem.varc_exact_line(true);
+                let mut exact: Vec<f32> = Vec::with_capacity(levels.len());
+                for &level in &levels {
+                    let mut out = [0.0];
+                    modem.varc_step(sip::media::LINEAR_RATE, &[level], &mut out);
+                    exact.push(out[0] as f32);
                 }
-                None => line.transmit(&to_line),
+                to_line.extend_from_slice(&exact);
+                line.transmit_exact(&exact);
+                for text in modem.take_line_notes() {
+                    note(&text);
+                }
+            } else {
+                // A digital modem reads the network's own levels (it ignores
+                // them otherwise).
+                modem.give_network_levels(&levels);
+                for &s in &from_line {
+                    to_line.push(modem.step(f64::from(s)) as f32);
+                }
+                // A digital modem's codewords go as they are; everything else
+                // is a waveform and goes through the rate conversion.
+                match modem.take_network_levels() {
+                    Some(levels) => {
+                        let levels: Vec<f32> = levels.iter().map(|l| *l as f32).collect();
+                        line.transmit_exact(&levels);
+                    }
+                    None => line.transmit(&to_line),
+                }
             }
             if record.is_some() {
                 for (heard, sent) in from_line.iter().zip(to_line.iter()) {
@@ -332,7 +354,13 @@ fn run(
             let detail = match modem.rate() {
                 Some(r) => format!(
                     ", {r} bit/s, {}{}{}{}",
-                    if modem.error_controlled() { "V.42" } else { "no error control" },
+                    if modem.varc_wanted().is_some() {
+                        "its own retransmission"
+                    } else if modem.error_controlled() {
+                        "V.42"
+                    } else {
+                        "no error control"
+                    },
                     if modem.compressing() { " with compression" } else { "" },
                     if modem.quick_connected().is_some() { ", short phase 1" } else { "" },
                     if modem.short_phase2() { ", short phase 2" } else { "" }

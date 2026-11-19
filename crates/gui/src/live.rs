@@ -55,6 +55,10 @@ enum Wire {
     Audio(Box<line::Duplex>),
     /// A call over the network, with no sound card anywhere in it.
     Sip(Box<sip::Line>),
+    /// The same two audio devices as they are, both channels at their own
+    /// rate, for as long as a V.ARC call wants them that way. The names are
+    /// kept to put the two-wire line back afterwards.
+    Wide { line: Box<line::Wide>, input: String, output: String },
 }
 
 impl Wire {
@@ -62,6 +66,8 @@ impl Wire {
         match self {
             Self::Audio(line) => line.receive(into),
             Self::Sip(line) => line.receive(into),
+            // Stepped a frame at a time at its own rate, by its own path.
+            Self::Wide { .. } => {}
         }
     }
 
@@ -69,6 +75,7 @@ impl Wire {
         match self {
             Self::Audio(line) => line.transmit(samples),
             Self::Sip(line) => line.transmit(samples),
+            Self::Wide { .. } => {}
         }
     }
 
@@ -79,6 +86,7 @@ impl Wire {
         match self {
             Self::Audio(line) => line.dropped_in(),
             Self::Sip(line) => line.stats().jitter.overflowed,
+            Self::Wide { line, .. } => line.dropped_in(),
         }
     }
 
@@ -88,13 +96,21 @@ impl Wire {
         match self {
             Self::Audio(line) => line.underruns(),
             Self::Sip(line) => line.stats().underruns,
+            Self::Wide { line, .. } => line.underruns(),
         }
     }
 
     fn sip(&self) -> Option<&sip::Line> {
         match self {
             Self::Sip(line) => Some(line),
-            Self::Audio(_) => None,
+            Self::Audio(_) | Self::Wide { .. } => None,
+        }
+    }
+
+    fn wide(&self) -> Option<&line::Wide> {
+        match self {
+            Self::Wide { line, .. } => Some(line),
+            Self::Audio(_) | Self::Sip(_) => None,
         }
     }
 }
@@ -1077,6 +1093,15 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     let mut from_line: Vec<f32> = Vec::with_capacity(4096);
     let mut from_network: Vec<f32> = Vec::with_capacity(2048);
     let mut to_line: Vec<f32> = Vec::with_capacity(4096);
+    // A V.ARC call's frames, at the sound card's own rate, and what of them
+    // the scopes are shown at the modem's.
+    let mut wide_heard: Vec<f32> = Vec::with_capacity(16_384);
+    let mut wide_send: Vec<f32> = Vec::with_capacity(16_384);
+    let mut wide_sent: Vec<f32> = Vec::with_capacity(4096);
+    let mut wide_owed = 0.0f64;
+    // The spectrum of a V.ARC call, taken at the card's rate so that the
+    // waterfall can show the whole of the band the call is using.
+    let mut wide_spectrum: Option<(u32, Spectrum)> = None;
     let mut rx_bytes = 0u64;
     let mut tx_bytes = 0u64;
     // What arrived and what was sent, interleaved, so the two stay lined up
@@ -1583,6 +1608,53 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             }
         }
 
+        // V.ARC wants the sound card as it is: both channels, at its own
+        // rate, with no conversion in the way. So for as long as the modem
+        // has a V.ARC call the two-wire line is put away and the same two
+        // devices are opened wide, and when the call is over they go back.
+        // The call is the modem's to end; the line only follows.
+        //
+        // A SIP line is left as it is. What a V.ARC call wants of one is
+        // settled when the call is answered, and is dealt with where the
+        // samples are; see below.
+        match (audio.as_ref(), modem.varc_wanted()) {
+            (Some(Wire::Audio(two_wire)), Some(mode)) => {
+                let (input, output) = (two_wire.input_device.clone(), two_wire.output_device.clone());
+                // The old streams have to stop before new ones open on the
+                // same devices.
+                drop(audio.take());
+                match line::Wide::open(Some(&input), Some(&output)) {
+                    Ok(wide) => {
+                        tx.log(
+                            Direction::Note,
+                            format!(
+                                "{}: the sound card as it is, {} Hz, {} channels in and {} out",
+                                mode.name(),
+                                wide.rate,
+                                wide.input_channels,
+                                wide.output_channels
+                            ),
+                        );
+                        audio = Some(Wire::Wide { line: Box::new(wide), input, output });
+                    }
+                    Err(e) => {
+                        tx.log(Direction::Note, format!("{}: could not open the sound card for it: {e}", mode.name()));
+                        modem.carrier_lost();
+                        audio = line::Duplex::open(Some(&input), Some(&output), FS).ok().map(|l| Wire::Audio(Box::new(l)));
+                    }
+                }
+            }
+            (Some(Wire::Wide { input, output, .. }), None) => {
+                let (input, output) = (input.clone(), output.clone());
+                drop(audio.take());
+                match line::Duplex::open(Some(&input), Some(&output), FS) {
+                    Ok(two_wire) => audio = Some(Wire::Audio(Box::new(two_wire))),
+                    Err(e) => tx.log(Direction::Note, format!("could not reopen the line: {e}")),
+                }
+            }
+            _ => {}
+        }
+
         let Some(audio) = audio.as_ref() else {
             drain_dte(
             &mut modem,
@@ -1693,9 +1765,47 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         from_network.clear();
         // A SIP line also says what arrived at the network's own rate, which
         // is what a digital modem's receiver reads (it ignores it otherwise).
-        match audio.sip() {
-            Some(sip) => sip.receive_both(&mut from_line, &mut from_network),
-            None => audio.receive(&mut from_line),
+        let on_wide = audio.wide().is_some();
+        if let Some(wide) = audio.wide() {
+            // A V.ARC call: every frame the card heard goes to the modem as
+            // it is and what comes back goes out as it is. The spectrum and
+            // the waterfall are taken from the left channel at the card's
+            // own rate and drawn out to half of it. The oscilloscope and the
+            // level meter were built for the modem's rate and are shown the
+            // left channel cut down to it -- every third sample of a 48 kHz
+            // card -- which says something is there and measures nothing.
+            if wide_spectrum.as_ref().map(|(rate, _)| *rate) != Some(wide.rate) {
+                wide_spectrum = Some((wide.rate, Spectrum::new(FFT_SIZE, f64::from(wide.rate))));
+            }
+            wide_heard.clear();
+            wide_send.clear();
+            wide_sent.clear();
+            wide.receive(&mut wide_heard);
+            let rate = f64::from(wide.rate);
+            for frame in wide_heard.as_chunks::<2>().0 {
+                let mut out = [0.0f64; 2];
+                modem.varc_step(rate, &[f64::from(frame[0]), f64::from(frame[1])], &mut out);
+                wide_send.push(out[0] as f32);
+                wide_send.push(out[1] as f32);
+                if let Some((_, spectrum)) = wide_spectrum.as_mut() {
+                    spectrum.push(f64::from(frame[0]));
+                }
+                wide_owed += FS;
+                if wide_owed >= rate {
+                    wide_owed -= rate;
+                    from_line.push(frame[0]);
+                    wide_sent.push(out[0] as f32);
+                }
+            }
+            wide.transmit(&wide_send);
+            for text in modem.take_line_notes() {
+                noted.push((0, modem.call_seconds(), text));
+            }
+        } else {
+            match audio.sip() {
+                Some(sip) => sip.receive_both(&mut from_line, &mut from_network),
+                None => audio.receive(&mut from_line),
+            }
         }
         if from_line.is_empty() {
             // Nothing has arrived, so nothing can be stepped: the line is the
@@ -1764,9 +1874,37 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
 
         last_audio = Instant::now();
         to_line.clear();
+        if on_wide {
+            to_line.extend_from_slice(&wide_sent);
+        }
         if !from_network.is_empty() {
             let levels: Vec<f64> = from_network.iter().map(|l| f64::from(*l)).collect();
             modem.give_network_levels(&levels);
+        }
+        // A V.ARC call on a SIP line. If the call agreed on linear samples
+        // the network's own samples are the modem's line, one for one, and
+        // what it says goes back as it is. If the far end answered in G.711
+        // there is nothing for V.ARC to run on, and the call carries on as
+        // an ordinary one.
+        let mut exact_sent: Option<Vec<f32>> = None;
+        if let Some(sip) = audio.sip()
+            && modem.varc_wanted().is_some()
+        {
+            if sip.linear() {
+                modem.varc_exact_line(true);
+                let mut exact = Vec::with_capacity(from_network.len());
+                for &level in &from_network {
+                    let mut out = [0.0f64];
+                    modem.varc_step(sip::media::LINEAR_RATE, &[f64::from(level)], &mut out);
+                    exact.push(out[0] as f32);
+                }
+                for text in modem.take_line_notes() {
+                    noted.push((0, modem.call_seconds(), text));
+                }
+                exact_sent = Some(exact);
+            } else {
+                modem.varc_fall_back();
+            }
         }
         let drive = session.drive();
         // The PCM scope is every sample against the next, and a dense grid
@@ -1778,7 +1916,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             // only turns them back into the same ones at the level they left:
             // no drive of any other size will do.
             let drive = if modem.exact_levels() { 1.0 } else { drive };
-            to_line.push(modem.step(heard) as f32 * drive);
+            if !on_wide {
+                to_line.push(modem.step(heard) as f32 * drive);
+            }
             for text in modem.take_line_notes() {
                 noted.push((n, modem.call_seconds(), text));
             }
@@ -1811,12 +1951,19 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         }
         // On a SIP line a digital modem's codewords go as they are, with no
         // rate conversion to blur them; see `Modem::take_network_levels`.
-        match (audio.sip(), modem.take_network_levels()) {
-            (Some(sip), Some(levels)) => {
-                let levels: Vec<f32> = levels.iter().map(|l| *l as f32).collect();
-                sip.transmit_exact(&levels);
+        if let (Some(sip), Some(exact)) = (audio.sip(), exact_sent.as_ref()) {
+            // V.ARC's samples are the data: nothing may touch them.
+            to_line.clear();
+            to_line.extend_from_slice(exact);
+            sip.transmit_exact(exact);
+        } else {
+            match (audio.sip(), modem.take_network_levels()) {
+                (Some(sip), Some(levels)) => {
+                    let levels: Vec<f32> = levels.iter().map(|l| *l as f32).collect();
+                    sip.transmit_exact(&levels);
+                }
+                _ => audio.transmit(&to_line),
             }
-            _ => audio.transmit(&to_line),
         }
         owed_ms += from_line.len() as f64 / FS * 1000.0;
 
@@ -2003,8 +2150,20 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
 
         if Instant::now() >= next_publish {
             next_publish = Instant::now() + publish_every;
-            if spectrum.ready() {
-                spectrum.magnitudes_db(&mut bins);
+            // On a V.ARC call the spectrum is the card's, out to half its
+            // rate; otherwise a telephone channel's, out to 4 kHz.
+            let wide_rate = audio.wide().map(|w| f64::from(w.rate));
+            match (wide_rate, wide_spectrum.as_mut()) {
+                (Some(_), Some((_, wide))) => {
+                    if wide.ready() {
+                        wide.magnitudes_db(&mut bins);
+                    }
+                }
+                _ => {
+                    if spectrum.ready() {
+                        spectrum.magnitudes_db(&mut bins);
+                    }
+                }
             }
             let level = {
                 let n = waveform.data.len().max(1);
@@ -2022,7 +2181,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 for (slot, &v) in f.spectrum_db.iter_mut().zip(bins.iter()) {
                     *slot = v as f32;
                 }
-                f.hz_per_bin = FS / FFT_SIZE as f64;
+                f.hz_per_bin = wide_rate.unwrap_or(FS) / FFT_SIZE as f64;
+                // A V.ARC call on a SIP line fills the call's whole 8 kHz.
+                let narrow = if modem.varc_wanted().is_some() { FS / 2.0 } else { crate::scopes::DISPLAY_HZ };
+                f.display_hz = wide_rate.map_or(narrow, |rate| rate / 2.0);
                 f.rx_level_db = (20.0 * (level + 1e-9).log10()) as f32;
                 f.carrier = modem.carrier();
                 f.state = call_state(state, modem.off_hook());

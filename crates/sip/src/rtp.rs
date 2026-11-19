@@ -199,6 +199,13 @@ impl Stream {
     /// minutes at 20 ms -- and a timestamp every six hours or so. A call runs
     /// straight through both.
     pub fn next(&mut self, payload: &[u8], marker: bool, out: &mut Vec<u8>) {
+        self.next_of(payload, marker, payload.len() as u32, out);
+    }
+
+    /// [`Self::next`] for a coding that is not an octet a sample: the
+    /// timestamp counts samples (RFC 3550 5.1), and `samples` is how many
+    /// this payload holds. L16 has two octets to each.
+    pub fn next_of(&mut self, payload: &[u8], marker: bool, samples: u32, out: &mut Vec<u8>) {
         let packet = Packet {
             payload_type: self.payload_type,
             marker,
@@ -212,7 +219,7 @@ impl Stream {
         };
         packet.write(out);
         self.sequence = self.sequence.wrapping_add(1);
-        self.timestamp = self.timestamp.wrapping_add(payload.len() as u32);
+        self.timestamp = self.timestamp.wrapping_add(samples);
         self.packets += 1;
         self.octets += payload.len() as u64;
     }

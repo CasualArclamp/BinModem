@@ -1593,6 +1593,7 @@ dependencies = [
  "sip",
  "transfer",
  "v8",
+ "varc",
 ]
 
 [[package]]
@@ -2926,6 +2927,14 @@ name = "v8"
 version = "4.2.0"
 dependencies = [
  "dsp",
+]
+
+[[package]]
+name = "varc"
+version = "4.2.0"
+dependencies = [
+ "dsp",
+ "ec",
 ]
 
 [[package]]

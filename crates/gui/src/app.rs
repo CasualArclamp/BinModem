@@ -202,6 +202,9 @@ impl Modulation {
             // the same 2400 baud.
             3 => &[4800, 7200, 9600, 12_000, 14_400],
             6 => &[300],
+            // V.ARC has no rates to choose among: each end loads the line
+            // for what it measures, and nought is how +MS says "unspecified".
+            8..=10 => &[0],
             // V.34 5.1: "2400 bit/s to 33 600 bit/s in multiples of 2400".
             _ => &[
                 2400, 4800, 7200, 9600, 12_000, 14_400, 16_800, 19_200, 21_600, 24_000, 26_400,
@@ -783,7 +786,7 @@ impl ScopeApp {
     ///
     /// Positions are what the rate lists, the ceilings and the default go by,
     /// so a new one goes on the end rather than where it might read best.
-    const CARRIERS: [(&'static str, &'static str); 8] = [
+    const CARRIERS: [(&'static str, &'static str); 11] = [
         ("B103", "Bell 103 - 300 bit/s"),
         ("V22B", "V.22bis - 1200 or 2400"),
         ("V32", "V.32 - 4800 or 9600"),
@@ -801,6 +804,12 @@ impl ScopeApp {
             "V92",
             "V.92 - V.90's 56000 with V.92's own start-up. A server that is no V.92 server gets V.90",
         ),
+        (
+            "VARC",
+            "V.ARC - our own, for a sound card wired to another of these by a stereo lead and not for a telephone line. Hundreds of carriers, each loaded for what the lead measures",
+        ),
+        ("VARCQ", "V.ARC/QAM - the same lead with one carrier at 16000 baud"),
+        ("VARCP", "V.ARC/PCM - the same lead with levels at baseband, 16000 baud"),
     ];
 
     /// Boards to start from, because a text box on its own is a box nobody
@@ -2596,6 +2605,10 @@ impl ScopeApp {
                             // slow connection, it is an error, and V.250 5.4.2
                             // says a modem should refuse it.
                             let rates = Modulation::rates(self.carrier);
+                            if rates == [0] {
+                                ui.label(RichText::new("whatever the lead measures").color(dim));
+                                return;
+                            }
                             let before =
                                 (self.modulation.min_rate, self.modulation.max_rate);
                             ui.label(RichText::new("from").color(dim));
@@ -2625,7 +2638,15 @@ impl ScopeApp {
                 let rates = Modulation::rates(self.carrier);
                 let top = rates[rates.len() - 1];
                 ui.add_space(4.0);
-                if self.modulation.max_rate < top {
+                if top == 0 {
+                    ui.label(
+                        RichText::new(
+                            "V.ARC is for a stereo lead between two sound cards: line out to the far end's line in, each way. Dial anything to call and answer at the other end, or dial LOOP on a lead that comes straight back. It will not work down a telephone line or a SIP call.",
+                        )
+                        .small()
+                        .color(dim),
+                    );
+                } else if self.modulation.max_rate < top {
                     ui.label(
                         RichText::new(format!(
                             "Held to {}. On a line that cannot carry {top}, that is not the slower connection -- it is the one that works.",
@@ -3435,7 +3456,7 @@ impl ScopeApp {
     /// rate menu in it, the retrain, the waterfall and the spectrum.
     fn scopes_pane(&mut self, ui: &mut egui::Ui) {
         const CARD_W: f32 = 420.0;
-        let measured = scopes::measure(&self.frame.spectrum_db, self.frame.hz_per_bin);
+        let measured = scopes::measure(&self.frame.spectrum_db, self.frame.hz_per_bin, self.frame.display_hz);
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 ui.set_width(CARD_W);
@@ -3464,7 +3485,8 @@ impl ScopeApp {
                     ui,
                     "waterfall",
                     format!(
-                        "0 - 4000 Hz · newest at the top · {:.0} s deep · {:.0} rows a second",
+                        "0 - {:.0} Hz · newest at the top · {:.0} s deep · {:.0} rows a second",
+                        self.frame.display_hz,
                         WATERFALL_H as f32 * self.row_secs,
                         1.0 / self.row_secs
                     ),
@@ -3488,6 +3510,7 @@ impl ScopeApp {
                         bins: &self.frame.spectrum_db,
                         hold: &self.hold,
                         hz_per_bin: self.frame.hz_per_bin,
+                        span_hz: self.frame.display_hz,
                         floor: self.waterfall.floor_db,
                         ceiling: self.waterfall.ceiling_db,
                         modulation: self.frame.modulation,
@@ -3836,7 +3859,7 @@ impl ScopeApp {
         if self.rx.read(&mut self.frame) && self.frame.seq != self.last_seq {
             self.last_seq = self.frame.seq;
             self.waterfall
-                .push_row(&self.frame.spectrum_db, self.frame.hz_per_bin);
+                .push_row(&self.frame.spectrum_db, self.frame.hz_per_bin, self.frame.display_hz);
             // A row's length, smoothed; a gap of a second is a pause, not a
             // slow row.
             let now = std::time::Instant::now();
@@ -3989,7 +4012,7 @@ impl ScopeApp {
     /// A modulation and nothing else. The rate is the modem's to find: every
     /// one of these settles on the fastest the line will carry, and a ceiling
     /// set on purpose is in the Advanced window with the rest of AT+MS.
-    const MODES: [(usize, &'static str); 8] = [
+    const MODES: [(usize, &'static str); 11] = [
         (7, "V.92"),
         (5, "V.90"),
         (4, "V.34"),
@@ -3998,6 +4021,10 @@ impl ScopeApp {
         (1, "V.22bis"),
         (6, "V.21"),
         (0, "Bell 103"),
+        // Not slower than the rest: not for the same kind of line at all.
+        (8, "V.ARC"),
+        (9, "V.ARC/QAM"),
+        (10, "V.ARC/PCM"),
     ];
 
     /// How fast at most, and the three things that are simply on or off.
@@ -5652,7 +5679,15 @@ mod modulation_tests {
         // V.92's are V.90's: the same V.34 upstream unless PCM upstream is on.
         assert_eq!(ScopeApp::CARRIERS[7].0, "V92");
         assert_eq!(Modulation::rates(7), Modulation::rates(4));
-        assert_eq!(ScopeApp::CARRIERS.len(), 8);
+        // V.ARC's three have no rate to ask for.
+        for (i, name) in [(8, "VARC"), (9, "VARCQ"), (10, "VARCP")] {
+            assert_eq!(ScopeApp::CARRIERS[i].0, name);
+            assert_eq!(Modulation::rates(i), &[0]);
+            let mut m = Modulation { min_rate: 9600, max_rate: 33_600, ..Modulation::default() };
+            m.fit(i);
+            assert_eq!(m.command(name), format!("AT+MS={name},1"));
+        }
+        assert_eq!(ScopeApp::CARRIERS.len(), 11);
     }
 
     /// The two V.32 carriers are two ceilings on one modulation, and the
