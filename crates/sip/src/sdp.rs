@@ -382,7 +382,13 @@ impl fmt::Display for Sdp {
 /// What the two ends agreed to, in the terms the rest of the crate needs.
 #[derive(Debug, Clone)]
 pub struct Negotiated {
+    /// The companding law, when the call is G.711. When [`Self::linear`] is
+    /// set there is none and this is not to be believed.
     pub law: Law,
+    /// The call is not G.711 at all but L16 at 16 kHz: sixteen-bit linear
+    /// samples, two octets each, exactly as sent (RFC 3551 4.5.11). Only
+    /// ever agreed between two of these, for V.ARC; see [`offer_with`].
+    pub linear: bool,
     /// The payload type number the far end used. It is 0 or 8 in every case
     /// anyone has seen, but it is read off the description rather than derived
     /// from the law, because a far end that numbers G.711 unusually is doing
@@ -414,6 +420,33 @@ pub struct Negotiated {
 /// offer has no telephone-event in it, and a call placed with events we then
 /// ignore is better than no call. Offering it does not mean sending it.
 pub fn offer(address: &str, port: u16, laws: &[Law], ptime_ms: u32, dtmf: Option<u8>) -> String {
+    offer_with(address, port, laws, false, ptime_ms, dtmf)
+}
+
+/// The payload type L16 is offered as. It has no static one at 16 kHz, so it
+/// is a dynamic number, and the first of them will do.
+pub const LINEAR_PAYLOAD_TYPE: u8 = 96;
+
+/// The clock rate L16 is offered at.
+pub const LINEAR_RATE: u32 = 16_000;
+
+/// [`offer`], with L16 at 16 kHz in front of G.711 when `linear` is set.
+///
+/// G.711 is the only coding a telephone network leaves a modem signal
+/// intact through, which is why it is all this agent ever offered. Linear
+/// PCM is the one other coding with that property, and it has it more
+/// thoroughly: every sample arrives as the sixteen bits that were sent, so
+/// the samples can simply *be* the data. No trunk carries it and no
+/// provider will answer with it. Another of these will, and G.711 is still
+/// in the offer behind it for everything else.
+pub fn offer_with(
+    address: &str,
+    port: u16,
+    laws: &[Law],
+    linear: bool,
+    ptime_ms: u32,
+    dtmf: Option<u8>,
+) -> String {
     // A caller that asks for no law at all gets both, mu-law first, rather
     // than an m= line with an empty format list -- which is malformed, and
     // which a far end would answer with a 488 rather than a question.
@@ -429,6 +462,10 @@ pub fn offer(address: &str, port: u16, laws: &[Law], ptime_ms: u32, dtmf: Option
 
     let mut formats: Vec<String> = chosen.iter().map(|l| l.payload_type().to_string()).collect();
     let mut attributes: Vec<(String, Option<String>)> = Vec::new();
+    if linear {
+        formats.insert(0, LINEAR_PAYLOAD_TYPE.to_string());
+        attributes.push(("rtpmap".to_owned(), Some(format!("{LINEAR_PAYLOAD_TYPE} L16/{LINEAR_RATE}"))));
+    }
     for law in &chosen {
         // RFC 3551 3 makes an rtpmap for a static number redundant. It is
         // written anyway because far ends exist that look at rtpmap first and
@@ -487,6 +524,18 @@ pub fn answer(
     acceptable: &[Law],
     ptime_ms: u32,
 ) -> Result<(String, Negotiated), String> {
+    answer_with(offer, address, port, acceptable, false, ptime_ms)
+}
+
+/// [`answer`], taking L16 at 16 kHz when it is offered and `linear` is set.
+pub fn answer_with(
+    offer: &Sdp,
+    address: &str,
+    port: u16,
+    acceptable: &[Law],
+    linear: bool,
+    ptime_ms: u32,
+) -> Result<(String, Negotiated), String> {
     let Some(media) = offer.audio() else {
         if wants_t38(offer) {
             // Where the T.38 answer would eventually be built. It would be an
@@ -527,8 +576,16 @@ pub fn answer(
     // 37 dB of noise on the Crazytel trunk. Among two laws that are both
     // lossless codeword paths, matching the far end is worth more than our
     // own preference.
+    // The offerer's order is its preference (RFC 3264 6.1), and the first
+    // format this end can carry is the one taken.
     let mut law = None;
+    let mut is_linear = false;
     for format in &media.formats {
+        if linear && let Some(pt) = linear_of(media, format) {
+            law = Some((Law::Mu, pt));
+            is_linear = true;
+            break;
+        }
         if let Some(found) = law_of(media, format)
             && acceptable.contains(&found)
             && let Ok(pt) = format.trim().parse::<u8>()
@@ -549,10 +606,8 @@ pub fn answer(
     let direction = direction_of(offer, media, far_address).flipped();
 
     let mut formats = vec![payload_type.to_string()];
-    let mut attributes = vec![(
-        "rtpmap".to_owned(),
-        Some(format!("{payload_type} {}/8000", law.encoding_name())),
-    )];
+    let coding = if is_linear { format!("L16/{LINEAR_RATE}") } else { format!("{}/8000", law.encoding_name()) };
+    let mut attributes = vec![("rtpmap".to_owned(), Some(format!("{payload_type} {coding}")))];
     // RFC 3264 6.1: an answer may only contain payload types the offer had.
     // Telephone-event is mirrored when offered because refusing it makes some
     // trunks drop the call, and because an event we did not agree to still
@@ -590,6 +645,7 @@ pub fn answer(
         body,
         Negotiated {
             law,
+            linear: is_linear,
             payload_type,
             address: far_address.to_owned(),
             port: media.port,
@@ -607,6 +663,11 @@ pub fn answer(
 /// did not read the offer or a media gateway that substituted its own idea of
 /// a codec, and neither can be talked round.
 pub fn read_answer(answer: &Sdp, offered: &[Law]) -> Result<Negotiated, String> {
+    read_answer_with(answer, offered, false)
+}
+
+/// [`read_answer`], for an offer that had L16 in it when `linear` is set.
+pub fn read_answer_with(answer: &Sdp, offered: &[Law], linear: bool) -> Result<Negotiated, String> {
     let Some(media) = answer.audio() else {
         if wants_t38(answer) {
             return Err(
@@ -639,7 +700,13 @@ pub fn read_answer(answer: &Sdp, offered: &[Law]) -> Result<Negotiated, String> 
     // commonly one of them, so the list is walked rather than assumed to have
     // one entry. The first entry that is a law we offered is the agreement.
     let mut chosen = None;
+    let mut is_linear = false;
     for format in &media.formats {
+        if linear && let Some(pt) = linear_of(media, format) {
+            chosen = Some((Law::Mu, pt));
+            is_linear = true;
+            break;
+        }
         if let Some(law) = law_of(media, format)
             && offered.contains(&law)
             && let Ok(pt) = format.trim().parse::<u8>()
@@ -659,6 +726,7 @@ pub fn read_answer(answer: &Sdp, offered: &[Law]) -> Result<Negotiated, String> 
 
     Ok(Negotiated {
         law,
+        linear: is_linear,
         payload_type,
         address: address.to_owned(),
         port: media.port,
@@ -775,6 +843,22 @@ fn law_of(media: &MediaLine, format: &str) -> Option<Law> {
     } else {
         None
     }
+}
+
+/// The payload type of a format that is L16 at 16 kHz on one channel, if
+/// that is what the format is.
+///
+/// Only ever by its `a=rtpmap`: the static table has L16 at 44.1 kHz and
+/// nothing else, so a number alone never means this. A channel count that
+/// is given has to be one.
+fn linear_of(media: &MediaLine, format: &str) -> Option<u8> {
+    let payload_type: u8 = format.trim().parse().ok()?;
+    let map = media.rtpmap(payload_type)?;
+    let mut fields = map.split('/');
+    let name = fields.next()?.trim();
+    let rate = fields.next()?.trim();
+    let channels = fields.next().map_or("1", str::trim);
+    (name.eq_ignore_ascii_case("L16") && rate == LINEAR_RATE.to_string() && channels == "1").then_some(payload_type)
 }
 
 /// The payload type an RFC 4733 telephone-event was given, if there is one.
@@ -1009,6 +1093,58 @@ mod tests {
         assert!(body.contains("m=audio 40000 RTP/AVP 0 101\r\n"));
         assert!(body.contains("a=rtpmap:0 PCMU/8000\r\n"));
         assert!(!body.contains("PCMA"));
+    }
+
+    #[test]
+    fn linear_is_offered_first_taken_by_one_of_these_and_passed_over_by_a_trunk() {
+        let body = offer_with("192.0.2.1", 4000, &[Law::Mu, Law::A], true, 20, None);
+        assert!(body.contains("m=audio 4000 RTP/AVP 96 0 8\r\n"), "{body}");
+        assert!(body.contains("a=rtpmap:96 L16/16000\r\n"), "{body}");
+        let offered = Sdp::parse(&body).unwrap();
+
+        // Another of these takes the linear coding, under the offerer's
+        // number for it.
+        let (answer, agreed) = answer_with(&offered, "192.0.2.2", 5000, &[Law::Mu, Law::A], true, 20).unwrap();
+        assert!(agreed.linear);
+        assert_eq!(agreed.payload_type, 96);
+        assert!(answer.contains("m=audio 5000 RTP/AVP 96\r\n"), "{answer}");
+        assert!(answer.contains("a=rtpmap:96 L16/16000\r\n"), "{answer}");
+        let read = read_answer_with(&Sdp::parse(&answer).unwrap(), &[Law::Mu, Law::A], true).unwrap();
+        assert!(read.linear);
+        assert_eq!((read.payload_type, read.port), (96, 5000));
+
+        // Anything else has never heard of it and answers with G.711, and
+        // that is a call like any other.
+        let (answer, agreed) = super::answer(&offered, "192.0.2.3", 6000, &[Law::Mu, Law::A], 20).unwrap();
+        assert!(!agreed.linear);
+        assert_eq!(agreed.law, Law::Mu);
+        let read = read_answer_with(&Sdp::parse(&answer).unwrap(), &[Law::Mu, Law::A], true).unwrap();
+        assert!(!read.linear);
+        assert_eq!(read.payload_type, 0);
+
+        // And an offer without it is answered as it always was, whatever
+        // this end would have liked.
+        let plain = Sdp::parse(&offer("192.0.2.1", 4000, &[Law::A], 20, None)).unwrap();
+        let (_, agreed) = answer_with(&plain, "192.0.2.2", 5000, &[Law::Mu, Law::A], true, 20).unwrap();
+        assert!(!agreed.linear);
+        assert_eq!(agreed.law, Law::A);
+    }
+
+    #[test]
+    fn only_sixteen_kilohertz_on_one_channel_is_the_linear_coding_meant() {
+        let with = |map: &str| {
+            let text = format!(
+                "v=0\r\no=- 1 1 IN IP4 192.0.2.1\r\ns=-\r\nc=IN IP4 192.0.2.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 97 0\r\na=rtpmap:97 {map}\r\n"
+            );
+            answer_with(&Sdp::parse(&text).unwrap(), "192.0.2.2", 5000, &[Law::Mu], true, 20).unwrap().1
+        };
+        assert!(with("L16/16000").linear);
+        assert!(with("l16/16000/1").linear);
+        assert_eq!(with("L16/16000").payload_type, 97);
+        assert!(!with("L16/16000/2").linear);
+        assert!(!with("L16/44100").linear);
+        assert!(!with("L16/8000").linear);
+        assert!(!with("G722/8000").linear);
     }
 
     #[test]
