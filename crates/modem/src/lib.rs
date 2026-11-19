@@ -1944,9 +1944,29 @@ impl Modem {
     /// card heard it, at the card's own rate `fs`, and a sample of each to
     /// send. Silence out when there is no V.ARC call.
     pub fn varc_step(&mut self, fs: f64, input: &[f64], output: &mut [f64]) {
+        self.varc_hear(fs, fs, input);
+        self.varc_say(output);
+    }
+
+    /// One frame of a V.ARC call to send, for a sound card whose two
+    /// directions are stepped apart; see [`Self::varc_hear`]. Silence when
+    /// there is no V.ARC call.
+    pub fn varc_say(&mut self, output: &mut [f64]) {
         output.fill(0.0);
+        if let Some(call) = self.varc.as_mut() {
+            call.speak(output);
+        }
+    }
+
+    /// One frame of a V.ARC call as it was heard, at `fs`, by an end that
+    /// sends at `fs_out`. For a line made of two sound devices that do not
+    /// run at the same rate: each direction is then a line of its own, at
+    /// its own rate, and what is sent is asked for with [`Self::varc_say`]
+    /// as fast as the sending device takes it. The call's clock is the
+    /// frames heard.
+    pub fn varc_hear(&mut self, fs: f64, fs_out: f64, input: &[f64]) {
         let Some(call) = self.varc.as_mut() else { return };
-        let look = match call.step(fs, input, output) {
+        let look = match call.hear(fs, fs_out, input) {
             Ok(look) => look,
             Err(why) => {
                 self.line_notes.push(why);

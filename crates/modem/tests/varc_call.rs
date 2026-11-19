@@ -296,3 +296,40 @@ fn a_call_answered_in_g711_becomes_an_ordinary_call() {
     let loud = (0..16_000).map(|_| modem.step(0.0).abs()).fold(0.0, f64::max);
     assert!(loud > 0.0 || modem.line_phase() == "quiet", "{}", modem.line_phase());
 }
+
+/// A line made of two sound devices that do not run at the same rate: this
+/// end hears on one at 192 kHz and sends on the other at 48 kHz, and the far
+/// end the other way about. Each direction is a line of its own.
+#[test]
+fn two_devices_at_two_rates_are_a_line_each_way() {
+    let (fast, slow) = (192_000.0, 48_000.0);
+    let mut caller = Modem::new(16_000.0);
+    let mut host = Modem::new(16_000.0);
+    type_at(&mut caller, "AT+MS=VARC\r");
+    type_at(&mut host, "AT+MS=VARC\rATA\r");
+    type_at(&mut caller, "ATD1\r");
+    // The caller sends slowly and hears fast.
+    let (mut from_caller, mut from_host) = ([0.0; 2], [0.0; 2]);
+    let (mut at_caller, mut at_host) = (Vec::new(), Vec::new());
+    let mut typed = false;
+    for tick in 0..(10.0 * fast) as usize {
+        host.varc_say(&mut from_host);
+        caller.varc_hear(fast, slow, &from_host);
+        if tick % 4 == 0 {
+            caller.varc_say(&mut from_caller);
+            host.varc_hear(slow, fast, &from_caller);
+        }
+        at_caller.extend(caller.take_dte());
+        at_host.extend(host.take_dte());
+        if !typed && caller.state() == State::Data && host.state() == State::Data {
+            typed = true;
+            at_host.clear();
+            type_at(&mut caller, "each way at its own rate");
+        }
+    }
+    assert_eq!(caller.state(), State::Data, "{}", Pair::said(&at_caller));
+    assert_eq!(Pair::said(&at_host), "each way at its own rate");
+    // The fast way carries about four times what the slow way does.
+    let (down, up) = (caller.rate().unwrap_or(0), host.rate().unwrap_or(0));
+    assert!(down > 3 * up && up > 300_000, "{down} arriving at the caller, {up} at the host");
+}

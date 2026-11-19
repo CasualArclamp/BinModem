@@ -85,6 +85,8 @@ pub(crate) struct Call {
     hears: u8,
     station: Option<End>,
     fs: f64,
+    /// The rate it sends at, which is the other sound device's.
+    fs_out: f64,
     samples: u64,
     /// Samples since any channel last heard the far end.
     deaf: u64,
@@ -122,6 +124,7 @@ impl Call {
             hears,
             station: None,
             fs: 0.0,
+            fs_out: 0.0,
             samples: 0,
             deaf: 0,
             first_loaded: None,
@@ -146,7 +149,7 @@ impl Call {
         self.note.take()
     }
 
-    fn build(&mut self, fs: f64, channels: usize) -> Result<End, String> {
+    fn build(&mut self, fs: f64, fs_out: f64, channels: usize) -> Result<End, String> {
         // On a line of exact samples the multicarrier mode gives way to no
         // modulation at all, until that has been tried and failed.
         if matches!(self.mode, VarcMode::Dmt | VarcMode::Linear) {
@@ -157,23 +160,26 @@ impl Call {
             let (sends, hears) = (self.sends + c, self.hears + c);
             match self.mode {
                 VarcMode::Linear => {
-                    pairs.push((Box::new(exact::Tx::new(fs)), Box::new(exact::Rx::new(fs))));
+                    pairs.push((Box::new(exact::Tx::new(fs_out)), Box::new(exact::Rx::new(fs))));
                 }
                 VarcMode::Dmt => {
-                    let plan = Plan::for_rate(fs);
                     pairs.push((
-                        Box::new(dmt::Tx::new(plan.clone().coloured(sends))),
-                        Box::new(dmt::Rx::new(plan.coloured(hears))),
+                        Box::new(dmt::Tx::new(Plan::for_rate(fs_out).coloured(sends))),
+                        Box::new(dmt::Rx::new(Plan::for_rate(fs).coloured(hears))),
                     ));
                 }
                 VarcMode::Qam | VarcMode::Pcm => {
-                    let shape = if self.mode == VarcMode::Qam { Shape::qam(fs) } else { Shape::pcm(fs) };
-                    let shape = shape.ok_or_else(|| {
-                        format!("{} wants a sound card running at a multiple of 48 kHz, not {fs} Hz", self.mode.name())
-                    })?;
+                    let name = self.mode.name();
+                    let qam = self.mode == VarcMode::Qam;
+                    let shape = |fs: f64| {
+                        let shape = if qam { Shape::qam(fs) } else { Shape::pcm(fs) };
+                        shape.ok_or_else(|| {
+                            format!("{name} wants a sound card running at a multiple of 48 kHz, not {fs} Hz")
+                        })
+                    };
                     pairs.push((
-                        Box::new(sc::Tx::new(shape.clone().coloured(sends))),
-                        Box::new(sc::Rx::new(shape.coloured(hears))),
+                        Box::new(sc::Tx::new(shape(fs_out)?.coloured(sends))),
+                        Box::new(sc::Rx::new(shape(fs)?.coloured(hears))),
                     ));
                 }
             }
@@ -181,23 +187,32 @@ impl Call {
         Ok(Station::new(fs, pairs))
     }
 
-    /// One frame of the card's samples in, one out. `Ok(true)` every few
+    /// One frame to send, when hearing and sending are stepped apart.
+    /// Silence until something has been heard to say what the rates are.
+    pub fn speak(&mut self, output: &mut [f64]) {
+        match self.station.as_mut() {
+            Some(station) => station.speak(output),
+            None => output.fill(0.0),
+        }
+    }
+
+    /// One frame heard, at `fs`, by an end that sends at `fs_out`: the two
+    /// need not be the same, since each direction is a line of its own and
+    /// the far end hears this one at whatever rate this one sends. The call's
+    /// clock is the samples heard. `Ok(true)` every few
     /// milliseconds, when the line has been looked over and whoever is
-    /// running the call should look at it too.
-    ///
-    /// Not every sample, because a sample at 192 kHz is five microseconds
-    /// and nothing about a call changes in five microseconds: asking each
-    /// channel how it was getting on at every sample cost more than the
-    /// modulation did, and a sound card was left waiting a second at a time
-    /// for a program that was busy asking.
-    pub fn step(&mut self, fs: f64, input: &[f64], output: &mut [f64]) -> Result<bool, String> {
-        if self.station.is_none() || self.fs != fs {
-            self.station = Some(self.build(fs, input.len())?);
+    /// running the call should look at it too: not every sample, because
+    /// asking each channel how it was getting on at every sample of a
+    /// 192 kHz card cost more than the modulation did.
+    pub fn hear(&mut self, fs: f64, fs_out: f64, input: &[f64]) -> Result<bool, String> {
+        if self.station.is_none() || self.fs != fs || self.fs_out != fs_out {
+            self.station = Some(self.build(fs, fs_out, input.len())?);
             self.fs = fs;
+            self.fs_out = fs_out;
             self.until_look = 0;
         }
         let station = self.station.as_mut().expect("just built");
-        station.step(input, output);
+        station.hear(input);
         self.samples += 1;
         if self.until_look > 0 {
             self.until_look -= 1;
@@ -225,7 +240,7 @@ impl Call {
                 self.note = Some(
                     "V.ARC: the line does not carry samples exactly; carrying on as the multicarrier mode".to_owned(),
                 );
-                self.station = Some(self.build(fs, input.len())?);
+                self.station = Some(self.build(fs, fs_out, input.len())?);
                 self.deaf = 0;
             }
         }

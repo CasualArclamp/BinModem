@@ -220,6 +220,20 @@ The sound card: the rest of the modem runs at 16 kHz on one channel through
 same two devices with `line::Wide`, and steps `Modem::varc_step` with the
 card's own frames; when the call ends it puts the two-wire line back.
 
+The two devices need not run at the same rate. A line can be a lead one way
+and a virtual cable the other, at 192 kHz and 48 kHz, and then each direction
+is a line of its own: the receiver is built for the rate of the device it
+hears on and the transmitter for the rate of the one it sends on. What is
+heard is stepped as it arrives (`Modem::varc_hear`) and what is sent is made
+as fast as the sending device takes it (`Modem::varc_say`), since two
+devices are two clocks. Below, two windows on one machine: Line In at 192 kHz
+and CABLE-B at 48 kHz, 2.14 Mbit/s one way and 0.80 the other.
+
+![Two windows, each direction at its own rate](../images/v-arc/two-rates.png)
+
+Before this a V.ARC call on two such devices ended at once in `NO CARRIER`,
+with the reason only in the transcript.
+
 During a V.ARC call the waterfall and the spectrum are taken from the left
 channel at the card's own rate and drawn from 0 Hz to half of it (24 kHz on a
 48 kHz card, 96 kHz at 192 kHz), with the ticks in kilohertz. On every other

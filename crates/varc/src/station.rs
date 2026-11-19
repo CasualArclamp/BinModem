@@ -307,6 +307,12 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
     }
 
     fn step(&mut self, input: f64, arq: &mut Arq, now: u64, fs: f64) -> f64 {
+        self.hear(input, arq, now, fs);
+        self.speak(arq, now)
+    }
+
+    /// One sample in, and everything that follows from it.
+    fn hear(&mut self, input: f64, arq: &mut Arq, now: u64, fs: f64) {
         self.rx.feed(input);
         if let Some(table) = self.rx.proposal() {
             let mark = self.next_mark;
@@ -381,7 +387,10 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
                 _ => {}
             }
         }
+    }
 
+    /// One sample out.
+    fn speak(&mut self, arq: &mut Arq, now: u64) -> f64 {
         if let Some(layout) = self.tx.wants() {
             if !self.packer.urgent_waiting() {
                 if self.lost_run >= 2 || self.wants_reset {
@@ -442,6 +451,24 @@ impl<T: Sender, R: Receiver> Station<T, R> {
         self.now += 1;
         for ((channel, &x), y) in self.channels.iter_mut().zip(input).zip(output.iter_mut()) {
             *y = channel.step(x, &mut self.arq, self.now, self.fs);
+        }
+    }
+
+    /// One sample of every channel in and none out: for an end whose two
+    /// directions run at different rates, as they do when it hears on one
+    /// sound device and sends on another. Time is counted here, in samples
+    /// heard.
+    pub fn hear(&mut self, input: &[f64]) {
+        self.now += 1;
+        for (channel, &x) in self.channels.iter_mut().zip(input) {
+            channel.hear(x, &mut self.arq, self.now, self.fs);
+        }
+    }
+
+    /// One sample of every channel out; the other half of [`Self::hear`].
+    pub fn speak(&mut self, output: &mut [f64]) {
+        for (channel, y) in self.channels.iter_mut().zip(output.iter_mut()) {
+            *y = channel.speak(&mut self.arq, self.now);
         }
     }
 
