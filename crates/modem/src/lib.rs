@@ -1900,6 +1900,14 @@ impl Modem {
         points
     }
 
+    /// The Reed-Solomon code a V.ARC call is receiving with, (n, k): octets
+    /// a codeword and how many of them are data. It follows the table, which
+    /// the two ends change as the line is measured. `None` on any other
+    /// call, and before anything is heard.
+    pub fn varc_code(&self) -> Option<(usize, usize)> {
+        self.varc.as_ref().and_then(varc::Call::code)
+    }
+
     /// Tell a V.ARC call that its line carries samples exactly as sent: a
     /// SIP call that agreed on linear PCM. It then starts with no
     /// modulation at all, the samples being the data, and gives that up for

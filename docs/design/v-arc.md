@@ -247,6 +247,13 @@ is a filled box, sharp at the edges when the line is clean. The picture is
 the Realtek lead: 32 768 points on the commonest carriers, 1 048 576 for the
 single carrier, 64 levels.
 
+Beside the size of the grid the panel gives the code on what is arriving,
+as data octets over octets a codeword (`code 236/252`), and the error control
+line spells it out. It follows the table, so it changes when the two ends
+change tables.
+
+![The code rate beside the grid's size](../images/v-arc/code-rate.png)
+
 The oscilloscope and the level meter were
 built for the modem's 16 kHz and are still shown the left channel cut down to
 that without filtering, which shows that something is there and measures

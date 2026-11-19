@@ -189,6 +189,9 @@ impl<T: Receiver + ?Sized> Receiver for Box<T> {
     fn shown_bits(&self) -> u8 {
         (**self).shown_bits()
     }
+    fn code(&self) -> Option<(usize, usize)> {
+        (**self).code()
+    }
 }
 
 /// The receiving half.
@@ -241,6 +244,13 @@ pub trait Receiver {
     /// none.
     fn shown_bits(&self) -> u8 {
         0
+    }
+
+    /// The Reed-Solomon code on what is arriving now, (n, k): octets a
+    /// codeword and how many of them are data. The table says how many are
+    /// check octets, so it changes when the table does.
+    fn code(&self) -> Option<(usize, usize)> {
+        None
     }
 }
 

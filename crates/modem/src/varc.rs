@@ -318,6 +318,12 @@ impl Call {
         taken
     }
 
+    /// The Reed-Solomon code on what is arriving, (n, k), on the first
+    /// channel that is hearing a table it knows.
+    pub fn code(&self) -> Option<(usize, usize)> {
+        self.station.as_ref()?.channels.iter().find_map(|c| c.rx.code())
+    }
+
     /// The signal to noise ratio on each channel, in decibels.
     pub fn snr_db(&self) -> Vec<f64> {
         self.station.as_ref().map_or_else(Vec::new, |s| s.channels.iter().map(|c| c.rx.health().snr_db).collect())

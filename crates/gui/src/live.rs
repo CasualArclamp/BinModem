@@ -2243,6 +2243,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     f.fax_trouble = call.trouble().map(str::to_owned);
                 }
                 f.echo_at = modem.reflection().map(|r| (r.delay, r.strength));
+                f.code = modem.varc_code().map(|(n, k)| (n as u16, k as u16));
                 f.tones = modem.states();
                 f.constellation_peak = modem.constellation_peak();
                 f.symbol_label = modem.shape();

@@ -1001,6 +1001,11 @@ impl Receiver for Rx {
         }
     }
 
+    fn code(&self) -> Option<(usize, usize)> {
+        let table = self.id.and_then(|id| self.tables[usize::from(id)].as_ref())?;
+        self.plan.layout(table).map(|layout| layout.code())
+    }
+
     fn points(&mut self) -> Vec<(f64, f64)> {
         std::mem::take(&mut self.points)
     }
