@@ -135,6 +135,41 @@ fn the_single_carrier_modes_connect_too() {
     }
 }
 
+/// The symbol diagram has something to draw in every mode that has symbols,
+/// and what it is given fits the box it is drawn in.
+#[test]
+fn every_mode_with_symbols_gives_the_symbol_diagram_its_points() {
+    for (carrier, shape) in [("VARC", "QAM"), ("VARCQ", "QAM"), ("VARCP", "PCM")] {
+        let mut pair = Pair::new(carrier);
+        assert_eq!(pair.caller.shape(), "-", "{carrier}: before the call");
+        type_at(&mut pair.host, "ATA\r");
+        type_at(&mut pair.caller, "ATD1\r");
+        pair.run(9.0);
+        assert_eq!(pair.caller.state(), State::Data, "{carrier}");
+        // Whatever gathered while the tables were being settled.
+        pair.caller.varc_points();
+        pair.run(1.0);
+        let points = pair.caller.varc_points();
+        assert!(points.len() > 500, "{carrier}: {} points", points.len());
+        assert_eq!(pair.caller.shape(), shape, "{carrier}");
+        let states = pair.caller.states();
+        assert!(states >= 16, "{carrier}: {states} points in the grid");
+        // A clean line: every point within its grid, and the grid filled
+        // out to its edge on the wider axis.
+        let reach = points.iter().map(|p| p.0.abs().max(p.1.abs())).fold(0.0, f64::max);
+        assert!((0.9..1.05).contains(&reach), "{carrier}: reaches {reach}");
+        // Taken means taken.
+        assert!(pair.caller.varc_points().len() < points.len(), "{carrier}");
+    }
+}
+
+#[test]
+fn a_call_of_exact_samples_has_no_symbols_to_draw() {
+    let (mut caller, _, _, _) = on_a_linear_call(1.0, 3.0);
+    assert!(caller.varc_points().is_empty());
+    assert_eq!(caller.shape(), "-");
+}
+
 #[test]
 fn a_lead_with_one_channel_wired_still_connects() {
     let mut pair = Pair::new("VARC");
@@ -260,4 +295,41 @@ fn a_call_answered_in_g711_becomes_an_ordinary_call() {
     // It makes sound again through the ordinary door.
     let loud = (0..16_000).map(|_| modem.step(0.0).abs()).fold(0.0, f64::max);
     assert!(loud > 0.0 || modem.line_phase() == "quiet", "{}", modem.line_phase());
+}
+
+/// A line made of two sound devices that do not run at the same rate: this
+/// end hears on one at 192 kHz and sends on the other at 48 kHz, and the far
+/// end the other way about. Each direction is a line of its own.
+#[test]
+fn two_devices_at_two_rates_are_a_line_each_way() {
+    let (fast, slow) = (192_000.0, 48_000.0);
+    let mut caller = Modem::new(16_000.0);
+    let mut host = Modem::new(16_000.0);
+    type_at(&mut caller, "AT+MS=VARC\r");
+    type_at(&mut host, "AT+MS=VARC\rATA\r");
+    type_at(&mut caller, "ATD1\r");
+    // The caller sends slowly and hears fast.
+    let (mut from_caller, mut from_host) = ([0.0; 2], [0.0; 2]);
+    let (mut at_caller, mut at_host) = (Vec::new(), Vec::new());
+    let mut typed = false;
+    for tick in 0..(10.0 * fast) as usize {
+        host.varc_say(&mut from_host);
+        caller.varc_hear(fast, slow, &from_host);
+        if tick % 4 == 0 {
+            caller.varc_say(&mut from_caller);
+            host.varc_hear(slow, fast, &from_caller);
+        }
+        at_caller.extend(caller.take_dte());
+        at_host.extend(host.take_dte());
+        if !typed && caller.state() == State::Data && host.state() == State::Data {
+            typed = true;
+            at_host.clear();
+            type_at(&mut caller, "each way at its own rate");
+        }
+    }
+    assert_eq!(caller.state(), State::Data, "{}", Pair::said(&at_caller));
+    assert_eq!(Pair::said(&at_host), "each way at its own rate");
+    // The fast way carries about four times what the slow way does.
+    let (down, up) = (caller.rate().unwrap_or(0), host.rate().unwrap_or(0));
+    assert!(down > 3 * up && up > 300_000, "{down} arriving at the caller, {up} at the host");
 }

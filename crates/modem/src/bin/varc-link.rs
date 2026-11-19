@@ -303,7 +303,17 @@ fn main() -> ExitCode {
         return usage();
     }
 
-    let audio = match Wide::open(input.as_deref(), output.as_deref()) {
+    let audio = Wide::open(input.as_deref(), output.as_deref()).and_then(|audio| {
+        if audio.rate == audio.output_rate {
+            Ok(audio)
+        } else {
+            Err(format!(
+                "{} runs at {} Hz and {} at {} Hz; this tool wants them at the same rate",
+                audio.input_device, audio.rate, audio.output_device, audio.output_rate
+            ))
+        }
+    });
+    let audio = match audio {
         Ok(audio) => audio,
         Err(e) => {
             eprintln!("could not open the sound devices: {e}");

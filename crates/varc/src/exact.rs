@@ -316,6 +316,10 @@ impl Receiver for Rx {
         if self.id.is_some() { rates(self.fs) } else { (0.0, 0.0) }
     }
 
+    fn code(&self) -> Option<(usize, usize)> {
+        self.id.map(|_| layout().code())
+    }
+
     fn spectrum(&self) -> Vec<Bin> {
         vec![Bin { hz: 0.0, snr_db: self.health().snr_db, bits: 16 }]
     }

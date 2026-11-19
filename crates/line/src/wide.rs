@@ -27,8 +27,12 @@ pub const CHANNELS: usize = 2;
 /// what matters is that a busy moment in the program loses nothing.
 const BUFFER: usize = 96_000;
 
-/// Frames of silence put in front of the output: about forty milliseconds.
-const PRIME: usize = 2048;
+/// The silence put in front of the output, as a fraction of a second: forty
+/// milliseconds, whatever the device's rate. It was a count of frames once,
+/// right for 48 kHz and a quarter of that at 192 kHz, where ten milliseconds
+/// was not enough to cover a busy moment and the gap that followed cost the
+/// call seconds.
+const PRIME_PER_SECOND: usize = 25;
 
 /// Frames of input thrown away while the device settles.
 const SETTLE: usize = 12_000;
@@ -58,8 +62,11 @@ pub struct Wide {
     shared: Arc<Shared>,
     pub input_device: String,
     pub output_device: String,
-    /// The rate both devices run at.
+    /// The rate the input runs at.
     pub rate: u32,
+    /// The rate the output runs at. Two devices need not agree, and each
+    /// is used at its own.
+    pub output_rate: u32,
     /// Channels each device really has; one means left and right are the
     /// same signal.
     pub input_channels: usize,
@@ -109,12 +116,7 @@ impl Wide {
         let in_config = in_device.default_input_config().map_err(|e| e.to_string())?;
         let out_config = out_device.default_output_config().map_err(|e| e.to_string())?;
         let rate = in_config.sample_rate();
-        if out_config.sample_rate() != rate {
-            return Err(format!(
-                "{in_name} runs at {rate} Hz and {out_name} at {} Hz; set them to the same rate in the sound settings",
-                out_config.sample_rate()
-            ));
-        }
+        let output_rate = out_config.sample_rate();
         let in_channels = in_config.channels() as usize;
         let out_channels = out_config.channels() as usize;
 
@@ -122,7 +124,7 @@ impl Wide {
             incoming: Mutex::new(VecDeque::with_capacity(BUFFER * CHANNELS)),
             settling: Mutex::new(SETTLE),
             delivering: AtomicBool::new(false),
-            outgoing: Mutex::new(VecDeque::from(vec![0.0; PRIME * CHANNELS])),
+            outgoing: Mutex::new(VecDeque::from(vec![0.0; output_rate as usize / PRIME_PER_SECOND * CHANNELS])),
             counters: Counters::default(),
         });
 
@@ -198,6 +200,7 @@ impl Wide {
             input_device: in_name,
             output_device: out_name,
             rate,
+            output_rate,
             input_channels: in_channels,
             output_channels: out_channels,
         })
@@ -220,6 +223,14 @@ impl Wide {
             }
             queue.extend(frame);
         }
+    }
+
+    /// Frames the output would take now to have a sixteenth of a second in
+    /// hand. For a writer that is paced by the output device and not by the
+    /// input: two devices have two clocks, and one that sent a frame for
+    /// every frame heard would run the other dry or drown it in the end.
+    pub fn wanted(&self) -> usize {
+        (self.output_rate as usize / 16).saturating_sub(self.pending())
     }
 
     /// Frames waiting to go out.

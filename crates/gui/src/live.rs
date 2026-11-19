@@ -1099,6 +1099,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     let mut wide_send: Vec<f32> = Vec::with_capacity(16_384);
     let mut wide_sent: Vec<f32> = Vec::with_capacity(4096);
     let mut wide_owed = 0.0f64;
+    // The last sample sent, for the scope, when sending is paced apart from
+    // hearing and there is not one sent for each heard.
+    let mut wide_last = 0.0f32;
     // The spectrum of a V.ARC call, taken at the card's rate so that the
     // waterfall can show the whole of the band the call is using.
     let mut wide_spectrum: Option<(u32, Spectrum)> = None;
@@ -1628,11 +1631,12 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                         tx.log(
                             Direction::Note,
                             format!(
-                                "{}: the sound card as it is, {} Hz, {} channels in and {} out",
+                                "{}: the sound card as it is, {} channels in at {} Hz and {} out at {} Hz",
                                 mode.name(),
-                                wide.rate,
                                 wide.input_channels,
-                                wide.output_channels
+                                wide.rate,
+                                wide.output_channels,
+                                wide.output_rate
                             ),
                         );
                         audio = Some(Wire::Wide { line: Box::new(wide), input, output });
@@ -1782,11 +1786,20 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             wide_sent.clear();
             wide.receive(&mut wide_heard);
             let rate = f64::from(wide.rate);
+            // Two devices at two rates are two lines, one each way: what is
+            // heard is stepped as it arrives, and what is sent is made
+            // afterwards, as much as the sending device has room for.
+            let apart = wide.output_rate != wide.rate;
             for frame in wide_heard.as_chunks::<2>().0 {
                 let mut out = [0.0f64; 2];
-                modem.varc_step(rate, &[f64::from(frame[0]), f64::from(frame[1])], &mut out);
-                wide_send.push(out[0] as f32);
-                wide_send.push(out[1] as f32);
+                if apart {
+                    modem.varc_hear(rate, f64::from(wide.output_rate), &[f64::from(frame[0]), f64::from(frame[1])]);
+                    out[0] = f64::from(wide_last);
+                } else {
+                    modem.varc_step(rate, &[f64::from(frame[0]), f64::from(frame[1])], &mut out);
+                    wide_send.push(out[0] as f32);
+                    wide_send.push(out[1] as f32);
+                }
                 if let Some((_, spectrum)) = wide_spectrum.as_mut() {
                     spectrum.push(f64::from(frame[0]));
                 }
@@ -1796,6 +1809,15 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     from_line.push(frame[0]);
                     wide_sent.push(out[0] as f32);
                 }
+            }
+            if apart {
+                for _ in 0..wide.wanted() {
+                    let mut out = [0.0f64; 2];
+                    modem.varc_say(&mut out);
+                    wide_send.push(out[0] as f32);
+                    wide_send.push(out[1] as f32);
+                }
+                wide_last = wide_send.as_chunks::<2>().0.last().map_or(wide_last, |f| f[0]);
             }
             wide.transmit(&wide_send);
             for text in modem.take_line_notes() {
@@ -1948,6 +1970,23 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             }
             spectrum.push(heard);
             waveform.push(s);
+        }
+        // A V.ARC call's symbols do not come a sample at a time: they are
+        // taken as they have gathered, a grid at a time.
+        let gathered = modem.varc_points();
+        if !gathered.is_empty() {
+            if modem.shape() != drawing {
+                drawing = modem.shape();
+                symbols.clear();
+                points.clear();
+            }
+            let depth = if modem.shape() == "PCM" { PCM_DEPTH } else { scope_depth(modem.states()) };
+            for (i, q) in gathered {
+                while points.len() >= depth {
+                    points.pop_front();
+                }
+                points.push_back((i as f32, q as f32));
+            }
         }
         // On a SIP line a digital modem's codewords go as they are, with no
         // rate conversion to blur them; see `Modem::take_network_levels`.
@@ -2226,6 +2265,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     f.fax_trouble = call.trouble().map(str::to_owned);
                 }
                 f.echo_at = modem.reflection().map(|r| (r.delay, r.strength));
+                f.code = modem.varc_code().map(|(n, k)| (n as u16, k as u16));
                 f.tones = modem.states();
                 f.constellation_peak = modem.constellation_peak();
                 f.symbol_label = modem.shape();

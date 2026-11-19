@@ -71,6 +71,14 @@ impl Layout {
         Some(Self { words, parity })
     }
 
+    /// The code as it would be written, (n, k): octets in the longest
+    /// codeword and how many of them are data. The others are an octet
+    /// shorter at most.
+    pub fn code(&self) -> (usize, usize) {
+        let n = self.words.iter().copied().max().unwrap_or(0);
+        (n, n.saturating_sub(self.parity))
+    }
+
     /// Octets of payload, header included, the superframe carries.
     pub fn payload(&self) -> usize {
         self.words.iter().map(|w| w - self.parity).sum()

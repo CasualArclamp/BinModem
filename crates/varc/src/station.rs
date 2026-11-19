@@ -307,6 +307,12 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
     }
 
     fn step(&mut self, input: f64, arq: &mut Arq, now: u64, fs: f64) -> f64 {
+        self.hear(input, arq, now, fs);
+        self.speak(arq, now)
+    }
+
+    /// One sample in, and everything that follows from it.
+    fn hear(&mut self, input: f64, arq: &mut Arq, now: u64, fs: f64) {
         self.rx.feed(input);
         if let Some(table) = self.rx.proposal() {
             let mark = self.next_mark;
@@ -381,7 +387,10 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
                 _ => {}
             }
         }
+    }
 
+    /// One sample out.
+    fn speak(&mut self, arq: &mut Arq, now: u64) -> f64 {
         if let Some(layout) = self.tx.wants() {
             if !self.packer.urgent_waiting() {
                 if self.lost_run >= 2 || self.wants_reset {
@@ -442,6 +451,24 @@ impl<T: Sender, R: Receiver> Station<T, R> {
         self.now += 1;
         for ((channel, &x), y) in self.channels.iter_mut().zip(input).zip(output.iter_mut()) {
             *y = channel.step(x, &mut self.arq, self.now, self.fs);
+        }
+    }
+
+    /// One sample of every channel in and none out: for an end whose two
+    /// directions run at different rates, as they do when it hears on one
+    /// sound device and sends on another. Time is counted here, in samples
+    /// heard.
+    pub fn hear(&mut self, input: &[f64]) {
+        self.now += 1;
+        for (channel, &x) in self.channels.iter_mut().zip(input) {
+            channel.hear(x, &mut self.arq, self.now, self.fs);
+        }
+    }
+
+    /// One sample of every channel out; the other half of [`Self::hear`].
+    pub fn speak(&mut self, output: &mut [f64]) {
+        for (channel, y) in self.channels.iter_mut().zip(output.iter_mut()) {
+            *y = channel.speak(&mut self.arq, self.now);
         }
     }
 
@@ -683,7 +710,7 @@ mod crosstalk {
 
     #[test]
     fn a_leak_from_the_other_channel_is_measured_when_the_lines_are_told_apart() {
-        let (a, b, sent, got) = leaky(true, 12.0);
+        let (a, b, sent, got) = leaky(true, 14.0);
         assert!(got == sent, "{} of {} octets", got.len(), sent.len());
         assert_eq!(b.channels[0].tally.proposals, 1);
         assert_eq!(b.channels[0].tally.failed, 0);
@@ -693,13 +720,19 @@ mod crosstalk {
     }
 
     #[test]
-    fn two_ends_that_deafen_each_other_both_start_again_and_recover() {
-        // Without their own known points the two ends measure a perfect
-        // line, load it to the limit and can then read nothing, either way.
-        let (a, b, sent, got) = leaky(false, 40.0);
-        assert!(b.channels[0].tally.proposals > 1);
-        assert!(b.channels[0].tally.failed > 0);
+    fn a_leak_is_measured_even_when_the_lines_are_not_told_apart() {
+        // Two ends with the same known points once measured a perfect line
+        // here, since what leaked across was a faint copy of what each was
+        // expecting; loaded it to the limit; and could then read nothing,
+        // either way. The starting table now puts data on nearly every
+        // carrier while the line is measured, and the two ends' data
+        // differs, so the leak is noise from the first symbol.
+        let (a, b, sent, got) = leaky(false, 14.0);
         assert!(got == sent, "{} of {} octets", got.len(), sent.len());
+        assert_eq!(b.channels[0].tally.proposals, 1);
+        assert_eq!(b.channels[0].tally.failed, 0);
+        let snr = b.channels[0].rx.health().snr_db;
+        assert!((snr - 45.0).abs() < 2.0, "measured {snr:.1} dB against a leak 45 dB down");
         assert_ne!(a.channels[0].tx.id(), 0);
     }
 }

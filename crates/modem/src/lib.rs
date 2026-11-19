@@ -1034,6 +1034,8 @@ pub struct Modem {
     varc_owed_ms: f64,
     /// What a V.ARC call's line was last noted as doing.
     varc_said: &'static str,
+    /// Bits a symbol of the grid a V.ARC call's symbol diagram is showing.
+    varc_bits: u8,
 }
 
 impl Modem {
@@ -1092,6 +1094,7 @@ impl Modem {
             varc: None,
             varc_owed_ms: 0.0,
             varc_said: "",
+            varc_bits: 0,
         }
     }
 
@@ -1302,6 +1305,9 @@ impl Modem {
         if let Some(fax) = self.fax.as_ref() {
             return fax.states();
         }
+        if self.varc.is_some() {
+            return 1usize << self.varc_bits.min(24);
+        }
         self.pump.as_ref().map_or(2, Pump::states)
     }
 
@@ -1340,6 +1346,13 @@ impl Modem {
     pub fn shape(&self) -> &'static str {
         if let Some(fax) = self.fax.as_ref() {
             return fax.shape();
+        }
+        if let Some(call) = self.varc.as_ref() {
+            return match (self.varc_bits, call.mode) {
+                (0, _) | (_, VarcMode::Linear) => "-",
+                (_, VarcMode::Pcm) => "PCM",
+                _ => "QAM",
+            };
         }
         self.pump.as_ref().map_or("-", Pump::shape)
     }
@@ -1870,6 +1883,31 @@ impl Modem {
         self.varc.as_ref().map(|call| call.mode)
     }
 
+    /// Points for a V.ARC call's symbol diagram: what its receiver has
+    /// sliced since this was last asked, scaled so that the grid fits a box
+    /// of one each way. The single-carrier QAM mode's are its symbols; the
+    /// multicarrier mode's are the carriers of its commonest loading; the
+    /// baseband mode's are each level against the one before. Nothing on a
+    /// call whose samples are the data, which has no symbols.
+    ///
+    /// [`Self::shape`] and [`Self::states`] say what grid they are on.
+    pub fn varc_points(&mut self) -> Vec<(f64, f64)> {
+        let Some(call) = self.varc.as_mut() else { return Vec::new() };
+        let (points, bits) = call.take_points();
+        if !points.is_empty() {
+            self.varc_bits = bits;
+        }
+        points
+    }
+
+    /// The Reed-Solomon code a V.ARC call is receiving with, (n, k): octets
+    /// a codeword and how many of them are data. It follows the table, which
+    /// the two ends change as the line is measured. `None` on any other
+    /// call, and before anything is heard.
+    pub fn varc_code(&self) -> Option<(usize, usize)> {
+        self.varc.as_ref().and_then(varc::Call::code)
+    }
+
     /// Tell a V.ARC call that its line carries samples exactly as sent: a
     /// SIP call that agreed on linear PCM. It then starts with no
     /// modulation at all, the samples being the data, and gives that up for
@@ -1906,9 +1944,29 @@ impl Modem {
     /// card heard it, at the card's own rate `fs`, and a sample of each to
     /// send. Silence out when there is no V.ARC call.
     pub fn varc_step(&mut self, fs: f64, input: &[f64], output: &mut [f64]) {
+        self.varc_hear(fs, fs, input);
+        self.varc_say(output);
+    }
+
+    /// One frame of a V.ARC call to send, for a sound card whose two
+    /// directions are stepped apart; see [`Self::varc_hear`]. Silence when
+    /// there is no V.ARC call.
+    pub fn varc_say(&mut self, output: &mut [f64]) {
         output.fill(0.0);
+        if let Some(call) = self.varc.as_mut() {
+            call.speak(output);
+        }
+    }
+
+    /// One frame of a V.ARC call as it was heard, at `fs`, by an end that
+    /// sends at `fs_out`. For a line made of two sound devices that do not
+    /// run at the same rate: each direction is then a line of its own, at
+    /// its own rate, and what is sent is asked for with [`Self::varc_say`]
+    /// as fast as the sending device takes it. The call's clock is the
+    /// frames heard.
+    pub fn varc_hear(&mut self, fs: f64, fs_out: f64, input: &[f64]) {
         let Some(call) = self.varc.as_mut() else { return };
-        let look = match call.step(fs, input, output) {
+        let look = match call.hear(fs, fs_out, input) {
             Ok(look) => look,
             Err(why) => {
                 self.line_notes.push(why);
@@ -2837,6 +2895,7 @@ impl Modem {
             self.outbound.clear();
             self.varc_owed_ms = 0.0;
             self.varc_said = "";
+            self.varc_bits = 0;
             self.state = State::Handshaking;
             self.varc = Some(varc::Call::new(mode, role, looped));
             return;

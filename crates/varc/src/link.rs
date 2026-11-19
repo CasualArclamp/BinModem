@@ -183,6 +183,15 @@ impl<T: Receiver + ?Sized> Receiver for Box<T> {
     fn spectrum(&self) -> Vec<Bin> {
         (**self).spectrum()
     }
+    fn points(&mut self) -> Vec<(f64, f64)> {
+        (**self).points()
+    }
+    fn shown_bits(&self) -> u8 {
+        (**self).shown_bits()
+    }
+    fn code(&self) -> Option<(usize, usize)> {
+        (**self).code()
+    }
 }
 
 /// The receiving half.
@@ -222,7 +231,32 @@ pub trait Receiver {
     /// The band, slice by slice: a carrier at a time for the multicarrier
     /// mode, and all in one for the others.
     fn spectrum(&self) -> Vec<Bin>;
+
+    /// Points for a symbol diagram: what arrived since this was last asked,
+    /// as it stood when it was sliced, scaled so the outermost point of the
+    /// grid is at one. Up to [`POINTS_KEPT`]; nothing for a receiver that
+    /// slices nothing.
+    fn points(&mut self) -> Vec<(f64, f64)> {
+        Vec::new()
+    }
+
+    /// Bits a symbol of the grid those points are on, nought when there is
+    /// none.
+    fn shown_bits(&self) -> u8 {
+        0
+    }
+
+    /// The Reed-Solomon code on what is arriving now, (n, k): octets a
+    /// codeword and how many of them are data. The table says how many are
+    /// check octets, so it changes when the table does.
+    fn code(&self) -> Option<(usize, usize)> {
+        None
+    }
 }
+
+/// Points a receiver keeps for whoever draws them. Past this it keeps no
+/// more until they are taken, so one nobody draws costs nothing.
+pub const POINTS_KEPT: usize = 2048;
 
 #[cfg(test)]
 mod tests {
