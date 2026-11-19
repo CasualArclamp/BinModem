@@ -3280,6 +3280,12 @@ impl ScopeApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new("BINMODEM").monospace().size(16.0).strong().color(BRIGHT));
             ui.label(RichText::new("56K softmodem").monospace().color(DIM));
+            // Which build: two windows that will not talk are often two
+            // builds, one of them left open from before a change.
+            ui.label(RichText::new(concat!("build ", env!("BINMODEM_BUILD"))).monospace().size(11.0).color(DIM))
+                .on_hover_text(
+                    "The commit this program was built from and when that commit was made.                      Both ends of a V.ARC call have to be the same build.",
+                );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let Some(state) = state else {
                     ui.label(RichText::new("a capture, replayed").monospace().color(DIM));
