@@ -7,6 +7,7 @@
 pub mod audio;
 pub mod duplex;
 pub mod wav;
+pub mod wide;
 
 pub use audio::{AudioSink, Monitor, listen, output_devices};
 
@@ -31,3 +32,4 @@ pub(crate) fn host() -> cpal::Host {
 }
 pub use duplex::{Duplex, input_devices};
 pub use wav::Wav;
+pub use wide::Wide;

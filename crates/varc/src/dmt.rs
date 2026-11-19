@@ -41,7 +41,7 @@ use dsp::{Complex, Fft};
 
 use crate::frame::Layout;
 use crate::interp::Interp;
-use crate::link::{Arrived, Receiver, Sender, Table};
+use crate::link::{Arrived, Bin, Health, Receiver, Sender, Table};
 use crate::map::{BitReader, BitWriter, MAX_BITS, qam_point, qam_slice};
 
 /// How many bit tables can be told apart by the sync symbol. Table zero is
@@ -80,6 +80,8 @@ pub struct Plan {
     pub cp: usize,
     /// Data symbols in a superframe.
     pub symbols: usize,
+    /// Which set of known points this line uses. See [`Plan::coloured`].
+    pub colour: u8,
 }
 
 impl Plan {
@@ -95,7 +97,22 @@ impl Plan {
         } else {
             4096
         };
-        Self { fs, n, cp: n / 16, symbols: 32 }
+        Self { fs, n, cp: n / 16, symbols: 32, colour: 0 }
+    }
+
+    /// The same plan with a different set of known points.
+    ///
+    /// Two lines that run side by side -- the two channels of a stereo lead
+    /// -- leak into each other, a little, and what leaks is the other
+    /// line's signal. If both were sending the same known points, in step,
+    /// the leak would be a faint copy of what the receiver was expecting and
+    /// would measure as a slightly stronger line; then data would start,
+    /// the two would differ, and the leak would be noise nobody had allowed
+    /// for. So each line gets its own points, and the leak is noise from the
+    /// first symbol, there to be measured.
+    pub fn coloured(mut self, colour: u8) -> Self {
+        self.colour = colour;
+        self
     }
 
     /// Carriers there are numbers for; carrier zero is DC and never used.
@@ -173,7 +190,7 @@ impl Plan {
     /// The known points: a row for each sync sequence, then a row for each
     /// data symbol of a superframe.
     fn known(&self) -> Vec<Vec<Complex>> {
-        let mut state: u32 = 0x5eed_a5c1;
+        let mut state: u32 = 0x5eed_a5c1 ^ u32::from(self.colour).wrapping_mul(0x9e37_79b9);
         let r = std::f64::consts::FRAC_1_SQRT_2;
         (0..TABLES + self.symbols)
             .map(|_| {
@@ -354,6 +371,10 @@ impl Sender for Tx {
     fn reset(&mut self) {
         self.next = Some((0, self.plan.default_table()));
     }
+
+    fn rates(&self) -> (f64, f64) {
+        (self.plan.gross(&self.table), self.plan.net(&self.table))
+    }
 }
 
 /// Where a receiver has got to.
@@ -414,6 +435,8 @@ pub struct Rx {
     arrived: VecDeque<Arrived>,
     proposal: Option<Table>,
     gap_db: f64,
+    /// Measure the line again as soon as the starting table is heard.
+    remeasure: bool,
 
     re: Vec<f64>,
     im: Vec<f64>,
@@ -476,6 +499,7 @@ impl Rx {
             arrived: VecDeque::new(),
             proposal: None,
             gap_db: GAP_DB,
+            remeasure: false,
             re: vec![0.0; plan.n],
             im: vec![0.0; plan.n],
             timing: 0.0,
@@ -711,6 +735,12 @@ impl Rx {
             self.hold_anchor();
         }
         let id = usize::from(self.id.unwrap_or(0));
+        if self.remeasure && id == 0 && self.stage == Stage::Steady {
+            self.remeasure = false;
+            self.stage = Stage::Training;
+            self.trained = 0;
+            self.measured.fill(0.0);
+        }
         let row = if self.symbol == 0 { id } else { TABLES + self.symbol - 1 };
         self.demodulate(row);
 
@@ -894,6 +924,33 @@ impl Receiver for Rx {
         if self.stage == Stage::Steady {
             self.proposal = Some(self.load());
         }
+    }
+
+    fn remeasure(&mut self, db: f64) {
+        self.gap_db += db;
+        self.remeasure = true;
+    }
+
+    fn health(&self) -> Health {
+        let top = self.plan.top();
+        let steady = self.stage == Stage::Steady;
+        Health {
+            locked: matches!(self.stage, Stage::Training | Stage::Steady),
+            steady,
+            snr_db: if steady { (1..=top).map(|k| self.snr_db(k)).sum::<f64>() / top as f64 } else { 0.0 },
+            clock_ppm: self.clock_ppm(),
+        }
+    }
+
+    fn spectrum(&self) -> Vec<Bin> {
+        let table = self.id.and_then(|id| self.tables[usize::from(id)].as_ref());
+        (1..self.plan.half())
+            .map(|k| Bin {
+                hz: self.plan.frequency(k),
+                snr_db: if self.stage == Stage::Steady { self.snr_db(k) } else { 0.0 },
+                bits: table.map_or(0, |t| t.bits[k]),
+            })
+            .collect()
     }
 }
 

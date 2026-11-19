@@ -12,6 +12,12 @@
 //! finds itself listening to a table it has never heard of -- it was
 //! restarted, say, and the far end was not -- it asks for the starting table.
 //!
+//! The awkward case is both directions failing at once, because then neither
+//! end can tell the other anything. So an end that can read nothing does
+//! two things without waiting to be asked: it goes back to the starting
+//! table itself, which the far end can read if it can read anything, and on
+//! that it asks the far end to do the same.
+//!
 //! **Retransmission.** The Reed-Solomon code deals with a wrong decision
 //! here and there. It does not deal with a click that takes out a whole
 //! symbol, and on a loaded line a whole symbol is a whole block. Data frames
@@ -255,6 +261,10 @@ pub struct Channel<T, R> {
     offered: Option<(u8, Table)>,
     lost_run: usize,
     trouble: u32,
+    /// Since when nearly every codeword has been beyond repair, if they are.
+    starved_since: Option<u64>,
+    /// The far end is to be asked for the starting table until it sends it.
+    wants_reset: bool,
     /// When a table was last proposed, so that asking again waits to see
     /// what the last one did.
     proposed_at: u64,
@@ -263,15 +273,22 @@ pub struct Channel<T, R> {
 
 impl<T: Sender, R: Receiver> Channel<T, R> {
     pub fn new(tx: T, rx: R) -> Self {
+        Self::numbered(tx, rx, 0)
+    }
+
+    /// A channel that is one of several in the same lead.
+    fn numbered(tx: T, rx: R, number: u32) -> Self {
         Self {
             tx,
             rx,
-            packer: Packer::new(),
+            packer: Packer::seeded(number.wrapping_mul(0x9e37_79b9)),
             unpacker: Unpacker::new(),
             next_mark: 1,
             offered: None,
             lost_run: 0,
             trouble: 0,
+            starved_since: None,
+            wants_reset: false,
             proposed_at: 0,
             tally: Tally::default(),
         }
@@ -302,6 +319,11 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
                     self.tally.corrected += report.corrected as u64;
                     self.lost_run = 0;
                     self.trouble = if report.failed > 0 { self.trouble + 4 } else { self.trouble.saturating_sub(1) };
+                    if report.failed * 4 >= report.words * 3 {
+                        self.starved_since.get_or_insert(now);
+                    } else {
+                        self.starved_since = None;
+                    }
                 }
                 Arrived::Lost => {
                     self.tally.lost += 1;
@@ -314,9 +336,22 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
         // choosing means it chose too high. Two seconds between changes of
         // mind, so that the last change has been heard before the next.
         let own = self.offered.as_ref().is_some_and(|(mark, _)| self.rx.id() == Some(*mark));
-        if self.trouble >= 12 && own && now - self.proposed_at > (2.0 * fs) as u64 {
+        if own && self.starved_since.is_some_and(|since| now - since > fs as u64) {
+            // A second of nothing readable. The table was far too high, not
+            // a little, and the far end may be as deaf as this one: start
+            // again from the starting table, both ways.
+            self.starved_since = None;
+            self.trouble = 0;
+            self.offered = None;
+            self.wants_reset = true;
+            self.tx.reset();
+            self.rx.remeasure(3.0);
+        } else if self.trouble >= 12 && own && now - self.proposed_at > (2.0 * fs) as u64 {
             self.trouble = 0;
             self.rx.back_off(1.5);
+        }
+        if self.rx.id() == Some(0) {
+            self.wants_reset = false;
         }
         while let Some((kind, body)) = self.unpacker.pop() {
             match kind {
@@ -342,7 +377,7 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
 
         if let Some(layout) = self.tx.wants() {
             if !self.packer.urgent_waiting() {
-                if self.lost_run >= 2 {
+                if self.lost_run >= 2 || self.wants_reset {
                     self.packer.push_urgent(RESET, &[]);
                 } else if let Some((mark, table)) = &self.offered
                     && self.rx.id() != Some(*mark)
@@ -381,7 +416,7 @@ impl<T: Sender, R: Receiver> Station<T, R> {
     /// An end with a channel for each transmitter and receiver given.
     pub fn new(fs: f64, pairs: Vec<(T, R)>) -> Self {
         Self {
-            channels: pairs.into_iter().map(|(tx, rx)| Channel::new(tx, rx)).collect(),
+            channels: pairs.into_iter().zip(0..).map(|((tx, rx), c)| Channel::numbered(tx, rx, c)).collect(),
             arq: Arq::new(fs),
             fs,
             now: 0,
@@ -592,5 +627,65 @@ mod tests {
         assert!(after < before, "{before} then {after}");
         assert!(pair.b.channels[0].tally.proposals > 1);
         assert!(pair.at_b == to_b, "{} of {} octets", pair.at_b.len(), to_b.len());
+    }
+}
+
+#[cfg(test)]
+mod crosstalk {
+    use super::*;
+    use crate::dmt::{self, Plan};
+
+    type End = Station<dmt::Tx, dmt::Rx>;
+
+    fn stream(seed: usize, len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i * 131 + seed * 17 + (i >> 5) * 3 + (i >> 11)) as u8).collect()
+    }
+
+    /// Two ends on one stereo lead, one sending on each channel, with a
+    /// little of each channel leaking into the other: what a loop test on a
+    /// real sound card is.
+    fn leaky(coloured: bool, seconds: f64) -> (End, End, Vec<u8>, Vec<u8>) {
+        let plan = Plan::for_rate(48_000.0);
+        let end = |tx: u8, rx: u8| {
+            Station::new(
+                48_000.0,
+                vec![(dmt::Tx::new(plan.clone().coloured(tx)), dmt::Rx::new(plan.clone().coloured(rx)))],
+            )
+        };
+        let (mut a, mut b) = if coloured { (end(0, 1), end(1, 0)) } else { (end(0, 0), end(0, 0)) };
+        let sent = stream(9, 150_000);
+        a.write(&sent);
+        let leak = 10f64.powf(-45.0 / 20.0);
+        let (mut from_a, mut from_b) = ([0.0], [0.0]);
+        let mut got = Vec::new();
+        for _ in 0..(seconds * 48_000.0) as usize {
+            let (left, right) = (from_a[0] + leak * from_b[0], from_b[0] + leak * from_a[0]);
+            a.step(&[right], &mut from_a);
+            b.step(&[left], &mut from_b);
+            got.extend(b.read());
+        }
+        (a, b, sent, got)
+    }
+
+    #[test]
+    fn a_leak_from_the_other_channel_is_measured_when_the_lines_are_told_apart() {
+        let (a, b, sent, got) = leaky(true, 12.0);
+        assert!(got == sent, "{} of {} octets", got.len(), sent.len());
+        assert_eq!(b.channels[0].tally.proposals, 1);
+        assert_eq!(b.channels[0].tally.failed, 0);
+        let snr = b.channels[0].rx.health().snr_db;
+        assert!((snr - 45.0).abs() < 2.0, "measured {snr:.1} dB against a leak 45 dB down");
+        assert_eq!(a.channels[0].tx.id(), 1);
+    }
+
+    #[test]
+    fn two_ends_that_deafen_each_other_both_start_again_and_recover() {
+        // Without their own known points the two ends measure a perfect
+        // line, load it to the limit and can then read nothing, either way.
+        let (a, b, sent, got) = leaky(false, 40.0);
+        assert!(b.channels[0].tally.proposals > 1);
+        assert!(b.channels[0].tally.failed > 0);
+        assert!(got == sent, "{} of {} octets", got.len(), sent.len());
+        assert_ne!(a.channels[0].tx.id(), 0);
     }
 }

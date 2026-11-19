@@ -20,7 +20,13 @@
 //!   stream up again at the pointer.
 //! - **Frames**, end to end: a kind, a length, a body and a CRC-32. A frame
 //!   runs on into the next superframe if it has to. A zero where a kind
-//!   should be means nothing more is coming in this superframe.
+//!   should be means nothing more is coming in this superframe, and what
+//!   follows the zero is filler that is different every time. It has to be:
+//!   a line with nothing to say would otherwise say the same nothing in
+//!   every block, and a signal that repeats is a set of tones. Two lines
+//!   side by side both repeating would each leak into the other as a fixed
+//!   offset on every carrier rather than as noise, and a receiver's running
+//!   estimate of the line drifts off after it.
 
 use std::collections::VecDeque;
 
@@ -38,7 +44,7 @@ const NO_FRAME: u16 = 0xffff;
 const FRAME_OVERHEAD: usize = 3 + 4;
 
 /// The longest body a frame may have.
-pub const MAX_BODY: usize = 4096;
+pub const MAX_BODY: usize = 8192;
 
 /// How a superframe's room is divided into codewords.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,12 +138,20 @@ pub struct Packer {
     /// What is left of a frame the last superframe had no room to finish.
     carried: Vec<u8>,
     count: u8,
+    /// Where the filler has got to.
+    filler: u32,
     codes: Vec<ReedSolomon>,
 }
 
 impl Packer {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A packer whose filler is its own. Two lines in one lead want
+    /// different ones, for the reason the filler is there at all.
+    pub fn seeded(seed: u32) -> Self {
+        Self { filler: seed, ..Self::default() }
     }
 
     /// Queue a frame behind whatever is already waiting.
@@ -183,7 +197,13 @@ impl Packer {
             self.carried = frame[take..].to_vec();
         }
         payload[1..HEADER].copy_from_slice(&pointer.to_le_bytes());
-        payload.resize(room, 0);
+        if payload.len() < room {
+            payload.push(0);
+        }
+        while payload.len() < room {
+            self.filler = self.filler.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            payload.push((self.filler >> 24) as u8);
+        }
 
         let code = code_for(&mut self.codes, layout.parity);
         let order = layout.order();
@@ -404,6 +424,21 @@ mod tests {
             }
         }
         assert_eq!(got, sent);
+        assert_eq!(unpacker.bad_frames, 0);
+    }
+
+    #[test]
+    fn an_idle_line_never_says_the_same_thing_twice() {
+        let layout = Layout::new(300, 16).unwrap();
+        let mut packer = Packer::new();
+        let mut unpacker = Unpacker::new();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..50 {
+            let line = packer.fill(&layout);
+            unpacker.take(&line, &layout, None);
+            assert!(seen.insert(line[40..].to_vec()));
+        }
+        assert_eq!(unpacker.pop(), None);
         assert_eq!(unpacker.bad_frames, 0);
     }
 

@@ -71,6 +71,28 @@ pub enum Arrived {
     Lost,
 }
 
+/// How a receiver is getting on, in terms any of them can answer in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Health {
+    /// In step with the far end's signal.
+    pub locked: bool,
+    /// And finished measuring it.
+    pub steady: bool,
+    /// Signal to noise over the part of the band in use, in decibels.
+    pub snr_db: f64,
+    /// How far the far end's sample clock is from this one.
+    pub clock_ppm: f64,
+}
+
+/// One slice of the band as a receiver sees it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Bin {
+    pub hz: f64,
+    pub snr_db: f64,
+    /// Bits the far end is putting here.
+    pub bits: u8,
+}
+
 /// The sending half of a modulation.
 pub trait Sender {
     /// Room that needs filling for the block about to start, if any is
@@ -91,6 +113,9 @@ pub trait Sender {
 
     /// Go back to the table both ends start with, at the next superframe.
     fn reset(&mut self);
+
+    /// Bits a second with the table in use: on the line, and of frames.
+    fn rates(&self) -> (f64, f64);
 }
 
 /// The receiving half.
@@ -114,6 +139,18 @@ pub trait Receiver {
     /// Ask for a fresh proposal with this many more decibels in hand than
     /// the last, because the last was not enough.
     fn back_off(&mut self, db: f64);
+
+    /// Measure the line afresh once the far end is back on the starting
+    /// table, and propose from that with this many more decibels in hand.
+    /// For when what arrives is so wrong that nothing learned from it can
+    /// be trusted.
+    fn remeasure(&mut self, db: f64);
+
+    fn health(&self) -> Health;
+
+    /// The band, slice by slice: a carrier at a time for the multicarrier
+    /// mode, and all in one for the others.
+    fn spectrum(&self) -> Vec<Bin>;
 }
 
 #[cfg(test)]

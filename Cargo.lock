@@ -1593,6 +1593,7 @@ dependencies = [
  "sip",
  "transfer",
  "v8",
+ "varc",
 ]
 
 [[package]]
