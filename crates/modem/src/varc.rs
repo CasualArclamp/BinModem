@@ -100,6 +100,9 @@ pub(crate) struct Call {
     cleaned: Vec<f64>,
     /// How far down the echo was when whoever is watching was last told.
     echo_said: f64,
+    /// Times the cancellers had found the echo somewhere new, when last
+    /// looked.
+    echo_moved: u64,
     samples: u64,
     /// Samples since any channel last heard the far end.
     deaf: u64,
@@ -143,6 +146,7 @@ impl Call {
             echo: Vec::new(),
             cleaned: Vec::new(),
             echo_said: 0.0,
+            echo_moved: 0,
             samples: 0,
             deaf: 0,
             first_loaded: None,
@@ -261,7 +265,18 @@ impl Call {
             station.hear(input);
         } else {
             self.cleaned.clear();
-            self.cleaned.extend(self.echo.iter_mut().zip(input).map(|(canceller, &x)| canceller.clean(x)));
+            for ((canceller, &x), channel) in self.echo.iter_mut().zip(input).zip(station.channels.iter_mut()) {
+                self.cleaned.push(canceller.clean(x));
+                // The receiver's own stage is told what the echo is of,
+                // and to start again if the echo has moved.
+                channel.rx.echo_under(canceller.under_now());
+            }
+            if self.echo.iter().map(|c| c.moved).sum::<u64>() != self.echo_moved {
+                self.echo_moved = self.echo.iter().map(|c| c.moved).sum();
+                for channel in &mut station.channels {
+                    channel.rx.echo_again();
+                }
+            }
             station.hear(&self.cleaned);
         }
         self.samples += 1;
@@ -275,6 +290,20 @@ impl Call {
             self.deaf = 0;
         } else {
             self.deaf += u64::from(every.max(1));
+        }
+        // Once a receiver's own echo stage is working, the canceller in
+        // front of it holds still for it; and lets go if the receiver loses
+        // the far end, since that stage learns from the far end's symbols.
+        //
+        // Only once the receiver is already reading well, though. That stage
+        // can only finish a job that is mostly done: it learns from symbols
+        // it can read, and at 10 dB it reads too few of them rightly to
+        // learn much. Below 30 dB the canceller in front is the one that
+        // will get there, however slowly, and it is left to.
+        for (canceller, channel) in self.echo.iter_mut().zip(&station.channels) {
+            let health = channel.rx.health();
+            let enough = if canceller.held() { 24.0 } else { 30.0 };
+            canceller.hold(health.steady && health.snr_db >= enough && channel.rx.echo_left_db().is_some());
         }
         // The echo, as it goes down: said each time it is 10 dB further.
         if let Some(canceller) = self.echo.first() {

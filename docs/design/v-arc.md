@@ -239,15 +239,41 @@ what was sent against what was heard sample for sample.
 | The Realtek lead at 192 kHz, this end's own signal only | echo found 81.4 ms round, 40 dB down in 1.3 s; did not reach 50 dB in 14 s; no sound underruns |
 | The same pair with no canceller (`VARC`), simulation | never connects |
 
-The slow climb is the price of learning while the far end talks, and it is
-what limits the rate: a wire each way gives 60 dB on the lead and this gives
-about 40 after a minute. Doing better means taking the far end's own signal
-out of what the filter learns from, once it has been decoded, which is not
-built.
+**The second stage.** That slow climb is the price of learning while the far
+end talks, and by itself it stops at about 40 dB after a minute. What gets
+past it is in the multicarrier receiver (`Rx::learn_echo`):
+
+- Once a symbol has been read, the receiver knows what the far end sent on
+  every carrier and what the line did to each. That is the far end's whole
+  part of the window, so it is built again and taken away.
+- What is left is the echo the canceller missed and the line's noise. A
+  second filter, the same 4 ms, is fitted to that, and is working against
+  the noise alone.
+- It is fitted after the receiver's resampler, where the far end's symbols
+  are. This end's own signal is put through a resampler steered exactly as
+  the line's is, so the two stay sample for sample.
+- It learns only from symbols that were read (three carriers in four within
+  6 dB of a point), since a wrong decision leaves the far end in what it
+  learns from. It forgets what it knows when the receiver loses the far end.
+- Once the receiver reads at 30 dB the canceller in front is held still, so
+  that what it missed stays put for the second stage to find; below 24 dB it
+  is let go again. Before that was conditional, an end that started badly
+  stayed at 10 dB for the whole call.
+
+| Where | First stage only | With the second stage |
+|---|---|---|
+| Simulation, echo 6 dB louder than the far end | Es/N0 41.6 dB at 165 s, 164 kbit/s | 75 dB at 50 s, 392 kbit/s, which is what a wire each way gives |
+| Two ends on one machine, both on VB-Cable A, 48 kHz, two channels | about 38 dB at 35 s, 300 kbit/s each way | 72 dB at 60 s; 720 and 634 kbit/s; 2.6 and 2.3 million octets, none wrong |
 
 Not tried: a real two-wire line (a hybrid, a telephone pair), two machines,
 or two sound cards whose clocks differ, where the echo of one card is still
-its own but the far end slides.
+its own but the far end slides. The virtual cable is as kind as a line gets:
+its echo is one spike with no tail and it adds no noise. A real hybrid's echo
+has a tail and a converter's is not perfectly linear, and neither stage can
+take out what is not a filtered copy of what was sent.
+
+`varc-link --modem --mode 2w --dial ATA` and `--dial ATD1` run the two ends
+without a window.
 
 **Two more scopes.** Under the symbol diagram while a V.ARC call is up: the
 bits on each carrier with the signal to noise they were chosen from, and the
@@ -452,8 +478,8 @@ the Realtek lead: 32 768 points on the commonest carriers, 1 048 576 for the
 single carrier, 64 levels.
 
 Beside the size of the grid the panel gives the code on what is arriving,
-as data octets over octets a codeword (`code 236/252`), and the error control
-line spells it out. It follows the table, so it changes when the two ends
+as a decimal (`code 0.94`), and the error control line gives the code it is
+the rate of (`Reed-Solomon 236/252`). It follows the table, so it changes when the two ends
 change tables.
 
 ![The code rate beside the grid's size](../images/v-arc/code-rate.png)

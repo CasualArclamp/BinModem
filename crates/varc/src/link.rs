@@ -252,6 +252,15 @@ impl<T: Receiver + ?Sized> Receiver for Box<T> {
     fn code(&self) -> Option<(usize, usize)> {
         (**self).code()
     }
+    fn echo_under(&mut self, sample: f64) {
+        (**self).echo_under(sample)
+    }
+    fn echo_again(&mut self) {
+        (**self).echo_again()
+    }
+    fn echo_left_db(&self) -> Option<f64> {
+        (**self).echo_left_db()
+    }
 }
 
 /// The receiving half.
@@ -310,6 +319,23 @@ pub trait Receiver {
     /// codeword and how many of them are data. The table says how many are
     /// check octets, so it changes when the table does.
     fn code(&self) -> Option<(usize, usize)> {
+        None
+    }
+
+    /// On a line that is one pair of wires: the sample of this end's own
+    /// signal that the echo in the next sample fed is the echo of, as the
+    /// canceller in front of this receiver has placed it. Given before each
+    /// [`Receiver::feed`]. A receiver that knows what the far end sent can
+    /// take the echo further down than a canceller that does not; one that
+    /// cannot ignores this.
+    fn echo_under(&mut self, _sample: f64) {}
+
+    /// The echo has moved: whatever was learned of it is to be forgotten.
+    fn echo_again(&mut self) {}
+
+    /// How much this receiver's own stage has taken off the echo it was
+    /// handed, in decibels, if it has one and it has learned anything.
+    fn echo_left_db(&self) -> Option<f64> {
         None
     }
 }

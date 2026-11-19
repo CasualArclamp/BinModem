@@ -80,6 +80,8 @@ pub struct Canceller {
     /// What arrives and what is passed on, as powers, slowly averaged.
     power_in: f64,
     power_out: f64,
+    /// Told to stop learning; see [`Canceller::hold`].
+    held: bool,
     /// Times the delay was found somewhere other than where it had been.
     pub moved: u64,
 }
@@ -116,6 +118,7 @@ impl Canceller {
             probe_len: 0,
             power_in: 0.0,
             power_out: 0.0,
+            held: false,
             moved: 0,
         }
     }
@@ -141,6 +144,33 @@ impl Canceller {
         // The filter is laid against history oldest first, so its last tap
         // is the soonest part of the echo.
         self.taps.iter().rev().copied().collect()
+    }
+
+    /// Stop learning, or start again.
+    ///
+    /// While the far end talks this filter never comes to rest: every step
+    /// it takes is partly a step after the far end's signal, and it goes on
+    /// wandering about the right answer by a little. A receiver with a stage
+    /// of its own, which learns from what is left once the far end's part is
+    /// taken out, can find what this one missed far more exactly than this
+    /// one can, but only if what this one missed stays where it is. So once
+    /// that stage is working this one is held, and the other follows
+    /// whatever the line does from then on. An echo that moves outright
+    /// starts both again.
+    pub fn hold(&mut self, held: bool) {
+        self.held = held;
+    }
+
+    /// Whether it has been told to hold still.
+    pub fn held(&self) -> bool {
+        self.held
+    }
+
+    /// The newest sample under the filter: the one sent a delay ago, which
+    /// the newest part of the echo now arriving is the echo of. Nought until
+    /// the delay is known.
+    pub fn under_now(&self) -> f64 {
+        self.under().map_or(0.0, |range| self.sent[range.end - 1])
     }
 
     /// The delay round the line, in samples, once found.
@@ -171,8 +201,9 @@ impl Canceller {
         let under = &self.sent[range];
         let echo: f64 = self.taps.iter().zip(under).map(|(t, x)| t * x).sum();
         let left = heard - echo;
-        // Only while this end is sending is there anything to learn from.
-        if self.energy > 1e-9 {
+        // Only while this end is sending is there anything to learn from,
+        // and not while it has been told to hold still.
+        if self.energy > 1e-9 && !self.held {
             let n = self.taps.len() as f64;
             let step = (n / (self.learned as f64 + n)).max(SMALLEST_STEP);
             let push = step * left / (self.energy + 1e-9);
@@ -268,6 +299,7 @@ impl Canceller {
                 self.delay = Some(delay);
                 self.taps.fill(0.0);
                 self.learned = 0;
+                self.held = false;
                 self.since_summed = u32::MAX / 2;
             }
         }

@@ -4420,7 +4420,9 @@ impl ScopeApp {
             );
             // The code rate, for a mode that has a code and changes it: data
             // octets over octets a codeword.
-            let code = f.code.filter(|c| c.0 > 0).map(|(n, k)| format!("code {k}/{n}"));
+            // As a decimal: 227/243 says nothing at a glance and 0.93 does.
+            // The line under "Error control" has the code itself.
+            let code = f.code.filter(|c| c.0 > 0).map(|(n, k)| format!("code {:.2}", f64::from(k) / f64::from(n)));
             if merit.is_some() || code.is_some() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some(merit) = &merit {
@@ -4633,7 +4635,7 @@ impl ScopeApp {
                     "Error control",
                     if let (true, Some((n, k))) = (f.leds.ec, f.code.filter(|c| c.0 > 0)) {
                         format!(
-                            "running: frames checked and resent\nReed-Solomon {k}/{n} · rate {:.3} · mends {} a word",
+                            "running: frames checked and resent\nReed-Solomon {k}/{n} · code rate {:.2} · mends {} a word",
                             f64::from(k) / f64::from(n),
                             (n - k) / 2
                         )

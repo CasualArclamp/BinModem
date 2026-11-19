@@ -67,6 +67,15 @@ const LOADED_PARITY: u8 = 16;
 /// Octets a group of symbols has to hold before it is a block by itself.
 const GROUP_OCTETS: usize = 200;
 
+/// How much of the line the receiver's own echo stage covers, in seconds:
+/// what the canceller in front of it covers.
+const ECHO_SPAN: f64 = 0.004;
+
+/// Samples of each symbol the echo stage learns from. Every sample would be
+/// four times the work at 192 kHz for an answer a quarter of a second
+/// sooner.
+const ECHO_LEARNT: usize = 256;
+
 /// Symbols spent letting the channel estimate settle before measuring.
 const SETTLE: usize = 44;
 
@@ -515,6 +524,24 @@ pub struct Rx {
     /// superframes in a row the line has looked good for a good deal more.
     proposed: usize,
     better: usize,
+    /// The second stage of echo cancelling; see [`Rx::learn_echo`].
+    ///
+    /// This end's own signal as the canceller in front has placed it, after
+    /// the same resampling as the line, twice over so any stretch is one
+    /// slice; the taps; samples learned from; and what a window held before
+    /// and after this stage, as powers, for saying how much it does.
+    echo_on: bool,
+    echo_in: f64,
+    echo_interp: Interp,
+    echo_ref: Vec<f64>,
+    echo_taps: Vec<f64>,
+    echo_learned: u64,
+    echo_power: (f64, f64),
+    /// The far end's signal as decided, for the symbol just read, and where
+    /// that symbol's window began.
+    far_re: Vec<f64>,
+    far_im: Vec<f64>,
+    last_start: i64,
     /// Which of the starting table's points each carrier carries.
     spread: Vec<Option<u16>>,
     /// The noise on each carrier under the starting table, as of the last
@@ -589,6 +616,16 @@ impl Rx {
             mean_snr_db: 0.0,
             proposed: 0,
             better: 0,
+            echo_on: false,
+            echo_in: 0.0,
+            echo_interp: Interp::new(),
+            echo_ref: Vec::new(),
+            echo_taps: vec![0.0; (ECHO_SPAN * plan.fs).round() as usize],
+            echo_learned: 0,
+            echo_power: (0.0, 0.0),
+            far_re: vec![0.0; plan.n],
+            far_im: vec![0.0; plan.n],
+            last_start: 0,
             spread: plan.spread(),
             heard: vec![1.0; half],
             points: Vec::new(),
@@ -635,12 +672,110 @@ impl Rx {
     }
 
     fn hunt_again(&mut self) {
+        // Whatever the echo stage learned, it learned from symbols this
+        // receiver could read, and it has just stopped being able to.
+        self.echo_taps.fill(0.0);
+        self.echo_learned = 0;
+        self.echo_power = (0.0, 0.0);
         self.stage = Stage::Hunting;
         self.products.fill((0.0, 0.0));
         self.sum = (0.0, 0.0);
         self.folded.fill((0.0, 0.0));
         self.hunted = 0;
         self.id = None;
+    }
+
+    /// The stretch of this end's own signal that lies under the echo stage
+    /// for the sample numbered `index`: oldest first, ending with the sample
+    /// that arrived with it.
+    fn echo_under_at(&self, index: i64) -> &[f64] {
+        let kept = self.echo_ref.len() / 2;
+        let end = index.rem_euclid(kept as i64) as usize + kept + 1;
+        &self.echo_ref[end - self.echo_taps.len()..end]
+    }
+
+    /// A sample off the line and, with it, the sample of this end's own
+    /// signal the canceller in front says its echo is of.
+    fn sample_with(&mut self, x: f64, own: f64) {
+        if self.echo_ref.is_empty() {
+            self.echo_ref = vec![0.0; 2 * (6 * self.plan.span() + self.echo_taps.len())];
+        }
+        let kept = self.echo_ref.len() / 2;
+        let at = self.count.rem_euclid(kept as i64) as usize;
+        self.echo_ref[at] = own;
+        self.echo_ref[at + kept] = own;
+        let x = if self.echo_learned > 0 {
+            let under = self.echo_under_at(self.count);
+            // Taps are newest first: the last sample under is the first tap's.
+            x - self.echo_taps.iter().zip(under.iter().rev()).map(|(t, r)| t * r).sum::<f64>()
+        } else {
+            x
+        };
+        self.sample(x);
+    }
+
+    /// The second stage of echo cancelling: learn what is left of this end's
+    /// echo from a symbol the far end's part has been taken out of.
+    ///
+    /// The canceller in front of the receiver learns while the far end
+    /// talks, and to it the far end is noise as loud as the signal: the
+    /// echo it leaves falls only as one over the time it has had. But once a
+    /// symbol has been read, this receiver knows what the far end sent in
+    /// it, carrier by carrier, and what the line did to each. That is the
+    /// far end's whole part of the window, and it can be built again and
+    /// taken away. What is left is the echo the canceller missed and the
+    /// line's own noise, and a filter fitted to *that* is working against
+    /// the noise alone.
+    ///
+    /// It is fitted here, after the resampler, where the far end's symbols
+    /// are; so this end's own signal is put through a resampler steered
+    /// exactly as the line's is, and the two stay sample for sample.
+    fn learn_echo(&mut self) {
+        let n = self.plan.n;
+        // The far end's part of the window: the inverse transform of what
+        // each carrier was decided to hold. The conjugate goes in and the
+        // forward transform comes out as the inverse would have.
+        for k in 1..n / 2 {
+            let (re, im) = (self.far_re[k], self.far_im[k]);
+            self.far_im[k] = -im;
+            self.far_re[n - k] = re;
+            self.far_im[n - k] = im;
+        }
+        self.far_re[0] = 0.0;
+        self.far_im[0] = 0.0;
+        self.far_re[n / 2] = 0.0;
+        self.far_im[n / 2] = 0.0;
+        self.fft.process(&mut self.far_re, &mut self.far_im);
+        let taps = self.echo_taps.len();
+        let every = (n / ECHO_LEARNT).max(1);
+        let (mut before, mut after) = (0.0, 0.0);
+        for m in (0..n).step_by(every) {
+            let index = self.last_start + m as i64;
+            let far = self.far_re[m] / n as f64;
+            let left = self.at(index) - far;
+            let kept = self.echo_ref.len() / 2;
+            let end = index.rem_euclid(kept as i64) as usize + kept + 1;
+            let under = &self.echo_ref[end - taps..end];
+            let energy: f64 = under.iter().map(|r| r * r).sum();
+            if energy < 1e-9 {
+                continue;
+            }
+            // What this stage had already taken off this sample, so that
+            // what it does can be said.
+            let had: f64 = self.echo_taps.iter().zip(under.iter().rev()).map(|(t, r)| t * r).sum();
+            before += (left + had) * (left + had);
+            after += left * left;
+            // Large steps at first, since there is only noise to be misled
+            // by; then small ones, which a wrong decision cannot move far.
+            let step = (taps as f64 / (self.echo_learned as f64 + taps as f64)).clamp(0.002, 0.2);
+            let push = step * left / energy;
+            for (t, r) in self.echo_taps.iter_mut().zip(under.iter().rev()) {
+                *t += push * r;
+            }
+            self.echo_learned += 1;
+        }
+        self.echo_power.0 += (before - self.echo_power.0) / 32.0;
+        self.echo_power.1 += (after - self.echo_power.1) / 32.0;
     }
 
     fn sample(&mut self, x: f64) {
@@ -763,6 +898,7 @@ impl Rx {
 
     fn symbol_at(&mut self, start: i64) {
         let span = self.plan.span() as i64;
+        self.last_start = start;
         self.transform(start);
         if self.stage == Stage::Framing {
             let (id, quality) = self.sync_match();
@@ -875,6 +1011,7 @@ impl Rx {
             self.h[k] = self.h[k] * Complex::from_polar(1.0, turn * k as f64);
         }
         self.interp.nudge(crept);
+        self.echo_interp.nudge(crept);
     }
 
     fn demodulate(&mut self, row: usize) {
@@ -1012,6 +1149,13 @@ impl Rx {
         let measuring = self.stage == Stage::Training && self.trained >= SETTLE;
         let turn = Complex::from_polar(1.0, TAU * late / n);
 
+        if self.echo_on {
+            self.far_re.fill(0.0);
+            self.far_im.fill(0.0);
+        }
+        // Carriers worth judging the symbol by, and how many of them came
+        // out near a point.
+        let (mut seen, mut sound) = (0usize, 0usize);
         let mut back = Complex::ONE;
         for k in 1..half {
             back = back * turn;
@@ -1039,8 +1183,18 @@ impl Rx {
             } else {
                 self.known[row][k]
             };
+            if self.echo_on {
+                // What this carrier held as it arrived, by the decision.
+                let held = reference * self.h[k] * back.conj();
+                self.far_re[k] = held.re;
+                self.far_im[k] = held.im;
+            }
             let error = z - reference;
             let e2 = error.norm_sqr();
+            if k <= top && self.weight[k] > 1e-3 {
+                seen += 1;
+                sound += usize::from(e2 < 0.25 * reference.norm_sqr());
+            }
             if spreading && k <= top {
                 self.heard[k] += (e2.max(1e-12) - self.heard[k]) / 16.0;
             }
@@ -1081,6 +1235,16 @@ impl Rx {
         // taken out at once, and a fiftieth of it changes the rate.
         self.interp.nudge(0.2 * late);
         self.interp.adjust_step(0.02 * late / self.plan.span() as f64);
+        self.echo_interp.nudge(0.2 * late);
+        self.echo_interp.adjust_step(0.02 * late / self.plan.span() as f64);
+        // The echo stage learns from a symbol only if the symbol was read:
+        // what it takes away as the far end's part is the decisions, and if
+        // those are wrong what is left is not the echo but the far end, and
+        // a filter fitted to that is worse than none. Most carriers within
+        // a few decibels of a point is a symbol that was read.
+        if self.echo_on && !unknown && 4 * sound >= 3 * seen.max(1) {
+            self.learn_echo();
+        }
 
         if self.stage == Stage::Training && unknown {
             // Sent with a table this end has never seen, so most carriers
@@ -1138,9 +1302,41 @@ impl Receiver for Rx {
                 count += 1;
             }
         });
-        for &y in &out[..count] {
-            self.sample(y);
+        if !self.echo_on {
+            for &y in &out[..count] {
+                self.sample(y);
+            }
+            return;
         }
+        // This end's own signal through a resampler steered as the line's
+        // is, so that the two come out together.
+        let mut own = [0.0; 2];
+        let mut owned = 0;
+        self.echo_interp.feed(self.echo_in, |y| {
+            if owned < 2 {
+                own[owned] = y;
+                owned += 1;
+            }
+        });
+        for (&y, &r) in out[..count].iter().zip(&own) {
+            self.sample_with(y, r);
+        }
+    }
+
+    fn echo_under(&mut self, sample: f64) {
+        self.echo_on = true;
+        self.echo_in = sample;
+    }
+
+    fn echo_again(&mut self) {
+        self.echo_taps.fill(0.0);
+        self.echo_learned = 0;
+        self.echo_power = (0.0, 0.0);
+    }
+
+    fn echo_left_db(&self) -> Option<f64> {
+        let (before, after) = self.echo_power;
+        (self.echo_learned > 0 && before > 0.0 && after > 0.0).then(|| 10.0 * (before / after).log10())
     }
 
     fn take(&mut self) -> Option<Arrived> {

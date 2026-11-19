@@ -380,9 +380,14 @@ fn on_one_pair_of_wires_each_end_takes_its_own_echo_out() {
     assert_eq!(echo.len(), 1);
     let found = echo[0].1.expect("a delay");
     assert!(found.abs_diff(delay) < 8, "found {found}");
-    // The rate after 40 s: the echo is some 40 dB down by then.
+    // The rate after 40 s. The canceller in front of the receiver leaves
+    // the echo some 37 dB down by then, which is 150 kbit/s; the receiver's
+    // own stage, which learns from what is left once the far end's part is
+    // taken out, is what takes it past that.
     let rate = caller.rate().unwrap_or(0);
-    assert!(rate > 100_000, "{rate} bit/s");
+    assert!(rate > 250_000, "{rate} bit/s");
+    let far = caller.varc_far_end().expect("a report").0;
+    assert!(far.snr_db > 55.0, "the far end reads this end at {:.1} dB", far.snr_db);
     eprintln!("two-wire: {rate} bit/s, echo {:.1} dB down", echo[0].0);
 }
 
