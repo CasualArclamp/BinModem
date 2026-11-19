@@ -2929,6 +2929,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "varc"
+version = "4.2.0"
+dependencies = [
+ "dsp",
+ "ec",
+]
+
+[[package]]
 name = "vello_common"
 version = "0.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
