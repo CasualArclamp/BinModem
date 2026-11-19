@@ -186,6 +186,15 @@ OS-specific code — but only built and run on Windows so far.
   provider's server puts exact codewords on the network, which is why a real
   modem gets 56k on the same line.
 
+- **V.ARC**, a wideband mode of our own for two sound cards joined by a lead
+  rather than by a telephone line. Three modulations: a multicarrier one
+  loaded a carrier at a time, and QAM and baseband levels at 16 000 baud.
+  Through a real stereo lead between a Realtek line output and its line
+  input at 192 kHz the multicarrier mode measured a megabit a second each
+  way with no octet wrong. It runs from `varc-link` only: nothing in the
+  modem or the window reaches it yet, and it has never been run between two
+  machines. See [docs/design/v-arc.md](docs/design/v-arc.md).
+
 ## Next
 
 V.33 -- the same trellis code as V.32bis again, on a leased line.
