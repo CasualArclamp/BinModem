@@ -24,6 +24,12 @@
 //!   regardless, sends a known point, which is what the receiver times
 //!   itself against and how it goes on measuring carriers nothing is using.
 //!
+//! The octets do not wait for a superframe. The data symbols are taken in
+//! *groups*, each group a block of Reed-Solomon codewords on its own, and a
+//! group is as few symbols as hold a codeword's worth: one, on a line that
+//! has been measured and loaded, so that an octet is on its way a fiftieth
+//! of a second after it was offered and not three quarters of a second.
+//!
 //! Nothing is modulated onto a carrier frequency: the signal is real and at
 //! baseband, so there is no frequency offset between two ends to find, only
 //! the difference between their sample clocks. See [`crate::interp`].
@@ -53,6 +59,9 @@ const DEFAULT_PARITY: u8 = 32;
 
 /// And under a table made to measure.
 const LOADED_PARITY: u8 = 16;
+
+/// Octets a group of symbols has to hold before it is a block by itself.
+const GROUP_OCTETS: usize = 200;
 
 /// Symbols spent letting the channel estimate settle before measuring.
 const SETTLE: usize = 44;
@@ -103,6 +112,17 @@ impl Plan {
         carrier as f64 * self.fs / self.n as f64
     }
 
+    /// The highest carrier that is ever given bits.
+    ///
+    /// The receiver's resampler is flat to about 0.87 of Nyquist and above
+    /// that its response moves as the two ends' clocks slide past each
+    /// other. On average those carriers look usable; for the few symbols in
+    /// each slide when they are at their worst they are not, and the errors
+    /// come all at once. Converters have little to offer up there anyway.
+    pub fn top(&self) -> usize {
+        self.half() * 43 / 50
+    }
+
     pub fn is_pilot(carrier: usize) -> bool {
         carrier % PILOT_EVERY == PILOT_AT
     }
@@ -124,9 +144,19 @@ impl Plan {
         Table { parity: DEFAULT_PARITY, bits }
     }
 
-    /// How a superframe sent with `table` is laid out, if it holds anything.
+    /// Data symbols in each group sent with `table`: the fewest, in powers
+    /// of two, that between them hold most of a codeword.
+    pub fn group(&self, table: &Table) -> usize {
+        let mut group = 1;
+        while group < self.symbols && group * table.total() / 8 < GROUP_OCTETS {
+            group *= 2;
+        }
+        group
+    }
+
+    /// How a group sent with `table` is laid out, if it holds anything.
     pub fn layout(&self, table: &Table) -> Option<Layout> {
-        Layout::new(self.symbols * table.total() / 8, usize::from(table.parity))
+        Layout::new(self.group(table) * table.total() / 8, usize::from(table.parity))
     }
 
     /// Bits a second `table` carries on the line, coding and all.
@@ -136,7 +166,8 @@ impl Plan {
 
     /// Bits a second of frames `table` carries.
     pub fn net(&self, table: &Table) -> f64 {
-        self.layout(table).map_or(0.0, |l| (l.payload() * 8) as f64 / self.superframe())
+        let groups = self.symbols / self.group(table);
+        self.layout(table).map_or(0.0, |l| (groups * l.payload() * 8) as f64 / self.superframe())
     }
 
     /// The known points: a row for each sync sequence, then a row for each
@@ -265,6 +296,11 @@ impl Tx {
             }
             self.out.push(s.clamp(-1.0, 1.0));
         }
+        // The octets for a group are asked for as the last symbol of the
+        // one before goes out, and a change of table waits for the end of
+        // a superframe, where the sync symbol can announce it.
+        let done = self.symbol;
+        let group = self.plan.group(&self.table);
         self.symbol += 1;
         if self.symbol > self.plan.symbols {
             self.symbol = 0;
@@ -272,6 +308,8 @@ impl Tx {
                 self.id = id;
                 self.table = table;
             }
+        }
+        if done > 0 && done.is_multiple_of(group) {
             self.reader = BitReader::default();
             self.wanting = true;
         }
@@ -311,6 +349,10 @@ impl Sender for Tx {
 
     fn id(&self) -> u8 {
         self.next.as_ref().map_or(self.id, |(id, _)| *id)
+    }
+
+    fn reset(&mut self) {
+        self.next = Some((0, self.plan.default_table()));
     }
 }
 
@@ -638,9 +680,8 @@ impl Rx {
             // is no guide at the very top of the band: the resampler's own
             // response up there moves as the two clocks slide past each
             // other, which reads as timing error and is not.
-            let trusted = self.plan.half() * 17 / 20;
             for k in 0..self.plan.half() {
-                self.weight[k] = if k <= trusted { self.h[k].norm_sqr() / peak } else { 0.0 };
+                self.weight[k] = if k <= self.plan.top() { self.h[k].norm_sqr() / peak } else { 0.0 };
             }
             self.noise.fill(1.0);
             self.measured.fill(0.0);
@@ -673,8 +714,9 @@ impl Rx {
         let row = if self.symbol == 0 { id } else { TABLES + self.symbol - 1 };
         self.demodulate(row);
 
-        if self.symbol == self.plan.symbols {
-            let table = self.tables[id].as_ref();
+        let table = self.tables[id].as_ref();
+        let group = table.map_or(self.plan.symbols, |t| self.plan.group(t));
+        if self.symbol > 0 && self.symbol.is_multiple_of(group) {
             match table.and_then(|t| self.plan.layout(t)) {
                 Some(layout) => {
                     let line = self.writer.finish(layout.capacity());
@@ -685,10 +727,8 @@ impl Rx {
                     self.arrived.push_back(Arrived::Lost);
                 }
             }
-            self.symbol = 0;
-        } else {
-            self.symbol += 1;
         }
+        self.symbol = if self.symbol == self.plan.symbols { 0 } else { self.symbol + 1 };
         self.next_start += span;
     }
 
@@ -779,7 +819,13 @@ impl Rx {
         self.interp.nudge(0.2 * late);
         self.interp.adjust_step(0.02 * late / self.plan.span() as f64);
 
-        if self.stage == Stage::Training && !is_sync {
+        if self.stage == Stage::Training && unknown {
+            // Sent with a table this end has never seen, so most carriers
+            // hold points it cannot name and there is nothing to measure
+            // them against. Wait for the far end to go back to the start.
+            self.trained = 0;
+            self.measured.fill(0.0);
+        } else if self.stage == Stage::Training && !is_sync {
             self.trained += 1;
             if self.trained == SETTLE + MEASURE {
                 for k in 1..half {
@@ -801,7 +847,7 @@ impl Rx {
         let gap = 10f64.powf(self.gap_db / 10.0);
         let bits = (0..self.plan.half())
             .map(|k| {
-                if k == 0 || Plan::is_pilot(k) {
+                if k == 0 || k > self.plan.top() || Plan::is_pilot(k) {
                     return 0;
                 }
                 let snr = 1.0 / self.noise[k];
@@ -980,7 +1026,7 @@ mod tests {
             line.rx.expect(1, table.clone());
             line.tx.adopt(1, table.clone());
             let rate = line.rx.plan().net(&table);
-            assert!(rate > 250_000.0, "{rate} bit/s");
+            assert!(rate > 230_000.0, "{rate} bit/s");
             line.got.clear();
             line.run(1.5);
             let sent: Vec<Vec<u8>> = (0..300usize).map(|i| (0..1000).map(|j| (i * 7 + j * 13 + (j >> 4)) as u8).collect()).collect();

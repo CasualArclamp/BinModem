@@ -1,7 +1,7 @@
 //! What the three modulations have in common, as seen from above.
 //!
-//! Each of them is a transmitter that offers room for octets once a
-//! superframe and a receiver that hands back what arrived in that room; each
+//! Each of them is a transmitter that offers room for octets every so often
+//! and a receiver that hands back what arrived in that room; each
 //! measures the line it is listening to and says how many bits it thinks the
 //! line will stand; and each can be told, by the far end, how many bits to
 //! send. The traits here are that and nothing else, so that what sits above
@@ -61,19 +61,19 @@ impl Table {
     }
 }
 
-/// What a receiver has to show for one superframe.
+/// What a receiver has to show for one block of octets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Arrived {
     /// The octets as sliced, errors and all, and how they are laid out.
     Octets { line: Vec<u8>, layout: Layout },
-    /// A superframe went by that could not be read: sent with a table this
-    /// end does not have, or missed.
+    /// A block went by that could not be read: sent with a table this end
+    /// does not have, or missed.
     Lost,
 }
 
 /// The sending half of a modulation.
 pub trait Sender {
-    /// Room that needs filling for the superframe about to start, if any is
+    /// Room that needs filling for the block about to start, if any is
     /// wanted and it has not been given yet.
     fn wants(&self) -> Option<Layout>;
 
@@ -88,6 +88,9 @@ pub trait Sender {
 
     /// The table in use, or about to be.
     fn id(&self) -> u8;
+
+    /// Go back to the table both ends start with, at the next superframe.
+    fn reset(&mut self);
 }
 
 /// The receiving half.
@@ -95,7 +98,7 @@ pub trait Receiver {
     /// One sample off the line.
     fn feed(&mut self, sample: f64);
 
-    /// The next superframe that has finished arriving.
+    /// The next block that has finished arriving.
     fn take(&mut self) -> Option<Arrived>;
 
     /// A table the receiver would like the far end to use, when it has
