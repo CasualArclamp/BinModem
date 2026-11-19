@@ -302,6 +302,22 @@ impl Call {
         }
     }
 
+    /// Points for a symbol diagram: those of the first channel that has
+    /// any, scaled so the grid's outermost point is at one, and the bits a
+    /// symbol of that grid. The other channels' are thrown away, so that
+    /// what is drawn is one grid and not two laid over each other.
+    pub fn take_points(&mut self) -> (Vec<(f64, f64)>, u8) {
+        let mut taken = (Vec::new(), 0);
+        let Some(station) = self.station.as_mut() else { return taken };
+        for channel in &mut station.channels {
+            let points = channel.rx.points();
+            if taken.0.is_empty() && !points.is_empty() {
+                taken = (points, channel.rx.shown_bits());
+            }
+        }
+        taken
+    }
+
     /// The signal to noise ratio on each channel, in decibels.
     pub fn snr_db(&self) -> Vec<f64> {
         self.station.as_ref().map_or_else(Vec::new, |s| s.channels.iter().map(|c| c.rx.health().snr_db).collect())

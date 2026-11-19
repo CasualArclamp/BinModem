@@ -1034,6 +1034,8 @@ pub struct Modem {
     varc_owed_ms: f64,
     /// What a V.ARC call's line was last noted as doing.
     varc_said: &'static str,
+    /// Bits a symbol of the grid a V.ARC call's symbol diagram is showing.
+    varc_bits: u8,
 }
 
 impl Modem {
@@ -1092,6 +1094,7 @@ impl Modem {
             varc: None,
             varc_owed_ms: 0.0,
             varc_said: "",
+            varc_bits: 0,
         }
     }
 
@@ -1302,6 +1305,9 @@ impl Modem {
         if let Some(fax) = self.fax.as_ref() {
             return fax.states();
         }
+        if self.varc.is_some() {
+            return 1usize << self.varc_bits.min(24);
+        }
         self.pump.as_ref().map_or(2, Pump::states)
     }
 
@@ -1340,6 +1346,13 @@ impl Modem {
     pub fn shape(&self) -> &'static str {
         if let Some(fax) = self.fax.as_ref() {
             return fax.shape();
+        }
+        if let Some(call) = self.varc.as_ref() {
+            return match (self.varc_bits, call.mode) {
+                (0, _) | (_, VarcMode::Linear) => "-",
+                (_, VarcMode::Pcm) => "PCM",
+                _ => "QAM",
+            };
         }
         self.pump.as_ref().map_or("-", Pump::shape)
     }
@@ -1868,6 +1881,23 @@ impl Modem {
     /// rather than [`Self::step`] until this says otherwise.
     pub fn varc_wanted(&self) -> Option<VarcMode> {
         self.varc.as_ref().map(|call| call.mode)
+    }
+
+    /// Points for a V.ARC call's symbol diagram: what its receiver has
+    /// sliced since this was last asked, scaled so that the grid fits a box
+    /// of one each way. The single-carrier QAM mode's are its symbols; the
+    /// multicarrier mode's are the carriers of its commonest loading; the
+    /// baseband mode's are each level against the one before. Nothing on a
+    /// call whose samples are the data, which has no symbols.
+    ///
+    /// [`Self::shape`] and [`Self::states`] say what grid they are on.
+    pub fn varc_points(&mut self) -> Vec<(f64, f64)> {
+        let Some(call) = self.varc.as_mut() else { return Vec::new() };
+        let (points, bits) = call.take_points();
+        if !points.is_empty() {
+            self.varc_bits = bits;
+        }
+        points
     }
 
     /// Tell a V.ARC call that its line carries samples exactly as sent: a
@@ -2837,6 +2867,7 @@ impl Modem {
             self.outbound.clear();
             self.varc_owed_ms = 0.0;
             self.varc_said = "";
+            self.varc_bits = 0;
             self.state = State::Handshaking;
             self.varc = Some(varc::Call::new(mode, role, looped));
             return;

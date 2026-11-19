@@ -40,7 +40,7 @@ use dsp::{Complex, rrc_taps};
 
 use crate::frame::Layout;
 use crate::interp::{Interp, bessel_i0};
-use crate::link::{Arrived, Bin, Health, Receiver, Sender, Table};
+use crate::link::{Arrived, Bin, Health, POINTS_KEPT, Receiver, Sender, Table};
 use crate::map::{BitReader, BitWriter, MAX_BITS, pam_level, pam_slice, qam_point, qam_slice};
 
 /// Symbols a second.
@@ -541,6 +541,11 @@ pub struct Rx {
     better: usize,
     gap_db: f64,
     remeasure: bool,
+    /// Points for a symbol diagram, the bits a symbol of those shown, and
+    /// the level before this one, which the baseband mode plots it against.
+    points: Vec<(f64, f64)>,
+    shown: u8,
+    before: f64,
     /// The timing error at the last sync word, in samples.
     pub timing: f64,
     /// Times the receiver has lost the signal and gone back to hunting.
@@ -602,6 +607,9 @@ impl Rx {
             better: 0,
             gap_db: GAP_DB,
             remeasure: false,
+            points: Vec::new(),
+            shown: 0,
+            before: 0.0,
             timing: 0.0,
             losses: 0,
             shape,
@@ -773,6 +781,27 @@ impl Rx {
         }
         let least = if self.shape.real { 1 } else { 2 };
         let bits = if in_sync { least } else { table.as_ref().map_or(0, |t| self.shape.bits_of(t)) };
+
+        // The diagram shows the data. The sync word is on the smallest grid
+        // whatever the data is on, so it is shown only until there is data.
+        if bits > 0 && (!in_sync || table.is_none()) {
+            if bits != self.shown {
+                self.shown = bits;
+                self.points.clear();
+            }
+            if self.shape.real {
+                // Levels have no plane: each against the one before it.
+                let level = seen.re / (pam_scale(bits) * ((1u64 << bits) - 1) as f64);
+                if self.points.len() < POINTS_KEPT {
+                    self.points.push((self.before, level));
+                }
+                self.before = level;
+            } else if self.points.len() < POINTS_KEPT {
+                let (bi, _) = crate::map::split(bits);
+                let reach = crate::map::qam_scale(bits) * ((1u64 << bi) - 1) as f64;
+                self.points.push((seen.re / reach, seen.im / reach));
+            }
+        }
 
         if bits > 0 {
             let (value, point) = self.shape.slice(seen, bits);
@@ -1084,6 +1113,14 @@ impl Receiver for Rx {
             Some(table) => (self.shape.gross(table), self.shape.net(table)),
             None => (0.0, 0.0),
         }
+    }
+
+    fn points(&mut self) -> Vec<(f64, f64)> {
+        std::mem::take(&mut self.points)
+    }
+
+    fn shown_bits(&self) -> u8 {
+        self.shown
     }
 
     fn spectrum(&self) -> Vec<Bin> {

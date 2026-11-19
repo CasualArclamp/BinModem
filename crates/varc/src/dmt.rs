@@ -41,7 +41,7 @@ use dsp::{Complex, Fft};
 
 use crate::frame::Layout;
 use crate::interp::Interp;
-use crate::link::{Arrived, Bin, Health, Receiver, Sender, Table};
+use crate::link::{Arrived, Bin, Health, POINTS_KEPT, Receiver, Sender, Table};
 use crate::map::{BitReader, BitWriter, MAX_BITS, qam_point, qam_slice};
 
 /// How many bit tables can be told apart by the sync symbol. Table zero is
@@ -445,6 +445,9 @@ pub struct Rx {
     /// the last symbol. Kept because it is asked for far more often than it
     /// changes, and is a logarithm a carrier to work out.
     mean_snr_db: f64,
+    /// Points for a symbol diagram, and the bits a carrier of those shown.
+    points: Vec<(f64, f64)>,
+    shown: u8,
 
     re: Vec<f64>,
     im: Vec<f64>,
@@ -509,6 +512,8 @@ impl Rx {
             gap_db: GAP_DB,
             remeasure: false,
             mean_snr_db: 0.0,
+            points: Vec::new(),
+            shown: 0,
             re: vec![0.0; plan.n],
             im: vec![0.0; plan.n],
             timing: 0.0,
@@ -802,6 +807,32 @@ impl Rx {
         };
         let unknown = table.is_none() && !is_sync;
 
+        // One diagram cannot hold every carrier: they carry different
+        // numbers of bits, and a grid of four points laid over one of a
+        // thousand shows neither. So it shows the carriers of the commonest
+        // loading, and about sixty of those a symbol. Before anything is
+        // loaded it shows the known points, which are four.
+        let top = self.plan.top();
+        let (shown, every) = if is_sync {
+            (0, 0)
+        } else {
+            let mut count = [0usize; MAX_BITS as usize + 1];
+            for k in 1..=top {
+                count[usize::from(bits_at(k))] += 1;
+            }
+            let shown = (1..count.len()).max_by_key(|&b| count[b]).filter(|&b| count[b] > 0).unwrap_or(0);
+            (shown as u8, (count[shown] / 64).max(1))
+        };
+        if !is_sync && shown != self.shown {
+            self.shown = shown;
+            self.points.clear();
+        }
+        let reach = {
+            let (bi, _) = crate::map::split(shown);
+            if shown == 0 { 1.0 } else { crate::map::qam_scale(shown) * ((1u64 << bi) - 1) as f64 }
+        };
+        let mut passed = 0usize;
+
         // The timing error, from every carrier whose point is known: a late
         // signal turns carrier k back by k times as much as carrier one.
         let (mut num, mut den) = (0.0, 0.0);
@@ -833,6 +864,14 @@ impl Rx {
             }
             let z = Complex::new(self.re[k], self.im[k]) * back / self.h[k];
             let bits = bits_at(k);
+            if !is_sync && !unknown && bits == shown && k <= top && !(shown == 0 && Plan::is_pilot(k)) {
+                passed += 1;
+                if passed.is_multiple_of(every) && self.points.len() < POINTS_KEPT {
+                    // The known points sit at a root of a half on each axis.
+                    let scale = if shown == 0 { 1.0 } else { 1.0 / reach };
+                    self.points.push((z.re * scale, z.im * scale));
+                }
+            }
             let reference = if bits > 0 {
                 let (value, point) = qam_slice(z, bits);
                 self.writer.put(value, u32::from(bits));
@@ -960,6 +999,15 @@ impl Receiver for Rx {
             Some(table) => (self.plan.gross(table), self.plan.net(table)),
             None => (0.0, 0.0),
         }
+    }
+
+    fn points(&mut self) -> Vec<(f64, f64)> {
+        std::mem::take(&mut self.points)
+    }
+
+    fn shown_bits(&self) -> u8 {
+        // Before anything is loaded the known points are shown: two bits.
+        if self.shown == 0 { 2 } else { self.shown }
     }
 
     fn spectrum(&self) -> Vec<Bin> {

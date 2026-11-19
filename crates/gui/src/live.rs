@@ -1949,6 +1949,23 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             spectrum.push(heard);
             waveform.push(s);
         }
+        // A V.ARC call's symbols do not come a sample at a time: they are
+        // taken as they have gathered, a grid at a time.
+        let gathered = modem.varc_points();
+        if !gathered.is_empty() {
+            if modem.shape() != drawing {
+                drawing = modem.shape();
+                symbols.clear();
+                points.clear();
+            }
+            let depth = if modem.shape() == "PCM" { PCM_DEPTH } else { scope_depth(modem.states()) };
+            for (i, q) in gathered {
+                while points.len() >= depth {
+                    points.pop_front();
+                }
+                points.push_back((i as f32, q as f32));
+            }
+        }
         // On a SIP line a digital modem's codewords go as they are, with no
         // rate conversion to blur them; see `Modem::take_network_levels`.
         if let (Some(sip), Some(exact)) = (audio.sip(), exact_sent.as_ref()) {

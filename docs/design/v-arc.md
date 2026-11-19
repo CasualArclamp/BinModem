@@ -224,7 +224,30 @@ During a V.ARC call the waterfall and the spectrum are taken from the left
 channel at the card's own rate and drawn from 0 Hz to half of it (24 kHz on a
 48 kHz card, 96 kHz at 192 kHz), with the ticks in kilohertz. On every other
 call they stay at 0 to 4000 Hz, except a V.ARC call on a SIP line, which is
-drawn to the call's 8 kHz. The oscilloscope and the level meter were
+drawn to the call's 8 kHz.
+
+The symbol diagram shows what the receiver sliced, on the first channel that
+is hearing anything, scaled so the grid's outermost point is at the edge of
+the box:
+
+![The symbol diagram in the three modes](../images/v-arc/symbols.png)
+
+- **V.ARC/QAM:** every symbol.
+- **V.ARC/PCM:** each level against the one before, as V.90's is drawn,
+  since levels have no plane to be points on.
+- **V.ARC/DMT:** the carriers differ in how many bits they carry, and a grid
+  of four points laid over one of a thousand shows neither. So it shows the
+  carriers of the commonest loading, about sixty of them a symbol. Until a
+  table is loaded it shows the four known points.
+- **V.ARC/L16:** nothing. There are no symbols.
+
+The panel's label gives the size of the grid shown. On a good lead that is
+tens of thousands of points or more, which no screen resolves: what is drawn
+is a filled box, sharp at the edges when the line is clean. The picture is
+the Realtek lead: 32 768 points on the commonest carriers, 1 048 576 for the
+single carrier, 64 levels.
+
+The oscilloscope and the level meter were
 built for the modem's 16 kHz and are still shown the left channel cut down to
 that without filtering, which shows that something is there and measures
 nothing.
@@ -306,12 +329,14 @@ Three faults that simulation with one clean wire each way did not show:
   `AT+MS=V34` one ends in `NO CARRIER`, on `main` as well as here, so that is
   not V.ARC's; but it means the fallback has not been seen to end in a
   connection.
-- **Scopes for it.** The window has no constellation, SNR-by-carrier or bit
-  table display for V.ARC; `varc-link --csv` is the only way to see those.
+- **Scopes for it.** The window has the symbol diagram, and no
+  SNR-by-carrier or bit table display for V.ARC; `varc-link --csv` is the
+  only way to see those. The multicarrier diagram shows one loading of many.
 - **The window beyond a loop.** The window has run V.ARC/DMT calls to itself
   (`ATDLOOP`) through VB-Cable A and through the Realtek lead. Choosing it
-  from the mode box rather than typing `AT+MS`, the QAM and PCM modes in the
-  window, and a file or PPP over it have not been tried. The headless tools
+  from the mode box rather than typing `AT+MS`, and a file or PPP over it,
+  have not been tried. The QAM and PCM modes have run in the window as loop
+  calls on the Realtek lead. The headless tools
   (`modem-sip`, `--answer`) do not know about V.ARC.
 - **Two machines.** Never run between two sound cards with separate clocks.
 - **44.1 kHz** for the single-carrier modes (they need a multiple of 48 kHz).
