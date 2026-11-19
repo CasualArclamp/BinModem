@@ -946,6 +946,13 @@ impl Receiver for Rx {
         }
     }
 
+    fn rates(&self) -> (f64, f64) {
+        match self.id.and_then(|id| self.tables[usize::from(id)].as_ref()) {
+            Some(table) => (self.plan.gross(table), self.plan.net(table)),
+            None => (0.0, 0.0),
+        }
+    }
+
     fn spectrum(&self) -> Vec<Bin> {
         let table = self.id.and_then(|id| self.tables[usize::from(id)].as_ref());
         (1..self.plan.half())

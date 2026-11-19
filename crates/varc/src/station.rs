@@ -294,6 +294,13 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
         }
     }
 
+    /// Whether both directions of this channel are running on tables made
+    /// to measure: the far end is sending with the one this end asked for,
+    /// and this end with one the far end asked for.
+    pub fn loaded(&self) -> bool {
+        self.offered.as_ref().is_some_and(|(mark, _)| self.rx.id() == Some(*mark)) && self.tx.id() != 0
+    }
+
     /// The table the far end has been asked for and is not yet using.
     pub fn waiting_for(&self) -> Option<u8> {
         self.offered.as_ref().map(|(mark, _)| *mark).filter(|&mark| self.rx.id() != Some(mark))
@@ -389,7 +396,14 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
             }
             let room = layout.payload();
             let chunk = room.saturating_sub(16).clamp(32, CHUNK);
-            while self.packer.backlog() < room {
+            // The stream goes only down a channel that is alive. A lead with
+            // one channel connected is a perfectly good line, and the other
+            // channel's transmitter would otherwise take its share of the
+            // frames and send them to nobody. This end cannot see whether
+            // the far end hears it; it can see whether it hears the far
+            // end on the same channel, and a channel is a wire each way.
+            let live = self.rx.health().locked;
+            while live && self.packer.backlog() < room {
                 match arq.next_frame(now, chunk) {
                     Some((ACK, body)) => self.packer.push_urgent(ACK, &body),
                     Some((kind, body)) => self.packer.push(kind, &body),

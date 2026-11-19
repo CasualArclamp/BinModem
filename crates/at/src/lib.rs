@@ -384,7 +384,11 @@ impl Interpreter {
             // the analogue half of V.90 only: this modem dials a server, and
             // is not one. V92 is V.90 with V.92's phase 2 in it, and with PCM
             // upstream when the far end offers it (V.92 9.3).
-            modulations: ["V92", "V90", "V34", "V32B", "V32", "V22B", "V21", "B103"]
+            //
+            // The last three are no Recommendation's: V.ARC, this modem's
+            // own mode for a sound card wired to another one, as its
+            // multicarrier, QAM and baseband modulations.
+            modulations: ["V92", "V90", "V34", "V32B", "V32", "V22B", "V21", "B103", "VARC", "VARCQ", "VARCP"]
                 .iter()
                 .map(|s| (*s).to_owned())
                 .collect(),

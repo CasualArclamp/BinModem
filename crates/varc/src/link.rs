@@ -175,6 +175,9 @@ impl<T: Receiver + ?Sized> Receiver for Box<T> {
     fn health(&self) -> Health {
         (**self).health()
     }
+    fn rates(&self) -> (f64, f64) {
+        Receiver::rates(&**self)
+    }
     fn spectrum(&self) -> Vec<Bin> {
         (**self).spectrum()
     }
@@ -209,6 +212,10 @@ pub trait Receiver {
     fn remeasure(&mut self, db: f64);
 
     fn health(&self) -> Health;
+
+    /// Bits a second arriving with the table the far end is using: on the
+    /// line, and of frames.
+    fn rates(&self) -> (f64, f64);
 
     /// The band, slice by slice: a carrier at a time for the multicarrier
     /// mode, and all in one for the others.
