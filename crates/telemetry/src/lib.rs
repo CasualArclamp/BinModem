@@ -91,6 +91,22 @@ pub struct PcmLevels {
     pub fastest: u32,
 }
 
+/// What the far end of a call says it hears of this end.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FarEnd {
+    /// The level arriving there, RMS, and the largest sample in the last
+    /// second, in decibels against its full scale.
+    pub level_db: f32,
+    pub peak_db: f32,
+    /// Samples in that second at full scale.
+    pub clipped: u32,
+    /// Signal to noise at its slicer, in decibels; nought until measured.
+    pub snr_db: f32,
+    /// Decibels this end is sending below its made-for level because of
+    /// what the far end said.
+    pub trim_db: f32,
+}
+
 /// One snapshot of the signal path, sized once and then written in place.
 #[derive(Debug, Clone)]
 pub struct Frame {
@@ -135,6 +151,8 @@ pub struct Frame {
     /// The error-correcting code on what is arriving, (n, k): octets a
     /// codeword and how many of them are data. Only V.ARC has one.
     pub code: Option<(u16, u16)>,
+    /// What the far end says it hears of this end. Only V.ARC is told.
+    pub far_end: Option<FarEnd>,
     /// Received level in dBFS.
     pub rx_level_db: f32,
     /// Estimated signal-to-noise ratio in dB, if the datapump can measure one.
@@ -232,6 +250,7 @@ impl Frame {
             hz_per_bin: sample_rate / (spectrum_bins as f64 * 2.0),
             display_hz: 4000.0,
             code: None,
+            far_end: None,
             rx_level_db: -120.0,
             snr_db: None,
             carrier: false,

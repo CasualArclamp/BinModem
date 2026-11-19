@@ -302,6 +302,8 @@ pub struct Tx {
     turn: f64,
     step: f64,
     gain: f64,
+    /// What the far end has asked the level be multiplied by; one or less.
+    trim: f64,
     /// Samples that reached full scale and were held there.
     pub clipped: u64,
 }
@@ -335,6 +337,7 @@ impl Tx {
             step: TAU * shape.carrier / shape.fs,
             // The real part of a complex envelope has half its power.
             gain: if shape.real { level } else { level * std::f64::consts::SQRT_2 },
+            trim: 1.0,
             clipped: 0,
             shape,
         }
@@ -430,11 +433,11 @@ impl Sender for Tx {
         }
         self.phase = (self.phase + 1) % sps;
         let s = if self.shape.real {
-            envelope.re * self.gain
+            envelope.re * self.gain * self.trim
         } else {
             let (sin, cos) = self.turn.sin_cos();
             self.turn = (self.turn + self.step) % TAU;
-            (envelope.re * cos - envelope.im * sin) * self.gain
+            (envelope.re * cos - envelope.im * sin) * self.gain * self.trim
         };
         if s.abs() >= 1.0 {
             self.clipped += 1;
@@ -456,6 +459,10 @@ impl Sender for Tx {
 
     fn reset(&mut self) {
         self.next = Some((0, self.shape.default_table()));
+    }
+
+    fn trim(&mut self, db: f64) {
+        self.trim = 10f64.powf(-db.max(0.0) / 20.0);
     }
 
     fn rates(&self) -> (f64, f64) {

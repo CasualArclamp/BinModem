@@ -162,6 +162,52 @@ V.ARC/QAM and V.ARC/PCM have no such thing. Their band is fixed, 1.5 to
 19.5 kHz and 0 to 9.6 kHz, and a line that does not pass it does not carry
 them.
 
+## What the far end hears
+
+A transmitter cannot hear its own line. It does not know whether what it
+sends arrives faint, or so loud that the far converter is flat against its
+stops. So each end measures what arrives on each channel, a second at a
+time, and tells the other in a frame of its own (REPORT, 8 octets):
+
+| Field | What it is |
+|---|---|
+| Level | RMS of what arrived, in half decibels below full scale |
+| Peak | the largest sample in the second, the same way |
+| Clipped | samples in the second at full scale |
+| Es/N0 | signal to noise at the slicer over the band in use, in tenths of a decibel; nought until measured |
+| Trim | how far the reporting end has turned itself down |
+
+Reports are sent whether or not the reporting end can read anything, since
+the end that most needs telling is the one deafening the other.
+
+**Acting on it.** Samples at full scale are the one fault no table loads
+around: the tops of the waveform are gone on every carrier at once. So:
+
+- If the far end reports samples at full scale, or peaks within 1 dB of it,
+  this end sends lower: by enough to put the peaks at -4 dBFS, and 3 or 9 dB
+  more if any were clipped, since a clipped peak reads as full scale however
+  far over it was.
+- If it is trimmed and later hears that the peaks are below -14 dBFS, some
+  comes back off.
+- It never sends above the level it was made for. That level is already as
+  much as its own converter has room for (-16 dBFS RMS for the multicarrier
+  mode, whose peaks are 10 to 12 dB above that).
+- A change of level moves everything the far receiver has learned. So each
+  one puts the line back on the starting table and tells the far end to
+  measure afresh (LEVEL), and changes are kept 3 s apart.
+
+In simulation, 20 dB of gain into a converter that clips: the sending end
+ends up 26 dB down, nothing is clipped, and the stream arrives whole.
+
+**Seeing it.** The window has a line for it while a V.ARC call is up, and the
+transcript says when the level changes. On the Realtek lead:
+
+![What the far end hears](../images/v-arc/far-end.png)
+
+What this cannot do is turn the far end's input down, or this end's output
+up past its own full scale: those are the sound card's mixer. It says which
+is needed.
+
 ## Modulation and coding
 
 There is no list of modes to pick from. The receiver measures the line and
@@ -251,7 +297,7 @@ octets were offered, on a loaded line.
 
 ## The link
 
-`station.rs`. Frame kinds: TABLE (2), DATA (3), ACK (4), RESET (5).
+`station.rs`. Frame kinds: TABLE (2), DATA (3), ACK (4), RESET (5), REPORT (6), LEVEL (7).
 
 **Tables.** There are four marks. Mark 0 is the starting table: for DMT, 48
 four-point symbols each sent on every carrier that has its turn (see

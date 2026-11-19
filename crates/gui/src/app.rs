@@ -4618,6 +4618,43 @@ impl ScopeApp {
                     },
                 );
 
+                // What the far end hears of this end, where it says. A
+                // transmitter cannot hear its own line, so this is the only
+                // way to know whether it is too loud or too faint there.
+                if let Some(far) = f.far_end {
+                    let health = if far.clipped > 0 {
+                        BAD
+                    } else if far.peak_db > -1.0 || far.trim_db > 0.0 {
+                        WARN
+                    } else {
+                        GOOD
+                    };
+                    let snr = if far.snr_db > 0.0 {
+                        format!("Es/N0 {:.1} dB", far.snr_db)
+                    } else {
+                        "Es/N0 not measured yet".to_owned()
+                    };
+                    let clipped = match far.clipped {
+                        0 => "nothing at full scale".to_owned(),
+                        n => format!("{n} samples a second at full scale"),
+                    };
+                    let sending = if far.trim_db > 0.0 {
+                        format!("this end turned down {:.1} dB", far.trim_db)
+                    } else {
+                        "this end at full level".to_owned()
+                    };
+                    stage(
+                        ui,
+                        health,
+                        "Far end",
+                        format!(
+                            "hears {:.1} dBFS · peaks {:.1} · {snr}
+{clipped} · {sending}",
+                            far.level_db, far.peak_db
+                        ),
+                    );
+                }
+
                 let (rx_rate, tx_rate) = self.byte_rates();
                 stage(
                     ui,

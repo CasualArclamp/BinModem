@@ -121,6 +121,63 @@ pub trait Sender {
 
     /// Samples that reached full scale and were held there.
     fn clipped(&self) -> u64;
+
+    /// Send this many decibels below the level the transmitter was made
+    /// for; nought is that level. Nothing for a sender whose samples are
+    /// the data and have no level to choose.
+    fn trim(&mut self, _db: f64) {}
+}
+
+/// What one end hears, as it tells the other.
+///
+/// A transmitter cannot hear its own line. It does not know whether what it
+/// sends arrives faint, or so loud that the far end's converter is flat
+/// against its stops, and those are the two things it could do something
+/// about. So each end measures what arrives on each channel, a second at a
+/// time, and sends it back.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Report {
+    /// The level arriving, RMS, in decibels against full scale.
+    pub level_db: f64,
+    /// The largest sample in the second, the same way.
+    pub peak_db: f64,
+    /// Samples in the second that were at full scale: the converter had
+    /// nowhere further to go.
+    pub clipped: u32,
+    /// Signal to noise at the slicer over the band in use, in decibels:
+    /// a symbol's energy against the noise under it. Nought until the
+    /// receiver has measured anything.
+    pub snr_db: f64,
+    /// Decibels below its made-for level the reporting end is itself
+    /// sending at.
+    pub trim_db: f64,
+}
+
+impl Report {
+    /// Eight octets: a version, then half decibels below full scale for the
+    /// level and the peak, the clipped count, tenths of a decibel of signal
+    /// to noise, and half decibels of trim.
+    pub fn encode(&self) -> Vec<u8> {
+        let below = |db: f64| (-2.0 * db).round().clamp(0.0, 255.0) as u8;
+        let snr = (10.0 * self.snr_db).round().clamp(0.0, 65_535.0) as u16;
+        let clipped = self.clipped.min(65_535) as u16;
+        let mut out = vec![1, below(self.level_db), below(self.peak_db)];
+        out.extend_from_slice(&clipped.to_le_bytes());
+        out.extend_from_slice(&snr.to_le_bytes());
+        out.push(below(-self.trim_db));
+        out
+    }
+
+    pub fn decode(body: &[u8]) -> Option<Self> {
+        let &[1, level, peak, c0, c1, s0, s1, trim, ..] = body else { return None };
+        Some(Self {
+            level_db: -f64::from(level) / 2.0,
+            peak_db: -f64::from(peak) / 2.0,
+            clipped: u32::from(u16::from_le_bytes([c0, c1])),
+            snr_db: f64::from(u16::from_le_bytes([s0, s1])) / 10.0,
+            trim_db: f64::from(trim) / 2.0,
+        })
+    }
 }
 
 // A boxed half is a half, so that a program can choose its modulation when
@@ -149,6 +206,9 @@ impl<T: Sender + ?Sized> Sender for Box<T> {
     }
     fn clipped(&self) -> u64 {
         (**self).clipped()
+    }
+    fn trim(&mut self, db: f64) {
+        (**self).trim(db)
     }
 }
 

@@ -272,6 +272,8 @@ pub struct Tx {
     im: Vec<f64>,
     /// Which of the starting table's points each carrier carries.
     spread: Vec<Option<u16>>,
+    /// What the far end has asked the level be multiplied by; one or less.
+    trim: f64,
     /// Samples that reached full scale and were held there.
     pub clipped: u64,
 }
@@ -315,6 +317,7 @@ impl Tx {
             re: vec![0.0; plan.n],
             im: vec![0.0; plan.n],
             spread: plan.spread(),
+            trim: 1.0,
             clipped: 0,
             plan,
         }
@@ -366,7 +369,7 @@ impl Tx {
         self.cursor = 0;
         let cp = self.plan.cp;
         for i in (n - cp..n).chain(0..n) {
-            let s = self.re[i] * self.scale;
+            let s = self.re[i] * self.scale * self.trim;
             if s.abs() >= 1.0 {
                 self.clipped += 1;
             }
@@ -429,6 +432,10 @@ impl Sender for Tx {
 
     fn reset(&mut self) {
         self.next = Some((0, self.plan.default_table()));
+    }
+
+    fn trim(&mut self, db: f64) {
+        self.trim = 10f64.powf(-db.max(0.0) / 20.0);
     }
 
     fn rates(&self) -> (f64, f64) {

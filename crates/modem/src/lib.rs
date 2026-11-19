@@ -1908,6 +1908,15 @@ impl Modem {
         self.varc.as_ref().and_then(varc::Call::code)
     }
 
+    /// What the far end of a V.ARC call says it hears of this end, and how
+    /// many decibels this end has turned itself down because of it. Each
+    /// end measures what arrives, a second at a time, and tells the other:
+    /// the level, the largest sample, how many samples were at full scale,
+    /// and the signal to noise at its slicer. `None` until it has.
+    pub fn varc_far_end(&self) -> Option<(::varc::link::Report, f64)> {
+        self.varc.as_ref().and_then(varc::Call::far_end)
+    }
+
     /// Tell a V.ARC call that its line carries samples exactly as sent: a
     /// SIP call that agreed on linear PCM. It then starts with no
     /// modulation at all, the samples being the data, and gives that up for

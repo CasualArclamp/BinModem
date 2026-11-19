@@ -2266,6 +2266,13 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 }
                 f.echo_at = modem.reflection().map(|r| (r.delay, r.strength));
                 f.code = modem.varc_code().map(|(n, k)| (n as u16, k as u16));
+                f.far_end = modem.varc_far_end().map(|(report, trim)| telemetry::FarEnd {
+                    level_db: report.level_db as f32,
+                    peak_db: report.peak_db as f32,
+                    clipped: report.clipped,
+                    snr_db: report.snr_db as f32,
+                    trim_db: trim as f32,
+                });
                 f.tones = modem.states();
                 f.constellation_peak = modem.constellation_peak();
                 f.symbol_label = modem.shape();

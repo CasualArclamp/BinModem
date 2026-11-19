@@ -23,7 +23,7 @@
 
 use varc::dmt::{self, Plan};
 use varc::exact;
-use varc::link::{Receiver, Sender};
+use varc::link::{Receiver, Report, Sender};
 use varc::sc::{self, Shape};
 use varc::station::Station;
 
@@ -87,6 +87,8 @@ pub(crate) struct Call {
     fs: f64,
     /// The rate it sends at, which is the other sound device's.
     fs_out: f64,
+    /// The trim, over all channels, that whoever is watching was last told.
+    trim_said: f64,
     samples: u64,
     /// Samples since any channel last heard the far end.
     deaf: u64,
@@ -125,6 +127,7 @@ impl Call {
             station: None,
             fs: 0.0,
             fs_out: 0.0,
+            trim_said: 0.0,
             samples: 0,
             deaf: 0,
             first_loaded: None,
@@ -224,6 +227,24 @@ impl Call {
             self.deaf = 0;
         } else {
             self.deaf += u64::from(every.max(1));
+        }
+        // A change of level is worth saying: it starts the line again.
+        let trim: f64 = station.channels.iter().map(|c| c.trim_db).sum();
+        if trim != self.trim_said {
+            let lower = trim > self.trim_said;
+            self.trim_said = trim;
+            let levels: Vec<String> = station.channels.iter().map(|c| format!("{:.1} dB", -c.trim_db)).collect();
+            let why = station
+                .channels
+                .iter()
+                .find_map(|c| c.there)
+                .map(|r| format!("peaks at {:.1} dBFS, {} samples at full scale", r.peak_db, r.clipped))
+                .unwrap_or_default();
+            self.note = Some(if lower {
+                format!("V.ARC: the far end hears this end too loud ({why}); now sending at {}", levels.join(", "))
+            } else {
+                format!("V.ARC: the far end has room again ({why}); now sending at {}", levels.join(", "))
+            });
         }
         if self.first_loaded.is_none() && station.channels.iter().any(|c| c.loaded()) {
             self.first_loaded = Some(self.samples);
@@ -337,6 +358,13 @@ impl Call {
     /// channel that is hearing a table it knows.
     pub fn code(&self) -> Option<(usize, usize)> {
         self.station.as_ref()?.channels.iter().find_map(|c| c.rx.code())
+    }
+
+    /// What the far end says it hears of this end, on the first channel it
+    /// has said anything about, and how far this end has turned itself
+    /// down on that channel because of it.
+    pub fn far_end(&self) -> Option<(Report, f64)> {
+        self.station.as_ref()?.channels.iter().find_map(|c| c.there.map(|report| (report, c.trim_db)))
     }
 
     /// The signal to noise ratio on each channel, in decibels.
