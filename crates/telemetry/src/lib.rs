@@ -128,6 +128,10 @@ pub struct Frame {
     /// Magnitude spectrum in dBFS, DC to Nyquist.
     pub spectrum_db: Vec<f32>,
     pub hz_per_bin: f64,
+    /// How far up the spectrum is worth drawing, in hertz. 4000 for a
+    /// telephone channel, whatever rate it was sampled at; the whole of what
+    /// the sound card passes for a mode that uses the whole of it.
+    pub display_hz: f64,
     /// Received level in dBFS.
     pub rx_level_db: f32,
     /// Estimated signal-to-noise ratio in dB, if the datapump can measure one.
@@ -223,6 +227,7 @@ impl Frame {
             symbol_label: "-",
             spectrum_db: vec![-120.0; spectrum_bins],
             hz_per_bin: sample_rate / (spectrum_bins as f64 * 2.0),
+            display_hz: 4000.0,
             rx_level_db: -120.0,
             snr_db: None,
             carrier: false,

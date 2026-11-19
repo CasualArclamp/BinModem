@@ -795,10 +795,11 @@ impl Worker {
         let remote = Address::new(target.clone());
         let branch = rand::branch();
 
-        let offer = sdp::offer(
+        let offer = sdp::offer_with(
             &self.contact_host(),
             self.rtp_port,
             &self.account.laws,
+            self.account.linear,
             self.account.ptime_ms,
             None,
         );
@@ -861,11 +862,12 @@ impl Worker {
                 return;
             }
         };
-        let answered = sdp::answer(
+        let answered = sdp::answer_with(
             &offer,
             &self.contact_host(),
             self.rtp_port,
             &self.account.laws,
+            self.account.linear,
             self.account.ptime_ms,
         );
         let (body, negotiated) = match answered {
@@ -1727,7 +1729,7 @@ impl Worker {
         }
         let text = String::from_utf8_lossy(&response.body);
         match sdp::Sdp::parse(&text) {
-            Ok(answer) => match sdp::read_answer(&answer, &self.account.laws) {
+            Ok(answer) => match sdp::read_answer_with(&answer, &self.account.laws, self.account.linear) {
                 Ok(negotiated) => Some(negotiated),
                 Err(e) => {
                     self.note(format!("sip: the answer will not do: {e}"));
@@ -1950,11 +1952,12 @@ impl Worker {
             self.note("sip: the far end asked for T.38; declined, staying on G.711".to_owned());
             return;
         }
-        match sdp::answer(
+        match sdp::answer_with(
             &offer,
             &self.contact_host(),
             self.rtp_port,
             &self.account.laws,
+            self.account.linear,
             self.account.ptime_ms,
         ) {
             Ok((body, negotiated)) => {

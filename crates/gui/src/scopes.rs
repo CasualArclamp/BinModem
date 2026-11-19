@@ -9,6 +9,22 @@ use eframe::egui::{
 /// showing 0-4000 Hz wastes no space and keeps the tone pairs large.
 pub const DISPLAY_HZ: f64 = 4000.0;
 
+/// How far apart to put the frequency ticks on a display `span_hz` wide:
+/// every 500 Hz on a telephone channel, as it always was, and the round
+/// number that gives about as many on anything wider.
+pub fn tick_hz(span_hz: f64) -> f64 {
+    [500.0, 1000.0, 2000.0, 5000.0, 10_000.0, 20_000.0]
+        .into_iter()
+        .find(|step| span_hz / step <= 12.0)
+        .unwrap_or(50_000.0)
+}
+
+/// A frequency as a tick says it: in hertz on a telephone channel, in
+/// kilohertz once the ticks are that far apart.
+pub fn tick_label(hz: f64, span_hz: f64) -> String {
+    if tick_hz(span_hz) >= 1000.0 { format!("{:.0}k", hz / 1000.0) } else { format!("{hz:.0}") }
+}
+
 const BACKDROP: Color32 = Color32::from_rgb(12, 14, 18);
 const GRID: Color32 = Color32::from_rgb(40, 46, 56);
 const TRACE: Color32 = Color32::from_rgb(120, 220, 160);
@@ -102,6 +118,8 @@ pub struct Waterfall {
     /// dB window mapped across the colour ramp.
     pub floor_db: f32,
     pub ceiling_db: f32,
+    /// How many hertz the width stands for.
+    span_hz: f64,
 }
 
 impl Waterfall {
@@ -113,6 +131,7 @@ impl Waterfall {
             texture: None,
             floor_db: -90.0,
             ceiling_db: -20.0,
+            span_hz: DISPLAY_HZ,
         }
     }
 
@@ -121,8 +140,14 @@ impl Waterfall {
         self.image.pixels.fill(BACKDROP);
     }
 
-    /// Push one spectrum row, resampling the bins across the display width.
-    pub fn push_row(&mut self, bins: &[f32], hz_per_bin: f64) {
+    /// Push one spectrum row, resampling the bins across the display width,
+    /// which stands for `span_hz`.
+    pub fn push_row(&mut self, bins: &[f32], hz_per_bin: f64, span_hz: f64) {
+        if span_hz != self.span_hz {
+            // Rows drawn to one scale mean nothing under another.
+            self.span_hz = span_hz;
+            self.clear();
+        }
         let px = &mut self.image.pixels;
         let w = self.width;
         // Scroll everything down by one row, then write the new row at the top.
@@ -130,7 +155,7 @@ impl Waterfall {
 
         let span = self.ceiling_db - self.floor_db;
         for (x, cell) in px.iter_mut().take(w).enumerate() {
-            let hz = DISPLAY_HZ * x as f64 / w as f64;
+            let hz = span_hz * x as f64 / w as f64;
             let bin = (hz / hz_per_bin).round() as usize;
             let db = bins.get(bin).copied().unwrap_or(-120.0);
             *cell = heat((db - self.floor_db) / span);
@@ -156,18 +181,20 @@ impl Waterfall {
             Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
             Color32::WHITE,
         );
-        paint_tone_markers(&painter, rect, false, modulation);
+        let span_hz = self.span_hz;
+        paint_tone_markers(&painter, rect, false, modulation, span_hz);
 
-        // Frequency along the top, every 500 Hz.
-        let mut hz = 500.0;
-        while hz < DISPLAY_HZ {
-            let x = rect.left() + rect.width() * (hz / DISPLAY_HZ) as f32;
+        // Frequency along the top: every 500 Hz on a telephone channel.
+        let step = tick_hz(span_hz);
+        let mut hz = step;
+        while hz < span_hz {
+            let x = rect.left() + rect.width() * (hz / span_hz) as f32;
             painter.line_segment(
                 [pos2(x, rect.top()), pos2(x, rect.top() + 4.0)],
                 Stroke::new(1.0, LABEL),
             );
-            tag(&painter, pos2(x, rect.top() + 5.0), Align2::CENTER_TOP, format!("{hz:.0}"), LABEL);
-            hz += 500.0;
+            tag(&painter, pos2(x, rect.top() + 5.0), Align2::CENTER_TOP, tick_label(hz, span_hz), LABEL);
+            hz += step;
         }
 
         // How long ago, down the left: a round step that gives a handful of
@@ -211,7 +238,7 @@ impl Waterfall {
 
         // Under the pointer: which frequency, and how long ago.
         if let Some(at) = response.hover_pos() {
-            let hz = DISPLAY_HZ * ((at.x - rect.left()) / rect.width()) as f64;
+            let hz = span_hz * ((at.x - rect.left()) / rect.width()) as f64;
             let ago = depth * (at.y - rect.top()) / rect.height();
             painter.line_segment(
                 [pos2(at.x, rect.top()), pos2(at.x, rect.bottom())],
@@ -256,12 +283,12 @@ pub struct Measured {
 ///
 /// Above 100 Hz only: under that is mains hum and the DC a sound card leaves,
 /// and neither is anything a modem sent.
-pub fn measure(bins: &[f32], hz_per_bin: f64) -> Option<Measured> {
+pub fn measure(bins: &[f32], hz_per_bin: f64, span_hz: f64) -> Option<Measured> {
     if hz_per_bin <= 0.0 {
         return None;
     }
     let first = (100.0 / hz_per_bin).ceil() as usize;
-    let last = ((DISPLAY_HZ / hz_per_bin) as usize).min(bins.len());
+    let last = ((span_hz / hz_per_bin) as usize).min(bins.len());
     if last < first + 8 {
         return None;
     }
@@ -382,9 +409,9 @@ fn frame_border(painter: &Painter, rect: Rect) {
 /// Bell 103's tones sit 200 Hz apart, which is only a few pixels wide, so the
 /// labels are staggered vertically. Drawn on one line they overlap into an
 /// unreadable smear.
-fn paint_tone_markers(painter: &Painter, rect: Rect, with_text: bool, modulation: &str) {
+fn paint_tone_markers(painter: &Painter, rect: Rect, with_text: bool, modulation: &str, span_hz: f64) {
     for (i, (hz, name, colour)) in markers(modulation).iter().enumerate() {
-        let x = rect.left() + rect.width() * (*hz / DISPLAY_HZ) as f32;
+        let x = rect.left() + rect.width() * (*hz / span_hz) as f32;
         painter.line_segment(
             [pos2(x, rect.top()), pos2(x, rect.bottom())],
             Stroke::new(1.0, colour.gamma_multiply(0.55)),
@@ -409,6 +436,8 @@ pub struct Trace<'a> {
     /// that came and went looked like while it was there.
     pub hold: &'a [f32],
     pub hz_per_bin: f64,
+    /// How many hertz the width stands for.
+    pub span_hz: f64,
     pub floor: f32,
     pub ceiling: f32,
     pub modulation: &'a str,
@@ -419,7 +448,7 @@ pub struct Trace<'a> {
 /// peak, the noise floor, the band the signal occupies, and the frequency
 /// and level under the pointer.
 pub fn spectrum(ui: &mut Ui, height: f32, trace: Trace<'_>) {
-    let Trace { bins, hold, hz_per_bin, floor, ceiling, modulation, measured } = trace;
+    let Trace { bins, hold, hz_per_bin, span_hz, floor, ceiling, modulation, measured } = trace;
     let (response, painter) = allocate(ui, height);
     let whole = response.rect;
     painter.rect_filled(whole, 0.0, BACKDROP);
@@ -429,7 +458,7 @@ pub fn spectrum(ui: &mut Ui, height: f32, trace: Trace<'_>) {
 
     let span = ceiling - floor;
     let y_of = |db: f32| rect.bottom() - rect.height() * ((db - floor) / span).clamp(0.0, 1.0);
-    let x_of = |hz: f64| rect.left() + rect.width() * (hz / DISPLAY_HZ) as f32;
+    let x_of = |hz: f64| rect.left() + rect.width() * (hz / span_hz) as f32;
 
     // Horizontal grid every 20 dB, labelled.
     let mut db = (ceiling / 20.0).floor() * 20.0;
@@ -452,28 +481,29 @@ pub fn spectrum(ui: &mut Ui, height: f32, trace: Trace<'_>) {
         FontId::monospace(9.0),
         LABEL,
     );
-    // Frequency grid and ticks every 500 Hz.
+    // Frequency grid and ticks: every 500 Hz on a telephone channel.
+    let step = tick_hz(span_hz);
     let mut hz = 0.0;
-    while hz <= DISPLAY_HZ {
+    while hz <= span_hz {
         let x = x_of(hz);
         painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.0, GRID));
         let (anchor, text) = if hz == 0.0 {
             (Align2::LEFT_BOTTOM, "0 Hz".to_owned())
-        } else if hz >= DISPLAY_HZ {
-            (Align2::RIGHT_BOTTOM, format!("{hz:.0}"))
+        } else if hz >= span_hz {
+            (Align2::RIGHT_BOTTOM, tick_label(hz, span_hz))
         } else {
-            (Align2::CENTER_BOTTOM, format!("{hz:.0}"))
+            (Align2::CENTER_BOTTOM, tick_label(hz, span_hz))
         };
         painter.text(pos2(x, whole.bottom() - 1.0), anchor, text, FontId::monospace(9.0), LABEL);
-        hz += 500.0;
+        hz += step;
     }
-    paint_tone_markers(&painter, rect, true, modulation);
+    paint_tone_markers(&painter, rect, true, modulation, span_hz);
 
     let w = rect.width() as usize;
     let line = |source: &[f32], stroke: Stroke| {
         let points: Vec<Pos2> = (0..w)
             .map(|x| {
-                let hz = DISPLAY_HZ * x as f64 / w as f64;
+                let hz = span_hz * x as f64 / w as f64;
                 let bin = (hz / hz_per_bin).round() as usize;
                 pos2(rect.left() + x as f32, y_of(source.get(bin).copied().unwrap_or(-120.0)))
             })
@@ -527,7 +557,7 @@ pub fn spectrum(ui: &mut Ui, height: f32, trace: Trace<'_>) {
 
     // Under the pointer: the frequency, and the level of the bin there.
     if let Some(at) = response.hover_pos().filter(|p| rect.contains(*p)) {
-        let hz = DISPLAY_HZ * ((at.x - rect.left()) / rect.width()) as f64;
+        let hz = span_hz * ((at.x - rect.left()) / rect.width()) as f64;
         let level = bins.get((hz / hz_per_bin).round() as usize).copied().unwrap_or(-120.0);
         painter.line_segment(
             [pos2(at.x, rect.top()), pos2(at.x, rect.bottom())],
@@ -816,7 +846,7 @@ mod tests {
         bins[tone] = -30.0;
         bins[tone - 1] = -42.0;
         bins[tone + 1] = -42.0;
-        let m = measure(&bins, hz_per_bin).expect("a tone 60 dB over the noise");
+        let m = measure(&bins, hz_per_bin, DISPLAY_HZ).expect("a tone 60 dB over the noise");
         assert!((m.peak_hz - 2225.0).abs() < hz_per_bin, "peak at {}", m.peak_hz);
         assert_eq!(m.peak_db, -30.0);
         assert_eq!(m.floor_db, -90.0);
@@ -826,8 +856,18 @@ mod tests {
 
     #[test]
     fn silence_measures_as_nothing() {
-        assert_eq!(measure(&[-120.0; 512], 4000.0 / 512.0), None);
-        assert_eq!(measure(&[], 7.8), None);
+        assert_eq!(measure(&[-120.0; 512], 4000.0 / 512.0, DISPLAY_HZ), None);
+    }
+
+    #[test]
+    fn a_wider_display_gets_ticks_to_suit_and_a_telephone_keeps_its_own() {
+        assert_eq!(tick_hz(DISPLAY_HZ), 500.0);
+        assert_eq!(tick_label(1500.0, DISPLAY_HZ), "1500");
+        assert_eq!(tick_hz(24_000.0), 2000.0);
+        assert_eq!(tick_label(20_000.0, 24_000.0), "20k");
+        assert_eq!(tick_hz(96_000.0), 10_000.0);
+        assert_eq!(tick_label(80_000.0, 96_000.0), "80k");
+        assert_eq!(measure(&[], 7.8, DISPLAY_HZ), None);
     }
 
     #[test]

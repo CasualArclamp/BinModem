@@ -225,7 +225,7 @@ impl Line {
                     // would leave us sending to the wrong place.
                     said.push(format!(
                         "sip: early media offered ({} from {}:{}), ignored until answer",
-                        negotiated.law.encoding_name(),
+                        negotiated.coding(),
                         negotiated.address,
                         negotiated.port
                     ));
@@ -256,7 +256,7 @@ impl Line {
                     Ok(remote) => {
                         said.push(format!(
                             "sip: answered; {} with {remote}, {} ms packets",
-                            negotiated.law.encoding_name(),
+                            negotiated.coding(),
                             negotiated.ptime_ms
                         ));
                         if negotiated.direction == Direction::ReceiveOnly {
@@ -426,12 +426,11 @@ impl Line {
 
     fn start_media(&self, negotiated: &Negotiated) -> Result<SocketAddr, String> {
         let remote = resolve_media(&negotiated.address, negotiated.port)?;
-        self.media.connect(
-            remote,
-            negotiated.law,
-            negotiated.payload_type,
-            negotiated.ptime_ms,
-        );
+        if negotiated.linear {
+            self.media.connect_linear(remote, negotiated.payload_type, negotiated.ptime_ms);
+        } else {
+            self.media.connect(remote, negotiated.law, negotiated.payload_type, negotiated.ptime_ms);
+        }
         // `Negotiated::direction` is ours, not theirs -- `sdp` has already
         // flipped it -- so receive-only here means the far end will not
         // listen, and inactive means neither end will. Either way our
@@ -447,6 +446,14 @@ impl Line {
     }
 
     /// What the last answered call agreed to.
+    /// Whether the call that is up carries linear samples exactly as sent,
+    /// L16 at 16 kHz, rather than G.711. Then [`Self::receive_both`]'s
+    /// network samples and [`Self::transmit_exact`] are at 16 kHz and every
+    /// one is sixteen bits that arrive as they left.
+    pub fn linear(&self) -> bool {
+        self.media.connected() && self.media.linear()
+    }
+
     pub fn negotiated(&self) -> Option<Negotiated> {
         self.negotiated.lock().ok().and_then(|n| n.clone())
     }

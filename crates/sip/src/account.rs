@@ -65,6 +65,11 @@ pub struct Account {
     pub expires: u32,
     /// Companding laws to offer, in preference order. Default mu-law first.
     pub laws: Vec<Law>,
+    /// Whether to offer, and to take, L16 at 16 kHz ahead of G.711: linear
+    /// samples that arrive exactly as sent, which is what V.ARC wants of a
+    /// call. Only another of these will ever agree to it, and an account on
+    /// a provider's trunk loses nothing by leaving it off.
+    pub linear: bool,
     /// The local SIP port. 0 = let the system choose, which is right unless
     /// something upstream is forwarding a fixed one.
     pub local_port: u16,
@@ -145,6 +150,7 @@ impl Default for Account {
             // transcoding trunk the law that needs no conversion is the one
             // that keeps them.
             laws: vec![Law::Mu, Law::A],
+            linear: false,
             local_port: 0,
             rtp_port: 0,
             ptime_ms: 20,
@@ -230,6 +236,7 @@ impl Account {
             "register" => self.register = parse_yes_no(value, key, number)?,
             "expires" => self.expires = parse_number(value, key, number)?,
             "laws" => self.laws = parse_laws(value, number)?,
+            "linear" => self.linear = parse_yes_no(value, key, number)?,
             "local_port" => self.local_port = parse_number(value, key, number)?,
             "rtp_port" => self.rtp_port = parse_number(value, key, number)?,
             "ptime_ms" => self.ptime_ms = parse_number(value, key, number)?,
@@ -242,7 +249,7 @@ impl Account {
                 return Err(format!(
                     "line {number}: \"{key}\" is not a setting this understands. The settings are \
                      registrar, domain, username, auth_username, password, display, \
-                     outbound_proxy, register, expires, laws, local_port, rtp_port, ptime_ms \
+                     outbound_proxy, register, expires, laws, linear, local_port, rtp_port, ptime_ms \
                      and transport"
                 ));
             }
@@ -406,6 +413,9 @@ impl Account {
                     })
                     .collect();
                 line("laws", &laws.join(", "));
+            }
+            if account.linear != fallback.linear {
+                line("linear", if account.linear { "yes" } else { "no" });
             }
             if account.local_port != fallback.local_port {
                 line("local_port", &account.local_port.to_string());
