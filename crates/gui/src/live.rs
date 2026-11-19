@@ -2266,6 +2266,23 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 }
                 f.echo_at = modem.reflection().map(|r| (r.delay, r.strength));
                 f.code = modem.varc_code().map(|(n, k)| (n as u16, k as u16));
+                // The band a carrier at a time, thinned to what a small
+                // scope can draw: each entry the mean of its neighbours.
+                let carriers = modem.varc_carriers();
+                let every = carriers.len().div_ceil(220).max(1);
+                f.carriers.clear();
+                f.carriers.extend(carriers.chunks(every).map(|group| {
+                    let n = group.len() as f64;
+                    (
+                        (group.iter().map(|c| c.0).sum::<f64>() / n) as f32,
+                        (group.iter().map(|c| c.1).sum::<f64>() / n) as f32,
+                        (group.iter().map(|c| f64::from(c.2)).sum::<f64>() / n) as f32,
+                    )
+                }));
+                f.echo.clear();
+                f.echo.extend(modem.varc_echo_response().iter().map(|t| *t as f32));
+                let delay = modem.varc_echo().first().and_then(|echo| echo.1);
+                f.echo_delay_ms = wide_rate.map_or(0.0, |rate| 1000.0 * delay.unwrap_or(0) as f64 / rate) as f32;
                 f.far_end = modem.varc_far_end().map(|(report, trim)| telemetry::FarEnd {
                     level_db: report.level_db as f32,
                     peak_db: report.peak_db as f32,

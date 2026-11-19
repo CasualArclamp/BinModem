@@ -22,6 +22,7 @@
 //! call's 16 kHz, which wants only that the path be clean.
 
 use varc::dmt::{self, Plan};
+use varc::echo::Canceller;
 use varc::exact;
 use varc::link::{Receiver, Report, Sender};
 use varc::sc::{self, Shape};
@@ -48,7 +49,9 @@ impl VarcMode {
     /// The mode `+MS` names, if it names one of these.
     pub fn from_carrier(carrier: &str) -> Option<Self> {
         match carrier {
-            "VARC" => Some(Self::Dmt),
+            // The multicarrier mode on one pair of wires is the same
+            // modulation behind an echo canceller.
+            "VARC" | "VARC2W" => Some(Self::Dmt),
             "VARCQ" => Some(Self::Qam),
             "VARCP" => Some(Self::Pcm),
             _ => None,
@@ -89,6 +92,14 @@ pub(crate) struct Call {
     fs_out: f64,
     /// The trim, over all channels, that whoever is watching was last told.
     trim_said: f64,
+    /// The line is one pair of wires, both ends sending into it: a
+    /// canceller a channel takes this end's own signal out of what it
+    /// hears. Empty on a line with a wire each way.
+    two_wire: bool,
+    echo: Vec<Canceller>,
+    cleaned: Vec<f64>,
+    /// How far down the echo was when whoever is watching was last told.
+    echo_said: f64,
     samples: u64,
     /// Samples since any channel last heard the far end.
     deaf: u64,
@@ -128,6 +139,10 @@ impl Call {
             fs: 0.0,
             fs_out: 0.0,
             trim_said: 0.0,
+            two_wire: false,
+            echo: Vec::new(),
+            cleaned: Vec::new(),
+            echo_said: 0.0,
             samples: 0,
             deaf: 0,
             first_loaded: None,
@@ -197,6 +212,22 @@ impl Call {
             Some(station) => station.speak(output),
             None => output.fill(0.0),
         }
+        for (canceller, &sample) in self.echo.iter_mut().zip(output.iter()) {
+            canceller.sent(sample);
+        }
+    }
+
+    /// Say that the line is one pair of wires, or is not. Before the call's
+    /// first sample.
+    pub fn two_wire(&mut self, two_wire: bool) {
+        self.two_wire = two_wire;
+    }
+
+    /// How far down each channel's canceller has taken this end's echo, in
+    /// decibels, and how far round the line it found it, in samples. Empty
+    /// on a line with a wire each way.
+    pub fn echo(&self) -> Vec<(f64, Option<usize>)> {
+        self.echo.iter().map(|c| (c.down_db(), c.delay())).collect()
     }
 
     /// One frame heard, at `fs`, by an end that sends at `fs_out`: the two
@@ -213,9 +244,26 @@ impl Call {
             self.fs = fs;
             self.fs_out = fs_out;
             self.until_look = 0;
+            self.echo.clear();
+            if self.two_wire {
+                // The canceller lays what was sent against what was heard,
+                // sample for sample, so the two have to be the same clock.
+                if fs != fs_out {
+                    return Err(format!(
+                        "V.ARC on two wires wants one sound card: this line hears at {fs} Hz and sends at {fs_out} Hz"
+                    ));
+                }
+                self.echo = (0..input.len()).map(|_| Canceller::new(fs)).collect();
+            }
         }
         let station = self.station.as_mut().expect("just built");
-        station.hear(input);
+        if self.echo.is_empty() {
+            station.hear(input);
+        } else {
+            self.cleaned.clear();
+            self.cleaned.extend(self.echo.iter_mut().zip(input).map(|(canceller, &x)| canceller.clean(x)));
+            station.hear(&self.cleaned);
+        }
         self.samples += 1;
         if self.until_look > 0 {
             self.until_look -= 1;
@@ -227,6 +275,17 @@ impl Call {
             self.deaf = 0;
         } else {
             self.deaf += u64::from(every.max(1));
+        }
+        // The echo, as it goes down: said each time it is 10 dB further.
+        if let Some(canceller) = self.echo.first() {
+            let down = canceller.down_db();
+            if canceller.delay().is_some() && down >= self.echo_said + 10.0 {
+                self.echo_said = (down / 10.0).floor() * 10.0;
+                self.note = Some(format!(
+                    "V.ARC: this end's echo is {:.1} ms round the line and {down:.0} dB down",
+                    1000.0 * canceller.delay().unwrap_or(0) as f64 / fs
+                ));
+            }
         }
         // A change of level is worth saying: it starts the line again.
         let trim: f64 = station.channels.iter().map(|c| c.trim_db).sum();
@@ -365,6 +424,26 @@ impl Call {
     /// down on that channel because of it.
     pub fn far_end(&self) -> Option<(Report, f64)> {
         self.station.as_ref()?.channels.iter().find_map(|c| c.there.map(|report| (report, c.trim_db)))
+    }
+
+    /// The band as the first channel that hears anything has it: each
+    /// carrier's frequency, its signal to noise in decibels, and the bits
+    /// the far end is putting on it.
+    pub fn carriers(&self) -> Vec<(f64, f64, u8)> {
+        let Some(station) = self.station.as_ref() else { return Vec::new() };
+        station
+            .channels
+            .iter()
+            .find(|c| c.rx.health().locked)
+            .map(|c| c.rx.spectrum().iter().map(|bin| (bin.hz, bin.snr_db, bin.bits)).collect())
+            .unwrap_or_default()
+    }
+
+    /// The first channel's echo, as its canceller has learned it: the
+    /// line's answer to one sample sent. Empty on a line with a wire each
+    /// way, and until the echo has been found.
+    pub fn echo_response(&self) -> Vec<f64> {
+        self.echo.first().map(Canceller::response).unwrap_or_default()
     }
 
     /// The signal to noise ratio on each channel, in decibels.

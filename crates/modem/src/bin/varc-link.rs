@@ -158,6 +158,7 @@ fn through_the_modem(audio: &Wide, mode: &str, seconds: f64) -> ExitCode {
         "dmt" => "VARC",
         "qam" => "VARCQ",
         "pcm" => "VARCP",
+        "2w" => "VARC2W",
         _ => return usage(),
     };
     println!(

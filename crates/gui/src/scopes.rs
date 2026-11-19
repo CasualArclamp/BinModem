@@ -389,6 +389,118 @@ pub fn oscilloscope(ui: &mut Ui, samples: &[f32], sample_rate: f64, size: Vec2) 
     frame_border(&painter, rect);
 }
 
+/// The band a carrier at a time: the bits on each as bars, and the signal
+/// to noise they were chosen from as a line over them.
+///
+/// This is the picture of what a multicarrier mode is for. A line is not one
+/// figure; it is good here and poor there, and each carrier is given what
+/// its own stretch will bear. The two scales are tied so that the line sits
+/// on top of the bars when the loading is what the ratio allows: three
+/// decibels a bit, with eight in hand.
+pub fn loading(ui: &mut Ui, carriers: &[(f32, f32, f32)], size: Vec2) {
+    let (response, painter) = ui.allocate_painter(size, Sense::hover());
+    let rect = response.rect;
+    painter.rect_filled(rect, 0.0, BACKDROP);
+    let plot = Rect::from_min_max(pos2(rect.left() + 2.0, rect.top() + 16.0), pos2(rect.right() - 2.0, rect.bottom() - 16.0));
+    // Twenty-four bits is the most a carrier takes: 80 dB on the same axis.
+    const MOST_BITS: f32 = 24.0;
+    let height_of = |bits: f32| plot.height() * (bits / MOST_BITS).clamp(0.0, 1.0);
+    for eighth in 1..3 {
+        let y = plot.bottom() - height_of(8.0 * eighth as f32);
+        painter.line_segment([pos2(plot.left(), y), pos2(plot.right(), y)], Stroke::new(1.0, GRID));
+    }
+    let top_hz = carriers.last().map_or(1.0, |c| c.0.max(1.0));
+    let most = carriers.iter().fold(0.0f32, |m, c| m.max(c.2));
+    let best = carriers.iter().fold(0.0f32, |m, c| m.max(c.1));
+    if carriers.len() > 1 {
+        let width = (plot.width() / carriers.len() as f32).max(1.0);
+        let mut ratio: Vec<Pos2> = Vec::with_capacity(carriers.len());
+        for &(hz, snr_db, bits) in carriers {
+            let x = plot.left() + plot.width() * hz / top_hz;
+            if bits > 0.0 {
+                let bar = Rect::from_min_max(pos2(x - width, plot.bottom() - height_of(bits)), pos2(x, plot.bottom()));
+                painter.rect_filled(bar, 0.0, TRACE.gamma_multiply(0.55));
+            }
+            if snr_db > 0.0 {
+                // The bits this ratio would bear, on the bars' own scale.
+                ratio.push(pos2(x - width * 0.5, plot.bottom() - height_of((snr_db - 8.0) / 3.01)));
+            }
+        }
+        for pair in ratio.windows(2) {
+            painter.line_segment([pair[0], pair[1]], Stroke::new(1.2, Color32::from_rgb(240, 200, 90)));
+        }
+    }
+    let khz = top_hz / 1000.0;
+    let head = if carriers.len() > 1 {
+        format!("bits a carrier  to {khz:.0} kHz")
+    } else {
+        "bits a carrier".to_owned()
+    };
+    painter.text(pos2(rect.left() + 5.0, rect.top() + 3.0), Align2::LEFT_TOP, head, FontId::monospace(10.0), LABEL);
+    let foot = if carriers.len() > 1 {
+        format!("most {most:.0}  line: SNR to {best:.0} dB")
+    } else {
+        "one carrier: nothing to lay out".to_owned()
+    };
+    painter.text(pos2(rect.left() + 5.0, rect.bottom() - 3.0), Align2::LEFT_BOTTOM, foot, FontId::monospace(10.0), LABEL);
+    frame_border(&painter, rect);
+}
+
+/// The echo a canceller has learned: what comes back down the line for one
+/// sample sent, over the few milliseconds the canceller covers.
+///
+/// A clean lead is one spike. A hybrid is a spike with a tail; a room is a
+/// mess. What is drawn is the canceller's own picture of the line, so it is
+/// also the picture of the canceller finding it: nothing, then a shape out
+/// of the noise, then the noise draining out of the shape.
+pub fn echo(ui: &mut Ui, response: &[f32], delay_ms: f32, size: Vec2) {
+    let (response_area, painter) = ui.allocate_painter(size, Sense::hover());
+    let rect = response_area.rect;
+    painter.rect_filled(rect, 0.0, BACKDROP);
+    let mid = rect.center().y;
+    painter.line_segment([pos2(rect.left(), mid), pos2(rect.right(), mid)], Stroke::new(1.0, GRID));
+    for quarter in 1..4 {
+        let x = rect.left() + rect.width() * quarter as f32 / 4.0;
+        painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.0, GRID));
+    }
+    if response.len() > 1 {
+        let peak = response.iter().fold(1e-6f32, |m, v| m.max(v.abs()));
+        let half = rect.height() * 0.5 - 16.0;
+        let points: Vec<Pos2> = response
+            .iter()
+            .enumerate()
+            .map(|(i, v)| pos2(rect.left() + rect.width() * i as f32 / (response.len() - 1) as f32, mid - half * v / peak))
+            .collect();
+        for pair in points.windows(2) {
+            painter.line_segment([pair[0], pair[1]], Stroke::new(1.2, TRACE));
+        }
+        painter.text(
+            pos2(rect.left() + 5.0, rect.top() + 3.0),
+            Align2::LEFT_TOP,
+            format!("echo  {delay_ms:.1} ms round"),
+            FontId::monospace(10.0),
+            LABEL,
+        );
+        painter.text(
+            pos2(rect.left() + 5.0, rect.bottom() - 3.0),
+            Align2::LEFT_BOTTOM,
+            format!("4 ms shown  peak {peak:.2}"),
+            FontId::monospace(10.0),
+            LABEL,
+        );
+    } else {
+        painter.text(pos2(rect.left() + 5.0, rect.top() + 3.0), Align2::LEFT_TOP, "echo", FontId::monospace(10.0), LABEL);
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "a wire each way:\nno echo to cancel",
+            FontId::monospace(10.0),
+            LABEL,
+        );
+    }
+    frame_border(&painter, rect);
+}
+
 fn allocate(ui: &mut Ui, height: f32) -> (eframe::egui::Response, Painter) {
     let size = vec2(ui.available_width(), height);
     ui.allocate_painter(size, Sense::hover())

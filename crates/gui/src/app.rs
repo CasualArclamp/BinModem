@@ -204,7 +204,7 @@ impl Modulation {
             6 => &[300],
             // V.ARC has no rates to choose among: each end loads the line
             // for what it measures, and nought is how +MS says "unspecified".
-            8..=10 => &[0],
+            8..=11 => &[0],
             // V.34 5.1: "2400 bit/s to 33 600 bit/s in multiples of 2400".
             _ => &[
                 2400, 4800, 7200, 9600, 12_000, 14_400, 16_800, 19_200, 21_600, 24_000, 26_400,
@@ -786,7 +786,7 @@ impl ScopeApp {
     ///
     /// Positions are what the rate lists, the ceilings and the default go by,
     /// so a new one goes on the end rather than where it might read best.
-    const CARRIERS: [(&'static str, &'static str); 11] = [
+    const CARRIERS: [(&'static str, &'static str); 12] = [
         ("B103", "Bell 103 - 300 bit/s"),
         ("V22B", "V.22bis - 1200 or 2400"),
         ("V32", "V.32 - 4800 or 9600"),
@@ -810,6 +810,10 @@ impl ScopeApp {
         ),
         ("VARCQ", "V.ARC/QAM - the same lead with one carrier at 16000 baud"),
         ("VARCP", "V.ARC/PCM - the same lead with levels at baseband, 16000 baud"),
+        (
+            "VARC2W",
+            "V.ARC two-wire - the multicarrier mode on one pair of wires, both ends sending into it, with this end's own echo taken out. One sound card, input and output at the same rate. The rate climbs for minutes as the echo falls",
+        ),
     ];
 
     /// Boards to start from, because a text box on its own is a box nobody
@@ -3559,6 +3563,23 @@ impl ScopeApp {
                 egui::vec2(ui.available_width(), SIDE),
             );
         });
+        // Two more for a mode that has something to put in them: how the
+        // band is loaded, and the echo a two-wire call is taking out.
+        if !self.frame.carriers.is_empty() || !self.frame.echo.is_empty() {
+            const LOWER: f32 = 130.0;
+            ui.add_space(4.0);
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui(egui::vec2(SIDE, LOWER), |ui| {
+                    scopes::loading(ui, &self.frame.carriers, egui::vec2(SIDE, LOWER));
+                });
+                scopes::echo(
+                    ui,
+                    &self.frame.echo,
+                    self.frame.echo_delay_ms,
+                    egui::vec2(ui.available_width(), LOWER),
+                );
+            });
+        }
     }
 
     fn audio_controls(&mut self, ui: &mut egui::Ui) {
@@ -4018,7 +4039,7 @@ impl ScopeApp {
     /// A modulation and nothing else. The rate is the modem's to find: every
     /// one of these settles on the fastest the line will carry, and a ceiling
     /// set on purpose is in the Advanced window with the rest of AT+MS.
-    const MODES: [(usize, &'static str); 11] = [
+    const MODES: [(usize, &'static str); 12] = [
         (7, "V.92"),
         (5, "V.90"),
         (4, "V.34"),
@@ -4031,6 +4052,7 @@ impl ScopeApp {
         (8, "V.ARC"),
         (9, "V.ARC/QAM"),
         (10, "V.ARC/PCM"),
+        (11, "V.ARC two-wire"),
     ];
 
     /// How fast at most, and the three things that are simply on or off.
@@ -5737,14 +5759,14 @@ mod modulation_tests {
         assert_eq!(ScopeApp::CARRIERS[7].0, "V92");
         assert_eq!(Modulation::rates(7), Modulation::rates(4));
         // V.ARC's three have no rate to ask for.
-        for (i, name) in [(8, "VARC"), (9, "VARCQ"), (10, "VARCP")] {
+        for (i, name) in [(8, "VARC"), (9, "VARCQ"), (10, "VARCP"), (11, "VARC2W")] {
             assert_eq!(ScopeApp::CARRIERS[i].0, name);
             assert_eq!(Modulation::rates(i), &[0]);
             let mut m = Modulation { min_rate: 9600, max_rate: 33_600, ..Modulation::default() };
             m.fit(i);
             assert_eq!(m.command(name), format!("AT+MS={name},1"));
         }
-        assert_eq!(ScopeApp::CARRIERS.len(), 11);
+        assert_eq!(ScopeApp::CARRIERS.len(), 12);
     }
 
     /// The two V.32 carriers are two ceilings on one modulation, and the

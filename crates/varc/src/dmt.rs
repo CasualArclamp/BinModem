@@ -511,6 +511,10 @@ pub struct Rx {
     /// the last symbol. Kept because it is asked for far more often than it
     /// changes, and is a logarithm a carrier to work out.
     mean_snr_db: f64,
+    /// Bits a symbol in the table last proposed, and for how many
+    /// superframes in a row the line has looked good for a good deal more.
+    proposed: usize,
+    better: usize,
     /// Which of the starting table's points each carrier carries.
     spread: Vec<Option<u16>>,
     /// The noise on each carrier under the starting table, as of the last
@@ -583,6 +587,8 @@ impl Rx {
             gap_db: GAP_DB,
             remeasure: false,
             mean_snr_db: 0.0,
+            proposed: 0,
+            better: 0,
             spread: plan.spread(),
             heard: vec![1.0; half],
             points: Vec::new(),
@@ -1052,6 +1058,25 @@ impl Rx {
             self.mean_snr_db = (1..=top).map(|k| self.snr_db(k)).sum::<f64>() / top as f64;
         }
 
+        // A line is measured once, a few seconds in, and most lines are then
+        // what they will always be. One behind an echo canceller is not: the
+        // echo goes on falling for minutes, and the noise with it. So a line
+        // that has looked good for a twelfth more bits than it was asked
+        // for, eleven seconds running, is asked for them.
+        if is_sync && self.stage == Stage::Steady && self.proposed > 0 {
+            let now = self.load();
+            if now.total() * 12 >= self.proposed * 13 {
+                self.better += 1;
+                if self.better >= 16 {
+                    self.better = 0;
+                    self.proposed = now.total();
+                    self.proposal = Some(now);
+                }
+            } else {
+                self.better = 0;
+            }
+        }
+
         // A second-order loop about a hertz wide: most of each error is
         // taken out at once, and a fiftieth of it changes the rate.
         self.interp.nudge(0.2 * late);
@@ -1075,9 +1100,16 @@ impl Rx {
                     *w /= peak;
                 }
                 self.stage = Stage::Steady;
-                self.proposal = Some(self.load());
+                self.propose();
             }
         }
+    }
+
+    fn propose(&mut self) {
+        let table = self.load();
+        self.proposed = table.total();
+        self.better = 0;
+        self.proposal = Some(table);
     }
 
     /// The table this line will bear, by what has been measured.
@@ -1130,7 +1162,7 @@ impl Receiver for Rx {
     fn back_off(&mut self, db: f64) {
         self.gap_db += db;
         if self.stage == Stage::Steady {
-            self.proposal = Some(self.load());
+            self.propose();
         }
     }
 

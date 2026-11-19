@@ -1917,6 +1917,28 @@ impl Modem {
         self.varc.as_ref().and_then(varc::Call::far_end)
     }
 
+    /// On a two-wire V.ARC call (`+MS=VARC2W`): how far down each channel's
+    /// canceller has taken this end's own echo, in decibels, and how far
+    /// round the line it found it, in samples. Empty on any other call.
+    pub fn varc_echo(&self) -> Vec<(f64, Option<usize>)> {
+        self.varc.as_ref().map_or_else(Vec::new, varc::Call::echo)
+    }
+
+    /// A V.ARC call's band, carrier by carrier, on the first channel that
+    /// hears anything: frequency, signal to noise in decibels, and the bits
+    /// the far end is putting there. One entry for the single-carrier
+    /// modes. Empty on any other call.
+    pub fn varc_carriers(&self) -> Vec<(f64, f64, u8)> {
+        self.varc.as_ref().map_or_else(Vec::new, varc::Call::carriers)
+    }
+
+    /// A two-wire V.ARC call's echo as the canceller has learned it: what
+    /// comes back for one sample sent, over the few milliseconds the
+    /// canceller covers. Empty on any other call.
+    pub fn varc_echo_response(&self) -> Vec<f64> {
+        self.varc.as_ref().map_or_else(Vec::new, varc::Call::echo_response)
+    }
+
     /// Tell a V.ARC call that its line carries samples exactly as sent: a
     /// SIP call that agreed on linear PCM. It then starts with no
     /// modulation at all, the samples being the data, and gives that up for
@@ -2906,7 +2928,9 @@ impl Modem {
             self.varc_said = "";
             self.varc_bits = 0;
             self.state = State::Handshaking;
-            self.varc = Some(varc::Call::new(mode, role, looped));
+            let mut call = varc::Call::new(mode, role, looped);
+            call.two_wire(self.at.modulation.carrier == "VARC2W");
+            self.varc = Some(call);
             return;
         }
         // A fax call goes nowhere near any of this. There is no modulation to

@@ -151,6 +151,15 @@ pub struct Frame {
     /// The error-correcting code on what is arriving, (n, k): octets a
     /// codeword and how many of them are data. Only V.ARC has one.
     pub code: Option<(u16, u16)>,
+    /// The band a carrier at a time, for a mode that loads each carrier for
+    /// itself: frequency in hertz, signal to noise in decibels, and bits.
+    /// Thinned to a couple of hundred entries; empty for every other mode.
+    pub carriers: Vec<(f32, f32, f32)>,
+    /// The echo a canceller has learned: what comes back for one sample
+    /// sent. Empty when there is no canceller or it has found nothing.
+    pub echo: Vec<f32>,
+    /// How far round the line the echo is, in milliseconds.
+    pub echo_delay_ms: f32,
     /// What the far end says it hears of this end. Only V.ARC is told.
     pub far_end: Option<FarEnd>,
     /// Received level in dBFS.
@@ -250,6 +259,9 @@ impl Frame {
             hz_per_bin: sample_rate / (spectrum_bins as f64 * 2.0),
             display_hz: 4000.0,
             code: None,
+            carriers: Vec::new(),
+            echo: Vec::new(),
+            echo_delay_ms: 0.0,
             far_end: None,
             rx_level_db: -120.0,
             snr_db: None,

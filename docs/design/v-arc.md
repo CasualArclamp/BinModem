@@ -208,6 +208,55 @@ What this cannot do is turn the far end's input down, or this end's output
 up past its own full scale: those are the sound card's mixer. It says which
 is needed.
 
+## One pair of wires: the echo canceller
+
+Everything above supposes a wire each way. `AT+MS=VARC2W` is the multicarrier
+mode on a line where both ends send into the same pair, and each hears the
+other with its own signal on top (`echo.rs`).
+
+- **Where the echo is.** A sound card puts tens of milliseconds between a
+  sample written and the same sample heard. The delay is found by laying a
+  stretch of what was sent against what was heard at every lag up to a third
+  of a second, with one transform, and it is looked for again every few
+  seconds.
+- **What shape it is.** A filter 4 ms long (192 taps at 48 kHz, 768 at
+  192 kHz), fitted by normalised least mean squares.
+- **The far end does not stop talking** while it is learned, and to the
+  filter the far end is noise. So the step shrinks as one over the samples
+  seen: after `k` samples the echo left is about `taps / k` of the far end's
+  signal, 3 dB better for each doubling of the time.
+- **The table follows.** A multicarrier receiver that has looked good for a
+  twelfth more bits than it asked for, eleven seconds running, asks for
+  them. (This is for any V.ARC/DMT call, not only this one.)
+
+It needs one sound card, input and output at the same rate, since it lays
+what was sent against what was heard sample for sample.
+
+| Where | What happened |
+|---|---|
+| Simulation, echo 6 dB louder than the far end | connects; 117 kbit/s at 10 s, 150 at 30 s, 164 at 60 s; Es/N0 34 dB at 15 s, 40 dB at 90 s, 41.6 dB at 165 s |
+| Two windows on one machine, both sending into and hearing VB-Cable A, 48 kHz | connects both ways; about 300 kbit/s each way at 35 s, Es/N0 38 dB |
+| The Realtek lead at 192 kHz, this end's own signal only | echo found 81.4 ms round, 40 dB down in 1.3 s; did not reach 50 dB in 14 s; no sound underruns |
+| The same pair with no canceller (`VARC`), simulation | never connects |
+
+The slow climb is the price of learning while the far end talks, and it is
+what limits the rate: a wire each way gives 60 dB on the lead and this gives
+about 40 after a minute. Doing better means taking the far end's own signal
+out of what the filter learns from, once it has been decoded, which is not
+built.
+
+Not tried: a real two-wire line (a hybrid, a telephone pair), two machines,
+or two sound cards whose clocks differ, where the echo of one card is still
+its own but the far end slides.
+
+**Two more scopes.** Under the symbol diagram while a V.ARC call is up: the
+bits on each carrier with the signal to noise they were chosen from, and the
+echo as the canceller has learned it.
+
+| Two-wire, VB-Cable A | A wire each way, the Realtek lead |
+|---|---|
+| ![](../images/v-arc/scopes-two-wire.png) | ![](../images/v-arc/scopes-lead.png) |
+
 ## Modulation and coding
 
 There is no list of modes to pick from. The receiver measures the line and

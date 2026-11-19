@@ -333,3 +333,77 @@ fn two_devices_at_two_rates_are_a_line_each_way() {
     let (down, up) = (caller.rate().unwrap_or(0), host.rate().unwrap_or(0));
     assert!(down > 3 * up && up > 300_000, "{down} arriving at the caller, {up} at the host");
 }
+
+/// One pair of wires: both ends send into it, and each hears the other
+/// with its own signal on top, come back some milliseconds later through
+/// whatever the line is.
+#[test]
+fn on_one_pair_of_wires_each_end_takes_its_own_echo_out() {
+    let mut caller = Modem::new(16_000.0);
+    let mut host = Modem::new(16_000.0);
+    type_at(&mut caller, "AT+MS=VARC2W\r");
+    type_at(&mut host, "AT+MS=VARC2W\rATA\r");
+    type_at(&mut caller, "ATD1\r");
+    assert_eq!(caller.standard(), "V.ARC/DMT");
+    // What each end's own signal comes back as, and how long after.
+    let shape = [0.1, 0.7, 0.3, -0.1];
+    let delay = 1500;
+    let mut line_caller = std::collections::VecDeque::from(vec![0.0; delay + shape.len()]);
+    let mut line_host = line_caller.clone();
+    let (mut from_caller, mut from_host) = ([0.0], [0.0]);
+    let (mut at_caller, mut at_host) = (Vec::new(), Vec::new());
+    let mut typed = false;
+    let echo = |line: &std::collections::VecDeque<f64>| -> f64 {
+        shape.iter().enumerate().map(|(i, s)| s * line[delay + i]).sum()
+    };
+    for _ in 0..(40.0 * FS) as usize {
+        // The far end arrives 6 dB down; the echo is the louder.
+        let to_caller = [0.5 * from_host[0] + echo(&line_caller)];
+        let to_host = [0.5 * from_caller[0] + echo(&line_host)];
+        caller.varc_step(FS, &to_caller, &mut from_caller);
+        host.varc_step(FS, &to_host, &mut from_host);
+        line_caller.pop_back();
+        line_caller.push_front(from_caller[0]);
+        line_host.pop_back();
+        line_host.push_front(from_host[0]);
+        at_caller.extend(caller.take_dte());
+        at_host.extend(host.take_dte());
+        if !typed && caller.state() == State::Data && host.state() == State::Data {
+            typed = true;
+            at_host.clear();
+            type_at(&mut caller, "both ways down one pair");
+        }
+    }
+    assert_eq!(caller.state(), State::Data, "{}", Pair::said(&at_caller));
+    assert_eq!(Pair::said(&at_host), "both ways down one pair");
+    let echo = caller.varc_echo();
+    assert_eq!(echo.len(), 1);
+    let found = echo[0].1.expect("a delay");
+    assert!(found.abs_diff(delay) < 8, "found {found}");
+    // The rate after 40 s: the echo is some 40 dB down by then.
+    let rate = caller.rate().unwrap_or(0);
+    assert!(rate > 100_000, "{rate} bit/s");
+    eprintln!("two-wire: {rate} bit/s, echo {:.1} dB down", echo[0].0);
+}
+
+/// Without the canceller the same line carries nothing: each end hears
+/// itself louder than the other.
+#[test]
+fn the_same_pair_without_a_canceller_never_connects() {
+    let mut caller = Modem::new(16_000.0);
+    let mut host = Modem::new(16_000.0);
+    type_at(&mut caller, "AT+MS=VARC\r");
+    type_at(&mut host, "AT+MS=VARC\rATA\r");
+    type_at(&mut caller, "ATD1\r");
+    let (mut from_caller, mut from_host) = ([0.0], [0.0]);
+    let mut line = std::collections::VecDeque::from(vec![(0.0, 0.0); 1500]);
+    for _ in 0..(12.0 * FS) as usize {
+        let (own_caller, own_host) = line[1499];
+        caller.varc_step(FS, &[0.5 * from_host[0] + own_caller], &mut from_caller);
+        host.varc_step(FS, &[0.5 * from_caller[0] + own_host], &mut from_host);
+        line.pop_back();
+        line.push_front((from_caller[0], from_host[0]));
+    }
+    assert_ne!(caller.state(), State::Data);
+    assert!(caller.varc_echo().is_empty());
+}
