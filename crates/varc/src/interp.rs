@@ -35,7 +35,9 @@ const PHASES: usize = 1024;
 /// The Kaiser window's shape: about 100 dB of sidelobe.
 const BETA: f64 = 10.0;
 
-fn bessel_i0(x: f64) -> f64 {
+/// The modified Bessel function of the first kind, order nought: what a
+/// Kaiser window is made of.
+pub(crate) fn bessel_i0(x: f64) -> f64 {
     let mut sum = 1.0;
     let mut term = 1.0;
     let q = x * x / 4.0;

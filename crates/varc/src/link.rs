@@ -116,6 +116,68 @@ pub trait Sender {
 
     /// Bits a second with the table in use: on the line, and of frames.
     fn rates(&self) -> (f64, f64);
+
+    /// Samples that reached full scale and were held there.
+    fn clipped(&self) -> u64;
+}
+
+// A boxed half is a half, so that a program can choose its modulation when
+// it is run rather than when it is built.
+impl<T: Sender + ?Sized> Sender for Box<T> {
+    fn wants(&self) -> Option<Layout> {
+        (**self).wants()
+    }
+    fn give(&mut self, line: Vec<u8>) {
+        (**self).give(line)
+    }
+    fn next_sample(&mut self) -> f64 {
+        (**self).next_sample()
+    }
+    fn adopt(&mut self, id: u8, table: Table) {
+        (**self).adopt(id, table)
+    }
+    fn id(&self) -> u8 {
+        (**self).id()
+    }
+    fn reset(&mut self) {
+        (**self).reset()
+    }
+    fn rates(&self) -> (f64, f64) {
+        (**self).rates()
+    }
+    fn clipped(&self) -> u64 {
+        (**self).clipped()
+    }
+}
+
+impl<T: Receiver + ?Sized> Receiver for Box<T> {
+    fn feed(&mut self, sample: f64) {
+        (**self).feed(sample)
+    }
+    fn take(&mut self) -> Option<Arrived> {
+        (**self).take()
+    }
+    fn proposal(&mut self) -> Option<Table> {
+        (**self).proposal()
+    }
+    fn expect(&mut self, id: u8, table: Table) {
+        (**self).expect(id, table)
+    }
+    fn id(&self) -> Option<u8> {
+        (**self).id()
+    }
+    fn back_off(&mut self, db: f64) {
+        (**self).back_off(db)
+    }
+    fn remeasure(&mut self, db: f64) {
+        (**self).remeasure(db)
+    }
+    fn health(&self) -> Health {
+        (**self).health()
+    }
+    fn spectrum(&self) -> Vec<Bin> {
+        (**self).spectrum()
+    }
 }
 
 /// The receiving half.

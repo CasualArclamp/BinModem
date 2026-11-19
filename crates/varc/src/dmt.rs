@@ -375,6 +375,10 @@ impl Sender for Tx {
     fn rates(&self) -> (f64, f64) {
         (self.plan.gross(&self.table), self.plan.net(&self.table))
     }
+
+    fn clipped(&self) -> u64 {
+        self.clipped
+    }
 }
 
 /// Where a receiver has got to.
