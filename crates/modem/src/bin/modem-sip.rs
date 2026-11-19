@@ -27,6 +27,18 @@ use modem::{Modem, State};
 /// The rate the modem runs at on a SIP line, which is the window's.
 const FS: f64 = 16_000.0;
 
+/// How hard to drive the line unless told: the window's own default, twenty
+/// decibels down from what the modem hands over.
+///
+/// The modem's transmitters leave at a root mean square of 0.707 and the
+/// shaped constellations peak close to 2, and G.711 has nothing above one.
+/// Written out as it stood, V.34's training went down the line with one
+/// sample in six flat against the top of the scale: two of these calling each
+/// other on one machine heard each other at about twenty decibels, settled on
+/// 12000 bit/s, and lost MP' or E to the clipping more often than not, which
+/// the terminal was told as NO CARRIER.
+const DEFAULT_DRIVE: f32 = 0.1;
+
 fn main() -> ExitCode {
     let mut file: Option<PathBuf> = None;
     let mut name: Option<String> = None;
@@ -38,6 +50,7 @@ fn main() -> ExitCode {
     let mut record: Option<PathBuf> = None;
     let mut answer = false;
     let mut memos: Option<PathBuf> = None;
+    let mut drive = DEFAULT_DRIVE;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut rest = args.iter();
@@ -67,6 +80,16 @@ fn main() -> ExitCode {
             // The other way round: wait for a call and take it with ATA.
             "--answer" => answer = true,
             "--memos" => memos = Some(PathBuf::from(value())),
+            "--drive" => {
+                let text = value();
+                match text.parse::<f32>() {
+                    Ok(d) if d > 0.0 && d <= 1.0 => drive = d,
+                    _ => {
+                        eprintln!("--drive is a multiple above 0 and up to 1, not {text}");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
             "--pages" => {
                 if let Some(f) = fax.as_mut() {
                     f.pages = value().parse().unwrap_or(1);
@@ -77,7 +100,7 @@ fn main() -> ExitCode {
                     "modem-sip [--accounts <file>] --account <name> --type <line>... \n\
                      \x20         [--send <text>] [--hold <s>] [--seconds <s>]\n\
                      \x20         [--fax g3|v34 [--pages <n>]] [--record <wav>] [--answer]\n\
-                     \x20         [--memos <file>]\n\
+                     \x20         [--memos <file>] [--drive <multiple>]\n\
                      \n\
                      Opens the SIP account, types each line at the modem a second apart,\n\
                      and prints what comes back. Once connected it sends --send, stays up\n\
@@ -85,6 +108,8 @@ fn main() -> ExitCode {
                      Without --accounts the accounts are the window's own file.\n\
                      --memos keeps what V.92 calls teach in a file, by the string dialled,\n\
                      so that the next call to the same place starts up the short way.\n\
+                     --drive is how hard to drive the line, as a multiple of what the\n\
+                     modem hands over: 0.1 unless told, which is the window's own.\n\
                      With --fax the modem is a fax machine with a test page to send:\n\
                      type AT+FCLASS=1 and the ATD, and it exits 0 if a page went."
                 );
@@ -123,7 +148,7 @@ fn main() -> ExitCode {
         }
     };
 
-    run(&line, typed, send, hold, seconds, fax, record, answer, memos)
+    run(&line, typed, send, hold, seconds, fax, record, answer, memos, drive)
 }
 
 /// A fax to send instead of a data call.
@@ -172,6 +197,7 @@ fn run(
     record: Option<PathBuf>,
     answer: bool,
     memos: Option<PathBuf>,
+    drive: f32,
 ) -> ExitCode {
     let started = Instant::now();
     let note = |text: &str| eprintln!("[{:7.2}] {text}", started.elapsed().as_secs_f64());
@@ -274,7 +300,11 @@ fn run(
             modem.give_network_levels(&levels);
             to_line.clear();
             for &s in &from_line {
-                to_line.push(modem.step(f64::from(s)) as f32);
+                let said = modem.step(f64::from(s)) as f32;
+                // Levels that are exact are codewords or V.92's LU, and no
+                // drive of any other size will do: see `Modem::exact_levels`.
+                let drive = if modem.exact_levels() { 1.0 } else { drive };
+                to_line.push(said * drive);
             }
             // A digital modem's codewords go as they are; everything else
             // is a waveform and goes through the rate conversion.
