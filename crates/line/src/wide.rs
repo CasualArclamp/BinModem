@@ -27,8 +27,12 @@ pub const CHANNELS: usize = 2;
 /// what matters is that a busy moment in the program loses nothing.
 const BUFFER: usize = 96_000;
 
-/// Frames of silence put in front of the output: about forty milliseconds.
-const PRIME: usize = 2048;
+/// The silence put in front of the output, as a fraction of a second: forty
+/// milliseconds, whatever the device's rate. It was a count of frames once,
+/// right for 48 kHz and a quarter of that at 192 kHz, where ten milliseconds
+/// was not enough to cover a busy moment and the gap that followed cost the
+/// call seconds.
+const PRIME_PER_SECOND: usize = 25;
 
 /// Frames of input thrown away while the device settles.
 const SETTLE: usize = 12_000;
@@ -120,7 +124,7 @@ impl Wide {
             incoming: Mutex::new(VecDeque::with_capacity(BUFFER * CHANNELS)),
             settling: Mutex::new(SETTLE),
             delivering: AtomicBool::new(false),
-            outgoing: Mutex::new(VecDeque::from(vec![0.0; PRIME * CHANNELS])),
+            outgoing: Mutex::new(VecDeque::from(vec![0.0; output_rate as usize / PRIME_PER_SECOND * CHANNELS])),
             counters: Counters::default(),
         });
 

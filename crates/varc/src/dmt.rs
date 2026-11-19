@@ -53,6 +53,10 @@ pub const TABLES: usize = 4;
 const PILOT_AT: usize = 16;
 const PILOT_EVERY: usize = 32;
 
+/// Points a symbol carries under the starting table, each of them sent on
+/// many carriers at once. See [`Plan::spread`].
+pub const SPREAD: usize = 48;
+
 /// Check octets a codeword gets under the starting table, which has to work
 /// before anything is known about the line.
 const DEFAULT_PARITY: u8 = 32;
@@ -149,13 +153,52 @@ impl Plan {
         ((self.symbols + 1) * self.span()) as f64 / self.fs
     }
 
-    /// The table both ends start with: two bits on every carrier between
-    /// 500 Hz and 6 kHz, which any audio path at all will pass.
-    pub fn default_table(&self) -> Table {
-        let bits = (0..self.half())
+    /// Which of the starting table's points each carrier carries.
+    ///
+    /// The starting table has to work on a line nothing is known about, and
+    /// no stretch of the band can be counted on: a lead passes all of it, a
+    /// telephone-grade path three kilohertz of it, and something with a
+    /// transformer in it may have no bottom. So the starting table does not
+    /// choose a stretch. It sends [`SPREAD`] four-point symbols and sends
+    /// each of them on every carrier that has its turn, round and round from
+    /// the bottom of the band to the top, and the receiver adds the copies
+    /// together weighted by how good each carrier has turned out to be. Any
+    /// [`SPREAD`] carriers in a row that work are enough, wherever they are;
+    /// on a wide clean line there are dozens of copies and the sum is far
+    /// above the noise of any one.
+    ///
+    /// That is also the probe. Every carrier is carrying something whose
+    /// right answer the sum supplies, so every carrier's noise is measured
+    /// against it, the dead ones as well, and the table made from that is
+    /// what goes back over the same sum.
+    ///
+    /// Each copy is turned by the carrier's known point, or a symbol sent
+    /// forty times over in step would be a row of spikes.
+    pub fn spread(&self) -> Vec<Option<u16>> {
+        let mut turn = 0usize;
+        (0..self.half())
             .map(|k| {
-                let f = self.frequency(k);
-                u8::from((500.0..=6000.0).contains(&f) && !Self::is_pilot(k)) * 2
+                if k < 2 || k > self.top() || Self::is_pilot(k) {
+                    return None;
+                }
+                turn += 1;
+                Some(((turn - 1) % SPREAD) as u16)
+            })
+            .collect()
+    }
+
+    /// The table both ends start with: [`SPREAD`] points of two bits. Which
+    /// carriers they are entered against means nothing, since every carrier
+    /// carries one of them; see [`Plan::spread`].
+    pub fn default_table(&self) -> Table {
+        let spread = self.spread();
+        let mut seen = 0;
+        let bits = spread
+            .iter()
+            .map(|turn| {
+                let first = turn.is_some() && seen < SPREAD;
+                seen += usize::from(first);
+                u8::from(first) * 2
             })
             .collect();
         Table { parity: DEFAULT_PARITY, bits }
@@ -227,6 +270,8 @@ pub struct Tx {
     scale: f64,
     re: Vec<f64>,
     im: Vec<f64>,
+    /// Which of the starting table's points each carrier carries.
+    spread: Vec<Option<u16>>,
     /// Samples that reached full scale and were held there.
     pub clipped: u64,
 }
@@ -269,6 +314,7 @@ impl Tx {
             scale: level / (2.0 * carriers).sqrt(),
             re: vec![0.0; plan.n],
             im: vec![0.0; plan.n],
+            spread: plan.spread(),
             clipped: 0,
             plan,
         }
@@ -287,9 +333,22 @@ impl Tx {
         let row = if self.symbol == 0 { usize::from(self.id) } else { TABLES + self.symbol - 1 };
         self.re.fill(0.0);
         self.im.fill(0.0);
+        // The starting table: a few points, each on many carriers.
+        let spreading = self.symbol > 0 && self.id == 0;
+        let mut spoken = [Complex::ZERO; SPREAD];
+        if spreading {
+            for point in &mut spoken {
+                *point = qam_point(self.reader.take(2), 2);
+            }
+        }
         for k in 1..half {
             let bits = self.table.bits[k];
-            let x = if self.symbol > 0 && bits > 0 {
+            let x = if spreading {
+                match self.spread[k] {
+                    Some(turn) => spoken[usize::from(turn)] * self.known[row][k],
+                    None => self.known[row][k],
+                }
+            } else if self.symbol > 0 && bits > 0 {
                 qam_point(self.reader.take(u32::from(bits)), bits)
             } else {
                 self.known[row][k]
@@ -445,6 +504,11 @@ pub struct Rx {
     /// the last symbol. Kept because it is asked for far more often than it
     /// changes, and is a logarithm a carrier to work out.
     mean_snr_db: f64,
+    /// Which of the starting table's points each carrier carries.
+    spread: Vec<Option<u16>>,
+    /// The noise on each carrier under the starting table, as of the last
+    /// few symbols: what its copies are weighted by.
+    heard: Vec<f64>,
     /// Points for a symbol diagram, and the bits a carrier of those shown.
     points: Vec<(f64, f64)>,
     shown: u8,
@@ -512,6 +576,8 @@ impl Rx {
             gap_db: GAP_DB,
             remeasure: false,
             mean_snr_db: 0.0,
+            spread: plan.spread(),
+            heard: vec![1.0; half],
             points: Vec::new(),
             shown: 0,
             re: vec![0.0; plan.n],
@@ -720,6 +786,9 @@ impl Rx {
             // other, which reads as timing error and is not.
             for k in 0..self.plan.half() {
                 self.weight[k] = if k <= self.plan.top() { self.h[k].norm_sqr() / peak } else { 0.0 };
+                // A first guess at each carrier's noise, from how strongly
+                // it arrived: ten decibels clear on the strongest.
+                self.heard[k] = 0.1 / self.weight[k].max(1e-9);
             }
             self.noise.fill(1.0);
             self.measured.fill(0.0);
@@ -806,6 +875,9 @@ impl Rx {
             if is_sync { 0 } else { table.as_ref().map_or(0, |t| t.bits[k]) }
         };
         let unknown = table.is_none() && !is_sync;
+        // The starting table: a few points, each on many carriers.
+        let spreading = !is_sync && id == 0 && table.is_some();
+        let carries = |k: usize| if spreading { self.spread[k].is_some() } else { bits_at(k) > 0 };
 
         // One diagram cannot hold every carrier: they carry different
         // numbers of bits, and a grid of four points laid over one of a
@@ -815,6 +887,9 @@ impl Rx {
         let top = self.plan.top();
         let (shown, every) = if is_sync {
             (0, 0)
+        } else if spreading {
+            // The sums are shown, further down, and no carrier by itself.
+            (2, usize::MAX)
         } else {
             let mut count = [0usize; MAX_BITS as usize + 1];
             for k in 1..=top {
@@ -837,16 +912,83 @@ impl Rx {
         // signal turns carrier k back by k times as much as carrier one.
         let (mut num, mut den) = (0.0, 0.0);
         for k in 1..half {
-            if bits_at(k) > 0 || (unknown && !Plan::is_pilot(k)) {
+            if carries(k) || (unknown && !Plan::is_pilot(k)) {
                 continue;
             }
             let y = Complex::new(self.re[k], self.im[k]);
             let z = y * (self.h[k] * self.known[row][k]).conj();
-            let w = self.weight[k] * k as f64;
+            let w = if spreading { 1.0 / self.heard[k] } else { self.weight[k] } * k as f64;
             num += w * z.arg();
             den += w * k as f64;
         }
-        let late = if den > 0.0 { -num / den * n / TAU } else { 0.0 };
+        let mut late = if den > 0.0 { -num / den * n / TAU } else { 0.0 };
+
+        // Under the starting table every carrier's copy of its point is
+        // added to the others', each weighted by how good its carrier is:
+        // by the noise heard on it over the last few symbols, which starts
+        // as a guess from the strength it arrived at. The sum is what is
+        // sliced, and what was sliced is then every one of those carriers'
+        // right answer.
+        //
+        // The noise is kept up symbol by symbol and not measured once,
+        // because a carrier the line does not pass gets worse as it goes:
+        // its channel estimate is steered by noise, drifts toward nothing,
+        // and what is divided by it grows without limit.
+        let mut said = [Complex::ZERO; SPREAD];
+        if spreading {
+            let sums = |late: f64| {
+                let turn = Complex::from_polar(1.0, TAU * late / n);
+                let mut sum = [Complex::ZERO; SPREAD];
+                let mut weight = [0.0f64; SPREAD];
+                let mut back = Complex::ONE;
+                for k in 1..half {
+                    back = back * turn;
+                    let Some(turn) = self.spread[k] else { continue };
+                    if self.h[k].norm_sqr() < 1e-30 {
+                        continue;
+                    }
+                    let z = Complex::new(self.re[k], self.im[k]) * back / self.h[k];
+                    let w = 1.0 / self.heard[k];
+                    sum[usize::from(turn)] += z * self.known[row][k].conj() * w;
+                    weight[usize::from(turn)] += w;
+                }
+                for (sum, &weight) in sum.iter_mut().zip(&weight) {
+                    *sum = if weight > 0.0 { *sum * (1.0 / weight) } else { Complex::ZERO };
+                }
+                sum
+            };
+            // The pilots are one carrier in thirty-two, and on a line that
+            // passes a sliver of the band there may be two of them to take
+            // the timing from. So the timing is taken twice: roughly, from
+            // the pilots; then, with the points that gives, from every
+            // carrier, each now knowing what it was sent.
+            let rough = sums(late);
+            let (mut num, mut den) = (0.0, 0.0);
+            for k in 1..half {
+                let point = match self.spread[k] {
+                    Some(turn) => qam_slice(rough[usize::from(turn)], 2).1 * self.known[row][k],
+                    None => self.known[row][k],
+                };
+                let y = Complex::new(self.re[k], self.im[k]);
+                let z = y * (self.h[k] * point).conj();
+                let w = if k <= top { k as f64 / self.heard[k] } else { 0.0 };
+                num += w * z.arg();
+                den += w * k as f64;
+            }
+            if den > 0.0 {
+                late = -num / den * n / TAU;
+            }
+            let summed = sums(late);
+            let corner = std::f64::consts::SQRT_2;
+            for (point, &z) in said.iter_mut().zip(&summed) {
+                let (value, sliced) = qam_slice(z, 2);
+                self.writer.put(value, 2);
+                *point = sliced;
+                if self.points.len() < POINTS_KEPT {
+                    self.points.push((z.re * corner, z.im * corner));
+                }
+            }
+        }
         self.timing = late;
 
         let rate = match self.stage {
@@ -856,6 +998,7 @@ impl Rx {
         };
         let measuring = self.stage == Stage::Training && self.trained >= SETTLE;
         let turn = Complex::from_polar(1.0, TAU * late / n);
+
         let mut back = Complex::ONE;
         for k in 1..half {
             back = back * turn;
@@ -863,8 +1006,8 @@ impl Rx {
                 continue;
             }
             let z = Complex::new(self.re[k], self.im[k]) * back / self.h[k];
-            let bits = bits_at(k);
-            if !is_sync && !unknown && bits == shown && k <= top && !(shown == 0 && Plan::is_pilot(k)) {
+            let bits = if spreading { 0 } else { bits_at(k) };
+            if !is_sync && !unknown && !spreading && bits == shown && k <= top && !(shown == 0 && Plan::is_pilot(k)) {
                 passed += 1;
                 if passed.is_multiple_of(every) && self.points.len() < POINTS_KEPT {
                     // The known points sit at a root of a half on each axis.
@@ -872,7 +1015,9 @@ impl Rx {
                     self.points.push((z.re * scale, z.im * scale));
                 }
             }
-            let reference = if bits > 0 {
+            let reference = if let (true, Some(turn)) = (spreading, self.spread[k]) {
+                said[usize::from(turn)] * self.known[row][k]
+            } else if bits > 0 {
                 let (value, point) = qam_slice(z, bits);
                 self.writer.put(value, u32::from(bits));
                 point
@@ -883,6 +1028,9 @@ impl Rx {
             };
             let error = z - reference;
             let e2 = error.norm_sqr();
+            if spreading && k <= top {
+                self.heard[k] += (e2.max(1e-12) - self.heard[k]) / 16.0;
+            }
             if measuring {
                 self.measured[k] += e2;
             } else if self.stage == Stage::Steady {
@@ -1047,6 +1195,35 @@ mod tests {
         }
     }
 
+    /// A line that passes a band and nothing else: a windowed-sinc filter
+    /// a few hundred taps long, sharp enough that what is outside is gone.
+    struct Band {
+        taps: Vec<f64>,
+        past: VecDeque<f64>,
+    }
+
+    impl Band {
+        fn new(fs: f64, low: f64, high: f64) -> Self {
+            let half = 400i64;
+            let sinc = |x: f64| if x == 0.0 { 1.0 } else { (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x) };
+            let taps: Vec<f64> = (-half..=half)
+                .map(|i| {
+                    let t = i as f64;
+                    let window = 0.5 + 0.5 * (std::f64::consts::PI * t / (half + 1) as f64).cos();
+                    let (a, b) = (2.0 * high / fs, 2.0 * low / fs);
+                    (a * sinc(a * t) - b * sinc(b * t)) * window
+                })
+                .collect();
+            Self { past: VecDeque::from(vec![0.0; taps.len()]), taps }
+        }
+
+        fn pass(&mut self, x: f64) -> f64 {
+            self.past.pop_back();
+            self.past.push_front(x);
+            self.taps.iter().zip(&self.past).map(|(t, p)| t * p).sum()
+        }
+    }
+
     /// One direction of a line: a transmitter, a channel and a receiver,
     /// with frames going in one end and coming out of the other.
     struct Line {
@@ -1057,6 +1234,7 @@ mod tests {
         clock: Interp,
         noise: Noise,
         sigma: f64,
+        band: Option<Band>,
         failed: usize,
         words: usize,
         lost: usize,
@@ -1065,6 +1243,11 @@ mod tests {
 
     impl Line {
         fn new(fs: f64, snr_db: f64, ppm: f64) -> Self {
+            Self::through(fs, snr_db, ppm, None)
+        }
+
+        /// The same, through a line that passes only `band`, in hertz.
+        fn through(fs: f64, snr_db: f64, ppm: f64, band: Option<(f64, f64)>) -> Self {
             let plan = Plan::for_rate(fs);
             let mut clock = Interp::new();
             clock.adjust_step(ppm * 1e-6);
@@ -1076,6 +1259,7 @@ mod tests {
                 clock,
                 noise: Noise::new(7),
                 sigma: LEVEL * 10f64.powf(-snr_db / 20.0),
+                band: band.map(|(low, high)| Band::new(fs, low, high)),
                 failed: 0,
                 words: 0,
                 lost: 0,
@@ -1090,6 +1274,10 @@ mod tests {
                     self.tx.give(line);
                 }
                 let s = self.tx.next_sample();
+                let s = match self.band.as_mut() {
+                    Some(band) => band.pass(s),
+                    None => s,
+                };
                 let (rx, noise, sigma) = (&mut self.rx, &mut self.noise, self.sigma);
                 self.clock.feed(s, |y| rx.feed(y + sigma * noise.gaussian()));
                 while let Some(arrived) = self.rx.take() {
@@ -1118,7 +1306,7 @@ mod tests {
         for i in 0..20u8 {
             line.packer.push(3, &[i; 200]);
         }
-        line.run(8.0);
+        line.run(14.0);
         assert_eq!(line.rx.stage(), Stage::Steady);
         assert_eq!(line.failed, 0);
         // Whatever went by before the receiver found its feet is gone, and
@@ -1126,6 +1314,55 @@ mod tests {
         assert!(line.got.len() >= 12, "{} frames", line.got.len());
         assert!(line.got.windows(2).all(|w| w[0].1[0] + 1 == w[1].1[0]));
         assert_eq!(line.got.last().unwrap().1[0], 19);
+    }
+
+    /// The starting table on lines the old one could not have started on:
+    /// it sent two bits on every carrier from 500 Hz to 6 kHz, each carrier
+    /// for itself, and so wanted all of that band and a dozen decibels.
+    #[test]
+    fn the_starting_table_gets_through_whatever_part_of_the_band_there_is() {
+        // A telephone-grade path; only the top of the band; noise nearly
+        // as loud as the signal on every carrier; and a narrow band that is
+        // noisy as well, where there are few copies to add together. (The
+        // figures are a carrier's signal against its noise. Below about
+        // 10 dB the narrow band is not found at all, and at 10 dB it is
+        // found and cannot be read.)
+        let lines: [(Option<(f64, f64)>, f64); 4] = [
+            (Some((300.0, 3400.0)), 40.0),
+            (Some((12_000.0, 16_000.0)), 40.0),
+            (None, 3.0),
+            (Some((300.0, 3400.0)), 15.0),
+        ];
+        for (band, snr) in lines {
+            let mut line = Line::through(48_000.0, snr, 0.0, band);
+            for i in 0..6u8 {
+                line.packer.push(3, &[i; 200]);
+            }
+            line.run(14.0);
+            let what = format!("{band:?} at {snr} dB");
+            assert_eq!(line.rx.stage(), Stage::Steady, "{what}");
+            assert_eq!(line.failed, 0, "{what}: of {} words", line.words);
+            assert!(line.got.len() >= 3, "{what}: {} frames", line.got.len());
+            assert_eq!(line.got.last().unwrap().1[0], 5, "{what}");
+            // And the probe: bits where the line is, none where it is not.
+            let table = line.rx.proposal().expect("a proposal after training");
+            if let Some((low, high)) = band {
+                let plan = line.rx.plan().clone();
+                let outside: usize = (1..plan.half())
+                    .filter(|&k| plan.frequency(k) < low - 300.0 || plan.frequency(k) > high + 300.0)
+                    .map(|k| usize::from(table.bits[k]))
+                    .sum();
+                assert_eq!(outside, 0, "{what}: bits loaded outside the band");
+                if snr > 20.0 {
+                    let inside: usize = (1..plan.half())
+                        .filter(|&k| plan.frequency(k) > low + 300.0 && plan.frequency(k) < high - 300.0)
+                        .filter(|&k| !Plan::is_pilot(k))
+                        .map(|k| usize::from(table.bits[k].min(1)))
+                        .sum();
+                    assert!(inside > 30, "{what}: {inside} carriers loaded inside the band");
+                }
+            }
+        }
     }
 
     #[test]

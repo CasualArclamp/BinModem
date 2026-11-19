@@ -106,6 +106,100 @@ loops are equally happy a quarter turn round.
 
 Loading: `b = floor(log2(1 + SNR/gap))` for QAM, half that for PCM.
 
+## Probing the line: the starting table
+
+Both ends of a V.ARC/DMT call start on a table neither has had to be told,
+and the first table made to measure has to be carried over it. So it has to
+work on a line nothing is known about.
+
+It used to be two bits on every carrier from 500 Hz to 6 kHz, each carrier
+for itself. That wants the whole of that band and a dozen decibels on it. A
+line that passed 300 to 3400 Hz, or only the top of the band, or was noisy,
+never got as far as being measured.
+
+The starting table now chooses no stretch of the band (`Plan::spread`):
+
+- A symbol carries 48 four-point symbols, 96 bits.
+- Every carrier from the bottom of the band to the top that is not a pilot
+  carries one of them, round and round: 9 copies of each at 48 kHz, 36 at
+  192 kHz.
+- Each copy is turned by its carrier's known point, so that a symbol sent
+  dozens of times over is not a row of spikes.
+- The receiver adds the copies together, each weighted by the noise heard on
+  its carrier over the last few symbols, and slices the sum.
+- What was sliced is then every carrier's right answer. Every carrier's noise
+  is measured against it, the dead ones included, and that measurement is the
+  probe: the table made from it puts bits where the line is and none where it
+  is not.
+- Timing is taken twice a symbol: roughly from the pilots, then from every
+  carrier once the first pass has said what each was sent. A narrow line may
+  have two pilots in it.
+
+Any 48 carriers in a row that work are enough, which is 2.3 kHz, wherever in
+the band they are. Tested in simulation at 48 kHz, where the figure is a
+carrier's signal against its noise:
+
+| Line | Result |
+|---|---|
+| 300 to 3400 Hz, 40 dB | starts, loads only inside the band |
+| 12 to 16 kHz only, 40 dB | starts, loads only inside the band |
+| Whole band, 3 dB | starts |
+| Whole band, 0 dB | starts after losing a few blocks at the beginning |
+| 300 to 3400 Hz, 15 dB | starts |
+| 300 to 3400 Hz, 10 dB | found, cannot be read |
+| 300 to 3400 Hz, under 10 dB | not found: the sync symbol is not heard |
+
+What it costs is speed before the first table: 3.4 kbit/s where there was
+about 9. On the Realtek lead at 192 kHz the made-to-measure table is in use
+about 7 s after the start.
+
+It also measures a leak for what it is. Two ends with the same known points
+used to measure a perfect line, because what leaked across was a faint copy
+of what each expected. Now nearly every carrier carries data while the line
+is measured, and the two ends' data differs.
+
+V.ARC/QAM and V.ARC/PCM have no such thing. Their band is fixed, 1.5 to
+19.5 kHz and 0 to 9.6 kHz, and a line that does not pass it does not carry
+them.
+
+## Modulation and coding
+
+There is no list of modes to pick from. The receiver measures the line and
+asks for a number of bits; the far end adopts it.
+
+| | V.ARC/DMT | V.ARC/QAM | V.ARC/PCM | V.ARC/L16 |
+|---|---|---|---|---|
+| Symbols | carriers 46.9 Hz apart (31.3 at 16 kHz), up to 0.86 of half the sample rate | 16 000 baud on a 10.5 kHz carrier | 16 000 baud at baseband | none: the samples |
+| Bits | 0 to 24 on each carrier, each for itself | 2 to 24 a symbol | 1 to 12 a symbol | 16 a sample |
+| Grid | square for an even count, a 2:1 rectangle for an odd one | the same | a ladder of levels | - |
+| Code, starting | Reed-Solomon 160/192, rate 0.83 | 216/248, rate 0.87 | 185/217, rate 0.85 | - |
+| Code, loaded | 16 check octets a word, about 228/244, rate 0.93 | 16 check octets, rate 0.89 to 0.94 | the same | 48 check octets |
+| Net rate, starting | 3.4 kbit/s (2.3 at 16 kHz) | 27 kbit/s | 11.6 kbit/s | 200 kbit/s |
+
+A bit more on a carrier or a symbol wants about 3 dB more signal to noise,
+and there are 8 dB kept in hand: `bits = floor(log2(1 + SNR / 6.3))`, so
+about `3 x bits + 8` dB. For PCM it is half as many bits for the same ratio.
+
+| Bits | Grid | SNR wanted | V.ARC/QAM net | V.ARC/DMT net at 48 kHz, every carrier alike |
+|---|---|---|---|---|
+| 2 | 4 | 13 dB | 29 kbit/s | 34 kbit/s |
+| 4 | 16 | 20 dB | 58 kbit/s | 67 kbit/s |
+| 6 | 64 | 26 dB | 85 kbit/s | 101 kbit/s |
+| 8 | 256 | 32 dB | 116 kbit/s | 135 kbit/s |
+| 10 | 1024 | 38 dB | 139 kbit/s | 169 kbit/s |
+| 12 | 4096 | 44 dB | 170 kbit/s | 202 kbit/s |
+| 16 | 65 536 | 56 dB | 232 kbit/s | 270 kbit/s |
+| 20 | 1 048 576 | 68 dB | 286 kbit/s | 337 kbit/s |
+| 24 | 16 777 216 | 80 dB | 348 kbit/s | 405 kbit/s |
+
+The DMT column is two, four and so on times that at 96 and 192 kHz, since
+there are that many more carriers: 1.64 Mbit/s at 192 kHz with 24 bits on
+every one. A real line gives each carrier its own count and the rate is
+whatever they add up to.
+
+The code does not change with the line. Retransmission covers what it does
+not correct, and a table that turns out too high is asked for again lower.
+
 ## Over a SIP call: V.ARC/L16
 
 A fourth way of running, which is no modulation at all (`exact.rs`).
@@ -159,9 +253,10 @@ octets were offered, on a loaded line.
 
 `station.rs`. Frame kinds: TABLE (2), DATA (3), ACK (4), RESET (5).
 
-**Tables.** There are four marks. Mark 0 is the starting table: 2 bits on
-every DMT carrier from 500 Hz to 6 kHz, or 2 bits a symbol (QAM), or 1 bit a
-level (PCM).
+**Tables.** There are four marks. Mark 0 is the starting table: for DMT, 48
+four-point symbols each sent on every carrier that has its turn (see
+[Probing the line](#probing-the-line-the-starting-table)); 2 bits a symbol
+(QAM); or 1 bit a level (PCM).
 
 1. Each receiver measures its line and works out a table.
 2. It gives the table the next mark (1, 2, 3, 1, ...) and sends it back the
@@ -350,6 +445,15 @@ Three faults that simulation with one clean wire each way did not show:
   `AT+MS=V34` one ends in `NO CARRIER`, on `main` as well as here, so that is
   not V.ARC's; but it means the fallback has not been seen to end in a
   connection.
+- **The probe on a real poor line.** The starting table is tested on poor
+  lines in simulation only. The only real lines so far are a lead and a
+  virtual cable, both good.
+- **Recovery from a gap in the sound.** A gap in what the sound card sends
+  cost a call seconds, in both the multicarrier and the single-carrier
+  modes; half the blocks bad until the tables were made again. The gaps
+  seen were the output running dry at 192 kHz, which a cushion of 40 ms
+  where there were 10 has stopped on this machine. What a gap does once it
+  happens is unchanged.
 - **Scopes for it.** The window has the symbol diagram, and no
   SNR-by-carrier or bit table display for V.ARC; `varc-link --csv` is the
   only way to see those. The multicarrier diagram shows one loading of many.

@@ -710,7 +710,7 @@ mod crosstalk {
 
     #[test]
     fn a_leak_from_the_other_channel_is_measured_when_the_lines_are_told_apart() {
-        let (a, b, sent, got) = leaky(true, 12.0);
+        let (a, b, sent, got) = leaky(true, 14.0);
         assert!(got == sent, "{} of {} octets", got.len(), sent.len());
         assert_eq!(b.channels[0].tally.proposals, 1);
         assert_eq!(b.channels[0].tally.failed, 0);
@@ -720,13 +720,19 @@ mod crosstalk {
     }
 
     #[test]
-    fn two_ends_that_deafen_each_other_both_start_again_and_recover() {
-        // Without their own known points the two ends measure a perfect
-        // line, load it to the limit and can then read nothing, either way.
-        let (a, b, sent, got) = leaky(false, 40.0);
-        assert!(b.channels[0].tally.proposals > 1);
-        assert!(b.channels[0].tally.failed > 0);
+    fn a_leak_is_measured_even_when_the_lines_are_not_told_apart() {
+        // Two ends with the same known points once measured a perfect line
+        // here, since what leaked across was a faint copy of what each was
+        // expecting; loaded it to the limit; and could then read nothing,
+        // either way. The starting table now puts data on nearly every
+        // carrier while the line is measured, and the two ends' data
+        // differs, so the leak is noise from the first symbol.
+        let (a, b, sent, got) = leaky(false, 14.0);
         assert!(got == sent, "{} of {} octets", got.len(), sent.len());
+        assert_eq!(b.channels[0].tally.proposals, 1);
+        assert_eq!(b.channels[0].tally.failed, 0);
+        let snr = b.channels[0].rx.health().snr_db;
+        assert!((snr - 45.0).abs() < 2.0, "measured {snr:.1} dB against a leak 45 dB down");
         assert_ne!(a.channels[0].tx.id(), 0);
     }
 }
