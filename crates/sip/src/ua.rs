@@ -546,6 +546,10 @@ impl Worker {
         rtp_port: u16,
     ) -> Self {
         let want = account.register;
+        // A router that has been asked to forward the port forwards the
+        // same one, so the outside address with this port is where the far
+        // end reaches us.
+        let public = account.advertise.map(|address| SocketAddr::new(address, local.port()));
         Self {
             account,
             shared,
@@ -553,7 +557,7 @@ impl Worker {
             local,
             hop,
             rtp_port,
-            public: None,
+            public,
             registration: None,
             register_at: want.then(Instant::now),
             register_call_id: rand::call_id(&local.ip().to_string()),

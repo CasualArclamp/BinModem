@@ -74,6 +74,15 @@ pub struct Account {
     /// and channels. `None` is all of them, the fastest first. Not in the
     /// accounts file; EasySip sets it from what is chosen in the window.
     pub linear_only: Option<(u32, u8)>,
+    /// Whether to ask the router, by UPnP, to forward this account's SIP
+    /// and RTP ports to this machine and to say what its outside address
+    /// is: what a call with no registrar in it needs to cross the internet.
+    /// See [`crate::upnp`]. Not in the accounts file; EasySip sets it.
+    pub upnp: bool,
+    /// The address to give the far end as this one's, when it is known
+    /// before anything has been sent: the router's outside address. `None`
+    /// is this machine's own until a far end says what it saw.
+    pub advertise: Option<std::net::IpAddr>,
     /// The local SIP port. 0 = let the system choose, which is right unless
     /// something upstream is forwarding a fixed one.
     pub local_port: u16,
@@ -156,6 +165,8 @@ impl Default for Account {
             laws: vec![Law::Mu, Law::A],
             linear: false,
             linear_only: None,
+            upnp: false,
+            advertise: None,
             local_port: 0,
             rtp_port: 0,
             ptime_ms: 20,

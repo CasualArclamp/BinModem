@@ -750,6 +750,36 @@ EasySip, 270 500 and 239 500 bit/s for QAM and 305 000 and 243 000 for
 PCM. Slower than V.ARC/L16 on the same call, and there to be chosen, not
 because they are better there.
 
+## Over a SIP call in G.711: V.ARC/G.711
+
+A call in G.711 is 8000 codewords a second, and between two of these on a
+direct call nothing touches them. So they are the data, as the samples of
+a linear call are (`crates/varc/src/octets.rs`): a sync word of 48 octets
+and a block of 952, eight times a second. Any of the three modes becomes
+this on such a call, since none of them has anything to modulate at 8 kHz
+that the codewords do not carry better as they are, and both directions
+carry the same, which V.90 cannot say.
+
+- mu-law has two codewords for nought, and the path between the modem and
+  the packet turns one into the other. `0xFF` arriving is therefore treated
+  as not having arrived, an erasure, and mu-law keeps sixteen check octets
+  a codeword where A-law needs none: 56 832 bit/s against 60 928.
+- A lost packet is filled with silence, which is a run of one codeword, and
+  is erased the same way.
+- A call that something recodes never produces a sync word. After four
+  seconds of that the call carries on as an ordinary one, from V.8.
+
+The symbol diagram is successive octets against each other.
+
+### The direct modes choose their code by what is lost
+
+V.ARC/L16 and V.ARC/G.711 have no noise to code against: a sample arrives
+exactly or its packet does not arrive. Forty-eight check octets a codeword
+rebuild one lost packet in a block, and on a line that is losing none they
+were a fifth of the line. After forty blocks with nothing missing the
+receiver asks for none (sixteen in mu-law), and for the forty-eight again
+at the first hole or the first frame that fails.
+
 ## Octets on the line
 
 Same for all three (`frame.rs`). Each modulation offers room for so many

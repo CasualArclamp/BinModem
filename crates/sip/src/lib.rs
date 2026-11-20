@@ -54,6 +54,7 @@ pub mod rand;
 pub mod rtp;
 pub mod sdp;
 pub mod ua;
+pub mod upnp;
 pub mod uri;
 
 pub use account::{Account, Transport};

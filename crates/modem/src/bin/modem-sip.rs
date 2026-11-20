@@ -298,17 +298,22 @@ fn run(
             // one, the network's own samples are the modem's line and what
             // it says goes back untouched; on any other it is an ordinary
             // call after all.
-            if modem.varc_wanted().is_some() && !line.linear() {
-                modem.varc_fall_back();
-            }
             let levels: Vec<f64> = from_network.iter().map(|l| f64::from(*l)).collect();
             to_line.clear();
             if modem.varc_wanted().is_some() {
-                modem.varc_exact_line(true);
+                // Linear samples are the modem's line, and so are G.711's
+                // codewords between two of these.
+                let rate = if line.linear() {
+                    modem.varc_exact_line(true);
+                    line.linear_rate()
+                } else {
+                    modem.varc_codeword_line(Some(line.a_law()));
+                    8000.0
+                };
                 let mut exact: Vec<f32> = Vec::with_capacity(levels.len());
                 for &level in &levels {
                     let mut out = [0.0];
-                    modem.varc_step(line.linear_rate(), &[level], &mut out);
+                    modem.varc_step(rate, &[level], &mut out);
                     exact.push(out[0] as f32);
                 }
                 to_line.extend_from_slice(&exact);

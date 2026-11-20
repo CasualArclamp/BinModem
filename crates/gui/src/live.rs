@@ -212,9 +212,21 @@ pub fn sip_accounts() -> Vec<String> {
 pub const EASY_SIP: &str = "easysip:";
 
 /// The name of the EasySip line to `peer`, heard on `port`.
-pub fn easy_sip_name(peer: &str, port: u16, coding: &str) -> String {
-    let base = format!("{EASY_SIP}{}|{port}", peer.trim());
-    if coding.is_empty() || coding == EASY_CODINGS[0].0 { base } else { format!("{base}|{coding}") }
+pub fn easy_sip_name(peer: &str, port: u16, coding: &str, upnp: bool) -> String {
+    let mut name = format!("{EASY_SIP}{}|{port}", peer.trim());
+    if !(coding.is_empty() || coding == EASY_CODINGS[0].0) {
+        name.push('|');
+        name.push_str(coding);
+    }
+    if upnp {
+        name.push_str("|upnp");
+    }
+    name
+}
+
+/// Whether an EasySip line's name asks for the router to be opened.
+pub fn easy_sip_upnp(name: &str) -> bool {
+    name.strip_prefix(EASY_SIP).is_some_and(|rest| rest.split('|').skip(2).any(|f| f.trim().eq_ignore_ascii_case("upnp")))
 }
 
 /// What an EasySip call can be carried in, as it is written in a line's
@@ -237,8 +249,12 @@ pub const EASY_CODINGS: [(&str, &str); 11] = [
 /// The coding an EasySip line's name asks for: one of [`EASY_CODINGS`]'s,
 /// and the first of them when the name says nothing or nothing known.
 pub fn easy_sip_coding(name: &str) -> &'static str {
-    let asked = name.strip_prefix(EASY_SIP).and_then(|rest| rest.split('|').nth(2)).unwrap_or("");
-    EASY_CODINGS.iter().find(|(token, _)| token.eq_ignore_ascii_case(asked.trim())).map_or(EASY_CODINGS[0].0, |c| c.0)
+    let fields = name.strip_prefix(EASY_SIP).unwrap_or("").split('|').skip(2);
+    fields
+        .filter_map(|asked| EASY_CODINGS.iter().find(|(token, _)| token.eq_ignore_ascii_case(asked.trim())))
+        .map(|c| c.0)
+        .next()
+        .unwrap_or(EASY_CODINGS[0].0)
 }
 
 /// The far end's address and this end's port out of such a name.
@@ -270,6 +286,10 @@ fn easy_sip_account(name: &str) -> Result<sip::Account, String> {
         register: false,
         linear: coding.starts_with("L16") || coding == EASY_CODINGS[0].0,
         linear_only: linear_only(coding),
+        // The router is only in the way of a far end that is beyond it. One
+        // on this network, or this machine, is reached as it is, and told
+        // the router's outside address would send its sound to the router.
+        upnp: easy_sip_upnp(name) && host.parse::<std::net::IpAddr>().map_or(true, sip::upnp::is_public),
         // G.711 chosen is that law first and the other behind it, so that
         // two ends that chose differently still have a call.
         laws: if coding == "PCMA" { vec![sip::Law::A, sip::Law::Mu] } else { vec![sip::Law::Mu, sip::Law::A] },
@@ -298,7 +318,18 @@ fn open_sip(name: &str, tx: &Publisher) -> Result<sip::Line, String> {
                 EASY_CODINGS.iter().find(|c| c.0 == easy_sip_coding(name)).map_or("", |c| c.1)
             ),
         );
-        return sip::Line::open(account, FS);
+        let asked = easy_sip_upnp(name);
+        let beyond = account.upnp;
+        let line = sip::Line::open(account, FS)?;
+        match line.upnp_said() {
+            Some(said) => tx.log(Direction::Note, said.to_owned()),
+            None if asked && !beyond => tx.log(
+                Direction::Note,
+                "UPnP: not used, because the far end is on this network or this machine and no router is in the way",
+            ),
+            None => {}
+        }
+        return Ok(line);
     }
     let accounts = sip::Account::load_default()?;
     if accounts.is_empty() {
@@ -2023,27 +2054,34 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         }
         // A V.ARC call on a SIP line. If the call agreed on linear samples
         // the network's own samples are the modem's line, one for one, and
-        // what it says goes back as it is. If the far end answered in G.711
-        // there is nothing for V.ARC to run on, and the call carries on as
-        // an ordinary one.
+        // what it says goes back as it is. If it is in G.711 the same is
+        // true of its codewords, between two of these with nothing recoding
+        // them on the way; the modem finds out whether that is so, and
+        // carries on as an ordinary call if it is not.
         let mut exact_sent: Option<Vec<f32>> = None;
         if let Some(sip) = audio.sip()
             && modem.varc_wanted().is_some()
         {
-            if sip.linear() {
+            let rate = if sip.linear() {
                 modem.varc_exact_line(true);
-                let mut exact = Vec::with_capacity(from_network.len());
-                for &level in &from_network {
-                    let mut out = [0.0f64];
-                    modem.varc_step(sip.linear_rate(), &[f64::from(level)], &mut out);
-                    exact.push(out[0] as f32);
-                }
-                for text in modem.take_line_notes() {
-                    noted.push((0, modem.call_seconds(), text));
-                }
-                exact_sent = Some(exact);
+                sip.linear_rate()
             } else {
-                modem.varc_fall_back();
+                modem.varc_codeword_line(Some(sip.a_law()));
+                8000.0
+            };
+            let mut exact = Vec::with_capacity(from_network.len());
+            for &level in &from_network {
+                let mut out = [0.0f64];
+                modem.varc_step(rate, &[f64::from(level)], &mut out);
+                exact.push(out[0] as f32);
+            }
+            for text in modem.take_line_notes() {
+                noted.push((0, modem.call_seconds(), text));
+            }
+            // A call that gave V.ARC up in there is an ordinary one from
+            // the next block on, and has said nothing in this one.
+            if modem.varc_wanted().is_some() {
+                exact_sent = Some(exact);
             }
         }
         let drive = session.drive();

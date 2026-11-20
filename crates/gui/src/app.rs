@@ -368,6 +368,8 @@ pub struct ScopeApp {
     easy_port: u16,
     /// And what its calls are carried in: one of `live::EASY_CODINGS`.
     easy_coding: &'static str,
+    /// And whether the router is asked to let its calls in.
+    easy_upnp: bool,
     /// The open EasySip line those were last made to agree with.
     easy_shown: String,
     /// The same accounts in full, as the credentials window is editing them,
@@ -634,6 +636,7 @@ impl ScopeApp {
             easy_peer: String::new(),
             easy_port: 5060,
             easy_coding: live::EASY_CODINGS[0].0,
+            easy_upnp: true,
             easy_shown: String::new(),
             // Filled by `load_accounts` below, out of the same file the names
             // above came from.
@@ -1070,6 +1073,7 @@ impl ScopeApp {
                             self.easy_peer = peer;
                             self.easy_port = port;
                             self.easy_coding = live::easy_sip_coding(&progress.account);
+                            self.easy_upnp = live::easy_sip_upnp(&progress.account);
                         }
                         self.easy_shown.clone_from(&progress.account);
                     }
@@ -1172,7 +1176,17 @@ impl ScopeApp {
                          different linear rate gets G.711",
                     );
             }
-            let easy_name = live::easy_sip_name(&self.easy_peer, self.easy_port, self.easy_coding);
+            if easy {
+                ui.checkbox(&mut self.easy_upnp, "UPnP").on_hover_text(
+                    "Ask the router to forward this end's two ports and to say what its \
+                     outside address is, so that a far end across the internet can call \
+                     this one and be heard by it. Each end gives the other its router's \
+                     outside address, which the transcript says when the line opens. The \
+                     ports are closed again when the line is. Not used when the far end \
+                     is on this network or this machine",
+                );
+            }
+            let easy_name = live::easy_sip_name(&self.easy_peer, self.easy_port, self.easy_coding, self.easy_upnp);
             // Whose call it would be, beside the box rather than in it: an
             // account is not a kind of line. But a row that says nothing
             // about it leaves somebody with two accounts no way of telling
@@ -3004,8 +3018,11 @@ impl ScopeApp {
         if let Some(port) = loaded.get::<u16>("easysip_port") {
             self.easy_port = port;
         }
+        if let Some(on) = loaded.get::<u8>("easysip_upnp") {
+            self.easy_upnp = on != 0;
+        }
         if let Some(coding) = loaded.text("easysip_coding") {
-            self.easy_coding = live::easy_sip_coding(&live::easy_sip_name("x", 0, coding));
+            self.easy_coding = live::easy_sip_coding(&live::easy_sip_name("x", 0, coding, false));
         }
         self.remembered = self.settings().join("\n")
             + &self.dialin.fingerprint()
@@ -3014,7 +3031,7 @@ impl ScopeApp {
 
     /// The line, as something to compare from one frame to the next.
     fn line_fingerprint(&self) -> String {
-        format!("\u{1}{}\u{1}{}\u{1}{}", self.sip_line.as_deref().unwrap_or(""), self.easy_peer, self.easy_port) + self.easy_coding
+        format!("\u{1}{}\u{1}{}\u{1}{}", self.sip_line.as_deref().unwrap_or(""), self.easy_peer, self.easy_port) + self.easy_coding + if self.easy_upnp { "u" } else { "" }
     }
 
     /// Write the settings out if they have moved since they were last written.
@@ -3053,6 +3070,7 @@ impl ScopeApp {
             }
             r.set("easysip_port", self.easy_port);
             r.set("easysip_coding", self.easy_coding);
+            r.set("easysip_upnp", u8::from(self.easy_upnp));
             r.save();
         }
     }
@@ -3076,6 +3094,7 @@ impl ScopeApp {
                 self.easy_peer = peer;
                 self.easy_port = port;
                 self.easy_coding = live::easy_sip_coding(&name);
+                self.easy_upnp = live::easy_sip_upnp(&name);
                 session.open_sip(&name);
                 self.chosen_line = 2;
             }

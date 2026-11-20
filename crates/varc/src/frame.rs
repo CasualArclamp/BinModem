@@ -213,7 +213,8 @@ impl Packer {
             payload.push((self.filler >> 24) as u8);
         }
 
-        let code = code_for(&mut self.codes, layout.parity);
+        // No check octets is no code: the payload goes as it is.
+        let code = (layout.parity > 0).then(|| code_for(&mut self.codes, layout.parity).clone());
         let order = layout.order();
         let mut line = vec![0u8; layout.capacity()];
         let mut parity = vec![0u8; layout.parity];
@@ -221,7 +222,9 @@ impl Packer {
         for (w, &n) in layout.words.iter().enumerate() {
             let k = n - layout.parity;
             let data = &payload[at..at + k];
-            code.encode(data, &mut parity);
+            if let Some(code) = code.as_ref() {
+                code.encode(data, &mut parity);
+            }
             for (i, &octet) in data.iter().chain(parity.iter()).enumerate() {
                 line[order[w][i]] = octet;
             }
@@ -283,10 +286,23 @@ impl Unpacker {
     /// One superframe off the line. `erased` marks octets known to be
     /// missing, where the carrier can tell.
     pub fn take(&mut self, line: &[u8], layout: &Layout, erased: Option<&[bool]>) -> Decoded {
+        let bad = self.bad_frames;
+        let mut report = self.unpack(line, layout, erased);
+        // With no check octets there is no codeword to fail, and the only
+        // sign of a line that is not bearing it is a frame that fails its
+        // own check. That counts as one, or nothing would ever ask for a
+        // code again.
+        if layout.parity == 0 && self.bad_frames > bad {
+            report.failed = report.failed.max(1);
+        }
+        report
+    }
+
+    fn unpack(&mut self, line: &[u8], layout: &Layout, erased: Option<&[bool]>) -> Decoded {
         assert_eq!(line.len(), layout.capacity());
         let mut line = line.to_vec();
         scramble(&mut line);
-        let code = code_for(&mut self.codes, layout.parity);
+        let code = (layout.parity > 0).then(|| code_for(&mut self.codes, layout.parity).clone());
         let order = layout.order();
         let mut payload = Vec::with_capacity(layout.payload());
         let mut report = Decoded { words: layout.words.len(), ..Decoded::default() };
@@ -302,9 +318,15 @@ impl Unpacker {
             if let Some(erased) = erased {
                 holes.extend((0..n).filter(|&i| erased[order[w][i]]));
             }
-            match code.decode(&mut word, &holes) {
+            let read = match code.as_ref() {
+                Some(code) => code.decode(&mut word, &holes).map_err(|_| ()),
+                // Nothing to put a missing octet back with.
+                None if holes.is_empty() => Ok(0),
+                None => Err(()),
+            };
+            match read {
                 Ok(changed) => report.corrected += changed,
-                Err(_) => {
+                Err(()) => {
                     report.failed += 1;
                     good = good.min(payload.len());
                 }
