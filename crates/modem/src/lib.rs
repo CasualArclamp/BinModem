@@ -1966,6 +1966,13 @@ impl Modem {
         self.varc.as_mut().map_or_else(Vec::new, varc::Call::take_symbols)
     }
 
+    /// Signal to noise at a V.ARC call's slicer, in decibels: a symbol's
+    /// energy against the noise under it, over the band in use. `None` on
+    /// any other call and until the line has been measured.
+    pub fn varc_snr_db(&self) -> Option<f64> {
+        self.varc.as_ref().and_then(varc::Call::best_snr_db)
+    }
+
     /// The baud each direction of a single-carrier V.ARC call runs at: what
     /// this end hears, then what it sends. Noughts on any other call.
     pub fn varc_bauds(&self) -> (u32, u32) {

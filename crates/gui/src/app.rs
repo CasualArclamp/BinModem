@@ -452,6 +452,8 @@ pub struct ScopeApp {
     /// The running measurement behind `row_secs`, which is only moved to it
     /// when the two have come apart (see `poll`).
     row_measured: f32,
+    /// The line's figures, averaged for reading: see [`Calm`].
+    calm: Calm,
     /// Whether the SIP line had a call's audio the last time it was looked
     /// at, and the frame the scopes were emptied on when it stopped (see
     /// `clear_scopes`).
@@ -480,6 +482,75 @@ pub struct ScopeApp {
     /// What was written out last, so that a frame which changed nothing does
     /// not rewrite the file sixty times a second.
     remembered: String,
+}
+
+/// The line's figures as a person can read them.
+///
+/// Each frame's level, its largest sample and its spectrum are measurements
+/// of an eighth of a second, and from one to the next they differ by a
+/// decibel or two for no reason but that noise is noise. Printed as they
+/// came, the level and the crest factor flickered, and the strongest
+/// frequency of a signal that fills its band flat jumped from one end of
+/// the band to the other, since which bin of a flat spectrum is a hair above
+/// the rest is chance.
+///
+/// So the spectrum and the levels are averaged over about a second before
+/// anything is read off them; a level that moves a long way at once is
+/// taken at once, so that a call starting does not creep up the meter; and
+/// the strongest frequency stays where it was unless another is clearly
+/// stronger.
+#[derive(Debug, Default)]
+struct Calm {
+    spectrum_db: Vec<f32>,
+    level_db: f32,
+    rms_db: f32,
+    peak_db: f32,
+    /// Where the strongest bin was last said to be.
+    peak_hz: f64,
+    hz_per_bin: f64,
+}
+
+impl Calm {
+    /// Seconds a figure takes to come most of the way to a new value.
+    const SECONDS: f32 = 1.0;
+
+    /// Take a frame in; what the averaged spectrum says of itself.
+    fn update(&mut self, f: &Frame, dt: f32) -> Option<scopes::Measured> {
+        let share = 1.0 - (-dt / Self::SECONDS).exp();
+        // A different spectrum altogether, another rate or another span, is
+        // not averaged with the last one.
+        let fresh = self.spectrum_db.len() != f.spectrum_db.len() || self.hz_per_bin != f.hz_per_bin;
+        let follow = |was: &mut f32, now: f32, fresh: bool| {
+            // Ten decibels at once is a change and not noise.
+            *was = if fresh || (now - *was).abs() > 10.0 { now } else { *was + (now - *was) * share };
+        };
+        follow(&mut self.level_db, f.rx_level_db, fresh);
+        if let Some(wave) = scopes::wave(&f.waveform) {
+            follow(&mut self.rms_db, wave.rms_db, fresh);
+            follow(&mut self.peak_db, wave.peak_db, fresh);
+        }
+        if fresh {
+            self.spectrum_db.clone_from(&f.spectrum_db);
+            self.hz_per_bin = f.hz_per_bin;
+            self.peak_hz = 0.0;
+        } else {
+            for (was, &now) in self.spectrum_db.iter_mut().zip(&f.spectrum_db) {
+                *was = if (now - *was).abs() > 20.0 { now } else { *was + (now - *was) * share };
+            }
+        }
+        let mut measured = scopes::measure(&self.spectrum_db, f.hz_per_bin, f.display_hz)?;
+        // The strongest stays the strongest until another is a decibel and a
+        // half above it.
+        let held = (self.peak_hz / f.hz_per_bin).round() as usize;
+        match self.spectrum_db.get(held) {
+            Some(&db) if self.peak_hz > 0.0 && db > measured.peak_db - 1.5 && self.peak_hz <= f.display_hz => {
+                measured.peak_hz = self.peak_hz;
+                measured.peak_db = db;
+            }
+            _ => self.peak_hz = measured.peak_hz,
+        }
+        Some(measured)
+    }
 }
 
 impl ScopeApp {
@@ -584,6 +655,7 @@ impl ScopeApp {
             hold: vec![-120.0; SPECTRUM_BINS],
             row_secs: 1.0 / 30.0,
             row_measured: 1.0 / 30.0,
+            calm: Calm::default(),
             sip_call_was_up: false,
             pcm_up: true,
             quick_connect: !matches!(
@@ -3553,7 +3625,8 @@ impl ScopeApp {
     /// rate menu in it, the retrain, the waterfall and the spectrum.
     fn scopes_pane(&mut self, ui: &mut egui::Ui) {
         const CARD_W: f32 = 420.0;
-        let measured = scopes::measure(&self.frame.spectrum_db, self.frame.hz_per_bin, self.frame.display_hz);
+        let dt = ui.input(|i| i.stable_dt).clamp(0.0, 0.25);
+        let measured = self.calm.update(&self.frame, dt);
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 ui.set_width(CARD_W);
@@ -4462,6 +4535,28 @@ impl ScopeApp {
             }
             // Neither, but the receiver's own error against its decisions:
             // as decibels, so a tighter constellation is a larger number.
+            // V.ARC: the ratio its receiver measured, against the most any
+            // of its grids can use, which is 80 dB for sixteen million
+            // points. How good is good depends on the grid, so the colour
+            // only says whether there is a line at all.
+            _ if f.snr_db.is_some() && f.modulation.starts_with("V.ARC") => {
+                let db = f.snr_db.unwrap_or(0.0);
+                let c = if db >= 12.0 {
+                    GOOD
+                } else if db >= 6.0 {
+                    WARN
+                } else {
+                    BAD
+                };
+                (
+                    Some(format!("{db:.1} dB")),
+                    c,
+                    (db / 80.0).clamp(0.0, 1.0),
+                    None,
+                    format!("Es/N0 {db:.1} dB: a symbol against the noise under it"),
+                    "scale 0 - 80 dB",
+                )
+            }
             _ if f.snr_db.is_some() => {
                 let db = f.snr_db.unwrap_or(0.0);
                 let c = if db >= 20.0 {
@@ -4566,15 +4661,18 @@ impl ScopeApp {
             ui.add_space(10.0);
             ui.vertical(|ui| {
                 // The line: what is arriving, before anything is made of it.
-                let level = f.rx_level_db;
+                // Averaged over a second or so, except what is clipped: a
+                // figure that moves five times a second is not read, and a
+                // clipped sample is news the moment it happens.
+                let level = self.calm.level_db;
                 let wave = scopes::wave(&f.waveform);
                 let clipped = wave.map_or(0, |w| w.clipped);
                 let mut text = format!("{level:.1} dBFS");
-                if let Some(w) = wave.filter(|w| w.rms_db > -100.0) {
+                if wave.is_some_and(|w| w.rms_db > -100.0) {
                     text.push_str(&format!(
                         " · peaks {:.1} · crest {:.1} dB",
-                        w.peak_db,
-                        w.peak_db - w.rms_db
+                        self.calm.peak_db,
+                        self.calm.peak_db - self.calm.rms_db
                     ));
                 }
                 let health = if clipped > 0 {
@@ -4593,8 +4691,8 @@ impl ScopeApp {
                     GOOD
                 };
                 stage(ui, health, "Line", text).on_hover_text(
-                    "The received level, the largest sample and the crest factor of the \
-                     last eighth of a second. A modem receiving above -10 dBFS is almost \
+                    "The received level, the largest sample and the crest factor, averaged \
+                     over about a second. A modem receiving above -10 dBFS is almost \
                      certainly clipping somewhere upstream.",
                 );
 

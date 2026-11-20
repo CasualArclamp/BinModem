@@ -1121,6 +1121,15 @@ impl Call {
         std::mem::take(&mut self.symbols)
     }
 
+    /// Signal to noise at the slicer on the channel carrying most, in
+    /// decibels, once the line has been measured.
+    pub fn best_snr_db(&self) -> Option<f64> {
+        let channels = &self.station.as_ref()?.channels;
+        let best = channels.iter().max_by(|a, b| a.rx.rates().1.total_cmp(&b.rx.rates().1))?;
+        let health = best.rx.health();
+        health.steady.then_some(health.snr_db)
+    }
+
     /// The signal to noise ratio on each channel, in decibels.
     pub fn snr_db(&self) -> Vec<f64> {
         self.station.as_ref().map_or_else(Vec::new, |s| s.channels.iter().map(|c| c.rx.health().snr_db).collect())

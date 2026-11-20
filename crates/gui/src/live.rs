@@ -2334,11 +2334,15 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 f.tones = modem.states();
                 f.constellation_peak = modem.constellation_peak();
                 f.symbol_label = modem.shape();
-                f.snr_db = modem.residual_error().map(|e| {
-                    // The decision margin as decibels, so a tighter
-                    // constellation reads as a larger number.
-                    (-20.0 * e.max(1e-3).log10()) as f32
-                });
+                f.snr_db = modem
+                    .residual_error()
+                    .map(|e| {
+                        // The decision margin as decibels, so a tighter
+                        // constellation reads as a larger number.
+                        (-20.0 * e.max(1e-3).log10()) as f32
+                    })
+                    // A V.ARC receiver measures the ratio itself.
+                    .or_else(|| modem.varc_snr_db().map(|db| db as f32));
                 f.symbols.clear();
                 f.symbols.extend(symbols.iter().copied());
                 f.constellation.clear();
