@@ -304,9 +304,8 @@ end's address. One dials; the other presses Answer when it rings.
   that is killed leaves them for a day at most. It is not used when the far
   end is on this network or this machine. A router with UPnP off, or one
   behind another router (the provider's, on many mobile and some fibre
-  lines), cannot do it, and the transcript says which. Tested as far as
-  the router: the ports open, are listed, and close. A call across the
-  internet has not been made with it.
+  lines), cannot do it, and the transcript says which. It has carried a call
+  across the internet.
 - From the command line: `binmodem.exe --live --sip "easysip:192.168.1.20|5060"`,
   the far end's address, a bar, and this end's port. A third field chooses
   the coding: `"easysip:192.168.1.20|5060|PCMU"`, or `L16/16000`, or
