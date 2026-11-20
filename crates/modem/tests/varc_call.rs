@@ -663,3 +663,109 @@ fn the_single_carrier_modes_run_at_the_cards_own_rate() {
         assert!(rate > 4 * baud, "{carrier} at {fs} Hz: {rate} bit/s at {baud} baud");
     }
 }
+
+/// An ordinary call between two modems, each stepped at the telephone
+/// line's rate until it asks for the sound card as it is, and at the card's
+/// rate from then on. Returns the two and what was noted of the line.
+fn bis_call(caller_set: &str, host_set: &str, seconds: f64) -> (Modem, Modem, String, String) {
+    const LINE: f64 = 16_000.0;
+    let mut caller = Modem::new(LINE);
+    let mut host = Modem::new(LINE);
+    type_at(&mut caller, &format!("AT+A8E=,,,1{caller_set}\r"));
+    type_at(&mut host, &format!("AT+A8E=,,,1{host_set}\r"));
+    type_at(&mut host, "ATA\r");
+    type_at(&mut caller, "ATD5551234\r");
+    let (mut from_caller, mut from_host) = (0.0, 0.0);
+    let (mut wide_caller, mut wide_host) = ([0.0; 2], [0.0; 2]);
+    let mut notes = String::new();
+    // The card's clock, 48 kHz, with the line's every third tick of it. An
+    // end that has gone over to V.ARC is on the card and silent on the
+    // line, and one that has not hears nothing of the card, as it would
+    // not through a line's filters.
+    for tick in 0..(seconds * FS) as usize {
+        let (card_caller, card_host) = (wide_caller, wide_host);
+        if caller.varc_wanted().is_some() {
+            caller.varc_step(FS, &card_host, &mut wide_caller);
+        }
+        if host.varc_wanted().is_some() {
+            host.varc_step(FS, &card_caller, &mut wide_host);
+        }
+        if tick % 3 == 0 {
+            let (was_caller, was_host) = (from_caller, from_host);
+            from_caller = if caller.varc_wanted().is_none() { caller.step(was_host) } else { 0.0 };
+            from_host = if host.varc_wanted().is_none() { host.step(was_caller) } else { 0.0 };
+        }
+        for (who, m) in [("caller", &mut caller), ("host", &mut host)] {
+            for line in m.take_line_notes() {
+                notes.push_str(&format!("{who}: {line}\n"));
+            }
+        }
+        if caller.state() == State::Data && host.state() == State::Data {
+            break;
+        }
+    }
+    let told = Pair::said(&caller.take_dte());
+    (caller, host, notes, told)
+}
+
+/// `+VARCBIS` at both ends of a call that was not dialled as V.ARC: the
+/// V.8 bis transaction finds it, and the call is a V.ARC one.
+#[test]
+fn an_ordinary_call_between_two_that_list_varc_becomes_one() {
+    let (caller, host, notes, told) = bis_call(";+VARCBIS=1", ";+VARCBIS=1", 40.0);
+    println!("{notes}");
+    assert!(notes.contains("both ends have V.ARC"), "{notes}");
+    assert_eq!(caller.varc_wanted(), Some(VarcMode::Dmt));
+    assert_eq!(host.varc_wanted(), Some(VarcMode::Dmt));
+    assert_eq!(caller.state(), State::Data, "{notes}");
+    assert_eq!(host.state(), State::Data, "{notes}");
+    assert!(told.contains("CONNECT ") && told.contains("/VARC"), "{told}");
+    assert!(caller.rate().unwrap_or(0) > 300_000, "{:?} bit/s", caller.rate());
+}
+
+/// The same with it at one end only: nothing of V.ARC happens at all.
+#[test]
+fn a_call_to_one_that_does_not_list_varc_is_an_ordinary_call() {
+    for (caller_set, host_set) in [(";+VARCBIS=1", ""), ("", ";+VARCBIS=1")] {
+        let (caller, host, notes, _) = bis_call(caller_set, host_set, 20.0);
+        assert!(!notes.contains("both ends have V.ARC"), "{notes}");
+        assert!(notes.contains("V.8 bis: sent MS") || notes.contains("V.8 bis: heard MS"), "{notes}");
+        assert_eq!(caller.varc_wanted(), None);
+        assert_eq!(host.varc_wanted(), None);
+    }
+}
+
+/// V.ARC chosen in V.8 bis on a line that turns out not to carry it: the
+/// call starts again as an ordinary one, and does not choose it twice.
+#[test]
+fn varc_chosen_and_then_refused_by_the_line_is_not_chosen_again() {
+    const LINE: f64 = 16_000.0;
+    let mut caller = Modem::new(LINE);
+    let mut host = Modem::new(LINE);
+    type_at(&mut caller, "AT+A8E=,,,1;+VARCBIS=1\r");
+    type_at(&mut host, "AT+A8E=,,,1;+VARCBIS=1\r");
+    type_at(&mut host, "ATA\r");
+    type_at(&mut caller, "ATD5551234\r");
+    let (mut from_caller, mut from_host) = (0.0, 0.0);
+    let mut notes = String::new();
+    let mut fell_back = 0;
+    for _ in 0..(30.0 * LINE) as usize {
+        for m in [&mut caller, &mut host] {
+            if m.varc_wanted().is_some() {
+                m.varc_fall_back();
+                fell_back += 1;
+            }
+        }
+        let (was_caller, was_host) = (from_caller, from_host);
+        from_caller = caller.step(was_host);
+        from_host = host.step(was_caller);
+        for (who, m) in [("caller", &mut caller), ("host", &mut host)] {
+            for line in m.take_line_notes() {
+                notes.push_str(&format!("{who}: {line}\n"));
+            }
+        }
+    }
+    assert_eq!(fell_back, 2, "once at each end and no more\n{notes}");
+    assert_eq!(notes.matches("caller: V.8 bis: sent MS").count(), 2, "{notes}");
+    assert!(notes.contains("caller: V.8 bis: sent MS (V.92"), "{notes}");
+}

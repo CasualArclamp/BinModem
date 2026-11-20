@@ -266,6 +266,60 @@ Two things it turned up in the receiver, both now fixed:
   and could not then find a real signal. The clock now goes back to where
   it was last right whenever the signal is lost.
 
+## Found through V.8 bis
+
+A call dialled as `+MS=VARC` starts with V.ARC's handshake and nothing
+else, so both ends have to have been set to it. `AT+VARCBIS` lets an
+ordinary call find it instead.
+
+V.8 bis has a non-standard information field for what the ITU did not
+define (8.5), and a station set `+VARCBIS=1` puts a block in it beside its
+usual list:
+
+| Octets | |
+|---|---|
+| `09` | nine octets follow |
+| `FF FF` | country code |
+| `04` `42 69 6E 4D` | provider code, "BinM", and its length |
+| `01` | edition of this block |
+| flags | bits 1 and 2: multicarrier, QAM or PCM; bit 3: one pair of wires |
+
+with "non-standard field" set in the identification field (Table 5-1) and
+"non-standard capabilities" under the data mode (Table 6-3a).
+
+**The country and provider codes are not registered.** T.35 codes are
+allocated by a national administration and BinModem has none; these are
+made up. Another BinModem knows them. Anything else steps over the block,
+as 8.5 has it do with any block it does not know.
+
+Then it is the transaction as it was (CRe, CRd, CL, MS, ACK):
+
+- If both lists have the block, the MS names the data mode, the block and no
+  modulation of the ITU's. After the ACK there is no V.8: V.ARC's own
+  handshake starts, with the station that received the MS answering, and
+  settles rates, channels and wires as on any V.ARC call. If the two were
+  set to different modulations that handshake runs the multicarrier one.
+- If only one has it, or the far end's list was never seen, the call is
+  exactly what it would have been.
+- If V.ARC is chosen and the line cannot carry it (a SIP call answered in
+  G.711), the call starts again from V.8 bis without the block.
+
+`+VARCBIS=<mode>,<wires>`: mode 0 off (the default), 1 multicarrier, 2 QAM,
+3 PCM; wires 1 for one pair of wires. It needs `+A8E=,,,1`, and in the
+window it is under the V.8 bis switch.
+
+The end that sends the ACK holds the line 0.4 s before going over. Going to
+V.ARC closes the sound card and opens it again as it is, and on real cards
+that cut the end of the ACK off, so the caller never heard it.
+
+Measured between two windows on two VB-Audio cables at 48 kHz, each set
+`+MS=V92;+VARCBIS=1`: V.8 bis, V.ARC's handshake, and 404 534 bit/s each
+way. Not tried between two machines or over a telephone line. A caller
+that misses the ACK goes on to V.8 while the answerer is in V.ARC, and
+that call does not recover.
+
+![A call that started in V.8 bis, on V.ARC](../images/v-arc/varc-v8bis.png)
+
 ## When one end cannot hear the other
 
 A line can carry the modulation one way and not the other: a cable one way

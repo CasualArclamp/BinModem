@@ -296,6 +296,10 @@ pub struct Config {
     /// the baud, the code as a percentage of each word that is data, and
     /// the bits a symbol. Nought leaves each to the modem. Not V.250's.
     pub varc: (u32, u8, u8),
+    /// +VARCBIS — whether a V.8 bis transaction says this modem has V.ARC,
+    /// and which: nought not at all, one the multicarrier mode, two QAM,
+    /// three PCM; and whether on one pair of wires. Not V.250's.
+    pub varc_bis: (u8, bool),
 }
 
 impl Default for Config {
@@ -313,6 +317,7 @@ impl Default for Config {
             report_error_control: false,
             report_compression: false,
             varc: (0, 0, 0),
+            varc_bis: (0, false),
         }
     }
 }
@@ -980,6 +985,43 @@ impl Interpreter {
         }
     }
 
+    /// `+VARCBIS=<mode>,<wires>`: this modem's own.
+    ///
+    /// Whether an ordinary call's V.8 bis transaction lists V.ARC, in the
+    /// non-standard field, beside whatever `+MS` allows. Two modems that
+    /// both do go to V.ARC and not to V.8; with one that does not, the call
+    /// is what it would have been. `<mode>` is nought for no, one for the
+    /// multicarrier mode, two for QAM and three for PCM; `<wires>` is one
+    /// for a line that is one pair of wires and has an echo to cancel.
+    fn varc_bis_select(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
+        match op {
+            ExtOp::Read | ExtOp::Execute => {
+                let (mode, two_wire) = self.config.varc_bis;
+                self.fmt.info(&format!("+VARCBIS: {mode},{}", u8::from(two_wire)), &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Test => {
+                self.fmt.info("+VARCBIS: (0-3),(0,1)", &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Set(value) => {
+                let mut parts = value.split(',');
+                let mut field = |was: u32, most: u32| -> Result<u32, ResultCode> {
+                    match parts.next().map(str::trim) {
+                        // 5.4.2.1: an omitted subparameter keeps its value.
+                        None | Some("") => Ok(was),
+                        Some(v) => v.parse::<u32>().ok().filter(|n| *n <= most).ok_or(ResultCode::Error),
+                    }
+                };
+                let (was_mode, was_wires) = self.config.varc_bis;
+                let mode = field(u32::from(was_mode), 3)?;
+                let wires = field(u32::from(was_wires), 1)?;
+                self.config.varc_bis = (mode as u8, wires == 1);
+                Ok(None)
+            }
+        }
+    }
+
     fn v44_select(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
         match op {
             ExtOp::Read => {
@@ -1086,6 +1128,7 @@ impl Interpreter {
             "DS" => return self.compression_select(op),
             "DS44" => return self.v44_select(op),
             "VARC" => return self.varc_select(op),
+            "VARCBIS" => return self.varc_bis_select(op),
             "A8E" => return self.v8_controls(op),
             // V.250 6.5.5 and 6.6.3. The same parameter twice over: one bit,
             // defaulting to off, saying whether the DCE should report what it

@@ -189,7 +189,8 @@ OS-specific code — but only built and run on Windows so far.
 - **V.ARC**, a wideband mode of our own for a sound card and not a
   telephone line; both ends have to be BinModem. A multicarrier modulation
   loaded a carrier at a time, and QAM and baseband levels that fill the
-  card's band (`AT+VARC` sets their baud, code and grid by hand).
+  card's band (`AT+VARC` sets their baud, code and grid by hand). `AT+VARCBIS`
+  lists it in V.8 bis, so an ordinary call between two BinModems finds it.
   `AT+MS=VARC` or the window's mode box selects it and `ATD` and `ATA` place
   and answer the call.
   - Through a real lead between a Realtek line output and its line input at

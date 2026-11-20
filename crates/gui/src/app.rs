@@ -405,6 +405,10 @@ pub struct ScopeApp {
     /// baud, the percentage of each codeword that is data, and the bits a
     /// symbol; nought leaves that one to the modem.
     varc_asks: (u32, u8, u8),
+    /// `+VARCBIS`: whether V.8 bis lists V.ARC, and which: nought not at
+    /// all, then the multicarrier mode, QAM and PCM; and whether on one
+    /// pair of wires.
+    varc_bis: (u8, bool),
     advanced: bool,
     /// The same, for `AT+ES` and `AT+DS`.
     protection: Protection,
@@ -635,6 +639,7 @@ impl ScopeApp {
             modulation: Modulation::default(),
             v8bis: true,
             varc_asks: (0, 0, 0),
+            varc_bis: (0, false),
             advanced: false,
             protection: Protection::default(),
             protection_open: false,
@@ -2692,6 +2697,39 @@ impl ScopeApp {
                             );
                         ui.end_row();
 
+                        // V.ARC through V.8 bis: for a call that is not
+                        // dialled as V.ARC, and becomes one if the far end
+                        // turns out to be another of these.
+                        ui.label("");
+                        ui.add_enabled_ui(self.v8bis, |ui| {
+                            ui.horizontal(|ui| {
+                                const OFFERS: [(u8, bool, &str); 7] = [
+                                    (0, false, "do not list V.ARC"),
+                                    (1, false, "list V.ARC"),
+                                    (2, false, "list V.ARC/QAM"),
+                                    (3, false, "list V.ARC/PCM"),
+                                    (1, true, "list V.ARC two-wire"),
+                                    (2, true, "list V.ARC/QAM two-wire"),
+                                    (3, true, "list V.ARC/PCM two-wire"),
+                                ];
+                                let name = OFFERS.iter().find(|o| (o.0, o.1) == self.varc_bis).map_or(OFFERS[0].2, |o| o.2);
+                                egui::ComboBox::from_id_salt("varc-bis")
+                                    .width(190.0)
+                                    .selected_text(name)
+                                    .show_ui(ui, |ui| {
+                                        for (mode, two_wire, name) in OFFERS {
+                                            ui.selectable_value(&mut self.varc_bis, (mode, two_wire), name);
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "AT+VARCBIS. Say in the V.8 bis transaction, in its non-standard field, that this modem has V.ARC as well as what is chosen above. If the far end says the same the call goes to V.ARC, by V.ARC's own handshake, and not to V.8; if it does not, or is not BinModem, the call is what it would have been. Set it at both ends",
+                                    );
+                                ui.label(RichText::new("in the transaction, and go to it if the far end does too").small().color(dim));
+                            });
+                        });
+                        ui.end_row();
+
                         // V.ARC's single-carrier modes: the three things the
                         // receiver would otherwise choose for itself.
                         if let Some(levels) = self.single_carrier() {
@@ -2964,6 +3002,8 @@ impl ScopeApp {
         // put back to the modem's own choice.
         let (baud, code, bits) = if self.single_carrier().is_some() { self.varc_asks } else { (0, 0, 0) };
         out.push(format!("AT+VARC={baud},{code},{bits}"));
+        let (mode, two_wire) = if self.v8bis { self.varc_bis } else { (0, false) };
+        out.push(format!("AT+VARCBIS={mode},{}", u8::from(two_wire)));
         out.extend(self.protection.commands());
         out
     }

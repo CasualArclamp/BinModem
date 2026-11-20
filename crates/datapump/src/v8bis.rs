@@ -22,6 +22,7 @@ use std::collections::VecDeque;
 use std::f64::consts::TAU;
 
 use ec::hdlc::{Decoder, Encoder, Fcs, FrameError, fcs_ok};
+use v8::bis::varc::Offer;
 use v8::bis::{self, Data, Kind, Message, Modulation, Signal};
 
 pub use v8::bis::Station as Side;
@@ -354,6 +355,12 @@ impl Selection {
     /// The modulation the MS names, if it selected a data call.
     pub fn modulation(&self) -> Option<Modulation> {
         self.ms.data_mode().and_then(|d| d.selected())
+    }
+
+    /// V.ARC as the MS selected it, if that is what it selected: no V.8
+    /// follows, and V.ARC's own handshake does.
+    pub fn varc(&self) -> Option<Offer> {
+        self.ms.varc()
     }
 }
 
@@ -749,6 +756,20 @@ impl Station {
     /// Send the MS: the fastest thing both ends have where the far end's
     /// list is known, and the fastest this end has where it is not.
     fn choose(&mut self, far: Option<Message>, answering_signal: bool) {
+        // V.ARC before any of the ITU's, where both ends have said they
+        // have it: this end only says so when it was told to prefer it. It
+        // is never chosen blind, for a far end whose list has not been seen.
+        let varc = far.as_ref().and_then(Message::varc).and_then(|_| Message::select_varc(&self.capabilities));
+        if let Some(ms) = varc {
+            if answering_signal {
+                self.answer_signal(&ms);
+            } else {
+                self.mouth.silence(AFTER_MESSAGE);
+                self.send_message(&ms, false);
+            }
+            self.enter(State::SentMs(ms));
+            return;
+        }
         let ours = self.capabilities.data_mode().unwrap_or_default();
         let modulation = match far.as_ref().and_then(Message::data_mode) {
             Some(theirs) => ours.best_with(&theirs),
@@ -772,7 +793,10 @@ impl Station {
     /// An MS arrived: take it or refuse it (9.5, 9.7).
     fn judge(&mut self, ms: Message) {
         let ours = self.capabilities.data_mode().unwrap_or_default();
-        let can = ms.data_mode().is_some_and(|asked| ours.can_do(&asked));
+        let can = match ms.varc() {
+            Some(_) => self.capabilities.varc().is_some(),
+            None => ms.data_mode().is_some_and(|asked| ours.can_do(&asked)),
+        };
         self.mouth.silence(AFTER_MESSAGE);
         if !can {
             // "does not support or has disabled the requested mode".
@@ -818,7 +842,11 @@ fn information(frame: Result<Vec<u8>, FrameError>, decoder: &Decoder) -> Option<
 fn describe(message: &Message) -> String {
     let mut text = message.kind.name().to_owned();
     if let Some(data) = message.data_mode() {
-        text.push_str(&format!(" ({})", list_of(&data)));
+        let mut list = list_of(&data);
+        if let Some(offer) = message.varc() {
+            list = if list.is_empty() { offer.name().to_owned() } else { format!("{}, {list}", offer.name()) };
+        }
+        text.push_str(&format!(" ({list})"));
     }
     text
 }
@@ -826,6 +854,9 @@ fn describe(message: &Message) -> String {
 /// What a list says its station can do, in words, for a panel.
 pub fn capabilities(message: &Message) -> String {
     let mut text = message.data_mode().map_or_else(|| "no data mode".to_owned(), |data| list_of(&data));
+    if let Some(offer) = message.varc() {
+        text = format!("{}, {text}", offer.name());
+    }
     let id = message.identify();
     if id.network.is_some_and(|n| n.digital) {
         text.push_str(", on a digital line");
@@ -1049,6 +1080,60 @@ mod tests {
         assert_eq!(kinds(&said_a), ["sent MRe", "heard MRd", "sent MS", "heard ACK(1)"]);
         assert_eq!(kinds(&said_b), ["heard MRe", "sent MRd", "heard MS", "sent ACK(1)"]);
         assert!(selection(&b).answer);
+    }
+
+    /// Two stations that both list V.ARC in the non-standard field choose
+    /// it over V.92, by the same transaction as any other mode.
+    #[test]
+    fn two_stations_with_varc_choose_it() {
+        let offer = Offer { modulation: 0, two_wire: false };
+        let a = Station::answering(server().with_varc(offer), Signal::CRe, FS);
+        let b = Station::calling(caller().with_varc(offer), FS).replying(OnMr::Ms, OnCr::Crd);
+        let (a, b, said_a, said_b) = run(a, b, 0.02, 8.0);
+        println!("answering: {said_a:#?}\ncalling: {said_b:#?}");
+        let kinds = |said: &[String]| said.iter().map(|s| s.split(" (").next().unwrap().to_owned()).collect::<Vec<_>>();
+        assert_eq!(kinds(&said_a), ["sent CRe", "heard CRd", "sent CL", "heard MS", "sent ACK(1)"]);
+        assert_eq!(kinds(&said_b), ["heard CRe", "sent CRd", "heard CL", "sent MS", "heard ACK(1)"]);
+        let (at_a, at_b) = (selection(&a), selection(&b));
+        assert_eq!(at_a.varc(), Some(offer));
+        assert_eq!(at_b.varc(), Some(offer));
+        assert_eq!(at_a.modulation(), None, "and nothing of the ITU's with it");
+        assert!(at_a.answer && !at_b.answer);
+        assert!(said_b.iter().any(|s| s == "sent MS (V.ARC)"), "{said_b:?}");
+    }
+
+    /// One station with V.ARC and one without have a call as if neither
+    /// had: the one without steps over the block, and the one with does not
+    /// ask for what the other never listed.
+    #[test]
+    fn varc_at_one_end_only_changes_nothing() {
+        let offer = Offer { modulation: 0, two_wire: false };
+        for (answering, calling) in [(server().with_varc(offer), caller()), (server(), caller().with_varc(offer))] {
+            let a = Station::answering(answering, Signal::CRe, FS);
+            let b = Station::calling(calling, FS).replying(OnMr::Ms, OnCr::Crd);
+            let (a, b, said_a, said_b) = run(a, b, 0.02, 8.0);
+            println!("answering: {said_a:#?}\ncalling: {said_b:#?}");
+            assert_eq!(selection(&a).varc(), None);
+            assert_eq!(selection(&a).modulation(), Some(Modulation::V92));
+            assert_eq!(selection(&b).modulation(), Some(Modulation::V92));
+        }
+    }
+
+    /// An MS for V.ARC to a station that never said it had it is refused
+    /// like any other mode it does not have (9.5).
+    #[test]
+    fn varc_asked_of_a_station_without_it_is_refused() {
+        let offer = Offer { modulation: 0, two_wire: false };
+        // A mode request is answered blind, and blind it is never V.ARC...
+        let a = Station::answering(server(), Signal::MRe, FS);
+        let b = Station::calling(caller().with_varc(offer), FS);
+        let (a, _, _, _) = run(a, b, 0.02, 8.0);
+        assert_eq!(selection(&a).varc(), None);
+        // ...so the refusal is tried on a station by itself.
+        let mut alone = Station::calling(caller(), FS);
+        alone.judge(Message::select_varc(&caller().with_varc(offer)).unwrap());
+        assert!(matches!(alone.status, Status::Failed(_)));
+        assert!(alone.take_notes().iter().any(|s| s == "sent NAK(3)"));
     }
 
     /// 9.5: an MS for a mode the station does not have is refused with

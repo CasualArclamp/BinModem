@@ -1036,6 +1036,11 @@ pub struct Modem {
     varc_said: &'static str,
     /// Bits a symbol of the grid a V.ARC call's symbol diagram is showing.
     varc_bits: u8,
+    /// V.ARC has been tried on this call and the line turned out not to
+    /// carry it: it is not listed in V.8 bis again until the next call.
+    varc_spent: bool,
+    /// Samples since V.8 bis chose V.ARC, at the end that answers it.
+    varc_wait: usize,
     /// Why the last call could not be run on this line at all, until asked.
     call_refused: Option<String>,
 }
@@ -1097,6 +1102,8 @@ impl Modem {
             varc_owed_ms: 0.0,
             varc_said: "",
             varc_bits: 0,
+            varc_spent: false,
+            varc_wait: 0,
             call_refused: None,
         }
     }
@@ -2010,6 +2017,8 @@ impl Modem {
         );
         let role = self.role;
         self.varc = None;
+        // Or the V.8 bis this starts again with would choose it again.
+        self.varc_spent = true;
         self.at.modulation.carrier = "V92".to_owned();
         self.at.modulation.automode = true;
         self.at.modulation.min_rate = 0;
@@ -2900,6 +2909,7 @@ impl Modem {
                     }
                     self.dialled = Some(number.clone());
                     self.dial_request = Some(number);
+                    self.varc_spent = false;
                     self.place_call(Role::Calling);
                     self.memo_spent = self.quick_memo.is_some()
                         && self.at.modulation.carrier == "V92"
@@ -2907,6 +2917,7 @@ impl Modem {
                 }
                 Action::Answer => {
                     self.answer_request = true;
+                    self.varc_spent = false;
                     self.place_call(Role::Answering);
                 }
                 Action::HangUp => {
@@ -3042,6 +3053,7 @@ impl Modem {
         // used and there is nothing to negotiate.
         self.bis = None;
         self.bis_far = None;
+        self.varc_wait = 0;
         self.pcm_end = role;
         self.pump = None;
         self.negotiation = None;
@@ -3280,7 +3292,54 @@ impl Modem {
             network: (server && pcm("V90")).then_some(Network { digital: true, ..Network::default() }),
             ..Identification::default()
         };
-        Message::data(Kind::Cl, identification, data)
+        let list = Message::data(Kind::Cl, identification, data);
+        // `+VARCBIS`: V.ARC as well, in the non-standard field, for a far
+        // end that is another of these. Any other steps over it.
+        let (mode, two_wire) = self.at.config.varc_bis;
+        if mode == 0 || self.varc_spent {
+            return list;
+        }
+        list.with_varc(v8::bis::varc::Offer { modulation: mode - 1, two_wire })
+    }
+
+    /// V.8 bis chose V.ARC: both ends listed it and the MS named it. No V.8
+    /// follows. What does is V.ARC's own handshake, at once, with the
+    /// station that received the MS as the answering end of it (9.9) --
+    /// and on the sound card as it is, which whatever owns the card sees
+    /// from [`Self::varc_wanted`], as it does for a call dialled as V.ARC.
+    fn varc_after_bis(&mut self, answer: bool) {
+        let (mode, two_wire) = self.at.config.varc_bis;
+        let mode = match mode {
+            2 => VarcMode::Qam,
+            3 => VarcMode::Pcm,
+            _ => VarcMode::Dmt,
+        };
+        self.role = if answer { Role::Answering } else { Role::Calling };
+        self.line_notes.push(format!(
+            "V.8 bis: both ends have V.ARC; {}{} follows, from its own handshake",
+            mode.name(),
+            if two_wire { " on one pair of wires" } else { "" }
+        ));
+        self.since_dial_ms = 0;
+        self.rate = 0;
+        self.transmit_rate = 0;
+        self.ec = None;
+        self.pump = None;
+        self.negotiation = None;
+        self.announce = None;
+        self.far_menu = None;
+        self.v34_report = None;
+        self.far_ec.clear();
+        self.recovered.clear();
+        self.varc_owed_ms = 0.0;
+        self.varc_said = "";
+        self.varc_bits = 0;
+        self.state = State::Handshaking;
+        let mut call = varc::Call::new(mode, self.role, false);
+        call.two_wire(two_wire);
+        let (baud, code, bits) = self.at.config.varc;
+        call.ask_for(baud, code, bits);
+        self.varc = Some(call);
     }
 
     /// Carry the V.8 bis transaction one sample further, and V.8 underneath
@@ -3322,6 +3381,18 @@ impl Modem {
         }
         match status {
             v8bis::Status::Running => {}
+            v8bis::Status::Selected(selection) if selection.varc().is_some() => {
+                // The end that sent the ACK waits before it lets go of the
+                // line: going to V.ARC closes the sound card to open it
+                // again as it is, and what was still on its way out of the
+                // card went with it. On two real cards that was the end of
+                // the ACK, and a caller that never heard it.
+                self.varc_wait += 1;
+                if !selection.answer || self.varc_wait as f64 > VARC_AFTER_ACK * self.fs {
+                    self.bis = None;
+                    self.varc_after_bis(selection.answer);
+                }
+            }
             v8bis::Status::Selected(selection) => {
                 self.bis = None;
                 // 9.9: "the station which receives the MS message shall
@@ -3636,6 +3707,9 @@ impl Modem {
 
 /// How long a V.ARC call waits to hear another end before giving up.
 const VARC_WAIT_MS: u32 = 120_000;
+/// Seconds of silence between the ACK that accepts V.ARC in V.8 bis and
+/// this end letting go of the line for it: longer than a sound card holds.
+const VARC_AFTER_ACK: f64 = 0.4;
 
 /// How long a V.ARC call that was up may hear nothing before it is over.
 const VARC_DEAF_SECONDS: f64 = 5.0;
