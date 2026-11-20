@@ -9,9 +9,9 @@ binmodem.exe --capture        replay the golden capture
 
 [docs/usage.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/usage.md) has the setup.
 
-## What's new in 4.3.0
+## What's new in 5.0.0
 
-![V.ARC between two windows on one pair of wires, the echo canceller's picture of the line bottom right](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/releases/v4.3.0/varc-two-wire.png)
+![V.ARC between two windows on one pair of wires, the echo canceller's picture of the line bottom right](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/releases/v5.0.0/varc-two-wire.png)
 
 ### V.ARC: a mode of our own, for a sound card and not a telephone line
 
@@ -29,11 +29,24 @@ No Recommendation covers this one. Both ends have to be BinModem, and both have 
 - **Two sound devices at two rates are a line each way.** An input at 192 kHz and an output at 48 kHz run each direction at its own.
 - **Each end tells the other what it hears**: level, peaks, samples at full scale, and Es/N0. A sender told it is reaching the far converter's stops turns itself down. The window has a Far end line for it.
 - **V.ARC two-wire** (`AT+MS=VARC2W`) is the same mode on one pair of wires, both ends sending into it, with this end's echo taken out. A canceller finds the echo and fits a filter to it; then the receiver, once it has read a symbol, takes the far end's part of it away and fits a second filter to what is left. Each end first has the line to itself for two seconds, the caller and then the answerer, so each learns its echo with nobody talking over it. Two ends sharing one virtual cable connect at 327 kbit/s, reach 384, and go on improving past 75 dB, a million octets and none wrong. It wants one sound card, input and output at one rate. `VARCQ2W` and `VARCP2W` are the single-carrier modes the same way, by the first canceller alone: 139 kbit/s for QAM.
-- **Over SIP**, between two accounts that say `linear = yes`: the call carries sixteen-bit samples exactly, the samples are the data, and the rate is 200 kbit/s.
+- **An ordinary call finds it, through V.8 bis.** `AT+VARCBIS=1`, or "list V.ARC" under the V.8 bis switch, puts V.ARC in the non-standard field of the V.8 bis capabilities. Two BinModems that both list it choose it there and go to V.ARC's handshake in place of V.8; with a far end that does not, or is not BinModem, the call is what it would have been. Between two windows on two virtual cables, each set to V.92: 404 kbit/s, and 164 kbit/s with noise added at -55 dBFS. The country and provider codes in the block are made up, not registered.
+- **Over SIP**, the call carries sixteen-bit samples exactly, the samples are the data, and the rate is the sample rate: 601 kbit/s at 48 kHz, 200 kbit/s at 16 kHz.
+
+![An ordinary call that started in V.8 bis and found V.ARC](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/releases/v5.0.0/varc-v8bis.png)
+
+![V.ARC through the air, a monitor's loudspeakers to a webcam's microphone](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/releases/v5.0.0/varc-air.png)
+
+### SIP: linear PCM at every rate, and EasySip
+
+![EasySip between two windows on one machine: no account, linear samples at 48 kHz, V.ARC at 601 kbit/s](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/releases/v5.0.0/easysip.png)
+
+- **EasySip** is a third kind of line, beside the sound card and SIP. Type the other BinModem's address, open, and dial: no account, no registrar and no password. Each end listens on a port (5060 unless changed) and calls the other's. Linear samples are offered first and G.711 behind them. The far end answers with Answer when it rings.
+- **Linear PCM at 8, 16, 44.1 and 48 kHz, on one channel or two**, which are the codings softphones list as LPCM. An account with `linear = yes`, and every EasySip line, offers all eight ahead of G.711, the fastest first, and takes the first of them it is offered. Two channels carry one signal. 4.2 had 16 kHz on one channel only, and still gets it from this.
+- **A packet is the packet time at any rate**, so at 44.1 and 48 kHz it is larger than one Ethernet frame and the network sends it in pieces. That is how other softphones send these codings; a network that drops fragments will not carry them.
 
 ### The window
 
-![V.ARC through a real lead at 192 kHz, the bits on each carrier under the symbol diagram](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/releases/v4.3.0/varc-lead.png)
+![V.ARC through a real lead at 192 kHz, the bits on each carrier under the symbol diagram](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/releases/v5.0.0/varc-lead.png)
 
 - **The symbol diagram draws on a V.ARC call**, and beside the grid's size is the code rate (`code 0.94`).
 - **Two more scopes under it** on a V.ARC call: the bits on each carrier with the signal to noise they were chosen from, and the echo as the canceller has learned it.
@@ -50,7 +63,9 @@ No Recommendation covers this one. Both ends have to be BinModem, and both have 
 - **Two-wire has only met a virtual cable**, whose echo is one spike with no tail and no noise. A real hybrid or a telephone pair has not been tried, and neither has an echo through the air.
 - **The starting signal on a poor line** is tested in simulation only, and so is a fast sound card calling a slow one.
 - **A gap in the sound costs a call seconds**: half the blocks bad until the tables are made again.
-- **Over SIP** it has run between two processes on one machine and over no network.
+- **Over SIP and EasySip** it has run between two processes on one machine and over no network, and with no softphone or exchange at the far end. The single-carrier modes have not been tried on a SIP call at all.
+- **Through V.8 bis** it has run on virtual cables only. A caller that misses the ACK goes on to V.8 while the answerer is in V.ARC, and that call does not recover.
+- **On a SIP call the scopes show the line brought down to 16 kHz**, whatever the call's rate, and call an exact line "hot" for reaching full scale, which on that line is only data.
 
 ## What's new in 4.2.0
 

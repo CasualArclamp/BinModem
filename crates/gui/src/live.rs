@@ -207,8 +207,60 @@ pub fn sip_accounts() -> Vec<String> {
         .collect()
 }
 
+/// What an EasySip line is called, wherever an account's name goes: the far
+/// end's address and this end's port, which are all there is to one.
+pub const EASY_SIP: &str = "easysip:";
+
+/// The name of the EasySip line to `peer`, heard on `port`.
+pub fn easy_sip_name(peer: &str, port: u16) -> String {
+    format!("{EASY_SIP}{}|{port}", peer.trim())
+}
+
+/// The far end's address and this end's port out of such a name.
+pub fn easy_sip_parts(name: &str) -> Option<(String, u16)> {
+    let (peer, port) = name.strip_prefix(EASY_SIP)?.split_once('|')?;
+    Some((peer.to_owned(), port.parse().ok()?))
+}
+
+/// EasySip: a call straight to another of these, with nothing between.
+///
+/// No account, no registrar and no password. The far end is an address, and
+/// a call is an INVITE sent to it; this end listens on a port of its own for
+/// the same from there. Linear samples are offered first, since the far end
+/// is expected to be BinModem and V.ARC wants them, with G.711 behind for
+/// anything else that answers.
+fn easy_sip_account(name: &str) -> Result<sip::Account, String> {
+    let (peer, port) = easy_sip_parts(name).ok_or_else(|| format!("{name:?} is not an EasySip line"))?;
+    if peer.is_empty() {
+        return Err("EasySip: type the far end's address first, as 192.168.1.20 or 192.168.1.20:5060".to_owned());
+    }
+    let host = peer.rsplit_once(':').filter(|(_, p)| p.parse::<u16>().is_ok()).map_or(peer.as_str(), |(h, _)| h);
+    Ok(sip::Account {
+        name: name.to_owned(),
+        registrar: peer.clone(),
+        domain: host.to_owned(),
+        username: "binmodem".to_owned(),
+        register: false,
+        linear: true,
+        local_port: port,
+        ..sip::Account::default()
+    })
+}
+
 /// Open a line on one of them.
 fn open_sip(name: &str, tx: &Publisher) -> Result<sip::Line, String> {
+    if name.starts_with(EASY_SIP) {
+        let account = easy_sip_account(name)?;
+        tx.log(
+            Direction::Note,
+            format!(
+                "EasySip: calls go to {}, and are heard on port {}; no account and no registrar",
+                account.next_hop(),
+                account.local_port
+            ),
+        );
+        return sip::Line::open(account, FS);
+    }
     let accounts = sip::Account::load_default()?;
     if accounts.is_empty() {
         let where_it_goes = sip::Account::default_path()

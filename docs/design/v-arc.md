@@ -651,11 +651,35 @@ not correct, and a table that turns out too high is asked for again lower.
 
 A fourth way of running, which is no modulation at all (`exact.rs`).
 
-An account with `linear = yes` offers `L16/16000` in its SDP ahead of PCMU
-and PCMA, and takes it when offered: sixteen-bit linear samples, two octets
-each, at 16 kHz (RFC 3551 4.5.11). Between two such accounts the call's
-samples arrive as the sixteen bits that were sent, so the samples are the
-data.
+An account with `linear = yes`, and every EasySip line, offers L16 in its
+SDP ahead of PCMU and PCMA, and takes it when offered: sixteen-bit linear
+samples, two octets each (RFC 3551 4.5.11). Between two such ends the
+call's samples arrive as the sixteen bits that were sent, so the samples
+are the data.
+
+Eight codings are offered, the fastest first and one channel before two,
+and an answerer takes the first of the offer's that is one of them:
+
+| Rate | One channel | Two |
+|---|---|---|
+| 48 kHz | `L16/48000` | `L16/48000/2` |
+| 44.1 kHz | `L16/44100`, payload type 11 | `L16/44100/2`, payload type 10 |
+| 16 kHz | `L16/16000`, payload type 96 | `L16/16000/2` |
+| 8 kHz | `L16/8000` | `L16/8000/2` |
+
+These are what softphones list as LPCM. 44.1 kHz has static payload types;
+16 kHz on one channel keeps the number 4.2 gave it, which is all 4.2 knows;
+the rest are dynamic. Two channels carry one signal: the same sample is
+sent on both and their mean is what is heard, which between two of these is
+the sample that was sent. A packet is the packet time whatever the rate,
+so at 44.1 and 48 kHz it is more octets than an Ethernet frame holds and
+goes in pieces.
+
+**EasySip** is that with no account: the window's third kind of line. The
+far end is an address, a call is an INVITE sent to it, and this end
+listens on a port of its own (5060 unless changed) for the same. There is
+no registrar and no password. Two on one machine want two ports, each
+naming the other's.
 
 - Superframe: a sync word of 64 known samples, then a block of 2000 samples
   that are 4000 octets. Eight a second.
@@ -665,7 +689,12 @@ data.
   is taken as a hole and its octets are given to the decoder as erasures. One
   lost packet in a block is 40 erasures a codeword and is rebuilt; two is not,
   and the block is resent.
-- Rate: 256 kbit/s of samples, 200 434 bit/s of data.
+- Rate: at 16 kHz, 256 kbit/s of samples and 200 434 bit/s of data; at
+  48 kHz, 601 302 bit/s. Measured between two processes on one machine,
+  both as two `modem-sip` and as two windows on EasySip.
+- The level is left alone. Full scale is a value like any other when the
+  samples are the data, and a far end that reports hearing it is not
+  reporting a fault.
 
 ![The window as the caller on a V.ARC/L16 call over SIP](../images/v-arc/window-sip.png)
 
@@ -674,10 +703,10 @@ What the call turns out to be decides what runs on it:
 | The call | What `AT+MS=VARC` becomes |
 |---|---|
 | L16, and the samples arrive exactly | V.ARC/L16 |
-| L16, but nothing is heard in 4 s, or the two ends have not agreed in 10 s | V.ARC/DMT at the call's 16 kHz |
+| L16, but nothing is heard in 4 s, or the two ends have not agreed in 10 s | V.ARC/DMT at the call's rate |
 | G.711, because the far end answered with it | an ordinary call from V.8, with `+MS` set to `V92` |
 
-`VARCQ` and `VARCP` do not run on a SIP call: they need a multiple of 48 kHz.
+`VARCQ` and `VARCP` have not been tried on a SIP call.
 
 ## Octets on the line
 

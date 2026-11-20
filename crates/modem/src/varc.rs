@@ -605,7 +605,9 @@ impl Call {
         for c in 0..channels as u8 {
             pairs.push((self.sender(agreed, c, self.sends_slowed)?, self.receiver(agreed, c, self.hears_slowed)?));
         }
-        Ok(Station::new(fs, pairs))
+        let mut station = Station::new(fs, pairs);
+        station.level_is_fixed(self.mode == VarcMode::Linear);
+        Ok(station)
     }
 
     /// One frame to send, when hearing and sending are stepped apart.

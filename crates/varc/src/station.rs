@@ -301,6 +301,8 @@ pub struct Channel<T, R> {
     /// end said it was too loud; and when that last changed.
     pub trim_db: f64,
     trimmed_at: u64,
+    /// The level is not this end's to change: see [`Self::level_is_fixed`].
+    level_fixed: bool,
     /// The far end is to be told the level changed until it has been.
     level_owed: bool,
     /// Tables that arrived on this channel for others: the channel, the
@@ -335,6 +337,7 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
             there: None,
             trim_db: 0.0,
             trimmed_at: 0,
+            level_fixed: false,
             level_owed: false,
             foreign: Vec::new(),
         }
@@ -546,7 +549,17 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
     /// each one starts the line again from the starting table and tells
     /// the far end to measure afresh; and they are kept three seconds
     /// apart, so the report acted on is of the level now being sent.
+    /// Leave the level alone whatever the far end reports. For a line whose
+    /// samples are the data: full scale is then a value like any other, and
+    /// a far end that reports hearing it is not reporting a fault.
+    pub fn level_is_fixed(&mut self, fixed: bool) {
+        self.level_fixed = fixed;
+    }
+
     fn mind_the_level(&mut self, report: Report, now: u64, fs: f64) {
+        if self.level_fixed {
+            return;
+        }
         if now.saturating_sub(self.trimmed_at) < (3.0 * fs) as u64 && self.trimmed_at != 0 {
             return;
         }
@@ -644,6 +657,13 @@ pub struct Station<T, R> {
 }
 
 impl<T: Sender, R: Receiver> Station<T, R> {
+    /// [`Channel::level_is_fixed`] for every channel.
+    pub fn level_is_fixed(&mut self, fixed: bool) {
+        for channel in &mut self.channels {
+            channel.level_is_fixed(fixed);
+        }
+    }
+
     /// An end with a channel for each transmitter and receiver given.
     pub fn new(fs: f64, pairs: Vec<(T, R)>) -> Self {
         Self {

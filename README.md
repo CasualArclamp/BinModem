@@ -191,6 +191,8 @@ OS-specific code — but only built and run on Windows so far.
   loaded a carrier at a time, and QAM and baseband levels that fill the
   card's band (`AT+VARC` sets their baud, code and grid by hand). `AT+VARCBIS`
   lists it in V.8 bis, so an ordinary call between two BinModems finds it.
+  Over SIP, linear PCM at 8 to 48 kHz carries it exactly, and EasySip is
+  that with no account: type the other end's address.
   `AT+MS=VARC` or the window's mode box selects it and `ATD` and `ATA` place
   and answer the call.
   - Through a real lead between a Realtek line output and its line input at
