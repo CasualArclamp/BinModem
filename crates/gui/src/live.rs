@@ -2016,6 +2016,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         // Only on a call at the network's own rate: see
         // `sip::Line::carries_network_levels`.
         let network_levels = audio.sip().is_some_and(sip::Line::carries_network_levels);
+        modem.set_network_a_law(audio.sip().is_some_and(sip::Line::a_law));
         if !from_network.is_empty() && network_levels {
             let levels: Vec<f64> = from_network.iter().map(|l| f64::from(*l)).collect();
             modem.give_network_levels(&levels);

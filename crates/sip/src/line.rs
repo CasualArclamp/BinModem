@@ -473,6 +473,13 @@ impl Line {
         !self.media.linear() || (self.media.linear_rate() - 8000.0).abs() < 0.5
     }
 
+    /// Whether the call that is up is in A-law: G.711 as most of the world
+    /// outside North America and Japan has it. A V.90 or V.92 digital modem
+    /// has to know, because its signal is the law's own levels.
+    pub fn a_law(&self) -> bool {
+        self.media.connected() && !self.media.linear() && self.media.law() == crate::g711::Law::A
+    }
+
     /// Samples a second of the linear call that is up: 8, 16, 44.1 or 48
     /// thousand, whichever the two ends agreed on.
     pub fn linear_rate(&self) -> f64 {

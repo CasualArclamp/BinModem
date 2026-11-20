@@ -320,6 +320,7 @@ fn run(
                 // A digital modem reads the network's own levels (it ignores
                 // them otherwise).
                 let network_levels = line.carries_network_levels();
+                modem.set_network_a_law(line.a_law());
                 if network_levels {
                     modem.give_network_levels(&levels);
                 }

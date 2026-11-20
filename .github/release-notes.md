@@ -18,6 +18,7 @@ binmodem.exe --capture        replay the golden capture
 - **The window says what a SIP call is carried in**, in the line at the top: `L16/48000`, `PCMA`.
 - **EasySip chooses its coding.** The fastest linear coding both ends have, any one of the eight linear codings, or G.711 in either law, which is what the ordinary modes (V.34, V.90 and the rest) are for. V.ARC/QAM and V.ARC/PCM also run on an EasySip call at 48 kHz: 270 and 305 kbit/s between two windows on one machine.
 - **Fixed:** V.90 and V.92 on a linear SIP call at anything but 8 kHz. The digital end sent one level to a sample as it does into G.711, which at 16 kHz filled half of every packet: "gaps sent" by the hundred and a far end stuck in phase 2. It is now carried as a waveform there, as on a sound card: 56 000 down and 31 200 up between two windows on EasySip at 16 kHz stereo.
+- **Fixed:** V.90 and V.92 on an A-law SIP call. The digital end built its levels for mu-law and said mu-law in INFO0d whatever the call was in, so on A-law every level was moved to the nearest the line had and the call came up at its lowest rate, 28 000. It is now told the call's law: 56 000 down on A-law, the same as on mu-law.
 - **Fixed:** with the Setup row showing, an EasySip line opened from the command line was reopened with an empty address.
 - **Not fixed:** a gap of a few milliseconds in the sound still costs V.ARC/QAM and V.ARC/PCM several seconds while the two ends renegotiate.
 
