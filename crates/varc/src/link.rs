@@ -143,11 +143,36 @@ pub trait Sender {
 ///
 /// A receiver works out the table for each and asks for whichever carries
 /// most.
-pub const CODES: [(Option<f64>, f64); 5] = [(None, 8.0), (Some(0.75), 5.0), (Some(0.5), 3.0), (Some(0.33), 2.0), (Some(0.25), 1.5)];
+///
+/// And two the other way, for a line with more in hand than its grid can
+/// use: two check octets a codeword, which put right one wrong octet in
+/// 250, and none at all. With none, nothing is put right. A frame that
+/// arrives wrong fails its own check and is sent again, so these want a
+/// line on which that hardly happens, and are asked more of than the
+/// ordinary code is: a grid that is already as dense as the modulation
+/// goes loses nothing by it, and anything less dense is better served by
+/// the bit the ordinary code would let it carry.
+pub const CODES: [(Option<f64>, f64); 7] = [
+    (Some(1.0), 11.5),
+    (Some(0.99), 10.0),
+    (None, 8.0),
+    (Some(0.75), 5.0),
+    (Some(0.5), 3.0),
+    (Some(0.33), 2.0),
+    (Some(0.25), 1.5),
+];
 
 /// Check octets for a code of `rate` on blocks of `capacity` octets, which
 /// are cut into codewords of 255 at most.
 pub fn checks_for(rate: f64, capacity: usize) -> u8 {
+    // The two lightest are not a share of the codeword but a count: none,
+    // and the fewest a code can have.
+    if rate > 0.995 {
+        return 0;
+    }
+    if rate > 0.97 {
+        return 2;
+    }
     let words = capacity.div_ceil(255).max(1);
     let n = capacity / words;
     (((1.0 - rate) * n as f64).round() as usize).clamp(16, n.saturating_sub(8).max(16)).min(246) as u8

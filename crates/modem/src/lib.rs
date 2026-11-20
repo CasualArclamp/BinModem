@@ -1369,6 +1369,7 @@ impl Modem {
                 (0, _) => "-",
                 // No modulation, but sixteen bits at a time all the same.
                 (_, VarcMode::Linear) => "L16",
+                (_, VarcMode::G711) => "G.711",
                 (_, VarcMode::Pcm) => "PCM",
                 _ => "QAM",
             };
@@ -2028,8 +2029,20 @@ impl Modem {
         }
     }
 
+    /// Tell a V.ARC call that its line is a call in G.711, A-law if `a_law`
+    /// and mu-law otherwise, or with `None` that it is not. On such a call
+    /// it starts with no modulation, the codewords being the data, and if
+    /// they turn out not to arrive as sent it carries on as an ordinary
+    /// call; see [`Self::varc_fall_back`].
+    pub fn varc_codeword_line(&mut self, a_law: Option<bool>) {
+        if let Some(call) = self.varc.as_mut() {
+            call.codeword_line(a_law.map(|a| if a { datapump::v90::ucode::Law::A } else { datapump::v90::ucode::Law::Mu }));
+        }
+    }
+
     /// A V.ARC call has turned out to be on a line that cannot carry it: a
-    /// SIP call that was answered in G.711. The call is not thrown away.
+    /// call in G.711 that something recodes, or whose far end is not V.ARC.
+    /// The call is not thrown away.
     /// It carries on as an ordinary one, from V.8, as the same end it was,
     /// with V.92 and everything below it on offer; `+MS` is left saying so.
     pub fn varc_fall_back(&mut self) {
@@ -2037,7 +2050,7 @@ impl Modem {
             return;
         }
         self.line_notes.push(
-            "V.ARC: the call is G.711, not linear samples; an ordinary call instead, from V.92 down".to_owned(),
+            "V.ARC: this call cannot carry it; an ordinary call instead, from V.92 down".to_owned(),
         );
         let role = self.role;
         self.varc = None;
@@ -2094,6 +2107,10 @@ impl Modem {
             return;
         }
         self.line_notes.extend(call.take_notes());
+        if call.gave_up() {
+            self.varc_fall_back();
+            return;
+        }
         let phase = call.phase();
         if phase != self.varc_said {
             self.varc_said = phase;

@@ -24,7 +24,9 @@
 use varc::dmt::{self, Plan};
 use varc::echo::Canceller;
 use varc::hello::{Agreed, Caps, Faster, Half, Hello, Slower, Twice, Wanted, Watch};
+use datapump::v90::ucode::{self, Law};
 use varc::exact;
+use varc::octets;
 use varc::link::{Receiver, Report, Sender};
 use varc::sc::{self, Shape};
 use varc::station::Station;
@@ -44,6 +46,9 @@ pub enum VarcMode {
     /// `+MS` can ask for; it is what `VARC` becomes on a line that carries
     /// samples exactly.
     Linear,
+    /// No modulation on a call in G.711: its codewords are the data. What
+    /// any of the three becomes on a line that carries codewords exactly.
+    G711,
 }
 
 impl VarcMode {
@@ -65,6 +70,7 @@ impl VarcMode {
             Self::Qam => "V.ARC/QAM",
             Self::Pcm => "V.ARC/PCM",
             Self::Linear => "V.ARC/L16",
+            Self::G711 => "V.ARC/G.711",
         }
     }
 }
@@ -199,8 +205,14 @@ pub(crate) struct Call {
     until_look: u32,
     /// The line carries samples exactly: a linear SIP call, not a card.
     exact_line: bool,
+    /// The line carries G.711 codewords exactly, in this law: a SIP call
+    /// between two of these with nothing recoding it on the way.
+    g711: Option<Law>,
     /// And was found not to after all, so that it is not tried again.
     inexact: bool,
+    /// A line of codewords that turned out not to carry them has nothing
+    /// else V.ARC can run on, and the call is to go on as an ordinary one.
+    gave_up: bool,
     /// Something worth telling whoever is watching, once.
     notes: Vec<String>,
 }
@@ -258,7 +270,9 @@ impl Call {
             first_loaded: None,
             until_look: 0,
             exact_line: false,
+            g711: None,
             inexact: false,
+            gave_up: false,
             notes: Vec::new(),
         }
     }
@@ -270,6 +284,32 @@ impl Call {
             self.exact_line = exact;
             self.station = None;
         }
+    }
+
+    /// Say that the line carries G.711 codewords, in the law given, or
+    /// that it does not. Before the first frame.
+    pub fn codeword_line(&mut self, law: Option<Law>) {
+        if self.g711 != law {
+            self.g711 = law;
+            self.station = None;
+        }
+    }
+
+    /// Whether the call has found it cannot be a V.ARC call at all.
+    pub fn gave_up(&self) -> bool {
+        self.gave_up
+    }
+
+    /// The level every codeword of the line's law is, and its silence.
+    fn codewords(&self) -> (octets::Levels, u8) {
+        let law = self.g711.unwrap_or_default();
+        let mut levels = [0.0; 256];
+        for (octet, level) in levels.iter_mut().enumerate() {
+            let (ucode, negative) = ucode::from_octet(law, octet as u8);
+            *level = ucode::level(law, ucode) * if negative { -1.0 } else { 1.0 };
+        }
+        // What a packet that never came is filled with: nought, encoded.
+        (levels, ucode::octet(law, ucode::nearest(law, 0).0, false))
     }
 
     /// What there is to tell about the call since this was last asked.
@@ -455,7 +495,7 @@ impl Call {
     /// line of exact samples, where the far end is known to be the same as
     /// this one and the samples are not sound.
     fn greets(&self) -> bool {
-        !self.looped && !(self.exact_line && !self.inexact)
+        !self.looped && !((self.exact_line || self.g711.is_some()) && !self.inexact)
     }
 
     /// The ends as they would be with nothing to agree: both the same.
@@ -502,6 +542,7 @@ impl Call {
         let slow = 1usize << slowed;
         Ok(match self.mode {
             VarcMode::Linear => Box::new(exact::Tx::new(fs)),
+            VarcMode::G711 => Box::new(octets::Tx::new(fs, &self.codewords().0)),
             VarcMode::Dmt => {
                 let tx: Box<dyn Sender> = Box::new(dmt::Tx::new(Plan::for_rate(fs).coloured(colour)));
                 if agreed.send_times * slow > 1 { Box::new(Faster::slowed(tx, agreed.send_times * slow, slow)) } else { tx }
@@ -527,6 +568,10 @@ impl Call {
         let slow = 1usize << slowed;
         let mut rx: Box<dyn Receiver> = match self.mode {
             VarcMode::Linear => Box::new(exact::Rx::new(fs)),
+            VarcMode::G711 => {
+                let (levels, quiet) = self.codewords();
+                Box::new(octets::Rx::new(fs, &levels, quiet))
+            }
             VarcMode::Dmt => {
                 let rx: Box<dyn Receiver> = Box::new(dmt::Rx::new(Plan::for_rate(fs).coloured(colour)));
                 if agreed.hear_times * slow > 1 { Box::new(Slower::slowed(rx, agreed.hear_times * slow, slow)) } else { rx }
@@ -585,7 +630,11 @@ impl Call {
     fn build(&mut self, fs: f64, agreed: &Agreed, channels: usize) -> Result<End, String> {
         // On a line of exact samples the multicarrier mode gives way to no
         // modulation at all, until that has been tried and failed.
+        // And on a line of G.711 codewords every mode does: none of the
+        // three has anything to modulate at 8000 samples a second that the
+        // codewords do not carry better as they are.
         self.mode = match agreed.wanted {
+            _ if self.g711.is_some() && !self.inexact => VarcMode::G711,
             Wanted::Qam => VarcMode::Qam,
             Wanted::Pcm => VarcMode::Pcm,
             Wanted::Dmt if self.exact_line && !self.inexact => VarcMode::Linear,
@@ -606,7 +655,7 @@ impl Call {
             pairs.push((self.sender(agreed, c, self.sends_slowed)?, self.receiver(agreed, c, self.hears_slowed)?));
         }
         let mut station = Station::new(fs, pairs);
-        station.level_is_fixed(self.mode == VarcMode::Linear);
+        station.level_is_fixed(matches!(self.mode, VarcMode::Linear | VarcMode::G711));
         Ok(station)
     }
 
@@ -889,6 +938,18 @@ impl Call {
         // can read the other, and both find that out at about the same
         // time, so both give up on it at about the same time and start
         // again as something that only wants the line to be clean.
+        if self.mode == VarcMode::G711 && self.first_loaded.is_none() && !self.gave_up {
+            let waited = self.samples as f64 / fs;
+            let heard = station.channels.iter().any(|c| c.rx.health().locked);
+            if (!heard && waited > EXACT_UNHEARD) || waited > EXACT_UNAGREED {
+                self.inexact = true;
+                self.gave_up = true;
+                self.notes.push(
+                    "V.ARC: the call does not carry G.711 codewords as they were sent, or the far end is not V.ARC".to_owned(),
+                );
+                return Ok(true);
+            }
+        }
         if self.mode == VarcMode::Linear && self.first_loaded.is_none() {
             let waited = self.samples as f64 / fs;
             let heard = station.channels.iter().any(|c| c.rx.health().locked);

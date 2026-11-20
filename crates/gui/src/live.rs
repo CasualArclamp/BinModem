@@ -2054,27 +2054,34 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         }
         // A V.ARC call on a SIP line. If the call agreed on linear samples
         // the network's own samples are the modem's line, one for one, and
-        // what it says goes back as it is. If the far end answered in G.711
-        // there is nothing for V.ARC to run on, and the call carries on as
-        // an ordinary one.
+        // what it says goes back as it is. If it is in G.711 the same is
+        // true of its codewords, between two of these with nothing recoding
+        // them on the way; the modem finds out whether that is so, and
+        // carries on as an ordinary call if it is not.
         let mut exact_sent: Option<Vec<f32>> = None;
         if let Some(sip) = audio.sip()
             && modem.varc_wanted().is_some()
         {
-            if sip.linear() {
+            let rate = if sip.linear() {
                 modem.varc_exact_line(true);
-                let mut exact = Vec::with_capacity(from_network.len());
-                for &level in &from_network {
-                    let mut out = [0.0f64];
-                    modem.varc_step(sip.linear_rate(), &[f64::from(level)], &mut out);
-                    exact.push(out[0] as f32);
-                }
-                for text in modem.take_line_notes() {
-                    noted.push((0, modem.call_seconds(), text));
-                }
-                exact_sent = Some(exact);
+                sip.linear_rate()
             } else {
-                modem.varc_fall_back();
+                modem.varc_codeword_line(Some(sip.a_law()));
+                8000.0
+            };
+            let mut exact = Vec::with_capacity(from_network.len());
+            for &level in &from_network {
+                let mut out = [0.0f64];
+                modem.varc_step(rate, &[f64::from(level)], &mut out);
+                exact.push(out[0] as f32);
+            }
+            for text in modem.take_line_notes() {
+                noted.push((0, modem.call_seconds(), text));
+            }
+            // A call that gave V.ARC up in there is an ordinary one from
+            // the next block on, and has said nothing in this one.
+            if modem.varc_wanted().is_some() {
+                exact_sent = Some(exact);
             }
         }
         let drive = session.drive();

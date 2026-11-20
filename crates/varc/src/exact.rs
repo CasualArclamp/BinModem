@@ -52,12 +52,30 @@ const SHOWN: usize = 4096;
 /// be, before the receiver stops trusting where it is.
 const MISSED: usize = 4;
 
+/// Check octets in each codeword while no packet has gone missing for a
+/// while: none. Forty-eight of them are there to rebuild a lost packet, and
+/// on a line that is not losing any they are a fifth of the line spent on
+/// nothing, since what does arrive arrives exactly. A lost packet then
+/// costs its block, which is asked for again, and the next blocks go back
+/// to the full count.
+const LIGHT: u8 = 0;
+
+/// Blocks in a row with nothing missing before the lighter code is asked
+/// for: five seconds.
+const CLEAN: usize = 40;
+
 fn table() -> Table {
-    Table { parity: PARITY, bits: vec![16] }
+    table_of(PARITY)
 }
 
-fn layout() -> Layout {
-    Layout::new(2 * BLOCK, usize::from(PARITY)).expect("a block holds codewords")
+fn table_of(parity: u8) -> Table {
+    Table { parity, bits: vec![16] }
+}
+
+fn layout_of(parity: u8) -> Layout {
+    Layout::new(2 * BLOCK, usize::from(parity))
+        .or_else(|| Layout::new(2 * BLOCK, usize::from(PARITY)))
+        .expect("a block holds codewords")
 }
 
 /// The sync word for a mark: sixteen-bit words from a generator, none of
@@ -92,9 +110,14 @@ fn point(word: i16) -> (f64, f64) {
 }
 
 /// Bits a second on the line, and of frames.
+#[cfg(test)]
 fn rates(fs: f64) -> (f64, f64) {
+    rates_of(fs, PARITY)
+}
+
+fn rates_of(fs: f64, parity: u8) -> (f64, f64) {
     let superframe = (SYNC + BLOCK) as f64 / fs;
-    ((16 * BLOCK) as f64 / superframe, (8 * layout().payload()) as f64 / superframe)
+    ((16 * BLOCK) as f64 / superframe, (8 * layout_of(parity).payload()) as f64 / superframe)
 }
 
 /// The transmitter.
@@ -108,18 +131,20 @@ pub struct Tx {
     at: usize,
     block: Vec<u8>,
     wanting: bool,
+    /// Check octets a codeword under each mark, as the far end asked.
+    parity: [u8; 4],
 }
 
 impl Tx {
     /// A transmitter for a line of exact samples at `fs` a second.
     pub fn new(fs: f64) -> Self {
-        Self { fs, sync: (0..4).map(sync).collect(), id: 0, next: None, at: 0, block: Vec::new(), wanting: true }
+        Self { fs, sync: (0..4).map(sync).collect(), id: 0, next: None, at: 0, block: Vec::new(), wanting: true, parity: [PARITY; 4] }
     }
 }
 
 impl Sender for Tx {
     fn wants(&self) -> Option<Layout> {
-        self.wanting.then(layout)
+        self.wanting.then(|| layout_of(self.parity[usize::from(self.id & 3)]))
     }
 
     fn give(&mut self, line: Vec<u8>) {
@@ -151,10 +176,16 @@ impl Sender for Tx {
         f64::from(word) / 32768.0
     }
 
-    fn adopt(&mut self, id: u8, _table: Table) {
-        // There is one table. The mark is still changed, because the mark
-        // is how the far end knows it was heard.
-        self.next = Some(id & 3);
+    fn adopt(&mut self, id: u8, table: Table) {
+        // All a table says here is how many check octets a codeword has.
+        // The mark changes with it, which is how the far end knows it was
+        // heard; and the first mark is always the full count, since that is
+        // what both ends start from and go back to.
+        let id = id & 3;
+        if id != 0 {
+            self.parity[usize::from(id)] = table.parity;
+        }
+        self.next = Some(id);
     }
 
     fn id(&self) -> u8 {
@@ -166,7 +197,7 @@ impl Sender for Tx {
     }
 
     fn rates(&self) -> (f64, f64) {
-        rates(self.fs)
+        rates_of(self.fs, self.parity[usize::from(self.id & 3)])
     }
 
     fn clipped(&self) -> u64 {
@@ -193,6 +224,12 @@ pub struct Rx {
     points: Vec<(f64, f64)>,
     proposed: bool,
     proposal: Option<Table>,
+    /// Check octets a codeword under each mark, as this end asked.
+    parity: [u8; 4],
+    /// How many were last asked for, and blocks in a row since anything
+    /// went missing.
+    asked: u8,
+    clean: usize,
     /// Blocks that arrived, and octets in them that were holes.
     pub blocks: u64,
     pub erased: u64,
@@ -214,6 +251,9 @@ impl Rx {
             points: Vec::new(),
             proposed: false,
             proposal: None,
+            parity: [PARITY; 4],
+            asked: PARITY,
+            clean: 0,
             blocks: 0,
             erased: 0,
             losses: 0,
@@ -229,6 +269,30 @@ impl Rx {
             // there is without looking at the other sixty-three.
             word[SYNC - 1] == newest && self.recent.iter().zip(word).all(|(a, b)| a == b)
         })
+    }
+
+    /// Ask for the full count of check octets, unless that is what was
+    /// asked for last.
+    fn strong(&mut self) {
+        self.clean = 0;
+        if self.asked != PARITY {
+            self.asked = PARITY;
+            self.proposal = Some(table());
+        }
+    }
+
+    /// A block has arrived, with a hole in it or without: what that says
+    /// about how many check octets the next ones want.
+    fn judge(&mut self, hole: bool, light: u8) {
+        if hole {
+            self.strong();
+            return;
+        }
+        self.clean += 1;
+        if self.clean >= CLEAN && self.asked != light {
+            self.asked = light;
+            self.proposal = Some(table_of(light));
+        }
     }
 
     fn found(&mut self, mark: u8) {
@@ -260,8 +324,11 @@ impl Rx {
             }
         }
         self.blocks += 1;
-        self.erased += erased.iter().filter(|e| **e).count() as u64;
-        self.arrived.push_back(Arrived::Octets { line, layout: layout(), erased: Some(erased) });
+        let holes = erased.iter().filter(|e| **e).count();
+        self.erased += holes as u64;
+        self.judge(holes > 0, LIGHT);
+        let layout = layout_of(self.parity[usize::from(self.id.unwrap_or(0) & 3)]);
+        self.arrived.push_back(Arrived::Octets { line, layout, erased: Some(erased) });
     }
 }
 
@@ -318,19 +385,27 @@ impl Receiver for Rx {
         self.proposal.take()
     }
 
-    fn expect(&mut self, _id: u8, _table: Table) {}
+    fn expect(&mut self, id: u8, table: Table) {
+        if id & 3 != 0 {
+            self.parity[usize::from(id & 3)] = table.parity;
+        }
+    }
 
     fn id(&self) -> Option<u8> {
         self.id
     }
 
     fn back_off(&mut self, _db: f64) {
-        // There is nothing lower to ask for. What is failing is the path,
-        // and that is for whoever chose this mode to notice.
+        // Codewords are failing: the full count of check octets, if that
+        // is not what is in use. Past that there is nothing lower to ask
+        // for; what is failing is the path, and that is for whoever chose
+        // this mode to notice.
+        self.strong();
     }
 
     fn remeasure(&mut self, _db: f64) {
-        self.proposal = Some(table());
+        self.asked = LIGHT;
+        self.strong();
     }
 
     fn health(&self) -> Health {
@@ -340,11 +415,14 @@ impl Receiver for Rx {
     }
 
     fn rates(&self) -> (f64, f64) {
-        if self.id.is_some() { rates(self.fs) } else { (0.0, 0.0) }
+        match self.id {
+            Some(id) => rates_of(self.fs, self.parity[usize::from(id & 3)]),
+            None => (0.0, 0.0),
+        }
     }
 
     fn code(&self) -> Option<(usize, usize)> {
-        self.id.map(|_| layout().code())
+        self.id.map(|id| layout_of(self.parity[usize::from(id & 3)]).code())
     }
 
     fn spectrum(&self) -> Vec<Bin> {

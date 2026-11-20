@@ -266,6 +266,63 @@ fn on_a_linear_call(gain: f64, seconds: f64) -> (Modem, Modem, String, String) {
     (caller, host, Pair::said(&at_caller), Pair::said(&at_host))
 }
 
+/// Two modems on a SIP call in G.711: 8000 codewords a second, each
+/// arriving as the level it is, which for mu-law's two noughts is the same
+/// one; or every level moved a little, as a call that is recoded on the way
+/// has them.
+fn on_a_g711_call(a_law: bool, recoded: bool, seconds: f64) -> (Modem, Modem, String, String) {
+    let mut caller = Modem::new(16_000.0);
+    let mut host = Modem::new(16_000.0);
+    type_at(&mut caller, "AT+MS=VARC\r");
+    type_at(&mut host, "AT+MS=VARC\rATA\r");
+    type_at(&mut caller, "ATD100\r");
+    let carry = |x: f64| if recoded { 0.93 * x + 0.0007 } else { x };
+    let (mut from_caller, mut from_host) = ([0.0], [0.0]);
+    let (mut at_caller, mut at_host) = (Vec::new(), Vec::new());
+    let mut typed = false;
+    for _ in 0..(seconds * 8000.0) as usize {
+        let (to_host, to_caller) = ([carry(from_caller[0])], [carry(from_host[0])]);
+        // As a line does it: told what it is before every block, and
+        // stepped only while the call is still V.ARC's.
+        for (modem, heard, said) in [(&mut caller, &to_caller, &mut from_caller), (&mut host, &to_host, &mut from_host)] {
+            if modem.varc_wanted().is_some() {
+                modem.varc_codeword_line(Some(a_law));
+                modem.varc_step(8000.0, heard, said);
+            } else {
+                said[0] = 0.0;
+            }
+        }
+        at_caller.extend(caller.take_dte());
+        at_host.extend(host.take_dte());
+        if !typed && caller.state() == State::Data && host.state() == State::Data {
+            typed = true;
+            at_host.clear();
+            type_at(&mut caller, "codewords that are the data");
+        }
+    }
+    (caller, host, Pair::said(&at_caller), Pair::said(&at_host))
+}
+
+#[test]
+fn on_a_call_in_g711_the_codewords_are_the_data_in_either_law() {
+    for a_law in [true, false] {
+        let (caller, host, told, got) = on_a_g711_call(a_law, false, 4.0);
+        // Whatever was asked for: nothing else has anything to run on.
+        assert_eq!(caller.standard(), "V.ARC/G.711", "a-law {a_law}: {told}");
+        assert_eq!(host.varc_wanted(), Some(VarcMode::G711));
+        assert!(told.contains("CONNECT 48640/VARC"), "a-law {a_law}: {told}");
+        assert_eq!(got, "codewords that are the data", "a-law {a_law}");
+    }
+}
+
+#[test]
+fn a_call_in_g711_that_is_recoded_carries_on_as_an_ordinary_one() {
+    let (caller, host, told, _) = on_a_g711_call(true, true, 12.0);
+    assert_eq!(caller.varc_wanted(), None, "{told}");
+    assert_eq!(host.varc_wanted(), None);
+    assert!(!told.contains("CONNECT"), "{told}");
+}
+
 #[test]
 fn on_a_call_of_exact_samples_the_samples_are_the_data() {
     let (caller, host, told, got) = on_a_linear_call(1.0, 3.0);
@@ -300,7 +357,7 @@ fn a_call_answered_in_g711_becomes_an_ordinary_call() {
     assert!(modem.off_hook());
     assert_eq!(modem.standard(), "V.8");
     assert_eq!(modem.modulation(), "V92");
-    assert!(modem.take_line_notes().iter().any(|n| n.contains("G.711")));
+    assert!(modem.take_line_notes().iter().any(|n| n.contains("cannot carry it")));
     // It makes sound again through the ordinary door.
     let loud = (0..16_000).map(|_| modem.step(0.0).abs()).fold(0.0, f64::max);
     assert!(loud > 0.0 || modem.line_phase() == "quiet", "{}", modem.line_phase());

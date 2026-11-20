@@ -9,6 +9,13 @@ binmodem.exe --capture        replay the golden capture
 
 [docs/usage.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/usage.md) has the setup.
 
+## What's new in 5.1.0
+
+- **V.ARC/G.711.** V.ARC on a SIP call in G.711, which until now quietly became an ordinary V.90 call. Between two BinModems on a direct call the 8-bit codewords arrive as they were sent, so they are the data, in both directions alike: 60 928 bit/s each way in A-law and 56 832 in mu-law, where V.90 on the same call is 56 000 down and 31 200 up. Any of the three V.ARC modes becomes it on such a call. If something on the way recodes the call, or the far end is not V.ARC, it carries on as an ordinary call after four seconds. mu-law is the slower because it has two codewords for nought that arrive as one.
+- **The direct modes stop spending a fifth of the line on check octets.** V.ARC/L16 and V.ARC/G.711 carried forty-eight check octets a codeword, enough to rebuild a lost packet, whether or not any packet was being lost: the code rate sat at 0.80. After five seconds with nothing missing they now ask for none, and go back to the full count the moment a packet is lost. V.ARC/L16 at 48 kHz: 744 186 bit/s where it was 601 302.
+- **Code rates of 0.99 and 1.0 for every mode.** Two check octets a codeword, and none. The receiver asks for them when the line has more in hand than its grid can use. On two virtual cables V.ARC/DMT took 0.99 and went from 404 534 to 432 941 bit/s, and V.ARC/QAM from 348 000 to 353 500. With no check octets a frame that arrives wrong is sent again, and one that does counts against the code as a failed codeword would.
+- **EasySip through a router, by UPnP.** A tick box on the EasySip row: the router is asked for its outside address and to forward this end's two ports, the far end is told that address, and the transcript says what to give the other end. The ports close when the line does. Not used for a far end on this network. Tested as far as the router, which listed the port while it was open and not after; no call across the internet has been made with it.
+
 ## What's new in 5.0.1
 
 ![The slicer's signal to noise on V.ARC/QAM and V.ARC/PCM, 5.0.0 and now](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/v-arc/snr-steady.png)
