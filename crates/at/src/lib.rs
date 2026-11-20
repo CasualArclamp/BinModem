@@ -300,6 +300,10 @@ pub struct Config {
     /// and which: nought not at all, one the multicarrier mode, two QAM,
     /// three PCM; and whether on one pair of wires. Not V.250's.
     pub varc_bis: (u8, bool),
+    /// +VARCZ — what a V.ARC call may compress its stream with: 0 nothing,
+    /// 1 V.42bis and V.44 as `+DS` and `+DS44` allow them, 2 those and the
+    /// long-history compressor of its own as well.
+    pub varc_z: u8,
 }
 
 impl Default for Config {
@@ -318,6 +322,7 @@ impl Default for Config {
             report_compression: false,
             varc: (0, 0, 0),
             varc_bis: (0, false),
+            varc_z: 2,
         }
     }
 }
@@ -1022,6 +1027,28 @@ impl Interpreter {
         }
     }
 
+    /// `+VARCZ=<n>`: this modem's own. Compression of a V.ARC call's
+    /// stream, which has no V.42 under it for `+DS` to be about.
+    fn varc_z_select(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
+        match op {
+            ExtOp::Read | ExtOp::Execute => {
+                self.fmt.info(&format!("+VARCZ: {}", self.config.varc_z), &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Test => {
+                self.fmt.info("+VARCZ: (0-2)", &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Set(value) => {
+                self.config.varc_z = match value.trim() {
+                    "" => self.config.varc_z,
+                    v => v.parse::<u8>().ok().filter(|n| *n <= 2).ok_or(ResultCode::Error)?,
+                };
+                Ok(None)
+            }
+        }
+    }
+
     fn v44_select(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
         match op {
             ExtOp::Read => {
@@ -1129,6 +1156,7 @@ impl Interpreter {
             "DS44" => return self.v44_select(op),
             "VARC" => return self.varc_select(op),
             "VARCBIS" => return self.varc_bis_select(op),
+            "VARCZ" => return self.varc_z_select(op),
             "A8E" => return self.v8_controls(op),
             // V.250 6.5.5 and 6.6.3. The same parameter twice over: one bit,
             // defaulting to off, saying whether the DCE should report what it

@@ -9,6 +9,14 @@ binmodem.exe --capture        replay the golden capture
 
 [docs/usage.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/usage.md) has the setup.
 
+## What's new in 5.2.0
+
+- **V.ARC compresses.** A V.ARC call had no compression at all: `+DS` and `+DS44` are about V.42, and V.ARC has its own retransmission in place of V.42. Its stream is now compressed with the best method both ends have, each direction for itself, and the window says which and what it has been worth.
+- **LZ, a compressor of its own**, in LZMA's manner: matches against the last 256 kilobytes, and everything coded by a range coder with probabilities learnt as it goes. Text goes in under a third and tables of records in about a seventh; what will not compress costs a fiftieth more. It is not LZMA's format and reads no `.lzma` or `.xz` file.
+- **V.44 and V.42bis** as well, with their largest dictionaries, for whichever of `+DS44` and `+DS` is on.
+- **`AT+VARCZ=<n>`**: 0 for none, 1 for V.44 and V.42bis only, 2 (as it comes) for LZ as well.
+- **The two ends agree while the call runs**, with a frame an older build ignores, so a call to one of those is carried as it was. An end holds back what is written for one round trip while the far end learns where the compressed stream begins.
+
 ## What's new in 5.1.0
 
 - **V.ARC/G.711.** V.ARC on a SIP call in G.711, which until now quietly became an ordinary V.90 call. Between two BinModems on a direct call the 8-bit codewords arrive as they were sent, so they are the data, in both directions alike: 60 928 bit/s each way in A-law and 56 832 in mu-law, where V.90 on the same call is 56 000 down and 31 200 up. Any of the three V.ARC modes becomes it on such a call. If something on the way recodes the call, or the far end is not V.ARC, it carries on as an ordinary call after four seconds. mu-law is the slower because it has two codewords for nought that arrive as one.

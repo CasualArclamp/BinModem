@@ -41,7 +41,14 @@ jobs:
       # The suite is the whole argument that this is a modem rather than a
       # program that compiles: handshakes, framing, dictionaries, and a real
       # Bell 103 call decoded to its known plaintext.
+      # Optimised, because most of it is signal processing and unoptimised
+      # it took eighty minutes. Debug assertions and overflow checks stay
+      # on: only the optimiser is turned up, and only here, so a build on
+      # somebody's own machine is as quick to make as it was.
       - name: Tests
+        env:
+          CARGO_PROFILE_DEV_OPT_LEVEL: 2
+          CARGO_PROFILE_TEST_OPT_LEVEL: 2
         run: cargo test --workspace
 
   # Nobody develops this on Linux and people run it there, so the least CI

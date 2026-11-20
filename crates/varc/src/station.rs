@@ -33,6 +33,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use crate::frame::{Packer, Unpacker};
 use crate::link::{Report, Arrived, Receiver, Sender, Table};
+use crate::squeeze::Squeeze;
 
 /// "Send with this table": a mark, then the table.
 const TABLE: u8 = 2;
@@ -49,6 +50,9 @@ const LEVEL: u8 = 7;
 /// A table for another channel than the one it came in on: the channel's
 /// number, then what a TABLE frame holds.
 const TABLE_FOR: u8 = 8;
+/// What this end can compress the stream with, and where it begins to:
+/// see [`crate::squeeze`]. An end that does not know the kind ignores it.
+const SQUEEZE: u8 = 9;
 
 /// A sample this near full scale is the converter at its stops.
 const FULL_SCALE: f64 = 0.999;
@@ -99,6 +103,9 @@ pub struct Arq {
     pub sent: u64,
     /// Octets of the stream delivered in order.
     pub delivered: u64,
+    /// Compression of the stream, above the numbering: what is numbered
+    /// and sent again is what it turned the stream into.
+    pub squeeze: Squeeze,
 }
 
 impl Arq {
@@ -116,20 +123,29 @@ impl Arq {
             resent: 0,
             sent: 0,
             delivered: 0,
+            squeeze: Squeeze::new(0),
         }
     }
 
     pub fn write(&mut self, octets: &[u8]) {
-        self.outbox.extend(octets);
+        let line = self.squeeze.write(octets);
+        self.outbox.extend(line);
     }
 
     pub fn read(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.inbox)
+        let line = std::mem::take(&mut self.inbox);
+        self.squeeze.read(line)
+    }
+
+    /// The far end's word on compression.
+    fn on_squeeze(&mut self, body: &[u8]) {
+        let ready = self.squeeze.hear(body);
+        self.outbox.extend(ready);
     }
 
     /// Octets written and not yet acknowledged by the far end.
     pub fn pending(&self) -> usize {
-        self.outbox.len() + self.unacked.iter().filter(|s| !s.acked).map(|s| s.body.len() - 4).sum::<usize>()
+        self.squeeze.held() + self.outbox.len() + self.unacked.iter().filter(|s| !s.acked).map(|s| s.body.len() - 4).sum::<usize>()
     }
 
     /// The round trip as last measured, in seconds.
@@ -155,6 +171,9 @@ impl Arq {
                 body.extend_from_slice(&map);
             }
             return Some((ACK, body));
+        }
+        if let Some(body) = self.squeeze.say(now, self.fs) {
+            return Some((SQUEEZE, body));
         }
         // Twice the round trip and a little, or at once if the far end has
         // been seen to have a later frame without this one.
@@ -529,6 +548,7 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
                 }
                 DATA => arq.on_data(&body),
                 ACK => arq.on_ack(now, &body),
+                SQUEEZE => arq.on_squeeze(&body),
                 _ => {}
             }
         }
@@ -635,7 +655,7 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
             let live = self.rx.health().locked || self.sends_loaded();
             while live && self.packer.backlog() < room {
                 match arq.next_frame(now, chunk) {
-                    Some((ACK, body)) => self.packer.push_urgent(ACK, &body),
+                    Some((kind @ (ACK | SQUEEZE), body)) => self.packer.push_urgent(kind, &body),
                     Some((kind, body)) => self.packer.push(kind, &body),
                     None => break,
                 }
@@ -731,6 +751,13 @@ impl<T: Sender, R: Receiver> Station<T, R> {
             };
             *y = self.channels[i].speak(&mut self.arq, self.now, &others);
         }
+    }
+
+    /// The methods this end will compress the stream with if the far end
+    /// has them too, as [`crate::squeeze`]'s bits. None unless this is
+    /// called.
+    pub fn compress(&mut self, can: u8) {
+        self.arq.squeeze.offer(can);
     }
 
     /// Octets for the far end.

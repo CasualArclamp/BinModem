@@ -314,6 +314,21 @@ end's address. One dials; the other presses Answer when it rings.
 
 An account in the SIP file gets the same codings with `linear = yes`.
 
+### Compression on a V.ARC call
+
+A V.ARC call compresses what the terminal sends, with whichever method both
+ends have: LZ (BinModem's own, the strongest), V.44 or V.42bis. The
+"Compression" line in the scopes says which is in use each way and what it
+has saved.
+
+- `AT+VARCZ=2` is how it comes: all three, LZ preferred.
+- `AT+VARCZ=1` leaves LZ out: V.44 if `+DS44` is on, V.42bis if `+DS` is.
+- `AT+VARCZ=0` turns it off.
+
+It makes no difference to data that is already compressed, and both ends
+have to be 5.2 or later; with an older build the call is simply not
+compressed.
+
 ### A robbed bit, for testing
 
 No SIP call has robbed-bit signalling on it, so there is a switch that puts

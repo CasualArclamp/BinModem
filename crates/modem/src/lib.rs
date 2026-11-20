@@ -1944,6 +1944,33 @@ impl Modem {
         points
     }
 
+    /// What a V.ARC call's stream is compressed with, sending and then
+    /// receiving -- `"none"` until the two ends have agreed -- and the
+    /// octets before and after each way: written and sent, delivered and
+    /// received. `None` on any other call.
+    pub fn varc_compression(&self) -> Option<(&'static str, &'static str, [u64; 4])> {
+        let ((out, back), counts) = self.varc.as_ref()?.compression()?;
+        Some((::varc::squeeze::name(out), ::varc::squeeze::name(back), counts))
+    }
+
+    /// What a V.ARC call may compress its stream with, by `+VARCZ`, `+DS`
+    /// and `+DS44`, as `varc::squeeze`'s bits.
+    fn varc_compressors(&self) -> u8 {
+        use ::varc::squeeze::{LZ, V42BIS, V44};
+        let level = self.at.config.varc_z;
+        let mut can = 0;
+        if level >= 1 && self.at.compression.wanted() {
+            can |= V42BIS;
+        }
+        if level >= 1 && self.at.v44.wanted() {
+            can |= V44;
+        }
+        if level >= 2 {
+            can |= LZ;
+        }
+        can
+    }
+
     /// The Reed-Solomon code a V.ARC call is receiving with, (n, k): octets
     /// a codeword and how many of them are data. It follows the table, which
     /// the two ends change as the line is measured. `None` on any other
@@ -2168,7 +2195,12 @@ impl Modem {
                     self.rate = rx;
                     self.transmit_rate = tx;
                 }
-                if call.deaf_seconds() > VARC_DEAF_SECONDS {
+                if call.compression_broke() {
+                    // What arrives can no longer be turned back into what
+                    // was written, and nothing after it can be either.
+                    self.line_notes.push("V.ARC: the far end's compressed stream stopped making sense".to_owned());
+                    self.end_call(Ended::CarrierLost);
+                } else if call.deaf_seconds() > VARC_DEAF_SECONDS {
                     self.end_call(Ended::CarrierLost);
                 }
             }
@@ -3033,6 +3065,7 @@ impl Modem {
             call.two_wire(self.at.modulation.carrier.ends_with("2W"));
             let (baud, code, bits) = self.at.config.varc;
             call.ask_for(baud, code, bits);
+            call.compress(self.varc_compressors());
             self.varc = Some(call);
             return;
         }
@@ -3380,6 +3413,7 @@ impl Modem {
         call.two_wire(two_wire);
         let (baud, code, bits) = self.at.config.varc;
         call.ask_for(baud, code, bits);
+        call.compress(self.varc_compressors());
         self.varc = Some(call);
     }
 

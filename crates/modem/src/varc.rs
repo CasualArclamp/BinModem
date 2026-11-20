@@ -210,6 +210,8 @@ pub(crate) struct Call {
     g711: Option<Law>,
     /// And was found not to after all, so that it is not tried again.
     inexact: bool,
+    /// What the stream may be compressed with: `varc::squeeze`'s bits.
+    squeeze: u8,
     /// A line of codewords that turned out not to carry them has nothing
     /// else V.ARC can run on, and the call is to go on as an ordinary one.
     gave_up: bool,
@@ -272,6 +274,7 @@ impl Call {
             exact_line: false,
             g711: None,
             inexact: false,
+            squeeze: 0,
             gave_up: false,
             notes: Vec::new(),
         }
@@ -293,6 +296,26 @@ impl Call {
             self.g711 = law;
             self.station = None;
         }
+    }
+
+    /// What the stream may be compressed with, if the far end has it too.
+    pub fn compress(&mut self, can: u8) {
+        self.squeeze = can;
+        if let Some(station) = self.station.as_mut() {
+            station.compress(can);
+        }
+    }
+
+    /// What each direction's stream is compressed with, sending and then
+    /// receiving, and the octets before and after each way.
+    pub fn compression(&self) -> Option<((u8, u8), [u64; 4])> {
+        let squeeze = &self.station.as_ref()?.arq.squeeze;
+        Some((squeeze.methods(), [squeeze.plain_out, squeeze.coded_out, squeeze.plain_in, squeeze.coded_in]))
+    }
+
+    /// Whether the far end's compressed stream stopped making sense.
+    pub fn compression_broke(&self) -> bool {
+        self.station.as_ref().is_some_and(|s| s.arq.squeeze.broken())
     }
 
     /// Whether the call has found it cannot be a V.ARC call at all.
@@ -656,6 +679,7 @@ impl Call {
         }
         let mut station = Station::new(fs, pairs);
         station.level_is_fixed(matches!(self.mode, VarcMode::Linear | VarcMode::G711));
+        station.compress(self.squeeze);
         Ok(station)
     }
 
