@@ -1938,7 +1938,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 let mut exact = Vec::with_capacity(from_network.len());
                 for &level in &from_network {
                     let mut out = [0.0f64];
-                    modem.varc_step(sip::media::LINEAR_RATE, &[f64::from(level)], &mut out);
+                    modem.varc_step(sip.linear_rate(), &[f64::from(level)], &mut out);
                     exact.push(out[0] as f32);
                 }
                 for text in modem.take_line_notes() {

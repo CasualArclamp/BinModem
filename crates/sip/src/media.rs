@@ -58,15 +58,20 @@ use crate::rtp;
 /// there is no other option in this crate.
 pub const NETWORK_RATE: f64 = 8000.0;
 
-/// The rate of a linear call's samples: L16 at 16 kHz, the only linear
-/// coding this agent agrees to (see [`crate::sdp::offer_with`]).
+/// The rate of a linear call's samples unless the call says otherwise: L16
+/// at 16 kHz, the first linear coding this agent had. What a call agreed
+/// to is [`Media::linear_rate`] (see [`crate::sdp::LINEAR_FORMATS`]).
 pub const LINEAR_RATE: f64 = 16_000.0;
 
-/// Levels to L16: sixteen bits, most significant octet first.
-fn encode_linear(levels: &[f32], out: &mut Vec<u8>) {
+/// Levels to L16: sixteen bits, most significant octet first, and the same
+/// sample on every one of `channels`. A call with two channels carries one
+/// signal twice; see [`Media::connect_linear`].
+fn encode_linear(levels: &[f32], channels: usize, out: &mut Vec<u8>) {
     for &level in levels {
         let sample = (f64::from(level) * 32768.0).round().clamp(-32768.0, 32767.0) as i16;
-        out.extend_from_slice(&sample.to_be_bytes());
+        for _ in 0..channels.max(1) {
+            out.extend_from_slice(&sample.to_be_bytes());
+        }
     }
 }
 
@@ -266,9 +271,12 @@ struct Shared {
     /// How many codewords go in one packet.
     packet_octets: AtomicU64,
     running: AtomicBool,
-    /// The call is L16 at 16 kHz and not G.711: two octets to a sample,
-    /// most significant first, and no law.
+    /// The call is L16 and not G.711: two octets to a sample, most
+    /// significant first, and no law.
     linear: AtomicBool,
+    /// A linear call's samples a second, and its channels.
+    linear_rate: AtomicU64,
+    linear_channels: AtomicU8,
     connected: AtomicBool,
     /// Whether the modem has put anything on this call yet, which is what
     /// tells an underrun that cut into a handshake from one sent while the
@@ -302,6 +310,9 @@ struct Conversion {
     linear_up: Resampler,
     linear_down: Resampler,
     same_rate: bool,
+    /// The modem's own rate, to make those two again for a call at another
+    /// linear rate.
+    modem_rate: f64,
     codewords: Vec<u8>,
     at_network_rate: Vec<f32>,
     scratch: Vec<f64>,
@@ -345,6 +356,8 @@ impl Media {
             packet_octets: AtomicU64::new(160),
             running: AtomicBool::new(true),
             linear: AtomicBool::new(false),
+            linear_rate: AtomicU64::new(LINEAR_RATE as u64),
+            linear_channels: AtomicU8::new(1),
             connected: AtomicBool::new(false),
             spoke: AtomicBool::new(false),
             packets_sent: AtomicU64::new(0),
@@ -380,6 +393,7 @@ impl Media {
                 linear_up: Resampler::new(LINEAR_RATE, modem_rate),
                 linear_down: Resampler::new(modem_rate, LINEAR_RATE),
                 same_rate: (modem_rate - LINEAR_RATE).abs() < 0.5,
+                modem_rate,
                 codewords: Vec::with_capacity(2048),
                 at_network_rate: Vec::with_capacity(2048),
                 scratch: Vec::with_capacity(64),
@@ -415,16 +429,48 @@ impl Media {
         self.connect_as(remote, payload_type, octets, false);
     }
 
-    /// [`Self::connect`] for a call that agreed on L16 at 16 kHz: linear
-    /// samples of two octets, which go and come exactly as they are.
-    pub fn connect_linear(&self, remote: SocketAddr, payload_type: u8, ptime_ms: u32) {
-        let samples = ((LINEAR_RATE * f64::from(ptime_ms) / 1000.0).round() as u64).max(160);
-        self.connect_as(remote, payload_type, samples * 2, true);
+    /// [`Self::connect`] for a call that agreed on L16 at `rate` on
+    /// `channels` channels: linear samples of two octets, which go and come
+    /// exactly as they are.
+    ///
+    /// Two channels carry one signal. What is sent is the same sample on
+    /// both, and what is heard is their mean, which for a far end doing the
+    /// same is the sample it sent, to the bit.
+    ///
+    /// A packet is the packet time whatever the rate, as it is for every
+    /// softphone that has these codings, so at 44.1 and 48 kHz it is more
+    /// octets than an Ethernet frame holds and the network sends it in
+    /// pieces.
+    pub fn connect_linear(&self, remote: SocketAddr, payload_type: u8, ptime_ms: u32, rate: u32, channels: u8) {
+        let channels = channels.clamp(1, 2);
+        let rate = rate.max(8000);
+        let samples = ((f64::from(rate) * f64::from(ptime_ms) / 1000.0).round() as u64).max(80);
+        let was = (self.shared.linear_rate.swap(u64::from(rate), Ordering::Relaxed), self.linear());
+        self.shared.linear_channels.store(channels, Ordering::Relaxed);
+        if was != (u64::from(rate), true)
+            && let Ok(mut conversion) = self.conversion.lock()
+        {
+            let modem_rate = conversion.modem_rate;
+            conversion.linear_up = Resampler::new(f64::from(rate), modem_rate);
+            conversion.linear_down = Resampler::new(modem_rate, f64::from(rate));
+            conversion.same_rate = (modem_rate - f64::from(rate)).abs() < 0.5;
+        }
+        self.connect_as(remote, payload_type, samples * 2 * u64::from(channels), true);
     }
 
     /// Whether the call is linear rather than G.711.
     pub fn linear(&self) -> bool {
         self.shared.linear.load(Ordering::Relaxed)
+    }
+
+    /// Samples a second of a linear call, on each of its channels.
+    pub fn linear_rate(&self) -> f64 {
+        self.shared.linear_rate.load(Ordering::Relaxed) as f64
+    }
+
+    /// Channels of a linear call.
+    pub fn linear_channels(&self) -> usize {
+        usize::from(self.shared.linear_channels.load(Ordering::Relaxed))
     }
 
     fn connect_as(&self, remote: SocketAddr, payload_type: u8, octets: u64, linear: bool) {
@@ -573,8 +619,18 @@ impl Media {
             // Two octets a sample, most significant first (RFC 3551 4.5.11).
             // A sixteen-bit integer over 32768 is exact in a float, so what
             // comes out here is what the far end put in, to the bit.
-            for pair in conversion.codewords.as_chunks::<2>().0 {
-                conversion.at_network_rate.push(f32::from(i16::from_be_bytes(*pair)) / 32768.0);
+            if self.linear_channels() == 2 {
+                // One signal on two channels: their mean, which is exact
+                // when they are the same and the best there is when not.
+                for four in conversion.codewords.as_chunks::<4>().0 {
+                    let left = i32::from(i16::from_be_bytes([four[0], four[1]]));
+                    let right = i32::from(i16::from_be_bytes([four[2], four[3]]));
+                    conversion.at_network_rate.push(((left + right) as f32 / 2.0) / 32768.0);
+                }
+            } else {
+                for pair in conversion.codewords.as_chunks::<2>().0 {
+                    conversion.at_network_rate.push(f32::from(i16::from_be_bytes(*pair)) / 32768.0);
+                }
             }
         } else {
             g711::decode_into(law, &conversion.codewords, &mut conversion.at_network_rate);
@@ -620,7 +676,7 @@ impl Media {
         }
         conversion.codewords.clear();
         if linear {
-            encode_linear(&conversion.at_network_rate, &mut conversion.codewords);
+            encode_linear(&conversion.at_network_rate, self.linear_channels(), &mut conversion.codewords);
         } else {
             g711::encode_into(law, &conversion.at_network_rate, &mut conversion.codewords);
         }
@@ -645,7 +701,7 @@ impl Media {
         let conversion = &mut *conversion;
         conversion.codewords.clear();
         if self.linear() {
-            encode_linear(levels, &mut conversion.codewords);
+            encode_linear(levels, self.linear_channels(), &mut conversion.codewords);
         } else {
             g711::encode_into(law, levels, &mut conversion.codewords);
         }
@@ -730,7 +786,8 @@ impl Drop for Media {
 
 /// The reader: datagrams in, payloads into the buffer, nothing else.
 fn read(shared: Arc<Shared>, socket: UdpSocket) {
-    let mut buffer = vec![0u8; 2048];
+    // A linear call at 48 kHz on two channels is 3840 octets every 20 ms.
+    let mut buffer = vec![0u8; 16384];
     while shared.running.load(Ordering::Relaxed) {
         let Ok((n, from)) = socket.recv_from(&mut buffer) else {
             continue;
@@ -850,8 +907,14 @@ fn pace(shared: Arc<Shared>, socket: UdpSocket) {
     while shared.running.load(Ordering::Relaxed) {
         let octets = shared.packet_octets.load(Ordering::Relaxed) as usize;
         let linear = shared.linear.load(Ordering::Relaxed);
-        // Octets a second: one a sample at 8 kHz, or two at 16 kHz.
-        let octet_rate = if linear { 2.0 * LINEAR_RATE } else { NETWORK_RATE };
+        // Octets a second: one a sample at 8 kHz, or two a sample a channel
+        // at the linear call's rate.
+        let frame = 2 * usize::from(shared.linear_channels.load(Ordering::Relaxed)).max(1);
+        let octet_rate = if linear {
+            frame as f64 * shared.linear_rate.load(Ordering::Relaxed) as f64
+        } else {
+            NETWORK_RATE
+        };
         let interval = Duration::from_secs_f64(octets as f64 / octet_rate);
         let now = Instant::now();
         if now < due {
@@ -952,7 +1015,7 @@ fn pace(shared: Arc<Shared>, socket: UdpSocket) {
             }
         }
 
-        let samples = if linear { payload.len() / 2 } else { payload.len() };
+        let samples = if linear { payload.len() / frame } else { payload.len() };
         sender.next_of(&payload, first, samples as u32, &mut datagram);
         first = false;
         if socket.send_to(&datagram, remote).is_ok() {
@@ -972,11 +1035,26 @@ mod tests {
     /// at 16 kHz, with no law and no rate conversion anywhere between.
     #[test]
     fn a_linear_call_carries_every_sample_exactly() {
-        let near = Media::open(0, 16_000.0).unwrap();
-        let far = Media::open(0, 16_000.0).unwrap();
+        exactly(16_000, 1);
+    }
+
+    /// And at the other rates, and on two channels, where a packet at
+    /// 48 kHz is more than one Ethernet frame.
+    #[test]
+    fn a_linear_call_at_any_of_its_rates_carries_every_sample_exactly() {
+        for (rate, channels) in [(8_000, 2), (44_100, 1), (48_000, 1), (48_000, 2)] {
+            exactly(rate, channels);
+        }
+    }
+
+    fn exactly(rate: u32, channels: u8) {
+        let near = Media::open(0, f64::from(rate)).unwrap();
+        let far = Media::open(0, f64::from(rate)).unwrap();
         let to = |m: &Media| SocketAddr::from(([127, 0, 0, 1], m.local_port()));
-        near.connect_linear(to(&far), 96, 20);
-        far.connect_linear(to(&near), 96, 20);
+        near.connect_linear(to(&far), 96, 20, rate, channels);
+        far.connect_linear(to(&near), 96, 20, rate, channels);
+        assert_eq!((far.linear_rate(), far.linear_channels()), (f64::from(rate), usize::from(channels)));
+        let packet = rate as usize / 50;
         assert!(near.linear() && far.linear());
         assert_eq!(far.stats().law, Some("L16"));
 
@@ -988,10 +1066,10 @@ mod tests {
         let (mut modem, mut network) = (Vec::new(), Vec::new());
         let started = Instant::now();
         let mut offered = 0;
-        while got.len() < sent.len() + 16_000 && started.elapsed() < Duration::from_secs(20) {
+        while got.len() < sent.len() + rate as usize && started.elapsed() < Duration::from_secs(30) {
             // A packet's worth at a time, at the pace a call would go.
-            if offered < levels.len() && offered as f64 <= started.elapsed().as_secs_f64() * 16_000.0 {
-                let end = (offered + 320).min(levels.len());
+            if offered < levels.len() && offered as f64 <= started.elapsed().as_secs_f64() * f64::from(rate) {
+                let end = (offered + packet).min(levels.len());
                 near.transmit_exact(&levels[offered..end]);
                 offered = end;
             }
@@ -1002,15 +1080,15 @@ mod tests {
             assert_eq!(modem, network);
             got.extend(network.iter().map(|l| (l * 32768.0) as i16));
             thread::sleep(Duration::from_millis(2));
-            if offered == levels.len() && got.len() >= sent.len() && got.ends_with(&[0; 640]) {
+            if offered == levels.len() && got.len() >= sent.len() && got.ends_with(&vec![0; 2 * packet]) {
                 break;
             }
         }
         // Silence before the first sample and after the last, and between
         // them exactly what was sent.
         let first = got.iter().position(|&v| v == sent[1]).expect("the stream arrived") - 1;
-        assert!(got.len() >= first + sent.len(), "{} of {} samples", got.len() - first, sent.len());
-        assert!(got[first..first + sent.len()] == sent[..]);
+        assert!(got.len() >= first + sent.len(), "{rate}/{channels}: {} of {} samples", got.len() - first, sent.len());
+        assert!(got[first..first + sent.len()] == sent[..], "{rate}/{channels}");
         assert_eq!(far.stats().jitter.lost, 0);
     }
 
@@ -1019,7 +1097,7 @@ mod tests {
         let media = Media::open(0, 16_000.0).unwrap();
         let far = UdpSocket::bind("127.0.0.1:0").unwrap();
         far.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-        media.connect_linear(far.local_addr().unwrap(), 96, 20);
+        media.connect_linear(far.local_addr().unwrap(), 96, 20, 16_000, 1);
         let mut buf = [0u8; 2048];
         let mut stamps = Vec::new();
         for _ in 0..3 {

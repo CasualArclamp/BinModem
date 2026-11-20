@@ -308,7 +308,7 @@ fn run(
                 let mut exact: Vec<f32> = Vec::with_capacity(levels.len());
                 for &level in &levels {
                     let mut out = [0.0];
-                    modem.varc_step(sip::media::LINEAR_RATE, &[level], &mut out);
+                    modem.varc_step(line.linear_rate(), &[level], &mut out);
                     exact.push(out[0] as f32);
                 }
                 to_line.extend_from_slice(&exact);
