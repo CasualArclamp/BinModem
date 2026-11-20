@@ -537,6 +537,9 @@ pub struct Rx {
     echo_taps: Vec<f64>,
     echo_learned: u64,
     echo_power: (f64, f64),
+    /// The resampler's ratio when this receiver last had the line measured:
+    /// one until it has.
+    good_step: f64,
     /// The far end's signal as decided, for the symbol just read, and where
     /// that symbol's window began.
     far_re: Vec<f64>,
@@ -623,6 +626,7 @@ impl Rx {
             echo_taps: vec![0.0; (ECHO_SPAN * plan.fs).round() as usize],
             echo_learned: 0,
             echo_power: (0.0, 0.0),
+            good_step: 1.0,
             far_re: vec![0.0; plan.n],
             far_im: vec![0.0; plan.n],
             last_start: 0,
@@ -677,6 +681,16 @@ impl Rx {
         self.echo_taps.fill(0.0);
         self.echo_learned = 0;
         self.echo_power = (0.0, 0.0);
+        // And the clock goes back to where it was last known to be right.
+        // A receiver that framed on something that was not a signal, a
+        // steady tone for one, has been steering its clock by nonsense, as
+        // far wrong as the clock will go; and at a thousand parts in a
+        // million out it would never find a real signal again.
+        if self.stage == Stage::Steady {
+            self.good_step = self.interp.step();
+        }
+        self.interp.set_step(self.good_step);
+        self.echo_interp.set_step(self.good_step);
         self.stage = Stage::Hunting;
         self.products.fill((0.0, 0.0));
         self.sum = (0.0, 0.0);
@@ -902,7 +916,16 @@ impl Rx {
         self.transform(start);
         if self.stage == Stage::Framing {
             let (id, quality) = self.sync_match();
-            if quality < 0.5 {
+            // A sync symbol has every carrier in it. Something with an
+            // eighth of its power on one carrier is a tone, which repeats as
+            // a symbol's guard does and can look like a sync symbol from
+            // carrier to carrier: the far end's last word in the handshake
+            // did, and a receiver that started listening before it finished
+            // framed on it.
+            let half = self.plan.half();
+            let power = |k: usize| self.re[k] * self.re[k] + self.im[k] * self.im[k];
+            let (total, most) = (1..half).map(power).fold((0.0, 0.0f64), |(sum, most), p| (sum + p, most.max(p)));
+            if quality < 0.5 || 8.0 * most > total {
                 self.next_start += span;
                 self.searched += 1;
                 if self.searched > 3 * (self.plan.symbols + 1) {

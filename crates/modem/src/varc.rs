@@ -23,6 +23,7 @@
 
 use varc::dmt::{self, Plan};
 use varc::echo::Canceller;
+use varc::hello::{Agreed, Caps, Faster, Hello, Slower, Wanted};
 use varc::exact;
 use varc::link::{Receiver, Report, Sender};
 use varc::sc::{self, Shape};
@@ -52,8 +53,8 @@ impl VarcMode {
             // The multicarrier mode on one pair of wires is the same
             // modulation behind an echo canceller.
             "VARC" | "VARC2W" => Some(Self::Dmt),
-            "VARCQ" => Some(Self::Qam),
-            "VARCP" => Some(Self::Pcm),
+            "VARCQ" | "VARCQ2W" => Some(Self::Qam),
+            "VARCP" | "VARCP2W" => Some(Self::Pcm),
             _ => None,
         }
     }
@@ -103,6 +104,14 @@ pub(crate) struct Call {
     /// Times the cancellers had found the echo somewhere new, when last
     /// looked.
     echo_moved: u64,
+    /// The end that called, and a lead that comes straight back.
+    calling: bool,
+    looped: bool,
+    /// The handshake, while it is going on, and what came of it: what the
+    /// far end said it was, and what the two will do.
+    hello: Option<Hello>,
+    agreed: Option<Agreed>,
+    far: Option<Caps>,
     samples: u64,
     /// Samples since any channel last heard the far end.
     deaf: u64,
@@ -147,6 +156,11 @@ impl Call {
             cleaned: Vec::new(),
             echo_said: 0.0,
             echo_moved: 0,
+            calling: role == Role::Calling,
+            looped,
+            hello: None,
+            agreed: None,
+            far: None,
             samples: 0,
             deaf: 0,
             first_loaded: None,
@@ -171,21 +185,53 @@ impl Call {
         self.note.take()
     }
 
-    fn build(&mut self, fs: f64, fs_out: f64, channels: usize) -> Result<End, String> {
+    /// Whether this call starts by saying what each end is. Not on a lead
+    /// that comes straight back, where there is nobody else; and not on a
+    /// line of exact samples, where the far end is known to be the same as
+    /// this one and the samples are not sound.
+    fn greets(&self) -> bool {
+        !self.looped && !(self.exact_line && !self.inexact)
+    }
+
+    /// The ends as they would be with nothing to agree: both the same.
+    fn alone(fs: f64, fs_out: f64, wanted: Wanted, two_wire: bool) -> Agreed {
+        Agreed { wanted, two_wire, send_hz: fs_out, hear_hz: fs, send_times: 1, hear_times: 1, notes: Vec::new() }
+    }
+
+    fn wanted(&self) -> Wanted {
+        match self.mode {
+            VarcMode::Qam => Wanted::Qam,
+            VarcMode::Pcm => Wanted::Pcm,
+            _ => Wanted::Dmt,
+        }
+    }
+
+    fn build(&mut self, fs: f64, agreed: &Agreed, channels: usize) -> Result<End, String> {
         // On a line of exact samples the multicarrier mode gives way to no
         // modulation at all, until that has been tried and failed.
-        if matches!(self.mode, VarcMode::Dmt | VarcMode::Linear) {
-            self.mode = if self.exact_line && !self.inexact { VarcMode::Linear } else { VarcMode::Dmt };
-        }
+        self.mode = match agreed.wanted {
+            Wanted::Qam => VarcMode::Qam,
+            Wanted::Pcm => VarcMode::Pcm,
+            Wanted::Dmt if self.exact_line && !self.inexact => VarcMode::Linear,
+            Wanted::Dmt => VarcMode::Dmt,
+        };
+        // The modulation runs at the slower card's rate each way; this end
+        // makes up the difference where its own card is the faster.
+        let (fs, fs_out, device) = (agreed.hear_hz, agreed.send_hz, fs);
+        let fit = |tx: Box<dyn Sender>, rx: Box<dyn Receiver>| -> (Box<dyn Sender>, Box<dyn Receiver>) {
+            let tx: Box<dyn Sender> = if agreed.send_times > 1 { Box::new(Faster::new(tx, agreed.send_times)) } else { tx };
+            let rx: Box<dyn Receiver> = if agreed.hear_times > 1 { Box::new(Slower::new(rx, agreed.hear_times)) } else { rx };
+            (tx, rx)
+        };
         let mut pairs: Vec<(Box<dyn Sender>, Box<dyn Receiver>)> = Vec::new();
         for c in 0..channels as u8 {
             let (sends, hears) = (self.sends + c, self.hears + c);
             match self.mode {
                 VarcMode::Linear => {
-                    pairs.push((Box::new(exact::Tx::new(fs_out)), Box::new(exact::Rx::new(fs))));
+                    pairs.push(fit(Box::new(exact::Tx::new(fs_out)), Box::new(exact::Rx::new(fs))));
                 }
                 VarcMode::Dmt => {
-                    pairs.push((
+                    pairs.push(fit(
                         Box::new(dmt::Tx::new(Plan::for_rate(fs_out).coloured(sends))),
                         Box::new(dmt::Rx::new(Plan::for_rate(fs).coloured(hears))),
                     ));
@@ -199,22 +245,24 @@ impl Call {
                             format!("{name} wants a sound card running at a multiple of 48 kHz, not {fs} Hz")
                         })
                     };
-                    pairs.push((
+                    pairs.push(fit(
                         Box::new(sc::Tx::new(shape(fs_out)?.coloured(sends))),
                         Box::new(sc::Rx::new(shape(fs)?.coloured(hears))),
                     ));
                 }
             }
         }
-        Ok(Station::new(fs, pairs))
+        Ok(Station::new(device, pairs))
     }
 
     /// One frame to send, when hearing and sending are stepped apart.
     /// Silence until something has been heard to say what the rates are.
     pub fn speak(&mut self, output: &mut [f64]) {
-        match self.station.as_mut() {
-            Some(station) => station.speak(output),
-            None => output.fill(0.0),
+        match (self.hello.as_mut(), self.station.as_mut()) {
+            // Saying what this end is: the same on every channel.
+            (Some(hello), _) => output.fill(hello.say()),
+            (None, Some(station)) => station.speak(output),
+            (None, None) => output.fill(0.0),
         }
         for (canceller, &sample) in self.echo.iter_mut().zip(output.iter()) {
             canceller.sent(sample);
@@ -243,22 +291,79 @@ impl Call {
     /// asking each channel how it was getting on at every sample of a
     /// 192 kHz card cost more than the modulation did.
     pub fn hear(&mut self, fs: f64, fs_out: f64, input: &[f64]) -> Result<bool, String> {
-        if self.station.is_none() || self.fs != fs || self.fs_out != fs_out {
-            self.station = Some(self.build(fs, fs_out, input.len())?);
+        if self.fs != fs || self.fs_out != fs_out {
+            // A line at other rates is another line: start from nothing.
+            self.station = None;
+            self.hello = None;
+            self.agreed = None;
             self.fs = fs;
             self.fs_out = fs_out;
-            self.until_look = 0;
-            self.echo.clear();
-            if self.two_wire {
-                // The canceller lays what was sent against what was heard,
-                // sample for sample, so the two have to be the same clock.
-                if fs != fs_out {
-                    return Err(format!(
-                        "V.ARC two-wire needs its input and output on one sound card at one rate: this line hears at {fs} Hz and sends at {fs_out} Hz. A line with a wire each way is plain V.ARC"
-                    ));
-                }
-                self.echo = (0..input.len()).map(|_| Canceller::new(fs)).collect();
+        }
+        // First, each end says what it is, and the two work out what they
+        // will do. Until that is done there is no modulation to run.
+        if self.station.is_none() && self.agreed.is_none() && self.greets() {
+            let (calling, wanted, two_wire) = (self.calling, self.wanted(), self.two_wire);
+            let hello = self.hello.get_or_insert_with(|| {
+                Hello::new(
+                    calling,
+                    Caps {
+                        hears_hz: fs as u32,
+                        sends_hz: fs_out as u32,
+                        channels: input.len() as u8,
+                        wanted,
+                        two_wire,
+                        heard: false,
+                    },
+                )
+            });
+            hello.hear(input);
+            self.samples += 1;
+            if !hello.done() {
+                return Ok(self.samples.is_multiple_of((fs / LOOKS_A_SECOND).max(1.0) as u64));
             }
+            let theirs = hello.theirs().copied();
+            self.far = theirs;
+            let agreed = hello.agreed().unwrap_or_else(|| Err("the far end said nothing".to_owned()))?;
+            self.hello = None;
+            let mut said = Vec::new();
+            if let Some(theirs) = theirs {
+                said.push(format!(
+                    "V.ARC: the far end hears at {} Hz and sends at {} Hz, on {} channel{}",
+                    theirs.hears_hz,
+                    theirs.sends_hz,
+                    theirs.channels,
+                    if theirs.channels == 1 { "" } else { "s" }
+                ));
+            }
+            said.push(format!(
+                "V.ARC: agreed on {}, {:.0} Hz out and {:.0} Hz back",
+                if agreed.two_wire { "one pair of wires" } else { "a wire each way" },
+                agreed.send_hz,
+                agreed.hear_hz
+            ));
+            said.extend(agreed.notes.iter().map(|note| format!("V.ARC: {note}")));
+            self.note = Some(said.join("\n"));
+            self.agreed = Some(agreed);
+        }
+        if self.station.is_none() {
+            let agreed = match self.agreed.clone() {
+                Some(agreed) => agreed,
+                None => {
+                    // Nobody to agree with: this end as it was asked to be.
+                    if self.two_wire && fs != fs_out {
+                        return Err(format!(
+                            "V.ARC two-wire needs its input and output on one sound card at one rate: this line hears at {fs} Hz and sends at {fs_out} Hz. A line with a wire each way is plain V.ARC"
+                        ));
+                    }
+                    Self::alone(fs, fs_out, self.wanted(), self.two_wire)
+                }
+            };
+            self.station = Some(self.build(fs, &agreed, input.len())?);
+            self.until_look = 0;
+            // The canceller lays what was sent against what was heard,
+            // sample for sample, at the card's own rate.
+            self.echo = if agreed.two_wire { (0..input.len()).map(|_| Canceller::new(fs)).collect() } else { Vec::new() };
+            self.agreed = Some(agreed);
         }
         let station = self.station.as_mut().expect("just built");
         if self.echo.is_empty() {
@@ -349,8 +454,10 @@ impl Call {
                 self.note = Some(
                     "V.ARC: the line does not carry samples exactly; carrying on as the multicarrier mode".to_owned(),
                 );
-                self.station = Some(self.build(fs, fs_out, input.len())?);
+                self.agreed = None;
+                self.station = None;
                 self.deaf = 0;
+                return Ok(true);
             }
         }
         Ok(true)
@@ -414,6 +521,9 @@ impl Call {
     }
 
     pub fn phase(&self) -> &'static str {
+        if let Some(hello) = self.hello.as_ref() {
+            return if hello.theirs().is_some() { "V.ARC: agreeing with the far end" } else { "V.ARC: calling the far end" };
+        }
         let Some(station) = self.station.as_ref() else { return "V.ARC: waiting for the line" };
         if station.channels.iter().any(|c| c.loaded()) {
             "V.ARC: loaded"
@@ -473,6 +583,60 @@ impl Call {
     /// way, and until the echo has been found.
     pub fn echo_response(&self) -> Vec<f64> {
         self.echo.first().map(Canceller::response).unwrap_or_default()
+    }
+
+    /// What the far end said it was in the handshake, and what was agreed,
+    /// a row a fact: for showing beside what a V.8 menu would have said.
+    pub fn distant(&self) -> Vec<(&'static str, String)> {
+        let mut rows = Vec::new();
+        let said = |caps: &Caps| {
+            format!(
+                "hears at {} Hz, sends at {} Hz, {} channel{}",
+                caps.hears_hz,
+                caps.sends_hz,
+                caps.channels,
+                if caps.channels == 1 { "" } else { "s" }
+            )
+        };
+        let asked = |caps: &Caps| {
+            let mode = match caps.wanted {
+                Wanted::Dmt => "multicarrier",
+                Wanted::Qam => "QAM at 16 000 baud",
+                Wanted::Pcm => "levels at 16 000 baud",
+            };
+            format!("{mode}, {}", if caps.two_wire { "one pair of wires" } else { "a wire each way" })
+        };
+        // While it is still going on, what has arrived so far.
+        let far = self.hello.as_ref().and_then(|hello| hello.theirs().copied()).or(self.far);
+        match far {
+            Some(caps) => {
+                rows.push(("V.ARC hello", said(&caps)));
+                rows.push(("asked for", asked(&caps)));
+                if self.hello.is_some() {
+                    rows.push(("far end", if caps.heard { "has heard this end" } else { "has not heard this end yet" }.to_owned()));
+                }
+            }
+            None if self.hello.is_some() => {
+                let (ours, theirs) = if self.calling { ("1000 and 1400", "2000 and 2400") } else { ("2000 and 2400", "1000 and 1400") };
+                rows.push(("V.ARC hello", format!("calling on {ours} Hz, listening on {theirs} Hz: nothing heard yet")));
+            }
+            None => {}
+        }
+        if let (Some(agreed), true) = (self.agreed.as_ref(), self.far.is_some()) {
+            rows.push((
+                "agreed",
+                format!(
+                    "{}, {:.0} Hz out and {:.0} Hz back",
+                    if agreed.two_wire { "one pair of wires" } else { "a wire each way" },
+                    agreed.send_hz,
+                    agreed.hear_hz
+                ),
+            ));
+            for note in &agreed.notes {
+                rows.push(("note", note.clone()));
+            }
+        }
+        rows
     }
 
     /// The signal to noise ratio on each channel, in decibels.

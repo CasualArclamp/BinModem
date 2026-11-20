@@ -21,9 +21,10 @@ No Recommendation covers this one. Both ends have to be BinModem, and both have 
 - **Through a stereo lead** from a Realtek line output to its line input at 192 kHz: 1.1 Mbit/s a channel, 2.1 Mbit/s over both, no octet wrong.
 - **V.ARC/QAM and V.ARC/PCM** are one carrier and baseband levels at 16 000 baud: 240 and 120 kbit/s on a virtual cable.
 - **It starts on a line it knows nothing about.** The starting signal is 48 four-point symbols, each sent on every carrier in turn and added together by the receiver, so any 2.3 kHz of the band that works is enough; every carrier's noise is measured against the result and the table loads only where the line is. In simulation it starts on 300 to 3400 Hz, and on the whole band with a carrier 3 dB above its noise.
+- **A call starts with a handshake any line will carry**: 200 bit/s in two tones a direction, in the middle of the voice band. Each end says what rates it hears and sends at, how many channels, which modulation it was asked for and whether it was told the line is two-wire, and both work out the same answer. A fast card and a slow one meet at the slow one's rate; ends told two-wire that cannot be run a wire each way and say why. The "distant" panel shows what the far end said.
 - **Two sound devices at two rates are a line each way.** An input at 192 kHz and an output at 48 kHz run each direction at its own.
 - **Each end tells the other what it hears**: level, peaks, samples at full scale, and Es/N0. A sender told it is reaching the far converter's stops turns itself down. The window has a Far end line for it.
-- **V.ARC two-wire** (`AT+MS=VARC2W`) is the same mode on one pair of wires, both ends sending into it, with this end's echo taken out. A canceller finds the echo and fits a filter to it; then the receiver, once it has read a symbol, takes the far end's part of it away and fits a second filter to what is left. Two windows sharing one virtual cable: 72 dB and 630 to 760 kbit/s each way, millions of octets and none wrong. It wants one sound card, input and output at one rate.
+- **V.ARC two-wire** (`AT+MS=VARC2W`) is the same mode on one pair of wires, both ends sending into it, with this end's echo taken out. A canceller finds the echo and fits a filter to it; then the receiver, once it has read a symbol, takes the far end's part of it away and fits a second filter to what is left. Two windows sharing one virtual cable: 72 dB and 630 to 760 kbit/s each way, millions of octets and none wrong. It wants one sound card, input and output at one rate. `VARCQ2W` and `VARCP2W` are the single-carrier modes the same way, by the first canceller alone: 85 to 100 kbit/s and 12 to 27.
 - **Over SIP**, between two accounts that say `linear = yes`: the call carries sixteen-bit samples exactly, the samples are the data, and the rate is 200 kbit/s.
 
 ### The window
@@ -43,7 +44,7 @@ No Recommendation covers this one. Both ends have to be BinModem, and both have 
 
 - **It has never run between two machines.** Every figure above is one computer: one sound card, a lead, or virtual cables. Clock recovery is tested in simulation, to 150 parts in a million.
 - **Two-wire has only met a virtual cable**, whose echo is one spike with no tail and no noise. A real hybrid or a telephone pair has not been tried, and neither has an echo through the air.
-- **The starting signal on a poor line** is tested in simulation only.
+- **The starting signal on a poor line** is tested in simulation only, and so is a fast sound card calling a slow one.
 - **A gap in the sound costs a call seconds**: half the blocks bad until the tables are made again.
 - **Over SIP** it has run between two processes on one machine and over no network.
 

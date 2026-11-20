@@ -1480,6 +1480,11 @@ impl Modem {
     }
 
     pub fn distant(&self) -> Vec<(&'static str, String)> {
+        // A V.ARC call has no menu and no XID. It has a handshake, which
+        // says what the far end's sound cards are and what was agreed.
+        if let Some(call) = self.varc.as_ref() {
+            return call.distant();
+        }
         let mut rows = Vec::new();
         // What the far end's V.8 bis list said, where there was one: it comes
         // before V.8's menu and says more.
@@ -2943,7 +2948,7 @@ impl Modem {
             self.varc_bits = 0;
             self.state = State::Handshaking;
             let mut call = varc::Call::new(mode, role, looped);
-            call.two_wire(self.at.modulation.carrier == "VARC2W");
+            call.two_wire(self.at.modulation.carrier.ends_with("2W"));
             self.varc = Some(call);
             return;
         }

@@ -388,7 +388,7 @@ impl Interpreter {
             // The last three are no Recommendation's: V.ARC, this modem's
             // own mode for a sound card wired to another one, as its
             // multicarrier, QAM and baseband modulations.
-            modulations: ["V92", "V90", "V34", "V32B", "V32", "V22B", "V21", "B103", "VARC", "VARCQ", "VARCP", "VARC2W"]
+            modulations: ["V92", "V90", "V34", "V32B", "V32", "V22B", "V21", "B103", "VARC", "VARCQ", "VARCP", "VARC2W", "VARCQ2W", "VARCP2W"]
                 .iter()
                 .map(|s| (*s).to_owned())
                 .collect(),

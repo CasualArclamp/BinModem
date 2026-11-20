@@ -106,6 +106,66 @@ loops are equally happy a quarter turn round.
 
 Loading: `b = floor(log2(1 + SNR/gap))` for QAM, half that for PCM.
 
+## The handshake
+
+A call begins with each end saying what it is (`hello.rs`). Two ends need
+not have the same sound card: one hears at 192 kHz and sends at 48, the
+other has one device both ways, one was told the line is a single pair of
+wires and the other was not. Nothing in a wideband signal can settle that,
+because until it is settled neither end knows what signal to listen for.
+Before this, both simply started, and a pair that did not match heard
+nothing for a minute and said `NO CARRIER`.
+
+- **200 bits a second, two tones a direction**, in the middle of the voice
+  band: the caller sends 1000 Hz for a one and 1400 Hz for a nought, the
+  answerer 2000 Hz and 2400 Hz. A telephone channel carries them, and the
+  sample rate of the card making or hearing them does not matter.
+- **All four are multiples of the bit rate**, and each is measured over one
+  bit through a raised-cosine window, so an end on one pair of wires hears
+  the far end's tones through its own with no echo canceller. With a square
+  window it did not: each change of its own tone splashed across the far
+  end's.
+- **Asynchronous characters**, a start bit and a stop bit, so there is no
+  clock to recover.
+- **One message of 16 octets, over and over**: the rates this end hears and
+  sends at, how many channels, which modulation it was asked for, whether it
+  was told two-wire, and whether it has the far end's message yet; then a
+  CRC.
+- When an end has the far end's message and has seen in it that the far end
+  has its own, it sends once more and stops. About four seconds.
+
+Both ends then work out the same answer from the same two messages
+(`hello::agree`):
+
+| Question | Answer |
+|---|---|
+| What rate does each direction run at? | The slower of the two cards on it. The end with the faster card converts, by a whole number of times (`Faster`, `Slower`). Cards that no whole number relates, 44.1 and 48 kHz, are told so. |
+| One pair of wires? | If either end was told so, and both hear and send on one card at one rate. Otherwise a wire each way, with a note. |
+| Which modulation? | The one both asked for. If they differ, or a single-carrier mode would not have a multiple of 48 kHz each way, the multicarrier one. |
+
+The window's "distant" panel shows what the far end said and what was
+agreed, where a V.8 menu would be:
+
+![What the far end said in the handshake](../images/v-arc/hello.png)
+
+There is no handshake on a lead that comes straight back (`ATDLOOP`), where
+there is nobody else, or on a SIP call that carries samples exactly.
+
+Run for real, both on one machine: Line In at 192 kHz with CABLE-B at 48 kHz
+the other way (2.13 and 0.80 Mbit/s, as before it), and two ends sharing
+VB-Cable A two-wire. A fast card calling a slow one, and two ends
+told two-wire that cannot be, are tested in simulation only: there is no
+pair of real devices here to wire that way.
+
+Two things it turned up in the receiver, both now fixed:
+
+- A receiver that began listening before the far end's last tone had
+  finished framed on the tone, which repeats as a symbol's guard does. A
+  sync symbol with an eighth of its power on one carrier is now refused.
+- Having framed on nonsense it steered its clock by nonsense, to the limit,
+  and could not then find a real signal. The clock now goes back to where
+  it was last right whenever the signal is lost.
+
 ## Probing the line: the starting table
 
 Both ends of a V.ARC/DMT call start on a table neither has had to be told,
@@ -231,6 +291,13 @@ other with its own signal on top (`echo.rs`).
 
 It needs one sound card, input and output at the same rate, since it lays
 what was sent against what was heard sample for sample.
+
+`AT+MS=VARCQ2W` and `AT+MS=VARCP2W` are the single-carrier modes on one pair
+of wires. The canceller in front knows nothing of the modulation and serves
+them as it is; the second stage below is the multicarrier receiver's and
+they do not have it, so they settle where the first stage leaves them. On
+the shared virtual cable, after 50 s: QAM 85 to 100 kbit/s, PCM 12 to
+27 kbit/s, nothing wrong.
 
 | Where | What happened |
 |---|---|

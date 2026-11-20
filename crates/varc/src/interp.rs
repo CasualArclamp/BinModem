@@ -123,6 +123,17 @@ impl Interp {
         self.step = (self.step + delta).clamp(0.999, 1.001);
     }
 
+    /// Input samples to an output sample, as it stands.
+    pub fn step(&self) -> f64 {
+        self.step
+    }
+
+    /// Set the ratio outright: to what it was when it was last known to be
+    /// right, after something has steered it wrong.
+    pub fn set_step(&mut self, step: f64) {
+        self.step = step.clamp(0.999, 1.001);
+    }
+
     /// Take every later output `samples` input samples later than it would
     /// have been taken.
     pub fn nudge(&mut self, samples: f64) {

@@ -159,6 +159,8 @@ fn through_the_modem(audio: &Wide, mode: &str, dial: &str, seconds: f64) -> Exit
         "qam" => "VARCQ",
         "pcm" => "VARCP",
         "2w" => "VARC2W",
+        "qam2w" => "VARCQ2W",
+        "pcm2w" => "VARCP2W",
         _ => return usage(),
     };
     println!(
@@ -189,12 +191,27 @@ fn through_the_modem(audio: &Wide, mode: &str, dial: &str, seconds: f64) -> Exit
         turn = Instant::now();
         send.clear();
         let was = modem.state();
+        // Two devices at two rates: what is heard is stepped as it arrives,
+        // and what is sent is made as fast as the sending device takes it.
+        let apart = audio.output_rate != audio.rate;
         for frame in heard.as_chunks::<2>().0 {
             peak = peak.max(frame[0].abs()).max(frame[1].abs());
             let mut out = [0.0f64; 2];
-            modem.varc_step(fs, &[f64::from(frame[0]), f64::from(frame[1])], &mut out);
-            send.push(out[0] as f32);
-            send.push(out[1] as f32);
+            if apart {
+                modem.varc_hear(fs, f64::from(audio.output_rate), &[f64::from(frame[0]), f64::from(frame[1])]);
+            } else {
+                modem.varc_step(fs, &[f64::from(frame[0]), f64::from(frame[1])], &mut out);
+                send.push(out[0] as f32);
+                send.push(out[1] as f32);
+            }
+        }
+        if apart {
+            for _ in 0..audio.wanted() {
+                let mut out = [0.0f64; 2];
+                modem.varc_say(&mut out);
+                send.push(out[0] as f32);
+                send.push(out[1] as f32);
+            }
         }
         audio.transmit(&send);
         for note in modem.take_line_notes() {
@@ -323,7 +340,8 @@ fn main() -> ExitCode {
     }
 
     let audio = Wide::open(input.as_deref(), output.as_deref()).and_then(|audio| {
-        if audio.rate == audio.output_rate {
+        // A whole modem takes two devices at two rates; the bare ends do not.
+        if audio.rate == audio.output_rate || as_modem {
             Ok(audio)
         } else {
             Err(format!(

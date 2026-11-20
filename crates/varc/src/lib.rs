@@ -8,6 +8,7 @@ pub mod dmt;
 pub mod echo;
 pub mod exact;
 pub mod frame;
+pub mod hello;
 pub mod interp;
 pub mod link;
 pub mod map;

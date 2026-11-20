@@ -204,7 +204,7 @@ impl Modulation {
             6 => &[300],
             // V.ARC has no rates to choose among: each end loads the line
             // for what it measures, and nought is how +MS says "unspecified".
-            8..=11 => &[0],
+            8..=13 => &[0],
             // V.34 5.1: "2400 bit/s to 33 600 bit/s in multiples of 2400".
             _ => &[
                 2400, 4800, 7200, 9600, 12_000, 14_400, 16_800, 19_200, 21_600, 24_000, 26_400,
@@ -786,7 +786,7 @@ impl ScopeApp {
     ///
     /// Positions are what the rate lists, the ceilings and the default go by,
     /// so a new one goes on the end rather than where it might read best.
-    const CARRIERS: [(&'static str, &'static str); 12] = [
+    const CARRIERS: [(&'static str, &'static str); 14] = [
         ("B103", "Bell 103 - 300 bit/s"),
         ("V22B", "V.22bis - 1200 or 2400"),
         ("V32", "V.32 - 4800 or 9600"),
@@ -814,6 +814,11 @@ impl ScopeApp {
             "VARC2W",
             "V.ARC two-wire - the multicarrier mode on one pair of wires, both ends sending into it, with this end's own echo taken out. One sound card, input and output at the same rate. The rate climbs for minutes as the echo falls",
         ),
+        (
+            "VARCQ2W",
+            "V.ARC/QAM two-wire - one carrier at 16000 baud on one pair of wires. The echo is taken out by the first canceller alone, so it settles lower than the multicarrier mode does",
+        ),
+        ("VARCP2W", "V.ARC/PCM two-wire - levels at baseband on one pair of wires, by the first canceller alone"),
     ];
 
     /// Boards to start from, because a text box on its own is a box nobody
@@ -4039,7 +4044,7 @@ impl ScopeApp {
     /// A modulation and nothing else. The rate is the modem's to find: every
     /// one of these settles on the fastest the line will carry, and a ceiling
     /// set on purpose is in the Advanced window with the rest of AT+MS.
-    const MODES: [(usize, &'static str); 12] = [
+    const MODES: [(usize, &'static str); 14] = [
         (7, "V.92"),
         (5, "V.90"),
         (4, "V.34"),
@@ -4053,6 +4058,8 @@ impl ScopeApp {
         (9, "V.ARC/QAM"),
         (10, "V.ARC/PCM"),
         (11, "V.ARC two-wire"),
+        (12, "V.ARC/QAM two-wire"),
+        (13, "V.ARC/PCM two-wire"),
     ];
 
     /// How fast at most, and the three things that are simply on or off.
@@ -5761,14 +5768,14 @@ mod modulation_tests {
         assert_eq!(ScopeApp::CARRIERS[7].0, "V92");
         assert_eq!(Modulation::rates(7), Modulation::rates(4));
         // V.ARC's three have no rate to ask for.
-        for (i, name) in [(8, "VARC"), (9, "VARCQ"), (10, "VARCP"), (11, "VARC2W")] {
+        for (i, name) in [(8, "VARC"), (9, "VARCQ"), (10, "VARCP"), (11, "VARC2W"), (12, "VARCQ2W"), (13, "VARCP2W")] {
             assert_eq!(ScopeApp::CARRIERS[i].0, name);
             assert_eq!(Modulation::rates(i), &[0]);
             let mut m = Modulation { min_rate: 9600, max_rate: 33_600, ..Modulation::default() };
             m.fit(i);
             assert_eq!(m.command(name), format!("AT+MS={name},1"));
         }
-        assert_eq!(ScopeApp::CARRIERS.len(), 12);
+        assert_eq!(ScopeApp::CARRIERS.len(), 14);
     }
 
     /// The two V.32 carriers are two ceilings on one modulation, and the

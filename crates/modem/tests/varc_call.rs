@@ -76,7 +76,7 @@ fn a_call_is_placed_answered_used_and_put_down() {
     assert_eq!(pair.caller.state(), State::Handshaking);
     assert!(pair.caller.off_hook());
 
-    pair.run(8.0);
+    pair.run(13.0);
     assert_eq!(pair.caller.state(), State::Data, "{}", Pair::said(&pair.at_caller));
     assert_eq!(pair.host.state(), State::Data, "{}", Pair::said(&pair.at_host));
     let told = Pair::said(&pair.at_caller);
@@ -123,7 +123,7 @@ fn the_single_carrier_modes_connect_too() {
         let mut pair = Pair::new(carrier);
         type_at(&mut pair.host, "ATA\r");
         type_at(&mut pair.caller, "ATD1\r");
-        pair.run(9.0);
+        pair.run(14.0);
         assert_eq!(pair.caller.standard(), name);
         assert_eq!(pair.caller.state(), State::Data, "{name}: {}", Pair::said(&pair.at_caller));
         let rate = pair.caller.rate().unwrap_or(0);
@@ -144,7 +144,7 @@ fn every_mode_with_symbols_gives_the_symbol_diagram_its_points() {
         assert_eq!(pair.caller.shape(), "-", "{carrier}: before the call");
         type_at(&mut pair.host, "ATA\r");
         type_at(&mut pair.caller, "ATD1\r");
-        pair.run(9.0);
+        pair.run(14.0);
         assert_eq!(pair.caller.state(), State::Data, "{carrier}");
         // Whatever gathered while the tables were being settled.
         pair.caller.varc_points();
@@ -176,7 +176,7 @@ fn a_lead_with_one_channel_wired_still_connects() {
     pair.wired = 1;
     type_at(&mut pair.host, "ATA\r");
     type_at(&mut pair.caller, "ATD1\r");
-    pair.run(14.0);
+    pair.run(19.0);
     assert_eq!(pair.caller.state(), State::Data, "{}", Pair::said(&pair.at_caller));
     pair.at_host.clear();
     let page: Vec<u8> = (0..20_000u32).map(|i| (i * 7 + (i >> 5)) as u8).collect();
@@ -269,7 +269,7 @@ fn on_a_call_of_exact_samples_the_samples_are_the_data() {
 #[test]
 fn a_call_that_is_not_exact_after_all_carries_on_as_the_multicarrier_mode() {
     // A tenth of a decibel of gain somewhere along the way.
-    let (mut caller, host, told, got) = on_a_linear_call(0.989, 16.0);
+    let (mut caller, host, told, got) = on_a_linear_call(0.989, 24.0);
     assert_eq!(caller.standard(), "V.ARC/DMT", "{told}");
     assert_eq!(host.state(), State::Data);
     assert!(told.contains("/VARC"), "{told}");
@@ -312,7 +312,7 @@ fn two_devices_at_two_rates_are_a_line_each_way() {
     let (mut from_caller, mut from_host) = ([0.0; 2], [0.0; 2]);
     let (mut at_caller, mut at_host) = (Vec::new(), Vec::new());
     let mut typed = false;
-    for tick in 0..(10.0 * fast) as usize {
+    for tick in 0..(15.0 * fast) as usize {
         host.varc_say(&mut from_host);
         caller.varc_hear(fast, slow, &from_host);
         if tick % 4 == 0 {
@@ -356,7 +356,7 @@ fn on_one_pair_of_wires_each_end_takes_its_own_echo_out() {
     let echo = |line: &std::collections::VecDeque<f64>| -> f64 {
         shape.iter().enumerate().map(|(i, s)| s * line[delay + i]).sum()
     };
-    for _ in 0..(40.0 * FS) as usize {
+    for _ in 0..(45.0 * FS) as usize {
         // The far end arrives 6 dB down; the echo is the louder.
         let to_caller = [0.5 * from_host[0] + echo(&line_caller)];
         let to_host = [0.5 * from_caller[0] + echo(&line_host)];
@@ -411,4 +411,112 @@ fn the_same_pair_without_a_canceller_never_connects() {
     }
     assert_ne!(caller.state(), State::Data);
     assert!(caller.varc_echo().is_empty());
+}
+
+/// Two ends on a line each way, each with its own rates hearing and
+/// sending, stepped on a clock of 192 kHz. What one sends the other hears a
+/// sample at a time, held or skipped where their rates differ, which is
+/// crude and is what a pair of sound cards does to each other anyway.
+fn across(
+    carrier: &str,
+    caller_rates: (f64, f64),
+    host_rates: (f64, f64),
+    seconds: f64,
+) -> (Modem, Modem, String, String, Vec<String>) {
+    let clock = 192_000.0;
+    let mut caller = Modem::new(16_000.0);
+    let mut host = Modem::new(16_000.0);
+    type_at(&mut caller, &format!("AT+MS={carrier}\r"));
+    type_at(&mut host, &format!("AT+MS={carrier}\rATA\r"));
+    type_at(&mut caller, "ATD1\r");
+    let (mut from_caller, mut from_host) = ([0.0; 2], [0.0; 2]);
+    let (mut at_caller, mut at_host) = (Vec::new(), Vec::new());
+    let mut notes = Vec::new();
+    // Owed samples: the caller hearing and sending, then the host.
+    let mut owed = [0.0f64; 4];
+    let rates = [caller_rates.0, caller_rates.1, host_rates.0, host_rates.1];
+    let mut typed = false;
+    for _ in 0..(seconds * clock) as usize {
+        for (owed, rate) in owed.iter_mut().zip(rates) {
+            *owed += rate / clock;
+        }
+        if owed[1] >= 1.0 {
+            owed[1] -= 1.0;
+            caller.varc_say(&mut from_caller);
+        }
+        if owed[3] >= 1.0 {
+            owed[3] -= 1.0;
+            host.varc_say(&mut from_host);
+        }
+        if owed[0] >= 1.0 {
+            owed[0] -= 1.0;
+            caller.varc_hear(caller_rates.0, caller_rates.1, &from_host);
+        }
+        if owed[2] >= 1.0 {
+            owed[2] -= 1.0;
+            host.varc_hear(host_rates.0, host_rates.1, &from_caller);
+        }
+        at_caller.extend(caller.take_dte());
+        at_host.extend(host.take_dte());
+        notes.extend(caller.take_line_notes());
+        if !typed && caller.state() == State::Data && host.state() == State::Data {
+            typed = true;
+            at_host.clear();
+            type_at(&mut caller, "said, then agreed, then sent");
+        }
+    }
+    (caller, host, Pair::said(&at_caller), Pair::said(&at_host), notes)
+}
+
+/// The rig that the handshake was written for: each end hears on one sound
+/// device and sends on another at a different rate, and both were told the
+/// line was two-wire, which on two devices cannot be run. They used to hear
+/// nothing and say NO CARRIER.
+#[test]
+fn ends_that_were_told_two_wire_and_cannot_be_run_a_wire_each_way() {
+    let (caller, host, told, got, notes) = across("VARC2W", (48_000.0, 192_000.0), (192_000.0, 48_000.0), 16.0);
+    assert_eq!(caller.state(), State::Data, "{told}\n{notes:?}");
+    assert_eq!(host.state(), State::Data);
+    assert_eq!(got, "said, then agreed, then sent");
+    assert!(caller.varc_echo().is_empty(), "no canceller on a wire each way");
+    let all = notes.join("\n");
+    assert!(all.contains("the far end hears at 192000 Hz and sends at 48000 Hz"), "{all}");
+    assert!(all.contains("two-wire was asked for"), "{all}");
+    assert!(all.contains("agreed on a wire each way, 192000 Hz out and 48000 Hz back"), "{all}");
+}
+
+/// A card at 192 kHz calling one at 48 kHz. The modulation runs at 48 kHz
+/// both ways and the faster end makes up the difference. They used to send
+/// each other signals built for different rates.
+#[test]
+fn a_fast_card_and_a_slow_card_run_at_the_slow_cards_rate() {
+    let (caller, host, told, got, notes) = across("VARC", (192_000.0, 192_000.0), (48_000.0, 48_000.0), 16.0);
+    assert_eq!(caller.state(), State::Data, "{told}\n{notes:?}");
+    assert_eq!(got, "said, then agreed, then sent");
+    let all = notes.join("\n");
+    assert!(all.contains("agreed on a wire each way, 48000 Hz out and 48000 Hz back"), "{all}");
+    assert!(all.contains("the ends' sound cards differ"), "{all}");
+    // What a 48 kHz line carries, on both channels, each way.
+    let (down, up) = (caller.rate().unwrap_or(0), host.rate().unwrap_or(0));
+    assert!(down > 500_000 && up > 500_000, "{down} and {up} bit/s");
+}
+
+/// Ends that were asked for different modulations run the multicarrier one.
+#[test]
+fn ends_asked_for_different_modulations_agree_on_one() {
+    let clock = 48_000.0;
+    let mut caller = Modem::new(16_000.0);
+    let mut host = Modem::new(16_000.0);
+    type_at(&mut caller, "AT+MS=VARCQ\r");
+    type_at(&mut host, "AT+MS=VARCP\rATA\r");
+    type_at(&mut caller, "ATD1\r");
+    let (mut from_caller, mut from_host) = ([0.0; 2], [0.0; 2]);
+    for _ in 0..(14.0 * clock) as usize {
+        let (to_caller, to_host) = (from_host, from_caller);
+        caller.varc_step(clock, &to_caller, &mut from_caller);
+        host.varc_step(clock, &to_host, &mut from_host);
+    }
+    assert_eq!(caller.state(), State::Data);
+    assert_eq!(caller.standard(), "V.ARC/DMT");
+    assert_eq!(host.standard(), "V.ARC/DMT");
 }

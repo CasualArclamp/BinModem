@@ -194,6 +194,9 @@ OS-specific code — but only built and run on Windows so far.
   - Through a real stereo lead between a Realtek line output and its line
     input at 192 kHz: a megabit a second a channel, two over both, with no
     octet wrong.
+  - A call starts with a handshake at 200 bit/s in the voice band, where
+    each end says what its sound cards are, so ends that differ agree on
+    what to run and do not just fail.
   - It starts on a line it knows nothing about, with a signal that needs any
     2.3 kHz of the band, and loads only where the line is.
   - Each end tells the other what it hears, and a sender that is too loud
