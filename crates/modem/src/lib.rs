@@ -1966,6 +1966,12 @@ impl Modem {
         self.varc.as_mut().map_or_else(Vec::new, varc::Call::take_symbols)
     }
 
+    /// The baud each direction of a single-carrier V.ARC call runs at: what
+    /// this end hears, then what it sends. Noughts on any other call.
+    pub fn varc_bauds(&self) -> (u32, u32) {
+        self.varc.as_ref().map_or((0, 0), varc::Call::bauds)
+    }
+
     /// How many times slowed each direction of a V.ARC call is running:
     /// what this end hears, then what it sends. One and one on a line that
     /// carries the modulation as it was made; more where an end could not
@@ -2966,6 +2972,8 @@ impl Modem {
             self.state = State::Handshaking;
             let mut call = varc::Call::new(mode, role, looped);
             call.two_wire(self.at.modulation.carrier.ends_with("2W"));
+            let (baud, code, bits) = self.at.config.varc;
+            call.ask_for(baud, code, bits);
             self.varc = Some(call);
             return;
         }

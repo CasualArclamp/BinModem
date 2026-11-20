@@ -48,7 +48,7 @@ const HEAD: [u8; 2] = *b"VA";
 
 /// The message's length on the line: the head, the body and a check.
 const FRAME: usize = HEAD.len() + BODY + 2;
-const BODY: usize = 12;
+const BODY: usize = 16;
 
 /// Bits of idle between one message and the next.
 const GAP: usize = 16;
@@ -81,6 +81,9 @@ pub struct Caps {
     pub two_wire: bool,
     /// This end has the far end's message.
     pub heard: bool,
+    /// The baud this end wants to be sent to at, where somebody has chosen
+    /// one for a single-carrier mode; nought for whatever the line bears.
+    pub asks_baud: u32,
 }
 
 impl Caps {
@@ -97,6 +100,7 @@ impl Caps {
         out[5] = self.channels;
         out[6..10].copy_from_slice(&self.hears_hz.to_le_bytes());
         out[10..14].copy_from_slice(&self.sends_hz.to_le_bytes());
+        out[14..18].copy_from_slice(&self.asks_baud.to_le_bytes());
         let check = crc16(&out[..FRAME - 2]);
         out[FRAME - 2..].copy_from_slice(&check.to_le_bytes());
         out
@@ -121,6 +125,7 @@ impl Caps {
             channels: frame[5],
             hears_hz: u32::from_le_bytes(frame[6..10].try_into().ok()?),
             sends_hz: u32::from_le_bytes(frame[10..14].try_into().ok()?),
+            asks_baud: u32::from_le_bytes(frame[14..18].try_into().ok()?),
         })
     }
 }
@@ -193,6 +198,10 @@ pub struct Agreed {
     /// sending and hearing.
     pub send_times: usize,
     pub hear_times: usize,
+    /// The baud each end asked to be sent to at, nought where it left it to
+    /// the line: what this end is to send at, and what it asked for itself.
+    pub send_baud: u32,
+    pub hear_baud: u32,
     /// Anything asked for that could not be had, for whoever is watching.
     pub notes: Vec<String>,
 }
@@ -228,18 +237,23 @@ pub fn agree(mine: &Caps, theirs: &Caps) -> Result<Agreed, String> {
         );
     }
 
-    // The single-carrier modes are built for multiples of 48 kHz.
-    let fits = |hz: f64| hz >= 48_000.0 && (hz / 48_000.0).fract() == 0.0;
     let wanted = if mine.wanted != theirs.wanted {
         notes.push("the ends asked for different modulations: running the multicarrier one".to_owned());
-        Wanted::Dmt
-    } else if mine.wanted != Wanted::Dmt && !(fits(send_hz) && fits(hear_hz)) {
-        notes.push("the single-carrier modes want a multiple of 48 kHz each way: running the multicarrier one".to_owned());
         Wanted::Dmt
     } else {
         mine.wanted
     };
-    Ok(Agreed { wanted, two_wire: asked && able, send_hz, hear_hz, send_times, hear_times, notes })
+    Ok(Agreed {
+        wanted,
+        two_wire: asked && able,
+        send_hz,
+        hear_hz,
+        send_times,
+        hear_times,
+        send_baud: theirs.asks_baud,
+        hear_baud: mine.asks_baud,
+        notes,
+    })
 }
 
 /// One tone pair's detector on one channel: is the bit now arriving a one
@@ -622,9 +636,9 @@ pub struct Faster {
     /// The modulation's last samples, newest first.
     past: std::collections::VecDeque<f64>,
     phase: usize,
-    /// How many times slower than it believes the modulation is being run:
-    /// see [`Faster::slowed`].
-    slow: f64,
+    /// How many times faster than it believes the modulation is being run;
+    /// less than one for slower. See [`Faster::paced`].
+    pace: f64,
 }
 
 /// A receiver whose modulation runs slower than the sound card it hears on:
@@ -640,8 +654,137 @@ pub struct Slower {
     own: std::collections::VecDeque<f64>,
     own_given: bool,
     count: usize,
-    /// How many times slower than it believes the modulation is being run.
-    slow: f64,
+    /// How many times faster than it believes the modulation is being run.
+    pace: f64,
+}
+
+/// A sender whose modulation is run at twice the speed it was made for, by
+/// sending every other one of its samples.
+///
+/// Only for a modulation that keeps below half its own band, which the
+/// baseband levels do: 9.6 kHz of 24. Halving its samples doubles every
+/// frequency in it, to 19.2 kHz of 24, and doubles its baud. One that
+/// already fills its band, as the carrier at 10.5 kHz does, would fold over
+/// on itself.
+#[allow(missing_debug_implementations)]
+pub struct Twice {
+    inner: Box<dyn Sender>,
+    taps: Vec<f64>,
+    past: std::collections::VecDeque<f64>,
+}
+
+/// The receiver to go with [`Twice`]: each sample heard becomes two of the
+/// modulation's.
+#[allow(missing_debug_implementations)]
+pub struct Half {
+    inner: Box<dyn Receiver>,
+    taps: Vec<f64>,
+    past: std::collections::VecDeque<f64>,
+}
+
+impl Twice {
+    pub fn new(inner: Box<dyn Sender>) -> Self {
+        let taps = between(2);
+        Self { past: std::collections::VecDeque::from(vec![0.0; taps.len()]), inner, taps }
+    }
+}
+
+impl Sender for Twice {
+    fn wants(&self) -> Option<crate::frame::Layout> {
+        self.inner.wants()
+    }
+    fn give(&mut self, line: Vec<u8>) {
+        self.inner.give(line)
+    }
+    fn next_sample(&mut self) -> f64 {
+        for _ in 0..2 {
+            self.past.pop_back();
+            let sample = self.inner.next_sample();
+            self.past.push_front(sample);
+        }
+        self.taps.iter().zip(&self.past).map(|(t, x)| t * x).sum()
+    }
+    fn adopt(&mut self, id: u8, table: crate::link::Table) {
+        self.inner.adopt(id, table)
+    }
+    fn id(&self) -> u8 {
+        self.inner.id()
+    }
+    fn reset(&mut self) {
+        self.inner.reset()
+    }
+    fn rates(&self) -> (f64, f64) {
+        let (line, frames) = self.inner.rates();
+        (2.0 * line, 2.0 * frames)
+    }
+    fn clipped(&self) -> u64 {
+        self.inner.clipped()
+    }
+    fn trim(&mut self, db: f64) {
+        self.inner.trim(db)
+    }
+}
+
+impl Half {
+    pub fn new(inner: Box<dyn Receiver>) -> Self {
+        let taps = between(2);
+        Self { past: std::collections::VecDeque::from(vec![0.0; taps.len() / 2 + 1]), inner, taps }
+    }
+}
+
+impl Receiver for Half {
+    fn feed(&mut self, sample: f64) {
+        self.past.pop_back();
+        self.past.push_front(sample);
+        for phase in 0..2 {
+            let filled: f64 = self.taps.iter().skip(phase).step_by(2).zip(&self.past).map(|(t, x)| t * x).sum();
+            self.inner.feed(2.0 * filled);
+        }
+    }
+    fn take(&mut self) -> Option<crate::link::Arrived> {
+        self.inner.take()
+    }
+    fn proposal(&mut self) -> Option<crate::link::Table> {
+        self.inner.proposal()
+    }
+    fn expect(&mut self, id: u8, table: crate::link::Table) {
+        self.inner.expect(id, table)
+    }
+    fn id(&self) -> Option<u8> {
+        self.inner.id()
+    }
+    fn back_off(&mut self, db: f64) {
+        self.inner.back_off(db)
+    }
+    fn remeasure(&mut self, db: f64) {
+        self.inner.remeasure(db)
+    }
+    fn health(&self) -> crate::link::Health {
+        self.inner.health()
+    }
+    fn rates(&self) -> (f64, f64) {
+        let (line, frames) = self.inner.rates();
+        (2.0 * line, 2.0 * frames)
+    }
+    fn spectrum(&self) -> Vec<crate::link::Bin> {
+        let mut bins = self.inner.spectrum();
+        for bin in &mut bins {
+            bin.hz *= 2.0;
+        }
+        bins
+    }
+    fn points(&mut self) -> Vec<(f64, f64)> {
+        self.inner.points()
+    }
+    fn shown_bits(&self) -> u8 {
+        self.inner.shown_bits()
+    }
+    fn code(&self) -> Option<(usize, usize)> {
+        self.inner.code()
+    }
+    fn fix(&mut self, bits: Option<u8>, code: Option<f64>) {
+        self.inner.fix(bits, code)
+    }
 }
 
 /// A low-pass for going between a rate and `times` that rate: flat to 0.86
@@ -670,7 +813,12 @@ fn between(times: usize) -> Vec<f64> {
 
 impl Faster {
     pub fn new(inner: Box<dyn Sender>, times: usize) -> Self {
-        Self::slowed(inner, times, 1)
+        Self::paced(inner, times, 1.0)
+    }
+
+    /// For a modulation slowed `slow` times: see [`Faster::paced`].
+    pub fn slowed(inner: Box<dyn Sender>, times: usize, slow: usize) -> Self {
+        Self::paced(inner, times, 1.0 / slow as f64)
     }
 
     /// The same, for a modulation that is being run slower than it was
@@ -680,7 +828,14 @@ impl Faster {
     /// times as long, which is how a line that will not pass the band the
     /// modulation wants is given one it will. The modulation knows nothing
     /// of it; only the rates it reports have to be put right.
-    pub fn slowed(inner: Box<dyn Sender>, times: usize, slow: usize) -> Self {
+    ///
+    /// More generally, a modulation built for one rate may be run at any
+    /// other: `pace` is how many times faster than the rate it believes in
+    /// its samples really go by. A single carrier built for 48 kHz and
+    /// played sample for sample on a card at 192 kHz is the same carrier at
+    /// four times the baud across four times the band, with `times` one and
+    /// `pace` four.
+    pub fn paced(inner: Box<dyn Sender>, times: usize, pace: f64) -> Self {
         let taps = between(times);
         Self {
             past: std::collections::VecDeque::from(vec![0.0; taps.len() / times + 1]),
@@ -688,7 +843,7 @@ impl Faster {
             times,
             taps,
             phase: 0,
-            slow: slow as f64,
+            pace,
         }
     }
 }
@@ -701,6 +856,10 @@ impl Sender for Faster {
         self.inner.give(line)
     }
     fn next_sample(&mut self) -> f64 {
+        if self.times == 1 {
+            // Sample for sample: there is nothing to fill in.
+            return self.inner.next_sample();
+        }
         if self.phase == 0 {
             self.past.pop_back();
             let sample = self.inner.next_sample();
@@ -724,7 +883,7 @@ impl Sender for Faster {
     }
     fn rates(&self) -> (f64, f64) {
         let (line, frames) = self.inner.rates();
-        (line / self.slow, frames / self.slow)
+        (line * self.pace, frames * self.pace)
     }
     fn clipped(&self) -> u64 {
         self.inner.clipped()
@@ -736,11 +895,16 @@ impl Sender for Faster {
 
 impl Slower {
     pub fn new(inner: Box<dyn Receiver>, times: usize) -> Self {
-        Self::slowed(inner, times, 1)
+        Self::paced(inner, times, 1.0)
     }
 
     /// The receiving half of [`Faster::slowed`].
     pub fn slowed(inner: Box<dyn Receiver>, times: usize, slow: usize) -> Self {
+        Self::paced(inner, times, 1.0 / slow as f64)
+    }
+
+    /// The receiving half of [`Faster::paced`].
+    pub fn paced(inner: Box<dyn Receiver>, times: usize, pace: f64) -> Self {
         let taps = between(times);
         Self {
             past: std::collections::VecDeque::from(vec![0.0; taps.len()]),
@@ -750,13 +914,20 @@ impl Slower {
             times,
             taps,
             count: 0,
-            slow: slow as f64,
+            pace,
         }
     }
 }
 
 impl Receiver for Slower {
     fn feed(&mut self, sample: f64) {
+        if self.times == 1 {
+            // Sample for sample: there is nothing to take out.
+            if self.own_given {
+                self.inner.echo_under(self.own[0]);
+            }
+            return self.inner.feed(sample);
+        }
         self.past.pop_back();
         self.past.push_front(sample);
         self.count += 1;
@@ -805,12 +976,12 @@ impl Receiver for Slower {
     }
     fn rates(&self) -> (f64, f64) {
         let (line, frames) = self.inner.rates();
-        (line / self.slow, frames / self.slow)
+        (line * self.pace, frames * self.pace)
     }
     fn spectrum(&self) -> Vec<crate::link::Bin> {
         let mut bins = self.inner.spectrum();
         for bin in &mut bins {
-            bin.hz /= self.slow;
+            bin.hz *= self.pace;
         }
         bins
     }
@@ -823,6 +994,9 @@ impl Receiver for Slower {
     fn code(&self) -> Option<(usize, usize)> {
         self.inner.code()
     }
+    fn fix(&mut self, bits: Option<u8>, code: Option<f64>) {
+        self.inner.fix(bits, code)
+    }
 }
 
 #[cfg(test)]
@@ -830,12 +1004,12 @@ mod tests {
     use super::*;
 
     fn caps(hears: u32, sends: u32) -> Caps {
-        Caps { hears_hz: hears, sends_hz: sends, channels: 2, wanted: Wanted::Dmt, two_wire: false, heard: false }
+        Caps { hears_hz: hears, sends_hz: sends, channels: 2, wanted: Wanted::Dmt, two_wire: false, heard: false, asks_baud: 0 }
     }
 
     #[test]
     fn a_message_survives_being_written_down() {
-        let said = Caps { two_wire: true, heard: true, wanted: Wanted::Pcm, ..caps(192_000, 48_000) };
+        let said = Caps { two_wire: true, heard: true, wanted: Wanted::Pcm, asks_baud: 8000, ..caps(192_000, 48_000) };
         assert_eq!(Caps::decode(&said.encode()), Some(said));
         let mut spoiled = said.encode();
         spoiled[7] ^= 1;

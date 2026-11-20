@@ -554,6 +554,9 @@ pub struct Rx {
     better: usize,
     gap_db: f64,
     remeasure: bool,
+    /// Bits a symbol and a code to ask for whatever the line measures, where
+    /// somebody has said so.
+    fixed: (Option<u8>, Option<f64>),
     /// Points for a symbol diagram, the bits a symbol of those shown, and
     /// the level before this one, which the baseband mode plots it against.
     points: Vec<(f64, f64)>,
@@ -620,6 +623,7 @@ impl Rx {
             better: 0,
             gap_db: GAP_DB,
             remeasure: false,
+            fixed: (None, None),
             points: Vec::new(),
             shown: 0,
             before: 0.0,
@@ -661,10 +665,24 @@ impl Rx {
         let least = if self.shape.real { 1 } else { 2 };
         let mut best: Option<(f64, bool, Table)> = None;
         for (rate, gap_db) in crate::link::CODES {
+            // A code that was asked for is the only one there is: the
+            // nearest of these to it.
+            if let Some(fixed) = self.fixed.1 {
+                let nearest = crate::link::CODES
+                    .iter()
+                    .map(|(r, _)| r.unwrap_or(0.93))
+                    .min_by(|a, b| (a - fixed).abs().total_cmp(&(b - fixed).abs()))
+                    .unwrap_or(0.93);
+                if (rate.unwrap_or(0.93) - nearest).abs() > 1e-9 {
+                    continue;
+                }
+            }
             let gap = 10f64.powf((gap_db + extra) / 10.0);
             let capacity = (1.0 + snr / gap).log2();
             // A ladder on one axis holds half what a point on two does.
             let room = if self.shape.real { capacity / 2.0 } else { capacity };
+            // Bits that were asked for are the bits, whatever the line says.
+            let room = self.fixed.0.map_or(room, f64::from);
             // Whether the line bears even the smallest grid with this code,
             // or is being given it regardless because there is none smaller.
             let fits = room >= f64::from(least);
@@ -1165,6 +1183,14 @@ impl Receiver for Rx {
 
     fn shown_bits(&self) -> u8 {
         self.shown
+    }
+
+    fn fix(&mut self, bits: Option<u8>, code: Option<f64>) {
+        let least = if self.shape.real { 1 } else { 2 };
+        self.fixed = (bits.map(|b| b.clamp(least, self.shape.max_bits())), code);
+        if self.stage == Stage::Steady {
+            self.propose();
+        }
     }
 
     fn spectrum(&self) -> Vec<Bin> {

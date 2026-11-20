@@ -137,6 +137,53 @@ signal. Measured since, on one machine, nothing wrong in any:
 above these on the same lines, were measured before this** and are what two
 signals carried.
 
+## The single-carrier modes fill the card's band
+
+V.ARC/QAM and V.ARC/PCM were 16 000 baud whatever the card: 1.5 to 19.5 kHz
+and 0 to 9.6 kHz. On a card at 48 kHz that is four-fifths of the band for
+the carrier and two-fifths for the levels; on one at 192 kHz it is a fifth
+and a tenth.
+
+They are still built for 48 kHz and 16 000 baud (`sc.rs` is unchanged), and
+are now run at whatever rate the line has, sample for sample, so every
+frequency in them moves with the rate (`Faster::paced`). The levels keep
+below half their band, so they are run twice as fast again by sending every
+other sample (`hello::Twice`, `hello::Half`).
+
+| | V.ARC/QAM | V.ARC/PCM |
+|---|---|---|
+| Baud | a third of the sample rate | two-thirds of it |
+| At 48 kHz | 16 000 baud, 1.5 to 19.5 kHz | 32 000 baud, 0 to 19.2 kHz |
+| At 192 kHz | 64 000 baud, 6 to 78 kHz | 128 000 baud, 0 to 77 kHz |
+| Bits a symbol | 2 to 24: four points to sixteen million | 1 to 12: 2PCM, 4PCM, 8PCM and so on to 4096PCM |
+
+On the Realtek lead at 192 kHz, a call to itself, nothing wrong in either:
+
+| Mode | Was | Is |
+|---|---|---|
+| V.ARC/QAM | about 200 kbit/s | 1.14 Mbit/s, 3.5 million octets |
+| V.ARC/PCM | 83 kbit/s | 972 kbit/s, 3.2 million octets |
+
+A card need no longer run at a multiple of 48 kHz for these modes.
+
+**By hand.** `AT+VARC=<baud>,<code>,<bits>` sets what a single-carrier call
+asks the far end to send with, where somebody wants to choose and not have
+the receiver choose; the modulation window has the same three under "by
+hand". Nought leaves that one to the modem.
+
+- **Baud**: the nearest the card has, which is its fastest and halves of
+  it. It goes in the handshake, since it is the far end that sends at it,
+  and a direction given one is not slowed further for not being heard.
+- **Code**: the percentage of each codeword that is data: 93, 75, 50, 33
+  or 25.
+- **Bits a symbol**: the grid, whatever the line measures. Ask for more
+  than it bears and nothing arrives.
+
+Each end chooses for what it hears, so the two ways can differ. In
+simulation `AT+VARC=8000,50,4` at one end of a 48 kHz line gives that end
+8000 baud, sixteen points and a code of a half, 15 kbit/s, with the other
+way left at 16 000 baud and whatever it will bear.
+
 ## The handshake
 
 A call begins with each end saying what it is (`hello.rs`). Two ends need
@@ -223,12 +270,13 @@ about it.
   card's samples to each of its own (`Faster::slowed`, `Slower::slowed`).
   Every frequency in it comes down and every symbol lasts longer:
 
-  | Slowed | V.ARC/QAM at 48 kHz | A multicarrier symbol |
-  |---|---|---|
-  | 1 | 16 000 baud, 1.5 to 19.5 kHz | 23 ms, 1.3 ms of guard |
-  | 2 | 8000 baud, 0.75 to 9.75 kHz | 45 ms, 2.7 ms |
-  | 4 | 4000 baud, 375 Hz to 4.9 kHz | 91 ms, 5.3 ms |
-  | 8 | 2000 baud, 190 Hz to 2.4 kHz | 181 ms, 10.7 ms |
+  | Slowed | V.ARC/QAM at 48 kHz | V.ARC/PCM at 48 kHz | A multicarrier symbol |
+  |---|---|---|---|
+  | 1 | 16 000 baud, 1.5 to 19.5 kHz | 32 000 baud, to 19.2 kHz | 23 ms, 1.3 ms of guard |
+  | 2 | 8000 baud, 0.75 to 9.75 kHz | 16 000 baud, to 9.6 kHz | 45 ms, 2.7 ms |
+  | 4 | 4000 baud, 375 Hz to 4.9 kHz | 8000 baud, to 4.8 kHz | 91 ms, 5.3 ms |
+  | 8 | 2000 baud, 190 Hz to 2.4 kHz | 4000 baud, to 2.4 kHz | 181 ms, 10.7 ms |
+  | 16 | | 2000 baud, to 1.2 kHz | |
 
 - **Each direction for itself.** Only the direction that could not be heard
   is slowed.

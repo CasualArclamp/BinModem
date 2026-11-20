@@ -292,6 +292,10 @@ pub struct Config {
     pub report_error_control: bool,
     /// +DR — report the compression that was negotiated (V.250 6.6.3).
     pub report_compression: bool,
+    /// +VARC — what a single-carrier V.ARC call is to be asked for by hand:
+    /// the baud, the code as a percentage of each word that is data, and
+    /// the bits a symbol. Nought leaves each to the modem. Not V.250's.
+    pub varc: (u32, u8, u8),
 }
 
 impl Default for Config {
@@ -308,6 +312,7 @@ impl Default for Config {
             // that wants to be told asks to be told.
             report_error_control: false,
             report_compression: false,
+            varc: (0, 0, 0),
         }
     }
 }
@@ -938,6 +943,43 @@ impl Interpreter {
     }
 
     /// `+DS44` — V.44 data compression (V.250 6.6.2, Table 28).
+    /// `+VARC=<baud>,<code>,<bits>`: this modem's own, for its own mode.
+    ///
+    /// What a V.ARC/QAM or V.ARC/PCM call asks the far end to send with,
+    /// where somebody wants to choose and not have the receiver choose:
+    /// the baud, the code as the percentage of each codeword that is data,
+    /// and the bits a symbol. Nought, or leaving one out of a first
+    /// setting, leaves that one to the modem.
+    fn varc_select(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
+        match op {
+            ExtOp::Read | ExtOp::Execute => {
+                let (baud, code, bits) = self.config.varc;
+                self.fmt.info(&format!("+VARC: {baud},{code},{bits}"), &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Test => {
+                self.fmt.info("+VARC: (0,250-128000),(0,25,33,50,75,93),(0-24)", &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Set(value) => {
+                let mut parts = value.split(',');
+                let mut field = |was: u32, most: u32| -> Result<u32, ResultCode> {
+                    match parts.next().map(str::trim) {
+                        // 5.4.2.1: an omitted subparameter keeps its value.
+                        None | Some("") => Ok(was),
+                        Some(v) => v.parse::<u32>().ok().filter(|n| *n <= most).ok_or(ResultCode::Error),
+                    }
+                };
+                let (was_baud, was_code, was_bits) = self.config.varc;
+                let baud = field(was_baud, 128_000)?;
+                let code = field(u32::from(was_code), 99)?;
+                let bits = field(u32::from(was_bits), 24)?;
+                self.config.varc = (baud, code as u8, bits as u8);
+                Ok(None)
+            }
+        }
+    }
+
     fn v44_select(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
         match op {
             ExtOp::Read => {
@@ -1043,6 +1085,7 @@ impl Interpreter {
             "ES" => return self.error_control_select(op),
             "DS" => return self.compression_select(op),
             "DS44" => return self.v44_select(op),
+            "VARC" => return self.varc_select(op),
             "A8E" => return self.v8_controls(op),
             // V.250 6.5.5 and 6.6.3. The same parameter twice over: one bit,
             // defaulting to off, saying whether the DCE should report what it

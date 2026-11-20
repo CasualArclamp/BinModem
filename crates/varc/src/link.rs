@@ -286,6 +286,9 @@ impl<T: Receiver + ?Sized> Receiver for Box<T> {
     fn echo_left_db(&self) -> Option<f64> {
         (**self).echo_left_db()
     }
+    fn fix(&mut self, bits: Option<u8>, code: Option<f64>) {
+        (**self).fix(bits, code)
+    }
 }
 
 /// The receiving half.
@@ -363,6 +366,13 @@ pub trait Receiver {
     fn echo_left_db(&self) -> Option<f64> {
         None
     }
+
+    /// Ask the far end for these bits a symbol and this code whatever the
+    /// line measures, where either is given: for somebody who wants to see
+    /// what a setting does and not what the receiver would choose. `None`
+    /// leaves the choice with the receiver. Only the single-carrier modes
+    /// take any notice.
+    fn fix(&mut self, _bits: Option<u8>, _code: Option<f64>) {}
 }
 
 /// Points a receiver keeps for whoever draws them. Past this it keeps no

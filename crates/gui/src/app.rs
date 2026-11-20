@@ -401,6 +401,10 @@ pub struct ScopeApp {
     /// front of V.8 (V.251). On unless turned off in the modulation window;
     /// the modem's own factory setting is off.
     v8bis: bool,
+    /// `+VARC`: what a single-carrier V.ARC call is asked for by hand. The
+    /// baud, the percentage of each codeword that is data, and the bits a
+    /// symbol; nought leaves that one to the modem.
+    varc_asks: (u32, u8, u8),
     advanced: bool,
     /// The same, for `AT+ES` and `AT+DS`.
     protection: Protection,
@@ -557,6 +561,7 @@ impl ScopeApp {
             carrier: 1,
             modulation: Modulation::default(),
             v8bis: true,
+            varc_asks: (0, 0, 0),
             advanced: false,
             protection: Protection::default(),
             protection_open: false,
@@ -2607,6 +2612,66 @@ impl ScopeApp {
                             );
                         ui.end_row();
 
+                        // V.ARC's single-carrier modes: the three things the
+                        // receiver would otherwise choose for itself.
+                        if let Some(levels) = self.single_carrier() {
+                            ui.label(RichText::new("by hand").monospace().color(dim));
+                            ui.horizontal(|ui| {
+                                let (baud, code, bits) = &mut self.varc_asks;
+                                egui::ComboBox::from_id_salt("varc-baud")
+                                    .width(96.0)
+                                    .selected_text(if *baud == 0 { "baud: auto".to_owned() } else { format!("{baud} baud") })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(baud, 0, "auto");
+                                        for choice in [128_000u32, 64_000, 32_000, 16_000, 8_000, 4_000, 2_000, 1_000] {
+                                            ui.selectable_value(baud, choice, choice.to_string());
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "The symbol rate this end asks to be sent to at. The nearest the sound card has is used: its rate over three for QAM, twice that for PCM, and halves of those. Auto is the fastest, slowed only if nothing is heard",
+                                    );
+                                egui::ComboBox::from_id_salt("varc-code")
+                                    .width(88.0)
+                                    .selected_text(if *code == 0 { "code: auto".to_owned() } else { format!("code 0.{code:02}") })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(code, 0, "auto");
+                                        for choice in [93u8, 75, 50, 33, 25] {
+                                            ui.selectable_value(code, choice, format!("0.{choice:02}"));
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "How much of each Reed-Solomon codeword is data. 0.93 for a good line; 0.25 reads a line at 6 dB. Auto is whichever carries most",
+                                    );
+                                let most = if levels { 12u8 } else { 24 };
+                                let least = if levels { 1u8 } else { 2 };
+                                *bits = if *bits == 0 { 0 } else { (*bits).clamp(least, most) };
+                                let name = |b: u8| format!("{}{}", 1u64 << b, if levels { "PCM" } else { "QAM" });
+                                egui::ComboBox::from_id_salt("varc-bits")
+                                    .width(120.0)
+                                    .selected_text(if *bits == 0 { "grid: auto".to_owned() } else { name(*bits) })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(bits, 0, "auto");
+                                        for choice in least..=most {
+                                            ui.selectable_value(bits, choice, format!("{} ({choice} bits)", name(choice)));
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "Bits a symbol, whatever the line measures. Ask for more than it bears and nothing arrives: each bit wants about 3 dB for QAM and 6 dB for PCM",
+                                    );
+                            });
+                            ui.end_row();
+                            ui.label("");
+                            ui.label(
+                                RichText::new("AT+VARC. What this end asks the far end to send it; set the other window for the other way")
+                                    .small()
+                                    .color(dim),
+                            );
+                            ui.end_row();
+                        }
+
                         ui.label(RichText::new("line rate").monospace().color(dim));
                         ui.horizontal(|ui| {
                             // Only the rates this modulation has. They are not
@@ -2794,6 +2859,19 @@ impl ScopeApp {
         self.sip_chosen = i;
     }
 
+    /// Whether the mode chosen is one of V.ARC's single-carrier ones, and if
+    /// so whether it is the baseband one.
+    fn single_carrier(&self) -> Option<bool> {
+        let carrier = Self::CARRIERS[self.carrier].0;
+        if carrier.starts_with("VARCQ") {
+            Some(false)
+        } else if carrier.starts_with("VARCP") {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
     /// `&F` first, and then all of it. The window's controls are the ones a
     /// person has actually looked at, so they are what the modem should be
     /// running -- and anything not represented here should be a default rather
@@ -2802,6 +2880,10 @@ impl ScopeApp {
         let mut out = vec!["AT&F".to_owned()];
         out.push(self.modulation.command(Self::CARRIERS[self.carrier].0));
         out.push(format!("AT+A8E=,,,{}", u8::from(self.v8bis)));
+        // Only for the modes it means anything to: under any other it is
+        // put back to the modem's own choice.
+        let (baud, code, bits) = if self.single_carrier().is_some() { self.varc_asks } else { (0, 0, 0) };
+        out.push(format!("AT+VARC={baud},{code},{bits}"));
         out.extend(self.protection.commands());
         out
     }

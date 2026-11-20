@@ -604,3 +604,62 @@ fn an_end_that_cannot_hear_asks_for_it_slower_and_gets_it() {
     let (down, up) = (caller.rate().unwrap_or(0), host.rate().unwrap_or(0));
     assert!(down > 10_000 && down < 100_000 && up > 150_000, "{down} down the dull way, {up} up the cable");
 }
+
+/// The baud, the code and the bits a symbol, chosen by hand at one end for
+/// what that end hears: `AT+VARC=8000,50,4`. The other way is left to the
+/// modem and is whatever the line bears.
+#[test]
+fn a_baud_a_code_and_a_grid_can_be_chosen_by_hand() {
+    let mut pair = Pair::new("VARCQ");
+    type_at(&mut pair.caller, "AT+VARC=8000,50,4\r");
+    type_at(&mut pair.caller, "AT+VARC?\r");
+    assert!(Pair::said(&pair.caller.take_dte()).contains("+VARC: 8000,50,4"));
+    type_at(&mut pair.host, "ATA\r");
+    type_at(&mut pair.caller, "ATD1\r");
+    pair.run(16.0);
+    assert_eq!(pair.caller.state(), State::Data, "{}", Pair::said(&pair.at_caller));
+    // What the caller hears is what it asked for: half the baud a 48 kHz
+    // line would give it, sixteen points, half of every word checks.
+    assert_eq!(pair.caller.varc_bauds(), (8_000, 16_000));
+    assert_eq!(pair.host.varc_bauds(), (16_000, 8_000));
+    // The grid is whatever the symbol diagram was last given.
+    pair.caller.varc_points();
+    pair.run(0.5);
+    assert!(!pair.caller.varc_points().is_empty());
+    assert_eq!(pair.caller.states(), 16);
+    let (n, k) = pair.caller.varc_code().expect("a code");
+    assert!((k as f64 / n as f64 - 0.5).abs() < 0.03, "a code of {k}/{n}");
+    // 8000 baud of four bits, half of them data, less the sync words.
+    let rate = pair.caller.rate().unwrap_or(0);
+    assert!((14_000..16_500).contains(&rate), "{rate} bit/s");
+    // And the way nobody chose is as fast as it would have been.
+    assert!(pair.host.rate().unwrap_or(0) > 100_000, "{:?}", pair.host.rate());
+    pair.at_caller.clear();
+    type_at(&mut pair.host, "as asked");
+    pair.run(1.5);
+    assert_eq!(Pair::said(&pair.at_caller), "as asked");
+}
+
+/// The single-carrier modes fill the band of whatever card they are on: a
+/// third of its rate in baud for the carrier, two-thirds for the levels.
+#[test]
+fn the_single_carrier_modes_run_at_the_cards_own_rate() {
+    for (carrier, fs, baud) in [("VARCQ", 48_000.0, 16_000), ("VARCP", 48_000.0, 32_000), ("VARCQ", 192_000.0, 64_000)] {
+        let mut caller = Modem::new(16_000.0);
+        let mut host = Modem::new(16_000.0);
+        type_at(&mut caller, &format!("AT+MS={carrier}\r"));
+        type_at(&mut host, &format!("AT+MS={carrier}\rATA\r"));
+        type_at(&mut caller, "ATD1\r");
+        let (mut from_caller, mut from_host) = ([0.0], [0.0]);
+        for _ in 0..(12.0 * fs) as usize {
+            let (to_caller, to_host) = (from_host, from_caller);
+            caller.varc_step(fs, &to_caller, &mut from_caller);
+            host.varc_step(fs, &to_host, &mut from_host);
+        }
+        assert_eq!(caller.state(), State::Data, "{carrier} at {fs} Hz");
+        assert_eq!(caller.varc_bauds(), (baud, baud), "{carrier} at {fs} Hz");
+        // Several bits a symbol on a line with no noise in it.
+        let rate = caller.rate().unwrap_or(0);
+        assert!(rate > 4 * baud, "{carrier} at {fs} Hz: {rate} bit/s at {baud} baud");
+    }
+}

@@ -23,7 +23,7 @@
 
 use varc::dmt::{self, Plan};
 use varc::echo::Canceller;
-use varc::hello::{Agreed, Caps, Faster, Hello, Slower, Wanted, Watch};
+use varc::hello::{Agreed, Caps, Faster, Half, Hello, Slower, Twice, Wanted, Watch};
 use varc::exact;
 use varc::link::{Receiver, Report, Sender};
 use varc::sc::{self, Shape};
@@ -73,8 +73,13 @@ type End = Station<Box<dyn Sender>, Box<dyn Receiver>>;
 
 /// The most a direction is slowed: by two to this, which is eight times.
 /// At 48 kHz that takes the single carrier from 16 000 baud between 1.5 and
-/// 19.5 kHz down to 2000 baud between 190 Hz and 2.4 kHz.
+/// 19.5 kHz down to 2000 baud between 190 Hz and 2.4 kHz. The baseband
+/// levels start twice as fast and have a step more, down to the same 2000.
 const SLOWEST: u8 = 3;
+
+/// The rate the single-carrier modes are built for. They are then run at
+/// whatever rate the line has, sample for sample: see [`Call::sender`].
+const BUILT_FOR: f64 = 48_000.0;
 
 /// How long a receiver that has never heard the far end waits before it asks
 /// for the modulation slower, in seconds, by how slowed it is already. A
@@ -172,6 +177,11 @@ pub(crate) struct Call {
     heard_once: bool,
     /// Codewords read when the receivers now listening began.
     read_before: u64,
+    /// What somebody has chosen for a single-carrier call and not left to
+    /// the modem: the baud, the code as a share of each word, and the bits
+    /// a symbol.
+    asks_baud: u32,
+    asks: (Option<u8>, Option<f64>),
     /// The handshake's tones as they are heard, for a symbol scope: which
     /// tone, eight times a bit.
     symbols: Vec<f64>,
@@ -237,6 +247,8 @@ impl Call {
             unheard: 0.0,
             heard_once: false,
             read_before: 0,
+            asks_baud: 0,
+            asks: (None, None),
             symbols: Vec::new(),
             hello: None,
             agreed: None,
@@ -280,7 +292,7 @@ impl Call {
         let calling = self.calling;
         let watch = self.watch.get_or_insert_with(|| Watch::new(calling, fs, fs_out, input.len()));
         if let Some(asked) = watch.hear(input) {
-            let asked = asked.min(SLOWEST);
+            let asked = asked.min(self.slowest());
             if asked != self.sends_slowed {
                 self.sends_slowed = asked;
                 for c in 0..input.len() as u8 {
@@ -312,7 +324,7 @@ impl Call {
             self.unheard = 0.0;
             // At the slowest there is nothing slower to ask for, but the
             // far end may not have heard the asking: say it again.
-            let slowed = (self.hears_slowed + 1).min(SLOWEST);
+            let slowed = (self.hears_slowed + 1).min(self.slowest());
             if slowed != self.hears_slowed {
                 self.hears_slowed = slowed;
                 self.read_before = read;
@@ -448,7 +460,17 @@ impl Call {
 
     /// The ends as they would be with nothing to agree: both the same.
     fn alone(fs: f64, fs_out: f64, wanted: Wanted, two_wire: bool) -> Agreed {
-        Agreed { wanted, two_wire, send_hz: fs_out, hear_hz: fs, send_times: 1, hear_times: 1, notes: Vec::new() }
+        Agreed {
+            wanted,
+            two_wire,
+            send_hz: fs_out,
+            hear_hz: fs,
+            send_times: 1,
+            hear_times: 1,
+            send_baud: 0,
+            hear_baud: 0,
+            notes: Vec::new(),
+        }
     }
 
     fn wanted(&self) -> Wanted {
@@ -462,38 +484,101 @@ impl Call {
     /// A transmitter for channel `c`, for the modulation slowed by two to
     /// the `slowed`.
     ///
-    /// The modulation is built for the rate agreed and then run slower by
-    /// giving it more of the card's samples to each of its own. Every
-    /// frequency in it comes down and every symbol lasts longer, which is
-    /// how a line that will not pass the band it wants is given one it
-    /// will. The same goes for where this end's card is simply the faster.
+    /// The modulation is built for one rate and run at another by how many
+    /// of the card's samples it is given to each of its own. Every frequency
+    /// in it moves with the rate and every symbol lasts as long as its
+    /// samples do, which is how a line that will not pass the band it wants
+    /// is given one it will.
+    ///
+    /// The single-carrier modes are built for 48 kHz, where the carrier at
+    /// 16 000 baud covers 1.5 to 19.5 kHz, and are run sample for sample at
+    /// whatever rate the line has: a third of the rate in baud, four-fifths
+    /// of the band, whatever the card. They were 16 000 baud at any rate,
+    /// which on a card at 192 kHz was a tenth of what it passes. The
+    /// baseband levels keep below half their band, so they are run twice as
+    /// fast again: two-thirds of the rate in baud.
     fn sender(&self, agreed: &Agreed, c: u8, slowed: u8) -> Result<Box<dyn Sender>, String> {
         let (fs, colour) = (agreed.send_hz, self.sends + c);
-        let tx: Box<dyn Sender> = match self.mode {
-            VarcMode::Linear => Box::new(exact::Tx::new(fs)),
-            VarcMode::Dmt => Box::new(dmt::Tx::new(Plan::for_rate(fs).coloured(colour))),
-            VarcMode::Qam | VarcMode::Pcm => Box::new(sc::Tx::new(self.shape(fs)?.coloured(colour))),
-        };
         let slow = 1usize << slowed;
-        Ok(if agreed.send_times * slow > 1 { Box::new(Faster::slowed(tx, agreed.send_times * slow, slow)) } else { tx })
+        Ok(match self.mode {
+            VarcMode::Linear => Box::new(exact::Tx::new(fs)),
+            VarcMode::Dmt => {
+                let tx: Box<dyn Sender> = Box::new(dmt::Tx::new(Plan::for_rate(fs).coloured(colour)));
+                if agreed.send_times * slow > 1 { Box::new(Faster::slowed(tx, agreed.send_times * slow, slow)) } else { tx }
+            }
+            VarcMode::Qam => {
+                let tx = Box::new(sc::Tx::new(self.shape().coloured(colour)));
+                Box::new(Faster::paced(tx, agreed.send_times * slow, fs / BUILT_FOR / slow as f64))
+            }
+            VarcMode::Pcm if slowed == 0 => {
+                let tx = Box::new(Twice::new(Box::new(sc::Tx::new(self.shape().coloured(colour)))));
+                Box::new(Faster::paced(tx, agreed.send_times, fs / BUILT_FOR))
+            }
+            VarcMode::Pcm => {
+                let tx = Box::new(sc::Tx::new(self.shape().coloured(colour)));
+                Box::new(Faster::paced(tx, agreed.send_times * slow / 2, 2.0 * fs / BUILT_FOR / slow as f64))
+            }
+        })
     }
 
     /// The receiver to go with [`Self::sender`] at the far end.
     fn receiver(&self, agreed: &Agreed, c: u8, slowed: u8) -> Result<Box<dyn Receiver>, String> {
         let (fs, colour) = (agreed.hear_hz, self.hears + c);
-        let rx: Box<dyn Receiver> = match self.mode {
-            VarcMode::Linear => Box::new(exact::Rx::new(fs)),
-            VarcMode::Dmt => Box::new(dmt::Rx::new(Plan::for_rate(fs).coloured(colour))),
-            VarcMode::Qam | VarcMode::Pcm => Box::new(sc::Rx::new(self.shape(fs)?.coloured(colour))),
-        };
         let slow = 1usize << slowed;
-        Ok(if agreed.hear_times * slow > 1 { Box::new(Slower::slowed(rx, agreed.hear_times * slow, slow)) } else { rx })
+        let mut rx: Box<dyn Receiver> = match self.mode {
+            VarcMode::Linear => Box::new(exact::Rx::new(fs)),
+            VarcMode::Dmt => {
+                let rx: Box<dyn Receiver> = Box::new(dmt::Rx::new(Plan::for_rate(fs).coloured(colour)));
+                if agreed.hear_times * slow > 1 { Box::new(Slower::slowed(rx, agreed.hear_times * slow, slow)) } else { rx }
+            }
+            VarcMode::Qam => {
+                let rx = Box::new(sc::Rx::new(self.shape().coloured(colour)));
+                Box::new(Slower::paced(rx, agreed.hear_times * slow, fs / BUILT_FOR / slow as f64))
+            }
+            VarcMode::Pcm if slowed == 0 => {
+                let rx = Box::new(Half::new(Box::new(sc::Rx::new(self.shape().coloured(colour)))));
+                Box::new(Slower::paced(rx, agreed.hear_times, fs / BUILT_FOR))
+            }
+            VarcMode::Pcm => {
+                let rx = Box::new(sc::Rx::new(self.shape().coloured(colour)));
+                Box::new(Slower::paced(rx, agreed.hear_times * slow / 2, 2.0 * fs / BUILT_FOR / slow as f64))
+            }
+        };
+        // What somebody chose, where they chose.
+        rx.fix(self.asks.0, self.asks.1);
+        Ok(rx)
     }
 
-    fn shape(&self, fs: f64) -> Result<Shape, String> {
-        let shape = if self.mode == VarcMode::Qam { Shape::qam(fs) } else { Shape::pcm(fs) };
-        shape.ok_or_else(|| {
-            format!("{} wants a sound card running at a multiple of 48 kHz, not {fs} Hz", self.mode.name())
+    fn shape(&self) -> Shape {
+        let shape = if self.mode == VarcMode::Qam { Shape::qam(BUILT_FOR) } else { Shape::pcm(BUILT_FOR) };
+        shape.expect("the rate the single-carrier modes are built for")
+    }
+
+    /// The most a direction of this call is slowed.
+    fn slowest(&self) -> u8 {
+        if self.mode == VarcMode::Pcm { SLOWEST + 1 } else { SLOWEST }
+    }
+
+    /// The baud a single-carrier direction runs at on a line of `hz`,
+    /// slowed by two to the `slowed`; nought for the other modes.
+    fn baud(&self, hz: f64, slowed: u8) -> f64 {
+        let fastest = match self.mode {
+            VarcMode::Qam => hz / 3.0,
+            VarcMode::Pcm => 2.0 * hz / 3.0,
+            _ => return 0.0,
+        };
+        fastest / f64::from(1u32 << slowed)
+    }
+
+    /// How slowed a direction on a line of `hz` has to be for the baud that
+    /// was asked for: the nearest there is. `None` where none was.
+    fn slowed_for(&self, hz: f64, baud: u32) -> Option<u8> {
+        if baud == 0 || self.baud(hz, 0) == 0.0 {
+            return None;
+        }
+        (0..=self.slowest()).min_by(|a, b| {
+            let miss = |s: u8| (self.baud(hz, s).ln() - f64::from(baud).ln()).abs();
+            miss(*a).total_cmp(&miss(*b))
         })
     }
 
@@ -506,6 +591,16 @@ impl Call {
             Wanted::Dmt if self.exact_line && !self.inexact => VarcMode::Linear,
             Wanted::Dmt => VarcMode::Dmt,
         };
+        // A baud that was asked for, by either end for what it hears, is
+        // where that direction starts; and where it stays, since somebody
+        // asked for it.
+        if let Some(slowed) = self.slowed_for(agreed.send_hz, agreed.send_baud) {
+            self.sends_slowed = slowed;
+        }
+        if let Some(slowed) = self.slowed_for(agreed.hear_hz, agreed.hear_baud) {
+            self.hears_slowed = slowed;
+            self.heard_once = true;
+        }
         let mut pairs: Vec<(Box<dyn Sender>, Box<dyn Receiver>)> = Vec::new();
         for c in 0..channels as u8 {
             pairs.push((self.sender(agreed, c, self.sends_slowed)?, self.receiver(agreed, c, self.hears_slowed)?));
@@ -543,6 +638,28 @@ impl Call {
         }
         for (canceller, &sample) in self.echo.iter_mut().zip(output.iter()) {
             canceller.sent(sample);
+        }
+    }
+
+    /// What a single-carrier call is to ask the far end for by hand: the
+    /// baud, the percentage of each codeword that is data, and the bits a
+    /// symbol. Nought for any leaves that one to the modem. Before the
+    /// call's first sample.
+    pub fn ask_for(&mut self, baud: u32, code: u8, bits: u8) {
+        self.asks_baud = baud;
+        self.asks = ((bits > 0).then_some(bits), (code > 0).then(|| f64::from(code) / 100.0));
+    }
+
+    /// The baud each direction of a single-carrier call is running at: what
+    /// this end hears, then what it sends. Noughts for the other modes and
+    /// before the ends have agreed.
+    pub fn bauds(&self) -> (u32, u32) {
+        match self.agreed.as_ref() {
+            Some(agreed) if self.station.is_some() => (
+                self.baud(agreed.hear_hz, self.hears_slowed) as u32,
+                self.baud(agreed.send_hz, self.sends_slowed) as u32,
+            ),
+            _ => (0, 0),
         }
     }
 
@@ -591,7 +708,7 @@ impl Call {
         // First, each end says what it is, and the two work out what they
         // will do. Until that is done there is no modulation to run.
         if self.station.is_none() && self.agreed.is_none() && self.greets() {
-            let (calling, wanted, two_wire) = (self.calling, self.wanted(), self.two_wire);
+            let (calling, wanted, two_wire, asks_baud) = (self.calling, self.wanted(), self.two_wire, self.asks_baud);
             let hello = self.hello.get_or_insert_with(|| {
                 Hello::new(
                     calling,
@@ -602,6 +719,7 @@ impl Call {
                         wanted,
                         two_wire,
                         heard: false,
+                        asks_baud,
                     },
                 )
             });
@@ -983,6 +1101,10 @@ impl Call {
                     "slowed",
                     format!("hearing {}, sending {}", times(self.hears_slowed), times(self.sends_slowed)),
                 ));
+            }
+            let (hears, sends) = self.bauds();
+            if hears > 0 {
+                rows.push(("baud", format!("{hears} arriving, {sends} going")));
             }
         }
         rows
