@@ -302,6 +302,24 @@ end's address. One dials; the other presses Answer when it rings.
 
 An account in the SIP file gets the same codings with `linear = yes`.
 
+### A robbed bit, for testing
+
+No SIP call has robbed-bit signalling on it, so there is a switch that puts
+it there. `BINMODEM_ROB_BIT=3` in the environment of a window (or of
+`modem-sip`) overwrites the least significant bit of one G.711 octet in
+six, of what that end receives, as a T1 trunk without a signalling channel
+does. `0,3` robs two positions, as a call over two trunks has it, and
+`3:0` writes a nought where the default is a one. Set it on the calling
+end to rob the downstream.
+
+![V.90 with one robbed position, V.92 with one, and V.90 with two](images/robbed-bit.png)
+
+Between two windows on EasySip in mu-law, on one machine: V.90 finds it and
+connects at 53 333 on 112 levels where a clean line gives 56 000 on 132;
+with two positions robbed, 45 333 on 54 levels. V.92 with PCM upstream did
+not come up at all in the one run tried, which fits its calling side
+asking for no DIL.
+
 ### UDP or TCP
 
 UDP unless you have a reason. It is what a trunk expects, and the protocol
