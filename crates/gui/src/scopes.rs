@@ -705,9 +705,41 @@ pub struct Constellation<'a> {
     pub tones: usize,
     /// How far the points reach. One fits the box exactly.
     pub peak: f32,
-    /// The points are PCM samples, each against the next, rather than I and
-    /// Q -- which a reader will take them for unless told.
-    pub pairs: bool,
+    /// The points are PCM samples, each with the one before it, rather than
+    /// I and Q -- which a reader will take them for unless told -- and this
+    /// is how they are to be drawn.
+    pub pcm: Option<PcmView>,
+}
+
+/// Ways of drawing PCM, which has levels and no plane to put them on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PcmView {
+    /// Each sample against the next: a square grid of every pair of levels.
+    /// Shows at a glance how many levels there are and whether they are
+    /// apart, and nothing about which of them are in trouble.
+    #[default]
+    Pairs,
+    /// The levels up the side and time across: the ladder itself, as an
+    /// oscilloscope with a very long memory would have it.
+    Ladder,
+    /// How far each sample fell from the level it was taken for, against
+    /// that level: the whole height is from one decision line to the next.
+    /// A clean line is a thin stripe along the middle; noise thickens it,
+    /// and a line that treats its large levels worse than its small ones
+    /// shows it as a stripe that flares at the ends.
+    Error,
+}
+
+impl PcmView {
+    pub const ALL: [Self; 3] = [Self::Pairs, Self::Ladder, Self::Error];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Pairs => "pairs",
+            Self::Ladder => "ladder",
+            Self::Error => "error by level",
+        }
+    }
 }
 
 pub fn symbol_scope(
@@ -718,7 +750,8 @@ pub fn symbol_scope(
     quality: Option<u32>,
     height: f32,
 ) -> eframe::egui::Response {
-    let Constellation { points: constellation, tones, peak, pairs } = dots;
+    let Constellation { points: constellation, tones, peak, pcm } = dots;
+    let pairs = pcm.is_some();
     let size = vec2(ui.available_width(), height);
     let (response, painter) = ui.allocate_painter(size, Sense::click());
     let rect = response.rect;
@@ -812,18 +845,53 @@ pub fn symbol_scope(
         (radius / 180.0).clamp(1.0, 2.5) * if crowded { 1.0 } else { 1.7 }
     };
     let colour = Color32::from_rgba_unmultiplied(120, 220, 160, if few { 255 } else if crowded { 110 } else { 150 });
-    for &(re, im) in constellation {
-        mesh.add_colored_rect(Rect::from_center_size(at(re, im), vec2(side, side)), colour);
+    match pcm {
+        Some(PcmView::Ladder) => {
+            // Oldest on the left; the level is the second of each pair.
+            let span = (constellation.len().max(2) - 1) as f32;
+            for (i, &(_, level)) in constellation.iter().enumerate() {
+                mesh.add_colored_rect(Rect::from_center_size(at(2.0 * i as f32 / span - 1.0, level), vec2(side, side)), colour);
+            }
+        }
+        Some(PcmView::Error) => {
+            // The levels sit evenly from minus one to one, so the nearest is
+            // a rounding, and half the gap between two is the decision line.
+            let steps = tones.max(2) as f32 - 1.0;
+            for &(_, level) in constellation {
+                let level = level * fit;
+                let nearest = ((level * steps + steps) / 2.0).round().clamp(0.0, steps);
+                let ideal = (2.0 * nearest - steps) / steps;
+                let miss = (level - ideal) * steps;
+                mesh.add_colored_rect(
+                    Rect::from_center_size(
+                        pos2(centre.x + ideal * radius, centre.y - miss.clamp(-1.0, 1.0) * radius),
+                        vec2(side, side),
+                    ),
+                    colour,
+                );
+            }
+        }
+        _ => {
+            for &(re, im) in constellation {
+                mesh.add_colored_rect(Rect::from_center_size(at(re, im), vec2(side, side)), colour);
+            }
+        }
     }
     painter.add(eframe::egui::Shape::mesh(mesh));
 
     // Always say something. A silent, empty scope gives no way to tell a modem
     // that is not decoding from a display that is not being fed.
-    if pairs {
+    if let Some(view) = pcm {
         // Said on the axes themselves, always: this is not I against Q.
         let faint = Color32::from_rgb(110, 125, 145);
-        painter.text(pos2(centre.x + radius - 2.0, centre.y + 4.0), Align2::RIGHT_TOP, "sample n", FontId::monospace(10.0), faint);
-        painter.text(pos2(centre.x + 4.0, centre.y - radius + 2.0), Align2::LEFT_TOP, "sample n+1", FontId::monospace(10.0), faint);
+        let (across, up) = match view {
+            PcmView::Pairs => ("sample n", "sample n+1"),
+            PcmView::Ladder => ("time", "level"),
+            // Top and bottom of the box are the decision lines.
+            PcmView::Error => ("level", "miss"),
+        };
+        painter.text(pos2(centre.x + radius - 2.0, centre.y + 4.0), Align2::RIGHT_TOP, across, FontId::monospace(10.0), faint);
+        painter.text(pos2(centre.x + 4.0, centre.y - radius + 2.0), Align2::LEFT_TOP, up, FontId::monospace(10.0), faint);
     }
     let (text, colour) = match quality {
         _ if pairs && !constellation.is_empty() => (

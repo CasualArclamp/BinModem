@@ -166,6 +166,14 @@ On the Realtek lead at 192 kHz, a call to itself, nothing wrong in either:
 
 A card need no longer run at a multiple of 48 kHz for these modes.
 
+PCM has levels and no plane to put them on, so the window draws it one of
+three ways, chosen above the scope (`BINMODEM_PCM_VIEW=ladder` or `error`
+starts on that one): each sample against the next; the levels with time
+across; or how far each sample fell from its level, against the level, with
+the box's top and bottom the decision lines. Below, 512 levels on the lead.
+
+![PCM drawn as pairs, as a ladder, and as error by level](../images/v-arc/pcm-views.png)
+
 **By hand.** `AT+VARC=<baud>,<code>,<bits>` sets what a single-carrier call
 asks the far end to send with, where somebody wants to choose and not have
 the receiver choose; the modulation window has the same three under "by

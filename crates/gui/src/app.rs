@@ -454,6 +454,8 @@ pub struct ScopeApp {
     row_measured: f32,
     /// The line's figures, averaged for reading: see [`Calm`].
     calm: Calm,
+    /// How PCM is drawn on the symbol scope.
+    pcm_view: scopes::PcmView,
     /// Whether the SIP line had a call's audio the last time it was looked
     /// at, and the frame the scopes were emptied on when it stopped (see
     /// `clear_scopes`).
@@ -656,6 +658,12 @@ impl ScopeApp {
             row_secs: 1.0 / 30.0,
             row_measured: 1.0 / 30.0,
             calm: Calm::default(),
+            // `BINMODEM_PCM_VIEW=ladder` or `error` starts on that one.
+            pcm_view: match std::env::var("BINMODEM_PCM_VIEW").as_deref() {
+                Ok("ladder") => scopes::PcmView::Ladder,
+                Ok("error") => scopes::PcmView::Error,
+                _ => scopes::PcmView::Pairs,
+            },
             sip_call_was_up: false,
             pcm_up: true,
             quick_connect: !matches!(
@@ -3694,6 +3702,25 @@ impl ScopeApp {
     /// The symbol scope and, beside it, the line as an oscilloscope has it.
     fn symbol_row(&mut self, ui: &mut egui::Ui) {
         const SIDE: f32 = 190.0;
+        // PCM has no plane to be points on, and no one picture of it says
+        // everything: which is wanted depends on the question.
+        if self.frame.symbol_label == "PCM" {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("PCM drawn as").size(12.0).color(DIM));
+                egui::ComboBox::from_id_salt("pcm-view")
+                    .width(120.0)
+                    .selected_text(self.pcm_view.name())
+                    .show_ui(ui, |ui| {
+                        for view in scopes::PcmView::ALL {
+                            ui.selectable_value(&mut self.pcm_view, view, view.name());
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "Pairs: each sample against the next, a grid of every pair of levels. Ladder: the levels up the side with time across. Error by level: how far each sample fell from its level, the full height being one decision line to the next",
+                    );
+            });
+        }
         ui.horizontal_top(|ui| {
             let label = self.symbol_label();
             let scope = ui
@@ -3705,7 +3732,7 @@ impl ScopeApp {
                             points: &self.frame.constellation,
                             tones: self.frame.tones,
                             peak: self.frame.constellation_peak,
-                            pairs: self.frame.symbol_label == "PCM",
+                            pcm: (self.frame.symbol_label == "PCM").then_some(self.pcm_view),
                         },
                         &label,
                         self.frame.symbol_quality(),
@@ -5276,7 +5303,7 @@ impl ScopeApp {
                         points: &self.frame.constellation,
                         tones: self.frame.tones,
                         peak: self.frame.constellation_peak,
-                        pairs: self.frame.symbol_label == "PCM",
+                        pcm: (self.frame.symbol_label == "PCM").then_some(self.pcm_view),
                     },
                     &label,
                     self.frame.symbol_quality(),
