@@ -2013,7 +2013,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         if on_wide {
             to_line.extend_from_slice(&wide_sent);
         }
-        if !from_network.is_empty() {
+        // Only on a call at the network's own rate: see
+        // `sip::Line::carries_network_levels`.
+        let network_levels = audio.sip().is_some_and(sip::Line::carries_network_levels);
+        if !from_network.is_empty() && network_levels {
             let levels: Vec<f64> = from_network.iter().map(|l| f64::from(*l)).collect();
             modem.give_network_levels(&levels);
         }
@@ -2127,7 +2130,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             sip.transmit_exact(exact);
         } else {
             match (audio.sip(), modem.take_network_levels()) {
-                (Some(sip), Some(levels)) => {
+                (Some(sip), Some(levels)) if network_levels => {
                     let levels: Vec<f32> = levels.iter().map(|l| *l as f32).collect();
                     sip.transmit_exact(&levels);
                 }

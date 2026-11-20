@@ -460,6 +460,19 @@ impl Line {
         self.media.connected() && self.media.linear()
     }
 
+    /// Whether the call's samples are the telephone network's: 8000 a
+    /// second, which is every G.711 call and a linear one at that rate.
+    ///
+    /// A V.90 or V.92 digital modem's signal is one level to a network
+    /// sample, and on such a call its levels go out and come in as they
+    /// are. On a linear call at any other rate one level to a sample is
+    /// the wrong rate altogether: the packets come up short, the far end
+    /// hears the signal in pieces, and the modem has to be treated as it
+    /// is on a sound card, as a waveform to be converted.
+    pub fn carries_network_levels(&self) -> bool {
+        !self.media.linear() || (self.media.linear_rate() - 8000.0).abs() < 0.5
+    }
+
     /// Samples a second of the linear call that is up: 8, 16, 44.1 or 48
     /// thousand, whichever the two ends agreed on.
     pub fn linear_rate(&self) -> f64 {
