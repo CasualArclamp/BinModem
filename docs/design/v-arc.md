@@ -780,6 +780,47 @@ were a fifth of the line. After forty blocks with nothing missing the
 receiver asks for none (sixteen in mu-law), and for the forty-eight again
 at the first hole or the first frame that fails.
 
+## Compression
+
+V.ARC has its own retransmission and so no V.42 over it, which left it
+with no compression either: `+DS` and `+DS44` are V.42's. The stream is
+now compressed above the numbering (`crates/varc/src/squeeze.rs`), so that
+what is numbered, sent again and put back in order is what the stream
+turned into.
+
+| Method | What it is |
+|---|---|
+| LZ | `crates/varc/src/lz.rs`: matches of 3 to 258 octets against the last 256 kilobytes, the last distance again for nearly nothing, and every bit through a range coder against a probability learnt as it goes. In LZMA's manner, not its format |
+| V.44 | as V.42 runs it, 2048 codewords and strings of 255 |
+| V.42bis | the same, 2048 codewords and strings of 250 |
+
+Each direction uses the best both ends have. `AT+VARCZ=0` is none, `1` is
+V.44 and V.42bis as `+DS44` and `+DS` allow them, `2` is LZ as well and is
+how it comes.
+
+**A write is a block.** Everything written in one go is readable at the far
+end as soon as it has arrived: LZ ends its range coder and begins again,
+which costs five octets, so a write of under 24 octets goes as it is with
+two octets in front. A keystroke is three octets on the line and not one.
+
+**Agreeing** is one frame of 19 octets, kind 9, the same each time: what
+this end can do, what its stream turns into and at which octet, and the far
+end's `at` as this end has it. An end that has heard what the far end can
+do chooses a method and an `at`, which is where its stream has got to, and
+holds back everything written after that until a frame comes back naming
+that `at`. So nothing compressed can arrive before the far end knows where
+it begins, whatever frames are lost. The frames are not retransmitted;
+they are repeated until they have had their effect. A far end that never
+answers, which an older build does not, is asked for half a minute and
+then left alone, and gets the stream as it is.
+
+A compressed stream that stops making sense ends the call. Nothing after
+the first wrong octet can be read, and the retransmission under it has
+already made sure there is no wrong octet for the line's sake.
+
+Between two windows on one machine, lines of text: 5577 octets sent as
+253. Real traffic will not be that kind.
+
 ## Octets on the line
 
 Same for all three (`frame.rs`). Each modulation offers room for so many

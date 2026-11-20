@@ -323,6 +323,65 @@ fn a_call_in_g711_that_is_recoded_carries_on_as_an_ordinary_one() {
     assert!(!told.contains("CONNECT"), "{told}");
 }
 
+/// A linear call with `sent` written at the calling end once it is up,
+/// each end having typed `setup` first: what arrived, and what the calling
+/// end says of its compression.
+/// What a call says of its compression: the method each way, and the octets.
+type Squeezed = Option<(&'static str, &'static str, [u64; 4])>;
+
+fn compressed(setup: [&str; 2], sent: &[u8], seconds: f64) -> (Vec<u8>, Squeezed) {
+    let mut caller = Modem::new(16_000.0);
+    let mut host = Modem::new(16_000.0);
+    type_at(&mut caller, &format!("{}AT+MS=VARC\r", setup[0]));
+    type_at(&mut host, &format!("{}AT+MS=VARC\rATA\r", setup[1]));
+    type_at(&mut caller, "ATD100\r");
+    caller.varc_exact_line(true);
+    host.varc_exact_line(true);
+    let (mut from_caller, mut from_host) = ([0.0], [0.0]);
+    let mut at_host = Vec::new();
+    let mut left = Some(sent);
+    for _ in 0..(seconds * 16_000.0) as usize {
+        let (to_host, to_caller) = ([from_caller[0]], [from_host[0]]);
+        caller.varc_step(16_000.0, &to_caller, &mut from_caller);
+        host.varc_step(16_000.0, &to_host, &mut from_host);
+        caller.take_dte();
+        at_host.extend(host.take_dte());
+        if caller.state() == State::Data && host.state() == State::Data {
+            // As a terminal does it: a piece at a time, when there is room.
+            if let Some(rest) = left
+                && caller.queued() < 2000
+            {
+                let take = rest.len().min(1500);
+                for &octet in &rest[..take] {
+                    caller.feed_dte(octet);
+                }
+                left = (take < rest.len()).then(|| &rest[take..]);
+            }
+        }
+    }
+    (at_host, caller.varc_compression())
+}
+
+#[test]
+fn a_call_compresses_its_stream_with_the_best_both_ends_have() {
+    let text: Vec<u8> = (0..120_000).map(|i| b"what the terminal wrote is mostly text, and text is mostly the same words. "[i % 75]).collect();
+    for (setup, method) in [
+        (["", ""], "LZ"),
+        (["AT+VARCZ=1\r", ""], "V.44"),
+        (["AT+DS44=0\r", "AT+VARCZ=1\r"], "V.42bis"),
+        (["AT+VARCZ=0\r", ""], "none"),
+    ] {
+        let (got, said) = compressed(setup, &text, 8.0);
+        let (out, back, [plain, coded, _, _]) = said.expect("a V.ARC call");
+        assert_eq!(out, method, "{setup:?}");
+        assert_eq!(back, method, "{setup:?}");
+        assert!(got.ends_with(&text[text.len() - 4000..]), "{setup:?}: {} octets arrived", got.len());
+        if method != "none" {
+            assert!(coded * 4 < plain, "{setup:?}: {plain} octets sent as {coded}");
+        }
+    }
+}
+
 #[test]
 fn on_a_call_of_exact_samples_the_samples_are_the_data() {
     let (caller, host, told, got) = on_a_linear_call(1.0, 3.0);

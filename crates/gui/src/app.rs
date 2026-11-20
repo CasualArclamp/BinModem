@@ -5055,6 +5055,32 @@ impl ScopeApp {
                     },
                 );
 
+                // What the stream is compressed with, each way, and what
+                // that has been worth: the octets the terminal wrote
+                // against the octets the line was given for them.
+                if let Some((out, back, [plain_out, coded_out, plain_in, coded_in])) = f.squeeze
+                    && connected
+                {
+                    let worth = |plain: u64, coded: u64| {
+                        if coded == 0 { String::new() } else { format!(" {:.1} to 1", plain as f64 / coded as f64) }
+                    };
+                    let on = out != "none" || back != "none";
+                    stage(
+                        ui,
+                        if on { GOOD } else { grey },
+                        "Compression",
+                        if on {
+                            format!(
+                                "sending {out}{} · receiving {back}{}\n{plain_out} octets sent as {coded_out} · {plain_in} received as {coded_in}",
+                                worth(plain_out, coded_out),
+                                worth(plain_in, coded_in)
+                            )
+                        } else {
+                            "none: the far end has not agreed to any".into()
+                        },
+                    );
+                }
+
                 // What the far end hears of this end, where it says. A
                 // transmitter cannot hear its own line, so this is the only
                 // way to know whether it is too loud or too faint there.

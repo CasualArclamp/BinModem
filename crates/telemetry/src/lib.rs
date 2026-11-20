@@ -151,6 +151,10 @@ pub struct Frame {
     /// The error-correcting code on what is arriving, (n, k): octets a
     /// codeword and how many of them are data. Only V.ARC has one.
     pub code: Option<(u16, u16)>,
+    /// What a V.ARC call's stream is compressed with, sending and then
+    /// receiving, and the octets each way before and after: written and
+    /// sent, delivered and received.
+    pub squeeze: Option<(&'static str, &'static str, [u64; 4])>,
     /// The band a carrier at a time, for a mode that loads each carrier for
     /// itself: frequency in hertz, signal to noise in decibels, and bits.
     /// Thinned to a couple of hundred entries; empty for every other mode.
@@ -260,6 +264,7 @@ impl Frame {
             hz_per_bin: sample_rate / (spectrum_bins as f64 * 2.0),
             display_hz: 4000.0,
             code: None,
+            squeeze: None,
             carriers: Vec::new(),
             echo: Vec::new(),
             echo_delay_ms: 0.0,
