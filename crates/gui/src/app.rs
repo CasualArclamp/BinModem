@@ -204,7 +204,7 @@ impl Modulation {
             6 => &[300],
             // V.ARC has no rates to choose among: each end loads the line
             // for what it measures, and nought is how +MS says "unspecified".
-            8..=10 => &[0],
+            8..=13 => &[0],
             // V.34 5.1: "2400 bit/s to 33 600 bit/s in multiples of 2400".
             _ => &[
                 2400, 4800, 7200, 9600, 12_000, 14_400, 16_800, 19_200, 21_600, 24_000, 26_400,
@@ -362,6 +362,10 @@ pub struct ScopeApp {
     /// credentials window and the dialler already show.
     sip_accounts: Vec<String>,
     chosen_line: usize,
+    /// EasySip: the far end's address as typed, and the port this end hears
+    /// calls on.
+    easy_peer: String,
+    easy_port: u16,
     /// The same accounts in full, as the credentials window is editing them,
     /// and which of them it is showing.
     ///
@@ -401,6 +405,14 @@ pub struct ScopeApp {
     /// front of V.8 (V.251). On unless turned off in the modulation window;
     /// the modem's own factory setting is off.
     v8bis: bool,
+    /// `+VARC`: what a single-carrier V.ARC call is asked for by hand. The
+    /// baud, the percentage of each codeword that is data, and the bits a
+    /// symbol; nought leaves that one to the modem.
+    varc_asks: (u32, u8, u8),
+    /// `+VARCBIS`: whether V.8 bis lists V.ARC, and which: nought not at
+    /// all, then the multicarrier mode, QAM and PCM; and whether on one
+    /// pair of wires.
+    varc_bis: (u8, bool),
     advanced: bool,
     /// The same, for `AT+ES` and `AT+DS`.
     protection: Protection,
@@ -448,6 +460,10 @@ pub struct ScopeApp {
     /// The running measurement behind `row_secs`, which is only moved to it
     /// when the two have come apart (see `poll`).
     row_measured: f32,
+    /// The line's figures, averaged for reading: see [`Calm`].
+    calm: Calm,
+    /// How PCM is drawn on the symbol scope.
+    pcm_view: scopes::PcmView,
     /// Whether the SIP line had a call's audio the last time it was looked
     /// at, and the frame the scopes were emptied on when it stopped (see
     /// `clear_scopes`).
@@ -476,6 +492,75 @@ pub struct ScopeApp {
     /// What was written out last, so that a frame which changed nothing does
     /// not rewrite the file sixty times a second.
     remembered: String,
+}
+
+/// The line's figures as a person can read them.
+///
+/// Each frame's level, its largest sample and its spectrum are measurements
+/// of an eighth of a second, and from one to the next they differ by a
+/// decibel or two for no reason but that noise is noise. Printed as they
+/// came, the level and the crest factor flickered, and the strongest
+/// frequency of a signal that fills its band flat jumped from one end of
+/// the band to the other, since which bin of a flat spectrum is a hair above
+/// the rest is chance.
+///
+/// So the spectrum and the levels are averaged over about a second before
+/// anything is read off them; a level that moves a long way at once is
+/// taken at once, so that a call starting does not creep up the meter; and
+/// the strongest frequency stays where it was unless another is clearly
+/// stronger.
+#[derive(Debug, Default)]
+struct Calm {
+    spectrum_db: Vec<f32>,
+    level_db: f32,
+    rms_db: f32,
+    peak_db: f32,
+    /// Where the strongest bin was last said to be.
+    peak_hz: f64,
+    hz_per_bin: f64,
+}
+
+impl Calm {
+    /// Seconds a figure takes to come most of the way to a new value.
+    const SECONDS: f32 = 1.0;
+
+    /// Take a frame in; what the averaged spectrum says of itself.
+    fn update(&mut self, f: &Frame, dt: f32) -> Option<scopes::Measured> {
+        let share = 1.0 - (-dt / Self::SECONDS).exp();
+        // A different spectrum altogether, another rate or another span, is
+        // not averaged with the last one.
+        let fresh = self.spectrum_db.len() != f.spectrum_db.len() || self.hz_per_bin != f.hz_per_bin;
+        let follow = |was: &mut f32, now: f32, fresh: bool| {
+            // Ten decibels at once is a change and not noise.
+            *was = if fresh || (now - *was).abs() > 10.0 { now } else { *was + (now - *was) * share };
+        };
+        follow(&mut self.level_db, f.rx_level_db, fresh);
+        if let Some(wave) = scopes::wave(&f.waveform) {
+            follow(&mut self.rms_db, wave.rms_db, fresh);
+            follow(&mut self.peak_db, wave.peak_db, fresh);
+        }
+        if fresh {
+            self.spectrum_db.clone_from(&f.spectrum_db);
+            self.hz_per_bin = f.hz_per_bin;
+            self.peak_hz = 0.0;
+        } else {
+            for (was, &now) in self.spectrum_db.iter_mut().zip(&f.spectrum_db) {
+                *was = if (now - *was).abs() > 20.0 { now } else { *was + (now - *was) * share };
+            }
+        }
+        let mut measured = scopes::measure(&self.spectrum_db, f.hz_per_bin, f.display_hz)?;
+        // The strongest stays the strongest until another is a decibel and a
+        // half above it.
+        let held = (self.peak_hz / f.hz_per_bin).round() as usize;
+        match self.spectrum_db.get(held) {
+            Some(&db) if self.peak_hz > 0.0 && db > measured.peak_db - 1.5 && self.peak_hz <= f.display_hz => {
+                measured.peak_hz = self.peak_hz;
+                measured.peak_db = db;
+            }
+            _ => self.peak_hz = measured.peak_hz,
+        }
+        Some(measured)
+    }
 }
 
 impl ScopeApp {
@@ -542,6 +627,8 @@ impl ScopeApp {
             // right.
             sip_accounts: live::sip_accounts(),
             chosen_line: 0,
+            easy_peer: String::new(),
+            easy_port: 5060,
             // Filled by `load_accounts` below, out of the same file the names
             // above came from.
             sip_edit: Vec::new(),
@@ -557,6 +644,8 @@ impl ScopeApp {
             carrier: 1,
             modulation: Modulation::default(),
             v8bis: true,
+            varc_asks: (0, 0, 0),
+            varc_bis: (0, false),
             advanced: false,
             protection: Protection::default(),
             protection_open: false,
@@ -579,6 +668,13 @@ impl ScopeApp {
             hold: vec![-120.0; SPECTRUM_BINS],
             row_secs: 1.0 / 30.0,
             row_measured: 1.0 / 30.0,
+            calm: Calm::default(),
+            // `BINMODEM_PCM_VIEW=ladder` or `error` starts on that one.
+            pcm_view: match std::env::var("BINMODEM_PCM_VIEW").as_deref() {
+                Ok("ladder") => scopes::PcmView::Ladder,
+                Ok("error") => scopes::PcmView::Error,
+                _ => scopes::PcmView::Pairs,
+            },
             sip_call_was_up: false,
             pcm_up: true,
             quick_connect: !matches!(
@@ -786,7 +882,7 @@ impl ScopeApp {
     ///
     /// Positions are what the rate lists, the ceilings and the default go by,
     /// so a new one goes on the end rather than where it might read best.
-    const CARRIERS: [(&'static str, &'static str); 11] = [
+    const CARRIERS: [(&'static str, &'static str); 14] = [
         ("B103", "Bell 103 - 300 bit/s"),
         ("V22B", "V.22bis - 1200 or 2400"),
         ("V32", "V.32 - 4800 or 9600"),
@@ -810,6 +906,15 @@ impl ScopeApp {
         ),
         ("VARCQ", "V.ARC/QAM - the same lead with one carrier at 16000 baud"),
         ("VARCP", "V.ARC/PCM - the same lead with levels at baseband, 16000 baud"),
+        (
+            "VARC2W",
+            "V.ARC two-wire - the multicarrier mode on one pair of wires, both ends sending into it, with this end's own echo taken out. One sound card, input and output at the same rate. The rate climbs for minutes as the echo falls",
+        ),
+        (
+            "VARCQ2W",
+            "V.ARC/QAM two-wire - one carrier at 16000 baud on one pair of wires. The echo is taken out by the first canceller alone, so it settles lower than the multicarrier mode does",
+        ),
+        ("VARCP2W", "V.ARC/PCM two-wire - levels at baseband on one pair of wires, by the first canceller alone"),
     ];
 
     /// Boards to start from, because a text box on its own is a box nobody
@@ -948,6 +1053,7 @@ impl ScopeApp {
                 // A call rather than a pair of devices: follow which account
                 // it is on, for the same reason -- and the account belongs to
                 // the dialler's picker now, not to the box.
+                Some(progress) if progress.account.starts_with(live::EASY_SIP) => self.chosen_line = 2,
                 Some(progress) => {
                     self.chosen_line = 1;
                     if let Some(i) = self
@@ -996,7 +1102,7 @@ impl ScopeApp {
             let line_before = self.chosen_line;
             egui::ComboBox::from_id_salt("line-kind")
                 .width(150.0)
-                .selected_text(if self.chosen_line == 0 { "sound card" } else { "SIP" })
+                .selected_text(["sound card", "SIP", "EasySip"][self.chosen_line.min(2)])
                 .show_ui(ui, |ui| {
                     ui.selectable_value(&mut self.chosen_line, 0, "sound card")
                         .on_hover_text("Two audio devices as one two-wire line");
@@ -1005,13 +1111,29 @@ impl ScopeApp {
                          path. Which account, and its credentials, are \
                          in the dialler",
                     );
+                    ui.selectable_value(&mut self.chosen_line, 2, "EasySip").on_hover_text(
+                        "A call straight to another BinModem: type its address and                          that is all. No account, no registrar, no password. Linear                          samples are offered first, which is what V.ARC wants",
+                    );
                 });
-            let on_sip = self.chosen_line == 1;
+            let easy = self.chosen_line == 2;
+            let on_sip = self.chosen_line == 1 || easy;
+            if easy {
+                ui.label(RichText::new("far end").monospace().color(dim));
+                ui.add(egui::TextEdit::singleline(&mut self.easy_peer).desired_width(170.0).hint_text("192.168.1.20"))
+                    .on_hover_text(
+                        "The other BinModem's address, as it is reached from here: an IP                          address or a name, with :port after it if it does not listen on 5060",
+                    );
+                ui.label(RichText::new("my port").monospace().color(dim));
+                ui.add(egui::DragValue::new(&mut self.easy_port).range(1024..=65535)).on_hover_text(
+                    "The port this end hears calls on, which is what the far end puts                      after your address if it is not 5060. Two on one machine want two                      different ones",
+                );
+            }
+            let easy_name = live::easy_sip_name(&self.easy_peer, self.easy_port);
             // Whose call it would be, beside the box rather than in it: an
             // account is not a kind of line. But a row that says nothing
             // about it leaves somebody with two accounts no way of telling
             // which one Open would use.
-            if on_sip {
+            if on_sip && !easy {
                 let whose = self
                     .sip_edit
                     .get(self.sip_chosen)
@@ -1062,7 +1184,9 @@ impl ScopeApp {
             // line.
             let moved = picked != before || self.chosen_line != line_before;
             if moved && state.open {
-                if on_sip {
+                if easy {
+                    session.open_sip(&easy_name);
+                } else if on_sip {
                     if let Some(account) = self.sip_edit.get(self.sip_chosen) {
                         session.open_sip(&account.name);
                     }
@@ -1080,15 +1204,25 @@ impl ScopeApp {
                 }
             } else if ui
                 .add_enabled(
-                    if on_sip { self.sip_chosen < self.sip_edit.len() } else { have_both },
+                    if easy {
+                        !self.easy_peer.trim().is_empty()
+                    } else if on_sip {
+                        self.sip_chosen < self.sip_edit.len()
+                    } else {
+                        have_both
+                    },
                     egui::Button::new("Open"),
                 )
-                .on_hover_text(if on_sip {
+                .on_hover_text(if easy {
+                    "Listen for the far end's call, and wait for ATD to place one"
+                } else if on_sip {
                     "Register the dialler's account and wait for ATD"
                 } else {
                     "Open these two devices as one two-wire line"
                 })
-                .on_disabled_hover_text(if on_sip {
+                .on_disabled_hover_text(if easy {
+                    "Type the far end's address first"
+                } else if on_sip {
                     "There are no accounts. Open the dialler, then Credentials, and \
                      add one"
                 } else {
@@ -1096,7 +1230,9 @@ impl ScopeApp {
                 })
                 .clicked()
             {
-                if on_sip {
+                if easy {
+                    session.open_sip(&easy_name);
+                } else if on_sip {
                     if let Some(account) = self.sip_edit.get(self.sip_chosen) {
                         session.open_sip(&account.name);
                     }
@@ -1106,6 +1242,15 @@ impl ScopeApp {
                         &self.line_outputs[self.chosen_output],
                     );
                 }
+            }
+            // An EasySip line that is open follows what is typed, once
+            // typing has stopped: Enter, or the box losing the cursor.
+            if easy
+                && state.open
+                && state.sip.as_ref().is_some_and(|progress| progress.account != easy_name)
+                && !ui.ctx().egui_wants_keyboard_input()
+            {
+                session.open_sip(&easy_name);
             }
 
             if state.open {
@@ -1118,14 +1263,19 @@ impl ScopeApp {
                     Some(progress) => {
                         let good = Color32::from_rgb(120, 200, 130);
                         let bad = Color32::from_rgb(235, 100, 90);
+                        // EasySip has nobody to register with, and that is
+                        // not a fault to be shown in red.
+                        let direct = progress.account.starts_with(live::EASY_SIP);
                         ui.label(
-                            RichText::new(if progress.registered {
+                            RichText::new(if direct {
+                                "direct"
+                            } else if progress.registered {
                                 "registered"
                             } else {
                                 "not registered"
                             })
                             .monospace()
-                            .color(if progress.registered { good } else { bad }),
+                            .color(if progress.registered || direct { good } else { bad }),
                         )
                         .on_hover_text(match &progress.public {
                             Some(address) => format!(
@@ -2598,6 +2748,99 @@ impl ScopeApp {
                             );
                         ui.end_row();
 
+                        // V.ARC through V.8 bis: for a call that is not
+                        // dialled as V.ARC, and becomes one if the far end
+                        // turns out to be another of these.
+                        ui.label("");
+                        ui.add_enabled_ui(self.v8bis, |ui| {
+                            ui.horizontal(|ui| {
+                                const OFFERS: [(u8, bool, &str); 7] = [
+                                    (0, false, "do not list V.ARC"),
+                                    (1, false, "list V.ARC"),
+                                    (2, false, "list V.ARC/QAM"),
+                                    (3, false, "list V.ARC/PCM"),
+                                    (1, true, "list V.ARC two-wire"),
+                                    (2, true, "list V.ARC/QAM two-wire"),
+                                    (3, true, "list V.ARC/PCM two-wire"),
+                                ];
+                                let name = OFFERS.iter().find(|o| (o.0, o.1) == self.varc_bis).map_or(OFFERS[0].2, |o| o.2);
+                                egui::ComboBox::from_id_salt("varc-bis")
+                                    .width(190.0)
+                                    .selected_text(name)
+                                    .show_ui(ui, |ui| {
+                                        for (mode, two_wire, name) in OFFERS {
+                                            ui.selectable_value(&mut self.varc_bis, (mode, two_wire), name);
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "AT+VARCBIS. Say in the V.8 bis transaction, in its non-standard field, that this modem has V.ARC as well as what is chosen above. If the far end says the same the call goes to V.ARC, by V.ARC's own handshake, and not to V.8; if it does not, or is not BinModem, the call is what it would have been. Set it at both ends",
+                                    );
+                                ui.label(RichText::new("in the transaction, and go to it if the far end does too").small().color(dim));
+                            });
+                        });
+                        ui.end_row();
+
+                        // V.ARC's single-carrier modes: the three things the
+                        // receiver would otherwise choose for itself.
+                        if let Some(levels) = self.single_carrier() {
+                            ui.label(RichText::new("by hand").monospace().color(dim));
+                            ui.horizontal(|ui| {
+                                let (baud, code, bits) = &mut self.varc_asks;
+                                egui::ComboBox::from_id_salt("varc-baud")
+                                    .width(96.0)
+                                    .selected_text(if *baud == 0 { "baud: auto".to_owned() } else { format!("{baud} baud") })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(baud, 0, "auto");
+                                        for choice in [128_000u32, 64_000, 32_000, 16_000, 8_000, 4_000, 2_000, 1_000] {
+                                            ui.selectable_value(baud, choice, choice.to_string());
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "The symbol rate this end asks to be sent to at. The nearest the sound card has is used: its rate over three for QAM, twice that for PCM, and halves of those. Auto is the fastest, slowed only if nothing is heard",
+                                    );
+                                egui::ComboBox::from_id_salt("varc-code")
+                                    .width(88.0)
+                                    .selected_text(if *code == 0 { "code: auto".to_owned() } else { format!("code 0.{code:02}") })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(code, 0, "auto");
+                                        for choice in [93u8, 75, 50, 33, 25] {
+                                            ui.selectable_value(code, choice, format!("0.{choice:02}"));
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "How much of each Reed-Solomon codeword is data. 0.93 for a good line; 0.25 reads a line at 6 dB. Auto is whichever carries most",
+                                    );
+                                let most = if levels { 16u8 } else { 24 };
+                                let least = if levels { 1u8 } else { 2 };
+                                *bits = if *bits == 0 { 0 } else { (*bits).clamp(least, most) };
+                                let name = |b: u8| format!("{}{}", 1u64 << b, if levels { "PCM" } else { "QAM" });
+                                egui::ComboBox::from_id_salt("varc-bits")
+                                    .width(120.0)
+                                    .selected_text(if *bits == 0 { "grid: auto".to_owned() } else { name(*bits) })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(bits, 0, "auto");
+                                        for choice in least..=most {
+                                            ui.selectable_value(bits, choice, format!("{} ({choice} bits)", name(choice)));
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(
+                                        "Bits a symbol, whatever the line measures. Ask for more than it bears and nothing arrives: each bit wants about 3 dB for QAM and 6 dB for PCM",
+                                    );
+                            });
+                            ui.end_row();
+                            ui.label("");
+                            ui.label(
+                                RichText::new("AT+VARC. What this end asks the far end to send it; set the other window for the other way")
+                                    .small()
+                                    .color(dim),
+                            );
+                            ui.end_row();
+                        }
+
                         ui.label(RichText::new("line rate").monospace().color(dim));
                         ui.horizontal(|ui| {
                             // Only the rates this modulation has. They are not
@@ -2711,6 +2954,12 @@ impl ScopeApp {
             .filter(|name| !name.is_empty())
             .map(str::to_owned);
         self.sip_line.clone_from(&self.sip_restore);
+        if let Some(peer) = loaded.text("easysip_peer") {
+            self.easy_peer = peer.to_owned();
+        }
+        if let Some(port) = loaded.get::<u16>("easysip_port") {
+            self.easy_port = port;
+        }
         self.remembered = self.settings().join("\n")
             + &self.dialin.fingerprint()
             + &self.line_fingerprint();
@@ -2718,7 +2967,7 @@ impl ScopeApp {
 
     /// The line, as something to compare from one frame to the next.
     fn line_fingerprint(&self) -> String {
-        format!("\u{1}{}", self.sip_line.as_deref().unwrap_or(""))
+        format!("\u{1}{}\u{1}{}\u{1}{}", self.sip_line.as_deref().unwrap_or(""), self.easy_peer, self.easy_port)
     }
 
     /// Write the settings out if they have moved since they were last written.
@@ -2752,6 +3001,10 @@ impl ScopeApp {
             if let Some(name) = &self.sip_line {
                 r.set("sip_line", name);
             }
+            if !self.easy_peer.trim().is_empty() {
+                r.set("easysip_peer", self.easy_peer.trim());
+            }
+            r.set("easysip_port", self.easy_port);
             r.save();
         }
     }
@@ -2770,6 +3023,15 @@ impl ScopeApp {
         // Once, whatever comes of it. A restore that found nothing to do is
         // not one to try again next frame, and the frame after that, for ever.
         self.sip_restore = None;
+        if let Some((peer, port)) = live::easy_sip_parts(&name) {
+            if should_restore(state, session.was_asked_for_a_line()) {
+                self.easy_peer = peer;
+                self.easy_port = port;
+                session.open_sip(&name);
+                self.chosen_line = 2;
+            }
+            return;
+        }
         let Some(i) = self.sip_accounts.iter().position(|n| *n == name) else {
             // Renamed, or deleted, between one run and the next. Nothing to
             // say about it: the line row is standing there with the list.
@@ -2785,6 +3047,19 @@ impl ScopeApp {
         self.sip_chosen = i;
     }
 
+    /// Whether the mode chosen is one of V.ARC's single-carrier ones, and if
+    /// so whether it is the baseband one.
+    fn single_carrier(&self) -> Option<bool> {
+        let carrier = Self::CARRIERS[self.carrier].0;
+        if carrier.starts_with("VARCQ") {
+            Some(false)
+        } else if carrier.starts_with("VARCP") {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
     /// `&F` first, and then all of it. The window's controls are the ones a
     /// person has actually looked at, so they are what the modem should be
     /// running -- and anything not represented here should be a default rather
@@ -2793,6 +3068,12 @@ impl ScopeApp {
         let mut out = vec!["AT&F".to_owned()];
         out.push(self.modulation.command(Self::CARRIERS[self.carrier].0));
         out.push(format!("AT+A8E=,,,{}", u8::from(self.v8bis)));
+        // Only for the modes it means anything to: under any other it is
+        // put back to the modem's own choice.
+        let (baud, code, bits) = if self.single_carrier().is_some() { self.varc_asks } else { (0, 0, 0) };
+        out.push(format!("AT+VARC={baud},{code},{bits}"));
+        let (mode, two_wire) = if self.v8bis { self.varc_bis } else { (0, false) };
+        out.push(format!("AT+VARCBIS={mode},{}", u8::from(two_wire)));
         out.extend(self.protection.commands());
         out
     }
@@ -3280,6 +3561,12 @@ impl ScopeApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new("BINMODEM").monospace().size(16.0).strong().color(BRIGHT));
             ui.label(RichText::new("56K softmodem").monospace().color(DIM));
+            // Which build: two windows that will not talk are often two
+            // builds, one of them left open from before a change.
+            ui.label(RichText::new(concat!("build ", env!("BINMODEM_BUILD"))).monospace().size(11.0).color(DIM))
+                .on_hover_text(
+                    "The commit this program was built from and when that commit was made.                      Both ends of a V.ARC call have to be the same build.",
+                );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let Some(state) = state else {
                     ui.label(RichText::new("a capture, replayed").monospace().color(DIM));
@@ -3298,6 +3585,14 @@ impl ScopeApp {
                 // Right to left, so the last thing added is the first read.
                 let (what, how, colour) = match (&state.sip, state.open) {
                     (_, false) => (String::new(), "no line open", WARN),
+                    (Some(progress), true) if progress.account.starts_with(live::EASY_SIP) => (
+                        format!(
+                            "EasySip to {}",
+                            live::easy_sip_parts(&progress.account).map_or_else(String::new, |(peer, _)| peer)
+                        ),
+                        "direct",
+                        GOOD,
+                    ),
                     (Some(progress), true) => (
                         format!("SIP {}", progress.account),
                         if progress.registered { "registered" } else { "not registered" },
@@ -3456,7 +3751,8 @@ impl ScopeApp {
     /// rate menu in it, the retrain, the waterfall and the spectrum.
     fn scopes_pane(&mut self, ui: &mut egui::Ui) {
         const CARD_W: f32 = 420.0;
-        let measured = scopes::measure(&self.frame.spectrum_db, self.frame.hz_per_bin, self.frame.display_hz);
+        let dt = ui.input(|i| i.stable_dt).clamp(0.0, 0.25);
+        let measured = self.calm.update(&self.frame, dt);
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
                 ui.set_width(CARD_W);
@@ -3524,6 +3820,25 @@ impl ScopeApp {
     /// The symbol scope and, beside it, the line as an oscilloscope has it.
     fn symbol_row(&mut self, ui: &mut egui::Ui) {
         const SIDE: f32 = 190.0;
+        // PCM has no plane to be points on, and no one picture of it says
+        // everything: which is wanted depends on the question.
+        if self.frame.symbol_label == "PCM" {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("PCM drawn as").size(12.0).color(DIM));
+                egui::ComboBox::from_id_salt("pcm-view")
+                    .width(120.0)
+                    .selected_text(self.pcm_view.name())
+                    .show_ui(ui, |ui| {
+                        for view in scopes::PcmView::ALL {
+                            ui.selectable_value(&mut self.pcm_view, view, view.name());
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "Pairs: each sample against the next, a grid of every pair of levels. Ladder: the levels up the side with time across. Error by level: how far each sample fell from its level, the full height being one decision line to the next",
+                    );
+            });
+        }
         ui.horizontal_top(|ui| {
             let label = self.symbol_label();
             let scope = ui
@@ -3535,7 +3850,7 @@ impl ScopeApp {
                             points: &self.frame.constellation,
                             tones: self.frame.tones,
                             peak: self.frame.constellation_peak,
-                            pairs: self.frame.symbol_label == "PCM",
+                            pcm: (self.frame.symbol_label == "PCM").then_some(self.pcm_view),
                         },
                         &label,
                         self.frame.symbol_quality(),
@@ -3553,6 +3868,23 @@ impl ScopeApp {
                 egui::vec2(ui.available_width(), SIDE),
             );
         });
+        // Two more for a mode that has something to put in them: how the
+        // band is loaded, and the echo a two-wire call is taking out.
+        if !self.frame.carriers.is_empty() || !self.frame.echo.is_empty() {
+            const LOWER: f32 = 130.0;
+            ui.add_space(4.0);
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui(egui::vec2(SIDE, LOWER), |ui| {
+                    scopes::loading(ui, &self.frame.carriers, egui::vec2(SIDE, LOWER));
+                });
+                scopes::echo(
+                    ui,
+                    &self.frame.echo,
+                    self.frame.echo_delay_ms,
+                    egui::vec2(ui.available_width(), LOWER),
+                );
+            });
+        }
     }
 
     fn audio_controls(&mut self, ui: &mut egui::Ui) {
@@ -4012,7 +4344,7 @@ impl ScopeApp {
     /// A modulation and nothing else. The rate is the modem's to find: every
     /// one of these settles on the fastest the line will carry, and a ceiling
     /// set on purpose is in the Advanced window with the rest of AT+MS.
-    const MODES: [(usize, &'static str); 11] = [
+    const MODES: [(usize, &'static str); 14] = [
         (7, "V.92"),
         (5, "V.90"),
         (4, "V.34"),
@@ -4025,6 +4357,9 @@ impl ScopeApp {
         (8, "V.ARC"),
         (9, "V.ARC/QAM"),
         (10, "V.ARC/PCM"),
+        (11, "V.ARC two-wire"),
+        (12, "V.ARC/QAM two-wire"),
+        (13, "V.ARC/PCM two-wire"),
     ];
 
     /// How fast at most, and the three things that are simply on or off.
@@ -4345,6 +4680,28 @@ impl ScopeApp {
             }
             // Neither, but the receiver's own error against its decisions:
             // as decibels, so a tighter constellation is a larger number.
+            // V.ARC: the ratio its receiver measured, against the most any
+            // of its grids can use, which is 80 dB for sixteen million
+            // points. How good is good depends on the grid, so the colour
+            // only says whether there is a line at all.
+            _ if f.snr_db.is_some() && f.modulation.starts_with("V.ARC") => {
+                let db = f.snr_db.unwrap_or(0.0);
+                let c = if db >= 12.0 {
+                    GOOD
+                } else if db >= 6.0 {
+                    WARN
+                } else {
+                    BAD
+                };
+                (
+                    Some(format!("{db:.1} dB")),
+                    c,
+                    (db / 80.0).clamp(0.0, 1.0),
+                    None,
+                    format!("Es/N0 {db:.1} dB: a symbol against the noise under it"),
+                    "scale 0 - 80 dB",
+                )
+            }
             _ if f.snr_db.is_some() => {
                 let db = f.snr_db.unwrap_or(0.0);
                 let c = if db >= 20.0 {
@@ -4392,7 +4749,9 @@ impl ScopeApp {
             );
             // The code rate, for a mode that has a code and changes it: data
             // octets over octets a codeword.
-            let code = f.code.filter(|c| c.0 > 0).map(|(n, k)| format!("code {k}/{n}"));
+            // As a decimal: 227/243 says nothing at a glance and 0.93 does.
+            // The line under "Error control" has the code itself.
+            let code = f.code.filter(|c| c.0 > 0).map(|(n, k)| format!("code {:.2}", f64::from(k) / f64::from(n)));
             if merit.is_some() || code.is_some() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some(merit) = &merit {
@@ -4447,15 +4806,18 @@ impl ScopeApp {
             ui.add_space(10.0);
             ui.vertical(|ui| {
                 // The line: what is arriving, before anything is made of it.
-                let level = f.rx_level_db;
+                // Averaged over a second or so, except what is clipped: a
+                // figure that moves five times a second is not read, and a
+                // clipped sample is news the moment it happens.
+                let level = self.calm.level_db;
                 let wave = scopes::wave(&f.waveform);
                 let clipped = wave.map_or(0, |w| w.clipped);
                 let mut text = format!("{level:.1} dBFS");
-                if let Some(w) = wave.filter(|w| w.rms_db > -100.0) {
+                if wave.is_some_and(|w| w.rms_db > -100.0) {
                     text.push_str(&format!(
                         " · peaks {:.1} · crest {:.1} dB",
-                        w.peak_db,
-                        w.peak_db - w.rms_db
+                        self.calm.peak_db,
+                        self.calm.peak_db - self.calm.rms_db
                     ));
                 }
                 let health = if clipped > 0 {
@@ -4474,8 +4836,8 @@ impl ScopeApp {
                     GOOD
                 };
                 stage(ui, health, "Line", text).on_hover_text(
-                    "The received level, the largest sample and the crest factor of the \
-                     last eighth of a second. A modem receiving above -10 dBFS is almost \
+                    "The received level, the largest sample and the crest factor, averaged \
+                     over about a second. A modem receiving above -10 dBFS is almost \
                      certainly clipping somewhere upstream.",
                 );
 
@@ -4605,7 +4967,7 @@ impl ScopeApp {
                     "Error control",
                     if let (true, Some((n, k))) = (f.leds.ec, f.code.filter(|c| c.0 > 0)) {
                         format!(
-                            "running: frames checked and resent\nReed-Solomon {k}/{n} · rate {:.3} · mends {} a word",
+                            "running: frames checked and resent\nReed-Solomon {k}/{n} · code rate {:.2} · mends {} a word",
                             f64::from(k) / f64::from(n),
                             (n - k) / 2
                         )
@@ -4617,6 +4979,43 @@ impl ScopeApp {
                         "not up".into()
                     },
                 );
+
+                // What the far end hears of this end, where it says. A
+                // transmitter cannot hear its own line, so this is the only
+                // way to know whether it is too loud or too faint there.
+                if let Some(far) = f.far_end {
+                    let health = if far.clipped > 0 {
+                        BAD
+                    } else if far.peak_db > -1.0 || far.trim_db > 0.0 {
+                        WARN
+                    } else {
+                        GOOD
+                    };
+                    let snr = if far.snr_db > 0.0 {
+                        format!("Es/N0 {:.1} dB", far.snr_db)
+                    } else {
+                        "Es/N0 not measured yet".to_owned()
+                    };
+                    let clipped = match far.clipped {
+                        0 => "nothing at full scale".to_owned(),
+                        n => format!("{n} samples a second at full scale"),
+                    };
+                    let sending = if far.trim_db > 0.0 {
+                        format!("this end turned down {:.1} dB", far.trim_db)
+                    } else {
+                        "this end at full level".to_owned()
+                    };
+                    stage(
+                        ui,
+                        health,
+                        "Far end",
+                        format!(
+                            "hears {:.1} dBFS · peaks {:.1} · {snr}
+{clipped} · {sending}",
+                            far.level_db, far.peak_db
+                        ),
+                    );
+                }
 
                 let (rx_rate, tx_rate) = self.byte_rates();
                 stage(
@@ -5022,7 +5421,7 @@ impl ScopeApp {
                         points: &self.frame.constellation,
                         tones: self.frame.tones,
                         peak: self.frame.constellation_peak,
-                        pairs: self.frame.symbol_label == "PCM",
+                        pcm: (self.frame.symbol_label == "PCM").then_some(self.pcm_view),
                     },
                     &label,
                     self.frame.symbol_quality(),
@@ -5572,6 +5971,16 @@ fn credentials_form(ui: &mut egui::Ui, account: &mut sip::Account) {
                         );
                     });
                     ui.end_row();
+                    ui.label(RichText::new("linear").monospace().color(dim));
+                    ui.checkbox(&mut account.linear, "offer linear PCM ahead of G.711")
+                        .on_hover_text(
+                            "L16 at 48, 44.1, 16 and 8 kHz, on one channel or two: what \
+                             softphones list as LPCM. Sixteen-bit samples that arrive \
+                             exactly as sent, which V.ARC uses as the data itself. A \
+                             far end that has none of them answers with G.711 and the \
+                             call is as it was; a trunk will never agree to it",
+                        );
+                    ui.end_row();
                     ui.label(RichText::new("law").monospace().color(dim));
                     ui.horizontal(|ui| {
                         // Both are offered either way; this is the order they
@@ -5694,14 +6103,14 @@ mod modulation_tests {
         assert_eq!(ScopeApp::CARRIERS[7].0, "V92");
         assert_eq!(Modulation::rates(7), Modulation::rates(4));
         // V.ARC's three have no rate to ask for.
-        for (i, name) in [(8, "VARC"), (9, "VARCQ"), (10, "VARCP")] {
+        for (i, name) in [(8, "VARC"), (9, "VARCQ"), (10, "VARCP"), (11, "VARC2W"), (12, "VARCQ2W"), (13, "VARCP2W")] {
             assert_eq!(ScopeApp::CARRIERS[i].0, name);
             assert_eq!(Modulation::rates(i), &[0]);
             let mut m = Modulation { min_rate: 9600, max_rate: 33_600, ..Modulation::default() };
             m.fit(i);
             assert_eq!(m.command(name), format!("AT+MS={name},1"));
         }
-        assert_eq!(ScopeApp::CARRIERS.len(), 11);
+        assert_eq!(ScopeApp::CARRIERS.len(), 14);
     }
 
     /// The two V.32 carriers are two ceilings on one modulation, and the

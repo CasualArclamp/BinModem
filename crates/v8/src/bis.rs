@@ -417,6 +417,9 @@ pub struct Identification {
     /// Bit 4: an MS that is accepted is to be answered with ACK(1) before the
     /// answer tone, and not by the answer tone alone (9.7).
     pub ack1: bool,
+    /// Bit 7: a non-standard information field follows the standard one
+    /// (8.5).
+    pub non_standard: bool,
     /// Table 5-2 bit 1 and Table 5-3: the network this end is on. None is an
     /// analogue telephone line (Table 5-2's note).
     pub network: Option<Network>,
@@ -439,6 +442,7 @@ impl Identification {
         tree.set_npar1_bit(1, 2, self.short_v8);
         tree.set_npar1_bit(1, 3, self.more);
         tree.set_npar1_bit(1, 4, self.ack1);
+        tree.set_npar1_bit(1, 7, self.non_standard);
         if let Some(n) = self.network {
             let octet = u8::from(n.cellular) | u8::from(n.isdn) << 1 | u8::from(n.digital) << 2;
             tree.set_par2(1, 1, Some(Par2::flat(&[octet])));
@@ -452,6 +456,7 @@ impl Identification {
             short_v8: tree.npar1_bit(1, 2),
             more: tree.npar1_bit(1, 3),
             ack1: tree.npar1_bit(1, 4),
+            non_standard: tree.npar1_bit(1, 7),
             network: tree.par2(1, 1).map(|p| {
                 let o = p.npar2.first().copied().unwrap_or(0);
                 Network { cellular: o & 1 != 0, isdn: o & 2 != 0, digital: o & 4 != 0 }
@@ -470,6 +475,9 @@ pub struct Data {
     pub v42: bool,
     pub v42bis: bool,
     pub v14: bool,
+    /// Bit 6: "Non-standard capabilities". What they are is in the
+    /// non-standard information field (8.4.2).
+    pub non_standard: bool,
     // Table 6-3b.
     pub v34: bool,
     pub v32bis: bool,
@@ -503,7 +511,7 @@ impl Data {
     fn octets(self) -> [u8; 4] {
         let bits = |list: [bool; 6]| list.iter().enumerate().fold(0u8, |o, (i, b)| o | u8::from(*b) << i);
         [
-            bits([self.transparent, self.v42, self.v42bis, self.v14, false, false]),
+            bits([self.transparent, self.v42, self.v42bis, self.v14, false, self.non_standard]),
             bits([false, false, false, false, self.v34, self.v32bis]),
             bits([self.v32, self.v22bis, self.v22, self.v21, self.v90_analogue, self.v90_digital]),
             bits([self.v91, self.v92_analogue, self.v92_digital, false, false, false]),
@@ -517,6 +525,7 @@ impl Data {
             v42: bit(0, 1),
             v42bis: bit(0, 2),
             v14: bit(0, 3),
+            non_standard: bit(0, 5),
             v34: bit(1, 4),
             v32bis: bit(1, 5),
             v32: bit(2, 0),
@@ -643,6 +652,85 @@ pub mod mode {
     pub const T101: u8 = 7;
 }
 
+/// One block of the non-standard information field (8.5, Figure 10): whose
+/// it is, and whatever they wanted to say.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Block {
+    /// The T.35 country code: one octet, or since T.35 (2000) more.
+    pub country: Vec<u8>,
+    /// The provider code "as specified by the country".
+    pub provider: Vec<u8>,
+    pub information: Vec<u8>,
+}
+
+impl Block {
+    /// The octets on the line: a length for all that follows it, the
+    /// country, a length for the provider code, that, and the information.
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        out.push((self.country.len() + self.provider.len() + self.information.len() + 1) as u8);
+        out.extend_from_slice(&self.country);
+        out.push(self.provider.len() as u8);
+        out.extend_from_slice(&self.provider);
+        out.extend_from_slice(&self.information);
+    }
+}
+
+/// V.ARC, BinModem's own wideband modulation, as a non-standard capability.
+///
+/// V.8 bis "supports non-standard modes of operation as well as those
+/// defined by standards bodies" (I.3), and this is one. A station that has it
+/// says so in a block of the non-standard field; an MS with the block in it
+/// and no modulation of the ITU's selects it; and what follows the ACK is
+/// not V.8 but V.ARC's own handshake, which settles everything else. A far
+/// end that is not BinModem does not know the block and steps over it.
+pub mod varc {
+    /// Whose the block is. **These are not registered.** A T.35 code is
+    /// allocated by a country's administration and BinModem has none, so
+    /// these octets are its own invention: two for the country that are no
+    /// country's as far as is known here, and four for the provider. Another
+    /// BinModem knows them and nothing else should.
+    pub const COUNTRY: [u8; 2] = [0xFF, 0xFF];
+    pub const PROVIDER: [u8; 4] = *b"BinM";
+    /// The first octet of the information: which edition of this block.
+    pub const VERSION: u8 = 1;
+
+    /// What the block says. Little, on purpose: V.ARC's own handshake says
+    /// the rest, and what is here is only what the station was set to.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct Offer {
+        /// Nought multicarrier, one QAM, two PCM.
+        pub modulation: u8,
+        /// One pair of wires, with an echo to cancel.
+        pub two_wire: bool,
+    }
+
+    impl Offer {
+        pub fn information(self) -> [u8; 2] {
+            [VERSION, self.modulation & 3 | u8::from(self.two_wire) << 2]
+        }
+
+        /// None for an edition this end has not heard of.
+        pub fn from_information(octets: &[u8]) -> Option<Self> {
+            if *octets.first()? != VERSION {
+                return None;
+            }
+            let flags = octets.get(1).copied().unwrap_or(0);
+            Some(Self { modulation: flags & 3, two_wire: flags & 4 != 0 })
+        }
+
+        pub fn name(self) -> &'static str {
+            match (self.modulation, self.two_wire) {
+                (1, false) => "V.ARC/QAM",
+                (2, false) => "V.ARC/PCM",
+                (_, false) => "V.ARC",
+                (1, true) => "V.ARC/QAM two-wire",
+                (2, true) => "V.ARC/PCM two-wire",
+                (_, true) => "V.ARC two-wire",
+            }
+        }
+    }
+}
+
 /// One message (7.2, clause 8).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
@@ -653,6 +741,10 @@ pub struct Message {
     pub identification: Tree,
     /// The standard information field (8.4). Empty in ACK and NAK.
     pub standard: Tree,
+    /// The non-standard information field as it is on the line (8.5):
+    /// blocks one after another, each with its length in front. Empty in
+    /// most messages.
+    pub non_standard: Vec<u8>,
     /// Whatever followed the first octet of a message that is not a tree:
     /// V.92's, or a reserved type's.
     pub raw: Vec<u8>,
@@ -662,7 +754,14 @@ impl Message {
     /// A message of `kind` with nothing in it, which for ACK and NAK is all
     /// there is.
     pub fn bare(kind: Kind) -> Self {
-        Self { kind, revision: REVISION, identification: Tree::default(), standard: Tree::default(), raw: Vec::new() }
+        Self {
+            kind,
+            revision: REVISION,
+            identification: Tree::default(),
+            standard: Tree::default(),
+            non_standard: Vec::new(),
+            raw: Vec::new(),
+        }
     }
 
     /// A CL, CLR or MS for a data station: `identification` for the
@@ -694,6 +793,7 @@ impl Message {
         if self.kind.has_parameters() {
             self.identification.encode(&mut out);
             self.standard.encode(&mut out);
+            out.extend_from_slice(&self.non_standard);
         } else {
             out.extend_from_slice(&self.raw);
         }
@@ -709,12 +809,73 @@ impl Message {
             let mut at = 1;
             message.identification = Tree::decode(octets, &mut at)?;
             message.standard = Tree::decode(octets, &mut at)?;
-            // What follows is the non-standard field, which this end has no
-            // use for and is not an error (8.5).
+            // What follows is the non-standard field, if the identification
+            // field says there is one (8.5). Kept as it came: whose a block
+            // is has to be known before anything in it means anything.
+            if message.identify().non_standard {
+                message.non_standard = octets[at..].to_vec();
+            }
         } else {
             message.raw = octets[1..].to_vec();
         }
         Some(message)
+    }
+
+    /// Add a block to the non-standard field, and say in the identification
+    /// field and under the data mode that there is one (Table 5-1; Table
+    /// 6-3a).
+    pub fn with_block(mut self, block: &Block) -> Self {
+        block.encode(&mut self.non_standard);
+        self.identification.set_npar1_bit(1, 7, true);
+        if let Some(data) = self.data_mode() {
+            self.standard.set_par2(1, mode::DATA, Some(Data { non_standard: true, ..data }.to_par2()));
+        }
+        self
+    }
+
+    /// The information of the first block that is `provider`'s of
+    /// `country`. A field that runs off its end has nothing in it from
+    /// there on.
+    pub fn block_of(&self, country: &[u8], provider: &[u8]) -> Option<&[u8]> {
+        let mut at = 0;
+        loop {
+            let length = usize::from(*self.non_standard.get(at)?);
+            let body = self.non_standard.get(at + 1..at + 1 + length)?;
+            at += 1 + length;
+            let k = country.len();
+            if body.starts_with(country)
+                && body.get(k).is_some_and(|l| usize::from(*l) == provider.len())
+                && body[k + 1..].starts_with(provider)
+            {
+                return Some(&body[k + 1 + provider.len()..]);
+            }
+        }
+    }
+
+    /// This message, saying that its station has V.ARC as well.
+    pub fn with_varc(self, offer: varc::Offer) -> Self {
+        self.with_block(&Block {
+            country: varc::COUNTRY.to_vec(),
+            provider: varc::PROVIDER.to_vec(),
+            information: offer.information().to_vec(),
+        })
+    }
+
+    /// What the message says of V.ARC, if it says anything.
+    pub fn varc(&self) -> Option<varc::Offer> {
+        varc::Offer::from_information(self.block_of(&varc::COUNTRY, &varc::PROVIDER)?)
+    }
+
+    /// The MS that selects V.ARC, from this end's capabilities `ours`: the
+    /// data mode with no modulation of the ITU's named, the block, and no
+    /// V.8 asked for after, since it is V.ARC's own handshake that follows.
+    /// None if `ours` has no V.ARC in it.
+    pub fn select_varc(ours: &Self) -> Option<Self> {
+        let offer = ours.varc()?;
+        let mine = ours.identify();
+        let id = Identification { ack1: mine.ack1, network: mine.network, ..Identification::default() };
+        let data = Data { transparent: true, ..Data::default() };
+        Some(Self::data(Kind::Ms, id, data).with_varc(offer))
     }
 
     /// The MS this end sends to select `modulation`, from its own
@@ -777,6 +938,85 @@ mod tests {
             ]
         );
         assert_eq!(Message::decode(&cl.encode()), Some(cl));
+    }
+
+    /// 8.5, Figure 10: a block is its length, the country, the provider
+    /// code's length, the provider code and the information, after the
+    /// standard field; and Tables 5-1 and 6-3a each have a bit that says it
+    /// is there.
+    #[test]
+    fn a_non_standard_block_follows_the_standard_field() {
+        let cl = Message::data(
+            Kind::Cl,
+            Identification { v8: true, ack1: true, ..Identification::default() },
+            Data { transparent: true, v42: true, v34: true, ..Data::default() },
+        )
+        .with_varc(varc::Offer { modulation: 1, two_wire: true });
+        assert_eq!(
+            cl.encode(),
+            [
+                0x22, // CL, Revision 2
+                0xC9, // I NPar(1): V.8, ACK(1), a non-standard field
+                0x80, // I SPar(1): nothing
+                0x80, // S NPar(1): nothing
+                0x81, // S SPar(1): data
+                0x23, 0xD0, // data NPar(2): transparent, V.42, non-standard; V.34
+                9,    // the block: nine octets follow
+                0xFF, 0xFF, // country
+                4, b'B', b'i', b'n', b'M', // provider code, and its length
+                1, 0x05, // V.ARC's: edition 1; QAM, two-wire
+            ]
+        );
+        let back = Message::decode(&cl.encode()).unwrap();
+        assert_eq!(back, cl);
+        assert_eq!(back.varc(), Some(varc::Offer { modulation: 1, two_wire: true }));
+        assert!(back.data_mode().unwrap().v34, "the standard field is as it was");
+    }
+
+    /// A block that is somebody else's is stepped over to the one that is
+    /// ours, a field with none of ours says nothing of V.ARC, and one cut
+    /// short is not read past its end.
+    #[test]
+    fn only_its_own_block_is_read() {
+        let plain = Message::data(Kind::Cl, Identification::default(), Data { v34: true, ..Data::default() });
+        assert_eq!(plain.varc(), None);
+        let theirs = Block { country: vec![0xB5], provider: vec![0x00, 0x11], information: vec![1, 2, 3] };
+        let other = plain.clone().with_block(&theirs);
+        assert_eq!(Message::decode(&other.encode()).unwrap().varc(), None);
+        let both = other.with_varc(varc::Offer::default());
+        let back = Message::decode(&both.encode()).unwrap();
+        assert_eq!(back.varc(), Some(varc::Offer::default()));
+        assert_eq!(back.block_of(&[0xB5], &[0x00, 0x11]), Some(&[1u8, 2, 3][..]));
+        // An edition this end has not heard of is not V.ARC as it knows it.
+        let mut newer = plain.clone().with_varc(varc::Offer::default());
+        let at = newer.non_standard.len() - 2;
+        newer.non_standard[at] = 9;
+        assert_eq!(newer.varc(), None);
+        // Cut short, at every length.
+        let whole = plain.with_varc(varc::Offer::default()).encode();
+        for length in 1..whole.len() {
+            if let Some(message) = Message::decode(&whole[..length]) {
+                assert_eq!(message.varc(), None, "{length}");
+            }
+        }
+    }
+
+    /// The MS for V.ARC names the data mode, no modulation of the ITU's, and
+    /// no V.8 to follow.
+    #[test]
+    fn a_mode_select_for_varc_names_no_other_modulation() {
+        let ours = Message::data(
+            Kind::Cl,
+            Identification { v8: true, ack1: true, ..Identification::default() },
+            Data { v42: true, v34: true, v92_analogue: true, ..Data::default() },
+        );
+        assert_eq!(Message::select_varc(&ours), None, "not a station that has it");
+        let ms = Message::select_varc(&ours.with_varc(varc::Offer { modulation: 2, two_wire: false })).unwrap();
+        let back = Message::decode(&ms.encode()).unwrap();
+        assert_eq!(back.kind, Kind::Ms);
+        assert_eq!(back.varc(), Some(varc::Offer { modulation: 2, two_wire: false }));
+        assert_eq!(back.data_mode().unwrap().selected(), None);
+        assert!(back.identify().ack1 && !back.identify().v8);
     }
 
     /// The network type is a Par(2) of the identification field, and its

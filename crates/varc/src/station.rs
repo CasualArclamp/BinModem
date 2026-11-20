@@ -32,7 +32,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::frame::{Packer, Unpacker};
-use crate::link::{Arrived, Receiver, Sender, Table};
+use crate::link::{Report, Arrived, Receiver, Sender, Table};
 
 /// "Send with this table": a mark, then the table.
 const TABLE: u8 = 2;
@@ -42,6 +42,22 @@ const DATA: u8 = 3;
 const ACK: u8 = 4;
 /// "Go back to the starting table; I cannot read you."
 const RESET: u8 = 5;
+/// What this end hears: a [`Report`], once a second on each channel.
+const REPORT: u8 = 6;
+/// "I have changed the level I send at: measure the line again."
+const LEVEL: u8 = 7;
+/// A table for another channel than the one it came in on: the channel's
+/// number, then what a TABLE frame holds.
+const TABLE_FOR: u8 = 8;
+
+/// A sample this near full scale is the converter at its stops.
+const FULL_SCALE: f64 = 0.999;
+/// Where the far end's peaks are put when the level has to come down, in
+/// decibels against its full scale, and the most the level will be trimmed.
+const PEAK_AIM_DB: f64 = -4.0;
+const MOST_TRIM_DB: f64 = 60.0;
+/// Peaks this far down with trim still on mean the trim can come off again.
+const PEAK_LOW_DB: f64 = -14.0;
 
 /// Marks a table may be given. Zero is the starting table.
 const MARKS: u8 = 4;
@@ -269,6 +285,29 @@ pub struct Channel<T, R> {
     /// what the last one did.
     proposed_at: u64,
     pub tally: Tally,
+    /// What has arrived in the second being measured: the sum of squares,
+    /// the largest, how many at full scale, and how many samples.
+    heard: (f64, f64, u32, u32),
+    /// The next sample as the converter delivered it, where what is fed to
+    /// the receiver has had something done to it first.
+    raw: Option<f64>,
+    /// What this end heard in the last whole second, and whether the far
+    /// end has still to be told.
+    pub here: Option<Report>,
+    report_owed: bool,
+    /// What the far end last said it hears, which is this end's own signal.
+    pub there: Option<Report>,
+    /// Decibels this end sends below its made-for level, because the far
+    /// end said it was too loud; and when that last changed.
+    pub trim_db: f64,
+    trimmed_at: u64,
+    /// The level is not this end's to change: see [`Self::level_is_fixed`].
+    level_fixed: bool,
+    /// The far end is to be told the level changed until it has been.
+    level_owed: bool,
+    /// Tables that arrived on this channel for others: the channel, the
+    /// mark and the table.
+    foreign: Vec<(u8, u8, Table)>,
 }
 
 impl<T: Sender, R: Receiver> Channel<T, R> {
@@ -291,14 +330,79 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
             wants_reset: false,
             proposed_at: 0,
             tally: Tally::default(),
+            heard: (0.0, 0.0, 0, 0),
+            raw: None,
+            here: None,
+            report_owed: false,
+            there: None,
+            trim_db: 0.0,
+            trimmed_at: 0,
+            level_fixed: false,
+            level_owed: false,
+            foreign: Vec::new(),
         }
+    }
+
+    /// Listen with another receiver from here on: the far end is about to
+    /// send something else, a slower version of the modulation say. What was
+    /// known of the line was known of the old signal, and goes with it.
+    pub fn listen_with(&mut self, rx: R) {
+        self.rx = rx;
+        self.unpacker = Unpacker::new();
+        self.offered = None;
+        self.lost_run = 0;
+        self.trouble = 0;
+        self.starved_since = None;
+        self.wants_reset = false;
+    }
+
+    /// Send with another transmitter from here on, at the level this
+    /// channel had been brought down to. It starts on the starting table,
+    /// as any does; the frames in hand go with it.
+    pub fn send_with(&mut self, mut tx: T) {
+        tx.trim(self.trim_db);
+        self.tx = tx;
     }
 
     /// Whether both directions of this channel are running on tables made
     /// to measure: the far end is sending with the one this end asked for,
     /// and this end with one the far end asked for.
     pub fn loaded(&self) -> bool {
-        self.offered.as_ref().is_some_and(|(mark, _)| self.rx.id() == Some(*mark)) && self.tx.id() != 0
+        self.hears_loaded() && self.sends_loaded()
+    }
+
+    /// The far end is sending on this channel with the table this end asked
+    /// for. A channel can be loaded one way and not the other: a stereo
+    /// cable one way and a single microphone back is two channels there and
+    /// one here.
+    pub fn hears_loaded(&self) -> bool {
+        self.offered.as_ref().is_some_and(|(mark, _)| self.rx.id() == Some(*mark))
+    }
+
+    /// This end is sending on this channel with a table the far end asked
+    /// for.
+    pub fn sends_loaded(&self) -> bool {
+        self.tx.id() != 0
+    }
+
+    /// The table this end has asked the far end to send with on this
+    /// channel and has not yet seen it use, as a frame for another channel
+    /// to carry.
+    ///
+    /// Only once it has gone two seconds unanswered down its own channel. A
+    /// channel that works both ways answers in a fraction of that, and a
+    /// table that also went round by another channel can arrive after a
+    /// later one has: marks are few and are used again, so a late copy
+    /// under a mark since given to another table had the far end sending
+    /// with one table what this end was reading with another.
+    fn offer_for(&self, number: u8, now: u64, fs: f64) -> Option<Vec<u8>> {
+        if now.saturating_sub(self.proposed_at) < (2.0 * fs) as u64 {
+            return None;
+        }
+        let (mark, table) = self.offered.as_ref().filter(|(mark, _)| self.rx.id() != Some(*mark))?;
+        let mut body = vec![number, *mark];
+        body.extend_from_slice(&table.encode());
+        Some(body)
     }
 
     /// The table the far end has been asked for and is not yet using.
@@ -306,13 +410,33 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
         self.offered.as_ref().map(|(mark, _)| *mark).filter(|&mark| self.rx.id() != Some(mark))
     }
 
-    fn step(&mut self, input: f64, arq: &mut Arq, now: u64, fs: f64) -> f64 {
-        self.hear(input, arq, now, fs);
-        self.speak(arq, now)
-    }
-
     /// One sample in, and everything that follows from it.
     fn hear(&mut self, input: f64, arq: &mut Arq, now: u64, fs: f64) {
+        // What arrives, as it arrives: before anything is made of it, and
+        // before a canceller in front has taken this end's own echo out. It
+        // is the converter that runs out of room, and what the converter
+        // has to hold is everything on the line. Measured after cancelling,
+        // two ends on one pair of wires each saw only the other, well inside
+        // full scale, while the two together were flat against the stops.
+        let line = self.raw.take().unwrap_or(input);
+        let size = line.abs();
+        self.heard.0 += line * line;
+        self.heard.1 = self.heard.1.max(size);
+        self.heard.2 += u32::from(size >= FULL_SCALE);
+        self.heard.3 += 1;
+        if self.heard.3 >= fs as u32 {
+            let (squares, peak, clipped, count) = std::mem::replace(&mut self.heard, (0.0, 0.0, 0, 0));
+            let db = |x: f64| (20.0 * x.max(1e-7).log10()).clamp(-127.5, 0.0);
+            let health = self.rx.health();
+            self.here = Some(Report {
+                level_db: db((squares / f64::from(count)).sqrt()),
+                peak_db: db(peak),
+                clipped,
+                snr_db: if health.steady { health.snr_db.max(0.0) } else { 0.0 },
+                trim_db: self.trim_db,
+            });
+            self.report_owed = true;
+        }
         self.rx.feed(input);
         if let Some(table) = self.rx.proposal() {
             let mark = self.next_mark;
@@ -377,10 +501,31 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
                         self.tx.adopt(mark, table);
                     }
                 }
+                TABLE_FOR => {
+                    if let Some((&[channel, mark], rest)) = body.split_first_chunk::<2>()
+                        && (1..MARKS).contains(&mark)
+                        && let Some(table) = Table::decode(rest)
+                    {
+                        self.foreign.push((channel, mark, table));
+                    }
+                }
                 RESET => {
                     if self.tx.id() != 0 {
                         self.tx.reset();
                     }
+                }
+                REPORT => {
+                    if let Some(report) = Report::decode(&body) {
+                        self.there = Some(report);
+                        self.mind_the_level(report, now, fs);
+                    }
+                }
+                LEVEL => {
+                    // The far end sends at another level from here on, and
+                    // every figure this end has for the line was measured
+                    // at the old one.
+                    self.rx.remeasure(0.0);
+                    self.offered = None;
                 }
                 DATA => arq.on_data(&body),
                 ACK => arq.on_ack(now, &body),
@@ -389,10 +534,72 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
         }
     }
 
-    /// One sample out.
-    fn speak(&mut self, arq: &mut Arq, now: u64) -> f64 {
+    /// Act on what the far end says it hears.
+    ///
+    /// A signal that reaches the far converter's stops is the one fault no
+    /// table can load around: the tops of the waveform are simply gone, on
+    /// every carrier at once. So when the far end reports samples at full
+    /// scale, or peaks within a decibel of it, this end sends lower, by
+    /// enough to put the peaks at [`PEAK_AIM_DB`]. If it later hears that
+    /// the peaks are far down and it is still trimmed, some comes back off.
+    /// It never sends above the level it was made for, since that level is
+    /// already as much as its own converter has room for.
+    ///
+    /// A change of level moves everything the far receiver has learned, so
+    /// each one starts the line again from the starting table and tells
+    /// the far end to measure afresh; and they are kept three seconds
+    /// apart, so the report acted on is of the level now being sent.
+    /// Leave the level alone whatever the far end reports. For a line whose
+    /// samples are the data: full scale is then a value like any other, and
+    /// a far end that reports hearing it is not reporting a fault.
+    pub fn level_is_fixed(&mut self, fixed: bool) {
+        self.level_fixed = fixed;
+    }
+
+    fn mind_the_level(&mut self, report: Report, now: u64, fs: f64) {
+        if self.level_fixed {
+            return;
+        }
+        if now.saturating_sub(self.trimmed_at) < (3.0 * fs) as u64 && self.trimmed_at != 0 {
+            return;
+        }
+        let change = if report.clipped > 0 || report.peak_db > -1.0 {
+            // A clipped peak reads as full scale however far over it was,
+            // so the more of them there are the further down to go.
+            let over = if report.clipped > 100 { 9.0 } else { 3.0 };
+            (report.peak_db - PEAK_AIM_DB).max(0.0) + if report.clipped > 0 { over } else { 0.0 }
+        } else if self.trim_db > 0.0 && report.peak_db < PEAK_LOW_DB && report.level_db > -60.0 {
+            // (Not when what it hears is nothing at all: an end keeping
+            // silent for the far end's turn would be told there was room.)
+            -(PEAK_AIM_DB - 2.0 - report.peak_db).min(self.trim_db)
+        } else {
+            0.0
+        };
+        let trim = (self.trim_db + change).clamp(0.0, MOST_TRIM_DB);
+        // Half a decibel is as fine as a report says anything.
+        if (trim - self.trim_db).abs() < 0.5 {
+            return;
+        }
+        self.trim_db = trim;
+        self.trimmed_at = now.max(1);
+        self.tx.trim(trim);
+        self.tx.reset();
+        self.level_owed = true;
+    }
+
+    /// One sample out. `others` are tables the far end has been asked for
+    /// on other channels and is not yet using, for this channel to carry.
+    fn speak(&mut self, arq: &mut Arq, now: u64, others: &[Vec<u8>]) -> f64 {
         if let Some(layout) = self.tx.wants() {
             if !self.packer.urgent_waiting() {
+                // A table goes back down the channel it is for, and that is
+                // the one way it cannot arrive if the channel only works one
+                // way: two channels of cable out, one microphone back. So it
+                // goes down every other channel as well, and whichever of
+                // them the far end can hear delivers it.
+                for body in others {
+                    self.packer.push_urgent(TABLE_FOR, body);
+                }
                 if self.lost_run >= 2 || self.wants_reset {
                     self.packer.push_urgent(RESET, &[]);
                 } else if let Some((mark, table)) = &self.offered
@@ -402,6 +609,18 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
                     body.extend_from_slice(&table.encode());
                     self.packer.push_urgent(TABLE, &body);
                 }
+                // The change of level is told on the starting table, which
+                // is what the far end can read whatever the level did.
+                if self.level_owed && self.tx.id() == 0 {
+                    self.level_owed = false;
+                    self.packer.push_urgent(LEVEL, &[]);
+                }
+                if self.report_owed
+                    && let Some(report) = self.here
+                {
+                    self.report_owed = false;
+                    self.packer.push_urgent(REPORT, &Report { trim_db: self.trim_db, ..report }.encode());
+                }
             }
             let room = layout.payload();
             let chunk = room.saturating_sub(16).clamp(32, CHUNK);
@@ -410,8 +629,10 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
             // channel's transmitter would otherwise take its share of the
             // frames and send them to nobody. This end cannot see whether
             // the far end hears it; it can see whether it hears the far
-            // end on the same channel, and a channel is a wire each way.
-            let live = self.rx.health().locked;
+            // end on the same channel, and a channel is usually a wire each
+            // way. Or the far end has asked for a table on it, which it
+            // could only have measured by hearing it.
+            let live = self.rx.health().locked || self.sends_loaded();
             while live && self.packer.backlog() < room {
                 match arq.next_frame(now, chunk) {
                     Some((ACK, body)) => self.packer.push_urgent(ACK, &body),
@@ -436,6 +657,13 @@ pub struct Station<T, R> {
 }
 
 impl<T: Sender, R: Receiver> Station<T, R> {
+    /// [`Channel::level_is_fixed`] for every channel.
+    pub fn level_is_fixed(&mut self, fixed: bool) {
+        for channel in &mut self.channels {
+            channel.level_is_fixed(fixed);
+        }
+    }
+
     /// An end with a channel for each transmitter and receiver given.
     pub fn new(fs: f64, pairs: Vec<(T, R)>) -> Self {
         Self {
@@ -448,9 +676,21 @@ impl<T: Sender, R: Receiver> Station<T, R> {
 
     /// One sample of every channel in, one of every channel out.
     pub fn step(&mut self, input: &[f64], output: &mut [f64]) {
-        self.now += 1;
-        for ((channel, &x), y) in self.channels.iter_mut().zip(input).zip(output.iter_mut()) {
-            *y = channel.step(x, &mut self.arq, self.now, self.fs);
+        self.hear(input);
+        self.speak(output);
+    }
+
+    /// Tables that came in on one channel for another go to the one they
+    /// are for.
+    fn deliver(&mut self) {
+        for from in 0..self.channels.len() {
+            for (to, mark, table) in std::mem::take(&mut self.channels[from].foreign) {
+                if let Some(channel) = self.channels.get_mut(usize::from(to))
+                    && mark != channel.tx.id()
+                {
+                    channel.tx.adopt(mark, table);
+                }
+            }
         }
     }
 
@@ -463,12 +703,33 @@ impl<T: Sender, R: Receiver> Station<T, R> {
         for (channel, &x) in self.channels.iter_mut().zip(input) {
             channel.hear(x, &mut self.arq, self.now, self.fs);
         }
+        if self.channels.iter().any(|c| !c.foreign.is_empty()) {
+            self.deliver();
+        }
+    }
+
+    /// The next frame as the converter delivered it, for an end that hands
+    /// [`Self::hear`] something else: the line with its own echo taken
+    /// out. What the far end is told about levels is measured on this.
+    pub fn line(&mut self, raw: &[f64]) {
+        for (channel, &x) in self.channels.iter_mut().zip(raw) {
+            channel.raw = Some(x);
+        }
     }
 
     /// One sample of every channel out; the other half of [`Self::hear`].
     pub fn speak(&mut self, output: &mut [f64]) {
-        for (channel, y) in self.channels.iter_mut().zip(output.iter_mut()) {
-            *y = channel.speak(&mut self.arq, self.now);
+        for (i, y) in output.iter_mut().enumerate().take(self.channels.len()) {
+            // Only when a block is about to be filled, which is seldom.
+            let others: Vec<Vec<u8>> = if self.channels.len() > 1 && self.channels[i].tx.wants().is_some() {
+                (0..self.channels.len())
+                    .filter(|&j| j != i)
+                    .filter_map(|j| self.channels[j].offer_for(j as u8, self.now, self.fs))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            *y = self.channels[i].speak(&mut self.arq, self.now, &others);
         }
     }
 
@@ -501,11 +762,14 @@ mod tests {
     }
 
     /// A wire one way: a clock that disagrees, noise, and a switch to cut it.
-    struct Wire {
+    pub(super) struct Wire {
         clock: Interp,
         noise: Noise,
         sigma: f64,
-        cut: bool,
+        pub(super) cut: bool,
+        /// What the line multiplies by, before a converter that stops at
+        /// full scale.
+        pub(super) gain: f64,
         pending: VecDeque<f64>,
     }
 
@@ -518,6 +782,7 @@ mod tests {
                 noise: Noise(seed),
                 sigma: dmt::LEVEL * 10f64.powf(-snr_db / 20.0),
                 cut: false,
+                gain: 1.0,
                 // A real far end samples at its own rate and never runs
                 // short. Here both ends are stepped together, so the wire
                 // starts with enough in hand that a slow clock does not
@@ -530,37 +795,37 @@ mod tests {
         /// clock being what it is.
         fn carry(&mut self, x: f64) -> f64 {
             let x = if self.cut { 0.0 } else { x };
-            let (pending, noise, sigma) = (&mut self.pending, &mut self.noise, self.sigma);
-            self.clock.feed(x, |y| pending.push_back(y + sigma * noise.gaussian()));
+            let (pending, noise, sigma, gain) = (&mut self.pending, &mut self.noise, self.sigma, self.gain);
+            self.clock.feed(x, |y| pending.push_back((y * gain + sigma * noise.gaussian()).clamp(-1.0, 1.0)));
             self.pending.pop_front().expect("the wire ran dry: the test is too long for its slack")
         }
     }
 
-    type End = Station<dmt::Tx, dmt::Rx>;
+    pub(super) type End = Station<dmt::Tx, dmt::Rx>;
 
     fn end(channels: usize) -> End {
         let plan = Plan::for_rate(48_000.0);
         Station::new(48_000.0, (0..channels).map(|_| (dmt::Tx::new(plan.clone()), dmt::Rx::new(plan.clone()))).collect())
     }
 
-    fn stream(seed: usize, len: usize) -> Vec<u8> {
+    pub(super) fn stream(seed: usize, len: usize) -> Vec<u8> {
         (0..len).map(|i| (i * 131 + seed * 17 + (i >> 5) * 3 + (i >> 11)) as u8).collect()
     }
 
-    struct Pair {
-        a: End,
-        b: End,
+    pub(super) struct Pair {
+        pub(super) a: End,
+        pub(super) b: End,
         /// Wires from A to B and from B to A, one of each a channel.
-        there: Vec<Wire>,
-        back: Vec<Wire>,
+        pub(super) there: Vec<Wire>,
+        pub(super) back: Vec<Wire>,
         from_a: Vec<f64>,
         from_b: Vec<f64>,
-        at_a: Vec<u8>,
-        at_b: Vec<u8>,
+        pub(super) at_a: Vec<u8>,
+        pub(super) at_b: Vec<u8>,
     }
 
     impl Pair {
-        fn new(channels: usize, snr_db: &[f64], ppm: f64) -> Self {
+        pub(super) fn new(channels: usize, snr_db: &[f64], ppm: f64) -> Self {
             Self {
                 a: end(channels),
                 b: end(channels),
@@ -573,7 +838,7 @@ mod tests {
             }
         }
 
-        fn run(&mut self, seconds: f64) {
+        pub(super) fn run(&mut self, seconds: f64) {
             let channels = self.there.len();
             let mut to_a = vec![0.0; channels];
             let mut to_b = vec![0.0; channels];
@@ -668,6 +933,84 @@ mod tests {
         assert!(after < before, "{before} then {after}");
         assert!(pair.b.channels[0].tally.proposals > 1);
         assert!(pair.at_b == to_b, "{} of {} octets", pair.at_b.len(), to_b.len());
+    }
+}
+
+#[cfg(test)]
+mod reports {
+    use super::tests::*;
+    use super::*;
+
+    #[test]
+    fn each_end_is_told_what_the_other_hears() {
+        let mut pair = Pair::new(1, &[45.0], 20.0);
+        pair.run(8.0);
+        let said = pair.a.channels[0].there.expect("a report from the far end");
+        let heard = pair.b.channels[0].here.expect("a second measured");
+        // To the half decibel a report is sent in, and a second apart.
+        assert!((said.level_db - heard.level_db).abs() < 1.0, "{said:?} against {heard:?}");
+        assert!((said.snr_db - 45.0).abs() < 2.0, "{said:?}");
+        // The level it was sent at, near enough: -16 dBFS.
+        assert!((said.level_db + 16.0).abs() < 1.0, "{said:?}");
+        assert!(said.peak_db < -2.0 && said.peak_db > -10.0, "{said:?}");
+        assert_eq!(said.clipped, 0);
+        // Nothing wrong, so nothing changed.
+        assert_eq!(pair.a.channels[0].trim_db, 0.0);
+        assert_eq!(pair.b.channels[0].trim_db, 0.0);
+        assert_eq!(pair.b.channels[0].tally.proposals, 1);
+    }
+
+    #[test]
+    fn an_end_that_is_deafening_the_other_turns_itself_down() {
+        // Twenty decibels of gain on the way to B, into a converter that
+        // stops at full scale: most of every symbol is flat against it.
+        let mut pair = Pair::new(1, &[50.0], 0.0);
+        pair.there[0].gain = 10.0;
+        let to_b = stream(4, 200_000);
+        pair.a.write(&to_b);
+        pair.run(40.0);
+        let trim = pair.a.channels[0].trim_db;
+        assert!((18.0..34.0).contains(&trim), "trimmed {trim} dB");
+        let now = pair.b.channels[0].here.expect("a second measured");
+        assert_eq!(now.clipped, 0, "{now:?}");
+        assert!(now.peak_db < -1.0 && now.peak_db > -16.0, "{now:?}");
+        // And the far end knows it is being sent to more quietly.
+        assert_eq!(pair.a.channels[0].there.map(|r| r.clipped), Some(0));
+        assert_eq!(pair.b.channels[0].there.map(|r| r.trim_db), Some(trim));
+        assert_eq!(pair.a.channels[0].there.map(|r| r.trim_db), Some(0.0));
+        assert!(pair.at_b == to_b, "{} of {} octets", pair.at_b.len(), to_b.len());
+        // The way back was never touched.
+        assert_eq!(pair.b.channels[0].trim_db, 0.0);
+    }
+
+    /// Two channels of cable one way and one microphone back: the second
+    /// channel is heard by B and not by A. B's table for it cannot go back
+    /// down the channel it is for, so it goes down the other, and A loads
+    /// both of the channels it sends on.
+    #[test]
+    fn a_channel_that_works_one_way_is_loaded_that_way() {
+        let mut pair = Pair::new(2, &[50.0, 50.0], 0.0);
+        pair.back[1].cut = true;
+        let to_b = stream(8, 600_000);
+        pair.a.write(&to_b);
+        pair.run(20.0);
+        // Both of A's transmitters are on tables B asked for.
+        assert!(pair.a.channels[0].sends_loaded() && pair.a.channels[1].sends_loaded());
+        assert!(pair.b.channels[1].hears_loaded());
+        // And neither end thinks the dead way is alive.
+        assert!(!pair.a.channels[1].hears_loaded() && !pair.b.channels[1].sends_loaded());
+        assert!(!pair.a.channels[1].loaded());
+        // The stream went down both.
+        assert!(pair.at_b == to_b, "{} of {} octets", pair.at_b.len(), to_b.len());
+        assert!(pair.b.channels[1].tally.blocks > 100, "{:?}", pair.b.channels[1].tally);
+    }
+
+    #[test]
+    fn a_report_survives_its_eight_octets() {
+        let report = Report { level_db: -23.5, peak_db: -11.0, clipped: 312, snr_db: 54.3, trim_db: 6.5 };
+        assert_eq!(Report::decode(&report.encode()), Some(report));
+        assert_eq!(report.encode().len(), 8);
+        assert_eq!(Report::decode(&[2, 0, 0, 0, 0, 0, 0, 0]), None);
     }
 }
 

@@ -186,16 +186,38 @@ OS-specific code — but only built and run on Windows so far.
   provider's server puts exact codewords on the network, which is why a real
   modem gets 56k on the same line.
 
-- **V.ARC**, a wideband mode of our own for two sound cards joined by a lead
-  rather than by a telephone line. Three modulations: a multicarrier one
-  loaded a carrier at a time, and QAM and baseband levels at 16 000 baud.
-  Through a real stereo lead between a Realtek line output and its line
-  input at 192 kHz the multicarrier mode measured a megabit a second each
-  way with no octet wrong. `AT+MS=VARC` or the window's mode box selects it
-  and `ATD` and `ATA` place and answer the call. Between two SIP accounts
-  that say `linear = yes` the call carries sixteen-bit samples exactly and
-  the samples are the data, at 200 kbit/s. It has never been run between two
-  machines. See [docs/design/v-arc.md](docs/design/v-arc.md).
+- **V.ARC**, a wideband mode of our own for a sound card and not a
+  telephone line; both ends have to be BinModem. A multicarrier modulation
+  loaded a carrier at a time, and QAM and baseband levels that fill the
+  card's band (`AT+VARC` sets their baud, code and grid by hand). `AT+VARCBIS`
+  lists it in V.8 bis, so an ordinary call between two BinModems finds it.
+  Over SIP, linear PCM at 8 to 48 kHz carries it exactly, and EasySip is
+  that with no account: type the other end's address.
+  `AT+MS=VARC` or the window's mode box selects it and `ATD` and `ATA` place
+  and answer the call.
+  - Through a real lead between a Realtek line output and its line input at
+    192 kHz: 1.4 Mbit/s with no octet wrong. A call is one signal, the same
+    on both channels.
+  - A call starts with a handshake at 200 bit/s in the voice band, where
+    each end says what its sound cards are, so ends that differ agree on
+    what to run and do not just fail.
+  - It starts on a line it knows nothing about, with a signal that needs any
+    2.3 kHz of the band, and loads only where the line is.
+  - Each end tells the other what it hears, and a sender that is too loud
+    turns itself down.
+  - An end that cannot hear the other says so, and the far end slows the
+    modulation by halves until it can; codes from 0.93 down to 0.25 for
+    lines with little to spare. One direction has been out of a loudspeaker
+    and into a microphone: 20 kbit/s.
+  - `AT+MS=VARC2W` is the same mode on one pair of wires, with an echo
+    canceller. Each end learns its echo with the line to itself first; two
+    ends sharing a virtual cable connect at 327 kbit/s and pass 75 dB.
+  - Between two SIP accounts that say `linear = yes` the call carries
+    sixteen-bit samples exactly and the samples are the data, at 200 kbit/s.
+
+  It has never been run between two machines, and the two-wire mode has
+  never met a real two-wire line. See
+  [docs/design/v-arc.md](docs/design/v-arc.md).
 
 ## Next
 

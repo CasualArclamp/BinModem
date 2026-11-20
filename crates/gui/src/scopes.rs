@@ -389,6 +389,119 @@ pub fn oscilloscope(ui: &mut Ui, samples: &[f32], sample_rate: f64, size: Vec2) 
     frame_border(&painter, rect);
 }
 
+/// The band a carrier at a time: the bits on each as bars, and the signal
+/// to noise they were chosen from as a line over them.
+///
+/// This is the picture of what a multicarrier mode is for. A line is not one
+/// figure; it is good here and poor there, and each carrier is given what
+/// its own stretch will bear. The two scales are tied so that the line sits
+/// on top of the bars when the loading is what the ratio allows: three
+/// decibels a bit, with eight in hand.
+pub fn loading(ui: &mut Ui, carriers: &[(f32, f32, f32)], size: Vec2) {
+    let (response, painter) = ui.allocate_painter(size, Sense::hover());
+    let rect = response.rect;
+    painter.rect_filled(rect, 0.0, BACKDROP);
+    let plot = Rect::from_min_max(pos2(rect.left() + 2.0, rect.top() + 16.0), pos2(rect.right() - 2.0, rect.bottom() - 16.0));
+    // Twenty-four bits is the most a carrier takes: 80 dB on the same axis.
+    const MOST_BITS: f32 = 24.0;
+    let height_of = |bits: f32| plot.height() * (bits / MOST_BITS).clamp(0.0, 1.0);
+    for eighth in 1..3 {
+        let y = plot.bottom() - height_of(8.0 * eighth as f32);
+        painter.line_segment([pos2(plot.left(), y), pos2(plot.right(), y)], Stroke::new(1.0, GRID));
+    }
+    let top_hz = carriers.last().map_or(1.0, |c| c.0.max(1.0));
+    let most = carriers.iter().fold(0.0f32, |m, c| m.max(c.2));
+    let best = carriers.iter().fold(0.0f32, |m, c| m.max(c.1));
+    if carriers.len() > 1 {
+        let width = (plot.width() / carriers.len() as f32).max(1.0);
+        let mut ratio: Vec<Pos2> = Vec::with_capacity(carriers.len());
+        for &(hz, snr_db, bits) in carriers {
+            let x = plot.left() + plot.width() * hz / top_hz;
+            if bits > 0.0 {
+                let bar = Rect::from_min_max(pos2(x - width, plot.bottom() - height_of(bits)), pos2(x, plot.bottom()));
+                painter.rect_filled(bar, 0.0, TRACE.gamma_multiply(0.55));
+            }
+            if snr_db > 0.0 {
+                // The bits this ratio would bear, on the bars' own scale.
+                ratio.push(pos2(x - width * 0.5, plot.bottom() - height_of((snr_db - 8.0) / 3.01)));
+            }
+        }
+        for pair in ratio.windows(2) {
+            painter.line_segment([pair[0], pair[1]], Stroke::new(1.2, Color32::from_rgb(240, 200, 90)));
+        }
+    }
+    let khz = top_hz / 1000.0;
+    let head = if carriers.len() > 1 {
+        format!("bits a carrier  to {khz:.0} kHz")
+    } else {
+        "bits a carrier".to_owned()
+    };
+    painter.text(pos2(rect.left() + 5.0, rect.top() + 3.0), Align2::LEFT_TOP, head, FontId::monospace(10.0), LABEL);
+    let foot = if carriers.len() > 1 {
+        format!("most {most:.0}  line: SNR to {best:.0} dB")
+    } else {
+        "one carrier: nothing to lay out".to_owned()
+    };
+    painter.text(pos2(rect.left() + 5.0, rect.bottom() - 3.0), Align2::LEFT_BOTTOM, foot, FontId::monospace(10.0), LABEL);
+    frame_border(&painter, rect);
+}
+
+/// The echo a canceller has learned: what comes back down the line for one
+/// sample sent, over the few milliseconds the canceller covers.
+///
+/// A clean lead is one spike. A hybrid is a spike with a tail; a room is a
+/// mess. What is drawn is the canceller's own picture of the line, so it is
+/// also the picture of the canceller finding it: nothing, then a shape out
+/// of the noise, then the noise draining out of the shape.
+pub fn echo(ui: &mut Ui, response: &[f32], delay_ms: f32, size: Vec2) {
+    let (response_area, painter) = ui.allocate_painter(size, Sense::hover());
+    let rect = response_area.rect;
+    painter.rect_filled(rect, 0.0, BACKDROP);
+    let mid = rect.center().y;
+    painter.line_segment([pos2(rect.left(), mid), pos2(rect.right(), mid)], Stroke::new(1.0, GRID));
+    for quarter in 1..4 {
+        let x = rect.left() + rect.width() * quarter as f32 / 4.0;
+        painter.line_segment([pos2(x, rect.top()), pos2(x, rect.bottom())], Stroke::new(1.0, GRID));
+    }
+    if response.len() > 1 {
+        let peak = response.iter().fold(1e-6f32, |m, v| m.max(v.abs()));
+        let half = rect.height() * 0.5 - 16.0;
+        let points: Vec<Pos2> = response
+            .iter()
+            .enumerate()
+            .map(|(i, v)| pos2(rect.left() + rect.width() * i as f32 / (response.len() - 1) as f32, mid - half * v / peak))
+            .collect();
+        for pair in points.windows(2) {
+            painter.line_segment([pair[0], pair[1]], Stroke::new(1.2, TRACE));
+        }
+        painter.text(
+            pos2(rect.left() + 5.0, rect.top() + 3.0),
+            Align2::LEFT_TOP,
+            format!("echo  {delay_ms:.1} ms round"),
+            FontId::monospace(10.0),
+            LABEL,
+        );
+        painter.text(
+            pos2(rect.left() + 5.0, rect.bottom() - 3.0),
+            Align2::LEFT_BOTTOM,
+            format!("4 ms shown  peak {peak:.2}"),
+            FontId::monospace(10.0),
+            LABEL,
+        );
+    } else {
+        painter.text(pos2(rect.left() + 5.0, rect.top() + 3.0), Align2::LEFT_TOP, "echo", FontId::monospace(10.0), LABEL);
+        // A delay below nought is a canceller that is there and has found
+        // nothing yet, which is not the same as there being none.
+        let why = if delay_ms < 0.0 {
+            "one pair of wires:\nlooking for this end's echo"
+        } else {
+            "a wire each way:\nno echo to cancel"
+        };
+        painter.text(rect.center(), Align2::CENTER_CENTER, why, FontId::monospace(10.0), LABEL);
+    }
+    frame_border(&painter, rect);
+}
+
 fn allocate(ui: &mut Ui, height: f32) -> (eframe::egui::Response, Painter) {
     let size = vec2(ui.available_width(), height);
     ui.allocate_painter(size, Sense::hover())
@@ -592,9 +705,41 @@ pub struct Constellation<'a> {
     pub tones: usize,
     /// How far the points reach. One fits the box exactly.
     pub peak: f32,
-    /// The points are PCM samples, each against the next, rather than I and
-    /// Q -- which a reader will take them for unless told.
-    pub pairs: bool,
+    /// The points are PCM samples, each with the one before it, rather than
+    /// I and Q -- which a reader will take them for unless told -- and this
+    /// is how they are to be drawn.
+    pub pcm: Option<PcmView>,
+}
+
+/// Ways of drawing PCM, which has levels and no plane to put them on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PcmView {
+    /// Each sample against the next: a square grid of every pair of levels.
+    /// Shows at a glance how many levels there are and whether they are
+    /// apart, and nothing about which of them are in trouble.
+    #[default]
+    Pairs,
+    /// The levels up the side and time across: the ladder itself, as an
+    /// oscilloscope with a very long memory would have it.
+    Ladder,
+    /// How far each sample fell from the level it was taken for, against
+    /// that level: the whole height is from one decision line to the next.
+    /// A clean line is a thin stripe along the middle; noise thickens it,
+    /// and a line that treats its large levels worse than its small ones
+    /// shows it as a stripe that flares at the ends.
+    Error,
+}
+
+impl PcmView {
+    pub const ALL: [Self; 3] = [Self::Pairs, Self::Ladder, Self::Error];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Pairs => "pairs",
+            Self::Ladder => "ladder",
+            Self::Error => "error by level",
+        }
+    }
 }
 
 pub fn symbol_scope(
@@ -605,7 +750,8 @@ pub fn symbol_scope(
     quality: Option<u32>,
     height: f32,
 ) -> eframe::egui::Response {
-    let Constellation { points: constellation, tones, peak, pairs } = dots;
+    let Constellation { points: constellation, tones, peak, pcm } = dots;
+    let pairs = pcm.is_some();
     let size = vec2(ui.available_width(), height);
     let (response, painter) = ui.allocate_painter(size, Sense::click());
     let rect = response.rect;
@@ -685,21 +831,67 @@ pub fn symbol_scope(
     // handful of places, and on a clean line every symbol lands on exactly
     // the same pixel of each: a square a pixel or two across, on an axis
     // line, is a scope that looks empty. Those are drawn large and solid.
+    // Few points get a larger dot, so that four of them can be found; but
+    // not so large that they are blobs, and not when there are thousands of
+    // samples behind them: sixteen thousand nine-pixel squares on two levels
+    // was a box painted solid.
     let few = tones <= 4;
-    let side = if few { (radius / 14.0).clamp(5.0, 9.0) } else { (radius / 180.0).clamp(1.0, 2.5) * if crowded { 1.0 } else { 1.7 } };
+    let many = constellation.len() > 600;
+    let side = if few && !many {
+        (radius / 40.0).clamp(2.0, 3.5)
+    } else if few {
+        (radius / 90.0).clamp(1.0, 1.8)
+    } else {
+        (radius / 180.0).clamp(1.0, 2.5) * if crowded { 1.0 } else { 1.7 }
+    };
     let colour = Color32::from_rgba_unmultiplied(120, 220, 160, if few { 255 } else if crowded { 110 } else { 150 });
-    for &(re, im) in constellation {
-        mesh.add_colored_rect(Rect::from_center_size(at(re, im), vec2(side, side)), colour);
+    match pcm {
+        Some(PcmView::Ladder) => {
+            // Oldest on the left; the level is the second of each pair.
+            let span = (constellation.len().max(2) - 1) as f32;
+            for (i, &(_, level)) in constellation.iter().enumerate() {
+                mesh.add_colored_rect(Rect::from_center_size(at(2.0 * i as f32 / span - 1.0, level), vec2(side, side)), colour);
+            }
+        }
+        Some(PcmView::Error) => {
+            // The levels sit evenly from minus one to one, so the nearest is
+            // a rounding, and half the gap between two is the decision line.
+            let steps = tones.max(2) as f32 - 1.0;
+            for &(_, level) in constellation {
+                let level = level * fit;
+                let nearest = ((level * steps + steps) / 2.0).round().clamp(0.0, steps);
+                let ideal = (2.0 * nearest - steps) / steps;
+                let miss = (level - ideal) * steps;
+                mesh.add_colored_rect(
+                    Rect::from_center_size(
+                        pos2(centre.x + ideal * radius, centre.y - miss.clamp(-1.0, 1.0) * radius),
+                        vec2(side, side),
+                    ),
+                    colour,
+                );
+            }
+        }
+        _ => {
+            for &(re, im) in constellation {
+                mesh.add_colored_rect(Rect::from_center_size(at(re, im), vec2(side, side)), colour);
+            }
+        }
     }
     painter.add(eframe::egui::Shape::mesh(mesh));
 
     // Always say something. A silent, empty scope gives no way to tell a modem
     // that is not decoding from a display that is not being fed.
-    if pairs {
+    if let Some(view) = pcm {
         // Said on the axes themselves, always: this is not I against Q.
         let faint = Color32::from_rgb(110, 125, 145);
-        painter.text(pos2(centre.x + radius - 2.0, centre.y + 4.0), Align2::RIGHT_TOP, "sample n", FontId::monospace(10.0), faint);
-        painter.text(pos2(centre.x + 4.0, centre.y - radius + 2.0), Align2::LEFT_TOP, "sample n+1", FontId::monospace(10.0), faint);
+        let (across, up) = match view {
+            PcmView::Pairs => ("sample n", "sample n+1"),
+            PcmView::Ladder => ("time", "level"),
+            // Top and bottom of the box are the decision lines.
+            PcmView::Error => ("level", "miss"),
+        };
+        painter.text(pos2(centre.x + radius - 2.0, centre.y + 4.0), Align2::RIGHT_TOP, across, FontId::monospace(10.0), faint);
+        painter.text(pos2(centre.x + 4.0, centre.y - radius + 2.0), Align2::LEFT_TOP, up, FontId::monospace(10.0), faint);
     }
     let (text, colour) = match quality {
         _ if pairs && !constellation.is_empty() => (

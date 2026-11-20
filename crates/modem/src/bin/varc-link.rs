@@ -153,20 +153,23 @@ fn describe(name: &str, end: &End) -> String {
 }
 
 /// A call to oneself through a whole modem, as the window would place it.
-fn through_the_modem(audio: &Wide, mode: &str, seconds: f64) -> ExitCode {
+fn through_the_modem(audio: &Wide, mode: &str, dial: &str, seconds: f64) -> ExitCode {
     let carrier = match mode {
         "dmt" => "VARC",
         "qam" => "VARCQ",
         "pcm" => "VARCP",
+        "2w" => "VARC2W",
+        "qam2w" => "VARCQ2W",
+        "pcm2w" => "VARCP2W",
         _ => return usage(),
     };
     println!(
-        "in:  {} ({} ch)\nout: {} ({} ch)\nat {} Hz, AT+MS={carrier}, ATDLOOP",
+        "in:  {} ({} ch)\nout: {} ({} ch)\nat {} Hz, AT+MS={carrier}, {dial}",
         audio.input_device, audio.input_channels, audio.output_device, audio.output_channels, audio.rate
     );
     let fs = f64::from(audio.rate);
     let mut modem = Modem::new(16_000.0);
-    for b in format!("AT+MS={carrier}\rATDLOOP\r").bytes() {
+    for b in format!("AT+MS={carrier}\r{dial}\r").bytes() {
         modem.feed_dte(b);
     }
     let (mut source, mut check) = (Pattern(7), Pattern(7));
@@ -188,19 +191,44 @@ fn through_the_modem(audio: &Wide, mode: &str, seconds: f64) -> ExitCode {
         turn = Instant::now();
         send.clear();
         let was = modem.state();
+        // Two devices at two rates: what is heard is stepped as it arrives,
+        // and what is sent is made as fast as the sending device takes it.
+        let apart = audio.output_rate != audio.rate;
         for frame in heard.as_chunks::<2>().0 {
             peak = peak.max(frame[0].abs()).max(frame[1].abs());
             let mut out = [0.0f64; 2];
-            modem.varc_step(fs, &[f64::from(frame[0]), f64::from(frame[1])], &mut out);
-            send.push(out[0] as f32);
-            send.push(out[1] as f32);
+            if apart {
+                modem.varc_hear(fs, f64::from(audio.output_rate), &[f64::from(frame[0]), f64::from(frame[1])]);
+            } else {
+                modem.varc_step(fs, &[f64::from(frame[0]), f64::from(frame[1])], &mut out);
+                send.push(out[0] as f32);
+                send.push(out[1] as f32);
+            }
+        }
+        if apart {
+            for _ in 0..audio.wanted() {
+                let mut out = [0.0f64; 2];
+                modem.varc_say(&mut out);
+                send.push(out[0] as f32);
+                send.push(out[1] as f32);
+            }
         }
         audio.transmit(&send);
         for note in modem.take_line_notes() {
             println!("{:6.2}s  -- {note}", started.elapsed().as_secs_f64());
         }
-        let said = modem.take_dte();
-        if modem.state() == State::Data && was == State::Data {
+        let mut said = modem.take_dte();
+        if modem.state() == State::Data && was != State::Data {
+            // The turn the call came up in: the result code, and after it
+            // whatever the far end had already sent, which is data and is
+            // checked with the rest. (A far end that connected first has
+            // been sending for a second or two by now.)
+            let line = said.windows(7).position(|w| w == b"CONNECT").unwrap_or(0);
+            let end = said[line..].iter().position(|&b| b == b'\n').map_or(said.len(), |i| line + i + 1);
+            println!("{:6.2}s  {}", started.elapsed().as_secs_f64(), String::from_utf8_lossy(&said[..end]).trim());
+            said.drain(..end);
+        }
+        if modem.state() == State::Data {
             for octet in said {
                 arrived += 1;
                 if octet != check.next() {
@@ -224,7 +252,7 @@ fn through_the_modem(audio: &Wide, mode: &str, seconds: f64) -> ExitCode {
             let span = reported.elapsed().as_secs_f64();
             reported = Instant::now();
             println!(
-                "{:6.2}s  {} · {} · {} bit/s · {:.0} kbit/s back, {arrived} octets, {wrong} wrong · peak {peak:.3} · longest wait {:.0} ms · {} underruns, {} dropped",
+                "{:6.2}s  {} · {} · {} bit/s · {:.0} kbit/s back, {arrived} octets, {wrong} wrong · peak {peak:.3} · longest wait {:.0} ms · {} underruns, {} dropped · far Es/N0 {:.1} dB",
                 started.elapsed().as_secs_f64(),
                 modem.standard(),
                 modem.line_phase(),
@@ -233,6 +261,7 @@ fn through_the_modem(audio: &Wide, mode: &str, seconds: f64) -> ExitCode {
                 longest.as_secs_f64() * 1000.0,
                 audio.underruns(),
                 audio.dropped_in(),
+                modem.varc_far_end().map_or(0.0, |far| far.0.snr_db),
             );
             last = arrived;
             peak = 0.0;
@@ -256,6 +285,7 @@ fn main() -> ExitCode {
     let mut output = None;
     let mut oneway = None;
     let mut as_modem = false;
+    let mut dial = "ATDLOOP".to_owned();
     let mut seconds = 30.0;
     let mut level = None;
     let mut gap = None;
@@ -281,6 +311,12 @@ fn main() -> ExitCode {
             "--loop" => oneway = Some(false),
             "--oneway" => oneway = Some(true),
             "--modem" => as_modem = true,
+            // What to type to start the call: ATDLOOP for a lead that comes
+            // back, or ATA and ATD for two of these on one line.
+            "--dial" => match value() {
+                Some(command) => dial = command,
+                None => return usage(),
+            },
             "--csv" => csv = value(),
             "--mode" => match value() {
                 Some(name) => mode = name,
@@ -304,7 +340,8 @@ fn main() -> ExitCode {
     }
 
     let audio = Wide::open(input.as_deref(), output.as_deref()).and_then(|audio| {
-        if audio.rate == audio.output_rate {
+        // A whole modem takes two devices at two rates; the bare ends do not.
+        if audio.rate == audio.output_rate || as_modem {
             Ok(audio)
         } else {
             Err(format!(
@@ -321,7 +358,7 @@ fn main() -> ExitCode {
         }
     };
     if as_modem {
-        return through_the_modem(&audio, &mode, seconds);
+        return through_the_modem(&audio, &mode, &dial, seconds);
     }
     let oneway = oneway.unwrap_or(false);
     println!(

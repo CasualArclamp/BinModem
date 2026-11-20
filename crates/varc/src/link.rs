@@ -121,6 +121,88 @@ pub trait Sender {
 
     /// Samples that reached full scale and were held there.
     fn clipped(&self) -> u64;
+
+    /// Send this many decibels below the level the transmitter was made
+    /// for; nought is that level. Nothing for a sender whose samples are
+    /// the data and have no level to choose.
+    fn trim(&mut self, _db: f64) {}
+}
+
+/// The codes a table may be given, strongest last: the share of each
+/// codeword that is data, and how many decibels a point of the grid has to
+/// stand clear of the noise for that code to carry it.
+///
+/// The first is the one a good line gets: sixteen check octets a word,
+/// whatever its length, and eight decibels in hand. The rest are for lines
+/// that have not got eight decibels to spare. A code that is half checks
+/// mends a quarter of a word's octets, and a grid of four points can then be
+/// read at a ratio where one in fourteen of its points comes out wrong; so
+/// it needs three decibels in hand and not eight, and a line at 8 dB that
+/// could carry nothing carries a bit a symbol. Below a quarter there is
+/// little more to be had from a code that is told only right or wrong.
+///
+/// A receiver works out the table for each and asks for whichever carries
+/// most.
+pub const CODES: [(Option<f64>, f64); 5] = [(None, 8.0), (Some(0.75), 5.0), (Some(0.5), 3.0), (Some(0.33), 2.0), (Some(0.25), 1.5)];
+
+/// Check octets for a code of `rate` on blocks of `capacity` octets, which
+/// are cut into codewords of 255 at most.
+pub fn checks_for(rate: f64, capacity: usize) -> u8 {
+    let words = capacity.div_ceil(255).max(1);
+    let n = capacity / words;
+    (((1.0 - rate) * n as f64).round() as usize).clamp(16, n.saturating_sub(8).max(16)).min(246) as u8
+}
+
+/// What one end hears, as it tells the other.
+///
+/// A transmitter cannot hear its own line. It does not know whether what it
+/// sends arrives faint, or so loud that the far end's converter is flat
+/// against its stops, and those are the two things it could do something
+/// about. So each end measures what arrives on each channel, a second at a
+/// time, and sends it back.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Report {
+    /// The level arriving, RMS, in decibels against full scale.
+    pub level_db: f64,
+    /// The largest sample in the second, the same way.
+    pub peak_db: f64,
+    /// Samples in the second that were at full scale: the converter had
+    /// nowhere further to go.
+    pub clipped: u32,
+    /// Signal to noise at the slicer over the band in use, in decibels:
+    /// a symbol's energy against the noise under it. Nought until the
+    /// receiver has measured anything.
+    pub snr_db: f64,
+    /// Decibels below its made-for level the reporting end is itself
+    /// sending at.
+    pub trim_db: f64,
+}
+
+impl Report {
+    /// Eight octets: a version, then half decibels below full scale for the
+    /// level and the peak, the clipped count, tenths of a decibel of signal
+    /// to noise, and half decibels of trim.
+    pub fn encode(&self) -> Vec<u8> {
+        let below = |db: f64| (-2.0 * db).round().clamp(0.0, 255.0) as u8;
+        let snr = (10.0 * self.snr_db).round().clamp(0.0, 65_535.0) as u16;
+        let clipped = self.clipped.min(65_535) as u16;
+        let mut out = vec![1, below(self.level_db), below(self.peak_db)];
+        out.extend_from_slice(&clipped.to_le_bytes());
+        out.extend_from_slice(&snr.to_le_bytes());
+        out.push(below(-self.trim_db));
+        out
+    }
+
+    pub fn decode(body: &[u8]) -> Option<Self> {
+        let &[1, level, peak, c0, c1, s0, s1, trim, ..] = body else { return None };
+        Some(Self {
+            level_db: -f64::from(level) / 2.0,
+            peak_db: -f64::from(peak) / 2.0,
+            clipped: u32::from(u16::from_le_bytes([c0, c1])),
+            snr_db: f64::from(u16::from_le_bytes([s0, s1])) / 10.0,
+            trim_db: f64::from(trim) / 2.0,
+        })
+    }
 }
 
 // A boxed half is a half, so that a program can choose its modulation when
@@ -149,6 +231,9 @@ impl<T: Sender + ?Sized> Sender for Box<T> {
     }
     fn clipped(&self) -> u64 {
         (**self).clipped()
+    }
+    fn trim(&mut self, db: f64) {
+        (**self).trim(db)
     }
 }
 
@@ -191,6 +276,18 @@ impl<T: Receiver + ?Sized> Receiver for Box<T> {
     }
     fn code(&self) -> Option<(usize, usize)> {
         (**self).code()
+    }
+    fn echo_under(&mut self, sample: f64) {
+        (**self).echo_under(sample)
+    }
+    fn echo_again(&mut self) {
+        (**self).echo_again()
+    }
+    fn echo_left_db(&self) -> Option<f64> {
+        (**self).echo_left_db()
+    }
+    fn fix(&mut self, bits: Option<u8>, code: Option<f64>) {
+        (**self).fix(bits, code)
     }
 }
 
@@ -252,6 +349,30 @@ pub trait Receiver {
     fn code(&self) -> Option<(usize, usize)> {
         None
     }
+
+    /// On a line that is one pair of wires: the sample of this end's own
+    /// signal that the echo in the next sample fed is the echo of, as the
+    /// canceller in front of this receiver has placed it. Given before each
+    /// [`Receiver::feed`]. A receiver that knows what the far end sent can
+    /// take the echo further down than a canceller that does not; one that
+    /// cannot ignores this.
+    fn echo_under(&mut self, _sample: f64) {}
+
+    /// The echo has moved: whatever was learned of it is to be forgotten.
+    fn echo_again(&mut self) {}
+
+    /// How much this receiver's own stage has taken off the echo it was
+    /// handed, in decibels, if it has one and it has learned anything.
+    fn echo_left_db(&self) -> Option<f64> {
+        None
+    }
+
+    /// Ask the far end for these bits a symbol and this code whatever the
+    /// line measures, where either is given: for somebody who wants to see
+    /// what a setting does and not what the receiver would choose. `None`
+    /// leaves the choice with the receiver. Only the single-carrier modes
+    /// take any notice.
+    fn fix(&mut self, _bits: Option<u8>, _code: Option<f64>) {}
 }
 
 /// Points a receiver keeps for whoever draws them. Past this it keeps no

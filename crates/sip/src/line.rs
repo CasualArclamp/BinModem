@@ -427,7 +427,13 @@ impl Line {
     fn start_media(&self, negotiated: &Negotiated) -> Result<SocketAddr, String> {
         let remote = resolve_media(&negotiated.address, negotiated.port)?;
         if negotiated.linear {
-            self.media.connect_linear(remote, negotiated.payload_type, negotiated.ptime_ms);
+            self.media.connect_linear(
+                remote,
+                negotiated.payload_type,
+                negotiated.ptime_ms,
+                negotiated.rate,
+                negotiated.channels,
+            );
         } else {
             self.media.connect(remote, negotiated.law, negotiated.payload_type, negotiated.ptime_ms);
         }
@@ -447,11 +453,17 @@ impl Line {
 
     /// What the last answered call agreed to.
     /// Whether the call that is up carries linear samples exactly as sent,
-    /// L16 at 16 kHz, rather than G.711. Then [`Self::receive_both`]'s
-    /// network samples and [`Self::transmit_exact`] are at 16 kHz and every
-    /// one is sixteen bits that arrive as they left.
+    /// L16, rather than G.711. Then [`Self::receive_both`]'s network
+    /// samples and [`Self::transmit_exact`] are at [`Self::linear_rate`]
+    /// and every one is sixteen bits that arrive as they left.
     pub fn linear(&self) -> bool {
         self.media.connected() && self.media.linear()
+    }
+
+    /// Samples a second of the linear call that is up: 8, 16, 44.1 or 48
+    /// thousand, whichever the two ends agreed on.
+    pub fn linear_rate(&self) -> f64 {
+        self.media.linear_rate()
     }
 
     pub fn negotiated(&self) -> Option<Negotiated> {

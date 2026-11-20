@@ -83,8 +83,13 @@ const DC_BLOCK: usize = 8;
 /// Octets a block has to hold, as in the multicarrier mode.
 const BLOCK_OCTETS: usize = 200;
 
-/// The most bits a level of the baseband mode may carry.
-const MAX_PAM_BITS: u8 = 12;
+/// The most bits a level of the baseband mode may carry: 65 536 levels.
+///
+/// That is the most a table may ask for and not something a line here has
+/// borne. Each bit wants 6 dB, so sixteen want about 104 dB at the slicer;
+/// this receiver's own floor on a line with no noise at all is some 63 dB,
+/// which is ten bits, and a real converter is no better. It was twelve.
+const MAX_PAM_BITS: u8 = 16;
 
 const DEFAULT_PARITY: u8 = 32;
 const LOADED_PARITY: u8 = 16;
@@ -160,7 +165,13 @@ impl Shape {
     }
 
     pub fn default_table(&self) -> Table {
-        Table { parity: DEFAULT_PARITY, bits: vec![if self.real { 1 } else { 2 }] }
+        // Half of each word is checks: the starting table has to carry the
+        // first made-to-measure one over a line nothing is known about,
+        // and a single carrier has no copies of anything to add together.
+        let mut table = Table { parity: DEFAULT_PARITY, bits: vec![if self.real { 1 } else { 2 }] };
+        let capacity = self.block(&table) * self.group_bits(self.bits_of(&table)) / 8;
+        table.parity = crate::link::checks_for(0.5, capacity);
+        table
     }
 
     fn max_bits(&self) -> u8 {
@@ -302,6 +313,8 @@ pub struct Tx {
     turn: f64,
     step: f64,
     gain: f64,
+    /// What the far end has asked the level be multiplied by; one or less.
+    trim: f64,
     /// Samples that reached full scale and were held there.
     pub clipped: u64,
 }
@@ -335,6 +348,7 @@ impl Tx {
             step: TAU * shape.carrier / shape.fs,
             // The real part of a complex envelope has half its power.
             gain: if shape.real { level } else { level * std::f64::consts::SQRT_2 },
+            trim: 1.0,
             clipped: 0,
             shape,
         }
@@ -430,11 +444,11 @@ impl Sender for Tx {
         }
         self.phase = (self.phase + 1) % sps;
         let s = if self.shape.real {
-            envelope.re * self.gain
+            envelope.re * self.gain * self.trim
         } else {
             let (sin, cos) = self.turn.sin_cos();
             self.turn = (self.turn + self.step) % TAU;
-            (envelope.re * cos - envelope.im * sin) * self.gain
+            (envelope.re * cos - envelope.im * sin) * self.gain * self.trim
         };
         if s.abs() >= 1.0 {
             self.clipped += 1;
@@ -456,6 +470,10 @@ impl Sender for Tx {
 
     fn reset(&mut self) {
         self.next = Some((0, self.shape.default_table()));
+    }
+
+    fn trim(&mut self, db: f64) {
+        self.trim = 10f64.powf(-db.max(0.0) / 20.0);
     }
 
     fn rates(&self) -> (f64, f64) {
@@ -541,6 +559,9 @@ pub struct Rx {
     better: usize,
     gap_db: f64,
     remeasure: bool,
+    /// Bits a symbol and a code to ask for whatever the line measures, where
+    /// somebody has said so.
+    fixed: (Option<u8>, Option<f64>),
     /// Points for a symbol diagram, the bits a symbol of those shown, and
     /// the level before this one, which the baseband mode plots it against.
     points: Vec<(f64, f64)>,
@@ -607,6 +628,7 @@ impl Rx {
             better: 0,
             gap_db: GAP_DB,
             remeasure: false,
+            fixed: (None, None),
             points: Vec::new(),
             shown: 0,
             before: 0.0,
@@ -638,15 +660,55 @@ impl Rx {
     }
 
     /// The table this line will bear, by what has been measured.
+    ///
+    /// Worked out for each code there is, the stronger ones with less in
+    /// hand, and the one that carries most is the one asked for: see
+    /// [`crate::link::CODES`].
     pub fn load(&self) -> Table {
-        let gap = 10f64.powf(self.gap_db / 10.0);
+        let extra = self.gap_db - GAP_DB;
         let snr = 1.0 / self.noise.max(1e-30);
-        let capacity = (1.0 + snr / gap).log2();
-        // A ladder on one axis holds half what a point on two does.
-        let bits = if self.shape.real { capacity / 2.0 } else { capacity };
         let least = if self.shape.real { 1 } else { 2 };
-        let bits = (bits.floor() as i64).clamp(least, i64::from(self.shape.max_bits())) as u8;
-        Table { parity: LOADED_PARITY, bits: vec![bits] }
+        let mut best: Option<(f64, bool, Table)> = None;
+        for (rate, gap_db) in crate::link::CODES {
+            // A code that was asked for is the only one there is: the
+            // nearest of these to it.
+            if let Some(fixed) = self.fixed.1 {
+                let nearest = crate::link::CODES
+                    .iter()
+                    .map(|(r, _)| r.unwrap_or(0.93))
+                    .min_by(|a, b| (a - fixed).abs().total_cmp(&(b - fixed).abs()))
+                    .unwrap_or(0.93);
+                if (rate.unwrap_or(0.93) - nearest).abs() > 1e-9 {
+                    continue;
+                }
+            }
+            let gap = 10f64.powf((gap_db + extra) / 10.0);
+            let capacity = (1.0 + snr / gap).log2();
+            // A ladder on one axis holds half what a point on two does.
+            let room = if self.shape.real { capacity / 2.0 } else { capacity };
+            // Bits that were asked for are the bits, whatever the line says.
+            let room = self.fixed.0.map_or(room, f64::from);
+            // Whether the line bears even the smallest grid with this code,
+            // or is being given it regardless because there is none smaller.
+            let fits = room >= f64::from(least);
+            let bits = (room.floor() as i64).clamp(i64::from(least), i64::from(self.shape.max_bits())) as u8;
+            let mut table = Table { parity: LOADED_PARITY, bits: vec![bits] };
+            if let Some(rate) = rate {
+                let capacity = self.shape.block(&table) * self.shape.group_bits(bits) / 8;
+                table.parity = crate::link::checks_for(rate, capacity);
+            }
+            let net = self.shape.net(&table);
+            // A code the line bears beats one it does not, whatever each
+            // would carry if it worked; then whichever carries most.
+            let better = match best.as_ref() {
+                None => true,
+                Some((most, fitted, _)) => (fits && !fitted) || (fits == *fitted && net > *most),
+            };
+            if better {
+                best = Some((net, fits, table));
+            }
+        }
+        best.map(|(_, _, table)| table).expect("there are codes")
     }
 
     fn propose(&mut self) {
@@ -1128,6 +1190,14 @@ impl Receiver for Rx {
         self.shown
     }
 
+    fn fix(&mut self, bits: Option<u8>, code: Option<f64>) {
+        let least = if self.shape.real { 1 } else { 2 };
+        self.fixed = (bits.map(|b| b.clamp(least, self.shape.max_bits())), code);
+        if self.stage == Stage::Steady {
+            self.propose();
+        }
+    }
+
     fn spectrum(&self) -> Vec<Bin> {
         let table = self.id.and_then(|id| self.tables[usize::from(id)].as_ref());
         vec![Bin {
@@ -1294,6 +1364,27 @@ mod tests {
             // way up the constellation is.
             assert!(pair.b.channels[0].tally.failed < 10, "{snr} dB, {ppm} ppm");
         }
+    }
+
+    /// A line with 8 dB at the slicer, where a code of sixteen check octets
+    /// carries nothing: a sixteenth of four points' worth come out wrong.
+    /// The receiver asks for a code that is mostly checks, and the stream
+    /// arrives.
+    #[test]
+    fn a_noisy_line_gets_a_code_that_is_mostly_checks() {
+        // 8 dB at the slicer is 6.2 dB over the whole band.
+        let mut pair = Pair::new(Shape::qam(48_000.0).unwrap(), 6.2, 0.0, 0.0);
+        let to_b = stream(3, 8_000);
+        pair.a.write(&to_b);
+        pair.run(30.0);
+        let rx = &pair.b.channels[0].rx;
+        assert!((rx.snr_db() - 8.0).abs() < 1.5, "measured {:.1} dB", rx.snr_db());
+        let table = pair.a.channels[0].tx.table().clone();
+        let layout = rx.shape().layout(&table).expect("a layout");
+        let (n, k) = layout.code();
+        assert_eq!(table.bits[0], 2);
+        assert!(k * 2 <= n + 2, "a code of {k}/{n} at 8 dB");
+        assert!(pair.at_b == to_b, "{} of {} octets", pair.at_b.len(), to_b.len());
     }
 
     #[test]

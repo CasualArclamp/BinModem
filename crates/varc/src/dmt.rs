@@ -59,13 +59,25 @@ pub const SPREAD: usize = 48;
 
 /// Check octets a codeword gets under the starting table, which has to work
 /// before anything is known about the line.
-const DEFAULT_PARITY: u8 = 32;
+///
+/// A third of each word: enough to mend a sixth of its octets. It was a
+/// sixth, which wanted the summed points a good deal cleaner.
+const DEFAULT_PARITY: u8 = 64;
 
 /// And under a table made to measure.
 const LOADED_PARITY: u8 = 16;
 
 /// Octets a group of symbols has to hold before it is a block by itself.
 const GROUP_OCTETS: usize = 200;
+
+/// How much of the line the receiver's own echo stage covers, in seconds:
+/// what the canceller in front of it covers.
+const ECHO_SPAN: f64 = 0.004;
+
+/// Samples of each symbol the echo stage learns from. Every sample would be
+/// four times the work at 192 kHz for an answer a quarter of a second
+/// sooner.
+const ECHO_LEARNT: usize = 256;
 
 /// Symbols spent letting the channel estimate settle before measuring.
 const SETTLE: usize = 44;
@@ -272,6 +284,8 @@ pub struct Tx {
     im: Vec<f64>,
     /// Which of the starting table's points each carrier carries.
     spread: Vec<Option<u16>>,
+    /// What the far end has asked the level be multiplied by; one or less.
+    trim: f64,
     /// Samples that reached full scale and were held there.
     pub clipped: u64,
 }
@@ -315,6 +329,7 @@ impl Tx {
             re: vec![0.0; plan.n],
             im: vec![0.0; plan.n],
             spread: plan.spread(),
+            trim: 1.0,
             clipped: 0,
             plan,
         }
@@ -366,7 +381,7 @@ impl Tx {
         self.cursor = 0;
         let cp = self.plan.cp;
         for i in (n - cp..n).chain(0..n) {
-            let s = self.re[i] * self.scale;
+            let s = self.re[i] * self.scale * self.trim;
             if s.abs() >= 1.0 {
                 self.clipped += 1;
             }
@@ -429,6 +444,10 @@ impl Sender for Tx {
 
     fn reset(&mut self) {
         self.next = Some((0, self.plan.default_table()));
+    }
+
+    fn trim(&mut self, db: f64) {
+        self.trim = 10f64.powf(-db.max(0.0) / 20.0);
     }
 
     fn rates(&self) -> (f64, f64) {
@@ -504,6 +523,31 @@ pub struct Rx {
     /// the last symbol. Kept because it is asked for far more often than it
     /// changes, and is a logarithm a carrier to work out.
     mean_snr_db: f64,
+    /// Bits a symbol in the table last proposed, and for how many
+    /// superframes in a row the line has looked good for a good deal more.
+    proposed: usize,
+    better: usize,
+    /// The second stage of echo cancelling; see [`Rx::learn_echo`].
+    ///
+    /// This end's own signal as the canceller in front has placed it, after
+    /// the same resampling as the line, twice over so any stretch is one
+    /// slice; the taps; samples learned from; and what a window held before
+    /// and after this stage, as powers, for saying how much it does.
+    echo_on: bool,
+    echo_in: f64,
+    echo_interp: Interp,
+    echo_ref: Vec<f64>,
+    echo_taps: Vec<f64>,
+    echo_learned: u64,
+    echo_power: (f64, f64),
+    /// The resampler's ratio when this receiver last had the line measured:
+    /// one until it has.
+    good_step: f64,
+    /// The far end's signal as decided, for the symbol just read, and where
+    /// that symbol's window began.
+    far_re: Vec<f64>,
+    far_im: Vec<f64>,
+    last_start: i64,
     /// Which of the starting table's points each carrier carries.
     spread: Vec<Option<u16>>,
     /// The noise on each carrier under the starting table, as of the last
@@ -576,6 +620,19 @@ impl Rx {
             gap_db: GAP_DB,
             remeasure: false,
             mean_snr_db: 0.0,
+            proposed: 0,
+            better: 0,
+            echo_on: false,
+            echo_in: 0.0,
+            echo_interp: Interp::new(),
+            echo_ref: Vec::new(),
+            echo_taps: vec![0.0; (ECHO_SPAN * plan.fs).round() as usize],
+            echo_learned: 0,
+            echo_power: (0.0, 0.0),
+            good_step: 1.0,
+            far_re: vec![0.0; plan.n],
+            far_im: vec![0.0; plan.n],
+            last_start: 0,
             spread: plan.spread(),
             heard: vec![1.0; half],
             points: Vec::new(),
@@ -622,12 +679,120 @@ impl Rx {
     }
 
     fn hunt_again(&mut self) {
+        // Whatever the echo stage learned, it learned from symbols this
+        // receiver could read, and it has just stopped being able to.
+        self.echo_taps.fill(0.0);
+        self.echo_learned = 0;
+        self.echo_power = (0.0, 0.0);
+        // And the clock goes back to where it was last known to be right.
+        // A receiver that framed on something that was not a signal, a
+        // steady tone for one, has been steering its clock by nonsense, as
+        // far wrong as the clock will go; and at a thousand parts in a
+        // million out it would never find a real signal again.
+        if self.stage == Stage::Steady {
+            self.good_step = self.interp.step();
+        }
+        self.interp.set_step(self.good_step);
+        self.echo_interp.set_step(self.good_step);
         self.stage = Stage::Hunting;
         self.products.fill((0.0, 0.0));
         self.sum = (0.0, 0.0);
         self.folded.fill((0.0, 0.0));
         self.hunted = 0;
         self.id = None;
+    }
+
+    /// The stretch of this end's own signal that lies under the echo stage
+    /// for the sample numbered `index`: oldest first, ending with the sample
+    /// that arrived with it.
+    fn echo_under_at(&self, index: i64) -> &[f64] {
+        let kept = self.echo_ref.len() / 2;
+        let end = index.rem_euclid(kept as i64) as usize + kept + 1;
+        &self.echo_ref[end - self.echo_taps.len()..end]
+    }
+
+    /// A sample off the line and, with it, the sample of this end's own
+    /// signal the canceller in front says its echo is of.
+    fn sample_with(&mut self, x: f64, own: f64) {
+        if self.echo_ref.is_empty() {
+            self.echo_ref = vec![0.0; 2 * (6 * self.plan.span() + self.echo_taps.len())];
+        }
+        let kept = self.echo_ref.len() / 2;
+        let at = self.count.rem_euclid(kept as i64) as usize;
+        self.echo_ref[at] = own;
+        self.echo_ref[at + kept] = own;
+        let x = if self.echo_learned > 0 {
+            let under = self.echo_under_at(self.count);
+            // Taps are newest first: the last sample under is the first tap's.
+            x - self.echo_taps.iter().zip(under.iter().rev()).map(|(t, r)| t * r).sum::<f64>()
+        } else {
+            x
+        };
+        self.sample(x);
+    }
+
+    /// The second stage of echo cancelling: learn what is left of this end's
+    /// echo from a symbol the far end's part has been taken out of.
+    ///
+    /// The canceller in front of the receiver learns while the far end
+    /// talks, and to it the far end is noise as loud as the signal: the
+    /// echo it leaves falls only as one over the time it has had. But once a
+    /// symbol has been read, this receiver knows what the far end sent in
+    /// it, carrier by carrier, and what the line did to each. That is the
+    /// far end's whole part of the window, and it can be built again and
+    /// taken away. What is left is the echo the canceller missed and the
+    /// line's own noise, and a filter fitted to *that* is working against
+    /// the noise alone.
+    ///
+    /// It is fitted here, after the resampler, where the far end's symbols
+    /// are; so this end's own signal is put through a resampler steered
+    /// exactly as the line's is, and the two stay sample for sample.
+    fn learn_echo(&mut self) {
+        let n = self.plan.n;
+        // The far end's part of the window: the inverse transform of what
+        // each carrier was decided to hold. The conjugate goes in and the
+        // forward transform comes out as the inverse would have.
+        for k in 1..n / 2 {
+            let (re, im) = (self.far_re[k], self.far_im[k]);
+            self.far_im[k] = -im;
+            self.far_re[n - k] = re;
+            self.far_im[n - k] = im;
+        }
+        self.far_re[0] = 0.0;
+        self.far_im[0] = 0.0;
+        self.far_re[n / 2] = 0.0;
+        self.far_im[n / 2] = 0.0;
+        self.fft.process(&mut self.far_re, &mut self.far_im);
+        let taps = self.echo_taps.len();
+        let every = (n / ECHO_LEARNT).max(1);
+        let (mut before, mut after) = (0.0, 0.0);
+        for m in (0..n).step_by(every) {
+            let index = self.last_start + m as i64;
+            let far = self.far_re[m] / n as f64;
+            let left = self.at(index) - far;
+            let kept = self.echo_ref.len() / 2;
+            let end = index.rem_euclid(kept as i64) as usize + kept + 1;
+            let under = &self.echo_ref[end - taps..end];
+            let energy: f64 = under.iter().map(|r| r * r).sum();
+            if energy < 1e-9 {
+                continue;
+            }
+            // What this stage had already taken off this sample, so that
+            // what it does can be said.
+            let had: f64 = self.echo_taps.iter().zip(under.iter().rev()).map(|(t, r)| t * r).sum();
+            before += (left + had) * (left + had);
+            after += left * left;
+            // Large steps at first, since there is only noise to be misled
+            // by; then small ones, which a wrong decision cannot move far.
+            let step = (taps as f64 / (self.echo_learned as f64 + taps as f64)).clamp(0.002, 0.2);
+            let push = step * left / energy;
+            for (t, r) in self.echo_taps.iter_mut().zip(under.iter().rev()) {
+                *t += push * r;
+            }
+            self.echo_learned += 1;
+        }
+        self.echo_power.0 += (before - self.echo_power.0) / 32.0;
+        self.echo_power.1 += (after - self.echo_power.1) / 32.0;
     }
 
     fn sample(&mut self, x: f64) {
@@ -750,10 +915,20 @@ impl Rx {
 
     fn symbol_at(&mut self, start: i64) {
         let span = self.plan.span() as i64;
+        self.last_start = start;
         self.transform(start);
         if self.stage == Stage::Framing {
             let (id, quality) = self.sync_match();
-            if quality < 0.5 {
+            // A sync symbol has every carrier in it. Something with an
+            // eighth of its power on one carrier is a tone, which repeats as
+            // a symbol's guard does and can look like a sync symbol from
+            // carrier to carrier: the far end's last word in the handshake
+            // did, and a receiver that started listening before it finished
+            // framed on it.
+            let half = self.plan.half();
+            let power = |k: usize| self.re[k] * self.re[k] + self.im[k] * self.im[k];
+            let (total, most) = (1..half).map(power).fold((0.0, 0.0f64), |(sum, most), p| (sum + p, most.max(p)));
+            if quality < 0.5 || 8.0 * most > total {
                 self.next_start += span;
                 self.searched += 1;
                 if self.searched > 3 * (self.plan.symbols + 1) {
@@ -862,6 +1037,7 @@ impl Rx {
             self.h[k] = self.h[k] * Complex::from_polar(1.0, turn * k as f64);
         }
         self.interp.nudge(crept);
+        self.echo_interp.nudge(crept);
     }
 
     fn demodulate(&mut self, row: usize) {
@@ -999,6 +1175,16 @@ impl Rx {
         let measuring = self.stage == Stage::Training && self.trained >= SETTLE;
         let turn = Complex::from_polar(1.0, TAU * late / n);
 
+        if self.echo_on {
+            self.far_re.fill(0.0);
+            self.far_im.fill(0.0);
+        }
+        // Carriers worth judging the symbol by, and how many of them came
+        // out near a point.
+        let (mut seen, mut sound) = (0usize, 0usize);
+        // Loaded carriers, and the sum of how far each missed by against
+        // its own noise.
+        let (mut wide, mut miss) = (0usize, 0.0f64);
         let mut back = Complex::ONE;
         for k in 1..half {
             back = back * turn;
@@ -1026,8 +1212,23 @@ impl Rx {
             } else {
                 self.known[row][k]
             };
+            if self.echo_on {
+                // What this carrier held as it arrived, by the decision.
+                let held = reference * self.h[k] * back.conj();
+                self.far_re[k] = held.re;
+                self.far_im[k] = held.im;
+            }
             let error = z - reference;
             let e2 = error.norm_sqr();
+            if k <= top && self.weight[k] > 1e-3 {
+                seen += 1;
+                sound += usize::from(e2 < 0.25 * reference.norm_sqr());
+                if bits > 0 {
+                    // Against the noise as it stood before this symbol.
+                    wide += 1;
+                    miss += (e2 / self.noise[k].max(1e-30)).min(50.0);
+                }
+            }
             if spreading && k <= top {
                 self.heard[k] += (e2.max(1e-12) - self.heard[k]) / 16.0;
             }
@@ -1045,10 +1246,52 @@ impl Rx {
             self.mean_snr_db = (1..=top).map(|k| self.snr_db(k)).sum::<f64>() / top as f64;
         }
 
+        // A line is measured once, a few seconds in, and most lines are then
+        // what they will always be. One behind an echo canceller is not: the
+        // echo goes on falling for minutes, and the noise with it. So a line
+        // that has looked good for a twelfth more bits than it was asked
+        // for, eleven seconds running, is asked for them.
+        if is_sync && self.stage == Stage::Steady && self.proposed > 0 {
+            let now = self.load();
+            if now.total() * 12 >= self.proposed * 13 {
+                self.better += 1;
+                if self.better >= 16 {
+                    self.better = 0;
+                    self.proposed = now.total();
+                    self.proposal = Some(now);
+                }
+            } else {
+                self.better = 0;
+            }
+        }
+
         // A second-order loop about a hertz wide: most of each error is
         // taken out at once, and a fiftieth of it changes the rate.
         self.interp.nudge(0.2 * late);
         self.interp.adjust_step(0.02 * late / self.plan.span() as f64);
+        self.echo_interp.nudge(0.2 * late);
+        self.echo_interp.adjust_step(0.02 * late / self.plan.span() as f64);
+        // The echo stage learns from a symbol only if the symbol was read:
+        // what it takes away as the far end's part is the decisions, and if
+        // those are wrong what is left is not the echo but the far end, and
+        // a filter fitted to that is worse than none. Worse, it feeds
+        // itself: the filter goes wrong, the next symbol is read worse, and
+        // the filter learns from that.
+        //
+        // How to tell depends on the grid. On the starting table's four
+        // points a carrier within a few decibels of one was read. On a grid
+        // of thousands every sample is near *some* point, so that says
+        // nothing; there the test is against the noise each carrier is
+        // known to have. A symbol that was read misses by about that much on
+        // average, and one that was not misses by twice it or more.
+        let read = if self.stage == Stage::Steady && !spreading {
+            wide > 0 && miss < 2.0 * wide as f64
+        } else {
+            4 * sound >= 3 * seen.max(1)
+        };
+        if self.echo_on && !unknown && read {
+            self.learn_echo();
+        }
 
         if self.stage == Stage::Training && unknown {
             // Sent with a table this end has never seen, so most carriers
@@ -1068,24 +1311,49 @@ impl Rx {
                     *w /= peak;
                 }
                 self.stage = Stage::Steady;
-                self.proposal = Some(self.load());
+                self.propose();
             }
         }
     }
 
+    fn propose(&mut self) {
+        let table = self.load();
+        self.proposed = table.total();
+        self.better = 0;
+        self.proposal = Some(table);
+    }
+
     /// The table this line will bear, by what has been measured.
+    ///
+    /// Worked out for each code there is, the stronger ones with less in
+    /// hand, and the one that carries most is the one asked for: see
+    /// [`crate::link::CODES`].
     pub fn load(&self) -> Table {
-        let gap = 10f64.powf(self.gap_db / 10.0);
-        let bits = (0..self.plan.half())
-            .map(|k| {
-                if k == 0 || k > self.plan.top() || Plan::is_pilot(k) {
-                    return 0;
-                }
-                let snr = 1.0 / self.noise[k];
-                ((1.0 + snr / gap).log2().floor() as i64).clamp(0, i64::from(MAX_BITS)) as u8
-            })
-            .collect();
-        Table { parity: LOADED_PARITY, bits }
+        // What has been added to the margin because tables failed.
+        let extra = self.gap_db - GAP_DB;
+        let mut best: Option<(f64, Table)> = None;
+        for (rate, gap_db) in crate::link::CODES {
+            let gap = 10f64.powf((gap_db + extra) / 10.0);
+            let bits: Vec<u8> = (0..self.plan.half())
+                .map(|k| {
+                    if k == 0 || k > self.plan.top() || Plan::is_pilot(k) {
+                        return 0;
+                    }
+                    let snr = 1.0 / self.noise[k];
+                    ((1.0 + snr / gap).log2().floor() as i64).clamp(0, i64::from(MAX_BITS)) as u8
+                })
+                .collect();
+            let mut table = Table { parity: LOADED_PARITY, bits };
+            if let Some(rate) = rate {
+                let capacity = self.plan.group(&table) * table.total() / 8;
+                table.parity = crate::link::checks_for(rate, capacity);
+            }
+            let net = self.plan.net(&table);
+            if best.as_ref().is_none_or(|(most, _)| net > *most) {
+                best = Some((net, table));
+            }
+        }
+        best.map(|(_, table)| table).expect("there are codes")
     }
 }
 
@@ -1099,9 +1367,41 @@ impl Receiver for Rx {
                 count += 1;
             }
         });
-        for &y in &out[..count] {
-            self.sample(y);
+        if !self.echo_on {
+            for &y in &out[..count] {
+                self.sample(y);
+            }
+            return;
         }
+        // This end's own signal through a resampler steered as the line's
+        // is, so that the two come out together.
+        let mut own = [0.0; 2];
+        let mut owned = 0;
+        self.echo_interp.feed(self.echo_in, |y| {
+            if owned < 2 {
+                own[owned] = y;
+                owned += 1;
+            }
+        });
+        for (&y, &r) in out[..count].iter().zip(&own) {
+            self.sample_with(y, r);
+        }
+    }
+
+    fn echo_under(&mut self, sample: f64) {
+        self.echo_on = true;
+        self.echo_in = sample;
+    }
+
+    fn echo_again(&mut self) {
+        self.echo_taps.fill(0.0);
+        self.echo_learned = 0;
+        self.echo_power = (0.0, 0.0);
+    }
+
+    fn echo_left_db(&self) -> Option<f64> {
+        let (before, after) = self.echo_power;
+        (self.echo_learned > 0 && before > 0.0 && after > 0.0).then(|| 10.0 * (before / after).log10())
     }
 
     fn take(&mut self) -> Option<Arrived> {
@@ -1123,7 +1423,7 @@ impl Receiver for Rx {
     fn back_off(&mut self, db: f64) {
         self.gap_db += db;
         if self.stage == Stage::Steady {
-            self.proposal = Some(self.load());
+            self.propose();
         }
     }
 

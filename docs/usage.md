@@ -273,6 +273,26 @@ arriving, and a whole SIP URI works for a PBX on the desk --
 The modem hears nothing at all until the far end answers, so the handshake
 starts on a connected call rather than into ringback.
 
+### EasySip: no account at all
+
+For two BinModems that can reach each other by address, on one network or
+across a forwarded port. In the line box choose **EasySip**, type the other
+end's address beside it (`192.168.1.20`, or `192.168.1.20:5062` if it does
+not listen on 5060), and Open. Do the same at the other end with this
+end's address. One dials; the other presses Answer when it rings.
+
+- There is no account, registrar or password. Anything that can reach the
+  port can ring it, so it is for a network you trust.
+- "my port" is where this end listens: 5060 unless changed. Two on one
+  machine need two different ports, each naming the other's.
+- Linear samples are offered first, the fastest rate first, and G.711
+  behind them. With `AT+MS=VARC` the call is V.ARC/L16: 601 kbit/s at
+  48 kHz between two windows on one machine.
+- From the command line: `binmodem.exe --live --sip "easysip:192.168.1.20|5060"`,
+  the far end's address, a bar, and this end's port.
+
+An account in the SIP file gets the same codings with `linear = yes`.
+
 ### UDP or TCP
 
 UDP unless you have a reason. It is what a trunk expects, and the protocol

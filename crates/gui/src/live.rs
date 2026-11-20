@@ -207,8 +207,60 @@ pub fn sip_accounts() -> Vec<String> {
         .collect()
 }
 
+/// What an EasySip line is called, wherever an account's name goes: the far
+/// end's address and this end's port, which are all there is to one.
+pub const EASY_SIP: &str = "easysip:";
+
+/// The name of the EasySip line to `peer`, heard on `port`.
+pub fn easy_sip_name(peer: &str, port: u16) -> String {
+    format!("{EASY_SIP}{}|{port}", peer.trim())
+}
+
+/// The far end's address and this end's port out of such a name.
+pub fn easy_sip_parts(name: &str) -> Option<(String, u16)> {
+    let (peer, port) = name.strip_prefix(EASY_SIP)?.split_once('|')?;
+    Some((peer.to_owned(), port.parse().ok()?))
+}
+
+/// EasySip: a call straight to another of these, with nothing between.
+///
+/// No account, no registrar and no password. The far end is an address, and
+/// a call is an INVITE sent to it; this end listens on a port of its own for
+/// the same from there. Linear samples are offered first, since the far end
+/// is expected to be BinModem and V.ARC wants them, with G.711 behind for
+/// anything else that answers.
+fn easy_sip_account(name: &str) -> Result<sip::Account, String> {
+    let (peer, port) = easy_sip_parts(name).ok_or_else(|| format!("{name:?} is not an EasySip line"))?;
+    if peer.is_empty() {
+        return Err("EasySip: type the far end's address first, as 192.168.1.20 or 192.168.1.20:5060".to_owned());
+    }
+    let host = peer.rsplit_once(':').filter(|(_, p)| p.parse::<u16>().is_ok()).map_or(peer.as_str(), |(h, _)| h);
+    Ok(sip::Account {
+        name: name.to_owned(),
+        registrar: peer.clone(),
+        domain: host.to_owned(),
+        username: "binmodem".to_owned(),
+        register: false,
+        linear: true,
+        local_port: port,
+        ..sip::Account::default()
+    })
+}
+
 /// Open a line on one of them.
 fn open_sip(name: &str, tx: &Publisher) -> Result<sip::Line, String> {
+    if name.starts_with(EASY_SIP) {
+        let account = easy_sip_account(name)?;
+        tx.log(
+            Direction::Note,
+            format!(
+                "EasySip: calls go to {}, and are heard on port {}; no account and no registrar",
+                account.next_hop(),
+                account.local_port
+            ),
+        );
+        return sip::Line::open(account, FS);
+    }
     let accounts = sip::Account::load_default()?;
     if accounts.is_empty() {
         let where_it_goes = sip::Account::default_path()
@@ -1102,6 +1154,8 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // The last sample sent, for the scope, when sending is paced apart from
     // hearing and there is not one sent for each heard.
     let mut wide_last = 0.0f32;
+    // Why a call could not be run on this line at all, until it is shown.
+    let mut refused: Option<String> = None;
     // The spectrum of a V.ARC call, taken at the card's rate so that the
     // waterfall can show the whole of the band the call is using.
     let mut wide_spectrum: Option<(u32, Spectrum)> = None;
@@ -1640,9 +1694,19 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                             ),
                         );
                         audio = Some(Wire::Wide { line: Box::new(wide), input, output });
+                        // A new call: whatever the last one was refused for
+                        // has been read by now.
+                        let mut state = session.state();
+                        if state.error.take().is_some() {
+                            session.set_state(state);
+                        }
                     }
                     Err(e) => {
-                        tx.log(Direction::Note, format!("{}: could not open the sound card for it: {e}", mode.name()));
+                        let why = format!("{}: could not open the sound card for it: {e}", mode.name());
+                        tx.log(Direction::Note, why.clone());
+                        // Where it is seen: the transcript is a tab nobody
+                        // has open when a call will not start.
+                        refused = Some(why);
                         modem.carrier_lost();
                         audio = line::Duplex::open(Some(&input), Some(&output), FS).ok().map(|l| Wire::Audio(Box::new(l)));
                     }
@@ -1657,6 +1721,15 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 }
             }
             _ => {}
+        }
+        // A call the modem would not run on this line. The terminal has
+        // been told NO CARRIER and the transcript why; neither is where a
+        // person looks when a call will not start, so it goes on the line's
+        // own row as well, where a line that would not open is reported.
+        if let Some(why) = modem.take_call_refused().or_else(|| refused.take()) {
+            let mut state = session.state();
+            state.error = Some(why);
+            session.set_state(state);
         }
 
         let Some(audio) = audio.as_ref() else {
@@ -1917,7 +1990,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 let mut exact = Vec::with_capacity(from_network.len());
                 for &level in &from_network {
                     let mut out = [0.0f64];
-                    modem.varc_step(sip::media::LINEAR_RATE, &[f64::from(level)], &mut out);
+                    modem.varc_step(sip.linear_rate(), &[f64::from(level)], &mut out);
                     exact.push(out[0] as f32);
                 }
                 for text in modem.take_line_notes() {
@@ -1973,6 +2046,22 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         }
         // A V.ARC call's symbols do not come a sample at a time: they are
         // taken as they have gathered, a grid at a time.
+        // And its handshake is tones, which the scope draws as it does any
+        // FSK: which tone, along a line.
+        let tones = modem.varc_symbols();
+        if !tones.is_empty() {
+            if modem.shape() != drawing {
+                drawing = modem.shape();
+                symbols.clear();
+                points.clear();
+            }
+            for tone in tones {
+                if symbols.len() == SYMBOL_HISTORY {
+                    symbols.pop_front();
+                }
+                symbols.push_back(tone as f32);
+            }
+        }
         let gathered = modem.varc_points();
         if !gathered.is_empty() {
             if modem.shape() != drawing {
@@ -2266,14 +2355,46 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 }
                 f.echo_at = modem.reflection().map(|r| (r.delay, r.strength));
                 f.code = modem.varc_code().map(|(n, k)| (n as u16, k as u16));
+                // The band a carrier at a time, thinned to what a small
+                // scope can draw: each entry the mean of its neighbours.
+                let carriers = modem.varc_carriers();
+                let every = carriers.len().div_ceil(220).max(1);
+                f.carriers.clear();
+                f.carriers.extend(carriers.chunks(every).map(|group| {
+                    let n = group.len() as f64;
+                    (
+                        (group.iter().map(|c| c.0).sum::<f64>() / n) as f32,
+                        (group.iter().map(|c| c.1).sum::<f64>() / n) as f32,
+                        (group.iter().map(|c| f64::from(c.2)).sum::<f64>() / n) as f32,
+                    )
+                }));
+                f.echo.clear();
+                f.echo.extend(modem.varc_echo_response().iter().map(|t| *t as f32));
+                // Below nought for a canceller that has found nothing yet.
+                f.echo_delay_ms = match modem.varc_echo().first() {
+                    None => 0.0,
+                    Some((_, None)) => -1.0,
+                    Some((_, Some(delay))) => wide_rate.map_or(0.0, |rate| 1000.0 * *delay as f64 / rate) as f32,
+                };
+                f.far_end = modem.varc_far_end().map(|(report, trim)| telemetry::FarEnd {
+                    level_db: report.level_db as f32,
+                    peak_db: report.peak_db as f32,
+                    clipped: report.clipped,
+                    snr_db: report.snr_db as f32,
+                    trim_db: trim as f32,
+                });
                 f.tones = modem.states();
                 f.constellation_peak = modem.constellation_peak();
                 f.symbol_label = modem.shape();
-                f.snr_db = modem.residual_error().map(|e| {
-                    // The decision margin as decibels, so a tighter
-                    // constellation reads as a larger number.
-                    (-20.0 * e.max(1e-3).log10()) as f32
-                });
+                f.snr_db = modem
+                    .residual_error()
+                    .map(|e| {
+                        // The decision margin as decibels, so a tighter
+                        // constellation reads as a larger number.
+                        (-20.0 * e.max(1e-3).log10()) as f32
+                    })
+                    // A V.ARC receiver measures the ratio itself.
+                    .or_else(|| modem.varc_snr_db().map(|db| db as f32));
                 f.symbols.clear();
                 f.symbols.extend(symbols.iter().copied());
                 f.constellation.clear();
