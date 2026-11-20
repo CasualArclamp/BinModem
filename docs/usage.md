@@ -295,10 +295,22 @@ end's address. One dials; the other presses Answer when it rings.
   for. The caller's choice is tried first; an answerer that chose a
   different linear rate gets G.711. Once a call is up, the top line of the
   window says what it is in, as `L16/48000` or `PCMA`.
+- **UPnP** asks the router to let the call in, for a far end across the
+  internet. With it ticked, opening the line finds the router, asks what
+  its outside address is, and has it forward this end's SIP port and its
+  RTP port (both UDP) to this machine; the transcript then says where the
+  far end reaches this one, as `203.0.113.7:5060`. Each end gives the other
+  that address. The ports are closed again when the line is; a program
+  that is killed leaves them for a day at most. It is not used when the far
+  end is on this network or this machine. A router with UPnP off, or one
+  behind another router (the provider's, on many mobile and some fibre
+  lines), cannot do it, and the transcript says which. Tested as far as
+  the router: the ports open, are listed, and close. A call across the
+  internet has not been made with it.
 - From the command line: `binmodem.exe --live --sip "easysip:192.168.1.20|5060"`,
   the far end's address, a bar, and this end's port. A third field chooses
   the coding: `"easysip:192.168.1.20|5060|PCMU"`, or `L16/16000`, or
-  `L16/44100/2`. `--setup` leaves the Setup row showing with the line open.
+  `L16/44100/2`, and `|upnp` after it turns UPnP on. `--setup` leaves the Setup row showing with the line open.
 
 An account in the SIP file gets the same codings with `linear = yes`.
 

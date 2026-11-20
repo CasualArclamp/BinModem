@@ -101,6 +101,10 @@ pub struct Line {
     sending: AtomicBool,
     error: Mutex<Option<(String, Instant)>>,
     account: String,
+    /// The ports open on the router for this line, which close when it
+    /// does, and what came of asking for them.
+    upnp: Option<crate::upnp::Mapping>,
+    upnp_said: Option<String>,
 }
 
 impl Line {
@@ -111,8 +115,31 @@ impl Line {
     /// side of this is 8000, and the conversion between them is the only
     /// processing in the path.
     pub fn open(account: Account, modem_rate: f64) -> Result<Self, String> {
+        let mut account = account;
         let media = Media::open(account.rtp_port, modem_rate)?;
         let name = account.name.clone();
+        // The router is asked before the agent starts, since what it says
+        // its outside address is goes into everything the agent sends. A
+        // router that will not, or is not there, leaves a line that still
+        // works wherever no router is in the way.
+        let (mut upnp, mut upnp_said) = (None, None);
+        if account.upnp {
+            match crate::upnp::Mapping::open(&[account.local_port, media.local_port()]) {
+                Ok(mapping) => {
+                    upnp_said = Some(format!(
+                        "UPnP: the router forwards UDP {} and {} to {}; the far end reaches this one at {}:{}",
+                        account.local_port,
+                        media.local_port(),
+                        mapping.local,
+                        mapping.external,
+                        account.local_port
+                    ));
+                    account.advertise = Some(mapping.external);
+                    upnp = Some(mapping);
+                }
+                Err(why) => upnp_said = Some(format!("{why}. Calls on this network still work")),
+            }
+        }
         let agent = Agent::start(account, media.local_port())?;
         Ok(Self {
             agent,
@@ -121,7 +148,20 @@ impl Line {
             sending: AtomicBool::new(true),
             error: Mutex::new(None),
             account: name,
+            upnp,
+            upnp_said,
         })
+    }
+
+    /// What came of asking the router to forward this line's ports, if it
+    /// was asked: where the far end reaches this one, or why not.
+    pub fn upnp_said(&self) -> Option<&str> {
+        self.upnp_said.as_deref()
+    }
+
+    /// The router's outside address, when it is forwarding to this line.
+    pub fn upnp_address(&self) -> Option<std::net::IpAddr> {
+        self.upnp.as_ref().map(|m| m.external)
     }
 
     /// What was dialled: a number, a number with spaces in it, or a SIP URI.
