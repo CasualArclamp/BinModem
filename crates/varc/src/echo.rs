@@ -161,6 +161,20 @@ impl Canceller {
         self.held = held;
     }
 
+    /// What was learned is right: from here on take only the smallest steps.
+    ///
+    /// For a canceller that has just had the line to itself. With nobody
+    /// else talking it learns its echo against the line's noise alone and
+    /// has it almost exactly within a second. The moment the far end starts,
+    /// the steps it was taking would be steps after the far end's signal,
+    /// large enough to undo that in another second. So it is told that it
+    /// has seen as many samples as it takes for the steps to be at their
+    /// smallest, which is the same thing.
+    pub fn settle(&mut self) {
+        let enough = (self.taps.len() as f64 / SMALLEST_STEP) as u64;
+        self.learned = self.learned.max(enough);
+    }
+
     /// Whether it has been told to hold still.
     pub fn held(&self) -> bool {
         self.held
@@ -219,7 +233,12 @@ impl Canceller {
 
     /// A sample this end has just sent.
     pub fn sent(&mut self, sample: f64) {
-        if self.probe_len < self.probe_sent.len() {
+        if self.probe_len == 0 && sample == 0.0 {
+            // Nothing is being sent, so there is no echo to look for yet.
+            // The stretch starts with the first thing sent: an end that has
+            // been keeping silent for its turn then has a whole stretch of
+            // its own signal to look in, and not the tail of one.
+        } else if self.probe_len < self.probe_sent.len() {
             self.probe_sent[self.probe_len] = sample;
             self.probe_len += 1;
             if self.probe_len == self.probe_sent.len() {

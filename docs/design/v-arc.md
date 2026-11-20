@@ -134,6 +134,13 @@ nothing for a minute and said `NO CARRIER`.
 - When an end has the far end's message and has seen in it that the far end
   has its own, it sends once more and stops. About four seconds.
 
+What it looks like on the line, recorded off a virtual cable both ends were
+on: the answerer's pair at 2000 and 2400 Hz, the caller's at 1000 and
+1400 Hz starting a second later, six messages each, a moment of quiet, and
+then the first end's turn alone on the line.
+
+![The handshake's tones, then quiet, then the caller's turn](../images/v-arc/handshake-tones.png)
+
 Both ends then work out the same answer from the same two messages
 (`hello::agree`):
 
@@ -296,8 +303,9 @@ what was sent against what was heard sample for sample.
 of wires. The canceller in front knows nothing of the modulation and serves
 them as it is; the second stage below is the multicarrier receiver's and
 they do not have it, so they settle where the first stage leaves them. On
-the shared virtual cable, after 50 s: QAM 85 to 100 kbit/s, PCM 12 to
-27 kbit/s, nothing wrong.
+the shared virtual cable, learning while the far end talked: QAM 85 to
+100 kbit/s, PCM 12 to 27 kbit/s. With turns: QAM 278 kbit/s, PCM 112 to
+166 kbit/s, nothing wrong.
 
 | Where | What happened |
 |---|---|
@@ -306,9 +314,39 @@ the shared virtual cable, after 50 s: QAM 85 to 100 kbit/s, PCM 12 to
 | The Realtek lead at 192 kHz, this end's own signal only | echo found 81.4 ms round, 40 dB down in 1.3 s; did not reach 50 dB in 14 s; no sound underruns |
 | The same pair with no canceller (`VARC`), simulation | never connects |
 
-**The second stage.** That slow climb is the price of learning while the far
-end talks, and by itself it stops at about 40 dB after a minute. What gets
-past it is in the multicarrier receiver (`Rx::learn_echo`):
+**Turns.** After the handshake, and before either modulation is heard by
+anyone, each end has the line to itself (`Turn` in the modem's `varc.rs`):
+
+1. Both fall silent until the handshake's tones have gone.
+2. The caller sends alone for 2 s. Its canceller finds its echo and fits
+   it against the line's noise and nothing else.
+3. The caller stops; when its echo has died away the answerer hears the line
+   go quiet and takes its 2 s.
+4. The caller hears the answerer begin, counts 2 s, and joins it.
+
+Each step is taken on what is heard, since neither end can see the other's
+clock, and each wait has a limit past which the end goes on regardless. A
+canceller that has had its turn takes only its smallest steps afterwards,
+or the far end's signal would undo in a second what the turn did.
+
+Three things went wrong on the way and are worth knowing:
+
+- The caller took the tail of its own echo for the answerer starting, and
+  came back 130 ms early, over the end of the answerer's turn. It now waits
+  for quiet before it listens for the answerer.
+- What each end tells the other about levels was measured after cancelling,
+  so each saw only the other, well inside full scale, while the two together
+  were clipping the line. It is measured on the line as the converter
+  delivers it.
+- Two signals at the level one is made for do not fit in one converter. A
+  two-wire call starts each end 6 dB down.
+
+**The second stage.** Without turns, the slow climb is the price of learning
+while the far
+end talks, and by itself it stops at about 40 dB after a minute. With them
+the canceller starts some 50 dB down, and what takes it on from there, for
+as long as the call lasts, is in the multicarrier receiver
+(`Rx::learn_echo`):
 
 - Once a symbol has been read, the receiver knows what the far end sent on
   every carrier and what the line did to each. That is the far end's whole
@@ -338,6 +376,7 @@ past it is in the multicarrier receiver (`Rx::learn_echo`):
 |---|---|---|
 | Simulation, echo 6 dB louder than the far end | Es/N0 41.6 dB at 165 s, 164 kbit/s | 75 dB at 50 s, 392 kbit/s, which is what a wire each way gives |
 | Two ends on one machine, both on VB-Cable A, 48 kHz, two channels | about 38 dB at 35 s, 300 kbit/s each way | 70 to 80 dB at 60 s; 607 to 781 kbit/s; two runs of 115 s, 6 to 7 million octets each way in each, none wrong |
+| The same with turns | | connects at 15 s at 651 kbit/s where it had connected at 67; 731 kbit/s at 40 s; 59 dB at 40 s and 70 to 74 dB at 60 s, still rising; none wrong |
 
 Not tried: a real two-wire line (a hybrid, a telephone pair), two machines,
 or two sound cards whose clocks differ, where the echo of one card is still

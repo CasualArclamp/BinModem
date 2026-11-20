@@ -2028,9 +2028,7 @@ impl Modem {
         if !look {
             return;
         }
-        if let Some(note) = call.take_note() {
-            self.line_notes.push(note);
-        }
+        self.line_notes.extend(call.take_notes());
         let phase = call.phase();
         if phase != self.varc_said {
             self.varc_said = phase;

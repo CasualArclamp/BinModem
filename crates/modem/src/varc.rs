@@ -71,6 +71,37 @@ impl VarcMode {
 
 type End = Station<Box<dyn Sender>, Box<dyn Receiver>>;
 
+/// How long each end of a two-wire call has the line to itself, to learn
+/// its own echo with nobody talking over it, in seconds. The canceller needs
+/// most of a second to find how far round the line its echo is and a
+/// fraction of one to fit it.
+const ALONE: f64 = 2.0;
+
+/// Where a two-wire call has got to in learning its echoes. After the
+/// handshake the caller sends alone, then the answerer, then both.
+///
+/// Neither end has a clock the other can see, so each step is taken on what
+/// is heard: the line going quiet, the far end's signal starting, the far
+/// end's signal stopping. Every wait has a limit, past which the end simply
+/// goes on, and a call whose turns went wrong is a call that learns its
+/// echoes with the far end talking, as it did before there were turns.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Turn {
+    /// Silent, waiting for the handshake's tones to have stopped.
+    Quiet { waited: f64, still: f64 },
+    /// Sending alone, for this many more samples.
+    Mine { left: f64 },
+    /// Silent while the far end sends alone. `armed` is whether the line has
+    /// been heard quiet since this end stopped: until it has, what is on
+    /// the line is the tail of this end's own echo, which is not the far
+    /// end starting. `heard` is how loud the far end was when it started,
+    /// once it has; `gone` how long the line has been quiet; `left` what
+    /// remains of the far end's turn as this end counts it.
+    Theirs { armed: bool, waited: f64, heard: Option<f64>, gone: f64, left: f64 },
+    /// Both ends sending: the call itself.
+    Both,
+}
+
 /// How often a call's line is looked over: every five milliseconds.
 const LOOKS_A_SECOND: f64 = 200.0;
 
@@ -107,6 +138,15 @@ pub(crate) struct Call {
     /// The end that called, and a lead that comes straight back.
     calling: bool,
     looped: bool,
+    /// Whose turn it is on a two-wire call, how loud the line is now and
+    /// was during the handshake, and whether this end is keeping silent.
+    turn: Turn,
+    loud: f64,
+    spoke: f64,
+    muted: bool,
+    /// How loud the line is with nobody on it, as heard between the
+    /// handshake and the first turn.
+    floor: f64,
     /// The handshake, while it is going on, and what came of it: what the
     /// far end said it was, and what the two will do.
     hello: Option<Hello>,
@@ -124,7 +164,7 @@ pub(crate) struct Call {
     /// And was found not to after all, so that it is not tried again.
     inexact: bool,
     /// Something worth telling whoever is watching, once.
-    note: Option<String>,
+    notes: Vec<String>,
 }
 
 impl std::fmt::Debug for Call {
@@ -158,6 +198,11 @@ impl Call {
             echo_moved: 0,
             calling: role == Role::Calling,
             looped,
+            turn: Turn::Both,
+            loud: 0.0,
+            spoke: 0.0,
+            muted: false,
+            floor: 0.0,
             hello: None,
             agreed: None,
             far: None,
@@ -167,7 +212,7 @@ impl Call {
             until_look: 0,
             exact_line: false,
             inexact: false,
-            note: None,
+            notes: Vec::new(),
         }
     }
 
@@ -181,8 +226,106 @@ impl Call {
     }
 
     /// What there is to tell about the call since this was last asked.
-    pub fn take_note(&mut self) -> Option<String> {
-        self.note.take()
+    pub fn take_notes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.notes)
+    }
+
+    /// One sample of a two-wire call's turns: see [`Turn`].
+    fn take_turns(&mut self, fs: f64, input: &[f64]) {
+        let power: f64 = input.iter().map(|x| x * x).sum();
+        // Two milliseconds' worth: quick enough to time a turn by.
+        self.loud += (power - self.loud) / (0.002 * fs);
+        // Quiet, for knowing the handshake is over, is a hundredth of what
+        // the handshake sounded like. After that the line has been heard
+        // with nobody on it, and a signal is ten times that: the far end
+        // taking its turn may be far fainter than this end's own tones
+        // were, which is most of what the handshake sounded like here.
+        let quiet = (0.01 * self.spoke).max(1e-9);
+        let signal = (10.0 * self.floor).max(1e-8);
+        let settle = |echo: &mut Vec<Canceller>| -> Option<f64> {
+            // Only what was learned well is kept from being unlearned.
+            let down = echo.iter().map(Canceller::down_db).fold(f64::INFINITY, f64::min);
+            let found = echo.iter().all(|c| c.delay().is_some());
+            (found && down >= 20.0).then(|| {
+                echo.iter_mut().for_each(Canceller::settle);
+                down
+            })
+        };
+        self.turn = match self.turn {
+            Turn::Quiet { waited, still } => {
+                let still = if self.loud < quiet { still + 1.0 } else { 0.0 };
+                if still > 0.15 * fs || waited > 1.5 * fs {
+                    self.floor = self.loud;
+                    if self.calling {
+                        self.muted = false;
+                        Turn::Mine { left: ALONE * fs }
+                    } else {
+                        Turn::Theirs { armed: true, waited: 0.0, heard: None, gone: 0.0, left: 0.0 }
+                    }
+                } else {
+                    Turn::Quiet { waited: waited + 1.0, still }
+                }
+            }
+            Turn::Mine { left } if left > 0.0 => Turn::Mine { left: left - 1.0 },
+            Turn::Mine { .. } => {
+                if let Some(down) = settle(&mut self.echo) {
+                    self.notes.push(format!("V.ARC: this end's echo learned with the line to itself: {down:.0} dB down"));
+                }
+                if self.calling {
+                    // The answerer's turn now, once this end's own echo
+                    // has died away.
+                    self.muted = true;
+                    Turn::Theirs { armed: false, waited: 0.0, heard: None, gone: 0.0, left: 0.0 }
+                } else {
+                    // The answerer goes straight on; the caller joins it.
+                    Turn::Both
+                }
+            }
+            Turn::Theirs { armed: false, waited, gone, .. } => {
+                // Ten milliseconds of quiet, or half a second in any case:
+                // no echo this canceller can deal with is longer.
+                let gone = if self.loud < signal { gone + 1.0 } else { 0.0 };
+                let armed = gone > 0.01 * fs || waited > 0.5 * fs;
+                Turn::Theirs { armed, waited: if armed { 0.0 } else { waited + 1.0 }, heard: None, gone: if armed { 0.0 } else { gone }, left: 0.0 }
+            }
+            Turn::Theirs { armed: true, waited, heard: None, .. } => {
+                if self.loud > signal {
+                    Turn::Theirs { armed: true, waited: 0.0, heard: Some(self.loud), gone: 0.0, left: ALONE * fs }
+                } else if waited > 4.0 * fs {
+                    // Nobody took a turn. On with it.
+                    self.muted = false;
+                    Turn::Both
+                } else {
+                    Turn::Theirs { armed: true, waited: waited + 1.0, heard: None, gone: 0.0, left: 0.0 }
+                }
+            }
+            Turn::Theirs { armed: true, waited, heard: Some(level), gone, left } => {
+                if self.calling {
+                    // The caller cannot hear the answerer stop, since it
+                    // does not: it counts the answerer's turn from when it
+                    // began and joins in as it ends.
+                    if left <= 0.0 {
+                        self.muted = false;
+                        Turn::Both
+                    } else {
+                        Turn::Theirs { armed: true, waited, heard: Some(level), gone, left: left - 1.0 }
+                    }
+                } else {
+                    // The answerer waits for the caller to fall silent:
+                    // a hundredth of the loudest it has been, or back to
+                    // what the empty line sounded like.
+                    let level = level.max(self.loud);
+                    let gone = if self.loud < (0.01 * level).max(signal) { gone + 1.0 } else { 0.0 };
+                    if gone > 0.1 * fs || waited > (ALONE + 2.0) * fs {
+                        self.muted = false;
+                        Turn::Mine { left: ALONE * fs }
+                    } else {
+                        Turn::Theirs { armed: true, waited: waited + 1.0, heard: Some(level), gone, left }
+                    }
+                }
+            }
+            Turn::Both => Turn::Both,
+        };
     }
 
     /// Whether this call starts by saying what each end is. Not on a lead
@@ -261,7 +404,13 @@ impl Call {
         match (self.hello.as_mut(), self.station.as_mut()) {
             // Saying what this end is: the same on every channel.
             (Some(hello), _) => output.fill(hello.say()),
-            (None, Some(station)) => station.speak(output),
+            (None, Some(station)) => {
+                station.speak(output);
+                // Not this end's turn: the modulation runs on, unheard.
+                if self.muted {
+                    output.fill(0.0);
+                }
+            }
             (None, None) => output.fill(0.0),
         }
         for (canceller, &sample) in self.echo.iter_mut().zip(output.iter()) {
@@ -317,6 +466,10 @@ impl Call {
                 )
             });
             hello.hear(input);
+            // How loud the line is while the two ends are talking, to know
+            // quiet by afterwards.
+            let power: f64 = input.iter().map(|x| x * x).sum();
+            self.spoke += (power - self.spoke) / (0.05 * fs);
             self.samples += 1;
             if !hello.done() {
                 return Ok(self.samples.is_multiple_of((fs / LOOKS_A_SECOND).max(1.0) as u64));
@@ -342,7 +495,7 @@ impl Call {
                 agreed.hear_hz
             ));
             said.extend(agreed.notes.iter().map(|note| format!("V.ARC: {note}")));
-            self.note = Some(said.join("\n"));
+            self.notes.push(said.join("\n"));
             self.agreed = Some(agreed);
         }
         if self.station.is_none() {
@@ -358,12 +511,36 @@ impl Call {
                     Self::alone(fs, fs_out, self.wanted(), self.two_wire)
                 }
             };
-            self.station = Some(self.build(fs, &agreed, input.len())?);
+            let mut station = self.build(fs, &agreed, input.len())?;
+            if agreed.two_wire {
+                // Two ends on one pair of wires are two signals in one
+                // converter, and two at the level one is made for do not
+                // fit: their peaks together pass full scale. So each starts
+                // 6 dB down. Found the hard way: each end learned its echo
+                // alone, at full level and cleanly, and the moment the two
+                // spoke together the line clipped.
+                for channel in &mut station.channels {
+                    channel.trim_db = 6.0;
+                    channel.tx.trim(6.0);
+                }
+                self.trim_said = 6.0 * station.channels.len() as f64;
+            }
+            self.station = Some(station);
             self.until_look = 0;
             // The canceller lays what was sent against what was heard,
             // sample for sample, at the card's own rate.
             self.echo = if agreed.two_wire { (0..input.len()).map(|_| Canceller::new(fs)).collect() } else { Vec::new() };
+            // On one pair of wires each end first has the line to itself.
+            // Only where there was a handshake: without one there is no far
+            // end known to be keeping the same turns.
+            let turns = agreed.two_wire && self.far.is_some();
+            self.turn = if turns { Turn::Quiet { waited: 0.0, still: 0.0 } } else { Turn::Both };
+            self.muted = turns;
+            self.loud = self.spoke;
             self.agreed = Some(agreed);
+        }
+        if self.turn != Turn::Both {
+            self.take_turns(fs, input);
         }
         let station = self.station.as_mut().expect("just built");
         if self.echo.is_empty() {
@@ -382,6 +559,7 @@ impl Call {
                     channel.rx.echo_again();
                 }
             }
+            station.line(input);
             station.hear(&self.cleaned);
         }
         self.samples += 1;
@@ -415,7 +593,7 @@ impl Call {
             let down = canceller.down_db();
             if canceller.delay().is_some() && down >= self.echo_said + 10.0 {
                 self.echo_said = (down / 10.0).floor() * 10.0;
-                self.note = Some(format!(
+                self.notes.push(format!(
                     "V.ARC: this end's echo is {:.1} ms round the line and {down:.0} dB down",
                     1000.0 * canceller.delay().unwrap_or(0) as f64 / fs
                 ));
@@ -433,7 +611,7 @@ impl Call {
                 .find_map(|c| c.there)
                 .map(|r| format!("peaks at {:.1} dBFS, {} samples at full scale", r.peak_db, r.clipped))
                 .unwrap_or_default();
-            self.note = Some(if lower {
+            self.notes.push(if lower {
                 format!("V.ARC: the far end hears this end too loud ({why}); now sending at {}", levels.join(", "))
             } else {
                 format!("V.ARC: the far end has room again ({why}); now sending at {}", levels.join(", "))
@@ -451,7 +629,7 @@ impl Call {
             let heard = station.channels.iter().any(|c| c.rx.health().locked);
             if (!heard && waited > EXACT_UNHEARD) || waited > EXACT_UNAGREED {
                 self.inexact = true;
-                self.note = Some(
+                self.notes.push(
                     "V.ARC: the line does not carry samples exactly; carrying on as the multicarrier mode".to_owned(),
                 );
                 self.agreed = None;
@@ -523,6 +701,12 @@ impl Call {
     pub fn phase(&self) -> &'static str {
         if let Some(hello) = self.hello.as_ref() {
             return if hello.theirs().is_some() { "V.ARC: agreeing with the far end" } else { "V.ARC: calling the far end" };
+        }
+        match self.turn {
+            Turn::Quiet { .. } => return "V.ARC: waiting for the line to go quiet",
+            Turn::Mine { .. } => return "V.ARC: learning this end's echo, alone on the line",
+            Turn::Theirs { .. } => return "V.ARC: silent while the far end learns its echo",
+            Turn::Both => {}
         }
         let Some(station) = self.station.as_ref() else { return "V.ARC: waiting for the line" };
         if station.channels.iter().any(|c| c.loaded()) {

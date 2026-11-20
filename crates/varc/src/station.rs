@@ -285,6 +285,9 @@ pub struct Channel<T, R> {
     /// What has arrived in the second being measured: the sum of squares,
     /// the largest, how many at full scale, and how many samples.
     heard: (f64, f64, u32, u32),
+    /// The next sample as the converter delivered it, where what is fed to
+    /// the receiver has had something done to it first.
+    raw: Option<f64>,
     /// What this end heard in the last whole second, and whether the far
     /// end has still to be told.
     pub here: Option<Report>,
@@ -320,6 +323,7 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
             proposed_at: 0,
             tally: Tally::default(),
             heard: (0.0, 0.0, 0, 0),
+            raw: None,
             here: None,
             report_owed: false,
             there: None,
@@ -348,9 +352,15 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
 
     /// One sample in, and everything that follows from it.
     fn hear(&mut self, input: f64, arq: &mut Arq, now: u64, fs: f64) {
-        // What arrives, as it arrives: before anything is made of it.
-        let size = input.abs();
-        self.heard.0 += input * input;
+        // What arrives, as it arrives: before anything is made of it, and
+        // before a canceller in front has taken this end's own echo out. It
+        // is the converter that runs out of room, and what the converter
+        // has to hold is everything on the line. Measured after cancelling,
+        // two ends on one pair of wires each saw only the other, well inside
+        // full scale, while the two together were flat against the stops.
+        let line = self.raw.take().unwrap_or(input);
+        let size = line.abs();
+        self.heard.0 += line * line;
         self.heard.1 = self.heard.1.max(size);
         self.heard.2 += u32::from(size >= FULL_SCALE);
         self.heard.3 += 1;
@@ -480,7 +490,9 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
             // so the more of them there are the further down to go.
             let over = if report.clipped > 100 { 9.0 } else { 3.0 };
             (report.peak_db - PEAK_AIM_DB).max(0.0) + if report.clipped > 0 { over } else { 0.0 }
-        } else if self.trim_db > 0.0 && report.peak_db < PEAK_LOW_DB {
+        } else if self.trim_db > 0.0 && report.peak_db < PEAK_LOW_DB && report.level_db > -60.0 {
+            // (Not when what it hears is nothing at all: an end keeping
+            // silent for the far end's turn would be told there was room.)
             -(PEAK_AIM_DB - 2.0 - report.peak_db).min(self.trim_db)
         } else {
             0.0
@@ -582,6 +594,15 @@ impl<T: Sender, R: Receiver> Station<T, R> {
         self.now += 1;
         for (channel, &x) in self.channels.iter_mut().zip(input) {
             channel.hear(x, &mut self.arq, self.now, self.fs);
+        }
+    }
+
+    /// The next frame as the converter delivered it, for an end that hands
+    /// [`Self::hear`] something else: the line with its own echo taken
+    /// out. What the far end is told about levels is measured on this.
+    pub fn line(&mut self, raw: &[f64]) {
+        for (channel, &x) in self.channels.iter_mut().zip(raw) {
+            channel.raw = Some(x);
         }
     }
 

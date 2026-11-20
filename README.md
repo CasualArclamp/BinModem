@@ -202,8 +202,8 @@ OS-specific code — but only built and run on Windows so far.
   - Each end tells the other what it hears, and a sender that is too loud
     turns itself down.
   - `AT+MS=VARC2W` is the same mode on one pair of wires, with an echo
-    canceller: 72 dB and 630 to 760 kbit/s each way between two windows
-    sharing a virtual cable.
+    canceller. Each end learns its echo with the line to itself first; two
+    ends sharing a virtual cable connect at 650 kbit/s and pass 70 dB.
   - Between two SIP accounts that say `linear = yes` the call carries
     sixteen-bit samples exactly and the samples are the data, at 200 kbit/s.
 

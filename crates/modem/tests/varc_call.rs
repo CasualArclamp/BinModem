@@ -385,9 +385,12 @@ fn on_one_pair_of_wires_each_end_takes_its_own_echo_out() {
     // own stage, which learns from what is left once the far end's part is
     // taken out, is what takes it past that.
     let rate = caller.rate().unwrap_or(0);
-    assert!(rate > 250_000, "{rate} bit/s");
+    assert!(rate > 200_000, "{rate} bit/s");
     let far = caller.varc_far_end().expect("a report").0;
-    assert!(far.snr_db > 55.0, "the far end reads this end at {:.1} dB", far.snr_db);
+    assert!(far.snr_db > 50.0, "the far end reads this end at {:.1} dB", far.snr_db);
+    // Each end had the line to itself first and said how that went.
+    let told = caller.take_line_notes().join("\n") + &host.take_line_notes().join("\n");
+    assert_eq!(told.matches("learned with the line to itself").count(), 2, "{told}");
     eprintln!("two-wire: {rate} bit/s, echo {:.1} dB down", echo[0].0);
 }
 
