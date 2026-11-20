@@ -70,6 +70,10 @@ pub struct Account {
     /// call. Only another of these will ever agree to it, and an account on
     /// a provider's trunk loses nothing by leaving it off.
     pub linear: bool,
+    /// Of the linear codings, the one to offer and to take: samples a second
+    /// and channels. `None` is all of them, the fastest first. Not in the
+    /// accounts file; EasySip sets it from what is chosen in the window.
+    pub linear_only: Option<(u32, u8)>,
     /// The local SIP port. 0 = let the system choose, which is right unless
     /// something upstream is forwarding a fixed one.
     pub local_port: u16,
@@ -151,6 +155,7 @@ impl Default for Account {
             // that keeps them.
             laws: vec![Law::Mu, Law::A],
             linear: false,
+            linear_only: None,
             local_port: 0,
             rtp_port: 0,
             ptime_ms: 20,

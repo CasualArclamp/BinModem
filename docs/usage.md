@@ -288,8 +288,17 @@ end's address. One dials; the other presses Answer when it rings.
 - Linear samples are offered first, the fastest rate first, and G.711
   behind them. With `AT+MS=VARC` the call is V.ARC/L16: 601 kbit/s at
   48 kHz between two windows on one machine.
+- **coding** is what the call is carried in. "best both have" is the fastest
+  linear coding the two ends share. Any one of the eight linear codings can
+  be chosen instead, or G.711 mu-law or A-law, which is what a telephone
+  network carries and what the ordinary modes (V.34, V.90 and the rest) are
+  for. The caller's choice is tried first; an answerer that chose a
+  different linear rate gets G.711. Once a call is up, the top line of the
+  window says what it is in, as `L16/48000` or `PCMA`.
 - From the command line: `binmodem.exe --live --sip "easysip:192.168.1.20|5060"`,
-  the far end's address, a bar, and this end's port.
+  the far end's address, a bar, and this end's port. A third field chooses
+  the coding: `"easysip:192.168.1.20|5060|PCMU"`, or `L16/16000`, or
+  `L16/44100/2`. `--setup` leaves the Setup row showing with the line open.
 
 An account in the SIP file gets the same codings with `linear = yes`.
 

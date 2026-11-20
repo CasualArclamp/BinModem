@@ -168,10 +168,15 @@ fn every_mode_with_symbols_gives_the_symbol_diagram_its_points() {
 }
 
 #[test]
-fn a_call_of_exact_samples_has_no_symbols_to_draw() {
+fn a_call_of_exact_samples_draws_its_samples() {
+    // No carrier, so no symbols in the sense the other modes have them; a
+    // sample is sixteen bits at once, and that is what is drawn.
     let (mut caller, _, _, _) = on_a_linear_call(1.0, 3.0);
-    assert!(caller.varc_points().is_empty());
-    assert_eq!(caller.shape(), "-");
+    let points = caller.varc_points();
+    assert!(!points.is_empty());
+    assert!(points.iter().all(|(x, y)| x.abs() <= 1.0 && y.abs() <= 1.0));
+    assert_eq!(caller.shape(), "L16");
+    assert_eq!(caller.states(), 65_536);
 }
 
 #[test]

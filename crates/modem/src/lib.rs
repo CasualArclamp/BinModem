@@ -1363,7 +1363,9 @@ impl Modem {
                 return "2FSK";
             }
             return match (self.varc_bits, call.mode) {
-                (0, _) | (_, VarcMode::Linear) => "-",
+                (0, _) => "-",
+                // No modulation, but sixteen bits at a time all the same.
+                (_, VarcMode::Linear) => "L16",
                 (_, VarcMode::Pcm) => "PCM",
                 _ => "QAM",
             };

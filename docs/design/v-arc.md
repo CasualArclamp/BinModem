@@ -679,7 +679,14 @@ goes in pieces.
 far end is an address, a call is an INVITE sent to it, and this end
 listens on a port of its own (5060 unless changed) for the same. There is
 no registrar and no password. Two on one machine want two ports, each
-naming the other's.
+naming the other's. Its coding can be chosen: all of the above (the
+default), one of the eight, or G.711 in either law, in which case there is
+no L16 in the offer and none taken from one.
+
+The symbol diagram on V.ARC/L16 is the samples: a sample is sixteen bits
+sent at once, and its two octets are the two axes, the first across. That
+is a grid of 65 536 points with every one in use, and scrambled data fills
+the square evenly.
 
 - Superframe: a sync word of 64 known samples, then a block of 2000 samples
   that are 4000 octets. Eight a second.
@@ -706,7 +713,11 @@ What the call turns out to be decides what runs on it:
 | L16, but nothing is heard in 4 s, or the two ends have not agreed in 10 s | V.ARC/DMT at the call's rate |
 | G.711, because the far end answered with it | an ordinary call from V.8, with `+MS` set to `V92` |
 
-`VARCQ` and `VARCP` have not been tried on a SIP call.
+`VARCQ` and `VARCP` run on a linear call at 48 kHz as they do on a lead,
+modulating the samples rather than using them: between two windows on
+EasySip, 270 500 and 239 500 bit/s for QAM and 305 000 and 243 000 for
+PCM. Slower than V.ARC/L16 on the same call, and there to be chosen, not
+because they are better there.
 
 ## Octets on the line
 

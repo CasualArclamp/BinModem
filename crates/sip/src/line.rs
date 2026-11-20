@@ -491,10 +491,14 @@ impl Line {
             peer: status.peer,
             media: stats.connected,
             law: stats.connected.then(|| {
-                stats
-                    .law
-                    .unwrap_or(crate::g711::Law::Mu.encoding_name())
-                    .to_owned()
+                let law = stats.law.unwrap_or(crate::g711::Law::Mu.encoding_name());
+                // A linear call is one of eight codings, and which one is
+                // the rate everything on it runs at: said as SDP says it.
+                match (law, self.media.linear_channels()) {
+                    ("L16", 2) => format!("L16/{:.0}/2", self.media.linear_rate()),
+                    ("L16", _) => format!("L16/{:.0}", self.media.linear_rate()),
+                    _ => law.to_owned(),
+                }
             }),
             packets_sent: stats.packets_sent,
             packets_received: stats.packets_received,
