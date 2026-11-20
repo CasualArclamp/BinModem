@@ -1308,8 +1308,8 @@ impl Modem {
         if let Some(fax) = self.fax.as_ref() {
             return fax.states();
         }
-        if self.varc.is_some() {
-            return 1usize << self.varc_bits.min(24);
+        if let Some(call) = self.varc.as_ref() {
+            return if call.greeting() { 2 } else { 1usize << self.varc_bits.min(24) };
         }
         self.pump.as_ref().map_or(2, Pump::states)
     }
@@ -1351,6 +1351,10 @@ impl Modem {
             return fax.shape();
         }
         if let Some(call) = self.varc.as_ref() {
+            // The handshake is two tones a direction.
+            if call.greeting() {
+                return "2FSK";
+            }
             return match (self.varc_bits, call.mode) {
                 (0, _) | (_, VarcMode::Linear) => "-",
                 (_, VarcMode::Pcm) => "PCM",
@@ -1953,6 +1957,13 @@ impl Modem {
     /// whatever shows the line to a person should show this as well.
     pub fn take_call_refused(&mut self) -> Option<String> {
         self.call_refused.take()
+    }
+
+    /// A V.ARC call's handshake as it is heard: which of the far end's two
+    /// tones is arriving, between minus one and one, eight to a bit, since
+    /// this was last asked. Empty once the handshake is over.
+    pub fn varc_symbols(&mut self) -> Vec<f64> {
+        self.varc.as_mut().map_or_else(Vec::new, varc::Call::take_symbols)
     }
 
     /// Tell a V.ARC call that its line carries samples exactly as sent: a

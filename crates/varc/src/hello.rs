@@ -237,6 +237,8 @@ struct Ear {
     per_bit: f64,
     /// The last characters read, for finding a message in.
     read: Vec<u8>,
+    /// Which tone is arriving, between minus one and one.
+    eye: f64,
 }
 
 impl Ear {
@@ -264,6 +266,7 @@ impl Ear {
             octet: 0,
             per_bit,
             read: Vec::with_capacity(2 * FRAME),
+            eye: 0.0,
         }
     }
 
@@ -294,6 +297,10 @@ impl Ear {
             self.sums[i] += now[i] - old[i];
         }
         let (one, nought) = (self.through(1), self.through(3));
+        // Which tone, and by how much: one for all of it on the tone for a
+        // one, minus one for all of it on the other. What an eye is drawn
+        // from.
+        self.eye = (one - nought) / (one + nought + 1e-30);
         self.began = (self.began + self.began_step) % std::f64::consts::TAU;
         let is_one = one >= nought;
 
@@ -393,6 +400,13 @@ impl Hello {
         };
         hello.message();
         hello
+    }
+
+    /// Which of the far end's two tones is arriving on the first channel:
+    /// one for the tone that is a one, minus one for the other, and between
+    /// them while it changes or when neither is there. For drawing.
+    pub fn eye(&self) -> f64 {
+        self.ears.first().map_or(0.0, |ear| ear.eye)
     }
 
     /// The far end's message, once it has arrived.

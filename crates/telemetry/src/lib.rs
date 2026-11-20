@@ -158,7 +158,8 @@ pub struct Frame {
     /// The echo a canceller has learned: what comes back for one sample
     /// sent. Empty when there is no canceller or it has found nothing.
     pub echo: Vec<f32>,
-    /// How far round the line the echo is, in milliseconds.
+    /// How far round the line the echo is, in milliseconds; below nought
+    /// when there is a canceller and it has not found the echo.
     pub echo_delay_ms: f32,
     /// What the far end says it hears of this end. Only V.ARC is told.
     pub far_end: Option<FarEnd>,

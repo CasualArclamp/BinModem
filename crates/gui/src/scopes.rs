@@ -490,13 +490,14 @@ pub fn echo(ui: &mut Ui, response: &[f32], delay_ms: f32, size: Vec2) {
         );
     } else {
         painter.text(pos2(rect.left() + 5.0, rect.top() + 3.0), Align2::LEFT_TOP, "echo", FontId::monospace(10.0), LABEL);
-        painter.text(
-            rect.center(),
-            Align2::CENTER_CENTER,
-            "a wire each way:\nno echo to cancel",
-            FontId::monospace(10.0),
-            LABEL,
-        );
+        // A delay below nought is a canceller that is there and has found
+        // nothing yet, which is not the same as there being none.
+        let why = if delay_ms < 0.0 {
+            "one pair of wires:\nlooking for this end's echo"
+        } else {
+            "a wire each way:\nno echo to cancel"
+        };
+        painter.text(rect.center(), Align2::CENTER_CENTER, why, FontId::monospace(10.0), LABEL);
     }
     frame_border(&painter, rect);
 }
@@ -797,8 +798,19 @@ pub fn symbol_scope(
     // handful of places, and on a clean line every symbol lands on exactly
     // the same pixel of each: a square a pixel or two across, on an axis
     // line, is a scope that looks empty. Those are drawn large and solid.
+    // Few points get a larger dot, so that four of them can be found; but
+    // not so large that they are blobs, and not when there are thousands of
+    // samples behind them: sixteen thousand nine-pixel squares on two levels
+    // was a box painted solid.
     let few = tones <= 4;
-    let side = if few { (radius / 14.0).clamp(5.0, 9.0) } else { (radius / 180.0).clamp(1.0, 2.5) * if crowded { 1.0 } else { 1.7 } };
+    let many = constellation.len() > 600;
+    let side = if few && !many {
+        (radius / 40.0).clamp(2.0, 3.5)
+    } else if few {
+        (radius / 90.0).clamp(1.0, 1.8)
+    } else {
+        (radius / 180.0).clamp(1.0, 2.5) * if crowded { 1.0 } else { 1.7 }
+    };
     let colour = Color32::from_rgba_unmultiplied(120, 220, 160, if few { 255 } else if crowded { 110 } else { 150 });
     for &(re, im) in constellation {
         mesh.add_colored_rect(Rect::from_center_size(at(re, im), vec2(side, side)), colour);

@@ -1994,6 +1994,22 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         }
         // A V.ARC call's symbols do not come a sample at a time: they are
         // taken as they have gathered, a grid at a time.
+        // And its handshake is tones, which the scope draws as it does any
+        // FSK: which tone, along a line.
+        let tones = modem.varc_symbols();
+        if !tones.is_empty() {
+            if modem.shape() != drawing {
+                drawing = modem.shape();
+                symbols.clear();
+                points.clear();
+            }
+            for tone in tones {
+                if symbols.len() == SYMBOL_HISTORY {
+                    symbols.pop_front();
+                }
+                symbols.push_back(tone as f32);
+            }
+        }
         let gathered = modem.varc_points();
         if !gathered.is_empty() {
             if modem.shape() != drawing {
@@ -2302,8 +2318,12 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 }));
                 f.echo.clear();
                 f.echo.extend(modem.varc_echo_response().iter().map(|t| *t as f32));
-                let delay = modem.varc_echo().first().and_then(|echo| echo.1);
-                f.echo_delay_ms = wide_rate.map_or(0.0, |rate| 1000.0 * delay.unwrap_or(0) as f64 / rate) as f32;
+                // Below nought for a canceller that has found nothing yet.
+                f.echo_delay_ms = match modem.varc_echo().first() {
+                    None => 0.0,
+                    Some((_, None)) => -1.0,
+                    Some((_, Some(delay))) => wide_rate.map_or(0.0, |rate| 1000.0 * *delay as f64 / rate) as f32,
+                };
                 f.far_end = modem.varc_far_end().map(|(report, trim)| telemetry::FarEnd {
                     level_db: report.level_db as f32,
                     peak_db: report.peak_db as f32,

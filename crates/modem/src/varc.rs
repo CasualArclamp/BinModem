@@ -147,6 +147,9 @@ pub(crate) struct Call {
     /// How loud the line is with nobody on it, as heard between the
     /// handshake and the first turn.
     floor: f64,
+    /// The handshake's tones as they are heard, for a symbol scope: which
+    /// tone, eight times a bit.
+    symbols: Vec<f64>,
     /// The handshake, while it is going on, and what came of it: what the
     /// far end said it was, and what the two will do.
     hello: Option<Hello>,
@@ -203,6 +206,7 @@ impl Call {
             spoke: 0.0,
             muted: false,
             floor: 0.0,
+            symbols: Vec::new(),
             hello: None,
             agreed: None,
             far: None,
@@ -466,6 +470,9 @@ impl Call {
                 )
             });
             hello.hear(input);
+            if self.samples.is_multiple_of((fs / (8.0 * varc::hello::BAUD)).max(1.0) as u64) && self.symbols.len() < 4096 {
+                self.symbols.push(hello.eye());
+            }
             // How loud the line is while the two ends are talking, to know
             // quiet by afterwards.
             let power: f64 = input.iter().map(|x| x * x).sum();
@@ -821,6 +828,17 @@ impl Call {
             }
         }
         rows
+    }
+
+    /// Whether the call is still in its handshake.
+    pub fn greeting(&self) -> bool {
+        self.hello.is_some()
+    }
+
+    /// The handshake's tones as heard since this was last asked: which of
+    /// the far end's two is arriving, between minus one and one.
+    pub fn take_symbols(&mut self) -> Vec<f64> {
+        std::mem::take(&mut self.symbols)
     }
 
     /// The signal to noise ratio on each channel, in decibels.

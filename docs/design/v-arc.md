@@ -150,7 +150,8 @@ Both ends then work out the same answer from the same two messages
 | One pair of wires? | If either end was told so, and both hear and send on one card at one rate. Otherwise a wire each way, with a note. |
 | Which modulation? | The one both asked for. If they differ, or a single-carrier mode would not have a multiple of 48 kHz each way, the multicarrier one. |
 
-The window's "distant" panel shows what the far end said and what was
+While it lasts the symbol scope shows the far end's tones as it shows any
+FSK. The window's "distant" panel shows what the far end said and what was
 agreed, where a V.8 menu would be:
 
 ![What the far end said in the handshake](../images/v-arc/hello.png)
