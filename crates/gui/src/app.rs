@@ -2724,7 +2724,7 @@ impl ScopeApp {
                                     .on_hover_text(
                                         "How much of each Reed-Solomon codeword is data. 0.93 for a good line; 0.25 reads a line at 6 dB. Auto is whichever carries most",
                                     );
-                                let most = if levels { 12u8 } else { 24 };
+                                let most = if levels { 16u8 } else { 24 };
                                 let least = if levels { 1u8 } else { 2 };
                                 *bits = if *bits == 0 { 0 } else { (*bits).clamp(least, most) };
                                 let name = |b: u8| format!("{}{}", 1u64 << b, if levels { "PCM" } else { "QAM" });

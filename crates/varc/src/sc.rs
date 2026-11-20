@@ -83,8 +83,13 @@ const DC_BLOCK: usize = 8;
 /// Octets a block has to hold, as in the multicarrier mode.
 const BLOCK_OCTETS: usize = 200;
 
-/// The most bits a level of the baseband mode may carry.
-const MAX_PAM_BITS: u8 = 12;
+/// The most bits a level of the baseband mode may carry: 65 536 levels.
+///
+/// That is the most a table may ask for and not something a line here has
+/// borne. Each bit wants 6 dB, so sixteen want about 104 dB at the slicer;
+/// this receiver's own floor on a line with no noise at all is some 63 dB,
+/// which is ten bits, and a real converter is no better. It was twelve.
+const MAX_PAM_BITS: u8 = 16;
 
 const DEFAULT_PARITY: u8 = 32;
 const LOADED_PARITY: u8 = 16;

@@ -155,7 +155,7 @@ other sample (`hello::Twice`, `hello::Half`).
 | Baud | a third of the sample rate | two-thirds of it |
 | At 48 kHz | 16 000 baud, 1.5 to 19.5 kHz | 32 000 baud, 0 to 19.2 kHz |
 | At 192 kHz | 64 000 baud, 6 to 78 kHz | 128 000 baud, 0 to 77 kHz |
-| Bits a symbol | 2 to 24: four points to sixteen million | 1 to 12: 2PCM, 4PCM, 8PCM and so on to 4096PCM |
+| Bits a symbol | 2 to 24: four points to sixteen million | 1 to 16: 2PCM, 4PCM, 8PCM and so on to 65 536PCM |
 
 On the Realtek lead at 192 kHz, a call to itself, nothing wrong in either:
 
@@ -163,6 +163,12 @@ On the Realtek lead at 192 kHz, a call to itself, nothing wrong in either:
 |---|---|---|
 | V.ARC/QAM | about 200 kbit/s | 1.14 Mbit/s, 3.5 million octets |
 | V.ARC/PCM | 83 kbit/s | 972 kbit/s, 3.2 million octets |
+
+The top of the PCM ladder is a limit and not a result. Each bit wants 6 dB,
+so sixteen want about 104 dB at the slicer. The lead measures 63 dB and
+carries 512 levels; a virtual cable has carried 2048; and asked by hand for
+4096 or more on a simulated line with no noise at all, the receiver reads
+nothing, its own floor being about 63 dB.
 
 A card need no longer run at a multiple of 48 kHz for these modes.
 
