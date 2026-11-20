@@ -201,6 +201,10 @@ OS-specific code — but only built and run on Windows so far.
     2.3 kHz of the band, and loads only where the line is.
   - Each end tells the other what it hears, and a sender that is too loud
     turns itself down.
+  - An end that cannot hear the other says so, and the far end slows the
+    modulation by halves until it can; codes from 0.93 down to 0.25 for
+    lines with little to spare. One direction has been out of a loudspeaker
+    and into a microphone: 20 kbit/s.
   - `AT+MS=VARC2W` is the same mode on one pair of wires, with an echo
     canceller. Each end learns its echo with the line to itself first; two
     ends sharing a virtual cable connect at 650 kbit/s and pass 70 dB.

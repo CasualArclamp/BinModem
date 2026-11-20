@@ -160,7 +160,13 @@ impl Shape {
     }
 
     pub fn default_table(&self) -> Table {
-        Table { parity: DEFAULT_PARITY, bits: vec![if self.real { 1 } else { 2 }] }
+        // Half of each word is checks: the starting table has to carry the
+        // first made-to-measure one over a line nothing is known about,
+        // and a single carrier has no copies of anything to add together.
+        let mut table = Table { parity: DEFAULT_PARITY, bits: vec![if self.real { 1 } else { 2 }] };
+        let capacity = self.block(&table) * self.group_bits(self.bits_of(&table)) / 8;
+        table.parity = crate::link::checks_for(0.5, capacity);
+        table
     }
 
     fn max_bits(&self) -> u8 {
@@ -645,15 +651,41 @@ impl Rx {
     }
 
     /// The table this line will bear, by what has been measured.
+    ///
+    /// Worked out for each code there is, the stronger ones with less in
+    /// hand, and the one that carries most is the one asked for: see
+    /// [`crate::link::CODES`].
     pub fn load(&self) -> Table {
-        let gap = 10f64.powf(self.gap_db / 10.0);
+        let extra = self.gap_db - GAP_DB;
         let snr = 1.0 / self.noise.max(1e-30);
-        let capacity = (1.0 + snr / gap).log2();
-        // A ladder on one axis holds half what a point on two does.
-        let bits = if self.shape.real { capacity / 2.0 } else { capacity };
         let least = if self.shape.real { 1 } else { 2 };
-        let bits = (bits.floor() as i64).clamp(least, i64::from(self.shape.max_bits())) as u8;
-        Table { parity: LOADED_PARITY, bits: vec![bits] }
+        let mut best: Option<(f64, bool, Table)> = None;
+        for (rate, gap_db) in crate::link::CODES {
+            let gap = 10f64.powf((gap_db + extra) / 10.0);
+            let capacity = (1.0 + snr / gap).log2();
+            // A ladder on one axis holds half what a point on two does.
+            let room = if self.shape.real { capacity / 2.0 } else { capacity };
+            // Whether the line bears even the smallest grid with this code,
+            // or is being given it regardless because there is none smaller.
+            let fits = room >= f64::from(least);
+            let bits = (room.floor() as i64).clamp(i64::from(least), i64::from(self.shape.max_bits())) as u8;
+            let mut table = Table { parity: LOADED_PARITY, bits: vec![bits] };
+            if let Some(rate) = rate {
+                let capacity = self.shape.block(&table) * self.shape.group_bits(bits) / 8;
+                table.parity = crate::link::checks_for(rate, capacity);
+            }
+            let net = self.shape.net(&table);
+            // A code the line bears beats one it does not, whatever each
+            // would carry if it worked; then whichever carries most.
+            let better = match best.as_ref() {
+                None => true,
+                Some((most, fitted, _)) => (fits && !fitted) || (fits == *fitted && net > *most),
+            };
+            if better {
+                best = Some((net, fits, table));
+            }
+        }
+        best.map(|(_, _, table)| table).expect("there are codes")
     }
 
     fn propose(&mut self) {
@@ -1301,6 +1333,27 @@ mod tests {
             // way up the constellation is.
             assert!(pair.b.channels[0].tally.failed < 10, "{snr} dB, {ppm} ppm");
         }
+    }
+
+    /// A line with 8 dB at the slicer, where a code of sixteen check octets
+    /// carries nothing: a sixteenth of four points' worth come out wrong.
+    /// The receiver asks for a code that is mostly checks, and the stream
+    /// arrives.
+    #[test]
+    fn a_noisy_line_gets_a_code_that_is_mostly_checks() {
+        // 8 dB at the slicer is 6.2 dB over the whole band.
+        let mut pair = Pair::new(Shape::qam(48_000.0).unwrap(), 6.2, 0.0, 0.0);
+        let to_b = stream(3, 8_000);
+        pair.a.write(&to_b);
+        pair.run(30.0);
+        let rx = &pair.b.channels[0].rx;
+        assert!((rx.snr_db() - 8.0).abs() < 1.5, "measured {:.1} dB", rx.snr_db());
+        let table = pair.a.channels[0].tx.table().clone();
+        let layout = rx.shape().layout(&table).expect("a layout");
+        let (n, k) = layout.code();
+        assert_eq!(table.bits[0], 2);
+        assert!(k * 2 <= n + 2, "a code of {k}/{n} at 8 dB");
+        assert!(pair.at_b == to_b, "{} of {} octets", pair.at_b.len(), to_b.len());
     }
 
     #[test]

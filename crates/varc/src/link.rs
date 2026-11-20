@@ -128,6 +128,31 @@ pub trait Sender {
     fn trim(&mut self, _db: f64) {}
 }
 
+/// The codes a table may be given, strongest last: the share of each
+/// codeword that is data, and how many decibels a point of the grid has to
+/// stand clear of the noise for that code to carry it.
+///
+/// The first is the one a good line gets: sixteen check octets a word,
+/// whatever its length, and eight decibels in hand. The rest are for lines
+/// that have not got eight decibels to spare. A code that is half checks
+/// mends a quarter of a word's octets, and a grid of four points can then be
+/// read at a ratio where one in fourteen of its points comes out wrong; so
+/// it needs three decibels in hand and not eight, and a line at 8 dB that
+/// could carry nothing carries a bit a symbol. Below a quarter there is
+/// little more to be had from a code that is told only right or wrong.
+///
+/// A receiver works out the table for each and asks for whichever carries
+/// most.
+pub const CODES: [(Option<f64>, f64); 5] = [(None, 8.0), (Some(0.75), 5.0), (Some(0.5), 3.0), (Some(0.33), 2.0), (Some(0.25), 1.5)];
+
+/// Check octets for a code of `rate` on blocks of `capacity` octets, which
+/// are cut into codewords of 255 at most.
+pub fn checks_for(rate: f64, capacity: usize) -> u8 {
+    let words = capacity.div_ceil(255).max(1);
+    let n = capacity / words;
+    (((1.0 - rate) * n as f64).round() as usize).clamp(16, n.saturating_sub(8).max(16)).min(246) as u8
+}
+
 /// What one end hears, as it tells the other.
 ///
 /// A transmitter cannot hear its own line. It does not know whether what it

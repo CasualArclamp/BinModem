@@ -125,6 +125,45 @@ impl Caps {
     }
 }
 
+/// What an end says later in a call, in the same tones, when it cannot
+/// hear the far end's modulation: how many times slowed it is now listening
+/// for, as a power of two.
+///
+/// The handshake's tones get through lines the modulation does not, which is
+/// the whole reason they are what they are. A line that carries one way and
+/// not the other leaves one end loaded and waiting and the other hearing
+/// nothing it can use, and until this there was nothing either could do
+/// about it. The end that hears nothing cannot tell the far end so in the
+/// modulation, since it does not know that its own is heard; it can in
+/// these.
+const NOTICE_HEAD: [u8; 2] = *b"VN";
+const NOTICE: usize = NOTICE_HEAD.len() + 2 + 2;
+
+fn notice(slowed: u8) -> [u8; NOTICE] {
+    let mut out = [0u8; NOTICE];
+    out[..2].copy_from_slice(&NOTICE_HEAD);
+    out[2] = 1;
+    out[3] = slowed;
+    let check = crc16(&out[..NOTICE - 2]);
+    out[NOTICE - 2..].copy_from_slice(&check.to_le_bytes());
+    out
+}
+
+fn read_notice(frame: &[u8]) -> Option<u8> {
+    if frame.len() != NOTICE || frame[..2] != NOTICE_HEAD || frame[2] != 1 {
+        return None;
+    }
+    (crc16(&frame[..NOTICE - 2]) == u16::from_le_bytes([frame[NOTICE - 2], frame[NOTICE - 1]])).then_some(frame[3])
+}
+
+/// What an ear made of the characters it has read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Heard {
+    Caps(Caps),
+    /// The far end is listening for the modulation slowed by two to this.
+    Slowed(u8),
+}
+
 /// CRC-16/CCITT, as X.25 has it.
 fn crc16(octets: &[u8]) -> u16 {
     let mut crc = 0xffffu16;
@@ -284,7 +323,7 @@ impl Ear {
     }
 
     /// A sample; a message, if this sample finished one.
-    fn hear(&mut self, x: f64) -> Option<Caps> {
+    fn hear(&mut self, x: f64) -> Option<Heard> {
         let mut now = [0.0; 10];
         for i in 0..5 {
             now[2 * i] = x * self.turn[i].cos();
@@ -341,13 +380,16 @@ impl Ear {
         found
     }
 
-    fn character(&mut self) -> Option<Caps> {
+    fn character(&mut self) -> Option<Heard> {
         if self.read.len() == 2 * FRAME {
             self.read.remove(0);
         }
         self.read.push(self.octet);
-        let from = self.read.len().checked_sub(FRAME)?;
-        Caps::decode(&self.read[from..])
+        let last = |len: usize| self.read.len().checked_sub(len).map(|from| &self.read[from..]);
+        last(FRAME)
+            .and_then(Caps::decode)
+            .map(Heard::Caps)
+            .or_else(|| last(NOTICE).and_then(read_notice).map(Heard::Slowed))
     }
 }
 
@@ -441,7 +483,7 @@ impl Hello {
     /// A frame as it arrived, a sample a channel.
     pub fn hear(&mut self, input: &[f64]) {
         for (ear, &x) in self.ears.iter_mut().zip(input) {
-            if let Some(caps) = ear.hear(x) {
+            if let Some(Heard::Caps(caps)) = ear.hear(x) {
                 // The latest is the one that counts: it may now say the far
                 // end has heard.
                 self.theirs = Some(caps);
@@ -483,6 +525,93 @@ impl Hello {
     }
 }
 
+/// An end's ear for the handshake's tones for the rest of the call, and its
+/// voice in them: for saying, and hearing said, that the modulation is not
+/// getting through and should be slowed.
+pub struct Watch {
+    ears: Vec<Ear>,
+    tones: (f64, f64),
+    fs_out: f64,
+    turn: f64,
+    bits: Vec<bool>,
+    at: usize,
+    left_in_bit: f64,
+}
+
+impl std::fmt::Debug for Watch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Watch").field("saying", &self.saying()).finish_non_exhaustive()
+    }
+}
+
+impl Watch {
+    /// For the end that called or the end that answered, hearing on
+    /// `channels` channels at `fs_in` and sending at `fs_out`.
+    pub fn new(calling: bool, fs_in: f64, fs_out: f64, channels: usize) -> Self {
+        let (tones, listens) = if calling { (CALLER, ANSWERER) } else { (ANSWERER, CALLER) };
+        Self {
+            ears: (0..channels.max(1)).map(|_| Ear::new(fs_in, listens)).collect(),
+            tones,
+            fs_out,
+            turn: 0.0,
+            bits: Vec::new(),
+            at: 0,
+            left_in_bit: 0.0,
+        }
+    }
+
+    /// A frame as it arrived. What the far end says it is listening for,
+    /// if this frame finished its saying so.
+    pub fn hear(&mut self, input: &[f64]) -> Option<u8> {
+        let mut asked = None;
+        for (ear, &x) in self.ears.iter_mut().zip(input) {
+            if let Some(Heard::Slowed(by)) = ear.hear(x) {
+                asked = Some(by);
+            }
+        }
+        asked
+    }
+
+    /// Tell the far end this end is listening for the modulation slowed by
+    /// two to the `slowed`: three times over, a second and a bit, during
+    /// which [`Watch::say`] has the line.
+    pub fn tell(&mut self, slowed: u8) {
+        self.bits.clear();
+        // A bit of idle first, so the first start bit is an edge.
+        self.bits.extend(std::iter::repeat_n(true, GAP));
+        for _ in 0..3 {
+            for octet in notice(slowed) {
+                self.bits.push(false);
+                self.bits.extend((0..8).map(|i| octet >> i & 1 != 0));
+                self.bits.push(true);
+            }
+            self.bits.extend(std::iter::repeat_n(true, GAP));
+        }
+        self.at = 0;
+        self.left_in_bit = self.fs_out / BAUD;
+    }
+
+    /// Whether there is something still being said.
+    pub fn saying(&self) -> bool {
+        self.at < self.bits.len()
+    }
+
+    /// The next sample of what is being said; silence when nothing is.
+    pub fn say(&mut self) -> f64 {
+        if !self.saying() {
+            return 0.0;
+        }
+        let hz = if self.bits[self.at] { self.tones.0 } else { self.tones.1 };
+        self.turn = (self.turn + std::f64::consts::TAU * hz / self.fs_out) % std::f64::consts::TAU;
+        self.left_in_bit -= 1.0;
+        if self.left_in_bit <= 0.0 {
+            self.left_in_bit += self.fs_out / BAUD;
+            self.at += 1;
+        }
+        LEVEL * self.turn.sin()
+    }
+}
+
 /// A sender whose modulation runs slower than the sound card it sends on:
 /// each of its samples becomes `times` of the card's.
 #[allow(missing_debug_implementations)]
@@ -493,6 +622,9 @@ pub struct Faster {
     /// The modulation's last samples, newest first.
     past: std::collections::VecDeque<f64>,
     phase: usize,
+    /// How many times slower than it believes the modulation is being run:
+    /// see [`Faster::slowed`].
+    slow: f64,
 }
 
 /// A receiver whose modulation runs slower than the sound card it hears on:
@@ -508,6 +640,8 @@ pub struct Slower {
     own: std::collections::VecDeque<f64>,
     own_given: bool,
     count: usize,
+    /// How many times slower than it believes the modulation is being run.
+    slow: f64,
 }
 
 /// A low-pass for going between a rate and `times` that rate: flat to 0.86
@@ -536,8 +670,26 @@ fn between(times: usize) -> Vec<f64> {
 
 impl Faster {
     pub fn new(inner: Box<dyn Sender>, times: usize) -> Self {
+        Self::slowed(inner, times, 1)
+    }
+
+    /// The same, for a modulation that is being run slower than it was
+    /// made for: built for one rate, and given `times` of the card's samples
+    /// to each of its own where its own rate would have had fewer. Every
+    /// frequency in it comes down by `slow` and every symbol lasts `slow`
+    /// times as long, which is how a line that will not pass the band the
+    /// modulation wants is given one it will. The modulation knows nothing
+    /// of it; only the rates it reports have to be put right.
+    pub fn slowed(inner: Box<dyn Sender>, times: usize, slow: usize) -> Self {
         let taps = between(times);
-        Self { past: std::collections::VecDeque::from(vec![0.0; taps.len() / times + 1]), inner, times, taps, phase: 0 }
+        Self {
+            past: std::collections::VecDeque::from(vec![0.0; taps.len() / times + 1]),
+            inner,
+            times,
+            taps,
+            phase: 0,
+            slow: slow as f64,
+        }
     }
 }
 
@@ -571,7 +723,8 @@ impl Sender for Faster {
         self.inner.reset()
     }
     fn rates(&self) -> (f64, f64) {
-        self.inner.rates()
+        let (line, frames) = self.inner.rates();
+        (line / self.slow, frames / self.slow)
     }
     fn clipped(&self) -> u64 {
         self.inner.clipped()
@@ -583,6 +736,11 @@ impl Sender for Faster {
 
 impl Slower {
     pub fn new(inner: Box<dyn Receiver>, times: usize) -> Self {
+        Self::slowed(inner, times, 1)
+    }
+
+    /// The receiving half of [`Faster::slowed`].
+    pub fn slowed(inner: Box<dyn Receiver>, times: usize, slow: usize) -> Self {
         let taps = between(times);
         Self {
             past: std::collections::VecDeque::from(vec![0.0; taps.len()]),
@@ -592,6 +750,7 @@ impl Slower {
             times,
             taps,
             count: 0,
+            slow: slow as f64,
         }
     }
 }
@@ -645,10 +804,15 @@ impl Receiver for Slower {
         self.inner.health()
     }
     fn rates(&self) -> (f64, f64) {
-        self.inner.rates()
+        let (line, frames) = self.inner.rates();
+        (line / self.slow, frames / self.slow)
     }
     fn spectrum(&self) -> Vec<crate::link::Bin> {
-        self.inner.spectrum()
+        let mut bins = self.inner.spectrum();
+        for bin in &mut bins {
+            bin.hz /= self.slow;
+        }
+        bins
     }
     fn points(&mut self) -> Vec<(f64, f64)> {
         self.inner.points()
@@ -762,6 +926,26 @@ mod tests {
         // And cards that no whole number relates are told so.
         let odd = agree(&caps(44_100, 44_100), &caps(48_000, 48_000));
         assert!(odd.is_err_and(|why| why.contains("44100") && why.contains("48000")));
+    }
+
+    #[test]
+    fn an_end_that_cannot_hear_says_so_through_the_other_ends_signal() {
+        // The far end is sending its modulation, which to these tones is
+        // noise right across the band and as loud as they are.
+        let (mut deaf, mut far) = (Watch::new(true, 48_000.0, 48_000.0, 1), Watch::new(false, 48_000.0, 48_000.0, 1));
+        deaf.tell(2);
+        let mut seed = 5u64;
+        let mut heard = Vec::new();
+        for _ in 0..(3.0 * 48_000.0) as usize {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let hiss = 0.18 * (((seed >> 11) as f64 / (1u64 << 53) as f64) - 0.5) * 3.46;
+            let said = deaf.say();
+            heard.extend(far.hear(&[0.3 * said + hiss]));
+            // And nothing the deaf end hears is a notice to it.
+            assert_eq!(deaf.hear(&[hiss + said]), None);
+        }
+        assert!(!deaf.saying());
+        assert!(!heard.is_empty() && heard.iter().all(|&by| by == 2), "{heard:?}");
     }
 
     #[test]

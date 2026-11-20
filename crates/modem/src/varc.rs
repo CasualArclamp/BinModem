@@ -23,7 +23,7 @@
 
 use varc::dmt::{self, Plan};
 use varc::echo::Canceller;
-use varc::hello::{Agreed, Caps, Faster, Hello, Slower, Wanted};
+use varc::hello::{Agreed, Caps, Faster, Hello, Slower, Wanted, Watch};
 use varc::exact;
 use varc::link::{Receiver, Report, Sender};
 use varc::sc::{self, Shape};
@@ -70,6 +70,18 @@ impl VarcMode {
 }
 
 type End = Station<Box<dyn Sender>, Box<dyn Receiver>>;
+
+/// The most a direction is slowed: by two to this, which is eight times.
+/// At 48 kHz that takes the single carrier from 16 000 baud between 1.5 and
+/// 19.5 kHz down to 2000 baud between 190 Hz and 2.4 kHz.
+const SLOWEST: u8 = 3;
+
+/// How long a receiver that has never heard the far end waits before it asks
+/// for the modulation slower, in seconds, by how slowed it is already. A
+/// slowed modulation takes as many times longer to be found.
+fn patience(slowed: u8) -> f64 {
+    6.0 + 3.0 * f64::from(1u32 << slowed)
+}
 
 /// How long each end of a two-wire call has the line to itself, to learn
 /// its own echo with nobody talking over it, in seconds. The canceller needs
@@ -147,6 +159,19 @@ pub(crate) struct Call {
     /// How loud the line is with nobody on it, as heard between the
     /// handshake and the first turn.
     floor: f64,
+    /// For the rest of the call: an ear for the handshake's tones, and a
+    /// voice in them, for an end that cannot hear the modulation to say so.
+    watch: Option<Watch>,
+    /// How slowed this end's receivers are listening for the modulation,
+    /// and its transmitters sending it: by two to this.
+    hears_slowed: u8,
+    sends_slowed: u8,
+    /// Samples the receivers have gone without hearing the far end, while
+    /// they never have; and whether they ever have.
+    unheard: f64,
+    heard_once: bool,
+    /// Codewords read when the receivers now listening began.
+    read_before: u64,
     /// The handshake's tones as they are heard, for a symbol scope: which
     /// tone, eight times a bit.
     symbols: Vec<f64>,
@@ -206,6 +231,12 @@ impl Call {
             spoke: 0.0,
             muted: false,
             floor: 0.0,
+            watch: None,
+            hears_slowed: 0,
+            sends_slowed: 0,
+            unheard: 0.0,
+            heard_once: false,
+            read_before: 0,
             symbols: Vec::new(),
             hello: None,
             agreed: None,
@@ -232,6 +263,81 @@ impl Call {
     /// What there is to tell about the call since this was last asked.
     pub fn take_notes(&mut self) -> Vec<String> {
         std::mem::take(&mut self.notes)
+    }
+
+    /// One sample of watching for a direction that does not carry the
+    /// modulation, and of doing something about it.
+    ///
+    /// A receiver that has never heard the far end, for as long as
+    /// [`patience`] allows, starts listening for the modulation at half the
+    /// speed and says so in the handshake's tones, which get through lines
+    /// the modulation does not. An end that hears that said sends at
+    /// whatever speed it was told. Each direction is slowed for itself: a
+    /// line that is a cable one way and a loudspeaker and a microphone the
+    /// other runs at full speed one way and a quarter of it the other.
+    fn slow_down(&mut self, fs: f64, fs_out: f64, input: &[f64]) -> Result<(), String> {
+        let Some(agreed) = self.agreed.clone() else { return Ok(()) };
+        let calling = self.calling;
+        let watch = self.watch.get_or_insert_with(|| Watch::new(calling, fs, fs_out, input.len()));
+        if let Some(asked) = watch.hear(input) {
+            let asked = asked.min(SLOWEST);
+            if asked != self.sends_slowed {
+                self.sends_slowed = asked;
+                for c in 0..input.len() as u8 {
+                    let tx = self.sender(&agreed, c, asked)?;
+                    if let Some(channel) = self.station.as_mut().and_then(|s| s.channels.get_mut(usize::from(c))) {
+                        channel.send_with(tx);
+                    }
+                }
+                self.notes.push(format!(
+                    "V.ARC: the far end cannot hear this end; sending {} times slower",
+                    1u32 << asked
+                ));
+            }
+        }
+        let Some(station) = self.station.as_ref() else { return Ok(()) };
+        // Heard means read: codewords arriving that the code could mend.
+        // Not found, since a receiver can find a signal through a room and
+        // read none of it; and not a figure in decibels, since with a code
+        // that is mostly checks 8 dB is a line and with the lightest it is
+        // not. Four words since this receiver began is a line.
+        let read: u64 = station.channels.iter().map(|c| c.tally.words - c.tally.failed).sum();
+        if read >= self.read_before + 4 {
+            self.heard_once = true;
+            self.unheard = 0.0;
+        } else if !self.heard_once {
+            self.unheard += 1.0;
+        }
+        if self.unheard > patience(self.hears_slowed) * fs {
+            self.unheard = 0.0;
+            // At the slowest there is nothing slower to ask for, but the
+            // far end may not have heard the asking: say it again.
+            let slowed = (self.hears_slowed + 1).min(SLOWEST);
+            if slowed != self.hears_slowed {
+                self.hears_slowed = slowed;
+                self.read_before = read;
+                for c in 0..input.len() as u8 {
+                    let rx = self.receiver(&agreed, c, slowed)?;
+                    if let Some(channel) = self.station.as_mut().and_then(|s| s.channels.get_mut(usize::from(c))) {
+                        channel.listen_with(rx);
+                    }
+                }
+                self.notes.push(format!(
+                    "V.ARC: nothing heard of the far end; asking it to send {} times slower",
+                    1u32 << slowed
+                ));
+            }
+            if let Some(watch) = self.watch.as_mut() {
+                watch.tell(slowed);
+            }
+        }
+        Ok(())
+    }
+
+    /// How slowed each direction is, as a number of times: what this end
+    /// hears, then what it sends.
+    pub fn slowed(&self) -> (u32, u32) {
+        (1 << self.hears_slowed, 1 << self.sends_slowed)
     }
 
     /// One sample of a two-wire call's turns: see [`Turn`].
@@ -353,6 +459,44 @@ impl Call {
         }
     }
 
+    /// A transmitter for channel `c`, for the modulation slowed by two to
+    /// the `slowed`.
+    ///
+    /// The modulation is built for the rate agreed and then run slower by
+    /// giving it more of the card's samples to each of its own. Every
+    /// frequency in it comes down and every symbol lasts longer, which is
+    /// how a line that will not pass the band it wants is given one it
+    /// will. The same goes for where this end's card is simply the faster.
+    fn sender(&self, agreed: &Agreed, c: u8, slowed: u8) -> Result<Box<dyn Sender>, String> {
+        let (fs, colour) = (agreed.send_hz, self.sends + c);
+        let tx: Box<dyn Sender> = match self.mode {
+            VarcMode::Linear => Box::new(exact::Tx::new(fs)),
+            VarcMode::Dmt => Box::new(dmt::Tx::new(Plan::for_rate(fs).coloured(colour))),
+            VarcMode::Qam | VarcMode::Pcm => Box::new(sc::Tx::new(self.shape(fs)?.coloured(colour))),
+        };
+        let slow = 1usize << slowed;
+        Ok(if agreed.send_times * slow > 1 { Box::new(Faster::slowed(tx, agreed.send_times * slow, slow)) } else { tx })
+    }
+
+    /// The receiver to go with [`Self::sender`] at the far end.
+    fn receiver(&self, agreed: &Agreed, c: u8, slowed: u8) -> Result<Box<dyn Receiver>, String> {
+        let (fs, colour) = (agreed.hear_hz, self.hears + c);
+        let rx: Box<dyn Receiver> = match self.mode {
+            VarcMode::Linear => Box::new(exact::Rx::new(fs)),
+            VarcMode::Dmt => Box::new(dmt::Rx::new(Plan::for_rate(fs).coloured(colour))),
+            VarcMode::Qam | VarcMode::Pcm => Box::new(sc::Rx::new(self.shape(fs)?.coloured(colour))),
+        };
+        let slow = 1usize << slowed;
+        Ok(if agreed.hear_times * slow > 1 { Box::new(Slower::slowed(rx, agreed.hear_times * slow, slow)) } else { rx })
+    }
+
+    fn shape(&self, fs: f64) -> Result<Shape, String> {
+        let shape = if self.mode == VarcMode::Qam { Shape::qam(fs) } else { Shape::pcm(fs) };
+        shape.ok_or_else(|| {
+            format!("{} wants a sound card running at a multiple of 48 kHz, not {fs} Hz", self.mode.name())
+        })
+    }
+
     fn build(&mut self, fs: f64, agreed: &Agreed, channels: usize) -> Result<End, String> {
         // On a line of exact samples the multicarrier mode gives way to no
         // modulation at all, until that has been tried and failed.
@@ -362,44 +506,11 @@ impl Call {
             Wanted::Dmt if self.exact_line && !self.inexact => VarcMode::Linear,
             Wanted::Dmt => VarcMode::Dmt,
         };
-        // The modulation runs at the slower card's rate each way; this end
-        // makes up the difference where its own card is the faster.
-        let (fs, fs_out, device) = (agreed.hear_hz, agreed.send_hz, fs);
-        let fit = |tx: Box<dyn Sender>, rx: Box<dyn Receiver>| -> (Box<dyn Sender>, Box<dyn Receiver>) {
-            let tx: Box<dyn Sender> = if agreed.send_times > 1 { Box::new(Faster::new(tx, agreed.send_times)) } else { tx };
-            let rx: Box<dyn Receiver> = if agreed.hear_times > 1 { Box::new(Slower::new(rx, agreed.hear_times)) } else { rx };
-            (tx, rx)
-        };
         let mut pairs: Vec<(Box<dyn Sender>, Box<dyn Receiver>)> = Vec::new();
         for c in 0..channels as u8 {
-            let (sends, hears) = (self.sends + c, self.hears + c);
-            match self.mode {
-                VarcMode::Linear => {
-                    pairs.push(fit(Box::new(exact::Tx::new(fs_out)), Box::new(exact::Rx::new(fs))));
-                }
-                VarcMode::Dmt => {
-                    pairs.push(fit(
-                        Box::new(dmt::Tx::new(Plan::for_rate(fs_out).coloured(sends))),
-                        Box::new(dmt::Rx::new(Plan::for_rate(fs).coloured(hears))),
-                    ));
-                }
-                VarcMode::Qam | VarcMode::Pcm => {
-                    let name = self.mode.name();
-                    let qam = self.mode == VarcMode::Qam;
-                    let shape = |fs: f64| {
-                        let shape = if qam { Shape::qam(fs) } else { Shape::pcm(fs) };
-                        shape.ok_or_else(|| {
-                            format!("{name} wants a sound card running at a multiple of 48 kHz, not {fs} Hz")
-                        })
-                    };
-                    pairs.push(fit(
-                        Box::new(sc::Tx::new(shape(fs_out)?.coloured(sends))),
-                        Box::new(sc::Rx::new(shape(fs)?.coloured(hears))),
-                    ));
-                }
-            }
+            pairs.push((self.sender(agreed, c, self.sends_slowed)?, self.receiver(agreed, c, self.hears_slowed)?));
         }
-        Ok(Station::new(device, pairs))
+        Ok(Station::new(fs, pairs))
     }
 
     /// One frame to send, when hearing and sending are stepped apart.
@@ -408,6 +519,12 @@ impl Call {
         match (self.hello.as_mut(), self.station.as_mut()) {
             // Saying what this end is: the same on every channel.
             (Some(hello), _) => output.fill(hello.say()),
+            // Telling the far end this end cannot hear it: the modulation
+            // waits where it is until that has been said.
+            (None, Some(_)) if self.watch.as_ref().is_some_and(Watch::saying) => {
+                let said = self.watch.as_mut().map_or(0.0, Watch::say);
+                output.fill(said);
+            }
             (None, Some(station)) => {
                 station.speak(output);
                 // Not this end's turn: the modulation runs on, unheard.
@@ -548,6 +665,8 @@ impl Call {
         }
         if self.turn != Turn::Both {
             self.take_turns(fs, input);
+        } else if self.greets() {
+            self.slow_down(fs, fs_out, input)?;
         }
         let station = self.station.as_mut().expect("just built");
         if self.echo.is_empty() {
@@ -825,6 +944,13 @@ impl Call {
             ));
             for note in &agreed.notes {
                 rows.push(("note", note.clone()));
+            }
+            if self.hears_slowed > 0 || self.sends_slowed > 0 {
+                let times = |by: u8| if by == 0 { "at full speed".to_owned() } else { format!("{} times slower", 1u32 << by) };
+                rows.push((
+                    "slowed",
+                    format!("hearing {}, sending {}", times(self.hears_slowed), times(self.sends_slowed)),
+                ));
             }
         }
         rows

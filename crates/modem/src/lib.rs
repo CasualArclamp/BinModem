@@ -1966,6 +1966,14 @@ impl Modem {
         self.varc.as_mut().map_or_else(Vec::new, varc::Call::take_symbols)
     }
 
+    /// How many times slowed each direction of a V.ARC call is running:
+    /// what this end hears, then what it sends. One and one on a line that
+    /// carries the modulation as it was made; more where an end could not
+    /// hear the other and asked for it slower.
+    pub fn varc_slowed(&self) -> (u32, u32) {
+        self.varc.as_ref().map_or((1, 1), varc::Call::slowed)
+    }
+
     /// Tell a V.ARC call that its line carries samples exactly as sent: a
     /// SIP call that agreed on linear PCM. It then starts with no
     /// modulation at all, the samples being the data, and gives that up for
@@ -3612,7 +3620,7 @@ impl Modem {
 }
 
 /// How long a V.ARC call waits to hear another end before giving up.
-const VARC_WAIT_MS: u32 = 60_000;
+const VARC_WAIT_MS: u32 = 120_000;
 
 /// How long a V.ARC call that was up may hear nothing before it is over.
 const VARC_DEAF_SECONDS: f64 = 5.0;

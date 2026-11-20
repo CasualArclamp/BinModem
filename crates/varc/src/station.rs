@@ -333,6 +333,27 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
         }
     }
 
+    /// Listen with another receiver from here on: the far end is about to
+    /// send something else, a slower version of the modulation say. What was
+    /// known of the line was known of the old signal, and goes with it.
+    pub fn listen_with(&mut self, rx: R) {
+        self.rx = rx;
+        self.unpacker = Unpacker::new();
+        self.offered = None;
+        self.lost_run = 0;
+        self.trouble = 0;
+        self.starved_since = None;
+        self.wants_reset = false;
+    }
+
+    /// Send with another transmitter from here on, at the level this
+    /// channel had been brought down to. It starts on the starting table,
+    /// as any does; the frames in hand go with it.
+    pub fn send_with(&mut self, mut tx: T) {
+        tx.trim(self.trim_db);
+        self.tx = tx;
+    }
+
     /// Whether both directions of this channel are running on tables made
     /// to measure: the far end is sending with the one this end asked for,
     /// and this end with one the far end asked for.

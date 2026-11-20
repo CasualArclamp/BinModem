@@ -59,7 +59,10 @@ pub const SPREAD: usize = 48;
 
 /// Check octets a codeword gets under the starting table, which has to work
 /// before anything is known about the line.
-const DEFAULT_PARITY: u8 = 32;
+///
+/// A third of each word: enough to mend a sixth of its octets. It was a
+/// sixth, which wanted the summed points a good deal cleaner.
+const DEFAULT_PARITY: u8 = 64;
 
 /// And under a table made to measure.
 const LOADED_PARITY: u8 = 16;
@@ -1321,18 +1324,36 @@ impl Rx {
     }
 
     /// The table this line will bear, by what has been measured.
+    ///
+    /// Worked out for each code there is, the stronger ones with less in
+    /// hand, and the one that carries most is the one asked for: see
+    /// [`crate::link::CODES`].
     pub fn load(&self) -> Table {
-        let gap = 10f64.powf(self.gap_db / 10.0);
-        let bits = (0..self.plan.half())
-            .map(|k| {
-                if k == 0 || k > self.plan.top() || Plan::is_pilot(k) {
-                    return 0;
-                }
-                let snr = 1.0 / self.noise[k];
-                ((1.0 + snr / gap).log2().floor() as i64).clamp(0, i64::from(MAX_BITS)) as u8
-            })
-            .collect();
-        Table { parity: LOADED_PARITY, bits }
+        // What has been added to the margin because tables failed.
+        let extra = self.gap_db - GAP_DB;
+        let mut best: Option<(f64, Table)> = None;
+        for (rate, gap_db) in crate::link::CODES {
+            let gap = 10f64.powf((gap_db + extra) / 10.0);
+            let bits: Vec<u8> = (0..self.plan.half())
+                .map(|k| {
+                    if k == 0 || k > self.plan.top() || Plan::is_pilot(k) {
+                        return 0;
+                    }
+                    let snr = 1.0 / self.noise[k];
+                    ((1.0 + snr / gap).log2().floor() as i64).clamp(0, i64::from(MAX_BITS)) as u8
+                })
+                .collect();
+            let mut table = Table { parity: LOADED_PARITY, bits };
+            if let Some(rate) = rate {
+                let capacity = self.plan.group(&table) * table.total() / 8;
+                table.parity = crate::link::checks_for(rate, capacity);
+            }
+            let net = self.plan.net(&table);
+            if best.as_ref().is_none_or(|(most, _)| net > *most) {
+                best = Some((net, table));
+            }
+        }
+        best.map(|(_, table)| table).expect("there are codes")
     }
 }
 

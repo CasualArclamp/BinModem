@@ -174,6 +174,71 @@ Two things it turned up in the receiver, both now fixed:
   and could not then find a real signal. The clock now goes back to where
   it was last right whenever the signal is lost.
 
+## When one end cannot hear the other
+
+A line can carry the modulation one way and not the other: a cable one way
+and a loudspeaker and a microphone back, say. The end on the cable loads and
+waits; the other hears nothing it can use; and neither used to do anything
+about it.
+
+- **Saying so.** A receiver that has read nothing of the far end for
+  `6 + 3 x speed` seconds starts listening for the modulation at half the
+  speed and says so in the handshake's tones (a `VN` message of six octets,
+  three times over, `hello::Watch`). It cannot say so in the modulation,
+  since it does not know its own is heard. Its own sending waits while it
+  does: a second and a bit.
+- **Slowing.** An end that hears that said sends at the speed it was told.
+  The modulation is built as it was and run slower, by giving it more of the
+  card's samples to each of its own (`Faster::slowed`, `Slower::slowed`).
+  Every frequency in it comes down and every symbol lasts longer:
+
+  | Slowed | V.ARC/QAM at 48 kHz | A multicarrier symbol |
+  |---|---|---|
+  | 1 | 16 000 baud, 1.5 to 19.5 kHz | 23 ms, 1.3 ms of guard |
+  | 2 | 8000 baud, 0.75 to 9.75 kHz | 45 ms, 2.7 ms |
+  | 4 | 4000 baud, 375 Hz to 4.9 kHz | 91 ms, 5.3 ms |
+  | 8 | 2000 baud, 190 Hz to 2.4 kHz | 181 ms, 10.7 ms |
+
+- **Each direction for itself.** Only the direction that could not be heard
+  is slowed.
+- **Heard means read**: four codewords the code could mend. Not found, since
+  a receiver can find a signal through a room and read none of it, and not
+  a figure in decibels, since what figure is enough depends on the code.
+  Both were tried first and both kept a call that was already working
+  stepping down to an eighth.
+
+## Codes
+
+A table says how many check octets its codewords have, so the code is the
+receiver's to choose along with the bits (`link::CODES`):
+
+| Data in a word | Decibels in hand | For |
+|---|---|---|
+| all but 16 octets, about 0.93 | 8 | a good line |
+| 0.75 | 5 | |
+| 0.5 | 3 | |
+| 0.33 | 2 | |
+| 0.25 | 1.5 | a line at 6 dB |
+
+A receiver works out the table for each and asks for whichever carries most.
+A code that is half checks mends a quarter of a word's octets, and four
+points can then be read at a ratio where one in fourteen comes out wrong:
+a line at 8 dB that carried nothing carries a bit a symbol. Below a quarter
+there is little more to be had from a code that is told only right or wrong.
+
+The starting tables are stronger than they were, since they have to work
+before any of this is known: a third checks for the multicarrier mode (it
+was a sixth), half for the single-carrier modes (an eighth).
+
+**Through the air.** One direction a virtual cable, the other out of a
+monitor's loudspeakers and into a webcam's microphone a metre away, which
+passes nothing above 8 kHz and is a room:
+
+| Mode | Before | Now |
+|---|---|---|
+| V.ARC/QAM | never heard; `NO CARRIER` | asks for half speed at 16 s; 7750 bit/s through the air at 8 dB, 255 000 the other way; 31 860 octets each way, none wrong |
+| V.ARC/DMT | loaded at 8 dB and carried nothing | 20 449 bit/s through the air at full speed, 399 743 the other way; 136 438 octets, none wrong |
+
 ## Probing the line: the starting table
 
 Both ends of a V.ARC/DMT call start on a table neither has had to be told,
@@ -407,9 +472,9 @@ asks for a number of bits; the far end adopts it.
 | Symbols | carriers 46.9 Hz apart (31.3 at 16 kHz), up to 0.86 of half the sample rate | 16 000 baud on a 10.5 kHz carrier | 16 000 baud at baseband | none: the samples |
 | Bits | 0 to 24 on each carrier, each for itself | 2 to 24 a symbol | 1 to 12 a symbol | 16 a sample |
 | Grid | square for an even count, a 2:1 rectangle for an odd one | the same | a ladder of levels | - |
-| Code, starting | Reed-Solomon 160/192, rate 0.83 | 216/248, rate 0.87 | 185/217, rate 0.85 | - |
-| Code, loaded | 16 check octets a word, about 228/244, rate 0.93 | 16 check octets, rate 0.89 to 0.94 | the same | 48 check octets |
-| Net rate, starting | 3.4 kbit/s (2.3 at 16 kHz) | 27 kbit/s | 11.6 kbit/s | 200 kbit/s |
+| Code, starting | Reed-Solomon 128/192, rate 0.67 | 124/248, rate 0.5 | 108/217, rate 0.5 | - |
+| Code, loaded | 0.93 on a good line, down to 0.25 on a poor one; see [Codes](#codes) | the same | the same | 48 check octets |
+| Net rate, starting | 2.7 kbit/s | 15.5 kbit/s | 6.8 kbit/s | 200 kbit/s |
 
 A bit more on a carrier or a symbol wants about 3 dB more signal to noise,
 and there are 8 dB kept in hand: `bits = floor(log2(1 + SNR / 6.3))`, so
