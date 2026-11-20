@@ -516,6 +516,13 @@ impl Call {
     /// One frame to send, when hearing and sending are stepped apart.
     /// Silence until something has been heard to say what the rates are.
     pub fn speak(&mut self, output: &mut [f64]) {
+        // One signal, the same on every channel the card has: see `hear`.
+        let mut one = [0.0];
+        self.speak_one(&mut one);
+        output.fill(one[0]);
+    }
+
+    fn speak_one(&mut self, output: &mut [f64]) {
         match (self.hello.as_mut(), self.station.as_mut()) {
             // Saying what this end is: the same on every channel.
             (Some(hello), _) => output.fill(hello.say()),
@@ -560,7 +567,19 @@ impl Call {
     /// running the call should look at it too: not every sample, because
     /// asking each channel how it was getting on at every sample of a
     /// 192 kHz card cost more than the modulation did.
+    ///
+    /// The call is one signal however many channels the card has: what is
+    /// sent is the same on all of them, and what is heard is all of them
+    /// added together. It was a signal a channel, each with its own data,
+    /// which is twice the rate down a stereo lead and a call that half
+    /// works down anything else: a stereo cable one way and one microphone
+    /// back left one channel of two on its starting table for good.
     pub fn hear(&mut self, fs: f64, fs_out: f64, input: &[f64]) -> Result<bool, String> {
+        let one = [input.iter().sum::<f64>() / input.len().max(1) as f64];
+        self.hear_one(fs, fs_out, &one)
+    }
+
+    fn hear_one(&mut self, fs: f64, fs_out: f64, input: &[f64]) -> Result<bool, String> {
         if self.fs != fs || self.fs_out != fs_out {
             // A line at other rates is another line: start from nothing.
             self.station = None;
@@ -785,9 +804,14 @@ impl Call {
     pub fn rates(&self) -> (u32, u32) {
         let Some(station) = self.station.as_ref() else { return (0, 0) };
         let (mut rx, mut tx) = (0.0, 0.0);
-        for channel in station.channels.iter().filter(|c| c.loaded()) {
-            rx += channel.rx.rates().1;
-            tx += channel.tx.rates().1;
+        // Each way for itself: a channel may be loaded one way only.
+        for channel in &station.channels {
+            if channel.hears_loaded() {
+                rx += channel.rx.rates().1;
+            }
+            if channel.sends_loaded() {
+                tx += channel.tx.rates().1;
+            }
         }
         (rx as u32, tx as u32)
     }
@@ -853,9 +877,14 @@ impl Call {
     pub fn take_points(&mut self) -> (Vec<(f64, f64)>, u8) {
         let mut taken = (Vec::new(), 0);
         let Some(station) = self.station.as_mut() else { return taken };
+        // The channel carrying most, so that a channel still on its
+        // starting table is not what is shown for one that is loaded.
+        let mut most = -1.0;
         for channel in &mut station.channels {
             let points = channel.rx.points();
-            if taken.0.is_empty() && !points.is_empty() {
+            let carries = channel.rx.rates().1;
+            if !points.is_empty() && carries > most {
+                most = carries;
                 taken = (points, channel.rx.shown_bits());
             }
         }
@@ -865,7 +894,10 @@ impl Call {
     /// The Reed-Solomon code on what is arriving, (n, k), on the first
     /// channel that is hearing a table it knows.
     pub fn code(&self) -> Option<(usize, usize)> {
-        self.station.as_ref()?.channels.iter().find_map(|c| c.rx.code())
+        // Of the channel carrying most, as the symbol diagram is.
+        let channels = &self.station.as_ref()?.channels;
+        let best = channels.iter().max_by(|a, b| a.rx.rates().1.total_cmp(&b.rx.rates().1))?;
+        best.rx.code().or_else(|| channels.iter().find_map(|c| c.rx.code()))
     }
 
     /// What the far end says it hears of this end, on the first channel it

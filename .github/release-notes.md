@@ -11,28 +11,28 @@ binmodem.exe --capture        replay the golden capture
 
 ## What's new in 4.3.0
 
-![V.ARC between two windows on one pair of wires: 760 kbit/s arriving, the echo canceller's picture of the line bottom right](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/releases/v4.3.0/varc-two-wire.png)
+![V.ARC between two windows on one pair of wires, the echo canceller's picture of the line bottom right](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/releases/v4.3.0/varc-two-wire.png)
 
 ### V.ARC: a mode of our own, for a sound card and not a telephone line
 
 No Recommendation covers this one. Both ends have to be BinModem, and both have to be this release. [docs/design/v-arc.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/design/v-arc.md) is the design and every measurement.
 
 - **V.ARC** in the mode box, or `AT+MS=VARC`, then Dial and Answer as for any call. Hundreds of carriers 47 Hz apart, each given the bits its own stretch of the line will bear, from none to 24. The window opens the sound card at its own rate on both channels and the waterfall follows it out to half that rate.
-- **Through a stereo lead** from a Realtek line output to its line input at 192 kHz: 1.1 Mbit/s a channel, 2.1 Mbit/s over both, no octet wrong.
-- **V.ARC/QAM and V.ARC/PCM** are one carrier and baseband levels at 16 000 baud: 240 and 120 kbit/s on a virtual cable.
+- **Through a lead** from a Realtek line output to its line input at 192 kHz: 1.4 Mbit/s, no octet wrong. A call is one signal, the same on both channels and both added together on the way in.
+- **V.ARC/QAM and V.ARC/PCM** are one carrier and baseband levels at 16 000 baud.
 - **It starts on a line it knows nothing about.** The starting signal is 48 four-point symbols, each sent on every carrier in turn and added together by the receiver, so any 2.3 kHz of the band that works is enough; every carrier's noise is measured against the result and the table loads only where the line is. In simulation it starts on 300 to 3400 Hz, and on the whole band with a carrier 3 dB above its noise.
 - **A call starts with a handshake any line will carry**: 200 bit/s in two tones a direction, in the middle of the voice band. Each end says what rates it hears and sends at, how many channels, which modulation it was asked for and whether it was told the line is two-wire, and both work out the same answer. A fast card and a slow one meet at the slow one's rate; ends told two-wire that cannot be run a wire each way and say why. The "distant" panel shows what the far end said.
 - **An end that cannot hear the other says so, and is sent to slower.** A line can carry the modulation one way and not the other. The end that reads nothing says so in the handshake's tones, and the far end runs the modulation at half the speed, then a quarter, then an eighth, until it is read. Each direction for itself.
 - **Codes from 0.93 down to 0.25**, chosen by the receiver with the bits. A line at 8 dB that carried nothing carries a bit a symbol.
-- **It has been through the air**: one direction out of a monitor's loudspeakers into a webcam's microphone. The multicarrier mode carried 20 kbit/s that way and V.ARC/QAM 7.7 kbit/s at half speed, with nothing wrong.
+- **It has been through the air**: one direction out of a monitor's loudspeakers into a webcam's microphone. The multicarrier mode carried 20 kbit/s that way and V.ARC/QAM 10 kbit/s at half speed, with nothing wrong.
 - **Two sound devices at two rates are a line each way.** An input at 192 kHz and an output at 48 kHz run each direction at its own.
 - **Each end tells the other what it hears**: level, peaks, samples at full scale, and Es/N0. A sender told it is reaching the far converter's stops turns itself down. The window has a Far end line for it.
-- **V.ARC two-wire** (`AT+MS=VARC2W`) is the same mode on one pair of wires, both ends sending into it, with this end's echo taken out. A canceller finds the echo and fits a filter to it; then the receiver, once it has read a symbol, takes the far end's part of it away and fits a second filter to what is left. Each end first has the line to itself for two seconds, the caller and then the answerer, so each learns its echo with nobody talking over it. Two ends sharing one virtual cable connect at 650 kbit/s, reach 730, and go on improving past 70 dB, millions of octets and none wrong. It wants one sound card, input and output at one rate. `VARCQ2W` and `VARCP2W` are the single-carrier modes the same way, by the first canceller alone: 278 kbit/s, and 112 to 166.
+- **V.ARC two-wire** (`AT+MS=VARC2W`) is the same mode on one pair of wires, both ends sending into it, with this end's echo taken out. A canceller finds the echo and fits a filter to it; then the receiver, once it has read a symbol, takes the far end's part of it away and fits a second filter to what is left. Each end first has the line to itself for two seconds, the caller and then the answerer, so each learns its echo with nobody talking over it. Two ends sharing one virtual cable connect at 327 kbit/s, reach 384, and go on improving past 75 dB, a million octets and none wrong. It wants one sound card, input and output at one rate. `VARCQ2W` and `VARCP2W` are the single-carrier modes the same way, by the first canceller alone: 139 kbit/s for QAM.
 - **Over SIP**, between two accounts that say `linear = yes`: the call carries sixteen-bit samples exactly, the samples are the data, and the rate is 200 kbit/s.
 
 ### The window
 
-![V.ARC through a real lead at 192 kHz: 2.1 Mbit/s, the bits on each carrier under the symbol diagram](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/releases/v4.3.0/varc-lead.png)
+![V.ARC through a real lead at 192 kHz, the bits on each carrier under the symbol diagram](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/releases/v4.3.0/varc-lead.png)
 
 - **The symbol diagram draws on a V.ARC call**, and beside the grid's size is the code rate (`code 0.94`).
 - **Two more scopes under it** on a V.ARC call: the bits on each carrier with the signal to noise they were chosen from, and the echo as the canceller has learned it.

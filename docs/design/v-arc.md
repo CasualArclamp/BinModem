@@ -106,6 +106,37 @@ loops are equally happy a quarter turn round.
 
 Loading: `b = floor(log2(1 + SNR/gap))` for QAM, half that for PCM.
 
+## One signal
+
+A call is one signal however many channels the sound card has: what is sent
+is the same on every channel, and what is heard is all of them added
+together.
+
+It was a signal a channel at first, each with its own data and its own
+tables, which is twice the rate down a stereo lead. It is also a call that
+half works down anything else. A stereo cable one way and a single
+microphone back left one channel of two on its starting table for the whole
+call, since the table asking it to do better could only come back down the
+channel that was not there; and the window showed whichever channel it met
+first. (Tables can now go round by another channel, `TABLE_FOR`, and each
+direction of a channel is counted for itself; with one signal neither is
+needed, and both are still there for a `Station` given more than one.)
+
+Adding the channels together is worth about 3 dB where both carry the
+signal. Measured since, on one machine, nothing wrong in any:
+
+| Line | Rate |
+|---|---|
+| The Realtek lead at 192 kHz, a call to itself | 1.42 Mbit/s at 72 dB; it was 1.1 a channel, 2.1 over the two |
+| Line In at 192 kHz one way, CABLE-B at 48 kHz back | 1.42 Mbit/s and 0.40 |
+| Two ends on VB-Cable A, two-wire, multicarrier | connects at 327 kbit/s, 384 at 42 s, 77 dB |
+| The same, V.ARC/QAM two-wire | 139 kbit/s |
+| A cable one way, a monitor's loudspeakers to a webcam's microphone back, V.ARC/QAM | 10 250 bit/s through the air on four points with a code of a third; 286 000 the other way on a grid of a million |
+
+**Figures elsewhere in this note that speak of two channels, or of rates
+above these on the same lines, were measured before this** and are what two
+signals carried.
+
 ## The handshake
 
 A call begins with each end saying what it is (`hello.rs`). Two ends need

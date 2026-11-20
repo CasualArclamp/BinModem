@@ -191,9 +191,9 @@ OS-specific code — but only built and run on Windows so far.
   loaded a carrier at a time, and QAM and baseband levels at 16 000 baud.
   `AT+MS=VARC` or the window's mode box selects it and `ATD` and `ATA` place
   and answer the call.
-  - Through a real stereo lead between a Realtek line output and its line
-    input at 192 kHz: a megabit a second a channel, two over both, with no
-    octet wrong.
+  - Through a real lead between a Realtek line output and its line input at
+    192 kHz: 1.4 Mbit/s with no octet wrong. A call is one signal, the same
+    on both channels.
   - A call starts with a handshake at 200 bit/s in the voice band, where
     each end says what its sound cards are, so ends that differ agree on
     what to run and do not just fail.
@@ -207,7 +207,7 @@ OS-specific code — but only built and run on Windows so far.
     and into a microphone: 20 kbit/s.
   - `AT+MS=VARC2W` is the same mode on one pair of wires, with an echo
     canceller. Each end learns its echo with the line to itself first; two
-    ends sharing a virtual cable connect at 650 kbit/s and pass 70 dB.
+    ends sharing a virtual cable connect at 327 kbit/s and pass 75 dB.
   - Between two SIP accounts that say `linear = yes` the call carries
     sixteen-bit samples exactly and the samples are the data, at 200 kbit/s.
 

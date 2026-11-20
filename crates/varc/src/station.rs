@@ -46,6 +46,9 @@ const RESET: u8 = 5;
 const REPORT: u8 = 6;
 /// "I have changed the level I send at: measure the line again."
 const LEVEL: u8 = 7;
+/// A table for another channel than the one it came in on: the channel's
+/// number, then what a TABLE frame holds.
+const TABLE_FOR: u8 = 8;
 
 /// A sample this near full scale is the converter at its stops.
 const FULL_SCALE: f64 = 0.999;
@@ -300,6 +303,9 @@ pub struct Channel<T, R> {
     trimmed_at: u64,
     /// The far end is to be told the level changed until it has been.
     level_owed: bool,
+    /// Tables that arrived on this channel for others: the channel, the
+    /// mark and the table.
+    foreign: Vec<(u8, u8, Table)>,
 }
 
 impl<T: Sender, R: Receiver> Channel<T, R> {
@@ -330,6 +336,7 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
             trim_db: 0.0,
             trimmed_at: 0,
             level_owed: false,
+            foreign: Vec::new(),
         }
     }
 
@@ -358,17 +365,46 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
     /// to measure: the far end is sending with the one this end asked for,
     /// and this end with one the far end asked for.
     pub fn loaded(&self) -> bool {
-        self.offered.as_ref().is_some_and(|(mark, _)| self.rx.id() == Some(*mark)) && self.tx.id() != 0
+        self.hears_loaded() && self.sends_loaded()
+    }
+
+    /// The far end is sending on this channel with the table this end asked
+    /// for. A channel can be loaded one way and not the other: a stereo
+    /// cable one way and a single microphone back is two channels there and
+    /// one here.
+    pub fn hears_loaded(&self) -> bool {
+        self.offered.as_ref().is_some_and(|(mark, _)| self.rx.id() == Some(*mark))
+    }
+
+    /// This end is sending on this channel with a table the far end asked
+    /// for.
+    pub fn sends_loaded(&self) -> bool {
+        self.tx.id() != 0
+    }
+
+    /// The table this end has asked the far end to send with on this
+    /// channel and has not yet seen it use, as a frame for another channel
+    /// to carry.
+    ///
+    /// Only once it has gone two seconds unanswered down its own channel. A
+    /// channel that works both ways answers in a fraction of that, and a
+    /// table that also went round by another channel can arrive after a
+    /// later one has: marks are few and are used again, so a late copy
+    /// under a mark since given to another table had the far end sending
+    /// with one table what this end was reading with another.
+    fn offer_for(&self, number: u8, now: u64, fs: f64) -> Option<Vec<u8>> {
+        if now.saturating_sub(self.proposed_at) < (2.0 * fs) as u64 {
+            return None;
+        }
+        let (mark, table) = self.offered.as_ref().filter(|(mark, _)| self.rx.id() != Some(*mark))?;
+        let mut body = vec![number, *mark];
+        body.extend_from_slice(&table.encode());
+        Some(body)
     }
 
     /// The table the far end has been asked for and is not yet using.
     pub fn waiting_for(&self) -> Option<u8> {
         self.offered.as_ref().map(|(mark, _)| *mark).filter(|&mark| self.rx.id() != Some(mark))
-    }
-
-    fn step(&mut self, input: f64, arq: &mut Arq, now: u64, fs: f64) -> f64 {
-        self.hear(input, arq, now, fs);
-        self.speak(arq, now)
     }
 
     /// One sample in, and everything that follows from it.
@@ -462,6 +498,14 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
                         self.tx.adopt(mark, table);
                     }
                 }
+                TABLE_FOR => {
+                    if let Some((&[channel, mark], rest)) = body.split_first_chunk::<2>()
+                        && (1..MARKS).contains(&mark)
+                        && let Some(table) = Table::decode(rest)
+                    {
+                        self.foreign.push((channel, mark, table));
+                    }
+                }
                 RESET => {
                     if self.tx.id() != 0 {
                         self.tx.reset();
@@ -530,10 +574,19 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
         self.level_owed = true;
     }
 
-    /// One sample out.
-    fn speak(&mut self, arq: &mut Arq, now: u64) -> f64 {
+    /// One sample out. `others` are tables the far end has been asked for
+    /// on other channels and is not yet using, for this channel to carry.
+    fn speak(&mut self, arq: &mut Arq, now: u64, others: &[Vec<u8>]) -> f64 {
         if let Some(layout) = self.tx.wants() {
             if !self.packer.urgent_waiting() {
+                // A table goes back down the channel it is for, and that is
+                // the one way it cannot arrive if the channel only works one
+                // way: two channels of cable out, one microphone back. So it
+                // goes down every other channel as well, and whichever of
+                // them the far end can hear delivers it.
+                for body in others {
+                    self.packer.push_urgent(TABLE_FOR, body);
+                }
                 if self.lost_run >= 2 || self.wants_reset {
                     self.packer.push_urgent(RESET, &[]);
                 } else if let Some((mark, table)) = &self.offered
@@ -563,8 +616,10 @@ impl<T: Sender, R: Receiver> Channel<T, R> {
             // channel's transmitter would otherwise take its share of the
             // frames and send them to nobody. This end cannot see whether
             // the far end hears it; it can see whether it hears the far
-            // end on the same channel, and a channel is a wire each way.
-            let live = self.rx.health().locked;
+            // end on the same channel, and a channel is usually a wire each
+            // way. Or the far end has asked for a table on it, which it
+            // could only have measured by hearing it.
+            let live = self.rx.health().locked || self.sends_loaded();
             while live && self.packer.backlog() < room {
                 match arq.next_frame(now, chunk) {
                     Some((ACK, body)) => self.packer.push_urgent(ACK, &body),
@@ -601,9 +656,21 @@ impl<T: Sender, R: Receiver> Station<T, R> {
 
     /// One sample of every channel in, one of every channel out.
     pub fn step(&mut self, input: &[f64], output: &mut [f64]) {
-        self.now += 1;
-        for ((channel, &x), y) in self.channels.iter_mut().zip(input).zip(output.iter_mut()) {
-            *y = channel.step(x, &mut self.arq, self.now, self.fs);
+        self.hear(input);
+        self.speak(output);
+    }
+
+    /// Tables that came in on one channel for another go to the one they
+    /// are for.
+    fn deliver(&mut self) {
+        for from in 0..self.channels.len() {
+            for (to, mark, table) in std::mem::take(&mut self.channels[from].foreign) {
+                if let Some(channel) = self.channels.get_mut(usize::from(to))
+                    && mark != channel.tx.id()
+                {
+                    channel.tx.adopt(mark, table);
+                }
+            }
         }
     }
 
@@ -615,6 +682,9 @@ impl<T: Sender, R: Receiver> Station<T, R> {
         self.now += 1;
         for (channel, &x) in self.channels.iter_mut().zip(input) {
             channel.hear(x, &mut self.arq, self.now, self.fs);
+        }
+        if self.channels.iter().any(|c| !c.foreign.is_empty()) {
+            self.deliver();
         }
     }
 
@@ -629,8 +699,17 @@ impl<T: Sender, R: Receiver> Station<T, R> {
 
     /// One sample of every channel out; the other half of [`Self::hear`].
     pub fn speak(&mut self, output: &mut [f64]) {
-        for (channel, y) in self.channels.iter_mut().zip(output.iter_mut()) {
-            *y = channel.speak(&mut self.arq, self.now);
+        for (i, y) in output.iter_mut().enumerate().take(self.channels.len()) {
+            // Only when a block is about to be filled, which is seldom.
+            let others: Vec<Vec<u8>> = if self.channels.len() > 1 && self.channels[i].tx.wants().is_some() {
+                (0..self.channels.len())
+                    .filter(|&j| j != i)
+                    .filter_map(|j| self.channels[j].offer_for(j as u8, self.now, self.fs))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            *y = self.channels[i].speak(&mut self.arq, self.now, &others);
         }
     }
 
@@ -667,7 +746,7 @@ mod tests {
         clock: Interp,
         noise: Noise,
         sigma: f64,
-        cut: bool,
+        pub(super) cut: bool,
         /// What the line multiplies by, before a converter that stops at
         /// full scale.
         pub(super) gain: f64,
@@ -882,6 +961,28 @@ mod reports {
         assert!(pair.at_b == to_b, "{} of {} octets", pair.at_b.len(), to_b.len());
         // The way back was never touched.
         assert_eq!(pair.b.channels[0].trim_db, 0.0);
+    }
+
+    /// Two channels of cable one way and one microphone back: the second
+    /// channel is heard by B and not by A. B's table for it cannot go back
+    /// down the channel it is for, so it goes down the other, and A loads
+    /// both of the channels it sends on.
+    #[test]
+    fn a_channel_that_works_one_way_is_loaded_that_way() {
+        let mut pair = Pair::new(2, &[50.0, 50.0], 0.0);
+        pair.back[1].cut = true;
+        let to_b = stream(8, 600_000);
+        pair.a.write(&to_b);
+        pair.run(20.0);
+        // Both of A's transmitters are on tables B asked for.
+        assert!(pair.a.channels[0].sends_loaded() && pair.a.channels[1].sends_loaded());
+        assert!(pair.b.channels[1].hears_loaded());
+        // And neither end thinks the dead way is alive.
+        assert!(!pair.a.channels[1].hears_loaded() && !pair.b.channels[1].sends_loaded());
+        assert!(!pair.a.channels[1].loaded());
+        // The stream went down both.
+        assert!(pair.at_b == to_b, "{} of {} octets", pair.at_b.len(), to_b.len());
+        assert!(pair.b.channels[1].tally.blocks > 100, "{:?}", pair.b.channels[1].tally);
     }
 
     #[test]
