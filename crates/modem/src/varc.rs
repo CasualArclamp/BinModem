@@ -254,7 +254,7 @@ impl Call {
                 // sample for sample, so the two have to be the same clock.
                 if fs != fs_out {
                     return Err(format!(
-                        "V.ARC on two wires wants one sound card: this line hears at {fs} Hz and sends at {fs_out} Hz"
+                        "V.ARC two-wire needs its input and output on one sound card at one rate: this line hears at {fs} Hz and sends at {fs_out} Hz. A line with a wire each way is plain V.ARC"
                     ));
                 }
                 self.echo = (0..input.len()).map(|_| Canceller::new(fs)).collect();

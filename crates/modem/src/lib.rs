@@ -1036,6 +1036,8 @@ pub struct Modem {
     varc_said: &'static str,
     /// Bits a symbol of the grid a V.ARC call's symbol diagram is showing.
     varc_bits: u8,
+    /// Why the last call could not be run on this line at all, until asked.
+    call_refused: Option<String>,
 }
 
 impl Modem {
@@ -1095,6 +1097,7 @@ impl Modem {
             varc_owed_ms: 0.0,
             varc_said: "",
             varc_bits: 0,
+            call_refused: None,
         }
     }
 
@@ -1939,6 +1942,14 @@ impl Modem {
         self.varc.as_ref().map_or_else(Vec::new, varc::Call::echo_response)
     }
 
+    /// Why the last call could not be run on this line at all, once: a
+    /// two-wire call on two sound cards, a mode that wants a rate the card
+    /// is not running at. The terminal only ever sees `NO CARRIER`, so
+    /// whatever shows the line to a person should show this as well.
+    pub fn take_call_refused(&mut self) -> Option<String> {
+        self.call_refused.take()
+    }
+
     /// Tell a V.ARC call that its line carries samples exactly as sent: a
     /// SIP call that agreed on linear PCM. It then starts with no
     /// modulation at all, the samples being the data, and gives that up for
@@ -2000,6 +2011,9 @@ impl Modem {
         let look = match call.hear(fs, fs_out, input) {
             Ok(look) => look,
             Err(why) => {
+                // The terminal is told NO CARRIER and nothing else, so the
+                // reason is kept where whoever runs the line can ask for it.
+                self.call_refused = Some(why.clone());
                 self.line_notes.push(why);
                 self.end_call(Ended::CarrierLost);
                 return;

@@ -252,9 +252,16 @@ past it is in the multicarrier receiver (`Rx::learn_echo`):
 - It is fitted after the receiver's resampler, where the far end's symbols
   are. This end's own signal is put through a resampler steered exactly as
   the line's is, so the two stay sample for sample.
-- It learns only from symbols that were read (three carriers in four within
-  6 dB of a point), since a wrong decision leaves the far end in what it
-  learns from. It forgets what it knows when the receiver loses the far end.
+- It learns only from symbols that were read, since a wrong decision leaves
+  the far end in what it learns from, and that feeds itself: the filter goes
+  wrong, the next symbol is read worse, and it learns from that. On the
+  starting table's four points "read" is three carriers in four within 6 dB
+  of a point. On a grid of thousands every sample is near some point, so the
+  test there is against each carrier's known noise: a symbol that missed by
+  twice that on average was not read. The first version used the four-point
+  test throughout, and a call went round and round between loaded and
+  starting again for minutes. It forgets what it knows when the receiver
+  loses the far end.
 - Once the receiver reads at 30 dB the canceller in front is held still, so
   that what it missed stays put for the second stage to find; below 24 dB it
   is let go again. Before that was conditional, an end that started badly
@@ -263,7 +270,7 @@ past it is in the multicarrier receiver (`Rx::learn_echo`):
 | Where | First stage only | With the second stage |
 |---|---|---|
 | Simulation, echo 6 dB louder than the far end | Es/N0 41.6 dB at 165 s, 164 kbit/s | 75 dB at 50 s, 392 kbit/s, which is what a wire each way gives |
-| Two ends on one machine, both on VB-Cable A, 48 kHz, two channels | about 38 dB at 35 s, 300 kbit/s each way | 72 dB at 60 s; 720 and 634 kbit/s; 2.6 and 2.3 million octets, none wrong |
+| Two ends on one machine, both on VB-Cable A, 48 kHz, two channels | about 38 dB at 35 s, 300 kbit/s each way | 70 to 80 dB at 60 s; 607 to 781 kbit/s; two runs of 115 s, 6 to 7 million octets each way in each, none wrong |
 
 Not tried: a real two-wire line (a hybrid, a telephone pair), two machines,
 or two sound cards whose clocks differ, where the echo of one card is still
@@ -448,7 +455,9 @@ and CABLE-B at 48 kHz, 2.14 Mbit/s one way and 0.80 the other.
 ![Two windows, each direction at its own rate](../images/v-arc/two-rates.png)
 
 Before this a V.ARC call on two such devices ended at once in `NO CARRIER`,
-with the reason only in the transcript.
+with the reason only in the transcript. A call the line cannot run now says
+why in red on the line's row of the window: a two-wire call on two devices,
+for one, which is still refused.
 
 During a V.ARC call the waterfall and the spectrum are taken from the left
 channel at the card's own rate and drawn from 0 Hz to half of it (24 kHz on a

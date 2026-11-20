@@ -1102,6 +1102,8 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // The last sample sent, for the scope, when sending is paced apart from
     // hearing and there is not one sent for each heard.
     let mut wide_last = 0.0f32;
+    // Why a call could not be run on this line at all, until it is shown.
+    let mut refused: Option<String> = None;
     // The spectrum of a V.ARC call, taken at the card's rate so that the
     // waterfall can show the whole of the band the call is using.
     let mut wide_spectrum: Option<(u32, Spectrum)> = None;
@@ -1640,9 +1642,19 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                             ),
                         );
                         audio = Some(Wire::Wide { line: Box::new(wide), input, output });
+                        // A new call: whatever the last one was refused for
+                        // has been read by now.
+                        let mut state = session.state();
+                        if state.error.take().is_some() {
+                            session.set_state(state);
+                        }
                     }
                     Err(e) => {
-                        tx.log(Direction::Note, format!("{}: could not open the sound card for it: {e}", mode.name()));
+                        let why = format!("{}: could not open the sound card for it: {e}", mode.name());
+                        tx.log(Direction::Note, why.clone());
+                        // Where it is seen: the transcript is a tab nobody
+                        // has open when a call will not start.
+                        refused = Some(why);
                         modem.carrier_lost();
                         audio = line::Duplex::open(Some(&input), Some(&output), FS).ok().map(|l| Wire::Audio(Box::new(l)));
                     }
@@ -1657,6 +1669,15 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 }
             }
             _ => {}
+        }
+        // A call the modem would not run on this line. The terminal has
+        // been told NO CARRIER and the transcript why; neither is where a
+        // person looks when a call will not start, so it goes on the line's
+        // own row as well, where a line that would not open is reported.
+        if let Some(why) = modem.take_call_refused().or_else(|| refused.take()) {
+            let mut state = session.state();
+            state.error = Some(why);
+            session.set_state(state);
         }
 
         let Some(audio) = audio.as_ref() else {

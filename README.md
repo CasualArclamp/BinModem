@@ -186,16 +186,27 @@ OS-specific code — but only built and run on Windows so far.
   provider's server puts exact codewords on the network, which is why a real
   modem gets 56k on the same line.
 
-- **V.ARC**, a wideband mode of our own for two sound cards joined by a lead
-  rather than by a telephone line. Three modulations: a multicarrier one
+- **V.ARC**, a wideband mode of our own for a sound card and not a
+  telephone line; both ends have to be BinModem. A multicarrier modulation
   loaded a carrier at a time, and QAM and baseband levels at 16 000 baud.
-  Through a real stereo lead between a Realtek line output and its line
-  input at 192 kHz the multicarrier mode measured a megabit a second each
-  way with no octet wrong. `AT+MS=VARC` or the window's mode box selects it
-  and `ATD` and `ATA` place and answer the call. Between two SIP accounts
-  that say `linear = yes` the call carries sixteen-bit samples exactly and
-  the samples are the data, at 200 kbit/s. It has never been run between two
-  machines. See [docs/design/v-arc.md](docs/design/v-arc.md).
+  `AT+MS=VARC` or the window's mode box selects it and `ATD` and `ATA` place
+  and answer the call.
+  - Through a real stereo lead between a Realtek line output and its line
+    input at 192 kHz: a megabit a second a channel, two over both, with no
+    octet wrong.
+  - It starts on a line it knows nothing about, with a signal that needs any
+    2.3 kHz of the band, and loads only where the line is.
+  - Each end tells the other what it hears, and a sender that is too loud
+    turns itself down.
+  - `AT+MS=VARC2W` is the same mode on one pair of wires, with an echo
+    canceller: 72 dB and 630 to 760 kbit/s each way between two windows
+    sharing a virtual cable.
+  - Between two SIP accounts that say `linear = yes` the call carries
+    sixteen-bit samples exactly and the samples are the data, at 200 kbit/s.
+
+  It has never been run between two machines, and the two-wire mode has
+  never met a real two-wire line. See
+  [docs/design/v-arc.md](docs/design/v-arc.md).
 
 ## Next
 

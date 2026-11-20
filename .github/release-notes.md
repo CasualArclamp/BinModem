@@ -9,6 +9,44 @@ binmodem.exe --capture        replay the golden capture
 
 [docs/usage.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/usage.md) has the setup.
 
+## What's new in 4.3.0
+
+![V.ARC between two windows on one pair of wires: 760 kbit/s arriving, the echo canceller's picture of the line bottom right](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/releases/v4.3.0/varc-two-wire.png)
+
+### V.ARC: a mode of our own, for a sound card and not a telephone line
+
+No Recommendation covers this one. Both ends have to be BinModem, and both have to be this release. [docs/design/v-arc.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/design/v-arc.md) is the design and every measurement.
+
+- **V.ARC** in the mode box, or `AT+MS=VARC`, then Dial and Answer as for any call. Hundreds of carriers 47 Hz apart, each given the bits its own stretch of the line will bear, from none to 24. The window opens the sound card at its own rate on both channels and the waterfall follows it out to half that rate.
+- **Through a stereo lead** from a Realtek line output to its line input at 192 kHz: 1.1 Mbit/s a channel, 2.1 Mbit/s over both, no octet wrong.
+- **V.ARC/QAM and V.ARC/PCM** are one carrier and baseband levels at 16 000 baud: 240 and 120 kbit/s on a virtual cable.
+- **It starts on a line it knows nothing about.** The starting signal is 48 four-point symbols, each sent on every carrier in turn and added together by the receiver, so any 2.3 kHz of the band that works is enough; every carrier's noise is measured against the result and the table loads only where the line is. In simulation it starts on 300 to 3400 Hz, and on the whole band with a carrier 3 dB above its noise.
+- **Two sound devices at two rates are a line each way.** An input at 192 kHz and an output at 48 kHz run each direction at its own.
+- **Each end tells the other what it hears**: level, peaks, samples at full scale, and Es/N0. A sender told it is reaching the far converter's stops turns itself down. The window has a Far end line for it.
+- **V.ARC two-wire** (`AT+MS=VARC2W`) is the same mode on one pair of wires, both ends sending into it, with this end's echo taken out. A canceller finds the echo and fits a filter to it; then the receiver, once it has read a symbol, takes the far end's part of it away and fits a second filter to what is left. Two windows sharing one virtual cable: 72 dB and 630 to 760 kbit/s each way, millions of octets and none wrong. It wants one sound card, input and output at one rate.
+- **Over SIP**, between two accounts that say `linear = yes`: the call carries sixteen-bit samples exactly, the samples are the data, and the rate is 200 kbit/s.
+
+### The window
+
+![V.ARC through a real lead at 192 kHz: 2.1 Mbit/s, the bits on each carrier under the symbol diagram](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/releases/v4.3.0/varc-lead.png)
+
+- **The symbol diagram draws on a V.ARC call**, and beside the grid's size is the code rate (`code 0.94`).
+- **Two more scopes under it** on a V.ARC call: the bits on each carrier with the signal to noise they were chosen from, and the echo as the canceller has learned it.
+- **The window says which build it is**, top left. Two windows that will not talk are often two builds.
+- **A call the line cannot run says why**, in red on the line's row. It used to say `NO CARRIER` and keep the reason in the transcript.
+
+### Calls between two of these without a window
+
+- **`modem-sip` drives the line a tenth as hard**, as the window does. It was clipping its own signal into G.711, and a V.34 call between two of them ended in `NO CARRIER` more often than not. With the fix V.34 connected 13 times of 13 at 33 600, and V.92 3 of 3.
+
+### What V.ARC has not done
+
+- **It has never run between two machines.** Every figure above is one computer: one sound card, a lead, or virtual cables. Clock recovery is tested in simulation, to 150 parts in a million.
+- **Two-wire has only met a virtual cable**, whose echo is one spike with no tail and no noise. A real hybrid or a telephone pair has not been tried, and neither has an echo through the air.
+- **The starting signal on a poor line** is tested in simulation only.
+- **A gap in the sound costs a call seconds**: half the blocks bad until the tables are made again.
+- **Over SIP** it has run between two processes on one machine and over no network.
+
 ## What's new in 4.2.0
 
 ![Two calls from the window to D-Modem, dialled at the same moment: the first trains for 10.0 s, the second, the short way, for 7.5 s](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/releases/v4.2.0/quick-connect.png)

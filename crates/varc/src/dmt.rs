@@ -1156,6 +1156,9 @@ impl Rx {
         // Carriers worth judging the symbol by, and how many of them came
         // out near a point.
         let (mut seen, mut sound) = (0usize, 0usize);
+        // Loaded carriers, and the sum of how far each missed by against
+        // its own noise.
+        let (mut wide, mut miss) = (0usize, 0.0f64);
         let mut back = Complex::ONE;
         for k in 1..half {
             back = back * turn;
@@ -1194,6 +1197,11 @@ impl Rx {
             if k <= top && self.weight[k] > 1e-3 {
                 seen += 1;
                 sound += usize::from(e2 < 0.25 * reference.norm_sqr());
+                if bits > 0 {
+                    // Against the noise as it stood before this symbol.
+                    wide += 1;
+                    miss += (e2 / self.noise[k].max(1e-30)).min(50.0);
+                }
             }
             if spreading && k <= top {
                 self.heard[k] += (e2.max(1e-12) - self.heard[k]) / 16.0;
@@ -1240,9 +1248,22 @@ impl Rx {
         // The echo stage learns from a symbol only if the symbol was read:
         // what it takes away as the far end's part is the decisions, and if
         // those are wrong what is left is not the echo but the far end, and
-        // a filter fitted to that is worse than none. Most carriers within
-        // a few decibels of a point is a symbol that was read.
-        if self.echo_on && !unknown && 4 * sound >= 3 * seen.max(1) {
+        // a filter fitted to that is worse than none. Worse, it feeds
+        // itself: the filter goes wrong, the next symbol is read worse, and
+        // the filter learns from that.
+        //
+        // How to tell depends on the grid. On the starting table's four
+        // points a carrier within a few decibels of one was read. On a grid
+        // of thousands every sample is near *some* point, so that says
+        // nothing; there the test is against the noise each carrier is
+        // known to have. A symbol that was read misses by about that much on
+        // average, and one that was not misses by twice it or more.
+        let read = if self.stage == Stage::Steady && !spreading {
+            wide > 0 && miss < 2.0 * wide as f64
+        } else {
+            4 * sound >= 3 * seen.max(1)
+        };
+        if self.echo_on && !unknown && read {
             self.learn_echo();
         }
 
