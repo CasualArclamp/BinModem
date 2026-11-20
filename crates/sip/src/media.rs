@@ -884,8 +884,14 @@ fn read(shared: Arc<Shared>, socket: UdpSocket) {
         }
 
         shared.packets_received.fetch_add(1, Ordering::Relaxed);
+        let mut payload = packet.payload;
+        if let Some(robbed) = robbed_bits()
+            && matches!(packet.payload_type, 0 | 8)
+        {
+            rob(&mut payload, packet.timestamp, robbed);
+        }
         if let Ok(mut jitter) = shared.incoming.lock() {
-            jitter.push(packet.sequence, packet.payload_type, packet.payload);
+            jitter.push(packet.sequence, packet.payload_type, payload);
         }
     }
 }
@@ -1024,9 +1030,70 @@ fn pace(shared: Arc<Shared>, socket: UdpSocket) {
     }
 }
 
+/// A test line with robbed-bit signalling on it, asked for with
+/// `BINMODEM_ROB_BIT`: which of every six octets of G.711 arriving here have
+/// their least significant bit overwritten, and with what.
+///
+/// A T1 trunk without a signalling channel of its own takes that bit of
+/// every sixth frame to say whether the line is on hook. Speech does not
+/// notice. A V.90 or V.92 modem does, because the octet is its data: in
+/// that one position of six, each pair of neighbouring codewords arrives as
+/// one. No call over SIP ever has this done to it, so this is the only way
+/// to see what the modem makes of it.
+///
+/// `3` robs position 3 and writes a one; `0,3:0` robs positions 0 and 3,
+/// as a call across two trunks has it, and writes a nought. The positions
+/// are counted from the RTP timestamp, so a lost packet does not move
+/// them.
+fn robbed_bits() -> Option<([bool; 6], u8)> {
+    static ASKED: std::sync::OnceLock<Option<([bool; 6], u8)>> = std::sync::OnceLock::new();
+    *ASKED.get_or_init(|| parse_robbed(&std::env::var("BINMODEM_ROB_BIT").ok()?))
+}
+
+fn parse_robbed(asked: &str) -> Option<([bool; 6], u8)> {
+    let (positions, bit) = asked.split_once(':').unwrap_or((asked, "1"));
+    let mut which = [false; 6];
+    for position in positions.split(',') {
+        *which.get_mut(position.trim().parse::<usize>().ok()?)? = true;
+    }
+    let bit = match bit.trim() {
+        "0" => 0,
+        "1" => 1,
+        _ => return None,
+    };
+    which.contains(&true).then_some((which, bit))
+}
+
+/// Overwrite the robbed bits of a packet whose first octet is sample
+/// `timestamp` of the call.
+fn rob(payload: &mut [u8], timestamp: u32, (which, bit): ([bool; 6], u8)) {
+    for (i, octet) in payload.iter_mut().enumerate() {
+        if which[(timestamp as usize).wrapping_add(i) % 6] {
+            *octet = (*octet & 0xFE) | bit;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_robbed_bit_is_one_octet_in_six_whatever_packet_it_is_in() {
+        let asked = parse_robbed("3").unwrap();
+        let mut first = vec![0u8; 160];
+        let mut second = vec![0u8; 160];
+        rob(&mut first, 0, asked);
+        rob(&mut second, 160, asked);
+        let all: Vec<u8> = first.into_iter().chain(second).collect();
+        for (i, octet) in all.iter().enumerate() {
+            assert_eq!(*octet, u8::from(i % 6 == 3), "octet {i}");
+        }
+        let mut ones = vec![0xFFu8; 12];
+        rob(&mut ones, 0, parse_robbed("0,3:0").unwrap());
+        assert_eq!(ones.iter().filter(|o| **o == 0xFE).count(), 4);
+        assert!(parse_robbed("6").is_none() && parse_robbed("").is_none() && parse_robbed("1:2").is_none());
+    }
 
     /// Opening binds a port and hands it back, which is what the SDP offer
     /// needs before there is any call to offer.

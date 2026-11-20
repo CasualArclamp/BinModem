@@ -131,6 +131,9 @@ struct Args {
     /// whether to open on the scopes: for a call with nobody at the keyboard.
     typed: Vec<String>,
     scopes: bool,
+    /// Whether the Setup row stays showing once a line is open: for a
+    /// picture of a window that shows what line it is on.
+    setup: bool,
     /// Record the line from the start, as the window's Record key would: kept
     /// in `captures` when the window closes or the key is pressed.
     record: bool,
@@ -147,6 +150,7 @@ fn parse() -> Result<Option<Args>, String> {
         telnet: None,
         typed: Vec::new(),
         scopes: false,
+        setup: false,
         record: false,
     };
     let raw: Vec<String> = std::env::args().skip(1).collect();
@@ -180,6 +184,7 @@ fn parse() -> Result<Option<Args>, String> {
             }
             "--type" => args.typed.push(value("--type")?),
             "--scopes" => args.scopes = true,
+            "--setup" => args.setup = true,
             "--record" => args.record = true,
             "--in" => args.input = Some(value("--in")?),
             "--out" => args.output = Some(value("--out")?),
@@ -193,6 +198,7 @@ fn parse() -> Result<Option<Args>, String> {
                      binmodem --in <dev> --out <dev>            and opened straight away\n\
                      binmodem ... --type <line> [--scopes]      typed at the modem once the line is open\n\
                      binmodem ... --record                      record the line from the start, into captures\n\
+                     binmodem ... --setup                       leave the Setup row showing with a line open\n\
                      binmodem [path.wav]                        replay a capture\n\
                      binmodem --capture                         replay the Bell 103 golden vector\n\
                      binmodem --devices                         list audio devices\n\
@@ -252,7 +258,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let Some(mut args) = parse()? else { return Ok(()) };
     // Taken now, because `args` is picked apart below.
-    let (typed, scopes) = (std::mem::take(&mut args.typed), args.scopes);
+    let (typed, scopes, setup) = (std::mem::take(&mut args.typed), args.scopes, args.setup);
 
     let control = Arc::new(Control::default());
     let (sample_rate, title) = if args.live {
@@ -320,6 +326,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cc.egui_ctx.set_visuals(eframe::egui::Visuals::dark());
             let mut app = app::ScopeApp::new(rx, ui_control, sink, sample_rate, source);
             app.script(typed, scopes);
+            app.keep_setup_showing(setup);
             Ok(Box::new(app))
         }),
     )?;

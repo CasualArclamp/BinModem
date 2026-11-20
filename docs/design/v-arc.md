@@ -106,6 +106,37 @@ loops are equally happy a quarter turn round.
 
 Loading: `b = floor(log2(1 + SNR/gap))` for QAM, half that for PCM.
 
+### A measured line reads steadily
+
+![The slicer's signal to noise fifty times a second, before and after](../images/v-arc/snr-steady.png)
+
+5.0.0 did not. On a line good for eighty decibels the figure rose and fell
+by ten or fifteen every few seconds, the grid was renegotiated to suit each
+swing, and every renegotiation cost throughput. Two things together:
+
+- **The timing loop never came to rest.** Once the line was measured it
+  still took out a twentieth of each sync word's timing error at once, and
+  the measurement is only good to a hundredth of a sample. With the rate
+  term it had, the loop was under half of critical damping. It is now a
+  fifteenth as strong and critically damped, and takes minutes, which is
+  how fast two crystals drift.
+- **The equaliser was too slow to follow.** At a step of 0.005 it took a
+  second and a half to catch up with each move of the sampling instant,
+  and read badly for all of it. It is now 0.05, which costs a tenth of a
+  decibel in noise of its own.
+
+On two virtual cables the reading now moves by under half a decibel
+(84 to 85 dB for QAM, 80 and 71 for PCM) and the grid, once chosen, stays.
+`BINMODEM_VARC_TRACE=<file>` makes the window write the figure fifty times
+a second, and `trace_of_the_slicer_over_a_minute` in `sc.rs` does the same
+on a simulated line.
+
+Nothing is learnt from a gap either: while the power under the equaliser
+is well below what it has been, adaptation stops and the carrier coasts.
+That is not yet enough to ride one out. A few milliseconds of silence on a
+grid of twenty-four bits still leaves the receiver guessing until the two
+ends renegotiate, which takes seconds; see "What is not done".
+
 ## One signal
 
 A call is one signal however many channels the sound card has: what is sent
@@ -679,7 +710,14 @@ goes in pieces.
 far end is an address, a call is an INVITE sent to it, and this end
 listens on a port of its own (5060 unless changed) for the same. There is
 no registrar and no password. Two on one machine want two ports, each
-naming the other's.
+naming the other's. Its coding can be chosen: all of the above (the
+default), one of the eight, or G.711 in either law, in which case there is
+no L16 in the offer and none taken from one.
+
+The symbol diagram on V.ARC/L16 is the samples: a sample is sixteen bits
+sent at once, and its two octets are the two axes, the first across. That
+is a grid of 65 536 points with every one in use, and scrambled data fills
+the square evenly.
 
 - Superframe: a sync word of 64 known samples, then a block of 2000 samples
   that are 4000 octets. Eight a second.
@@ -706,7 +744,11 @@ What the call turns out to be decides what runs on it:
 | L16, but nothing is heard in 4 s, or the two ends have not agreed in 10 s | V.ARC/DMT at the call's rate |
 | G.711, because the far end answered with it | an ordinary call from V.8, with `+MS` set to `V92` |
 
-`VARCQ` and `VARCP` have not been tried on a SIP call.
+`VARCQ` and `VARCP` run on a linear call at 48 kHz as they do on a lead,
+modulating the samples rather than using them: between two windows on
+EasySip, 270 500 and 239 500 bit/s for QAM and 305 000 and 243 000 for
+PCM. Slower than V.ARC/L16 on the same call, and there to be chosen, not
+because they are better there.
 
 ## Octets on the line
 
@@ -912,6 +954,14 @@ Three faults that simulation with one clean wire each way did not show:
 - Reed-Solomon: errors and erasures to the bound for 2 to 32 check octets.
 
 ## What is not done
+
+- **A gap in the sound loses a dense single-carrier grid.** Five
+  milliseconds of silence, as a sound card that ran dry gives, and
+  V.ARC/QAM at twenty-four bits a symbol does not read again until the
+  grid is renegotiated: seconds on a real pair of cables, and on the
+  simulated line never. The equaliser is not what goes wrong (holding it
+  still, or putting back a copy from before the gap, changes nothing), and
+  what does is not yet found. `TRACE_GAP=480` on the trace test shows it.
 
 - **SIP beyond this machine.** Never run over a network, through a PBX, or
   with packets really lost. Whether any PBX passes L16 at 16 kHz untouched

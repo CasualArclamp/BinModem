@@ -501,6 +501,22 @@ pub fn offer_with(
     ptime_ms: u32,
     dtmf: Option<u8>,
 ) -> String {
+    offer_only(address, port, laws, linear, None, ptime_ms, dtmf)
+}
+
+/// [`offer_with`], with the linear codings cut down to `only` when that is
+/// given: one rate on one channel or two, under the number it always has,
+/// and G.711 still behind it. For a call that is to be at a rate somebody
+/// chose rather than the fastest both ends have.
+pub fn offer_only(
+    address: &str,
+    port: u16,
+    laws: &[Law],
+    linear: bool,
+    only: Option<(u32, u8)>,
+    ptime_ms: u32,
+    dtmf: Option<u8>,
+) -> String {
     // A caller that asks for no law at all gets both, mu-law first, rather
     // than an m= line with an empty format list -- which is malformed, and
     // which a far end would answer with a 488 rather than a question.
@@ -518,7 +534,8 @@ pub fn offer_with(
     let mut attributes: Vec<(String, Option<String>)> = Vec::new();
     if linear {
         let numbers = linear_payload_types(dtmf);
-        for (at, (&(rate, channels), pt)) in LINEAR_FORMATS.iter().zip(numbers).enumerate() {
+        let wanted = LINEAR_FORMATS.iter().zip(numbers).filter(|(format, _)| only.is_none_or(|o| o == **format));
+        for (at, (&(rate, channels), pt)) in wanted.enumerate() {
             formats.insert(at, pt.to_string());
             attributes.push(("rtpmap".to_owned(), Some(format!("{pt} {}", linear_name(rate, channels)))));
         }
@@ -594,6 +611,20 @@ pub fn answer_with(
     linear: bool,
     ptime_ms: u32,
 ) -> Result<(String, Negotiated), String> {
+    answer_only(offer, address, port, acceptable, linear, None, ptime_ms)
+}
+
+/// [`answer_with`], taking of the linear codings `only` the one given, and
+/// G.711 if the offer has not got it.
+pub fn answer_only(
+    offer: &Sdp,
+    address: &str,
+    port: u16,
+    acceptable: &[Law],
+    linear: bool,
+    only: Option<(u32, u8)>,
+    ptime_ms: u32,
+) -> Result<(String, Negotiated), String> {
     let Some(media) = offer.audio() else {
         if wants_t38(offer) {
             // Where the T.38 answer would eventually be built. It would be an
@@ -639,7 +670,10 @@ pub fn answer_with(
     let mut law = None;
     let mut is_linear = None;
     for format in &media.formats {
-        if linear && let Some((pt, rate, channels)) = linear_of(media, format) {
+        if linear
+            && let Some((pt, rate, channels)) = linear_of(media, format)
+            && only.is_none_or(|o| o == (rate, channels))
+        {
             law = Some((Law::Mu, pt));
             is_linear = Some((rate, channels));
             break;
@@ -1081,6 +1115,24 @@ fn origin_line(address: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chosen_linear_coding_is_the_only_one_offered_and_the_only_one_taken() {
+        let chosen = Some((16_000, 2));
+        let offer = offer_only("192.0.2.1", 4000, &[Law::Mu], true, chosen, 20, None);
+        assert_eq!(offer.matches("L16/").count(), 1, "{offer}");
+        assert!(offer.contains("L16/16000/2") && offer.contains("PCMU/8000"), "{offer}");
+
+        // An answerer that chose one takes it out of an offer of all eight.
+        let all = Sdp::parse(&offer_with("192.0.2.1", 4000, &[Law::Mu], true, 20, None)).unwrap();
+        let (_, agreed) = answer_only(&all, "192.0.2.2", 4002, &[Law::Mu], true, chosen, 20).unwrap();
+        assert_eq!((agreed.linear, agreed.rate, agreed.channels), (true, 16_000, 2));
+
+        // And G.711 when what it chose is not in the offer.
+        let other = Sdp::parse(&offer_only("192.0.2.1", 4000, &[Law::Mu], true, Some((8_000, 1)), 20, None)).unwrap();
+        let (_, agreed) = answer_only(&other, "192.0.2.2", 4002, &[Law::Mu], true, chosen, 20).unwrap();
+        assert!(!agreed.linear);
+    }
 
     /// Asterisk, the way it writes an offer: rtpmap for everything including
     /// the static numbers, telephone-event at 101, a maxptime nobody reads,

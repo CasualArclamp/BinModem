@@ -319,7 +319,11 @@ fn run(
             } else {
                 // A digital modem reads the network's own levels (it ignores
                 // them otherwise).
-                modem.give_network_levels(&levels);
+                let network_levels = line.carries_network_levels();
+                modem.set_network_a_law(line.a_law());
+                if network_levels {
+                    modem.give_network_levels(&levels);
+                }
                 for &s in &from_line {
                     let said = modem.step(f64::from(s)) as f32;
                     // Levels that are exact are codewords or V.92's LU, and
@@ -331,11 +335,11 @@ fn run(
                 // A digital modem's codewords go as they are; everything else
                 // is a waveform and goes through the rate conversion.
                 match modem.take_network_levels() {
-                    Some(levels) => {
+                    Some(levels) if network_levels => {
                         let levels: Vec<f32> = levels.iter().map(|l| *l as f32).collect();
                         line.transmit_exact(&levels);
                     }
-                    None => line.transmit(&to_line),
+                    _ => line.transmit(&to_line),
                 }
             }
             if record.is_some() {

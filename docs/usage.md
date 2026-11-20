@@ -288,10 +288,37 @@ end's address. One dials; the other presses Answer when it rings.
 - Linear samples are offered first, the fastest rate first, and G.711
   behind them. With `AT+MS=VARC` the call is V.ARC/L16: 601 kbit/s at
   48 kHz between two windows on one machine.
+- **coding** is what the call is carried in. "best both have" is the fastest
+  linear coding the two ends share. Any one of the eight linear codings can
+  be chosen instead, or G.711 mu-law or A-law, which is what a telephone
+  network carries and what the ordinary modes (V.34, V.90 and the rest) are
+  for. The caller's choice is tried first; an answerer that chose a
+  different linear rate gets G.711. Once a call is up, the top line of the
+  window says what it is in, as `L16/48000` or `PCMA`.
 - From the command line: `binmodem.exe --live --sip "easysip:192.168.1.20|5060"`,
-  the far end's address, a bar, and this end's port.
+  the far end's address, a bar, and this end's port. A third field chooses
+  the coding: `"easysip:192.168.1.20|5060|PCMU"`, or `L16/16000`, or
+  `L16/44100/2`. `--setup` leaves the Setup row showing with the line open.
 
 An account in the SIP file gets the same codings with `linear = yes`.
+
+### A robbed bit, for testing
+
+No SIP call has robbed-bit signalling on it, so there is a switch that puts
+it there. `BINMODEM_ROB_BIT=3` in the environment of a window (or of
+`modem-sip`) overwrites the least significant bit of one G.711 octet in
+six, of what that end receives, as a T1 trunk without a signalling channel
+does. `0,3` robs two positions, as a call over two trunks has it, and
+`3:0` writes a nought where the default is a one. Set it on the calling
+end to rob the downstream.
+
+![V.90 with one robbed position, V.92 with one, and V.90 with two](images/robbed-bit.png)
+
+Between two windows on EasySip in mu-law, on one machine: V.90 finds it and
+connects at 53 333 on 112 levels where a clean line gives 56 000 on 132;
+with two positions robbed, 45 333 on 54 levels. V.92 with PCM upstream did
+not come up at all in the one run tried, which fits its calling side
+asking for no DIL.
 
 ### UDP or TCP
 

@@ -366,6 +366,10 @@ pub struct ScopeApp {
     /// calls on.
     easy_peer: String,
     easy_port: u16,
+    /// And what its calls are carried in: one of `live::EASY_CODINGS`.
+    easy_coding: &'static str,
+    /// The open EasySip line those were last made to agree with.
+    easy_shown: String,
     /// The same accounts in full, as the credentials window is editing them,
     /// and which of them it is showing.
     ///
@@ -629,6 +633,8 @@ impl ScopeApp {
             chosen_line: 0,
             easy_peer: String::new(),
             easy_port: 5060,
+            easy_coding: live::EASY_CODINGS[0].0,
+            easy_shown: String::new(),
             // Filled by `load_accounts` below, out of the same file the names
             // above came from.
             sip_edit: Vec::new(),
@@ -1053,7 +1059,21 @@ impl ScopeApp {
                 // A call rather than a pair of devices: follow which account
                 // it is on, for the same reason -- and the account belongs to
                 // the dialler's picker now, not to the box.
-                Some(progress) if progress.account.starts_with(live::EASY_SIP) => self.chosen_line = 2,
+                Some(progress) if progress.account.starts_with(live::EASY_SIP) => {
+                    self.chosen_line = 2;
+                    // A line this row did not open -- one named on the
+                    // command line, or restored -- is what its boxes say
+                    // from then on, or the row would reopen it as whatever
+                    // they happened to hold.
+                    if self.easy_shown != progress.account {
+                        if let Some((peer, port)) = live::easy_sip_parts(&progress.account) {
+                            self.easy_peer = peer;
+                            self.easy_port = port;
+                            self.easy_coding = live::easy_sip_coding(&progress.account);
+                        }
+                        self.easy_shown.clone_from(&progress.account);
+                    }
+                }
                 Some(progress) => {
                     self.chosen_line = 1;
                     if let Some(i) = self
@@ -1112,7 +1132,9 @@ impl ScopeApp {
                          in the dialler",
                     );
                     ui.selectable_value(&mut self.chosen_line, 2, "EasySip").on_hover_text(
-                        "A call straight to another BinModem: type its address and                          that is all. No account, no registrar, no password. Linear                          samples are offered first, which is what V.ARC wants",
+                        "A call straight to another BinModem: type its address and \
+                         that is all. No account, no registrar, no password. Linear \
+                         samples are offered first unless a coding is chosen",
                     );
                 });
             let easy = self.chosen_line == 2;
@@ -1121,14 +1143,36 @@ impl ScopeApp {
                 ui.label(RichText::new("far end").monospace().color(dim));
                 ui.add(egui::TextEdit::singleline(&mut self.easy_peer).desired_width(170.0).hint_text("192.168.1.20"))
                     .on_hover_text(
-                        "The other BinModem's address, as it is reached from here: an IP                          address or a name, with :port after it if it does not listen on 5060",
+                        "The other BinModem's address, as it is reached from here: an IP \
+                         address or a name, with :port after it if it does not listen on 5060",
                     );
                 ui.label(RichText::new("my port").monospace().color(dim));
                 ui.add(egui::DragValue::new(&mut self.easy_port).range(1024..=65535)).on_hover_text(
-                    "The port this end hears calls on, which is what the far end puts                      after your address if it is not 5060. Two on one machine want two                      different ones",
+                    "The port this end hears calls on, which is what the far end puts \
+                     after your address if it is not 5060. Two on one machine want two \
+                     different ones",
                 );
             }
-            let easy_name = live::easy_sip_name(&self.easy_peer, self.easy_port);
+            if easy {
+                ui.label(RichText::new("coding").monospace().color(dim));
+                egui::ComboBox::from_id_salt("easysip coding")
+                    .width(150.0)
+                    .selected_text(live::EASY_CODINGS.iter().find(|c| c.0 == self.easy_coding).map_or("", |c| c.1))
+                    .show_ui(ui, |ui| {
+                        for (token, said) in live::EASY_CODINGS {
+                            ui.selectable_value(&mut self.easy_coding, token, said);
+                        }
+                    })
+                    .response
+                    .on_hover_text(
+                        "What the call is carried in. Linear PCM arrives exactly as sent, \
+                         which V.ARC/L16 needs; G.711 is what a telephone network carries, \
+                         for the ordinary modes as they would be on a real call. The \
+                         caller's choice is the one tried first; a far end that chose a \
+                         different linear rate gets G.711",
+                    );
+            }
+            let easy_name = live::easy_sip_name(&self.easy_peer, self.easy_port, self.easy_coding);
             // Whose call it would be, beside the box rather than in it: an
             // account is not a kind of line. But a row that says nothing
             // about it leaves somebody with two accounts no way of telling
@@ -2960,6 +3004,9 @@ impl ScopeApp {
         if let Some(port) = loaded.get::<u16>("easysip_port") {
             self.easy_port = port;
         }
+        if let Some(coding) = loaded.text("easysip_coding") {
+            self.easy_coding = live::easy_sip_coding(&live::easy_sip_name("x", 0, coding));
+        }
         self.remembered = self.settings().join("\n")
             + &self.dialin.fingerprint()
             + &self.line_fingerprint();
@@ -2967,7 +3014,7 @@ impl ScopeApp {
 
     /// The line, as something to compare from one frame to the next.
     fn line_fingerprint(&self) -> String {
-        format!("\u{1}{}\u{1}{}\u{1}{}", self.sip_line.as_deref().unwrap_or(""), self.easy_peer, self.easy_port)
+        format!("\u{1}{}\u{1}{}\u{1}{}", self.sip_line.as_deref().unwrap_or(""), self.easy_peer, self.easy_port) + self.easy_coding
     }
 
     /// Write the settings out if they have moved since they were last written.
@@ -3005,6 +3052,7 @@ impl ScopeApp {
                 r.set("easysip_peer", self.easy_peer.trim());
             }
             r.set("easysip_port", self.easy_port);
+            r.set("easysip_coding", self.easy_coding);
             r.save();
         }
     }
@@ -3027,6 +3075,7 @@ impl ScopeApp {
             if should_restore(state, session.was_asked_for_a_line()) {
                 self.easy_peer = peer;
                 self.easy_port = port;
+                self.easy_coding = live::easy_sip_coding(&name);
                 session.open_sip(&name);
                 self.chosen_line = 2;
             }
@@ -3565,7 +3614,8 @@ impl ScopeApp {
             // builds, one of them left open from before a change.
             ui.label(RichText::new(concat!("build ", env!("BINMODEM_BUILD"))).monospace().size(11.0).color(DIM))
                 .on_hover_text(
-                    "The commit this program was built from and when that commit was made.                      Both ends of a V.ARC call have to be the same build.",
+                    "The commit this program was built from and when that commit was made. \
+                     Both ends of a V.ARC call have to be the same build.",
                 );
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let Some(state) = state else {
@@ -3587,14 +3637,15 @@ impl ScopeApp {
                     (_, false) => (String::new(), "no line open", WARN),
                     (Some(progress), true) if progress.account.starts_with(live::EASY_SIP) => (
                         format!(
-                            "EasySip to {}",
-                            live::easy_sip_parts(&progress.account).map_or_else(String::new, |(peer, _)| peer)
+                            "EasySip to {}{}",
+                            live::easy_sip_parts(&progress.account).map_or_else(String::new, |(peer, _)| peer),
+                            coding_of(progress)
                         ),
                         "direct",
                         GOOD,
                     ),
                     (Some(progress), true) => (
-                        format!("SIP {}", progress.account),
+                        format!("SIP {}{}", progress.account, coding_of(progress)),
                         if progress.registered { "registered" } else { "not registered" },
                         if progress.registered { GOOD } else { BAD },
                     ),
@@ -3939,6 +3990,11 @@ impl ScopeApp {
         if let Some(err) = &self.audio_error {
             ui.label(RichText::new(err).color(Color32::from_rgb(235, 100, 90)));
         }
+    }
+
+    /// Leave the Setup row showing with a line open, as its button does.
+    pub fn keep_setup_showing(&mut self, on: bool) {
+        self.setup_open |= on;
     }
 
     /// What `--type` and `--scopes` asked for: lines to type at the modem
@@ -6629,4 +6685,11 @@ mod tests {
         assert_eq!(live::named(&plain, live::LINE_IN), None);
         assert_eq!(live::named(&plain, live::LINE_OUT), None);
     }
+}
+
+/// What a call that is up is carried in, for the line at the top of the
+/// window: PCMU, PCMA, or which of the linear codings, as `L16/48000`.
+/// Nothing while there is no call, since nothing has been agreed.
+fn coding_of(progress: &sip::Progress) -> String {
+    progress.law.as_ref().map_or_else(String::new, |law| format!(" · {law}"))
 }

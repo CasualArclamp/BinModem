@@ -112,6 +112,12 @@ const QUIET: f64 = 0.04;
 /// in thirds of a symbol.
 const SEARCH: usize = 6;
 
+/// How far below its usual power the signal under the equaliser is before
+/// nothing is learnt from it. The power of forty symbols of data is within
+/// a tenth or so of its mean, so this is passed now and then by nothing at
+/// all, and all that costs is a symbol's adaptation.
+const FADED: f64 = 0.8;
+
 /// The level a transmitter sends at, RMS against full scale. One carrier
 /// peaks far less than hundreds do, so this is higher than the multicarrier
 /// mode's and still leaves the largest constellation's corners in hand.
@@ -550,6 +556,9 @@ pub struct Rx {
     arrived: VecDeque<Arrived>,
 
     noise: f64,
+    /// The power under the equaliser as it has been lately, once the line
+    /// is measured: what a gap is told by.
+    level: f64,
     measured: f64,
     trained: usize,
     proposal: Option<Table>,
@@ -621,6 +630,7 @@ impl Rx {
             groups_in: 0,
             arrived: VecDeque::new(),
             noise: 1.0,
+            level: 0.0,
             measured: 0.0,
             trained: 0,
             proposal: None,
@@ -817,7 +827,15 @@ impl Rx {
             Stage::Training if self.trained < 4_000 || self.quiet < 2 => 0.2,
             Stage::Training if self.trained < SETTLE => 0.05,
             Stage::Training => 0.02,
-            _ => 0.005,
+            // Measured, it still has to follow: the two clocks are never
+            // quite still, and the timing loop moves the sampling instant
+            // a little at every word. At a tenth of this it took a second
+            // and a half to catch up with each move, and on a line good
+            // for eighty decibels read ten to fifteen worse for all of
+            // that time: the figure rose and fell by that much every few
+            // seconds, and the grid was renegotiated to suit each. What
+            // this costs in noise of its own is a tenth of a decibel.
+            _ => 0.05,
         }
     }
 
@@ -872,13 +890,27 @@ impl Rx {
                 error.im = 0.0;
             }
             let e2 = error.norm_sqr();
+            // A measured line that goes quiet has been interrupted: a
+            // sound card that ran dry, a packet that never came. Nothing
+            // is learnt from that. Adapting on silence, with the step
+            // scaled up to suit how little is arriving, takes an equaliser
+            // further out in a few symbols than a dense grid can find its
+            // way back from.
+            let steady = self.stage == Stage::Steady;
+            if steady && self.level == 0.0 {
+                self.level = power;
+            }
+            let faded = steady && power < FADED * self.level;
+            if steady && !faded {
+                self.level += (power - self.level) / 1024.0;
+            }
             if self.stage == Stage::Training && self.trained >= SETTLE {
                 self.measured += e2;
-            } else if self.stage == Stage::Steady {
+            } else if steady && !faded {
                 self.noise += (e2 - self.noise) / 8192.0;
             }
             // The equaliser sees the error turned back to where it works.
-            let rate = self.rate();
+            let rate = if faded { 0.0 } else { self.rate() };
             let push = error * turn.conj() * (rate / (power + 1e-12));
             for (i, tap) in self.taps.iter_mut().enumerate() {
                 // The faintest of leaks. Three taps a symbol is more than the
@@ -888,7 +920,13 @@ impl Rx {
                 // signal, so it is kept far below what the adaptation pushes.
                 *tap = *tap * (1.0 - 1e-9) + push * self.x[i].conj();
             }
-            if self.shape.real {
+            if faded {
+                // The two ends' clocks go on differing through a gap, and
+                // the carrier goes on turning with them.
+                if !self.shape.real {
+                    self.phase = (self.phase + self.drift) % TAU;
+                }
+            } else if self.shape.real {
                 self.wander -= 0.002 * error.re;
             } else {
                 // A second-order loop about ten hertz wide on whatever
@@ -907,6 +945,7 @@ impl Rx {
                 self.trained += 1;
                 if self.trained == SETTLE + MEASURE {
                     self.noise = (self.measured / MEASURE as f64).max(1e-30);
+                    self.level = 0.0;
                     self.stage = Stage::Steady;
                     self.propose();
                 }
@@ -1039,7 +1078,13 @@ impl Rx {
         // once the line is measured, so gently that what noise there is in
         // the measurement does not reach the equaliser as jitter.
         let (now, slow) = match self.stage {
-            Stage::Steady => (0.05, 0.004),
+            // So gently that the equaliser never sees the sampling instant
+            // move. A twentieth of the error at once and this much from
+            // the rate was a loop with less than half of critical damping,
+            // steered by a measurement good to a hundredth of a sample:
+            // it never came to rest. This one takes minutes, which is how
+            // fast two crystals drift apart.
+            Stage::Steady => (0.003, 2.5e-6),
             _ if self.quiet == 0 => (1.0, 0.5),
             _ => (0.5, 0.1),
         };
@@ -1292,6 +1337,58 @@ mod tests {
                 self.at_b.extend(self.b.read());
             }
         }
+    }
+
+    /// What the receiver measures, twenty times a second for a minute, as
+    /// lines of `TRACE,seconds,SNR,timing,ppm,bits,stage`: for plotting
+    /// how steady it is. `TRACE_PCM` for the baseband mode, `TRACE_SNR` and
+    /// `TRACE_PPM` for the line, `TRACE_GAP` for samples of silence put
+    /// into both directions at 25 s.
+    #[test]
+    #[ignore = "a trace for looking at, not a test"]
+    fn trace_of_the_slicer_over_a_minute() {
+        let number = |name: &str, or: f64| std::env::var(name).ok().and_then(|s| s.parse().ok()).unwrap_or(or);
+        let shape = if std::env::var("TRACE_PCM").is_ok() { Shape::pcm(48_000.0) } else { Shape::qam(48_000.0) };
+        let mut pair = Pair::new(shape.unwrap(), number("TRACE_SNR", 90.0), number("TRACE_PPM", 2.0), 0.0);
+        for i in 0..1200 {
+            if i == 500 {
+                for way in 0..2 {
+                    for _ in 0..number("TRACE_GAP", 0.0) as usize {
+                        pair.carry(way, 0.0);
+                    }
+                }
+            }
+            pair.run(0.05);
+            let rx = &pair.b.channels[0].rx;
+            println!(
+                "TRACE,{:.2},{:.3},{:.5},{:.4},{},{:?}",
+                f64::from(i) * 0.05,
+                rx.snr_db(),
+                rx.timing,
+                rx.clock_ppm(),
+                rx.proposed,
+                rx.stage
+            );
+        }
+    }
+
+    #[test]
+    fn a_measured_line_reads_steadily() {
+        // The fault this guards against: a timing loop that never came to
+        // rest and an equaliser too slow to follow it, which on a quiet
+        // line made the reading swing by ten decibels and more.
+        let mut pair = Pair::new(Shape::qam(48_000.0).unwrap(), 90.0, 2.0, 0.0);
+        pair.run(15.0);
+        let mut read = Vec::new();
+        for _ in 0..150 {
+            pair.run(0.1);
+            let rx = &pair.b.channels[0].rx;
+            assert_eq!(rx.stage(), Stage::Steady);
+            read.push(rx.snr_db());
+        }
+        let (least, most) = read.iter().fold((f64::MAX, f64::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+        assert!(least > 72.0, "fell to {least:.1} dB");
+        assert!(most - least < 6.0, "swung from {least:.1} to {most:.1} dB");
     }
 
     #[test]

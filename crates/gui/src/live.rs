@@ -212,14 +212,40 @@ pub fn sip_accounts() -> Vec<String> {
 pub const EASY_SIP: &str = "easysip:";
 
 /// The name of the EasySip line to `peer`, heard on `port`.
-pub fn easy_sip_name(peer: &str, port: u16) -> String {
-    format!("{EASY_SIP}{}|{port}", peer.trim())
+pub fn easy_sip_name(peer: &str, port: u16, coding: &str) -> String {
+    let base = format!("{EASY_SIP}{}|{port}", peer.trim());
+    if coding.is_empty() || coding == EASY_CODINGS[0].0 { base } else { format!("{base}|{coding}") }
+}
+
+/// What an EasySip call can be carried in, as it is written in a line's
+/// name and as it is said in the window. The first is no choice at all:
+/// the fastest linear coding both ends have, and G.711 behind them.
+pub const EASY_CODINGS: [(&str, &str); 11] = [
+    ("auto", "best both have"),
+    ("L16/48000", "LPCM 48 kHz"),
+    ("L16/48000/2", "LPCM 48 kHz stereo"),
+    ("L16/44100", "LPCM 44 kHz"),
+    ("L16/44100/2", "LPCM 44 kHz stereo"),
+    ("L16/16000", "LPCM 16 kHz"),
+    ("L16/16000/2", "LPCM 16 kHz stereo"),
+    ("L16/8000", "LPCM 8 kHz"),
+    ("L16/8000/2", "LPCM 8 kHz stereo"),
+    ("PCMU", "G.711 mu-law"),
+    ("PCMA", "G.711 A-law"),
+];
+
+/// The coding an EasySip line's name asks for: one of [`EASY_CODINGS`]'s,
+/// and the first of them when the name says nothing or nothing known.
+pub fn easy_sip_coding(name: &str) -> &'static str {
+    let asked = name.strip_prefix(EASY_SIP).and_then(|rest| rest.split('|').nth(2)).unwrap_or("");
+    EASY_CODINGS.iter().find(|(token, _)| token.eq_ignore_ascii_case(asked.trim())).map_or(EASY_CODINGS[0].0, |c| c.0)
 }
 
 /// The far end's address and this end's port out of such a name.
 pub fn easy_sip_parts(name: &str) -> Option<(String, u16)> {
-    let (peer, port) = name.strip_prefix(EASY_SIP)?.split_once('|')?;
-    Some((peer.to_owned(), port.parse().ok()?))
+    let (peer, rest) = name.strip_prefix(EASY_SIP)?.split_once('|')?;
+    let port = rest.split('|').next()?;
+    Some((peer.to_owned(), port.trim().parse().ok()?))
 }
 
 /// EasySip: a call straight to another of these, with nothing between.
@@ -231,6 +257,7 @@ pub fn easy_sip_parts(name: &str) -> Option<(String, u16)> {
 /// anything else that answers.
 fn easy_sip_account(name: &str) -> Result<sip::Account, String> {
     let (peer, port) = easy_sip_parts(name).ok_or_else(|| format!("{name:?} is not an EasySip line"))?;
+    let coding = easy_sip_coding(name);
     if peer.is_empty() {
         return Err("EasySip: type the far end's address first, as 192.168.1.20 or 192.168.1.20:5060".to_owned());
     }
@@ -241,10 +268,21 @@ fn easy_sip_account(name: &str) -> Result<sip::Account, String> {
         domain: host.to_owned(),
         username: "binmodem".to_owned(),
         register: false,
-        linear: true,
+        linear: coding.starts_with("L16") || coding == EASY_CODINGS[0].0,
+        linear_only: linear_only(coding),
+        // G.711 chosen is that law first and the other behind it, so that
+        // two ends that chose differently still have a call.
+        laws: if coding == "PCMA" { vec![sip::Law::A, sip::Law::Mu] } else { vec![sip::Law::Mu, sip::Law::A] },
         local_port: port,
         ..sip::Account::default()
     })
+}
+
+/// The rate and channels of `L16/48000` or `L16/48000/2`.
+fn linear_only(coding: &str) -> Option<(u32, u8)> {
+    let mut fields = coding.strip_prefix("L16/")?.split('/');
+    let rate = fields.next()?.parse().ok()?;
+    Some((rate, fields.next().map_or(Some(1), |c| c.parse().ok())?))
 }
 
 /// Open a line on one of them.
@@ -254,9 +292,10 @@ fn open_sip(name: &str, tx: &Publisher) -> Result<sip::Line, String> {
         tx.log(
             Direction::Note,
             format!(
-                "EasySip: calls go to {}, and are heard on port {}; no account and no registrar",
+                "EasySip: calls go to {}, and are heard on port {}; no account and no registrar; coding: {}",
                 account.next_hop(),
-                account.local_port
+                account.local_port,
+                EASY_CODINGS.iter().find(|c| c.0 == easy_sip_coding(name)).map_or("", |c| c.1)
             ),
         );
         return sip::Line::open(account, FS);
@@ -1178,6 +1217,8 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // V.90 call, told a line at a time as it happens.
     let mut noted: Vec<(usize, f64, String)> = Vec::new();
     let mut was_recording = false;
+    let mut trace = std::env::var_os("BINMODEM_VARC_TRACE").and_then(|path| std::fs::File::create(path).ok());
+    let (trace_from, mut trace_at) = (Instant::now(), Instant::now());
     let mut tx_peak = 0.0f32;
     let (mut tx_rms, mut rx_rms) = (0.0f32, 0.0f32);
     let (mut errors_before, mut errors_at) = (0u64, Instant::now());
@@ -1972,7 +2013,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         if on_wide {
             to_line.extend_from_slice(&wide_sent);
         }
-        if !from_network.is_empty() {
+        // Only on a call at the network's own rate: see
+        // `sip::Line::carries_network_levels`.
+        let network_levels = audio.sip().is_some_and(sip::Line::carries_network_levels);
+        modem.set_network_a_law(audio.sip().is_some_and(sip::Line::a_law));
+        if !from_network.is_empty() && network_levels {
             let levels: Vec<f64> = from_network.iter().map(|l| f64::from(*l)).collect();
             modem.give_network_levels(&levels);
         }
@@ -2086,7 +2131,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             sip.transmit_exact(exact);
         } else {
             match (audio.sip(), modem.take_network_levels()) {
-                (Some(sip), Some(levels)) => {
+                (Some(sip), Some(levels)) if network_levels => {
                     let levels: Vec<f32> = levels.iter().map(|l| *l as f32).collect();
                     sip.transmit_exact(&levels);
                 }
@@ -2094,6 +2139,25 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             }
         }
         owed_ms += from_line.len() as f64 / FS * 1000.0;
+
+        // A trace of what the V.ARC receiver measures, sixty times a
+        // second, for looking at how steady it is: BINMODEM_VARC_TRACE names
+        // the file.
+        if let Some(trace) = trace.as_mut()
+            && trace_at.elapsed() >= Duration::from_micros(16_667)
+        {
+            use std::io::Write as _;
+            trace_at = Instant::now();
+            let _ = writeln!(
+                trace,
+                "{:.4},{:.3},{},{},{:?}",
+                trace_from.elapsed().as_secs_f64(),
+                modem.varc_snr_db().unwrap_or(f64::NAN),
+                modem.states(),
+                modem.shape(),
+                modem.varc_bauds(),
+            );
+        }
 
         let recording_now = session.recording();
         // Where this block starts in the recording, if it is going into one.

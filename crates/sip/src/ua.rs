@@ -795,11 +795,12 @@ impl Worker {
         let remote = Address::new(target.clone());
         let branch = rand::branch();
 
-        let offer = sdp::offer_with(
+        let offer = sdp::offer_only(
             &self.contact_host(),
             self.rtp_port,
             &self.account.laws,
             self.account.linear,
+            self.account.linear_only,
             self.account.ptime_ms,
             None,
         );
@@ -862,12 +863,13 @@ impl Worker {
                 return;
             }
         };
-        let answered = sdp::answer_with(
+        let answered = sdp::answer_only(
             &offer,
             &self.contact_host(),
             self.rtp_port,
             &self.account.laws,
             self.account.linear,
+            self.account.linear_only,
             self.account.ptime_ms,
         );
         let (body, negotiated) = match answered {
@@ -1952,12 +1954,13 @@ impl Worker {
             self.note("sip: the far end asked for T.38; declined, staying on G.711".to_owned());
             return;
         }
-        match sdp::answer_with(
+        match sdp::answer_only(
             &offer,
             &self.contact_host(),
             self.rtp_port,
             &self.account.laws,
             self.account.linear,
+            self.account.linear_only,
             self.account.ptime_ms,
         ) {
             Ok((body, negotiated)) => {

@@ -43,6 +43,11 @@ const PARITY: u8 = 48;
 /// for a hole rather than for data.
 const HOLE: usize = 8;
 
+/// One sample in this many is kept for a symbol diagram, and no more than
+/// `SHOWN` of them wait to be taken.
+const EVERY: usize = 8;
+const SHOWN: usize = 4096;
+
 /// Sync words that may go missing in a row, with silence where they should
 /// be, before the receiver stops trusting where it is.
 const MISSED: usize = 4;
@@ -68,6 +73,22 @@ fn sync(mark: u8) -> Vec<i16> {
             if word == 0 { 0x5a5a } else { word }
         })
         .collect()
+}
+
+/// A sample as a point of a symbol diagram.
+///
+/// There is no carrier and so no symbol in the sense the other modes have
+/// one, but a sample is sixteen bits sent at once, which is what a symbol
+/// is. Its two octets are drawn as the two axes: the first across and the
+/// second up, each as a number from nought to 255 laid over -1 to 1. That is
+/// a grid of 65 536 points, every one of them in use, and scrambled data
+/// fills it evenly. A hole is a point in the middle of the bottom edge.
+fn point(word: i16) -> (f64, f64) {
+    let [across, up] = word.to_be_bytes();
+    // The first octet is the signed half: nought is the middle.
+    let across = f64::from(across as i8) + 0.5;
+    let up = f64::from(up) - 127.5;
+    (across / 127.5, up / 127.5)
 }
 
 /// Bits a second on the line, and of frames.
@@ -168,6 +189,8 @@ pub struct Rx {
     id: Option<u8>,
     missed: usize,
     arrived: VecDeque<Arrived>,
+    /// Samples of blocks, as points for a symbol diagram.
+    points: Vec<(f64, f64)>,
     proposed: bool,
     proposal: Option<Table>,
     /// Blocks that arrived, and octets in them that were holes.
@@ -188,6 +211,7 @@ impl Rx {
             id: None,
             missed: 0,
             arrived: VecDeque::new(),
+            points: Vec::new(),
             proposed: false,
             proposal: None,
             blocks: 0,
@@ -248,6 +272,9 @@ impl Receiver for Rx {
         self.recent.push_back(word);
 
         if let Some(block) = self.block.as_mut() {
+            if block.len() % EVERY == 0 && self.points.len() < SHOWN {
+                self.points.push(point(word));
+            }
             block.push(word);
             if block.len() == BLOCK {
                 let samples = self.block.take().unwrap_or_default();
@@ -323,11 +350,27 @@ impl Receiver for Rx {
     fn spectrum(&self) -> Vec<Bin> {
         vec![Bin { hz: 0.0, snr_db: self.health().snr_db, bits: 16 }]
     }
+
+    fn points(&mut self) -> Vec<(f64, f64)> {
+        std::mem::take(&mut self.points)
+    }
+
+    fn shown_bits(&self) -> u8 {
+        16
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sample_is_a_point_inside_the_square_and_the_corners_are_the_corners() {
+        assert_eq!(point(i16::MAX), (1.0, 1.0));
+        assert_eq!(point(i16::MIN), (-1.0, -1.0));
+        let (x, y) = point(0);
+        assert!(x.abs() < 0.01 && (y + 1.0).abs() < 1e-9);
+    }
     use crate::station::Station;
 
     fn stream(seed: usize, len: usize) -> Vec<u8> {

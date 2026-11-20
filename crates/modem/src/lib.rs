@@ -904,6 +904,8 @@ pub struct Modem {
     /// [`Self::take_network_levels`]).
     network_levels: Vec<f64>,
     network_exact: bool,
+    /// Whether the line is in A-law; see [`Self::set_network_a_law`].
+    network_a_law: bool,
     /// The rate V.90 start-ups ask for, as its drn, from the window's rate
     /// menu (see [`Self::choose_rate`]); None for the DIL's own choice. Kept
     /// from call to call.
@@ -1069,6 +1071,7 @@ impl Modem {
             line_notes: Vec::new(),
             network_levels: Vec::new(),
             network_exact: false,
+            network_a_law: false,
             pinned_rate: None,
             pcm_upstream: v92_pcm_upstream_wanted(),
             pinned_upstream: None,
@@ -1363,7 +1366,9 @@ impl Modem {
                 return "2FSK";
             }
             return match (self.varc_bits, call.mode) {
-                (0, _) | (_, VarcMode::Linear) => "-",
+                (0, _) => "-",
+                // No modulation, but sixteen bits at a time all the same.
+                (_, VarcMode::Linear) => "L16",
                 (_, VarcMode::Pcm) => "PCM",
                 _ => "QAM",
             };
@@ -1807,6 +1812,12 @@ impl Modem {
     /// train on. So a line of that kind sends these instead of the samples
     /// while there are any, one level to an octet. Call it once for each block
     /// of samples stepped; a sound card never calls it and loses nothing.
+    /// What the digital modem says of itself in INFO0d, in the law the
+    /// line is in.
+    fn server_info0d(&self) -> datapump::v34::info::Info0d {
+        datapump::v34::info::Info0d { a_law: self.network_a_law, ..v90::server::ours() }
+    }
+
     pub fn take_network_levels(&mut self) -> Option<Vec<f64>> {
         if self.network_exact {
             Some(std::mem::take(&mut self.network_levels))
@@ -1821,6 +1832,19 @@ impl Modem {
     /// [`Self::take_network_levels`], and kept only while the V.90 or V.92
     /// digital modem has the line. Call it before stepping the block the
     /// levels belong to.
+    /// Say which G.711 law the line is in: A-law if `a_law`, mu-law
+    /// otherwise, which is what a line that has not said is taken to be.
+    ///
+    /// A V.90 or V.92 digital modem sends the law's own levels and says
+    /// which law in INFO0d, and the analogue modem builds its ladder from
+    /// that. Told mu-law on an A-law call it sends levels that are not on
+    /// the line's ladder at all; each is moved to the nearest that is, and
+    /// the call comes up at the bottom of its rates. It takes effect at
+    /// the next call, which is when the digital modem is made.
+    pub fn set_network_a_law(&mut self, a_law: bool) {
+        self.network_a_law = a_law;
+    }
+
     pub fn give_network_levels(&mut self, levels: &[f64]) {
         if let Some(Pump::V90Server(m)) = self.pump.as_mut() {
             m.give_exact(levels);
@@ -3538,7 +3562,7 @@ impl Modem {
                 analogue.set_pinned(self.pinned_rate);
                 Pump::V90(Box::new(analogue))
             }
-            "V90S" => Pump::V90Server(Box::new(v90::server::Line::new(self.fs, v90::server::ours(), lead_in))),
+            "V90S" => Pump::V90Server(Box::new(v90::server::Line::new(self.fs, self.server_info0d(), lead_in))),
             "V92S" => {
                 let pcm_upstream = self.pcm_upstream;
                 // The short phase 2 is asked for along with the short phase
@@ -3547,7 +3571,7 @@ impl Modem {
                     QuickConnect::Off => v90::server::wish(pcm_upstream),
                     _ => v90::server::wish_short(pcm_upstream),
                 };
-                let mut line = v90::server::Line::new(self.fs, v90::server::ours(), lead_in).with_v92(wish);
+                let mut line = v90::server::Line::new(self.fs, self.server_info0d(), lead_in).with_v92(wish);
                 // After a QCA1d the rest of short Phase 1 is this pump's:
                 // QTS, ANSpcm and the wait for TONEq (9.2.4.3/V.92).
                 if let Some(quick) = self.quick.filter(|q| q.role == PcmRole::Digital) {
