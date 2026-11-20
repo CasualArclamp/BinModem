@@ -9,6 +9,17 @@ binmodem.exe --capture        replay the golden capture
 
 [docs/usage.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/usage.md) has the setup.
 
+## What's new in 5.0.1
+
+![The slicer's signal to noise on V.ARC/QAM and V.ARC/PCM, 5.0.0 and now](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/v-arc/snr-steady.png)
+
+- **V.ARC/QAM and V.ARC/PCM hold their rate.** In 5.0.0 the signal to noise on a good line swung by ten to fifteen decibels every few seconds, and the two ends kept renegotiating the grid to follow it. The timing loop never settled and the equaliser was too slow to keep up with it; both are fixed. On two virtual cables the reading now moves by under half a decibel and the rate, once reached, stays.
+- **V.ARC/L16 shows its symbols.** The diagram was empty on a linear SIP call. A sample is sixteen bits at once, and its two octets are now the two axes.
+- **The window says what a SIP call is carried in**, in the line at the top: `L16/48000`, `PCMA`.
+- **EasySip chooses its coding.** The fastest linear coding both ends have, any one of the eight linear codings, or G.711 in either law, which is what the ordinary modes (V.34, V.90 and the rest) are for. V.ARC/QAM and V.ARC/PCM also run on an EasySip call at 48 kHz: 270 and 305 kbit/s between two windows on one machine.
+- **Fixed:** with the Setup row showing, an EasySip line opened from the command line was reopened with an empty address.
+- **Not fixed:** a gap of a few milliseconds in the sound still costs V.ARC/QAM and V.ARC/PCM several seconds while the two ends renegotiate.
+
 ## What's new in 5.0.0
 
 ![V.ARC between two windows on one pair of wires, the echo canceller's picture of the line bottom right](https://raw.githubusercontent.com/CasualArclamp/BinModem/main/docs/images/releases/v5.0.0/varc-two-wire.png)

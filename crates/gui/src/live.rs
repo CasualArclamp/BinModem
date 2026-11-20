@@ -1217,6 +1217,8 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // V.90 call, told a line at a time as it happens.
     let mut noted: Vec<(usize, f64, String)> = Vec::new();
     let mut was_recording = false;
+    let mut trace = std::env::var_os("BINMODEM_VARC_TRACE").and_then(|path| std::fs::File::create(path).ok());
+    let (trace_from, mut trace_at) = (Instant::now(), Instant::now());
     let mut tx_peak = 0.0f32;
     let (mut tx_rms, mut rx_rms) = (0.0f32, 0.0f32);
     let (mut errors_before, mut errors_at) = (0u64, Instant::now());
@@ -2133,6 +2135,25 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             }
         }
         owed_ms += from_line.len() as f64 / FS * 1000.0;
+
+        // A trace of what the V.ARC receiver measures, sixty times a
+        // second, for looking at how steady it is: BINMODEM_VARC_TRACE names
+        // the file.
+        if let Some(trace) = trace.as_mut()
+            && trace_at.elapsed() >= Duration::from_micros(16_667)
+        {
+            use std::io::Write as _;
+            trace_at = Instant::now();
+            let _ = writeln!(
+                trace,
+                "{:.4},{:.3},{},{},{:?}",
+                trace_from.elapsed().as_secs_f64(),
+                modem.varc_snr_db().unwrap_or(f64::NAN),
+                modem.states(),
+                modem.shape(),
+                modem.varc_bauds(),
+            );
+        }
 
         let recording_now = session.recording();
         // Where this block starts in the recording, if it is going into one.

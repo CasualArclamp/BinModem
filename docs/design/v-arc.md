@@ -106,6 +106,37 @@ loops are equally happy a quarter turn round.
 
 Loading: `b = floor(log2(1 + SNR/gap))` for QAM, half that for PCM.
 
+### A measured line reads steadily
+
+![The slicer's signal to noise fifty times a second, before and after](../images/v-arc/snr-steady.png)
+
+5.0.0 did not. On a line good for eighty decibels the figure rose and fell
+by ten or fifteen every few seconds, the grid was renegotiated to suit each
+swing, and every renegotiation cost throughput. Two things together:
+
+- **The timing loop never came to rest.** Once the line was measured it
+  still took out a twentieth of each sync word's timing error at once, and
+  the measurement is only good to a hundredth of a sample. With the rate
+  term it had, the loop was under half of critical damping. It is now a
+  fifteenth as strong and critically damped, and takes minutes, which is
+  how fast two crystals drift.
+- **The equaliser was too slow to follow.** At a step of 0.005 it took a
+  second and a half to catch up with each move of the sampling instant,
+  and read badly for all of it. It is now 0.05, which costs a tenth of a
+  decibel in noise of its own.
+
+On two virtual cables the reading now moves by under half a decibel
+(84 to 85 dB for QAM, 80 and 71 for PCM) and the grid, once chosen, stays.
+`BINMODEM_VARC_TRACE=<file>` makes the window write the figure fifty times
+a second, and `trace_of_the_slicer_over_a_minute` in `sc.rs` does the same
+on a simulated line.
+
+Nothing is learnt from a gap either: while the power under the equaliser
+is well below what it has been, adaptation stops and the carrier coasts.
+That is not yet enough to ride one out. A few milliseconds of silence on a
+grid of twenty-four bits still leaves the receiver guessing until the two
+ends renegotiate, which takes seconds; see "What is not done".
+
 ## One signal
 
 A call is one signal however many channels the sound card has: what is sent
@@ -923,6 +954,14 @@ Three faults that simulation with one clean wire each way did not show:
 - Reed-Solomon: errors and erasures to the bound for 2 to 32 check octets.
 
 ## What is not done
+
+- **A gap in the sound loses a dense single-carrier grid.** Five
+  milliseconds of silence, as a sound card that ran dry gives, and
+  V.ARC/QAM at twenty-four bits a symbol does not read again until the
+  grid is renegotiated: seconds on a real pair of cables, and on the
+  simulated line never. The equaliser is not what goes wrong (holding it
+  still, or putting back a copy from before the gap, changes nothing), and
+  what does is not yet found. `TRACE_GAP=480` on the trace test shows it.
 
 - **SIP beyond this machine.** Never run over a network, through a PBX, or
   with packets really lost. Whether any PBX passes L16 at 16 kHz untouched
