@@ -2055,6 +2055,9 @@ impl Modem {
         if self.cpd.as_ref().is_none_or(|previous| previous.ack != cpd.ack) {
             self.notes.push(format!("CPd for drn {}, {} bit/s, ack {}", merged.drn, parameters.rate(), cpd.ack));
         }
+        if down_tracing() {
+            eprintln!("CPDFULL {merged:?}");
+        }
         self.cpd = Some(merged);
         self.parameters = Some(parameters);
         self.exchange.peer_cp(PeerCp { ack: cpd.ack }, self.now);

@@ -64,6 +64,25 @@ const ALIKE: f64 = 0.95;
 /// Looks in a row that must find Sd.
 const SURE: u32 = 3;
 
+/// How much of the loudest phase's energy every phase must have, over the
+/// window [`Line::sd_phase`] reads, before the phase is chosen.
+///
+/// A resampler from the network's 8 kHz up to the line's rate (a SIP call's
+/// own, `sip::Media`) rings for a couple of milliseconds before Sd: its kernel
+/// reaches that far ahead. The ringing is on the samples between the
+/// network's codewords only -- those are exactly zero until Sd arrives -- and
+/// it repeats Sd's period, so it passes the [`ALIKE`] test a few symbols
+/// early. Chosen there, the phase is the one that rings, half a symbol out:
+/// a live call's replay trained TRN1d at 19.6 dB on it instead of 79.5. Inside
+/// Sd every phase carries some of it, the far one at least a quarter of the
+/// energy, so a tenth tells the two apart with room to spare.
+const SETTLED: f64 = 0.1;
+
+/// Looks after [`SURE`] that the phase may wait for [`SETTLED`]: one whole
+/// window of [`Line::sd_phase`]'s, after which it has to be inside Sd if Sd
+/// is there at all, and still inside [`HOLD`].
+const SETTLE_LOOKS: u32 = ((PERIODS + 1) * SD_PERIOD) as u32;
+
 /// Levels kept between the modem and the transmitter, so that a symbol the
 /// transmitter asks for a sample early is never one the modem has not made.
 const CUSHION: usize = 2;
@@ -234,10 +253,29 @@ impl Line {
         let found = now / window as f64 > AUDIBLE && both / (now * before).sqrt().max(1e-30) > ALIKE;
         self.alike = if found { self.alike + 1 } else { 0 };
         if self.alike >= SURE {
+            let energies = self.phase_energies(per);
+            let loudest = energies.iter().copied().fold(0.0, f64::max);
+            let settled = energies.iter().all(|&energy| energy >= SETTLED * loudest);
+            if !settled && self.alike < SURE + SETTLE_LOOKS {
+                return;
+            }
             let phase = self.sd_phase(per);
             self.phase = Some(phase);
             self.notes.push(format!("V.92: Sd found; the downstream is read on sample {phase} of every {per}"));
         }
+    }
+
+    /// The energy at each sample phase over the window [`Self::sd_phase`]
+    /// reads.
+    fn phase_energies(&self, per: usize) -> Vec<f64> {
+        let length = (PERIODS + 1) * SD_PERIOD * per;
+        let end = self.held.len();
+        let first = self.taken - end as u64;
+        let mut energies = vec![0.0; per];
+        for i in end.saturating_sub(length)..end {
+            energies[((first + i as u64) % per as u64) as usize] += self.held[i] * self.held[i];
+        }
+        energies
     }
 
     /// The sample phase on which the Sd in hand is Sd: for each, the six
@@ -383,6 +421,50 @@ mod tests {
         }
         said.push_str(&format!("analogue {:?}, digital {:?}, shifts {} refused {} delays {:?}", line.modem().status(), server.modem.status(), line.tx.shifts(), line.tx.refused(), line.modem().delays()));
         (done, line, said)
+    }
+
+    /// Sd as a SIP call brings it, the network's codewords through an 8 kHz to
+    /// 16 kHz resampler, after any number of samples of silence: the phase
+    /// read is the one the codewords are on, never the one the resampler rings
+    /// on ahead of Sd.
+    #[test]
+    fn sd_through_a_resampler_is_read_on_its_codewords_after_any_lead() {
+        const W: f64 = 0.242;
+        const SD: [f64; SD_PERIOD] = [W, 0.0, W, -W, 0.0, -W];
+        for (lead, shift) in (0..2 * SD_PERIOD).flat_map(|lead| [(lead, 0), (lead, 1)]) {
+            let mut up = Resampler::new(8000.0, 16_000.0);
+            let mut line = Line::new(settings(), 16_000.0);
+            let mut made = Vec::new();
+            // A line sample before the resampler's first, which puts the
+            // codewords on the other phase of the line's own count.
+            let mut heard = vec![0.0; shift];
+            for _ in 0..shift {
+                line.step(0.0);
+            }
+            for n in 0..(100 + lead + 400) {
+                let level = n.checked_sub(100 + lead).map_or(0.0, |k| SD[k % SD_PERIOD]);
+                made.clear();
+                up.process(level, &mut made);
+                for &x in &made {
+                    // Sixteen-bit samples, as a call's audio is: the codewords'
+                    // phase is then exactly nought until Sd arrives.
+                    let x = (x * 32768.0).round() / 32768.0;
+                    heard.push(x);
+                    line.step(x);
+                }
+            }
+            let phase = line.phase().unwrap_or_else(|| panic!("lead {lead} shift {shift}: no Sd"));
+            // The codewords' phase is the one whose samples, inside Sd, are
+            // only ever W, nought or -W.
+            let on_codewords = |p: usize| {
+                heard[heard.len() - 200..]
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| (heard.len() - 200 + i) % 2 == p)
+                    .all(|(_, &x)| [W, 0.0, -W].iter().any(|&v| (x - v).abs() < 1e-3))
+            };
+            assert!(on_codewords(phase), "lead {lead} shift {shift}: phase {phase} is not where the codewords are");
+        }
     }
 
     /// Two of this project's own ends on a pair of virtual cables at 48 kHz:
