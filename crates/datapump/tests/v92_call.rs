@@ -94,6 +94,13 @@ struct Call {
     /// The network between them, as symbols of delay each way.
     down_pipe: VecDeque<f64>,
     up_pipe: VecDeque<f64>,
+    /// Robbed-bit signalling on the downstream: the octet LSB of every sixth
+    /// codeword the digital end sends is forced to one, starting at this
+    /// one, as a T1 route's signalling does (`v90::network`'s
+    /// `with_robbed_bit`).
+    robbed: Option<usize>,
+    /// Downstream codewords so far, which is what the robbed one is counted in.
+    octets: usize,
 }
 
 /// A line that can hold the far end's symbols a fraction of a symbol away from
@@ -266,6 +273,8 @@ impl Call {
             up_gain: 1.0,
             codec: None,
             down_pipe: VecDeque::new(),
+            robbed: None,
+            octets: 0,
             up_pipe: VecDeque::new(),
         }
     }
@@ -285,6 +294,13 @@ impl Call {
         self
     }
 
+    /// The same call on a route that robs a bit from every sixth downstream
+    /// codeword, starting at `phase`.
+    fn robbing_a_bit(mut self, phase: usize) -> Self {
+        self.robbed = Some(phase % 6);
+        self
+    }
+
     /// The same call with `symbols` of delay each way.
     fn delayed_by(mut self, symbols: usize) -> Self {
         self.down_pipe = VecDeque::from(vec![0.0; symbols]);
@@ -297,6 +313,14 @@ impl Call {
     /// what keeps the two of them causally apart.
     fn tick(&mut self) {
         let mut down = self.digital.step(self.up);
+        if let Some(phase) = self.robbed {
+            if self.octets % 6 == phase {
+                let (u, negative) = ucode::nearest(Law::Mu, (down * 32768.0).round() as i32);
+                let (u, negative) = ucode::from_octet(Law::Mu, ucode::octet(Law::Mu, u, negative) | 1);
+                down = ucode::level(Law::Mu, u) * if negative { -1.0 } else { 1.0 };
+            }
+            self.octets += 1;
+        }
         if !self.down_pipe.is_empty() {
             self.down_pipe.push_back(down);
             down = self.down_pipe.pop_front().unwrap_or(0.0);
@@ -734,6 +758,31 @@ fn a_voip_length_round_trip_with_no_dil_connects_with_pcm_upstream() {
     assert_carries_data(&mut call, "0.6 s each way, no DIL");
 }
 
+/// A route with robbed-bit signalling on the downstream and no DIL asked for,
+/// as the PCM upstream start-up of `v90::startup` makes it: its fixed CPt
+/// (`cpt_for(16)`) and a CPu whose rate comes from TRN1d.
+///
+/// The robbed bit moves an odd Ucode onto its even neighbour in one data frame
+/// interval of six. TRN1d's U_INFO is one of them, so the equaliser's fit on it
+/// reads about 38 dB however clean the route is, and in Phase 4 the same bit
+/// moves a point of the CPt half way to the next one where the points are
+/// two Ucodes apart. Live calls to a V.92 server on such a route read about
+/// half of the SUVds and none of a CPd thousands of bits long, and the
+/// start-up timed out waiting for B1d. The CPt has to be one the receiver
+/// that trained on TRN1d can read, as the CPu already is.
+#[test]
+fn a_robbed_bit_on_the_downstream_with_no_dil_still_connects() {
+    for phase in [0, 3] {
+        let what = format!("a robbed bit in octet {phase} of six");
+        let analogue = analogue::Settings {
+            rate_from_line: true,
+            ..analogue::Settings::new(Descriptor::none(), 0x7ffff, analogue::cpt_for(16))
+        };
+        let mut call = connected(Call::new(digital_settings(0), analogue).robbing_a_bit(phase));
+        assert_carries_data(&mut call, &what);
+    }
+}
+
 /// The upstream through the central office's codec, which is what makes it a
 /// PCM upstream (clause 1): every sample the digital modem is given is a G.711
 /// level, A-law and mu-law in turn, and the downstream's codewords are the
@@ -823,34 +872,39 @@ fn phase_3_completes_with_md() {
 }
 
 /// A digital end that never sends Sd leaves Ja unanswered, and AR1's 1500 ms --
-/// counted from the start of Ja and with no round-trip term -- is what notices.
+/// counted from the start of Ja, plus the round trip Ja takes to be answered --
+/// is what notices. With no round trip that is 1500 ms; with a VoIP call's 1.45
+/// s, which a live server answered Ja after, it is 2950 ms.
 #[test]
 fn a_digital_end_that_never_sends_sd_fails_analogue() {
-    let mut modem = analogue::Modem::new(analogue_settings(0));
-    let mut ja_began = None;
-    let mut failed = false;
-    for _ in 0..40_000u64 {
-        // Nothing on the line at all: no Sd, no S-bar-d, no TRN1d.
-        modem.step(0.0);
-        if modem.phase() == "V.92 phase 3: Ja" && ja_began.is_none() {
-            ja_began = Some(modem.elapsed());
+    for round_trip in [0.0, 1.45] {
+        let allowed = ((1.5 + round_trip) * 8000.0) as u64;
+        let mut modem = analogue::Modem::new(analogue::Settings { round_trip, ..analogue_settings(0) });
+        let mut ja_began = None;
+        let mut failed = false;
+        for _ in 0..60_000u64 {
+            // Nothing on the line at all: no Sd, no S-bar-d, no TRN1d.
+            modem.step(0.0);
+            if modem.phase() == "V.92 phase 3: Ja" && ja_began.is_none() {
+                ja_began = Some(modem.elapsed());
+            }
+            if let analogue::Status::Failed(why) = modem.status() {
+                let began = ja_began.expect("Ja went out");
+                assert_eq!(why, "no Sd reversal within 1500 ms and a round trip of Ja");
+                assert!(
+                    modem.elapsed() >= began + allowed,
+                    "AR1 at a {round_trip} s round trip: {} symbols after Ja began",
+                    modem.elapsed() - began
+                );
+                assert!(modem.elapsed() <= began + allowed + 200, "and it is a deadline, not a mood");
+                failed = true;
+                break;
+            }
         }
-        if let analogue::Status::Failed(why) = modem.status() {
-            let began = ja_began.expect("Ja went out");
-            assert_eq!(why, "no Sd reversal within 1500 ms of Ja");
-            assert!(
-                modem.elapsed() >= began + 12_000,
-                "AR1 is 1500 ms: {} symbols after Ja began",
-                modem.elapsed() - began
-            );
-            assert!(modem.elapsed() <= began + 12_200, "and it is a deadline, not a mood");
-            failed = true;
-            break;
-        }
+        let notes = modem.take_notes();
+        assert!(failed, "no failure in 60 000 symbols: {} notes {notes:?}", modem.phase());
+        assert!(notes.iter().any(|note| note.contains("no Sd reversal")), "{notes:?}");
     }
-    let notes = modem.take_notes();
-    assert!(failed, "no failure in 40 000 symbols: {} notes {notes:?}", modem.phase());
-    assert!(notes.iter().any(|note| note.contains("no Sd reversal")), "{notes:?}");
 }
 
 /// The far end's clock is not the network's, and Phase 3 is what puts it right.

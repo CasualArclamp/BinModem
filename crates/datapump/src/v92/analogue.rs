@@ -242,7 +242,15 @@ const DOWN_SIGN: f64 = -1.0;
 // ---------------------------------------------------------------------------
 
 /// AR1: "If the Sd-to-S-bar-d reversal is not detected within 1500 ms of the
-/// start of Ja, the analogue modem shall retrain". No round-trip term.
+/// start of Ja, the analogue modem shall retrain".
+///
+/// The clause carries no round-trip term, which assumes a terrestrial line:
+/// Ja has to reach the digital modem before it can answer, and Sd has to come
+/// back, so a round trip is spent inside the 1500 ms before anything else is.
+/// A V.92 server across the internet answered one round trip after Ja began
+/// (1.31 to 1.45 s measured), and at 1.45 s the reversal was still on its way
+/// when the flat deadline fired. Phase 2's round trip is added, as A6 and A11
+/// add it below.
 const SD_WITHIN: f64 = 1.5;
 
 /// AR2: "If Jd is not received within 4500 ms of the end of Ja".
@@ -298,6 +306,16 @@ fn tracing() -> bool {
     use std::sync::OnceLock;
     static TRACE: OnceLock<bool> = OnceLock::new();
     *TRACE.get_or_init(|| std::env::var_os("V92_TRACE").is_some())
+}
+
+/// Whether V92_DOWN_TRACE in the environment is set: every frame Phase 4's
+/// downstream reader descrambles, as `DOWNF frame bits`, and every event it
+/// reports, as `DOWNEV symbol seconds event`, go to standard error. That is
+/// what tells a CPd the far end sent and this end could not read from one
+/// the far end never sent.
+fn down_tracing() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| std::env::var_os("V92_DOWN_TRACE").is_some())
 }
 
 // ---------------------------------------------------------------------------
@@ -421,16 +439,22 @@ const DOWN_SIGMAS: f64 = 4.5;
 /// which a DIL would improve on and a guess would not.
 #[must_use]
 pub fn fastest_down(law: Law, uinfo: u8, snr_db: f64) -> u8 {
+    (1..=DOWNSTREAM_RATES as u8).rev().find(|&drn| readable(law, uinfo, snr_db, &cpt_for(drn))).unwrap_or(1)
+}
+
+/// Whether every interval of `cp` is a constellation [`fastest_down`]'s
+/// receiver reads cleanly: its two closest levels, or the two either side of
+/// nought, [`DOWN_SIGMAS`] of the noise TRN1d left from the boundary between
+/// them.
+#[must_use]
+pub fn readable(law: Law, uinfo: u8, snr_db: f64, cp: &Cp) -> bool {
     let sigma = ucode::level(law, uinfo) * 10f64.powf(-(snr_db - DOWN_MARGIN_DB) / 20.0);
-    (1..=DOWNSTREAM_RATES as u8)
-        .rev()
-        .find(|&drn| {
-            let levels: Vec<f64> = cpt_for(drn).points(0).iter().map(|&u| ucode::level(law, u)).collect();
-            let across_nought = 2.0 * levels.first().copied().unwrap_or(0.0);
-            let closest = levels.windows(2).map(|pair| pair[1] - pair[0]).fold(across_nought, f64::min);
-            closest / 2.0 >= DOWN_SIGMAS * sigma
-        })
-        .unwrap_or(1)
+    (0..INTERVALS).all(|i| {
+        let levels: Vec<f64> = cp.points(i).iter().map(|&u| ucode::level(law, u)).collect();
+        let across_nought = 2.0 * levels.first().copied().unwrap_or(0.0);
+        let closest = levels.windows(2).map(|pair| pair[1] - pair[0]).fold(across_nought, f64::min);
+        closest / 2.0 >= DOWN_SIGMAS * sigma
+    })
 }
 
 /// The CPt an end that asked for no DIL sends: 48 000 bit/s (drn 16) on
@@ -885,6 +909,10 @@ impl Downstream {
         let Some(bits) = frame else {
             return (DownState::Training(training), None);
         };
+        if down_tracing() {
+            let text: String = bits.iter().map(|&b| if b { '1' } else { '0' }).collect();
+            eprintln!("DOWNF {} {text}", training.frames);
+        }
         training.frames += 1;
         training.probes.retain(|probe| probe.unbroken() || probe.after_ed);
         // B1d's own first frame, if one of them has found it; failing that,
@@ -1056,6 +1084,8 @@ pub struct Modem {
     /// Whether [`Modem::choose`] has handed over the CPt and the CPu
     /// ([`Settings::choice_follows_dil`]).
     chosen: bool,
+    /// The rate and acknowledge bit the last CPu noted said.
+    cpu_noted: Option<(u8, bool)>,
     /// Whether Ri has been heard with no DIL asked for, so that CPt is due
     /// at the next twelve-symbol boundary of the TRN1u on the line
     /// (9.5.2.1.9, 9.5.2.1.10).
@@ -1193,6 +1223,7 @@ impl Modem {
             dil_left: 0,
             dil: Vec::new(),
             chosen: false,
+            cpu_noted: None,
             ri_heard: false,
             ri_given_up: false,
             stage: Stage::Opening,
@@ -1783,7 +1814,12 @@ impl Modem {
         let unit = trn2u_unit(size == Trn2uSize::Eight);
         let (kind, bits) = match (kind, self.cpu.as_ref()) {
             (SequenceKind::Cp, Some(cpu)) => {
-                self.notes.push(format!("CPu for drn {}, ack {ack}", cpu.drn));
+                // Once per change of what it says: a CPu repeated back to back
+                // for want of an answer is one line, not one a sequence.
+                if self.cpu_noted != Some((cpu.drn, ack)) {
+                    self.cpu_noted = Some((cpu.drn, ack));
+                    self.notes.push(format!("CPu for drn {}, ack {ack}", cpu.drn));
+                }
                 (kind, Cp { acknowledge: ack, ..cpu.clone() }.to_bits_in(Layout::V92, unit))
             }
             (SequenceKind::E, _) => {
@@ -1903,6 +1939,19 @@ impl Modem {
 
     fn heard_down(&mut self, event: DownEvent) {
         let now = self.now;
+        if down_tracing() {
+            let shown = match &event {
+                DownEvent::Data(_) => String::new(),
+                DownEvent::Sequence(f) => match &**f {
+                    DownFamily::Suvd(s) => format!("SUVd ack {}", s.ack),
+                    DownFamily::Cpd(c) => format!("CPd drn {} ack {}", c.drn, c.ack),
+                },
+                other => format!("{other:?}"),
+            };
+            if !shown.is_empty() {
+                eprintln!("DOWNEV {now} {:.3} {shown}", now as f64 / FS);
+            }
+        }
         match event {
             DownEvent::Found => self.notes.push("TRN2d found, reading for SUVd".into()),
             DownEvent::Sequence(family) => match *family {
@@ -2077,7 +2126,7 @@ impl Modem {
         self.source.start(Up::Ja);
         self.stage = Stage::Ja;
         self.ja_began = Some(self.now);
-        self.sd_deadline = Some(self.now + (SD_WITHIN * FS) as u64);
+        self.sd_deadline = Some(self.now + ((SD_WITHIN + self.settings.round_trip) * FS) as u64);
         self.notes.push("Ja".into());
     }
 
@@ -2093,12 +2142,49 @@ impl Modem {
 
     /// A10-A11: CPt, after the twenty-four ones (8.5.1).
     fn begin_cpt(&mut self) {
+        self.fit_cpt_to_line();
         self.source.begin_sequence();
         self.source.sender.preamble();
         self.source.start(Up::Cpt);
         self.stage = Stage::Cpt;
         self.cpt_by = None;
         self.notes.push(format!("CPt for drn {}", self.settings.cpt.drn));
+    }
+
+    /// Where the line is to set the downstream rate ([`Settings::rate_from_line`])
+    /// and nothing has been chosen from a DIL, a CPt that the receiver TRN1d
+    /// trained cannot read is replaced, before its first symbol, by the one
+    /// [`fastest_down`] would choose for the CPu.
+    ///
+    /// TRN2d, SUVd, CPd and Ed all come down on the CPt's constellations
+    /// (V.90 8.6.5, 8.8), and a CPd with its filter sections is thousands of
+    /// bits under one CRC: one symbol in a few hundred read wrong and none of
+    /// its repetitions is ever read, so no CPu is acknowledged and B1d never
+    /// comes (9.6.2.2.1). A robbed bit is what showed it: on a T1 route the
+    /// LSB of every sixth codeword is forced, U_INFO arrives one Ucode down in
+    /// one interval of six so TRN1d trains to about 38 dB on a route with no
+    /// noise at all, and the same bit moves a point of `cpt_for(16)` half way
+    /// to its neighbour where they are two Ucodes apart. The CPt's rate is only
+    /// that of Phase 4's own sequences, so slowing it costs nothing after B1d.
+    fn fit_cpt_to_line(&mut self) {
+        if !self.settings.rate_from_line || self.settings.cpu.is_some() || self.chosen {
+            return;
+        }
+        let (law, uinfo, snr) = (self.settings.law, self.settings.uinfo, self.rx.snr_db());
+        if readable(law, uinfo, snr, &self.settings.cpt) {
+            return;
+        }
+        let cpt = cpt_for(fastest_down(law, uinfo, snr));
+        if cpt.drn >= self.settings.cpt.drn || CodeMapping::from_cp(&cpt).is_none() {
+            return;
+        }
+        self.notes.push(format!(
+            "TRN1d trained at {snr:.0} dB: the CPt's levels are too close for it, so drn {} instead of {}",
+            cpt.drn, self.settings.cpt.drn
+        ));
+        // One bit a symbol (8.5.1), filled to whole twelve-symbol frames.
+        self.source.cpt_bits = cpt.to_bits_in(Layout::V92, UP_INTERVALS);
+        self.settings.cpt = cpt;
     }
 
     /// How long the TRN1u over the DIL has to be: at least 2040T, and at least
@@ -2321,8 +2407,8 @@ impl Modem {
             && self.now > at
         {
             self.sd_deadline = None;
-            // AR1, which carries no round-trip term.
-            self.fail("no Sd reversal within 1500 ms of Ja");
+            // AR1, with the round trip it takes for Ja to be answered.
+            self.fail("no Sd reversal within 1500 ms and a round trip of Ja");
             return;
         }
         if let Some(at) = self.jd_deadline

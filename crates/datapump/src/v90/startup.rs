@@ -493,7 +493,9 @@ impl Analogue {
             && self.v34.training().is_none()
             && let (Some(asked), Some(server)) = (p2.info1a_pcm_up(), p2.far_info0d())
         {
-            // No DIL: the CPt is `readable_cpt`'s careful guess, and SCR
+            // No DIL: the CPt is `cpt_for`'s guess, which the analogue modem
+            // swaps for a slower one if TRN1d says it cannot read it
+            // (`analogue::Modem::fit_cpt_to_line`, robbed bits), and SCR
             // stands in for the DIL (9.5.2.1.10). Every upstream rate of 6.1
             // is offered, and the digital modem's CPd chooses.
             // A rate somebody pinned is asked for as it is: downstream by a
