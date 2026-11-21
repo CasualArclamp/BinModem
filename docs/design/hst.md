@@ -78,6 +78,28 @@ download that takes it back, the 300 bit/s back channel, a noisy line that
 falls back and recovers its lost frames (and, with fallback off, nearly
 stalls), and a line that clears and climbs back to 14 400.
 
+## Milestone 3: the modem and AT layers
+
+`AT+MS=HST` selects it, and `+MS`'s minimum and maximum rates limit which
+forward rates the link request offers (`AT+MS=HST,0,0,9600`). `ATA` and `ATD`
+then run `datapump::hst::call::Call`:
+
+- The answerer is quiet for V.25's billing delay (2 s), sends 2100 Hz for
+  3.3 s, waits 75 ms, and starts the session holding the forward channel.
+- The caller waits for the tone to have been there 400 ms and then gone
+  30 ms, and starts the session holding the back channel; as MNP originator
+  it sends the link request.
+- `CONNECT 14400/ARQ/HST` (or the agreed rate) goes to both terminals once MNP
+  is up, after `+ER: ALT` if `+ER=1`. Data mode, `+++` and `ATO` are the
+  modem's own; typed octets go into MNP up to a 4 KB backlog.
+- `ATH` sends MNP's LD and holds the line a second for it, and the far end
+  hangs up on hearing it. A far end that goes silent instead is given up after
+  12 s without its carrier, past the 5 s watchdog that puts the roles back.
+- Nothing up 60 s after going off hook: `NO ANSWER` if no tone was heard,
+  `NO CARRIER` if one was.
+
+The tone lengths are V.25's, not measured from a Courier.
+
 ## Not yet
 
 - Interoperating with a real Courier: the forward channel's start-up is
@@ -87,5 +109,6 @@ stalls), and a line that clears and climbs back to 14 400.
   fallback timings are this implementation's.
 - USR's other frame types (piggybacked acknowledgement, short data frames)
   and MNP class 5 compression.
-- The call-start handshake (2100 Hz answer tone) and wiring into the modem
-  and AT layers.
+- Automode on a dual-standard answer: falling back to V.32bis or V.22bis
+  behind the tone when the caller is not HST.
+- USR's own S-registers and `&N` link-rate commands.

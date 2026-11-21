@@ -31,6 +31,7 @@
 //! module's own.
 
 mod back;
+pub mod call;
 pub mod session;
 
 pub use back::{BackRate, BackRx, BackTx};

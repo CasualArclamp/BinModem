@@ -88,6 +88,10 @@ const OPENING_RATE: Rate = Rate::R7200;
 /// roles are put back: the answerer takes the forward channel, the caller
 /// the back.
 const WATCHDOG_MS: u32 = 5000;
+/// No carrier from the far end for this long, once the link is up, and the
+/// call is over: long enough for the watchdog to put the roles back and the
+/// far end to train again, which a far end that is still there always does.
+const CARRIER_LOST_MS: u32 = 12_000;
 /// After the last frame before a handover has left the transmitter, how long
 /// to keep the carrier up so the far receiver's filters and trellis decoder
 /// give it all up.
@@ -164,6 +168,10 @@ pub struct Session {
     samples: usize,
     since_switch_ms: u32,
     quiet_ms: u32,
+    /// Since the far end's carrier was last heard, not reset by the
+    /// watchdog; and whether the call has been given up for that.
+    deaf_ms: u32,
+    lost: bool,
     /// The rates both ends allow, as a mask of rate codes.
     agreed_rates: u8,
     /// Since the forward receiver last went into data, in milliseconds, and
@@ -216,6 +224,8 @@ impl Session {
             samples: 0,
             since_switch_ms: 0,
             quiet_ms: 0,
+            deaf_ms: 0,
+            lost: false,
             agreed_rates: rate_mask(cfg.rates),
             in_data_ms: 0,
             asked_ms: 0,
@@ -467,6 +477,11 @@ impl Session {
             Holding::Back => self.frx.carrier(),
         };
         self.quiet_ms = if hearing { 0 } else { self.quiet_ms.saturating_add(ms) };
+        self.deaf_ms = if hearing || !self.link.is_connected() { 0 } else { self.deaf_ms.saturating_add(ms) };
+        if self.deaf_ms >= CARRIER_LOST_MS && !self.lost {
+            self.lost = true;
+            self.events.push_back(Event::Disconnected);
+        }
         if self.quiet_ms >= WATCHDOG_MS && self.pending == Pending::None {
             let should = if self.side == Side::Answerer { Holding::Forward } else { Holding::Back };
             if self.holding != should {
