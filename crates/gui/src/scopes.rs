@@ -1011,6 +1011,37 @@ fn hst_lamp(painter: &Painter, centre: Pos2, on: bool, label: &str) {
     );
 }
 
+/// A round domed bulb, as the first Courier HST of 1986 carried: a lens
+/// that catches the light even when it is out, and a hot centre when lit.
+fn hst_bulb(painter: &Painter, centre: Pos2, on: bool, label: &str) {
+    let r = 6.5;
+    // The bezel ring the lens sits in.
+    painter.circle_filled(centre, r + 2.0, Color32::from_rgb(6, 6, 7));
+    if on {
+        painter.circle_filled(centre, r + 7.0, HST_RED.gamma_multiply(0.10));
+        painter.circle_filled(centre, r + 3.5, HST_RED.gamma_multiply(0.22));
+        painter.circle_filled(centre, r, HST_RED);
+        painter.circle_filled(centre, r * 0.55, Color32::from_rgb(255, 120, 95));
+        painter.circle_filled(centre, r * 0.25, Color32::from_rgb(255, 215, 200));
+    } else {
+        painter.circle_filled(centre, r, Color32::from_rgb(70, 18, 16));
+        painter.circle_filled(centre, r * 0.6, Color32::from_rgb(84, 24, 21));
+    }
+    // The dome's reflection, up and to the left, lit or not.
+    painter.circle_filled(
+        pos2(centre.x - r * 0.35, centre.y - r * 0.38),
+        r * 0.26,
+        Color32::from_rgba_unmultiplied(255, 255, 255, if on { 150 } else { 60 }),
+    );
+    painter.text(
+        pos2(centre.x, centre.y + r + 4.0),
+        Align2::CENTER_TOP,
+        label,
+        FontId::proportional(10.0),
+        HST_LEGEND,
+    );
+}
+
 const HST_RED: Color32 = Color32::from_rgb(255, 44, 32);
 const HST_LEGEND: Color32 = Color32::from_rgb(196, 198, 202);
 const HST_PLATE: Color32 = Color32::from_rgb(20, 20, 23);
@@ -1072,7 +1103,16 @@ fn hst_lane(
 /// been reversed and that end is sending on the 450 bit/s back channel; MR
 /// blinks through a training, a handover and a rate change; ARQ is lit for an
 /// error-controlled call and blinks when a frame goes again.
-pub fn hst_faceplate(ui: &mut Ui, leds: &telemetry::Leds, hst: Option<&telemetry::HstFace>, height: f32) {
+///
+/// `classic` draws the first model's panel, the 1986 9600 instead: round
+/// bulbs, TD for SD, and EC and AL where the later ones put SYN and ARQ.
+pub fn hst_faceplate(
+    ui: &mut Ui,
+    leds: &telemetry::Leds,
+    hst: Option<&telemetry::HstFace>,
+    height: f32,
+    classic: bool,
+) {
     let size = vec2(ui.available_width(), height);
     let (response, painter) = ui.allocate_painter(size, Sense::hover());
     let rect = response.rect;
@@ -1112,6 +1152,7 @@ pub fn hst_faceplate(ui: &mut Ui, leds: &telemetry::Leds, hst: Option<&telemetry
         Align2::LEFT_TOP,
         match hst.filter(|h| h.started) {
             Some(h) => format!("{} / {}", h.forward, h.back),
+            None if classic => "9600 / 300".to_owned(),
             None => "14400 / 450".to_owned(),
         },
         FontId::monospace(11.0),
@@ -1134,7 +1175,8 @@ pub fn hst_faceplate(ui: &mut Ui, leds: &telemetry::Leds, hst: Option<&telemetry
     let lamps_right = rect.right() - 10.0;
     let linked = hst.is_some_and(|h| h.linked);
     let training = hst.is_some_and(|h| h.started && h.training);
-    let hs = hst.map_or(leds.hs, |h| h.linked && h.forward > 2400);
+    // The 9600's HS meant 9600; the later ones' meant above 2400.
+    let hs = hst.map_or(leds.hs, |h| h.linked && h.forward > if classic { 4800 } else { 2400 });
     let aa = match hst {
         Some(h) if h.linked => h.answering && h.sending_fast,
         Some(h) => h.answering,
@@ -1144,7 +1186,25 @@ pub fn hst_faceplate(ui: &mut Ui, leds: &telemetry::Leds, hst: Option<&telemetry
         Some(h) if h.linked => !(h.retransmitting && blink),
         _ => leds.ec,
     };
-    let lamps: [(&str, bool); 12] = [
+    let mr = leds.mr && !(training && blink);
+    let lamps: [(&str, bool); 12] = if classic {
+        [
+            ("HS", hs),
+            ("AA", aa),
+            ("CD", leds.cd),
+            ("OH", leds.oh),
+            ("RD", leds.rd),
+            ("TD", leds.sd),
+            ("TR", leds.tr),
+            ("MR", mr),
+            ("RS", leds.tr),
+            ("CS", leds.mr),
+            ("EC", arq),
+            // Analog loopback, the self-test: never, here.
+            ("AL", false),
+        ]
+    } else {
+        [
         ("HS", hs),
         ("AA", aa),
         ("CD", leds.cd),
@@ -1152,16 +1212,21 @@ pub fn hst_faceplate(ui: &mut Ui, leds: &telemetry::Leds, hst: Option<&telemetry
         ("RD", leds.rd),
         ("SD", leds.sd),
         ("TR", leds.tr),
-        ("MR", leds.mr && !(training && blink)),
+        ("MR", mr),
         ("RS", leds.tr),
         ("CS", leds.mr),
         ("SYN", false),
         ("ARQ", arq),
-    ];
+        ]
+    };
     let step = (lamps_right - lamps_left) / lamps.len() as f32;
     for (i, (label, on)) in lamps.iter().enumerate() {
         let x = lamps_left + step * (i as f32 + 0.5);
-        hst_lamp(&painter, pos2(x, rect.top() + 16.0), *on, label);
+        if classic {
+            hst_bulb(&painter, pos2(x, rect.top() + 15.0), *on, label);
+        } else {
+            hst_lamp(&painter, pos2(x, rect.top() + 16.0), *on, label);
+        }
     }
 
     // The two channels, between this end and the far one.

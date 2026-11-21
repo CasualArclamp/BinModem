@@ -141,3 +141,27 @@ fn typing_crosses_an_hst_call_both_ways_and_ath_hangs_up() {
     assert!(gone, "host is still {:?} and said {:?}", p.host.state(), Pair::saw(&p.at_host));
     assert!(Pair::saw(&p.at_host).contains("NO CARRIER"), "{:?}", Pair::saw(&p.at_host));
 }
+
+#[test]
+fn the_1986_hst_connects_at_9600_with_the_slow_back_channel() {
+    let mut p = connect("HST96", "HST96");
+    for (name, saw) in [("caller", Pair::saw(&p.at_caller)), ("host", Pair::saw(&p.at_host))] {
+        assert!(saw.contains("CONNECT 9600/ARQ/HST"), "the {name} was told {saw:?}");
+    }
+    let status = p.caller.hst_status().expect("an HST call");
+    assert_eq!((status.forward, status.back), (9600, 300));
+    assert_eq!(p.host.standard(), "HST 9600");
+    // And typing still crosses, over the 300 bit/s channel this time.
+    p.at_host.clear();
+    for b in b"over the slow one\r\n" {
+        p.caller.feed_dte(*b);
+    }
+    let crossed = p.run_until(10.0, |p| Pair::saw(&p.at_host).contains("over the slow one"));
+    assert!(crossed, "host got {:?}", Pair::saw(&p.at_host));
+}
+
+#[test]
+fn a_1986_hst_and_a_later_one_meet_at_9600() {
+    let p = connect("HST96", "HST");
+    assert!(Pair::saw(&p.at_host).contains("CONNECT 9600/ARQ/HST"), "{:?}", Pair::saw(&p.at_host));
+}

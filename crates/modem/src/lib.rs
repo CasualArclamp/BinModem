@@ -1416,8 +1416,12 @@ impl Modem {
         if let Some(fax) = self.fax.as_ref() {
             return fax.standard();
         }
-        if self.hst.is_some() || (self.pump.is_none() && self.at.modulation.carrier == "HST") {
-            return "HST";
+        if self.hst.is_some() || self.pump.is_none() {
+            match self.at.modulation.carrier.as_str() {
+                "HST" => return "HST",
+                "HST96" => return "HST 9600",
+                _ => {}
+            }
         }
         if self.bis.is_some() {
             return "V.8 bis";
@@ -3121,7 +3125,7 @@ impl Modem {
         self.varc = None;
         self.hst = None;
         self.hst_closing_ms = None;
-        if self.at.modulation.carrier == "HST" && self.at.service_class != at::ServiceClass::Fax {
+        if matches!(self.at.modulation.carrier.as_str(), "HST" | "HST96") && self.at.service_class != at::ServiceClass::Fax {
             self.place_hst_call(role);
             return;
         }
@@ -3858,7 +3862,13 @@ impl Modem {
             Role::Calling => hst::Side::Caller,
             Role::Answering => hst::Side::Answerer,
         };
-        let cfg = hst::Config { rates, ..hst::Config::default() };
+        // The original Courier HST of 1986: one forward rate and the slower
+        // back channel, which is what it had before 14 400 and 450 came.
+        let cfg = if self.at.modulation.carrier == "HST96" {
+            hst::Config { rates: &HST_RATES[1..2], back: hst::BackRate::B300, ..hst::Config::default() }
+        } else {
+            hst::Config { rates, ..hst::Config::default() }
+        };
         self.hst = Some(hst::call::Call::new(self.fs, side, cfg));
     }
 

@@ -207,6 +207,8 @@ impl Modulation {
             8..=13 => &[0],
             // HST's forward channel: V.17's four trellis rates, 2400 baud.
             14 => &[7200, 9600, 12_000, 14_400],
+            // The 1986 HST: 9600 and nothing else.
+            15 => &[9600],
             // V.34 5.1: "2400 bit/s to 33 600 bit/s in multiples of 2400".
             _ => &[
                 2400, 4800, 7200, 9600, 12_000, 14_400, 16_800, 19_200, 21_600, 24_000, 26_400,
@@ -893,7 +895,7 @@ impl ScopeApp {
     ///
     /// Positions are what the rate lists, the ceilings and the default go by,
     /// so a new one goes on the end rather than where it might read best.
-    const CARRIERS: [(&'static str, &'static str); 15] = [
+    const CARRIERS: [(&'static str, &'static str); 16] = [
         ("B103", "Bell 103 - 300 bit/s"),
         ("V22B", "V.22bis - 1200 or 2400"),
         ("V32", "V.32 - 4800 or 9600"),
@@ -929,6 +931,10 @@ impl ScopeApp {
         (
             "HST",
             "HST - USRobotics' own: 14400 one way and 450 the other, the two swapping ends as the traffic does, with MNP over both. Only another HST modem answers it",
+        ),
+        (
+            "HST96",
+            "HST 9600 - the first Courier HST, of 1986: 9600 one way and 300 the other, with the channels swapping as the traffic does. Only another HST modem answers it",
         ),
     ];
 
@@ -3706,11 +3712,17 @@ impl ScopeApp {
                         .show(ui, |ui| {
                             ui.set_width(plate_w - 22.0);
                             ui.set_height(FACE_H - 22.0);
-                            if self.frame.hst.is_some() || self.frame.modulation == "HST" {
+                            if self.frame.hst.is_some() || self.frame.modulation.starts_with("HST") {
                                 // HST gets its own panel: twelve lamps and
                                 // the two channels, because which end has the
                                 // fast one is the thing worth seeing.
-                                scopes::hst_faceplate(ui, &self.frame.leds, self.frame.hst.as_ref(), FACE_H - 22.0);
+                                scopes::hst_faceplate(
+                                    ui,
+                                    &self.frame.leds,
+                                    self.frame.hst.as_ref(),
+                                    FACE_H - 22.0,
+                                    self.frame.modulation == "HST 9600",
+                                );
                             } else {
                                 scopes::faceplate(ui, &self.frame.leds);
                                 ui.add_space(6.0);
@@ -4432,7 +4444,7 @@ impl ScopeApp {
     /// A modulation and nothing else. The rate is the modem's to find: every
     /// one of these settles on the fastest the line will carry, and a ceiling
     /// set on purpose is in the Advanced window with the rest of AT+MS.
-    const MODES: [(usize, &'static str); 15] = [
+    const MODES: [(usize, &'static str); 16] = [
         (7, "V.92"),
         (5, "V.90"),
         (4, "V.34"),
@@ -4443,6 +4455,7 @@ impl ScopeApp {
         (0, "Bell 103"),
         // Not a Recommendation's, and only for another of its kind.
         (14, "HST"),
+        (15, "HST 9600"),
         // Not slower than the rest: not for the same kind of line at all.
         (8, "V.ARC"),
         (9, "V.ARC/QAM"),
@@ -6228,7 +6241,9 @@ mod modulation_tests {
             m.fit(i);
             assert_eq!(m.command(name), format!("AT+MS={name},1"));
         }
-        assert_eq!(ScopeApp::CARRIERS.len(), 15);
+        assert_eq!(ScopeApp::CARRIERS.len(), 16);
+        assert_eq!(ScopeApp::CARRIERS[15].0, "HST96");
+        assert_eq!(Modulation::rates(15), &[9600]);
     }
 
     /// The two V.32 carriers are two ceilings on one modulation, and the
