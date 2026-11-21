@@ -1470,7 +1470,13 @@ impl Receiver {
             let share = correlate(&window, &anchor.template);
             if share > MATCHED {
                 // Still the same signal. The first period it is held for is
-                // when it is reported as having been found.
+                // when it is reported as having been found. Whatever strayed
+                // before it is over: the periods a change may take are counted
+                // in a row, or a long Ri through a line with short dropouts
+                // spends them all, one hole at a time, and its R-bar-i -- whose
+                // first period straddles the turn -- drops the anchor instead
+                // of being heard (a live SIP call lost Phase 3 so).
+                anchor.stray = 0;
                 anchor.held += 1;
                 if anchor.held == HELD_PERIODS {
                     match anchor.kind {
@@ -2836,6 +2842,45 @@ mod tests {
     }
 
     const RU_SYMBOLS_LOCAL: usize = 384;
+
+    /// A long Ru with a period lost here and there, as a SIP line's short
+    /// dropouts lose them, is still turned over by its R-bar-u: the periods a
+    /// change may take are counted in a row and not over the whole of the Ru.
+    #[test]
+    fn a_reversal_is_heard_after_scattered_dropouts() {
+        let length = 40 * RU_SYMBOLS_LOCAL;
+        // As many as the hunt allows a change to take, so that one more --
+        // the period that straddles the turn to R-bar-u -- is one too many if
+        // they are counted over the whole Ru.
+        let holes = STRAY_PERIODS as usize;
+        // Every place the turn can fall against the hunt's comparisons, which
+        // are of whole periods from where it found Ru: on a live line that is
+        // wherever the first clean period happened to be, so the period that
+        // straddles the turn may match neither shape.
+        for lead in 0..RU_PERIOD {
+            let mut rx = Receiver::new();
+            let mut found = Vec::new();
+            let turn = length + lead;
+            for k in 0..(turn + 64) {
+                let bar = k >= turn;
+                // Every so often, well after Ru is held, a symbol that is not
+                // Ru's, at Ru's level: one that a short dropout and the jitter
+                // buffer's concealment left wrong. It spoils exactly one of
+                // the hunt's comparisons. (A silent period drops the anchor
+                // outright and Ru is found again, which costs nothing.)
+                let hole = (1..=holes).any(|h| h * length / (holes + 1) == k);
+                let level = ru(k as u64, bar);
+                rx.feed(if hole { -level } else { level });
+                while let Some(event) = rx.heard() {
+                    if matches!(event, Heard::RuReversal { .. }) {
+                        found.push(k);
+                    }
+                }
+            }
+            let at = found.last().copied().unwrap_or_else(|| panic!("lead {lead}: no reversal"));
+            assert!(at >= turn && at <= turn + 2 * RU_PERIOD, "lead {lead}: reversal at {at}, R-bar-u at {turn}");
+        }
+    }
 
     /// 9.5.2.1.7: Su for 144T, then S-bar-u for 24.5T -- which starts half a
     /// symbol late, so the S-bar-u is the Su's own inverse **a half symbol
