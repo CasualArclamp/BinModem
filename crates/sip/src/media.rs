@@ -111,6 +111,18 @@ const OUTGOING_CUSHION: usize = 3;
 /// cutting a new one into the middle of a symbol.
 const DRY_BEFORE_REBUILD: usize = 3;
 
+/// Dry ticks in a row after which the modem has stopped rather than stalled,
+/// and the part packet a dry tick keeps back goes out padded with silence.
+///
+/// A dry tick sends a whole packet of silence and keeps any part packet for
+/// the next one (see `pace`), because silence spliced into the stream in
+/// anything but whole packets is a phase step in every tone on the line. That
+/// is for a stall, where more is coming. A modem that has gone quiet -- the
+/// end of what it had to say, a hold -- would leave those few milliseconds in
+/// the queue for good. Ten ticks is 200 ms: no inbound wobble is that long,
+/// and a splice behind 200 ms of silence is not in the middle of anything.
+const DRY_BEFORE_FLUSH: usize = 10;
+
 /// Packets of delay the jitter buffer holds before it hands anything over.
 ///
 /// Two, which is 40 ms. Enough to put back in order the pair-swaps and small
@@ -1033,11 +1045,16 @@ fn pace(shared: Arc<Shared>, socket: UdpSocket) {
                 // whole number of cycles of anything on a multiple of 50 Hz:
                 // tones A and B, the guard tone, every tone of L1 and L2, and
                 // V.8's and V.21's carriers all come out of the gap in the
-                // phase they went into it with.
+                // phase they went into it with. Until the modem has been quiet
+                // so long that it has stopped rather than stalled: then the
+                // part goes, padded (see `DRY_BEFORE_FLUSH`).
+                dry += 1;
+                if dry > DRY_BEFORE_FLUSH {
+                    payload.extend(queue.drain(..));
+                }
                 payload.resize(octets, quiet);
                 left_behind = queue.len();
                 ran_dry = true;
-                dry += 1;
             }
         }
         waited = wait;
@@ -1157,8 +1174,12 @@ mod tests {
         assert_eq!(far.stats().law, Some("L16"));
 
         // Every sixteen-bit value there is, twice round, in an order that
-        // would not survive any filter.
-        let sent: Vec<i16> = (0..131_072u32).map(|i| (i.wrapping_mul(40_503) & 0xffff) as u16 as i16).collect();
+        // would not survive any filter -- and on to the end of that packet.
+        // A last part packet is kept back behind silence until the pacer has
+        // been dry for `DRY_BEFORE_FLUSH` ticks, which is right for a modem
+        // that has stalled and not what this is testing.
+        let whole = 131_072u32.div_ceil(packet as u32) * packet as u32;
+        let sent: Vec<i16> = (0..whole).map(|i| (i.wrapping_mul(40_503) & 0xffff) as u16 as i16).collect();
         let levels: Vec<f32> = sent.iter().map(|&v| f32::from(v) / 32768.0).collect();
         let mut got: Vec<i16> = Vec::new();
         let (mut modem, mut network) = (Vec::new(), Vec::new());
