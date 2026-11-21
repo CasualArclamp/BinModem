@@ -293,6 +293,16 @@ pub(crate) const TONE_B_FLOOR: f64 = 0.5;
 /// seconds.
 const SHORT_WAIT: f64 = 2.5;
 
+/// How long the far end's tone has to have stood, with no INFO0 from it, for
+/// the answer modem to take it that the INFO0 was lost (11.2.2.2.1).
+///
+/// Well past [`TONE_HELD`]: the tone follows straight on from the INFO0, which
+/// is reported some thirty milliseconds after its last bit, and an INFO0 that
+/// did arrive must not be answered with a repeat of this end's. An INFO0 run
+/// of zeros is steady carrier too, and twenty milliseconds of it is twelve
+/// symbols.
+const TONE_B_BEFORE_INFO0: f64 = 0.100;
+
 /// No part of phase 2 takes this long, round trips and all.
 pub(crate) const GIVE_UP: f64 = 20.0;
 
@@ -1440,6 +1450,23 @@ impl Modem {
                     } else {
                         self.enter(Stage::AnswerAwaitTone);
                     }
+                } else if self.far.is_none() && self.tx.pending() == 0 && self.presence.stood(self.ms(TONE_B_BEFORE_INFO0)) {
+                    // 11.2.2.2.1, and V.90 9.2.2.2.1 in the same words: "If
+                    // ... the analogue modem detects Tone B before correctly
+                    // receiving INFO0d ... [it] shall repeatedly send INFO0a."
+                    // The far end got ours and has gone on to its tone, and
+                    // its INFO0 never arrived -- a hole in the line will do
+                    // it. Holding tone A tells it nothing; a repeated INFO0a
+                    // is what has it send its INFO0 again (11.2.2.1.1,
+                    // 9.2.1.2.1). Back to back while its tone lasts, and the
+                    // one going out is finished before tone A follows, as the
+                    // clause asks, by the arm above.
+                    if std::env::var_os("PHASE2_TRACE").is_some() {
+                        eprintln!("P2TRACE tone B before any INFO0: INFO0a again at now={now}");
+                    }
+                    self.recoveries += 1;
+                    let bits = self.info0_bits();
+                    self.tx.send(&bits);
                 }
             }
             Stage::AnswerShortTone => {
@@ -2112,6 +2139,40 @@ pub(crate) mod tests {
         assert_eq!(asked.md_length, 0);
         assert_eq!(asked.uinfo, 79, "the same ceiling V.90 works to, for the same INFO0d");
         assert!(asked.uinfo_is_sendable());
+    }
+
+    /// V.90 9.2.2.2.1: the digital modem's INFO0d is lost to a hole in the
+    /// line (a live call had two, 8.7 and 2.6 ms, right across it), but our
+    /// INFO0a got through and the digital modem goes on to tone B. The
+    /// analogue modem has to answer that tone with INFO0a again, which has the
+    /// digital modem repeat INFO0d; holding tone A and waiting left the call
+    /// in INFO0 until phase 2's twenty seconds were up.
+    #[test]
+    fn a_lost_info0d_is_recovered_by_repeating_info0a() {
+        let mut line = Line::new(0.030, 10.0, f64::INFINITY, 60.0);
+        let mut digital = Modem::v90(digital_v92(true), FS, 0.0);
+        let mut analogue = Modem::v90(analogue_v92(true), FS, 0.0);
+        // INFO0d is on the line at the analogue end from 30 ms to about 150.
+        let hole = (0.060 * FS) as usize..(0.080 * FS) as usize;
+        for n in 0..(12.0 * FS) as usize {
+            let at_digital = line.to_call.pop_front().unwrap() + line.noise();
+            let mut at_analogue = line.to_answer.pop_front().unwrap() + line.noise();
+            if hole.contains(&n) {
+                at_analogue = 0.0;
+            }
+            let from_digital = digital.step(at_digital);
+            let from_analogue = analogue.step(at_analogue);
+            line.to_answer.push_back(from_digital * line.loss);
+            line.to_call.push_back(from_analogue * line.loss);
+            if digital.status() != Status::Running && analogue.status() != Status::Running {
+                break;
+            }
+        }
+        assert_eq!(analogue.status(), Status::Done, "analogue: {}", analogue.phase());
+        assert_eq!(digital.status(), Status::Done, "digital: {}", digital.phase());
+        assert!(analogue.far_info0d().is_some(), "INFO0d was never read");
+        assert!(analogue.recoveries() > 0, "the hole missed INFO0d, so this tested nothing");
+        assert!(analogue.info1a_pcm_up().is_some());
     }
 
     /// 9.3: "If either modem does not indicate V.92 capability, then the

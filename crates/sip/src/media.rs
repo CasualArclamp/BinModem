@@ -111,6 +111,18 @@ const OUTGOING_CUSHION: usize = 3;
 /// cutting a new one into the middle of a symbol.
 const DRY_BEFORE_REBUILD: usize = 3;
 
+/// Dry ticks in a row after which the modem has stopped rather than stalled,
+/// and the part packet a dry tick keeps back goes out padded with silence.
+///
+/// A dry tick sends a whole packet of silence and keeps any part packet for
+/// the next one (see `pace`), because silence spliced into the stream in
+/// anything but whole packets is a phase step in every tone on the line. That
+/// is for a stall, where more is coming. A modem that has gone quiet -- the
+/// end of what it had to say, a hold -- would leave those few milliseconds in
+/// the queue for good. Ten ticks is 200 ms: no inbound wobble is that long,
+/// and a splice behind 200 ms of silence is not in the middle of anything.
+const DRY_BEFORE_FLUSH: usize = 10;
+
 /// Packets of delay the jitter buffer holds before it hands anything over.
 ///
 /// Two, which is 40 ms. Enough to put back in order the pair-swaps and small
@@ -710,7 +722,8 @@ impl Media {
 
     /// Octets for the pacer, oldest out first when there are too many.
     fn queue(&self, codewords: &[u8]) {
-        let limit = self.shared.packet_octets.load(Ordering::Relaxed) as usize * OUTGOING_LIMIT;
+        let packet = (self.shared.packet_octets.load(Ordering::Relaxed) as usize).max(1);
+        let limit = packet * OUTGOING_LIMIT;
         let Ok(mut queue) = self.shared.outgoing.lock() else {
             return;
         };
@@ -722,8 +735,13 @@ impl Media {
         }
         for &code in codewords.iter() {
             if queue.len() >= limit {
-                queue.pop_front();
-                self.shared.dropped_out.fetch_add(1, Ordering::Relaxed);
+                // A whole packet of the oldest, never an octet at a time: a
+                // stretch cut out of the stream moves what follows it by its
+                // own length, and only a whole packet moves the line's tones
+                // by a whole number of cycles (see the dry tick in `pace`).
+                let gone = packet.min(queue.len());
+                queue.drain(..gone);
+                self.shared.dropped_out.fetch_add(gone as u64, Ordering::Relaxed);
             }
             queue.push_back(code);
         }
@@ -909,6 +927,9 @@ fn pace(shared: Arc<Shared>, socket: UdpSocket) {
     // Whether the tick before this one waited rather than sending. At most one
     // in a row: see `Stats::deferred`.
     let mut waited = false;
+    // Octets a dry tick left in the queue (see below), so that the modem
+    // having said something since can be told from what it said before.
+    let mut left_behind = 0;
 
     while shared.running.load(Ordering::Relaxed) {
         let octets = shared.packet_octets.load(Ordering::Relaxed) as usize;
@@ -940,6 +961,7 @@ fn pace(shared: Arc<Shared>, socket: UdpSocket) {
             stream = None;
             first = true;
             dry = 0;
+            left_behind = 0;
             waited = false;
             continue;
         }
@@ -962,7 +984,7 @@ fn pace(shared: Arc<Shared>, socket: UdpSocket) {
         let mut ran_dry = false;
         let mut wait = false;
         if let Ok(mut queue) = shared.outgoing.lock() {
-            if dry >= DRY_BEFORE_REBUILD && !queue.is_empty() {
+            if dry >= DRY_BEFORE_REBUILD && queue.len() > left_behind {
                 // The cushion has been spent and the modem is producing
                 // again: put it back, in front of what it has just produced.
                 //
@@ -978,8 +1000,14 @@ fn pace(shared: Arc<Shared>, socket: UdpSocket) {
                 // the stream ends up `OUTGOING_CUSHION` packets in front of
                 // the pacer and no further, so the delay this can add to a
                 // call is the cushion and not the sum of its wobbles.
+                //
+                // In whole packets, rounded up: what is waiting may begin
+                // with the part of a packet a dry tick left behind (below),
+                // and silence put in front of that is silence spliced into
+                // the middle of the stream, which must come in whole packets
+                // like any other.
                 let want = octets * OUTGOING_CUSHION;
-                let put = want.saturating_sub(queue.len());
+                let put = want.saturating_sub(queue.len()).div_ceil(octets) * octets;
                 for _ in 0..put {
                     queue.push_front(quiet);
                 }
@@ -990,7 +1018,7 @@ fn pace(shared: Arc<Shared>, socket: UdpSocket) {
             if queue.len() >= octets {
                 payload.extend(queue.drain(..octets));
                 dry = 0;
-            } else if !waited && queue.len() + octets / 4 >= octets {
+            } else if !waited && dry == 0 && queue.len() + octets / 4 >= octets {
                 // A few octets short of a packet: the two clocks have drifted
                 // past each other by less than a quarter of a packet time.
                 // Wait one tick rather than pad, and the shortfall is gone for
@@ -1001,12 +1029,32 @@ fn pace(shared: Arc<Shared>, socket: UdpSocket) {
                 // there is.
                 wait = true;
             } else {
-                // The modem has not produced this packet's worth. What there
-                // is goes out with silence behind it.
-                payload.extend(queue.drain(..));
-                payload.resize(octets, quiet);
-                ran_dry = true;
+                // The modem has not produced this packet's worth: a packet of
+                // silence goes, and what there is stays where it is for the
+                // next tick, in front of whatever the modem says meanwhile.
+                //
+                // Never a part packet padded out. Silence spliced into the
+                // stream moves everything after it by its own length, and a
+                // length that is not a whole packet is a phase step in every
+                // tone on the line -- (160 - m) x 108 degrees at 2400 Hz for
+                // m octets sent. A V.34 phase 2 tone is exactly where that
+                // hurts: a splice of 2, 5 or 155 octets in tone A reads as a
+                // phase reversal, and a live call to a V.92 server went round
+                // phase 2 until hang-up because the server took one for the
+                // reversal it was waiting for. A whole packet is 20 ms, a
+                // whole number of cycles of anything on a multiple of 50 Hz:
+                // tones A and B, the guard tone, every tone of L1 and L2, and
+                // V.8's and V.21's carriers all come out of the gap in the
+                // phase they went into it with. Until the modem has been quiet
+                // so long that it has stopped rather than stalled: then the
+                // part goes, padded (see `DRY_BEFORE_FLUSH`).
                 dry += 1;
+                if dry > DRY_BEFORE_FLUSH {
+                    payload.extend(queue.drain(..));
+                }
+                payload.resize(octets, quiet);
+                left_behind = queue.len();
+                ran_dry = true;
             }
         }
         waited = wait;
@@ -1126,8 +1174,12 @@ mod tests {
         assert_eq!(far.stats().law, Some("L16"));
 
         // Every sixteen-bit value there is, twice round, in an order that
-        // would not survive any filter.
-        let sent: Vec<i16> = (0..131_072u32).map(|i| (i.wrapping_mul(40_503) & 0xffff) as u16 as i16).collect();
+        // would not survive any filter -- and on to the end of that packet.
+        // A last part packet is kept back behind silence until the pacer has
+        // been dry for `DRY_BEFORE_FLUSH` ticks, which is right for a modem
+        // that has stalled and not what this is testing.
+        let whole = 131_072u32.div_ceil(packet as u32) * packet as u32;
+        let sent: Vec<i16> = (0..whole).map(|i| (i.wrapping_mul(40_503) & 0xffff) as u16 as i16).collect();
         let levels: Vec<f32> = sent.iter().map(|&v| f32::from(v) / 32768.0).collect();
         let mut got: Vec<i16> = Vec::new();
         let (mut modem, mut network) = (Vec::new(), Vec::new());
@@ -1556,6 +1608,63 @@ mod tests {
         // And never twice over: the tick after a wait sends what there is,
         // because waiting again is how a pacer turns into a stall.
         assert!(stats.packets_sent >= 8, "the pacer stopped sending: {stats:?}");
+    }
+
+    /// A tick that finds part of a packet sends a whole packet of silence and
+    /// keeps the part, rather than padding the part out.
+    ///
+    /// Padding m octets out to a packet puts 160 - m octets of silence into
+    /// the stream, and everything after it moves by that much: a phase step
+    /// of (160 - m) x 108 degrees in a 2400 Hz tone. A V.92 server took one of
+    /// those in our tone A for a phase reversal and went round phase 2 until
+    /// it hung up. Silence a whole packet long is 20 ms, a whole number of
+    /// cycles of every tone phase 2 uses, so what goes out either side of a
+    /// gap has to meet at a packet boundary with nothing between them.
+    #[test]
+    fn a_part_packet_waits_behind_a_whole_packet_of_silence() {
+        let far = UdpSocket::bind("127.0.0.1:0").expect("a far end socket");
+        far.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        let far_address = far.local_addr().unwrap();
+        let media = Media::open(0, NETWORK_RATE).expect("a media path");
+        media.connect(far_address, Law::Mu, g711::PCMU, 20);
+
+        // A hundred octets: past the cushion, and too far short of a packet
+        // for the one-tick wait, so the pacer runs dry on them.
+        let first = 0.5;
+        let second = -0.5;
+        media.transmit_exact(&[first; 100]);
+        thread::sleep(Duration::from_millis(160));
+        media.transmit_exact(&[second; 160]);
+        thread::sleep(Duration::from_millis(120));
+
+        let mut stream = Vec::new();
+        let mut datagram = [0u8; 2048];
+        while let Ok(n) = far.recv(&mut datagram) {
+            if let Some(packet) = rtp::Packet::parse(&datagram[..n]) {
+                stream.extend_from_slice(&packet.payload);
+            }
+            if stream.len() > 160 * 40 {
+                break;
+            }
+        }
+        let quiet = Law::Mu.encode(0);
+        let code = |level: f32| {
+            let mut out = Vec::new();
+            g711::encode_into(Law::Mu, &[level], &mut out);
+            out[0]
+        };
+        let (a, b) = (code(first), code(second));
+        let start = stream.iter().position(|&o| o == a).expect("the first part never went out");
+        assert_eq!(start % 160, 0, "the first part did not start a packet");
+        assert!(stream[start..start + 100].iter().all(|&o| o == a), "the first part was cut up");
+        // The second part fills that packet out. What is left of it waits in
+        // the queue for whatever the modem says next, as the first part did.
+        assert!(
+            stream[start + 100..start + 160].iter().all(|&o| o == b),
+            "{} octets of silence were spliced between the two parts",
+            stream[start + 100..start + 160].iter().filter(|&&o| o == quiet).count()
+        );
+        assert!(media.stats().underruns_mid_call > 0, "the pacer never ran dry: {:?}", media.stats());
     }
 
     /// The caller's real cadence, with the far end going quiet in the middle
