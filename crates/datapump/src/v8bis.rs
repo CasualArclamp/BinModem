@@ -52,6 +52,10 @@ const TURNAROUND: f64 = 0.090;
 /// The quiet before answering a message, which is recognised at its last
 /// flag: there is nothing left of it to wait out.
 const AFTER_MESSAGE: f64 = 0.020;
+/// How long the far end's channel may drop out of a message and the message
+/// still be the one being read: longer than the 2 to 4 ms holes a VoIP path's
+/// tone clamp leaves, and the band filter's few milliseconds of catching up.
+const CARRIER_HOLD: f64 = 0.012;
 /// "remain silent for a minimum of 400 ms" before MRe or CRe (10.2.2).
 const BEFORE_OPENING: f64 = 0.400;
 /// "more than 5 s" in any state but the two that are rest, and the station
@@ -426,6 +430,8 @@ pub struct Station {
     /// Whether the far end's V.21 carrier was there on the last sample:
     /// its channel's band measured against everything on the line.
     carrier: bool,
+    /// Samples since the far end's channel last held its share of the line.
+    quiet: usize,
     /// The line's mean square, to measure the channel against.
     power: f64,
     alpha: f64,
@@ -460,6 +466,7 @@ impl Station {
             escaped: false,
             heard: false,
             carrier: false,
+            quiet: 0,
             power: 0.0,
             alpha: 1.0 - (-1.0 / (0.008 * fs)).exp(),
         }
@@ -566,11 +573,29 @@ impl Station {
             // Measured: the channel's band holds 0.67 of the line's level
             // while a message is all there is on it, 0.46 or more with this
             // end's own message echoing beside it, and under 0.29 of noise.
-            let carrier = self.power > 1e-8 && self.rx.band_level() > 0.38 * self.power.sqrt();
-            if self.carrier && !carrier {
-                self.decoder = Decoder::new(Fcs::Bits16);
+            //
+            // A carrier that is gone for a moment has not stopped, though. A
+            // capture of a CL from a server across a VoIP trunk had twenty
+            // holes of 2 to 4 ms in 0.7 s of it -- most likely a DTMF clamp
+            // in the path, since the low channel's 980 and 1180 Hz sit beside
+            // DTMF's 941 and 1209 -- and each hole reset the decoder,
+            // so the frame was neither read nor answered: the far end gave
+            // up and answered with ANSam, and the transcript said nothing.
+            // So the band has to be gone for longer than a hole before the
+            // carrier is, and a frame a hole has spoiled fails its check and
+            // is answered with NAK(1) as 9.8 says.
+            let band = self.power > 1e-8 && self.rx.band_level() > 0.38 * self.power.sqrt();
+            if band {
+                self.quiet = 0;
+                self.carrier = true;
+            } else if self.carrier {
+                self.quiet += 1;
+                if self.quiet as f64 > CARRIER_HOLD * self.fs {
+                    self.decoder = Decoder::new(Fcs::Bits16);
+                    self.carrier = false;
+                }
             }
-            self.carrier = carrier;
+            let carrier = self.carrier;
             if let Some(bit) = bit.filter(|_| carrier)
                 && let Some(frame) = self.decoder.feed(bit)
             {

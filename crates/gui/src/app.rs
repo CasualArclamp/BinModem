@@ -5463,12 +5463,14 @@ impl ScopeApp {
         let dim = Color32::from_rgb(140, 150, 165);
         let bright = Color32::from_rgb(220, 225, 235);
         ui.add_space(6.0);
-        ui.label(RichText::new("distant").strong());
+        // Not only V.8's menu: everything the far end has said about itself
+        // and everything the two ends settled, from V.8 bis to XID.
+        ui.label(RichText::new("distant modem and call").strong());
         ui.add_space(4.0);
         if self.frame.distant.is_empty() {
             ui.label(
                 RichText::new(
-                    "Nothing said yet. A far end describes itself in the V.8 menu, in the detection phase, and in XID -- and a call that gets none of the way through says nothing at all.",
+                    "Nothing said yet. A far end describes itself in V.8 bis and V.8, in phase 2's INFO sequences, in Jd and CP, in the detection phase and in XID -- and a call that gets none of the way through says nothing at all.",
                 )
                 .small()
                 .color(dim),
