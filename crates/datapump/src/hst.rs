@@ -31,8 +31,10 @@
 //! module's own.
 
 mod back;
+pub mod session;
 
 pub use back::{BackRate, BackRx, BackTx};
+pub use session::{Config, Holding, Session, Side};
 
 /// Symbols of preamble the back-channel transmitter sends.
 pub fn back_preamble() -> u32 {

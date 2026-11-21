@@ -24,7 +24,7 @@ working notes with every address live outside this repository.
   hears 2100 Hz and answers on the back channel. The answering end sends fast
   first.
 
-## What is built so far (milestone 1)
+## Milestone 1: the two channels
 
 `datapump::hst`:
 
@@ -41,11 +41,51 @@ working notes with every address live outside this repository.
 simulated two-wire line with loss, hybrid echo and noise, at every rate and
 both back-channel speeds, and carries HDLC frames both ways.
 
+## Milestone 2: MNP and the handover
+
+`ec::mnp` is MNP error control as HST carries it: link request, disconnect,
+numbered data frames, windowed acknowledgement with go-back-N retransmission,
+attention and its acknowledgement. Link setup uses standard headers (the
+request is the Courier's template byte for byte, plus USR's parameter 0xC0);
+once both ends agree parameter 8 the link moves to the optimized headers the
+Courier's receive path reads. Sans I/O, like `ec::lapm`.
+
+`datapump::hst::Session` is one end of a call: both channels, HDLC, MNP, and
+the policy on top.
+
+- The answerer holds the forward channel first; the caller is the MNP
+  originator and sends its request on the back channel. Everything starts at
+  7200 and 450; once 0xC0 is agreed the forward channel retrains at the
+  fastest rate both allow, and the back channel drops to 300 if either end
+  asked.
+- Handover: the back-channel end with more than `turnaround_backlog` octets
+  waiting sends attention 0x1R. The holder acknowledges, lets that go, and
+  moves to the back channel; the requester drops its back channel, waits
+  400 ms and trains the forward one. A minimum hold stops ping-pong.
+- Online fallback and fall-forward: the receiving end watches the forward
+  receiver's signal to noise and asks for a new rate with attention 0x3R; the
+  holder retrains at it. The Courier changes bits per symbol without
+  retraining; the V.17 engine cannot, so this retrains.
+- The forward-holding end listens for both back-channel speeds at once, so a
+  change of speed needs no coordination.
+- A watchdog puts the roles back (answerer forward, caller back) if a handover
+  is half lost and an end hears nothing for 5 s.
+
+`crates/datapump/tests/hst_session.rs` calls end to end over the simulated
+two-wire line: connection and rate agreement, a download with typing coming
+back on the back channel, an upload that takes the forward channel and a
+download that takes it back, the 300 bit/s back channel, a noisy line that
+falls back and recovers its lost frames (and, with fallback off, nearly
+stalls), and a line that clears and climbs back to 14 400.
+
 ## Not yet
 
 - Interoperating with a real Courier: the forward channel's start-up is
   V.17's 1.4 s train rather than HST's (180 + 72 + 200 or 3096 symbols), its
   pulse is V.17's rather than the Courier's, and the back channel's pulse and
-  preamble are guesses. 4800 and 16 800 are missing.
-- MNP error control with USR's additions, channel turnaround and fallback,
-  the call-start handshake, and wiring into the modem and AT layers.
+  preamble are guesses. 4800 and 16 800 are missing. The handover and
+  fallback timings are this implementation's.
+- USR's other frame types (piggybacked acknowledgement, short data frames)
+  and MNP class 5 compression.
+- The call-start handshake (2100 Hz answer tone) and wiring into the modem
+  and AT layers.
