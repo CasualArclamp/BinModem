@@ -520,6 +520,118 @@ impl Pump {
     }
 }
 
+/// What a pump's start-up has learned about the far end and settled with it,
+/// as rows for the distant panel: V.34's phase 2 report, and beside it what
+/// only a PCM call carries -- the INFO0d or INFO0a that says which half of
+/// V.90 or V.92 the far end is, the INFO1d and INFO1a that set phase 3 up,
+/// and V.90's or V.92's Jd and CP. Empty before phase 2 has heard anything.
+fn handshake_rows(pump: &Pump) -> Vec<(&'static str, String)> {
+    let Some(startup) = pump.v34() else { return Vec::new() };
+    let p2 = startup.phase2();
+    if p2.far_capabilities().is_none() && p2.far_info0d().is_none() {
+        return Vec::new();
+    }
+    let mut rows = V34Report::of(startup).rows();
+    let law = |a: bool| if a { "A-law" } else { "mu-law" };
+    if let Some(d) = p2.far_info0d() {
+        let flags = d.pcm_flags();
+        rows.push((
+            "INFO0d",
+            format!(
+                "{} digital modem, {}, phase 2 at -{} dBm0, at most -{:.1} dBm0{}{}{}",
+                if flags.v92 { "V.92" } else { "V.90" },
+                law(d.a_law),
+                6 + u32::from(d.nominal_power),
+                0.5 * (f64::from(d.max_power) + 1.0),
+                if d.power_at_codec { " at the codec" } else { "" },
+                if d.upstream_3429 { ", 3429 upstream" } else { "" },
+                if flags.short_phase2 { ", asks for short phase 2" } else { "" },
+            ),
+        ));
+    } else if p2.pcm().is_some() {
+        // This end is the digital modem: the far end's INFO0a says whether
+        // it is a V.92 analogue modem.
+        let flags = p2.far_pcm_flags();
+        rows.push((
+            "INFO0a",
+            format!(
+                "{} analogue modem{}",
+                if flags.v92 { "V.92" } else { "V.90" },
+                if flags.short_phase2 { ", asks for short phase 2" } else { "" }
+            ),
+        ));
+    }
+    if p2.pcm().is_some() {
+        if p2.was_short() {
+            rows.push(("phase 2", "short (V.92 9.4): no probing, no INFO1".to_owned()));
+        }
+        if let Some(c) = p2.info1c() {
+            rows.push((
+                "INFO1d",
+                format!(
+                    "power down {} dB, {} more tolerable, MD {} ms{}",
+                    c.min_power_reduction,
+                    c.additional_power_reduction,
+                    u32::from(c.md_length) * 35,
+                    c.frequency_offset.map_or(String::new(), |hz| format!(", {hz:+.2} Hz offset"))
+                ),
+            ));
+        }
+        if let Some(a) = p2.info1a_pcm() {
+            rows.push((
+                "INFO1a",
+                format!(
+                    "V.90: U_INFO {}, upstream {} symbols/s, MD {} ms",
+                    a.uinfo,
+                    a.upstream.nominal(),
+                    u32::from(a.md_length) * 35
+                ),
+            ));
+        }
+        if let Some(a) = p2.info1a_pcm_up() {
+            rows.push((
+                "INFO1a",
+                format!(
+                    "PCM upstream: U_INFO {}, {} filter sections, L_tot {}, L_max {}, MD {:.0} ms",
+                    a.uinfo,
+                    a.sections + 1,
+                    192 + 64 * u32::from(a.ltot_code),
+                    128 + 64 * u32::from(a.lmax_code),
+                    f64::from(a.md_length) * 34.5
+                ),
+            ));
+        }
+        if let Some(why) = p2.refused_info1a() {
+            rows.push(("INFO1a refused", why.to_owned()));
+        }
+    }
+    // Phase 3's Jd: the downstream rates the digital modem will send.
+    let jd = match pump {
+        Pump::V90(m) => m.v92().and_then(|v| v.far_jd().copied()).or_else(|| m.v90().and_then(|v| v.far_jd())),
+        _ => None,
+    };
+    if let Some(jd) = jd {
+        let top = (1..=v90::sequences::DOWNSTREAM_RATES as u8).rev().find(|&drn| jd.enables(drn));
+        rows.push((
+            "Jd",
+            format!(
+                "downstream up to {}, lookahead {}{}",
+                top.and_then(v90::sequences::data_rate).map_or("no rate".to_owned(), |r| format!("{r} bit/s")),
+                jd.lookahead,
+                if jd.sixteen_in_training { ", 16-point training" } else { "" }
+            ),
+        ));
+    }
+    if let Pump::V90(m) = pump {
+        rows.push((
+            "PCM",
+            if m.is_v92() { "V.92, PCM upstream" } else if m.is_v90() { "V.90, V.34 upstream" } else { "not settled yet" }
+                .to_owned(),
+        ));
+    }
+    rows
+}
+
 /// What a V.34 start-up found, kept after the call it ended.
 ///
 /// The start-up is all of V.34 there is so far, so this is the whole of what a
@@ -1006,6 +1118,13 @@ pub struct Modem {
     /// What V.34's phase 2 found on the last call that ran it, kept after the
     /// call it ended.
     v34_report: Option<V34Report>,
+    /// Everything the pump's start-up has learned about the far end and
+    /// settled with it -- phase 2's INFO sequences, V.90's and V.92's Jd and
+    /// CP -- read off the pump while it runs and kept after it is gone, so a
+    /// call that never connected still says what it found.
+    handshake_rows: Vec<(&'static str, String)>,
+    /// Milliseconds until `handshake_rows` is read again.
+    rows_due: u32,
     /// What the error control layer heard, kept after it is put away.
     ///
     /// A connection that ends up without error control drops the stack, and
@@ -1096,6 +1215,8 @@ impl Modem {
             fax_identification: String::new(),
             far_menu: None,
             v34_report: None,
+            handshake_rows: Vec::new(),
+            rows_due: 0,
             far_ec: Vec::new(),
             recovered: Vec::new(),
             declared_lapm: false,
@@ -1527,9 +1648,11 @@ impl Modem {
                 .to_owned(),
             ));
             // V.90 is not a modulation octet but a category of its own
-            // (Table 5), and says which half the far end can be.
+            // (Table 5), and says which half the far end can be -- of V.90
+            // or V.92, which its bits do not tell apart: that is for V.8
+            // bis's list or INFO0 to say.
             let pcm = menu.pcm.unwrap_or_default();
-            let mut modes: Vec<&str> = [(pcm.analogue, "V.90 analogue"), (pcm.digital, "V.90 digital"), (pcm.v91, "V.91")]
+            let mut modes: Vec<&str> = [(pcm.analogue, "V.90/V.92 analogue"), (pcm.digital, "V.90/V.92 digital"), (pcm.v91, "V.91")]
                 .into_iter()
                 .filter_map(|(has, name)| has.then_some(name))
                 .collect();
@@ -1571,7 +1694,9 @@ impl Modem {
             ));
         }
         rows.extend(self.error_control_rows());
-        if let Some(report) = self.v34_report.as_ref() {
+        if !self.handshake_rows.is_empty() {
+            rows.extend(self.handshake_rows.iter().cloned());
+        } else if let Some(report) = self.v34_report.as_ref() {
             rows.extend(report.rows());
         }
         // A Super G3 call's channels, from the half-duplex modem: what its
@@ -2210,6 +2335,18 @@ impl Modem {
 
     /// Time passing, which drives the escape guard and V.42's timers.
     pub fn tick(&mut self, ms: u32) {
+        // Four times a second is often enough for a panel, and the pump's
+        // accessors are not free.
+        self.rows_due = self.rows_due.saturating_sub(ms);
+        if self.rows_due == 0 {
+            self.rows_due = 250;
+            if let Some(pump) = self.pump.as_ref() {
+                let rows = handshake_rows(pump);
+                if !rows.is_empty() {
+                    self.handshake_rows = rows;
+                }
+            }
+        }
         if self.state == State::Handshaking {
             self.since_dial_ms = self.since_dial_ms.saturating_add(ms);
         }
@@ -3054,6 +3191,7 @@ impl Modem {
             self.announce = None;
             self.far_menu = None;
             self.v34_report = None;
+            self.handshake_rows.clear();
             self.far_ec.clear();
             self.recovered.clear();
             self.outbound.clear();
@@ -3110,6 +3248,7 @@ impl Modem {
         self.ec = None;
         self.far_menu = None;
         self.v34_report = None;
+        self.handshake_rows.clear();
         self.far_ec.clear();
         self.recovered.clear();
         self.declared_lapm = false;
@@ -3403,6 +3542,7 @@ impl Modem {
         self.announce = None;
         self.far_menu = None;
         self.v34_report = None;
+        self.handshake_rows.clear();
         self.far_ec.clear();
         self.recovered.clear();
         self.varc_owed_ms = 0.0;
