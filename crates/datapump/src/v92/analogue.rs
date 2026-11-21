@@ -242,7 +242,15 @@ const DOWN_SIGN: f64 = -1.0;
 // ---------------------------------------------------------------------------
 
 /// AR1: "If the Sd-to-S-bar-d reversal is not detected within 1500 ms of the
-/// start of Ja, the analogue modem shall retrain". No round-trip term.
+/// start of Ja, the analogue modem shall retrain".
+///
+/// The clause carries no round-trip term, which assumes a terrestrial line:
+/// Ja has to reach the digital modem before it can answer, and Sd has to come
+/// back, so a round trip is spent inside the 1500 ms before anything else is.
+/// A V.92 server across the internet answered one round trip after Ja began
+/// (1.31 to 1.45 s measured), and at 1.45 s the reversal was still on its way
+/// when the flat deadline fired. Phase 2's round trip is added, as A6 and A11
+/// add it below.
 const SD_WITHIN: f64 = 1.5;
 
 /// AR2: "If Jd is not received within 4500 ms of the end of Ja".
@@ -1076,6 +1084,8 @@ pub struct Modem {
     /// Whether [`Modem::choose`] has handed over the CPt and the CPu
     /// ([`Settings::choice_follows_dil`]).
     chosen: bool,
+    /// The rate and acknowledge bit the last CPu noted said.
+    cpu_noted: Option<(u8, bool)>,
     /// Whether Ri has been heard with no DIL asked for, so that CPt is due
     /// at the next twelve-symbol boundary of the TRN1u on the line
     /// (9.5.2.1.9, 9.5.2.1.10).
@@ -1213,6 +1223,7 @@ impl Modem {
             dil_left: 0,
             dil: Vec::new(),
             chosen: false,
+            cpu_noted: None,
             ri_heard: false,
             ri_given_up: false,
             stage: Stage::Opening,
@@ -1803,7 +1814,12 @@ impl Modem {
         let unit = trn2u_unit(size == Trn2uSize::Eight);
         let (kind, bits) = match (kind, self.cpu.as_ref()) {
             (SequenceKind::Cp, Some(cpu)) => {
-                self.notes.push(format!("CPu for drn {}, ack {ack}", cpu.drn));
+                // Once per change of what it says: a CPu repeated back to back
+                // for want of an answer is one line, not one a sequence.
+                if self.cpu_noted != Some((cpu.drn, ack)) {
+                    self.cpu_noted = Some((cpu.drn, ack));
+                    self.notes.push(format!("CPu for drn {}, ack {ack}", cpu.drn));
+                }
                 (kind, Cp { acknowledge: ack, ..cpu.clone() }.to_bits_in(Layout::V92, unit))
             }
             (SequenceKind::E, _) => {
@@ -2110,7 +2126,7 @@ impl Modem {
         self.source.start(Up::Ja);
         self.stage = Stage::Ja;
         self.ja_began = Some(self.now);
-        self.sd_deadline = Some(self.now + (SD_WITHIN * FS) as u64);
+        self.sd_deadline = Some(self.now + ((SD_WITHIN + self.settings.round_trip) * FS) as u64);
         self.notes.push("Ja".into());
     }
 
@@ -2391,8 +2407,8 @@ impl Modem {
             && self.now > at
         {
             self.sd_deadline = None;
-            // AR1, which carries no round-trip term.
-            self.fail("no Sd reversal within 1500 ms of Ja");
+            // AR1, with the round trip it takes for Ja to be answered.
+            self.fail("no Sd reversal within 1500 ms and a round trip of Ja");
             return;
         }
         if let Some(at) = self.jd_deadline

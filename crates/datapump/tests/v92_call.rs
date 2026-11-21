@@ -872,34 +872,39 @@ fn phase_3_completes_with_md() {
 }
 
 /// A digital end that never sends Sd leaves Ja unanswered, and AR1's 1500 ms --
-/// counted from the start of Ja and with no round-trip term -- is what notices.
+/// counted from the start of Ja, plus the round trip Ja takes to be answered --
+/// is what notices. With no round trip that is 1500 ms; with a VoIP call's 1.45
+/// s, which a live server answered Ja after, it is 2950 ms.
 #[test]
 fn a_digital_end_that_never_sends_sd_fails_analogue() {
-    let mut modem = analogue::Modem::new(analogue_settings(0));
-    let mut ja_began = None;
-    let mut failed = false;
-    for _ in 0..40_000u64 {
-        // Nothing on the line at all: no Sd, no S-bar-d, no TRN1d.
-        modem.step(0.0);
-        if modem.phase() == "V.92 phase 3: Ja" && ja_began.is_none() {
-            ja_began = Some(modem.elapsed());
+    for round_trip in [0.0, 1.45] {
+        let allowed = ((1.5 + round_trip) * 8000.0) as u64;
+        let mut modem = analogue::Modem::new(analogue::Settings { round_trip, ..analogue_settings(0) });
+        let mut ja_began = None;
+        let mut failed = false;
+        for _ in 0..60_000u64 {
+            // Nothing on the line at all: no Sd, no S-bar-d, no TRN1d.
+            modem.step(0.0);
+            if modem.phase() == "V.92 phase 3: Ja" && ja_began.is_none() {
+                ja_began = Some(modem.elapsed());
+            }
+            if let analogue::Status::Failed(why) = modem.status() {
+                let began = ja_began.expect("Ja went out");
+                assert_eq!(why, "no Sd reversal within 1500 ms and a round trip of Ja");
+                assert!(
+                    modem.elapsed() >= began + allowed,
+                    "AR1 at a {round_trip} s round trip: {} symbols after Ja began",
+                    modem.elapsed() - began
+                );
+                assert!(modem.elapsed() <= began + allowed + 200, "and it is a deadline, not a mood");
+                failed = true;
+                break;
+            }
         }
-        if let analogue::Status::Failed(why) = modem.status() {
-            let began = ja_began.expect("Ja went out");
-            assert_eq!(why, "no Sd reversal within 1500 ms of Ja");
-            assert!(
-                modem.elapsed() >= began + 12_000,
-                "AR1 is 1500 ms: {} symbols after Ja began",
-                modem.elapsed() - began
-            );
-            assert!(modem.elapsed() <= began + 12_200, "and it is a deadline, not a mood");
-            failed = true;
-            break;
-        }
+        let notes = modem.take_notes();
+        assert!(failed, "no failure in 60 000 symbols: {} notes {notes:?}", modem.phase());
+        assert!(notes.iter().any(|note| note.contains("no Sd reversal")), "{notes:?}");
     }
-    let notes = modem.take_notes();
-    assert!(failed, "no failure in 40 000 symbols: {} notes {notes:?}", modem.phase());
-    assert!(notes.iter().any(|note| note.contains("no Sd reversal")), "{notes:?}");
 }
 
 /// The far end's clock is not the network's, and Phase 3 is what puts it right.
