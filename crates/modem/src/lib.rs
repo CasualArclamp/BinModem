@@ -1160,6 +1160,11 @@ impl Modem {
     /// ending a session it has already said goodbye to has no reason to wait
     /// for that, and nothing it sends after the goodbye would be data.
     pub fn hang_up(&mut self) {
+        if self.hst_linked() {
+            self.hst_say_goodbye();
+            self.at.emit(ResultCode::Ok);
+            return;
+        }
         if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some() || self.hst.is_some() {
             self.end_call(Ended::LocalRequest);
         }
@@ -1474,6 +1479,26 @@ impl Modem {
         self.hst.as_ref().and_then(hst::call::Call::session)
     }
 
+    fn hst_linked(&self) -> bool {
+        self.hst_session().is_some_and(hst::Session::is_connected)
+    }
+
+    /// Hang up an HST call the way MNP does: an LD, which the far end hangs
+    /// up on at once rather than waiting out the silence. The line is held
+    /// long enough for it to go, and the modem is back in command state
+    /// straight away.
+    fn hst_say_goodbye(&mut self) {
+        if let Some(s) = self.hst.as_mut().and_then(hst::call::Call::session_mut) {
+            s.hang_up();
+        }
+        self.hst_closing_ms = Some(0);
+        self.rate = 0;
+        self.transmit_rate = 0;
+        self.outbound.clear();
+        self.escape.reset();
+        self.state = State::Command;
+    }
+
     /// What an HST call is doing, while there is one.
     pub fn hst_status(&self) -> Option<HstStatus> {
         let call = self.hst.as_ref().filter(|_| self.hst_closing_ms.is_none())?;
@@ -1781,7 +1806,9 @@ impl Modem {
     /// earlier position, everything in that queue is already stale and still
     /// has to be sent before anything new is heard.
     pub fn queued(&self) -> usize {
-        self.outbound.len() + self.ec.as_ref().map_or(0, Stack::queued)
+        self.outbound.len()
+            + self.ec.as_ref().map_or(0, Stack::queued)
+            + self.hst_session().map_or(0, hst::Session::backlog)
     }
 
     /// Compressed streams that arrived intact and would not decode.
@@ -3068,20 +3095,7 @@ impl Modem {
                     self.varc_spent = false;
                     self.place_call(Role::Answering);
                 }
-                Action::HangUp if self.hst.as_ref().and_then(hst::call::Call::session).is_some_and(hst::Session::is_connected) => {
-                    // MNP has a goodbye, the LD, and the far end hangs up at
-                    // once on hearing it rather than waiting out the silence.
-                    // So the line is held long enough for it to go.
-                    if let Some(s) = self.hst.as_mut().and_then(hst::call::Call::session_mut) {
-                        s.hang_up();
-                    }
-                    self.hst_closing_ms = Some(0);
-                    self.rate = 0;
-                    self.transmit_rate = 0;
-                    self.outbound.clear();
-                    self.escape.reset();
-                    self.state = State::Command;
-                }
+                Action::HangUp if self.hst_linked() => self.hst_say_goodbye(),
                 Action::HangUp => {
                     if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some() || self.hst.is_some() {
                         self.drop_call();

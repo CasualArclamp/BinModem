@@ -37,6 +37,7 @@
 
 mod answer;
 mod app;
+mod bbs;
 mod crashlog;
 mod dialin;
 mod document;

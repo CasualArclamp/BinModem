@@ -79,6 +79,24 @@ binmodem --answer --in "<input device>" --out "<output device>" --carrier V22B -
 Everything the caller is shown is printed there too, along with who logged in,
 the addresses PPP handed out and every ping that arrived.
 
+### Answering for a real board
+
+`--bbs` puts each caller through to a bulletin board that takes telnet
+callers, in place of the login prompt: WWIV's `wwivd`, Synchronet, Mystic,
+or anything else listening on a port. The board gets the caller's
+keystrokes and the caller gets the board's ANSI, exactly as with a serial
+port to a board in 1989.
+
+```powershell
+binmodem --answer --carrier HST --bbs localhost:2323 --in "<input device>" --out "<output device>"
+```
+
+Dial it from the window with HST (or HST 9600) chosen and `ATD1`. When the
+board logs the caller off, the modem waits for the board's last screen to
+reach the caller and then hangs up. A port left off means telnet's 23. A
+board that is not answering when a call comes in gets the caller hung up on,
+and the answering modem goes back to waiting.
+
 ## Trying V.34
 
 **33600** in the rate row, or `AT+MS=V34`, offers V.34 in V.8 alongside
