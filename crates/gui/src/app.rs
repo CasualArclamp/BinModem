@@ -205,6 +205,8 @@ impl Modulation {
             // V.ARC has no rates to choose among: each end loads the line
             // for what it measures, and nought is how +MS says "unspecified".
             8..=13 => &[0],
+            // HST's forward channel: V.17's four trellis rates, 2400 baud.
+            14 => &[7200, 9600, 12_000, 14_400],
             // V.34 5.1: "2400 bit/s to 33 600 bit/s in multiples of 2400".
             _ => &[
                 2400, 4800, 7200, 9600, 12_000, 14_400, 16_800, 19_200, 21_600, 24_000, 26_400,
@@ -891,7 +893,7 @@ impl ScopeApp {
     ///
     /// Positions are what the rate lists, the ceilings and the default go by,
     /// so a new one goes on the end rather than where it might read best.
-    const CARRIERS: [(&'static str, &'static str); 14] = [
+    const CARRIERS: [(&'static str, &'static str); 15] = [
         ("B103", "Bell 103 - 300 bit/s"),
         ("V22B", "V.22bis - 1200 or 2400"),
         ("V32", "V.32 - 4800 or 9600"),
@@ -924,6 +926,10 @@ impl ScopeApp {
             "V.ARC/QAM two-wire - one carrier at 16000 baud on one pair of wires. The echo is taken out by the first canceller alone, so it settles lower than the multicarrier mode does",
         ),
         ("VARCP2W", "V.ARC/PCM two-wire - levels at baseband on one pair of wires, by the first canceller alone"),
+        (
+            "HST",
+            "HST - USRobotics' own: 14400 one way and 450 the other, the two swapping ends as the traffic does, with MNP over both. Only another HST modem answers it",
+        ),
     ];
 
     /// Boards to start from, because a text box on its own is a box nobody
@@ -3700,10 +3706,17 @@ impl ScopeApp {
                         .show(ui, |ui| {
                             ui.set_width(plate_w - 22.0);
                             ui.set_height(FACE_H - 22.0);
-                            scopes::faceplate(ui, &self.frame.leds);
-                            ui.add_space(6.0);
-                            ui.label(RichText::new("receive level").monospace().small().color(DIM));
-                            scopes::level_meter(ui, self.frame.rx_level_db);
+                            if self.frame.hst.is_some() || self.frame.modulation == "HST" {
+                                // HST gets its own panel: twelve lamps and
+                                // the two channels, because which end has the
+                                // fast one is the thing worth seeing.
+                                scopes::hst_faceplate(ui, &self.frame.leds, self.frame.hst.as_ref(), FACE_H - 22.0);
+                            } else {
+                                scopes::faceplate(ui, &self.frame.leds);
+                                ui.add_space(6.0);
+                                ui.label(RichText::new("receive level").monospace().small().color(DIM));
+                                scopes::level_meter(ui, self.frame.rx_level_db);
+                            }
                         });
                 },
             );
@@ -4419,7 +4432,7 @@ impl ScopeApp {
     /// A modulation and nothing else. The rate is the modem's to find: every
     /// one of these settles on the fastest the line will carry, and a ceiling
     /// set on purpose is in the Advanced window with the rest of AT+MS.
-    const MODES: [(usize, &'static str); 14] = [
+    const MODES: [(usize, &'static str); 15] = [
         (7, "V.92"),
         (5, "V.90"),
         (4, "V.34"),
@@ -4428,6 +4441,8 @@ impl ScopeApp {
         (1, "V.22bis"),
         (6, "V.21"),
         (0, "Bell 103"),
+        // Not a Recommendation's, and only for another of its kind.
+        (14, "HST"),
         // Not slower than the rest: not for the same kind of line at all.
         (8, "V.ARC"),
         (9, "V.ARC/QAM"),
@@ -6198,6 +6213,8 @@ mod modulation_tests {
         // downstream is whatever the route allows, and +MS does not name it.
         assert_eq!(ScopeApp::CARRIERS[5].0, "V90");
         assert_eq!(Modulation::rates(5), Modulation::rates(4));
+        assert_eq!(ScopeApp::CARRIERS[14].0, "HST");
+        assert_eq!(Modulation::rates(14), &[7200, 9600, 12_000, 14_400]);
         assert_eq!(ScopeApp::CARRIERS[6].0, "V21");
         assert_eq!(Modulation::rates(6), &[300]);
         // V.92's are V.90's: the same V.34 upstream unless PCM upstream is on.
@@ -6211,7 +6228,7 @@ mod modulation_tests {
             m.fit(i);
             assert_eq!(m.command(name), format!("AT+MS={name},1"));
         }
-        assert_eq!(ScopeApp::CARRIERS.len(), 14);
+        assert_eq!(ScopeApp::CARRIERS.len(), 15);
     }
 
     /// The two V.32 carriers are two ceilings on one modulation, and the

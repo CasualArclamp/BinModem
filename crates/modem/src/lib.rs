@@ -87,6 +87,26 @@ fn v92_quick_connect_wanted() -> QuickConnect {
     }
 }
 
+/// What an HST call is doing, for a front panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HstStatus {
+    /// The forward channel's rate and the back channel's, in bit/s.
+    pub forward: u32,
+    pub back: u32,
+    /// Whether this end is sending on the forward channel just now.
+    pub sending_fast: bool,
+    /// Whether the session is past the answer tone.
+    pub started: bool,
+    /// Whether MNP is up.
+    pub linked: bool,
+    /// Whether the forward channel is training or being handed over.
+    pub training: bool,
+    /// Frames this end has had to send again, so far.
+    pub retransmitted: u64,
+    /// Where the call has got, in words.
+    pub phase: &'static str,
+}
+
 /// Which end of the call this modem is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -1202,6 +1222,9 @@ impl Modem {
         if let Some(fax) = self.fax.as_ref() {
             return fax.phase_name();
         }
+        if let Some(call) = self.hst.as_ref() {
+            return call.phase_name();
+        }
         if let Some(bis) = self.bis.as_ref() {
             return bis.phase();
         }
@@ -1393,6 +1416,9 @@ impl Modem {
         if let Some(fax) = self.fax.as_ref() {
             return fax.standard();
         }
+        if self.hst.is_some() || (self.pump.is_none() && self.at.modulation.carrier == "HST") {
+            return "HST";
+        }
         if self.bis.is_some() {
             return "V.8 bis";
         }
@@ -1418,7 +1444,7 @@ impl Modem {
         // the far end picks up, and a front panel that showed the lamp out
         // until a pump existed would show it out for the loudest three seconds
         // of the call.
-        self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some()
+        self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some() || self.hst.is_some()
     }
 
     /// Whether the modem is a fax rather than a modem just now (V.250 6.1.10).
@@ -1432,7 +1458,32 @@ impl Modem {
 
     /// Whether the far end's carrier is present.
     pub fn carrier(&self) -> bool {
-        self.pump.as_ref().is_some_and(Pump::carrier) || self.varc.as_ref().is_some_and(varc::Call::hearing)
+        self.pump.as_ref().is_some_and(Pump::carrier)
+            || self.varc.as_ref().is_some_and(varc::Call::hearing)
+            || self.hst_session().is_some_and(hst::Session::hearing)
+    }
+
+    fn hst_session(&self) -> Option<&hst::Session> {
+        if self.hst_closing_ms.is_some() {
+            return None;
+        }
+        self.hst.as_ref().and_then(hst::call::Call::session)
+    }
+
+    /// What an HST call is doing, while there is one.
+    pub fn hst_status(&self) -> Option<HstStatus> {
+        let call = self.hst.as_ref().filter(|_| self.hst_closing_ms.is_none())?;
+        let s = call.session();
+        Some(HstStatus {
+            forward: s.map_or(0, |s| s.rate().bits_per_second()),
+            back: s.map_or(450, |s| back_bps(s.back_rate())),
+            sending_fast: s.is_some_and(|s| s.holding() == hst::Holding::Forward),
+            started: s.is_some(),
+            linked: s.is_some_and(hst::Session::is_connected),
+            training: s.is_some_and(hst::Session::training),
+            retransmitted: s.map_or(0, hst::Session::retransmitted),
+            phase: call.phase_name(),
+        })
     }
 
     /// Whether this end placed the call or took it.
@@ -1487,7 +1538,9 @@ impl Modem {
         // frames are checked and sent again underneath. What the terminal
         // and the window want to know is whether octets can arrive wrong,
         // and they cannot.
-        self.ec.as_ref().is_some_and(Stack::is_connected) || (self.varc.is_some() && self.rate > 0)
+        self.ec.as_ref().is_some_and(Stack::is_connected)
+            || (self.varc.is_some() && self.rate > 0)
+            || self.hst_session().is_some_and(hst::Session::is_connected)
     }
 
     /// Everything the far end has said about itself, as label and value.

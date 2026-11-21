@@ -42,6 +42,33 @@ pub struct Leds {
     pub ec: bool,
 }
 
+/// An HST call's two channels, for the panel that shows them.
+///
+/// HST is the one modulation here whose two directions are different
+/// channels that change hands mid-call, so a single rate and a single lamp
+/// for carrier say too little: which end has the fast channel is the thing
+/// to see.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HstFace {
+    /// Forward (fast) and back channel rates, bit/s.
+    pub forward: u32,
+    pub back: u32,
+    /// This end is sending on the fast channel.
+    pub sending_fast: bool,
+    /// Past the answer tone.
+    pub started: bool,
+    /// MNP is up.
+    pub linked: bool,
+    /// Training, or a handover or rate change under way.
+    pub training: bool,
+    /// A frame was sent again in the last moment.
+    pub retransmitting: bool,
+    /// This end answered.
+    pub answering: bool,
+    /// Where the call has got, in words.
+    pub phase: &'static str,
+}
+
 /// Where the modem is in a call.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CallState {
@@ -167,6 +194,8 @@ pub struct Frame {
     pub echo_delay_ms: f32,
     /// What the far end says it hears of this end. Only V.ARC is told.
     pub far_end: Option<FarEnd>,
+    /// An HST call's channels, while one is running.
+    pub hst: Option<HstFace>,
     /// Received level in dBFS.
     pub rx_level_db: f32,
     /// Estimated signal-to-noise ratio in dB, if the datapump can measure one.
@@ -269,6 +298,7 @@ impl Frame {
             echo: Vec::new(),
             echo_delay_ms: 0.0,
             far_end: None,
+            hst: None,
             rx_level_db: -120.0,
             snr_db: None,
             carrier: false,

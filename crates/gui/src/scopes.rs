@@ -989,6 +989,235 @@ pub fn faceplate(ui: &mut Ui, leds: &telemetry::Leds) {
     frame_border(&painter, rect);
 }
 
+/// A red lamp of the kind the HST-era modems carried: a small lit oblong
+/// rather than a round dome, with its legend underneath.
+fn hst_lamp(painter: &Painter, centre: Pos2, on: bool, label: &str) {
+    let body = Rect::from_center_size(centre, vec2(15.0, 7.0));
+    if on {
+        painter.rect_filled(body.expand(4.0), 4.0, HST_RED.gamma_multiply(0.18));
+        painter.rect_filled(body, 1.5, HST_RED);
+        // The bright core a lit LED has through its lens.
+        painter.rect_filled(Rect::from_center_size(centre, vec2(7.0, 2.0)), 1.0, Color32::from_rgb(255, 170, 150));
+    } else {
+        painter.rect_filled(body, 1.5, Color32::from_rgb(58, 16, 14));
+    }
+    painter.rect_stroke(body, 1.5, Stroke::new(1.0, Color32::from_rgb(8, 8, 9)), eframe::egui::StrokeKind::Outside);
+    painter.text(
+        pos2(centre.x, centre.y + 8.0),
+        Align2::CENTER_TOP,
+        label,
+        FontId::proportional(10.0),
+        HST_LEGEND,
+    );
+}
+
+const HST_RED: Color32 = Color32::from_rgb(255, 44, 32);
+const HST_LEGEND: Color32 = Color32::from_rgb(196, 198, 202);
+const HST_PLATE: Color32 = Color32::from_rgb(20, 20, 23);
+
+/// One lane of the channel strip: a bar from the end that sends on it to the
+/// end that hears it, an arrowhead at the hearing end, and while data is
+/// moving, marks travelling along it at a speed that goes with its rate.
+#[allow(clippy::too_many_arguments)]
+fn hst_lane(
+    painter: &Painter,
+    y: f32,
+    left: f32,
+    right: f32,
+    thick: f32,
+    rightward: bool,
+    colour: Color32,
+    moving: Option<f64>,
+    label: &str,
+) {
+    let head = thick + 5.0;
+    let (from, to) = if rightward { (left, right) } else { (right, left) };
+    let dir = if rightward { 1.0 } else { -1.0 };
+    let shaft_end = to - dir * head;
+    painter.line_segment([pos2(from, y), pos2(shaft_end, y)], Stroke::new(thick, colour));
+    painter.add(eframe::egui::Shape::convex_polygon(
+        vec![pos2(to, y), pos2(shaft_end, y - head * 0.7), pos2(shaft_end, y + head * 0.7)],
+        colour,
+        Stroke::NONE,
+    ));
+    if let Some(phase) = moving {
+        let span = (shaft_end - from).abs();
+        let gap = 22.0;
+        let offset = (phase as f32 * gap).rem_euclid(gap);
+        let mut d = offset;
+        while d < span - 4.0 {
+            let x = from + dir * d;
+            painter.line_segment(
+                [pos2(x, y), pos2(x + dir * 5.0, y)],
+                Stroke::new((thick - 2.0).max(1.0), Color32::from_rgb(255, 235, 225)),
+            );
+            d += gap;
+        }
+    }
+    // The rate, on a tag sitting on the lane itself.
+    let galley = painter.layout_no_wrap(label.to_owned(), FontId::monospace(10.0), Color32::from_rgb(240, 240, 244));
+    let tag = Rect::from_center_size(pos2((left + right) / 2.0, y), galley.size() + vec2(10.0, 3.0));
+    painter.rect_filled(tag, 3.0, Color32::from_rgb(11, 11, 13));
+    painter.rect_stroke(tag, 3.0, Stroke::new(1.0, colour), eframe::egui::StrokeKind::Inside);
+    painter.galley(tag.center() - galley.size() / 2.0, galley, Color32::PLACEHOLDER);
+}
+
+/// The HST front panel: the twelve lamps a Courier-class HST modem carried,
+/// in their order, and under them the two channels and which way each is
+/// going just now.
+///
+/// The lamps mean what the Courier manuals say they mean. HS is out while
+/// the link is still being set up at the slow speed and lit once the call is
+/// up above 2400; AA, at the answering end, goes out when the channels have
+/// been reversed and that end is sending on the 450 bit/s back channel; MR
+/// blinks through a training, a handover and a rate change; ARQ is lit for an
+/// error-controlled call and blinks when a frame goes again.
+pub fn hst_faceplate(ui: &mut Ui, leds: &telemetry::Leds, hst: Option<&telemetry::HstFace>, height: f32) {
+    let size = vec2(ui.available_width(), height);
+    let (response, painter) = ui.allocate_painter(size, Sense::hover());
+    let rect = response.rect;
+    let time = ui.input(|i| i.time);
+    let blink = (time * 3.0) as i64 % 2 == 0;
+    if hst.is_some() {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(40));
+    }
+
+    painter.rect_filled(rect, 5.0, HST_PLATE);
+    // A brushed lip along the top edge, and a shadow along the bottom.
+    painter.line_segment(
+        [pos2(rect.left() + 5.0, rect.top() + 0.5), pos2(rect.right() - 5.0, rect.top() + 0.5)],
+        Stroke::new(1.0, Color32::from_rgb(78, 80, 86)),
+    );
+    painter.line_segment(
+        [pos2(rect.left() + 5.0, rect.bottom() - 0.5), pos2(rect.right() - 5.0, rect.bottom() - 0.5)],
+        Stroke::new(1.0, Color32::from_rgb(4, 4, 5)),
+    );
+
+    // The badge: the name, the two speeds, and where the call has got.
+    let badge_w = 112.0_f32.min(rect.width() * 0.28);
+    let bx = rect.left() + 12.0;
+    painter.text(
+        pos2(bx, rect.top() + 8.0),
+        Align2::LEFT_TOP,
+        "HST",
+        FontId::proportional(30.0),
+        Color32::from_rgb(236, 236, 240),
+    );
+    painter.line_segment(
+        [pos2(bx, rect.top() + 43.0), pos2(bx + badge_w - 16.0, rect.top() + 43.0)],
+        Stroke::new(2.0, HST_RED),
+    );
+    painter.text(
+        pos2(bx, rect.top() + 48.0),
+        Align2::LEFT_TOP,
+        match hst.filter(|h| h.started) {
+            Some(h) => format!("{} / {}", h.forward, h.back),
+            None => "14400 / 450".to_owned(),
+        },
+        FontId::monospace(11.0),
+        HST_LEGEND,
+    );
+    let phase = hst.map_or("ready", |h| h.phase);
+    painter.galley(
+        pos2(bx, rect.top() + 63.0),
+        painter.layout(
+            phase.to_owned(),
+            FontId::proportional(10.0),
+            Color32::from_rgb(140, 142, 150),
+            badge_w - 14.0,
+        ),
+        Color32::PLACEHOLDER,
+    );
+
+    // The lamps.
+    let lamps_left = rect.left() + badge_w + 6.0;
+    let lamps_right = rect.right() - 10.0;
+    let linked = hst.is_some_and(|h| h.linked);
+    let training = hst.is_some_and(|h| h.started && h.training);
+    let hs = hst.map_or(leds.hs, |h| h.linked && h.forward > 2400);
+    let aa = match hst {
+        Some(h) if h.linked => h.answering && h.sending_fast,
+        Some(h) => h.answering,
+        None => leds.aa,
+    };
+    let arq = match hst {
+        Some(h) if h.linked => !(h.retransmitting && blink),
+        _ => leds.ec,
+    };
+    let lamps: [(&str, bool); 12] = [
+        ("HS", hs),
+        ("AA", aa),
+        ("CD", leds.cd),
+        ("OH", leds.oh),
+        ("RD", leds.rd),
+        ("SD", leds.sd),
+        ("TR", leds.tr),
+        ("MR", leds.mr && !(training && blink)),
+        ("RS", leds.tr),
+        ("CS", leds.mr),
+        ("SYN", false),
+        ("ARQ", arq),
+    ];
+    let step = (lamps_right - lamps_left) / lamps.len() as f32;
+    for (i, (label, on)) in lamps.iter().enumerate() {
+        let x = lamps_left + step * (i as f32 + 0.5);
+        hst_lamp(&painter, pos2(x, rect.top() + 16.0), *on, label);
+    }
+
+    // The two channels, between this end and the far one.
+    let strip = Rect::from_min_max(pos2(lamps_left, rect.top() + 42.0), pos2(lamps_right, rect.bottom() - 6.0));
+    painter.rect_filled(strip, 3.0, Color32::from_rgb(11, 11, 13));
+    let end_w = 44.0;
+    for (x, text, align) in [
+        (strip.left() + 6.0, "HERE", Align2::LEFT_CENTER),
+        (strip.right() - 6.0, "FAR", Align2::RIGHT_CENTER),
+    ] {
+        painter.text(pos2(x, strip.center().y), align, text, FontId::monospace(10.0), HST_LEGEND);
+    }
+    let (l, r) = (strip.left() + end_w, strip.right() - end_w);
+    match hst.filter(|h| h.started) {
+        Some(h) => {
+            let fast_colour = if training {
+                if blink { Color32::from_rgb(245, 170, 60) } else { Color32::from_rgb(150, 100, 40) }
+            } else {
+                HST_RED
+            };
+            let back_colour = Color32::from_rgb(200, 70, 60);
+            let fast_label = if training { format!("{} training", h.forward) } else { h.forward.to_string() };
+            hst_lane(
+                &painter,
+                strip.top() + 13.0,
+                l,
+                r,
+                6.0,
+                h.sending_fast,
+                fast_colour,
+                (linked && !training).then_some(time * f64::from(h.forward) / 4800.0),
+                &fast_label,
+            );
+            hst_lane(
+                &painter,
+                strip.bottom() - 11.0,
+                l,
+                r,
+                2.0,
+                !h.sending_fast,
+                back_colour,
+                linked.then_some(time * f64::from(h.back) / 300.0),
+                &h.back.to_string(),
+            );
+        }
+        None => {
+            let dim = Color32::from_rgb(52, 52, 58);
+            let mid = strip.center().y;
+            painter.line_segment([pos2(l, mid - 7.0), pos2(r, mid - 7.0)], Stroke::new(6.0, dim));
+            painter.line_segment([pos2(l, mid + 9.0), pos2(r, mid + 9.0)], Stroke::new(2.0, dim));
+            let words = if hst.is_some() { "answer tone" } else { "no call" };
+            painter.text(strip.center(), Align2::CENTER_CENTER, words, FontId::monospace(10.0), HST_LEGEND);
+        }
+    }
+}
+
 /// A horizontal level meter in dBFS.
 pub fn level_meter(ui: &mut Ui, db: f32) {
     let size = vec2(ui.available_width(), 14.0);

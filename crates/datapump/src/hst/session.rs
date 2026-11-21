@@ -247,6 +247,30 @@ impl Session {
         self.rate
     }
 
+    /// The back channel's speed.
+    pub fn back_rate(&self) -> BackRate {
+        self.back
+    }
+
+    /// Whether the far end's carrier is being heard on the channel this end
+    /// listens to.
+    pub fn hearing(&self) -> bool {
+        match self.holding {
+            Holding::Forward => self.brx.iter().any(BackRx::carrier),
+            Holding::Back => self.frx.carrier(),
+        }
+    }
+
+    /// Whether the forward channel is training, or a handover or rate change
+    /// is under way: what a Courier blinks its MR lamp for.
+    pub fn training(&self) -> bool {
+        self.pending != Pending::None
+            || match self.holding {
+                Holding::Forward => !self.ftx.trained(),
+                Holding::Back => !self.frx.in_data(),
+            }
+    }
+
     pub fn is_connected(&self) -> bool {
         self.link.is_connected()
     }
