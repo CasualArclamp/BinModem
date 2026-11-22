@@ -9,6 +9,15 @@ binmodem.exe --capture        replay the golden capture
 
 [docs/usage.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/usage.md) has the setup.
 
+## What's new in 5.4.1
+
+- **Fixed: a fax received with ECM was reported as failed.** The outcome said "disconnected in phase E, after page 1 was confirmed" although every page had arrived. A sender that hangs up as it sends its DCN cuts it off. The receiver had already confirmed the last page and was waiting for the far end to hang up, which T.30 only reaches after the last page, so that now counts as confirmed.
+- **The page arriving fits a whole sheet** to the Fax tab, with the rest of the sheet dark until it comes. A large window now shows the page filling its paper, where it used to show a strip scrolling past.
+- **For filming or testing with nobody at the keyboard:**
+  - `--answer-as fax` (or `modem`) presses that answer once an incoming SIP call has rung for 2.5 s.
+  - `BINMODEM_LINE_NOISE=-52` adds white noise at that level (dBFS RMS) to everything the line delivers.
+  - `modem-sip` sends a page of your own with `--page <file.pbm>` (and `--fine`), and chooses the modulations with `--offer v27ter,v29,v17`. `--no-ecm` and `--no-jbig` turn those off.
+
 ## What's new in 5.4.0
 
 ### A Fax tab, and calls that ask before they are answered
