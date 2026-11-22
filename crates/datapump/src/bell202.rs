@@ -88,7 +88,7 @@ enum Turn {
     Preamble,
     Sending,
     Hang,
-    TurnOff,
+    CarrierOff,
 }
 
 /// Continuous-phase FSK transmitter with the 900 Hz turn-off.
@@ -312,10 +312,10 @@ impl Modem {
                 if !self.tx.drained() {
                     self.set_turn(Turn::Sending);
                 } else if self.turn_elapsed >= timing::HANG {
-                    self.set_turn(Turn::TurnOff);
+                    self.set_turn(Turn::CarrierOff);
                 }
             }
-            Turn::TurnOff => {
+            Turn::CarrierOff => {
                 if self.turn_elapsed >= timing::SCT {
                     self.quiet = 0.0;
                     self.set_turn(Turn::Quiet);
@@ -331,7 +331,7 @@ impl Modem {
                 Turn::Quiet => 0.0,
                 Turn::Preamble => self.tx.tone(MARK),
                 Turn::Sending | Turn::Hang => self.tx.data(),
-                Turn::TurnOff => self.tx.tone(SCT),
+                Turn::CarrierOff => self.tx.tone(SCT),
             },
             _ => 0.0,
         }
@@ -373,7 +373,7 @@ impl Modem {
                 Turn::Preamble => "carrier up",
                 Turn::Sending => "sending",
                 Turn::Hang => "hang",
-                Turn::TurnOff => "turn-off",
+                Turn::CarrierOff => "turn-off",
             },
             State::Failed => "failed",
         }
