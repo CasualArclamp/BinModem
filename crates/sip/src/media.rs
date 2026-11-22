@@ -115,14 +115,18 @@ const DRY_LIMIT: Duration = Duration::from_secs(1);
 /// Packets of delay the jitter buffer holds before it hands anything over,
 /// unless `BINMODEM_SIP_JITTER` asks for another number (1 to 25).
 ///
-/// Five, which is 100 ms. An inbound stall shorter than this costs nothing at
-/// all; a longer one costs the modem's input that much less silence. It used
-/// to be two, with a 60 ms cushion on the outgoing side, and the cushion is
-/// gone now that the modem and the pacer share a clock -- so the round trip is
-/// about what it was, and all of the margin is where a stall can use it.
-/// A telephone would stretch the audio to manage jitter; that is wrong for a
-/// modem.
-const JITTER_TARGET: usize = 5;
+/// Fifteen, which is 300 ms. An inbound stall shorter than this costs nothing
+/// at all; a longer one costs the modem's input that much less silence. It
+/// used to be two, with a 60 ms cushion on the outgoing side, then five once
+/// the cushion went and the modem and the pacer shared a clock. Five was
+/// still too few on an international route: live V.90 calls to a US server
+/// from Australia (round trip about 0.9 s) lost 20 ms holes in the middle of
+/// data mode, packets that arrived too late rather than not at all, and each
+/// one is a thousand bits of PCM gone. At fifteen those calls were clearly
+/// better. A modem minds 200 ms more delay far less than a hole: the
+/// handshake measures the round trip whatever it is. A telephone would
+/// stretch the audio to manage jitter; that is wrong for a modem.
+const JITTER_TARGET: usize = 15;
 /// And how many it will hold before shedding, which is where a far end whose
 /// clock runs fast ends up if the slew cannot keep up.
 const JITTER_CAPACITY: usize = 50;
@@ -396,6 +400,13 @@ impl Media {
     /// `port` of zero lets the system choose, which is normal; the chosen one
     /// is what goes into the SDP offer.
     pub fn open(port: u16, modem_rate: f64) -> Result<Self, String> {
+        Self::open_with_jitter(port, modem_rate, jitter_target())
+    }
+
+    /// The same with the jitter buffer's depth, in packets, given rather
+    /// than taken from the environment: for the tests, which are about
+    /// packets and stalls, not about the default.
+    fn open_with_jitter(port: u16, modem_rate: f64, target: usize) -> Result<Self, String> {
         let socket = UdpSocket::bind(("0.0.0.0", port))
             .map_err(|e| format!("could not bind the RTP port: {e}"))?;
         socket
@@ -406,7 +417,6 @@ impl Media {
             .map_err(|e| e.to_string())?
             .port();
 
-        let target = jitter_target();
         let shared = Arc::new(Shared {
             remote: Mutex::new(None),
             dialled: Mutex::new(None),
@@ -1175,6 +1185,11 @@ fn rob(payload: &mut [u8], timestamp: u32, (which, bit): ([bool; 6], u8)) {
 mod tests {
     use super::*;
 
+    /// The jitter buffer's depth the packet tests are written for: five,
+    /// the default before it became fifteen. Their timings and the stall
+    /// test's 100 to 300 ms stalls are sized against it.
+    const TEST_JITTER: usize = 5;
+
     #[test]
     fn a_robbed_bit_is_one_octet_in_six_whatever_packet_it_is_in() {
         let asked = parse_robbed("3").unwrap();
@@ -1311,7 +1326,7 @@ mod tests {
         // The modem rate is the network rate here on purpose: the rate
         // conversion is tested in `dsp`, and leaving it out makes this test
         // about the packets rather than about the filter.
-        let media = Media::open(0, NETWORK_RATE).unwrap();
+        let media = Media::open_with_jitter(0, NETWORK_RATE, TEST_JITTER).unwrap();
         let ours = SocketAddr::from(([127, 0, 0, 1], media.local_port()));
         media.connect(far_address, Law::Mu, g711::PCMU, 20);
 
@@ -1392,7 +1407,7 @@ mod tests {
         let far = UdpSocket::bind("127.0.0.1:0").expect("a far end socket");
         far.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
         let far_address = far.local_addr().unwrap();
-        let media = Media::open(0, NETWORK_RATE).expect("a media path");
+        let media = Media::open_with_jitter(0, NETWORK_RATE, TEST_JITTER).expect("a media path");
         let ours = SocketAddr::from(([127, 0, 0, 1], media.local_port()));
         media.connect(far_address, Law::Mu, g711::PCMU, 20);
         (far, media, ours)
@@ -1630,7 +1645,7 @@ mod tests {
     fn inbound_jitter_loss_and_stalls_never_reach_what_the_modem_sends() {
         let far = UdpSocket::bind("127.0.0.1:0").expect("a far end socket");
         far.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
-        let media = Media::open(0, NETWORK_RATE).expect("a media path");
+        let media = Media::open_with_jitter(0, NETWORK_RATE, TEST_JITTER).expect("a media path");
         let ours = SocketAddr::from(([127, 0, 0, 1], media.local_port()));
         media.connect(far.local_addr().unwrap(), Law::Mu, g711::PCMU, 20);
 
