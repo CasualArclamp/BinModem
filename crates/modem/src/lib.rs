@@ -1836,6 +1836,29 @@ impl Modem {
             // The stack has been put away; what it heard was kept.
             rows.extend(self.far_ec.iter().cloned());
         }
+        // The Bell modems say nothing about themselves: what the far end is
+        // is what it sent back, and that is worth a row.
+        match self.pump.as_ref() {
+            Some(Pump::Bell212(m)) if m.status() != bell212::Status::Negotiating => rows.push((
+                "far end",
+                if m.is_bell103() {
+                    "Bell 103: a steady mark, no 1200 offer".to_owned()
+                } else {
+                    "Bell 212A: scrambled ones at 1200".to_owned()
+                },
+            )),
+            Some(Pump::Bell202(m)) => rows.push((
+                "line",
+                if m.transmitting() {
+                    "half duplex, this end sending".to_owned()
+                } else if m.far_carrier() {
+                    "half duplex, far end sending".to_owned()
+                } else {
+                    "half duplex, quiet".to_owned()
+                },
+            )),
+            _ => {}
+        }
         rows
     }
 

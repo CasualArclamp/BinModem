@@ -118,3 +118,12 @@ fn b202_at_both_ends_takes_turns_at_1200() {
     assert!(!p.caller.error_controlled(), "error control over half duplex");
     p.converse(0.2, 1.0);
 }
+
+#[test]
+fn b212_held_to_300_is_a_bell_103() {
+    let mut p = Pair::call("B212,1,300,300", "B212", 8.0);
+    assert_eq!(p.caller.rate(), Some(300));
+    assert_eq!(p.caller.standard(), "Bell 103");
+    assert_eq!(p.host.standard(), "Bell 103");
+    p.converse(0.5, 2.0);
+}
