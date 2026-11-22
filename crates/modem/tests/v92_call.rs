@@ -319,7 +319,12 @@ fn a_second_call_to_the_same_place_starts_up_the_short_way() {
     // call had PCM upstream, so the caller asked, and the host always does.
     assert!(pair.caller.short_phase2() && pair.host.short_phase2());
     println!("full start-up {first:.2} s, with short Phases 1 and 2 {second:.2} s");
-    assert!(second < first - 2.0, "full {first:.2} s, short {second:.2} s");
+    // Sooner, though by less than it was: the full start-up now asks for a
+    // DIL, and with one its CPt follows the DIL rather than waiting for the
+    // Ri that a start-up with none waits for (`RI_WAIT_SYMBOLS`), which this
+    // pair's no-DIL Phase 3 spent about two seconds on (15.9 s before, 13.7
+    // with the DIL, 13.0 for this one).
+    assert!(second < first, "full {first:.2} s, short {second:.2} s");
     // What the short call teaches is what the full one did: the round trip
     // it could not measure is the one it was handed.
     assert_eq!(pair.caller.learned(), Some(memo));
@@ -329,6 +334,50 @@ fn a_second_call_to_the_same_place_starts_up_the_short_way() {
     let answered = |m: &Modem| m.distant().into_iter().find(|(what, _)| *what == "answered").map(|(_, said)| said);
     assert_eq!(answered(&pair.caller).as_deref(), Some("nothing"), "an ADP came back: {:?}", pair.caller.distant());
     carries_text(&mut pair, "after a quick connect", "");
+}
+
+/// Dial, and run until both ends are in data mode on V.92: the caller's
+/// notes, and the seconds it took.
+fn noted_connect(pair: &mut Pair, what: &str) -> (String, f64) {
+    Pair::type_at(&mut pair.host, "ATA");
+    Pair::type_at(&mut pair.caller, "ATD5551234");
+    let up = |m: &Modem| m.state() == State::Data && !m.retraining() && m.standard() == "V.92";
+    let mut notes = String::new();
+    for _ in 0..800 {
+        pair.run(0.05);
+        notes.push_str(&pair.notes());
+        if up(&pair.caller) && up(&pair.host) {
+            break;
+        }
+    }
+    assert_eq!((pair.caller.state(), pair.host.state()), (State::Data, State::Data), "{what}:
+{notes}");
+    (notes, pair.caller.call_seconds())
+}
+
+/// DIL on, except on the fast path: a full start-up's Ja asks for V.90's
+/// DIL and the CPt and CPu are chosen from it, and a start-up that came by
+/// quick connect asks for none, which is what keeps it quick.
+#[test]
+fn a_full_start_up_asks_for_a_dil_and_a_quick_connect_does_not() {
+    let mut pair = v92_pair();
+    let (notes, first) = noted_connect(&mut pair, "first call");
+    assert_eq!(pair.caller.quick_connected(), None, "{notes}");
+    assert!(notes.contains("caller: V.92: PCM upstream (Table 18)") && notes.contains("asking for a DIL"), "{notes}");
+    assert!(notes.contains("caller: Jp' read, DIL of 3528 symbols"), "{notes}");
+    assert!(notes.contains("caller: the DIL chose"), "{notes}");
+    let memo = pair.caller.learned().expect("a V.92 call in data mode teaches something");
+    carries_text(&mut pair, "a full start-up with a DIL", &notes);
+    hang_up(&mut pair);
+
+    pair.caller.set_quick_memo(Some(memo));
+    let (notes, second) = noted_connect(&mut pair, "second call");
+    assert_eq!(pair.caller.quick_connected(), Some(true), "{notes}");
+    assert!(notes.contains("no DIL after a quick connect"), "{notes}");
+    assert!(notes.contains("caller: Jp' read, DIL of 0 symbols"), "{notes}");
+    assert!(!notes.contains("the DIL chose"), "{notes}");
+    println!("full start-up with a DIL {first:.2} s, quick connect {second:.2} s");
+    carries_text(&mut pair, "a quick connect with no DIL", &notes);
 }
 
 /// A QC1a sent to a modem that does not answer one is ignored, and the CM

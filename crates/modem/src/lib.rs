@@ -3791,6 +3791,9 @@ impl Modem {
                 };
                 let mut analogue = v90::startup::Analogue::new(self.fs, lead_in).with_v92(wish, lead_in);
                 analogue.set_remembered_round_trip(memo.map(|memo| f64::from(memo.round_trip_ms) / 1000.0));
+                // DIL off only on the fast path: after a quick connect Ja asks
+                // for none, and on every other start-up for V.90's.
+                analogue.set_after_quick(self.quick.is_some_and(|q| q.role == PcmRole::Analogue));
                 analogue.set_pinned(self.pinned_rate);
                 analogue.set_pinned_upstream(self.pinned_upstream);
                 Pump::V90(Box::new(analogue))
