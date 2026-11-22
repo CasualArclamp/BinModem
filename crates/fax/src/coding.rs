@@ -69,6 +69,45 @@ pub fn jbig_bits(lines: &[Vec<bool>], options: jbig::Options) -> Vec<bool> {
     ecm::unpack(&jbig::encode(lines, options))
 }
 
+/// Where each line of a coded page ends: `ends[n]` is how many of `bits`
+/// a receiver has taken in when line `n` of the page is complete.
+///
+/// Read by decoding the bits the way the far end will, eight at a time, so
+/// it is right for every coding without the coders having to say: a line at
+/// a time for MH, MR and MMR, and a stripe at a time for JBIG, whose lines
+/// all come out together at the stripe's end.
+pub fn line_ends(coding: Coding, bits: &[bool]) -> Vec<usize> {
+    let mut decoder = Decoder::new(coding);
+    let mut ends = Vec::new();
+    for (i, octet) in bits.chunks(8).enumerate() {
+        decoder.feed_bits(octet);
+        let taken = i * 8 + octet.len();
+        ends.resize(decoder.lines().len().max(ends.len()), taken);
+        if decoder.is_done() {
+            break;
+        }
+    }
+    ends
+}
+
+/// How far down the page, in lines, once `sent` bits of it have gone.
+///
+/// Lines that end at the same bit -- a JBIG stripe -- share out the bits
+/// between the end before them and theirs, so the place moves steadily
+/// through a stripe rather than jumping 128 lines at its end. Within a line
+/// of the other codings it moves the same way, a fraction of a line at a
+/// time.
+pub fn line_at(ends: &[usize], sent: usize) -> f64 {
+    let first = ends.partition_point(|end| *end <= sent);
+    let Some(&end) = ends.get(first) else {
+        return ends.len() as f64;
+    };
+    let last = first + ends[first..].partition_point(|e| *e == end);
+    let before = first.checked_sub(1).map_or(0, |i| ends[i]);
+    let through = (sent - before) as f64 / (end - before).max(1) as f64;
+    first as f64 + through * (last - first) as f64
+}
+
 /// Bits in and lines out, whichever coding the page is in.
 #[derive(Debug)]
 pub enum Decoder {
@@ -170,6 +209,55 @@ impl Decoder {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_stripe_shares_its_bits_out_among_its_lines() {
+        // Two stripes of four lines, ending at bit 100 and bit 300.
+        let ends = [100, 100, 100, 100, 300, 300, 300, 300];
+        assert_eq!(line_at(&ends, 0), 0.0);
+        assert_eq!(line_at(&ends, 50), 2.0);
+        assert_eq!(line_at(&ends, 100), 4.0);
+        assert_eq!(line_at(&ends, 200), 6.0);
+        assert_eq!(line_at(&ends, 300), 8.0);
+        assert_eq!(line_at(&ends, 999), 8.0);
+        assert_eq!(line_at(&[], 5), 0.0);
+    }
+
+    #[test]
+    fn a_page_half_white_and_half_ink_spends_its_bits_on_the_ink() {
+        // The top half blank, the bottom half noise that no coding can
+        // squeeze: nearly all of the bits are the bottom half's, in every
+        // coding, so half the bits gone is far more than half the lines.
+        let mut seed = 1u32;
+        let lines: Vec<Vec<bool>> = (0..400)
+            .map(|y| {
+                (0..crate::page::WIDTH)
+                    .map(|_| {
+                        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                        y >= 200 && seed >> 31 == 1
+                    })
+                    .collect()
+            })
+            .collect();
+        for coding in [Coding::ModifiedHuffman, Coding::ModifiedRead, Coding::Mmr, Coding::Jbig] {
+            let bits = coding.encode(&lines, Resolution::Standard, 0);
+            let ends = line_ends(coding, &bits);
+            assert_eq!(ends.len(), lines.len(), "{coding:?}: not every line decoded");
+            assert!(ends.windows(2).all(|w| w[0] <= w[1]), "{coding:?}: ends go backwards");
+            assert!(*ends.last().unwrap() <= bits.len());
+            let half = line_at(&ends, bits.len() / 2);
+            assert!(half > 220.0, "{coding:?}: half the bits is only line {half}");
+            assert!(line_at(&ends, 0) < 1.0);
+            assert_eq!(line_at(&ends, bits.len()), lines.len() as f64);
+            // Never backwards as the bits go out.
+            let mut was = 0.0;
+            for sent in (0..=bits.len()).step_by(97) {
+                let now = line_at(&ends, sent);
+                assert!(now >= was, "{coding:?}: back from {was} to {now} at bit {sent}");
+                was = now;
+            }
+        }
+    }
+
     use super::*;
 
     fn a_page(rows: usize) -> Vec<Vec<bool>> {
