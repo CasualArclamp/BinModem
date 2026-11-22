@@ -409,6 +409,15 @@ impl Scan {
     }
 }
 
+/// A page's size on paper, in millimetres: its pels across at 8.04 to the
+/// millimetre and its lines down at its resolution's rate.
+fn paper_size(page: &Page) -> egui::Vec2 {
+    egui::vec2(
+        (page.width() as f64 / fax::page::PELS_PER_MM) as f32,
+        (page.height() as f64 / page.resolution.lines_per_mm()) as f32,
+    )
+}
+
 /// Write a page out as a picture, each line as many pixels tall as makes the
 /// pels square.
 fn write_page(lines: &[Vec<bool>], resolution: Resolution, path: &std::path::Path) -> Result<(), String> {
@@ -1443,7 +1452,10 @@ impl Fax {
             return;
         };
         let room = ui.available_size();
-        let size = texture.size_vec2();
+        // The paper's shape, not the pels': a standard page has half the
+        // lines of a fine one over the same sheet, and drawn a texel a pel
+        // it came out half as tall.
+        let size = self.pages.get(self.showing).map_or(texture.size_vec2(), paper_size);
         let scale = (room.x / size.x).min(room.y / size.y).max(0.01);
         let (rect, _) = ui.allocate_exact_size(size * scale, egui::Sense::hover());
         ui.painter().image(
@@ -2944,5 +2956,16 @@ mod tests {
         }
         fax.coding = "-";
         assert_eq!(fax.line_reached(0, 0.5), None, "a coding not known yet");
+    }
+
+    #[test]
+    fn a_page_to_send_is_drawn_the_shape_of_its_paper_at_either_resolution() {
+        // The same sheet at standard and at fine: half the lines, the same
+        // paper, the same picture.
+        let standard = Page { lines: lines_of(Resolution::Standard.lines(), false), resolution: Resolution::Standard };
+        let fine = Page { lines: lines_of(Resolution::Fine.lines(), false), resolution: Resolution::Fine };
+        let (a, b) = (paper_size(&standard), paper_size(&fine));
+        assert!((a.x - b.x).abs() < 0.01 && (a.y / b.y - 1.0).abs() < 0.01, "{a:?} against {b:?}");
+        assert!((a.y / a.x - 297.0 / 215.0).abs() < 0.02, "not A4: {a:?}");
     }
 }
