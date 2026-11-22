@@ -45,6 +45,10 @@ pub struct Fax {
     coded_bits: [usize; 4],
     /// The same, a page at a time, for the time left on the page going.
     coded_pages: Vec<[usize; 4]>,
+    /// Where each line of a page ends in its bits, in the coding a call is
+    /// sending it in, worked out the first time a call sends that page that
+    /// way.
+    line_ends: Vec<Option<LineMap>>,
     /// Which of the pages the preview is of.
     showing: usize,
     /// A small copy of that page for the window to draw.
@@ -120,6 +124,15 @@ pub struct Fax {
     looking: Option<(usize, Scan)>,
     /// What was said about saving the last page.
     pub saved: Option<String>,
+}
+
+/// A page's line ends in one coding: being worked out on a thread of its
+/// own -- a dense page at fine is most of a second of coding and decoding,
+/// which the window would otherwise spend frozen as the page starts -- or
+/// ready, with the page's bits in all.
+enum LineMap {
+    Working(&'static str, std::sync::mpsc::Receiver<(Vec<usize>, usize)>),
+    Ready(&'static str, Vec<usize>, usize),
 }
 
 /// What the pages to send are made from.
@@ -899,6 +912,7 @@ impl Fax {
         };
         self.coded_bits = [0; 4];
         self.coded_pages.clear();
+        self.line_ends = (0..pages.len()).map(|_| None).collect();
         for page in &pages {
             let codings = [Coding::ModifiedHuffman, Coding::ModifiedRead, Coding::Mmr, Coding::Jbig];
             let mut each = [0; 4];
@@ -1444,7 +1458,15 @@ impl Fax {
             && self.sheet - 1 == self.showing
             && let Some(fraction) = self.progress
         {
-            let y = rect.top() + rect.height() * fraction.clamp(0.0, 1.0) as f32;
+            // Down to the line the bits have reached, not as far down as
+            // the fraction of the bits: a blank stretch is a few bits a line
+            // and a dense one hundreds, so the two part company on any page
+            // with both.
+            let down = match self.line_reached(self.showing, fraction) {
+                Some((line, lines)) => line / lines.max(1) as f64,
+                None => fraction,
+            };
+            let y = rect.top() + rect.height() * down.clamp(0.0, 1.0) as f32;
             ui.painter().rect_filled(
                 egui::Rect::from_min_max(egui::pos2(rect.left(), y), rect.max),
                 0.0,
@@ -1745,6 +1767,9 @@ impl Fax {
             said.push(format!("page {} of {pages}", self.sheet.max(1)));
             if let Some(p) = send_progress(&bits, self.sheet, fraction, self.rate) {
                 said.push(format!("{:.1} of {:.1} kB", p.done_bits as f64 / 8000.0, p.page_bits as f64 / 8000.0));
+                if let Some((line, lines)) = self.line_reached(self.sheet - 1, fraction) {
+                    said.push(format!("line {} of {lines}", line.floor() as usize));
+                }
                 said.push(format!("{} left on this page", clock(p.page_left)));
                 if p.rest_left > 0.0 {
                     said.push(format!("about {} for the rest", clock(p.rest_left)));
@@ -1775,6 +1800,43 @@ impl Fax {
         }
         ui.add(egui::ProgressBar::new(fraction as f32).desired_height(16.0).show_percentage());
         ui.label(RichText::new(said.join(" · ")).monospace().size(12.0).color(dim));
+    }
+
+    /// How far down page `page` the call has got once `fraction` of its bits
+    /// have gone, in lines, and how many lines it has. None before the
+    /// coding is known.
+    fn line_reached(&mut self, page: usize, fraction: f64) -> Option<(f64, usize)> {
+        let coding = self.live().and_then(|c| c.carried).map_or(self.coding, |c| c.coding);
+        let which = match coding {
+            "MH" => Coding::ModifiedHuffman,
+            "MR" => Coding::ModifiedRead,
+            "MMR" => Coding::Mmr,
+            "JBIG" => Coding::Jbig,
+            _ => return None,
+        };
+        let lines = self.pages.get(page)?.height();
+        let slot = self.line_ends.get_mut(page)?;
+        let current = match slot.as_ref() {
+            Some(LineMap::Working(c, _) | LineMap::Ready(c, _, _)) => *c == coding,
+            None => false,
+        };
+        if !current {
+            let p = self.pages[page].clone();
+            let (tell, told) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let bits = which.encode(&p.lines, p.resolution, 0);
+                let _ = tell.send((fax::coding::line_ends(which, &bits), bits.len()));
+            });
+            *slot = Some(LineMap::Working(coding, told));
+        }
+        if let Some(LineMap::Working(c, told)) = slot.as_ref()
+            && let Ok((ends, total)) = told.try_recv()
+        {
+            *slot = Some(LineMap::Ready(c, ends, total));
+        }
+        let Some(LineMap::Ready(_, ends, total)) = slot.as_ref() else { return None };
+        let sent = (fraction.clamp(0.0, 1.0) * *total as f64).round() as usize;
+        Some((fax::coding::line_at(ends, sent), lines))
     }
 
     /// Which of the four codings the call is sending in.
@@ -2843,5 +2905,44 @@ mod tests {
         fax.observe(&frame, 0.0);
         let caps = fax.far.clone().expect("no far end");
         assert_eq!(fax.shared(&caps).as_deref(), Some("V.17 at 14400 bit/s"));
+    }
+
+    #[test]
+    fn the_line_sent_follows_the_lines_and_not_the_share_of_the_bits() {
+        // A page white for its top half and noise below: half its bits gone
+        // is well into the bottom half, not the middle of the page.
+        let mut seed = 7u32;
+        let lines: Vec<Vec<bool>> = (0..600)
+            .map(|y| {
+                (0..fax::page::WIDTH)
+                    .map(|_| {
+                        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                        y >= 300 && seed >> 31 == 1
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut fax = Fax::new();
+        fax.pages = vec![Page { lines, resolution: Resolution::Standard }];
+        fax.line_ends = vec![None];
+        for coding in ["MH", "MR", "MMR", "JBIG"] {
+            fax.coding = coding;
+            // Worked out on a thread: none until it is done.
+            let mut reached = None;
+            for _ in 0..2000 {
+                reached = fax.line_reached(0, 0.5);
+                if reached.is_some() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let (half, of) = reached.expect("no line");
+            assert_eq!(of, 600);
+            assert!(half > 400.0, "{coding}: half the bits is line {half}");
+            let (all, _) = fax.line_reached(0, 1.0).unwrap();
+            assert!((all - 600.0).abs() < 1.0, "{coding}: every bit is line {all}");
+        }
+        fax.coding = "-";
+        assert_eq!(fax.line_reached(0, 0.5), None, "a coding not known yet");
     }
 }
