@@ -33,6 +33,7 @@ use datapump::v32;
 use datapump::v34;
 use datapump::v90;
 pub use datapump::v92::memo::Recognized;
+pub mod bbs;
 mod faxcall;
 pub mod memos;
 mod varc;

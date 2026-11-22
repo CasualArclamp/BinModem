@@ -56,6 +56,7 @@ fn main() -> ExitCode {
     let mut offer: Option<Vec<fax::t30::Modulation>> = None;
     let mut ecm = true;
     let mut jbig = true;
+    let mut bbs: Option<PathBuf> = None;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut rest = args.iter();
@@ -95,6 +96,7 @@ fn main() -> ExitCode {
                     }
                 }
             }
+            "--bbs" => bbs = Some(PathBuf::from(value())),
             "--page" => page = Some(PathBuf::from(value())),
             "--fine" => fine = true,
             "--no-ecm" => ecm = false,
@@ -125,6 +127,7 @@ fn main() -> ExitCode {
                      \x20         [--send <text>] [--hold <s>] [--seconds <s>]\n\
                      \x20         [--fax g3|v34 [--pages <n>]] [--record <wav>] [--answer]\n\
                      \x20         [--page <pbm> [--fine]] [--offer v27ter,v29,v17] [--no-ecm] [--no-jbig]\n\
+                     \x20         [--bbs <folder>]\n\
                      \x20         [--memos <file>] [--drive <multiple>]\n\
                      \n\
                      Opens the SIP account, types each line at the modem a second apart,\n\
@@ -139,7 +142,10 @@ fn main() -> ExitCode {
                      type AT+FCLASS=1 and the ATD, and it exits 0 if a page went.\n\
                      --page sends a P4 PBM 1728 pels wide in place of the test page, its\n\
                      rows as lines at standard or, with --fine, at fine. --offer is the\n\
-                     modulations offered; --no-ecm and --no-jbig turn those off."
+                     modulations offered; --no-ecm and --no-jbig turn those off.\n\
+                     --bbs makes the end that answers a bulletin board, its screens and its\n\
+                     chat channel read from the folder (see modem::bbs): it hangs up once\n\
+                     the caller says goodbye."
                 );
                 return ExitCode::SUCCESS;
             }
@@ -183,7 +189,14 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let options = FaxOptions { page: custom, offer, ecm, jbig };
+    let board = match bbs.as_deref().map(|dir| modem::bbs::Board::open("Arclamp DX BBS", dir)).transpose() {
+        Ok(board) => board,
+        Err(e) => {
+            eprintln!("--bbs: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let options = FaxOptions { page: custom, offer, ecm, jbig, board };
     run(&line, typed, send, hold, seconds, fax, record, answer, memos, drive, options)
 }
 
@@ -199,6 +212,8 @@ struct FaxOptions {
     offer: Option<Vec<fax::t30::Modulation>>,
     ecm: bool,
     jbig: bool,
+    /// A bulletin board for the caller, once the call is up.
+    board: Option<modem::bbs::Board>,
 }
 
 /// A page from a P4 PBM: 1728 pels across, a row to a line, ink where the
@@ -284,6 +299,16 @@ fn run(
 ) -> ExitCode {
     let started = Instant::now();
     let note = |text: &str| eprintln!("[{:7.2}] {text}", started.elapsed().as_secs_f64());
+    let mut options = options;
+    let mut board = options.board.take();
+    // A file the board is sending by ZMODEM, when it started, and when it
+    // was last stepped.
+    let mut download: Option<(transfer::zmodem::Sender, usize, Instant)> = None;
+    let mut last_tick = Instant::now();
+    // How a download went, said a moment after it ends: the receiver at the
+    // far end is still reading the transfer's last octets, and would take
+    // anything said at once for more of them.
+    let mut finished: Option<(Instant, usize, f64, bool)> = None;
 
     let mut modem = Modem::new(FS);
     // V.92's recognised connections, by dial string: a second run with the
@@ -453,6 +478,64 @@ fn run(
             let _ = stdout.write_all(&out);
             let _ = stdout.flush();
         }
+        // The board hears what the caller types once the call is up, and
+        // what it says goes down the line.
+        if let Some(b) = board.as_mut()
+            && modem.state() == State::Data
+        {
+            let now = started.elapsed().as_secs_f64();
+            if let Some((name, data)) = b.take_download() {
+                let rate = modem.transmit_rate().unwrap_or(2400);
+                note(&format!("bbs: sending {name} ({} bytes) by ZMODEM", data.len()));
+                let info = transfer::zmodem::FileInfo {
+                    name,
+                    length: Some(data.len() as u64),
+                    modified: None,
+                    mode: 0o644,
+                };
+                let bytes = data.len();
+                download = Some((transfer::zmodem::Sender::new(info, data, rate), bytes, Instant::now()));
+                last_tick = Instant::now();
+            }
+            if let Some((sender, bytes, since)) = download.as_mut() {
+                // The transfer has the line: what arrives is its, and what it
+                // says goes out, two seconds of it queued at most, as the
+                // window does it.
+                sender.feed(&out);
+                let ms = last_tick.elapsed().as_millis() as u32;
+                last_tick = Instant::now();
+                sender.tick(ms);
+                let ahead = (modem.transmit_rate().unwrap_or(2400) as usize / 4).max(1024);
+                sender.set_room(ahead.saturating_sub(modem.queued()));
+                for byte in sender.take_out() {
+                    modem.feed_dte(byte);
+                }
+                use transfer::zmodem::State as Z;
+                if let state @ (Z::Done | Z::Failed(_)) = sender.state() {
+                    let secs = since.elapsed().as_secs_f64();
+                    note(&format!("bbs: the download ended {state:?} after {secs:.1} s"));
+                    finished = Some((Instant::now(), *bytes, secs, state == Z::Done));
+                    download = None;
+                }
+            } else if let Some((at, bytes, secs, ok)) = finished {
+                if at.elapsed() >= Duration::from_millis(1500) {
+                    b.download_finished(bytes, secs, ok);
+                    finished = None;
+                }
+            } else if !out.is_empty() {
+                b.hear(&out, now);
+            }
+            b.tick(now);
+            for byte in b.take_output() {
+                modem.feed_dte(byte);
+            }
+            // Long enough after goodbye for the screen to have gone out.
+            if b.gone_at().is_some_and(|at| now - at > 6.0) {
+                note("the caller said goodbye; hanging up");
+                modem.hang_up();
+                board = None;
+            }
+        }
 
         for said in modem.take_line_notes() {
             note(&format!("  line: {said}"));
@@ -502,6 +585,14 @@ fn run(
             if was == State::Data && connected_at.is_none() {
                 connected_at = Some(Instant::now());
                 reached_data = true;
+                if let Some(b) = board.as_mut() {
+                    let carrier = match modem.rate() {
+                        Some(rate) => format!("{} {rate}", modem.standard()),
+                        None => modem.standard().to_owned(),
+                    };
+                    note(&format!("bbs: a caller at {carrier}"));
+                    b.connected(&carrier);
+                }
                 if let Some(text) = &send {
                     for byte in text.bytes().chain(*b"\r\n") {
                         modem.feed_dte(byte);

@@ -509,6 +509,14 @@ pub struct ScopeApp {
     /// is due.
     script: std::collections::VecDeque<String>,
     script_due: Option<std::time::Instant>,
+    /// What has come in from the line lately, for a script's `@until`, and
+    /// how much of it an `@until` has already used.
+    heard: Vec<u8>,
+    heard_from: usize,
+    /// Keys a script's `@type` or `@key` has still to press, and when the
+    /// next is due.
+    typing: std::collections::VecDeque<u8>,
+    type_due: Option<std::time::Instant>,
     /// Whether the terminal's type is sized to the room it has.
     fit: bool,
     /// When the call first reached each step of the timeline, by the step's
@@ -720,6 +728,10 @@ impl ScopeApp {
             marks: std::collections::VecDeque::new(),
             script: std::collections::VecDeque::new(),
             script_due: None,
+            heard: Vec::new(),
+            heard_from: 0,
+            typing: std::collections::VecDeque::new(),
+            type_due: None,
             fit: true,
             step_at: [None; 6],
             remembered: String::new(),
@@ -4246,17 +4258,57 @@ impl ScopeApp {
     /// longer than the modem takes to answer any command but a dial.
     fn run_script(&mut self) {
         let Source::Live(session) = &self.source else { return };
-        if self.script.is_empty() || !session.state().open {
+        let session = Arc::clone(session);
+        if !session.state().open {
             return;
         }
         let now = std::time::Instant::now();
-        let due = *self.script_due.get_or_insert(now + std::time::Duration::from_millis(1500));
-        if now >= due
-            && let Some(line) = self.script.pop_front()
-        {
-            session.type_bytes(format!("{line}\r").as_bytes());
-            self.script_due = Some(now + std::time::Duration::from_secs(1));
+        // A line being typed, a key at a time at a person's speed.
+        if let Some(&key) = self.typing.front() {
+            if self.type_due.is_none_or(|due| now >= due) {
+                session.type_bytes(&[key]);
+                self.typing.pop_front();
+                self.type_due = Some(now + std::time::Duration::from_millis(key_gap(key)));
+                if self.typing.is_empty() {
+                    self.script_due = Some(now + std::time::Duration::from_millis(500));
+                }
+            }
+            return;
         }
+        let due = *self.script_due.get_or_insert(now + std::time::Duration::from_millis(1500));
+        if now < due {
+            return;
+        }
+        let Some(line) = self.script.front().cloned() else { return };
+        match script_step(&line) {
+            Step::Until(text) => {
+                let looked = &self.heard[self.heard_from.min(self.heard.len())..];
+                if let Some(at) = looked.windows(text.len().max(1)).position(|w| w == text.as_bytes()) {
+                    self.heard_from += at + text.len();
+                    self.script.pop_front();
+                }
+                return;
+            }
+            Step::Wait(seconds) => {
+                self.script_due = Some(now + std::time::Duration::from_secs_f64(seconds));
+            }
+            Step::Type(keys) => self.typing.extend(keys),
+            Step::Files(open) => self.transfer_open = open,
+            Step::Receive => session.receive_into(self.receive_dir.trim().into()),
+            Step::Tab(name) => {
+                self.tab = match name.as_str() {
+                    "scopes" => Tab::Scopes,
+                    "fax" => Tab::Fax,
+                    "transcript" => Tab::Transcript,
+                    _ => Tab::Terminal,
+                };
+            }
+            Step::Now(bytes) => {
+                session.type_bytes(&bytes);
+                self.script_due = Some(now + std::time::Duration::from_secs(1));
+            }
+        }
+        self.script.pop_front();
     }
 
     /// The type's size: fitted to the room, or set by hand.
@@ -4531,6 +4583,15 @@ impl ScopeApp {
             // enough to label which one it is in.
             if !data.is_empty() {
                 self.console.feed_screen(&data);
+                if !self.script.is_empty() || !self.typing.is_empty() {
+                    self.heard.extend_from_slice(&data);
+                    const KEEP: usize = 64 * 1024;
+                    if self.heard.len() > KEEP {
+                        let gone = self.heard.len() - KEEP;
+                        self.heard.drain(..gone);
+                        self.heard_from = self.heard_from.saturating_sub(gone);
+                    }
+                }
             }
             // Some of what arrives is a question rather than something to
             // draw, and a board that asks one and hears nothing concludes it
@@ -5915,6 +5976,60 @@ fn stage(ui: &mut egui::Ui, health: Color32, name: &str, text: String) -> egui::
     .response
 }
 
+/// One line of a `--type` script.
+#[derive(Debug, Clone, PartialEq)]
+enum Step {
+    /// Typed at once and Enter after it, a second before the next line: an
+    /// AT command, as scripts always typed them.
+    Now(Vec<u8>),
+    /// `@type text` (and Enter) or `@key k` (just that): keys pressed one at
+    /// a time at a person's speed.
+    Type(Vec<u8>),
+    /// `@wait 2.5`: seconds of nothing.
+    Wait(f64),
+    /// `@until text`: nothing until the line has shown that text.
+    Until(String),
+    /// `@tab scopes` (or terminal, transcript, fax): show that tab.
+    Tab(String),
+    /// `@files` and `@files off`: the file transfer window open or shut.
+    Files(bool),
+    /// `@receive`: take a file the far end sends by ZMODEM, into the folder
+    /// the file window names.
+    Receive,
+}
+
+fn script_step(line: &str) -> Step {
+    if let Some(text) = line.strip_prefix("@until ") {
+        return Step::Until(text.to_owned());
+    }
+    if line == "@receive" {
+        return Step::Receive;
+    }
+    if line == "@files" || line == "@files off" {
+        return Step::Files(line == "@files");
+    }
+    if let Some(name) = line.strip_prefix("@tab ") {
+        return Step::Tab(name.trim().to_owned());
+    }
+    if let Some(seconds) = line.strip_prefix("@wait ") {
+        return Step::Wait(seconds.trim().parse().unwrap_or(1.0));
+    }
+    if let Some(text) = line.strip_prefix("@type ") {
+        return Step::Type(text.bytes().chain(std::iter::once(b'\r')).collect());
+    }
+    if let Some(key) = line.strip_prefix("@key ") {
+        return Step::Type(key.as_bytes().to_vec());
+    }
+    Step::Now(format!("{line}\r").into_bytes())
+}
+
+/// How long after a key the next is pressed, in milliseconds: a person
+/// typing, uneven but steady, a little slower after a space.
+fn key_gap(key: u8) -> u64 {
+    let base = 70 + u64::from(key).wrapping_mul(37) % 80;
+    if key == b' ' { base + 60 } else { base }
+}
+
 impl eframe::App for ScopeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll();
@@ -6522,6 +6637,19 @@ mod modulation_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_script_line_says_what_to_do() {
+        assert_eq!(script_step("ATD123"), Step::Now(b"ATD123\r".to_vec()));
+        assert_eq!(script_step("@type rory"), Step::Type(b"rory\r".to_vec()));
+        assert_eq!(script_step("@key c"), Step::Type(b"c".to_vec()));
+        assert_eq!(script_step("@wait 2.5"), Step::Wait(2.5));
+        assert_eq!(script_step("@until login: "), Step::Until("login: ".to_owned()));
+        assert_eq!(script_step("@tab scopes"), Step::Tab("scopes".to_owned()));
+        assert_eq!(script_step("@receive"), Step::Receive);
+        assert_eq!(script_step("@files off"), Step::Files(false));
+        assert!((40..=250).contains(&key_gap(b'a')) && key_gap(b' ') > key_gap(b'a').min(149));
+    }
+
     use super::*;
 
     /// What one machine with both cables installed actually reports.
