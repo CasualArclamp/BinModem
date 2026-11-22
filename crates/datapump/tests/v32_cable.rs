@@ -192,11 +192,7 @@ fn holds(ppm: f64) {
         call.connected_at.is_finite(),
         "at {ppm} ppm the call was not up within {CONNECT_WITHIN} s"
     );
-    assert_eq!(
-        call.rate, 14_400,
-        "at {ppm} ppm the call came up at {}",
-        call.rate
-    );
+    assert_eq!(call.rate, 14_400, "at {ppm} ppm the call came up at {}", call.rate);
     assert_eq!(
         call.retrains,
         (0, 0),

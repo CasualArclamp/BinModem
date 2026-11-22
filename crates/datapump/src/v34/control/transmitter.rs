@@ -21,10 +21,7 @@ use std::f64::consts::TAU;
 
 use dsp::{Complex, rrc_at};
 
-use super::{
-    E_SYMBOLS, PPH_SYMBOLS, Rate, Reading, ac, samples_per_symbol, scrambler_of, sh, sh_bar,
-    unit_point,
-};
+use super::{E_SYMBOLS, PPH_SYMBOLS, Rate, Reading, ac, samples_per_symbol, scrambler_of, sh, sh_bar, unit_point};
 use crate::v34::dpsk::{GUARD_TONE, ROLLOFF, Side};
 use crate::v34::signals::{Sender, Size};
 
@@ -149,12 +146,7 @@ struct Slot {
 }
 
 impl Slot {
-    const SILENT: Self = Self {
-        symbol: Complex::ZERO,
-        kind: None,
-        began: false,
-        ended: false,
-    };
+    const SILENT: Self = Self { symbol: Complex::ZERO, kind: None, began: false, ended: false };
 }
 
 /// The segment being sent.
@@ -289,9 +281,7 @@ impl Transmitter {
     pub fn stop(&mut self) {
         self.queue.clear();
         self.current = None;
-        self.history
-            .iter_mut()
-            .for_each(|slot| *slot = Slot::SILENT);
+        self.history.iter_mut().for_each(|slot| *slot = Slot::SILENT);
         self.sounding = 0;
         self.guard_up = 0;
     }
@@ -377,20 +367,11 @@ impl Transmitter {
         // Under everything the answer modem sends, from its first symbol to
         // its last, as `dpsk.rs` has it; but brought up and down gently.
         if self.guard_amplitude > 0.0 {
-            let near = self
-                .history
-                .range(SPAN - GUARD_BEHIND..=SPAN + GUARD_AHEAD)
-                .any(|s| s.symbol != Complex::ZERO);
-            self.guard_up = if near {
-                (self.guard_up + 1).min(self.guard_ramp)
-            } else {
-                self.guard_up.saturating_sub(1)
-            };
+            let near = self.history.range(SPAN - GUARD_BEHIND..=SPAN + GUARD_AHEAD).any(|s| s.symbol != Complex::ZERO);
+            self.guard_up = if near { (self.guard_up + 1).min(self.guard_ramp) } else { self.guard_up.saturating_sub(1) };
         }
         if self.guard_up > 0 {
-            let level = 0.5
-                - 0.5
-                    * (std::f64::consts::PI * self.guard_up as f64 / self.guard_ramp as f64).cos();
+            let level = 0.5 - 0.5 * (std::f64::consts::PI * self.guard_up as f64 / self.guard_ramp as f64).cos();
             out += level * self.guard_amplitude * (TAU * self.guard).cos();
         }
         self.carrier = (self.carrier + self.carrier_step).fract();
@@ -423,16 +404,10 @@ impl Transmitter {
         let half = (self.p / (2 * self.q)).max(1);
         if let Some(kind) = centre.kind {
             if centre.began {
-                self.sent.push_back(Sent::Began {
-                    kind,
-                    at: self.now.saturating_sub(half),
-                });
+                self.sent.push_back(Sent::Began { kind, at: self.now.saturating_sub(half) });
             }
             if centre.ended {
-                self.sent.push_back(Sent::Ended {
-                    kind,
-                    at: self.now + half,
-                });
+                self.sent.push_back(Sent::Ended { kind, at: self.now + half });
             }
         }
     }
@@ -459,12 +434,7 @@ impl Transmitter {
             }
             let symbol = self.produce(&mut current);
             current.done += 1;
-            let slot = Slot {
-                symbol,
-                kind: Some(current.segment.kind()),
-                began: current.done == 1,
-                ended: false,
-            };
+            let slot = Slot { symbol, kind: Some(current.segment.kind()), began: current.done == 1, ended: false };
             self.current = Some(current);
             return slot;
         }
@@ -478,29 +448,20 @@ impl Transmitter {
             // loses one symbol of ALT (`plan.md` 8.4).
             self.sender.restart();
         }
-        Current {
-            segment,
-            done: 0,
-            position: 0,
-        }
+        Current { segment, done: 0, position: 0 }
     }
 
     /// Whether `current` has finished, or may give way to what is queued.
     fn over(&self, current: &Current) -> bool {
         let next = !self.queue.is_empty();
         match &current.segment {
-            Segment::Silence(n) | Segment::Sh(n) | Segment::ShBar(n) | Segment::Ones(n) => {
-                current.done >= *n
-            }
+            Segment::Silence(n) | Segment::Sh(n) | Segment::ShBar(n) | Segment::Ones(n) => current.done >= *n,
             Segment::Pph(_) => current.done >= PPH_SYMBOLS,
             Segment::E => current.done >= E_SYMBOLS,
             Segment::Alt { at_least } => current.done >= *at_least && next,
             Segment::Ac => next,
             Segment::Bits(bits) => current.position >= bits.len(),
-            Segment::Repeat(bits) => {
-                bits.is_empty()
-                    || (next && current.done > 0 && current.position.is_multiple_of(bits.len()))
-            }
+            Segment::Repeat(bits) => bits.is_empty() || (next && current.done > 0 && current.position.is_multiple_of(bits.len())),
             Segment::Data => next && self.bits.is_empty(),
         }
     }
@@ -519,16 +480,12 @@ impl Transmitter {
             Segment::Alt { .. } => self.differential(&[false, true], Size::Four),
             Segment::E => self.differential(&[true, true], Size::Four),
             Segment::Bits(bits) => {
-                let pair: Vec<bool> = (0..2)
-                    .map(|i| bits.get(current.position + i).copied().unwrap_or(true))
-                    .collect();
+                let pair: Vec<bool> = (0..2).map(|i| bits.get(current.position + i).copied().unwrap_or(true)).collect();
                 current.position += 2;
                 self.differential(&pair, Size::Four)
             }
             Segment::Repeat(bits) => {
-                let pair: Vec<bool> = (0..2)
-                    .map(|i| bits[(current.position + i) % bits.len()])
-                    .collect();
+                let pair: Vec<bool> = (0..2).map(|i| bits[(current.position + i) % bits.len()]).collect();
                 current.position += 2;
                 self.differential(&pair, Size::Four)
             }
@@ -537,9 +494,7 @@ impl Transmitter {
                 self.differential(&ones, self.rate.size())
             }
             Segment::Data => {
-                let bits: Vec<bool> = (0..self.rate.bits())
-                    .map(|_| self.bits.pop_front().unwrap_or(true))
-                    .collect();
+                let bits: Vec<bool> = (0..self.rate.bits()).map(|_| self.bits.pop_front().unwrap_or(true)).collect();
                 self.differential(&bits, self.rate.size())
             }
         }
@@ -596,17 +551,10 @@ mod tests {
                 assert!(near(*z, reading.point(i)), "{reading:?} symbol {i}");
                 assert_eq!(*kind, Some(Kind::Pph));
             }
-            assert!(
-                got[PPH_SYMBOLS..]
-                    .iter()
-                    .all(|(z, k)| *z == Complex::ZERO && k.is_none())
-            );
+            assert!(got[PPH_SYMBOLS..].iter().all(|(z, k)| *z == Complex::ZERO && k.is_none()));
         }
         // PPh(0) is sent first and is point 0's direction.
-        assert!(near(
-            pph(0),
-            Complex::new(1.0, 1.0).scale(std::f64::consts::FRAC_1_SQRT_2)
-        ));
+        assert!(near(pph(0), Complex::new(1.0, 1.0).scale(std::f64::consts::FRAC_1_SQRT_2)));
         assert!(near(pph_as_printed(0), pph(0)));
     }
 
@@ -616,25 +564,14 @@ mod tests {
         tx.queue(Segment::Sh(SH_SYMBOLS));
         tx.queue(Segment::ShBar(SH_BAR_SYMBOLS));
         tx.queue(Segment::Ac);
-        let got: Vec<(i32, i32)> = symbols(&mut tx, 40)
-            .into_iter()
-            .map(|(z, _)| grid(z))
-            .collect();
+        let got: Vec<(i32, i32)> = symbols(&mut tx, 40).into_iter().map(|(z, _)| grid(z)).collect();
         // Sh: point 0, then it turned counterclockwise by 90 degrees, ending
         // on the turned one.
         assert_eq!(got[0], (1, 1));
         assert_eq!(got[1], (-1, 1));
-        assert_eq!(
-            got[SH_SYMBOLS - 1],
-            (-1, 1),
-            "Sh ends on point 0 turned counterclockwise 90"
-        );
+        assert_eq!(got[SH_SYMBOLS - 1], (-1, 1), "Sh ends on point 0 turned counterclockwise 90");
         // S-bar-h: 180, then 270 counterclockwise, beginning with 180.
-        assert_eq!(
-            got[SH_SYMBOLS],
-            (-1, -1),
-            "S-bar-h begins on point 0 turned 180"
-        );
+        assert_eq!(got[SH_SYMBOLS], (-1, -1), "S-bar-h begins on point 0 turned 180");
         assert_eq!(got[SH_SYMBOLS + 1], (1, -1));
         assert_eq!(got[SH_SYMBOLS + SH_BAR_SYMBOLS - 1], (1, -1));
         // AC: point 0 and point 0 turned 180, alternately.
@@ -659,10 +596,7 @@ mod tests {
             let got = symbols(&mut tx, 3 + 30 + E_SYMBOLS);
             // A receiver started where ALT starts reads every bit of it.
             let mut reader = Reader::new(mode);
-            let bits: Vec<bool> = got[3..]
-                .iter()
-                .flat_map(|(z, _)| reader.differential(grid(*z), Size::Four))
-                .collect();
+            let bits: Vec<bool> = got[3..].iter().flat_map(|(z, _)| reader.differential(grid(*z), Size::Four)).collect();
             let alt = &bits[..60];
             for (i, b) in alt.iter().enumerate() {
                 assert_eq!(*b, i % 2 == 1, "{side:?} ALT bit {i}");
@@ -684,10 +618,7 @@ mod tests {
         let kinds: Vec<Option<Kind>> = symbols(&mut tx, 30).into_iter().map(|(_, k)| k).collect();
         assert!(kinds[..16].iter().all(|k| *k == Some(Kind::Alt)));
         assert!(kinds[16..26].iter().all(|k| *k == Some(Kind::E)));
-        assert!(
-            kinds[26..].iter().all(Option::is_none),
-            "nothing after E: silence"
-        );
+        assert!(kinds[26..].iter().all(Option::is_none), "nothing after E: silence");
 
         // A repeated MPh finishes the repetition it is in.
         let mut tx = Transmitter::new(Side::Call, FS);
@@ -698,10 +629,7 @@ mod tests {
         tx.queue(Segment::E);
         let rest: Vec<Option<Kind>> = symbols(&mut tx, 40).into_iter().map(|(_, k)| k).collect();
         // 50 symbols in, the second repetition is 6 symbols old: 38 to go.
-        assert!(
-            rest[..38].iter().all(|k| *k == Some(Kind::Repeat)),
-            "{rest:?}"
-        );
+        assert!(rest[..38].iter().all(|k| *k == Some(Kind::Repeat)), "{rest:?}");
         assert_eq!(rest[38], Some(Kind::E));
 
         // Data drains what was queued for it before giving way.
@@ -710,10 +638,7 @@ mod tests {
         tx.queue(Segment::Data);
         tx.queue(Segment::Ones(4));
         let kinds: Vec<Option<Kind>> = symbols(&mut tx, 12).into_iter().map(|(_, k)| k).collect();
-        assert!(
-            kinds[..6].iter().all(|k| *k == Some(Kind::Data)),
-            "{kinds:?}"
-        );
+        assert!(kinds[..6].iter().all(|k| *k == Some(Kind::Data)), "{kinds:?}");
         assert!(kinds[6..10].iter().all(|k| *k == Some(Kind::Ones)));
         assert_eq!(tx.pending_bits(), 0);
     }
@@ -733,11 +658,7 @@ mod tests {
             let scale = crate::v34::receiver::unit(rate.size());
             let mut bits = Vec::new();
             for (i, (z, _)) in got.iter().enumerate() {
-                let size = if i < 20 + E_SYMBOLS {
-                    Size::Four
-                } else {
-                    rate.size()
-                };
+                let size = if i < 20 + E_SYMBOLS { Size::Four } else { rate.size() };
                 let s = crate::v34::receiver::unit(size);
                 let point = ((z.re / s).round() as i32, (z.im / s).round() as i32);
                 bits.extend(reader.differential(point, size));
@@ -748,10 +669,7 @@ mod tests {
                 let tail = &got[20 + E_SYMBOLS..];
                 let power = tail.iter().map(|(z, _)| z.norm_sqr()).sum::<f64>() / tail.len() as f64;
                 assert!((power - 1.0).abs() < 0.2, "{power}");
-                assert!(
-                    tail.iter()
-                        .any(|(z, _)| (z.re.abs() - 3.0 * scale).abs() < 1e-9)
-                );
+                assert!(tail.iter().any(|(z, _)| (z.re.abs() - 3.0 * scale).abs() < 1e-9));
             }
         }
     }
@@ -774,30 +692,9 @@ mod tests {
         };
         let kinds: Vec<Sent> = sent.clone();
         assert_eq!(kinds.len(), 8, "{kinds:?}");
-        assert!(
-            matches!(
-                kinds[0],
-                Sent::Began {
-                    kind: Kind::Silence,
-                    ..
-                }
-            ),
-            "{kinds:?}"
-        );
-        assert!(matches!(
-            kinds[2],
-            Sent::Began {
-                kind: Kind::Pph,
-                ..
-            }
-        ));
-        assert!(matches!(
-            kinds[3],
-            Sent::Ended {
-                kind: Kind::Pph,
-                ..
-            }
-        ));
+        assert!(matches!(kinds[0], Sent::Began { kind: Kind::Silence, .. }), "{kinds:?}");
+        assert!(matches!(kinds[2], Sent::Began { kind: Kind::Pph, .. }));
+        assert!(matches!(kinds[3], Sent::Ended { kind: Kind::Pph, .. }));
         assert!(matches!(kinds[7], Sent::Ended { kind: Kind::E, .. }));
         // PPh is 32 symbols long, and ALT 16, on the line.
         assert!((at(&kinds[3]) - at(&kinds[2]) - 32.0 * symbol).abs() <= 2.0);
@@ -823,34 +720,9 @@ mod tests {
             samples.push(tx.next_sample());
             sent.extend(std::iter::from_fn(|| tx.sent()));
         }
-        let ended = sent
-            .iter()
-            .find(|s| {
-                matches!(
-                    s,
-                    Sent::Ended {
-                        kind: Kind::Pph,
-                        ..
-                    }
-                )
-            })
-            .copied();
-        let Some(Sent::Ended { at: ended, .. }) = ended else {
-            panic!("{sent:?}")
-        };
-        let Some(Sent::Began { at: began, .. }) = sent
-            .iter()
-            .rev()
-            .find(|s| {
-                matches!(
-                    s,
-                    Sent::Began {
-                        kind: Kind::Pph,
-                        ..
-                    }
-                )
-            })
-            .copied()
+        let ended = sent.iter().find(|s| matches!(s, Sent::Ended { kind: Kind::Pph, .. })).copied();
+        let Some(Sent::Ended { at: ended, .. }) = ended else { panic!("{sent:?}") };
+        let Some(Sent::Began { at: began, .. }) = sent.iter().rev().find(|s| matches!(s, Sent::Began { kind: Kind::Pph, .. })).copied()
         else {
             panic!("{sent:?}")
         };
@@ -887,9 +759,7 @@ mod tests {
             tx.next_sample();
         }
         let fft = dsp::Fft::new(n);
-        let window: Vec<f64> = (0..n)
-            .map(|i| 0.5 - 0.5 * (TAU * i as f64 / n as f64).cos())
-            .collect();
+        let window: Vec<f64> = (0..n).map(|i| 0.5 - 0.5 * (TAU * i as f64 / n as f64).cos()).collect();
         let mut power = vec![0.0f64; n / 2];
         for _ in 0..frames {
             let mut re: Vec<f64> = (0..n).map(|i| tx.next_sample() * window[i]).collect();
@@ -931,11 +801,7 @@ mod tests {
                     within(400.0, -9.0, -5.0);
                     within(450.0, -9.0 - 11.0 * 50.0 / 75.0, -9.0);
                     let far = db(sign * 560.0);
-                    assert!(
-                        far < -20.0,
-                        "{side:?} {rate:?} {} Hz: {far:.2} dB",
-                        sign * 560.0
-                    );
+                    assert!(far < -20.0, "{side:?} {rate:?} {} Hz: {far:.2} dB", sign * 560.0);
                 }
             }
         }
@@ -949,18 +815,11 @@ mod tests {
         let n = 4096;
         let hz = FS / n as f64;
         let power = spectrum(Side::Answer, Rate::R2400, n, 40);
-        let band = |from: f64, to: f64| {
-            ((from / hz).round() as usize..=(to / hz).round() as usize)
-                .map(|k| power[k])
-                .sum::<f64>()
-        };
+        let band = |from: f64, to: f64| ((from / hz).round() as usize..=(to / hz).round() as usize).map(|k| power[k]).sum::<f64>();
         let guard = band(1800.0 - 12.0, 1800.0 + 12.0);
         let carrier = band(2400.0 - 600.0 + 20.0, 2400.0 + 600.0);
         let db = 10.0 * (guard / carrier).log10();
-        assert!(
-            (db + 6.0).abs() < 0.3,
-            "guard tone {db:.2} dB against the carrier"
-        );
+        assert!((db + 6.0).abs() < 0.3, "guard tone {db:.2} dB against the carrier");
         // And the call modem has none.
         let power = spectrum(Side::Call, Rate::R1200, n, 10);
         let bins = (1800.0 / hz).round() as usize;
@@ -974,13 +833,7 @@ mod tests {
         // modem's 1 dB under with a guard tone 7 dB under, which between them
         // come back to within a whisker of it -- on every signal, whatever
         // its constellation.
-        let segments = [
-            Segment::Pph(Reading::WithI),
-            Segment::Ac,
-            Segment::Sh(1000),
-            Segment::Alt { at_least: 1000 },
-            Segment::Data,
-        ];
+        let segments = [Segment::Pph(Reading::WithI), Segment::Ac, Segment::Sh(1000), Segment::Alt { at_least: 1000 }, Segment::Data];
         for side in [Side::Call, Side::Answer] {
             for segment in &segments {
                 for rate in [Rate::R1200, Rate::R2400] {
@@ -992,13 +845,9 @@ mod tests {
                     }
                     let samples: Vec<f64> = (0..(FS as usize)).map(|_| tx.next_sample()).collect();
                     let steady = &samples[4000..12000];
-                    let rms =
-                        (steady.iter().map(|x| x * x).sum::<f64>() / steady.len() as f64).sqrt();
+                    let rms = (steady.iter().map(|x| x * x).sum::<f64>() / steady.len() as f64).sqrt();
                     let db = 20.0 * (rms / std::f64::consts::FRAC_1_SQRT_2).log10();
-                    assert!(
-                        db.abs() < 0.3,
-                        "{side:?} {segment:?} {rate:?}: {db:.2} dB from nominal"
-                    );
+                    assert!(db.abs() < 0.3, "{side:?} {segment:?} {rate:?}: {db:.2} dB from nominal");
                 }
             }
         }
@@ -1016,17 +865,12 @@ mod tests {
             let power = spectrum(side, Rate::R2400, n, 40);
             let carrier = side.carrier();
             let bin = |f: f64| (f / hz).round() as usize;
-            let own = power[bin(carrier - 75.0)..=bin(carrier + 75.0)]
-                .iter()
-                .sum::<f64>()
-                / (bin(carrier + 75.0) - bin(carrier - 75.0) + 1) as f64;
+            let own = power[bin(carrier - 75.0)..=bin(carrier + 75.0)].iter().sum::<f64>() / (bin(carrier + 75.0) - bin(carrier - 75.0) + 1) as f64;
             let (from, to) = (far - 525.0, far + 525.0);
             let worst = power[bin(from)..=bin(to)]
                 .iter()
                 .enumerate()
-                .filter(|(k, _)| {
-                    side == Side::Call || ((bin(from) + k) as f64 * hz - 1800.0).abs() > 30.0
-                })
+                .filter(|(k, _)| side == Side::Call || ((bin(from) + k) as f64 * hz - 1800.0).abs() > 30.0)
                 .map(|(_, p)| *p)
                 .fold(0.0, f64::max);
             let db = 10.0 * (worst / own).log10();

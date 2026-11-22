@@ -58,10 +58,7 @@ pub enum Status {
     /// two MPs -- no rate both ends enable.
     Done,
     /// In data mode: B1 has arrived, at these rates in bit/s.
-    Connected {
-        transmit: u32,
-        receive: u32,
-    },
+    Connected { transmit: u32, receive: u32 },
     /// Data mode was up and the two ends are back at MP: a rate renegotiation
     /// or a cleardown, from either end.
     Retraining,
@@ -96,14 +93,7 @@ impl Settings {
     /// From the INFO sequences: INFO1c is what the call modem found of the
     /// answer modem's transmitter, INFO1a what the answer modem found of the
     /// call modem's and the symbol rates both ways.
-    pub fn new(
-        role: Role,
-        far: &Info0,
-        info1c: &Info1c,
-        info1a: &Info1a,
-        round_trip: f64,
-        wide: bool,
-    ) -> Self {
+    pub fn new(role: Role, far: &Info0, info1c: &Info1c, info1a: &Info1a, round_trip: f64, wide: bool) -> Self {
         let towards_call = info1c.probed[info1a.answer_to_call.index() as usize];
         let towards_answer = info1a.probed;
         let call_band = Band::new(info1a.call_to_answer, towards_answer.high_carrier);
@@ -305,9 +295,7 @@ impl RetrainWatch {
             && self.on.amplitude() > RETRAIN_TONE_AUDIBLE;
         self.held = if clear { self.held + 1 } else { 0 };
         self.told &= self.held > 0;
-        let retrain = !self.told
-            && self.held >= (RETRAIN_TONE_HELD * fs) as u64
-            && self.on.amplitude() > self.floor;
+        let retrain = !self.told && self.held >= (RETRAIN_TONE_HELD * fs) as u64 && self.on.amplitude() > self.floor;
         self.told |= retrain;
         retrain
     }
@@ -398,9 +386,7 @@ impl Source {
             // the TRN signal" (10.1.3.8).
             Segment::Trn => self.sender.restart(),
             Segment::JPrime => self.queue.extend(J_PRIME),
-            Segment::E => self
-                .queue
-                .extend(std::iter::repeat_n(true, signals::E_BITS)),
+            Segment::E => self.queue.extend(std::iter::repeat_n(true, signals::E_BITS)),
             _ => {}
         }
     }
@@ -414,9 +400,7 @@ impl Source {
 
     /// Bits for one symbol of a differential sequence at `size`.
     fn differential(&mut self, size: Size) -> Complex {
-        let bits: Vec<bool> = (0..size.bits())
-            .map(|_| self.queue.pop_front().unwrap_or(true))
-            .collect();
+        let bits: Vec<bool> = (0..size.bits()).map(|_| self.queue.pop_front().unwrap_or(true)).collect();
         self.count += 1;
         grid(self.sender.differential(&bits), size)
     }
@@ -466,19 +450,12 @@ impl Source {
                         continue;
                     }
                     self.count += 1;
-                    let size = if self.after_s_bar == Segment::Pp {
-                        Size::Four
-                    } else {
-                        self.size
-                    };
+                    let size = if self.after_s_bar == Segment::Pp { Size::Four } else { self.size };
                     return grid(self.sender.trn(size), size);
                 }
                 Segment::J | Segment::Mp => {
                     if self.queue.is_empty() {
-                        if self.segment == Segment::Mp
-                            && self.count > 0
-                            && self.sending_acknowledged
-                        {
+                        if self.segment == Segment::Mp && self.count > 0 && self.sending_acknowledged {
                             self.acknowledged += 1;
                         }
                         if let Some(next) = self.pending.take() {
@@ -493,11 +470,7 @@ impl Source {
                             self.count = self.count.max(1);
                         }
                     }
-                    let size = if self.segment == Segment::J {
-                        Size::Four
-                    } else {
-                        self.size
-                    };
+                    let size = if self.segment == Segment::J { Size::Four } else { self.size };
                     return self.differential(size);
                 }
                 Segment::JPrime => {
@@ -511,11 +484,7 @@ impl Source {
                     if self.queue.is_empty() {
                         // 11.4.1.1.4 and 11.4.1.2.4: "After sending an E
                         // sequence, the ... modem shall send B1".
-                        let next = if self.encoder.is_some() {
-                            Segment::Data
-                        } else {
-                            Segment::Silence
-                        };
+                        let next = if self.encoder.is_some() { Segment::Data } else { Segment::Silence };
                         self.start(next);
                         continue;
                     }
@@ -538,13 +507,7 @@ impl Source {
                     let b1 = encoder.mapping_frames() < encoder.params().framing.p as u64;
                     let data = &mut self.data;
                     self.count += 1;
-                    return encoder.next_symbol(&mut || {
-                        if b1 {
-                            true
-                        } else {
-                            data.pop_front().unwrap_or(true)
-                        }
-                    });
+                    return encoder.next_symbol(&mut || if b1 { true } else { data.pop_front().unwrap_or(true) });
                 }
             }
         }
@@ -645,10 +608,7 @@ impl Listening {
             }
         }
         if self.size == Size::Four && self.bits.len() == 32 {
-            let (older, newer): (Vec<bool>, Vec<bool>) = (
-                self.bits.range(..16).copied().collect(),
-                self.bits.range(16..).copied().collect(),
-            );
+            let (older, newer): (Vec<bool>, Vec<bool>) = (self.bits.range(..16).copied().collect(), self.bits.range(16..).copied().collect());
             if self.j.is_none() {
                 for j in [Size::Four, Size::Sixteen] {
                     if older == j.j() && newer == j.j() {
@@ -707,11 +667,7 @@ impl SWatch {
         let point = (0.6..1.5).contains(&y.norm_sqr());
         let quarter = near(y, one_back * Complex::I) || near(y, -(one_back * Complex::I));
         if !self.heard {
-            self.run = if point && quarter && near(y, two_back) {
-                self.run + 1
-            } else {
-                0
-            };
+            self.run = if point && quarter && near(y, two_back) { self.run + 1 } else { 0 };
             if self.run >= S_HEARD {
                 self.heard = true;
                 return Watched::S;
@@ -719,11 +675,7 @@ impl SWatch {
             return Watched::Nothing;
         }
         self.since += 1;
-        self.flips = if point && quarter && near(y, -two_back) {
-            self.flips + 1
-        } else {
-            0
-        };
+        self.flips = if point && quarter && near(y, -two_back) { self.flips + 1 } else { 0 };
         if self.flips == 2 {
             return Watched::SBar;
         }
@@ -881,12 +833,7 @@ impl Modem {
             status: Status::Running,
             deadline: None,
             stopped_at: "",
-            tx: Transmitter::new(
-                settings.transmit,
-                settings.pre_emphasis,
-                settings.power_reduction,
-                fs,
-            ),
+            tx: Transmitter::new(settings.transmit, settings.pre_emphasis, settings.power_reduction, fs),
             source: Source::new(own, ask),
             rx: Receiver::new(settings.receive, fs),
             listening: Listening::new(far),
@@ -929,10 +876,7 @@ impl Modem {
             Role::Call => {
                 modem.rx.hunt();
                 // 11.3.2.1.1: J within 2800 ms and two round trips of INFO1c.
-                modem.deadline = Some((
-                    modem.samples(2.8 + 2.0 * settings.round_trip + SLACK),
-                    "no J from the answer modem",
-                ));
+                modem.deadline = Some((modem.samples(2.8 + 2.0 * settings.round_trip + SLACK), "no J from the answer modem"));
             }
             Role::Answer => {
                 // Silence, then S. The pulse reaches this many symbols ahead
@@ -1052,11 +996,7 @@ impl Modem {
         // 11.6.2: E within 2500 ms and two round trips of this end's S-bar if
         // it began, three if it answered; CME makes it thirty seconds.
         let trips = if initiating { 2.0 } else { 3.0 };
-        let wait = if self.settings.far_cme {
-            30.0
-        } else {
-            2.5 + (trips + E_PATIENCE) * self.rtd() + SLACK + 0.05
-        };
+        let wait = if self.settings.far_cme { 30.0 } else { 2.5 + (trips + E_PATIENCE) * self.rtd() + SLACK + 0.05 };
         self.deadline = Some((self.samples(wait), "no E in the rate renegotiation"));
         self.enter(Stage::Renegotiation);
     }
@@ -1069,9 +1009,7 @@ impl Modem {
 
     /// Look for where the far end's data frames are, from its data.
     fn search(&mut self) {
-        let Some(params) = self.receive_params() else {
-            return;
-        };
+        let Some(params) = self.receive_params() else { return };
         if self.decoder.is_none() && self.acquirer.is_none() {
             // From listening for E: the far end's data has been decided as
             // sixteen points since the error first rose, and every loop
@@ -1091,9 +1029,7 @@ impl Modem {
     /// The far end's data, decoded, to where it goes: B1's ones counted, and
     /// everything after them received.
     fn take_decoded(&mut self) {
-        let Some(decoder) = self.decoder.as_mut() else {
-            return;
-        };
+        let Some(decoder) = self.decoder.as_mut() else { return };
         for bit in decoder.take_bits() {
             if self.b1_left > 0 {
                 self.b1_left -= 1;
@@ -1109,10 +1045,8 @@ impl Modem {
     /// gone into data mode, and its E was lost -- the second live call to
     /// reach MP' had a VoIP slip land on it.
     fn watch_for_lost_e(&mut self, error: f64) {
-        let waiting = matches!(
-            self.stage,
-            Stage::CallMp | Stage::AnswerMp | Stage::Renegotiation
-        ) && self.far_acknowledged
+        let waiting = matches!(self.stage, Stage::CallMp | Stage::AnswerMp | Stage::Renegotiation)
+            && self.far_acknowledged
             && !self.far_e
             && (self.stage != Stage::Renegotiation || self.far_s_bar);
         if !waiting {
@@ -1120,17 +1054,9 @@ impl Modem {
         }
         self.unlike += 0.05 * (error - self.unlike);
         let unlike = self.unlike > UNLIKE_ERROR || self.rx.is_lost();
-        self.unlike_run = if unlike && self.rx.level() > 1e-4 {
-            self.unlike_run + 1
-        } else {
-            0
-        };
+        self.unlike_run = if unlike && self.rx.level() > 1e-4 { self.unlike_run + 1 } else { 0 };
         // A tenth of the way there is off already.
-        self.off_run = if self.unlike > 0.1 * UNLIKE_ERROR || self.rx.is_lost() {
-            self.off_run + 1
-        } else {
-            0
-        };
+        self.off_run = if self.unlike > 0.1 * UNLIKE_ERROR || self.rx.is_lost() { self.off_run + 1 } else { 0 };
         if self.unlike_run > UNLIKE_SYMBOLS {
             self.search();
         }
@@ -1251,20 +1177,12 @@ impl Modem {
     pub fn step(&mut self, line: f64) -> f64 {
         self.now += 1;
         self.rx.feed(line);
-        let live = |status: Status| {
-            matches!(
-                status,
-                Status::Running | Status::Connected { .. } | Status::Retraining
-            )
-        };
+        let live = |status: Status| matches!(status, Status::Running | Status::Connected { .. } | Status::Retraining);
         // The far end's retrain tone can come at any point a call is up: it is
         // how a far end falls back when a renegotiation goes unanswered or the
         // line changes too much for one (11.5). Watched on the raw line, since
         // it is a pure tone and not one of the demodulator's signals.
-        if live(self.status)
-            && self.stage != Stage::Finished
-            && self.retrain_watch.feed(line, self.fs)
-        {
+        if live(self.status) && self.stage != Stage::Finished && self.retrain_watch.feed(line, self.fs) {
             self.wants_retrain = true;
         }
         while let Some(heard) = self.rx.heard() {
@@ -1336,10 +1254,7 @@ impl Modem {
                         self.enter(Stage::AnswerAwaitJ);
                         // 11.3.2.2.2: J within 2600 ms and two round trips of
                         // the end of this end's J.
-                        self.deadline = Some((
-                            self.samples(2.6 + 2.0 * self.rtd() + SLACK),
-                            "no J from the call modem",
-                        ));
+                        self.deadline = Some((self.samples(2.6 + 2.0 * self.rtd() + SLACK), "no J from the call modem"));
                     }
                     Stage::CallTraining4 => self.phase4_snr = Some(snr_db),
                     _ => {}
@@ -1357,18 +1272,10 @@ impl Modem {
                         Watched::SBar => self.heard_far_s_bar(),
                         // S-bar missed, to a slip or to noise: TRN is surely
                         // under way by now.
-                        Watched::Nothing
-                            if self.s_watch.heard
-                                && self.s_watch.since > signals::S_SYMBOLS + 32 =>
-                        {
-                            self.heard_far_s_bar()
-                        }
+                        Watched::Nothing if self.s_watch.heard && self.s_watch.since > signals::S_SYMBOLS + 32 => self.heard_far_s_bar(),
                         Watched::Nothing => {}
                     }
-                    if self.stage == Stage::Renegotiation
-                        && !self.far_s_bar
-                        && self.decoder.is_none()
-                    {
+                    if self.stage == Stage::Renegotiation && !self.far_s_bar && self.decoder.is_none() {
                         return;
                     }
                 }
@@ -1394,18 +1301,12 @@ impl Modem {
                             self.decoder = Some(*decoder);
                             self.take_decoded();
                         }
-                        Acquired::Nothing
-                            if self.decoder.is_none() && self.stage != Stage::Data =>
-                        {
+                        Acquired::Nothing if self.decoder.is_none() && self.stage != Stage::Data => {
                             // Not data mode after all: listen for E again.
                             self.acquirer = None;
                             // Sixteen points in phase 4, as this end's J asked;
                             // four in a renegotiation.
-                            let size = if self.stage == Stage::Renegotiation {
-                                Size::Four
-                            } else {
-                                self.source.ask
-                            };
+                            let size = if self.stage == Stage::Renegotiation { Size::Four } else { self.source.ask };
                             self.rx.set_size(size);
                         }
                         Acquired::Nothing => self.search(),
@@ -1450,11 +1351,7 @@ impl Modem {
                     return;
                 }
                 self.rx.train(Reference::PpThenTrn, self.far_mode, at);
-                self.enter(if self.stage == Stage::CallAwaitS {
-                    Stage::CallTraining
-                } else {
-                    Stage::AnswerTraining
-                });
+                self.enter(if self.stage == Stage::CallAwaitS { Stage::CallTraining } else { Stage::AnswerTraining });
             }
             Stage::CallAwaitS4 => {
                 // 11.4.1.1.1: the answer modem's S-bar. Stop J with a J', and
@@ -1466,11 +1363,7 @@ impl Modem {
                 self.source.change(Segment::JPrime);
                 self.enter(Stage::CallTraining4);
                 // 11.4.2.1.2: E within 2500 ms and two round trips of J'.
-                let wait = if self.settings.far_cme {
-                    30.0
-                } else {
-                    2.5 + (2.0 + E_PATIENCE) * self.rtd() + SLACK
-                };
+                let wait = if self.settings.far_cme { 30.0 } else { 2.5 + (2.0 + E_PATIENCE) * self.rtd() + SLACK };
                 self.deadline = Some((self.samples(wait), "no E from the answer modem"));
             }
             _ => {}
@@ -1499,11 +1392,7 @@ impl Modem {
                 self.source.change(Segment::S);
                 self.enter(Stage::AnswerPhase4);
                 // 11.4.2.2.2: E within 2500 ms and three round trips of S-bar.
-                let wait = if self.settings.far_cme {
-                    30.0
-                } else {
-                    2.5 + (3.0 + E_PATIENCE) * self.rtd() + SLACK + 0.05
-                };
+                let wait = if self.settings.far_cme { 30.0 } else { 2.5 + (3.0 + E_PATIENCE) * self.rtd() + SLACK + 0.05 };
                 self.deadline = Some((self.samples(wait), "no E from the call modem"));
             }
             (Stage::AnswerPhase4, Event::JPrime) => {
@@ -1519,10 +1408,7 @@ impl Modem {
                 if let Some(coefficients) = mp.precoding {
                     self.precoding = coefficients;
                 }
-                if self.stage == Stage::Renegotiation
-                    && mp.call_to_answer == 0
-                    && mp.answer_to_call == 0
-                {
+                if self.stage == Stage::Renegotiation && mp.call_to_answer == 0 && mp.answer_to_call == 0 {
                     self.clearing = true;
                 }
                 self.far_mp = Some(mp);
@@ -1553,12 +1439,7 @@ impl Modem {
         let far = self.far_mp?;
         let (transmit, _) = self.rates()?;
         Some(Params {
-            framing: Framing::new(
-                self.settings.transmit.rate,
-                u32::from(transmit) * 2400,
-                false,
-                far.expanded_shaping,
-            )?,
+            framing: Framing::new(self.settings.transmit.rate, u32::from(transmit) * 2400, false, far.expanded_shaping)?,
             code: code_of(far.trellis),
             nonlinear: far.non_linear,
             // "Prior to receiving the first MP sequence in Phase 4, the
@@ -1574,12 +1455,7 @@ impl Modem {
         let ours = self.ours?;
         let (_, receive) = self.rates()?;
         Some(Params {
-            framing: Framing::new(
-                self.settings.receive.rate,
-                u32::from(receive) * 2400,
-                false,
-                ours.expanded_shaping,
-            )?,
+            framing: Framing::new(self.settings.receive.rate, u32::from(receive) * 2400, false, ours.expanded_shaping)?,
             code: code_of(ours.trellis),
             nonlinear: ours.non_linear,
             precoding: ours.precoding.unwrap_or([(0, 0); 3]),
@@ -1603,11 +1479,7 @@ impl Modem {
     /// ready or the frame is made up with idle ones, which in the middle of an
     /// HDLC frame is an abort.
     pub fn pending_bits(&self) -> usize {
-        let frame = self
-            .source
-            .encoder
-            .as_ref()
-            .map_or(0, |e| e.params().framing.b);
+        let frame = self.source.encoder.as_ref().map_or(0, |e| e.params().framing.b);
         self.source.data.len().saturating_sub(frame)
     }
 
@@ -1624,8 +1496,7 @@ impl Modem {
 
     /// Whether the far end's signal is there to be demodulated.
     pub fn carrier(&self) -> bool {
-        matches!(self.status, Status::Connected { .. } | Status::Retraining)
-            && self.rx.level() > 1e-4
+        matches!(self.status, Status::Connected { .. } | Status::Retraining) && self.rx.level() > 1e-4
     }
 
     /// The MP this end sends: what it can take and give.
@@ -1636,11 +1507,8 @@ impl Modem {
         // trained to, with the same allowance phase 2's projections make.
         let snr = 10f64.powf(self.mp_snr_db().min(60.0) / 10.0);
         let bits = (1.0 + snr / 10f64.powf(0.6)).log2();
-        let receive = ((bits * s.receive.baud() / 2400.0).floor() as u8)
-            .clamp(1, probe::ceiling(s.receive.rate));
-        let receive = self
-            .receive_cap
-            .map_or(receive, |cap| receive.min(cap.max(1)));
+        let receive = ((bits * s.receive.baud() / 2400.0).floor() as u8).clamp(1, probe::ceiling(s.receive.rate));
+        let receive = self.receive_cap.map_or(receive, |cap| receive.min(cap.max(1)));
         let transmit = probe::ceiling(s.transmit.rate);
         let (call_to_answer, answer_to_call) = match s.role {
             _ if self.clearing && self.initiated => (0, 0),
@@ -1696,10 +1564,7 @@ impl Modem {
                 if self.source.segment == Segment::J {
                     // 11.3.2.2.1: S-bar within 600 ms and a round trip of J.
                     self.rx.hunt();
-                    self.deadline = Some((
-                        self.samples(0.6 + self.rtd() + SLACK),
-                        "no S from the call modem",
-                    ));
+                    self.deadline = Some((self.samples(0.6 + self.rtd() + SLACK), "no S from the call modem"));
                     self.enter(Stage::AnswerAwaitS);
                 }
             }
@@ -1710,21 +1575,14 @@ impl Modem {
                 if self.source.segment == Segment::J {
                     // 11.4.2.1.1: the answer modem's S-bar within 600 ms and a
                     // round trip of this end's J.
-                    self.deadline = Some((
-                        self.samples(0.6 + self.rtd() + SLACK),
-                        "no S from the answer modem in phase 4",
-                    ));
+                    self.deadline = Some((self.samples(0.6 + self.rtd() + SLACK), "no S from the answer modem in phase 4"));
                     self.enter(Stage::CallAwaitS4);
                 }
             }
             Stage::CallTraining4 => {
                 // 11.4.1.1.2: TRN for 512T at least, then MP once trained, and
                 // not past two seconds of TRN whatever.
-                let sent = if self.source.segment == Segment::Trn {
-                    self.source.count
-                } else {
-                    0
-                };
+                let sent = if self.source.segment == Segment::Trn { self.source.count } else { 0 };
                 let trained = self.rx.is_trained() && self.listening.trn_symbols >= HEARD_TRN;
                 if sent >= LEAST_TRN && (trained || sent as f64 >= MOST_TRN * baud) {
                     let ours = self.make_mp();
@@ -1737,13 +1595,8 @@ impl Modem {
             Stage::AnswerPhase4 => {
                 // 11.4.1.2.2: MP after 512T of the call modem's TRN, and not
                 // past two seconds and a round trip of this end's.
-                let sent = if self.source.segment == Segment::Trn {
-                    self.source.count
-                } else {
-                    0
-                };
-                let heard = self.listening.j_prime
-                    && self.listening.trn_symbols + self.listening.grace >= LEAST_TRN;
+                let sent = if self.source.segment == Segment::Trn { self.source.count } else { 0 };
+                let heard = self.listening.j_prime && self.listening.trn_symbols + self.listening.grace >= LEAST_TRN;
                 if sent >= LEAST_TRN && (heard || sent as f64 >= (MOST_TRN + self.rtd()) * baud) {
                     let ours = self.make_mp();
                     self.ours = Some(ours);
@@ -1757,8 +1610,7 @@ impl Modem {
                 // TRN until the far end's MP says its receiver is ready, and
                 // no longer than RENEGOTIATION_TRN either way. A cleardown's
                 // MP is the far end asking for none at all (11.7.2.2).
-                let enough =
-                    self.far_mp.is_some() || self.source.count as f64 >= RENEGOTIATION_TRN * baud;
+                let enough = self.far_mp.is_some() || self.source.count as f64 >= RENEGOTIATION_TRN * baud;
                 if self.ours.is_none() && self.source.segment == Segment::Trn && enough {
                     let ours = self.make_mp();
                     self.ours = Some(ours);
@@ -1800,11 +1652,7 @@ impl Modem {
             self.enter(Stage::Finished);
             return;
         }
-        if !self.clearing
-            && !self.sent_e
-            && self.source.acknowledged >= MP_PRIME_REPEATS
-            && (self.far_acknowledged || self.far_e)
-        {
+        if !self.clearing && !self.sent_e && self.source.acknowledged >= MP_PRIME_REPEATS && (self.far_acknowledged || self.far_e) {
             self.source.encoder = self.transmit_params().map(Encoder::new);
             self.source.change(Segment::E);
             self.sent_e = true;
@@ -1832,8 +1680,7 @@ impl Modem {
                 // No data mode between these MPs. Done once E is not
                 // just asked for but on the line: the pulse carries
                 // symbols a way ahead of the sample going out.
-                let flushed = self.source.segment == Segment::Silence
-                    && self.source.silent > 2 * Transmitter::lookahead();
+                let flushed = self.source.segment == Segment::Silence && self.source.silent > 2 * Transmitter::lookahead();
                 if flushed {
                     self.status = Status::Done;
                     self.deadline = None;
@@ -1848,11 +1695,7 @@ impl Modem {
     /// initiating end once it is both sending and receiving MP'.
     fn cleared(&self) -> bool {
         let sent = self.source.acknowledged >= 1;
-        if self.initiated {
-            sent && self.far_acknowledged
-        } else {
-            sent && self.far_mp.is_some()
-        }
+        if self.initiated { sent && self.far_acknowledged } else { sent && self.far_mp.is_some() }
     }
 }
 
@@ -1882,23 +1725,14 @@ fn own_mode(role: Role) -> Mode {
 /// in which case both are the fastest no faster than any of the four limits.
 pub fn negotiate(call: &Mp, answer: &Mp) -> (u8, u8) {
     let enabled = call.rates & answer.rates;
-    let fastest = |limit: u8| {
-        (1..=limit.min(14))
-            .rev()
-            .find(|r| enabled >> (r - 1) & 1 == 1)
-            .unwrap_or(0)
-    };
+    let fastest = |limit: u8| (1..=limit.min(14)).rev().find(|r| enabled >> (r - 1) & 1 == 1).unwrap_or(0);
     if call.asymmetric && answer.asymmetric {
         (
             fastest(call.call_to_answer.min(answer.call_to_answer)),
             fastest(call.answer_to_call.min(answer.answer_to_call)),
         )
     } else {
-        let limit = call
-            .call_to_answer
-            .min(call.answer_to_call)
-            .min(answer.call_to_answer)
-            .min(answer.answer_to_call);
+        let limit = call.call_to_answer.min(call.answer_to_call).min(answer.call_to_answer).min(answer.answer_to_call);
         let rate = fastest(limit);
         (rate, rate)
     }
@@ -1912,28 +1746,14 @@ mod tests {
     const FS: f64 = 16_000.0;
 
     fn settings(role: Role, round_trip: f64) -> Settings {
-        let far = Info0 {
-            constellation_1664: true,
-            ..Info0::default()
-        };
-        let probed = Probed {
-            high_carrier: false,
-            pre_emphasis: 2,
-            max_rate: 14,
-        };
-        let info1c = Info1c {
-            probed: [probed; 6],
-            ..Info1c::default()
-        };
+        let far = Info0 { constellation_1664: true, ..Info0::default() };
+        let probed = Probed { high_carrier: false, pre_emphasis: 2, max_rate: 14 };
+        let info1c = Info1c { probed: [probed; 6], ..Info1c::default() };
         let info1a = Info1a {
             min_power_reduction: 0,
             additional_power_reduction: 0,
             md_length: 0,
-            probed: Probed {
-                high_carrier: false,
-                pre_emphasis: 1,
-                max_rate: 14,
-            },
+            probed: Probed { high_carrier: false, pre_emphasis: 1, max_rate: 14 },
             answer_to_call: SymbolRate::S3429,
             call_to_answer: SymbolRate::S3200,
             frequency_offset: None,
@@ -2004,13 +1824,11 @@ mod tests {
 
         /// One sample of the call end's clock.
         fn step(&mut self) {
-            let heard_by_call =
-                self.to_call.pop_front().unwrap() * self.loss + self.noise * self.rand();
+            let heard_by_call = self.to_call.pop_front().unwrap() * self.loss + self.noise * self.rand();
             let from_call = self.caller.step(heard_by_call);
             self.to_answer.push_back(from_call);
             self.buffer.clear();
-            self.up
-                .process(self.to_answer.pop_front().unwrap(), &mut self.buffer);
+            self.up.process(self.to_answer.pop_front().unwrap(), &mut self.buffer);
             self.into_answer.extend(self.buffer.iter().copied());
             while let Some(x) = self.into_answer.pop_front() {
                 let noise = self.noise * self.rand();
@@ -2019,8 +1837,7 @@ mod tests {
                 self.down.process(from_answer, &mut self.buffer);
                 self.out_of_answer.extend(self.buffer.iter().copied());
             }
-            self.to_call
-                .push_back(self.out_of_answer.pop_front().unwrap_or(0.0));
+            self.to_call.push_back(self.out_of_answer.pop_front().unwrap_or(0.0));
             self.at_answer.extend(self.answerer.take_bits());
             self.at_call.extend(self.caller.take_bits());
             self.n += 1;
@@ -2083,9 +1900,7 @@ mod tests {
     ) -> (Modem, Modem, Vec<bool>, Vec<bool>) {
         let mut link = Link::new(one_way, noise_db, ppm);
         let ended = |m: &Modem| matches!(m.status(), Status::Failed(_) | Status::Done);
-        let connected = link.run_until(seconds, |l| {
-            l.both_connected() || ended(&l.caller) || ended(&l.answerer)
-        });
+        let connected = link.run_until(seconds, |l| l.both_connected() || ended(&l.caller) || ended(&l.answerer));
         if connected && link.both_connected() {
             link.caller.send_bits(call_data);
             link.answerer.send_bits(answer_data);
@@ -2111,16 +1926,8 @@ mod tests {
                 m.far_mp()
             );
         }
-        assert!(
-            matches!(caller.status(), Status::Connected { .. }),
-            "call modem stuck at {}",
-            caller.phase()
-        );
-        assert!(
-            matches!(answerer.status(), Status::Connected { .. }),
-            "answer modem stuck at {}",
-            answerer.phase()
-        );
+        assert!(matches!(caller.status(), Status::Connected { .. }), "call modem stuck at {}", caller.phase());
+        assert!(matches!(answerer.status(), Status::Connected { .. }), "answer modem stuck at {}", answerer.phase());
         // Each end's B1 arrived as the ones it is.
         assert_eq!((caller.b1_errors(), answerer.b1_errors()), (0, 0));
         // Each end asked for sixteen points and was given them.
@@ -2135,12 +1942,7 @@ mod tests {
         let (answer_tx, answer_rx) = answerer.rates().unwrap();
         assert_eq!((call_tx, call_rx), (answer_rx, answer_tx));
         for m in [caller, answerer] {
-            assert!(
-                m.phase3_snr().unwrap() > 25.0,
-                "{:?} phase 3 at {:?}",
-                m.settings().role,
-                m.phase3_snr()
-            );
+            assert!(m.phase3_snr().unwrap() > 25.0, "{:?} phase 3 at {:?}", m.settings().role, m.phase3_snr());
         }
     }
 
@@ -2166,22 +1968,11 @@ mod tests {
         // A pattern each way that no idle line of ones could be mistaken for.
         let from_call: Vec<bool> = (0..6000).map(|i| (i * 37 + 11) % 7 < 3).collect();
         let from_answer: Vec<bool> = (0..6000).map(|i| (i * 13 + 5) % 5 < 2).collect();
-        let (caller, answerer, at_call, at_answer) =
-            call_with_data(0.030, 45.0, 60.0, 14.0, &from_call, &from_answer);
+        let (caller, answerer, at_call, at_answer) = call_with_data(0.030, 45.0, 60.0, 14.0, &from_call, &from_answer);
         check_connected(&caller, &answerer);
-        let contains = |haystack: &[bool], needle: &[bool]| {
-            haystack.windows(needle.len()).any(|w| w == needle)
-        };
-        assert!(
-            contains(&at_answer, &from_call),
-            "the answer end did not receive the call end's data ({} bits)",
-            at_answer.len()
-        );
-        assert!(
-            contains(&at_call, &from_answer),
-            "the call end did not receive the answer end's data ({} bits)",
-            at_call.len()
-        );
+        let contains = |haystack: &[bool], needle: &[bool]| haystack.windows(needle.len()).any(|w| w == needle);
+        assert!(contains(&at_answer, &from_call), "the answer end did not receive the call end's data ({} bits)", at_answer.len());
+        assert!(contains(&at_call, &from_answer), "the call end did not receive the answer end's data ({} bits)", at_call.len());
     }
 
     /// A pattern no idle line of ones could be mistaken for.
@@ -2197,29 +1988,15 @@ mod tests {
     fn either_end_renegotiates_the_rate_and_data_crosses_at_the_new_one() {
         for initiator in [Role::Call, Role::Answer] {
             let mut link = Link::new(0.030, 45.0, 60.0);
-            assert!(
-                link.run_until(20.0, Link::both_connected),
-                "never connected: {}",
-                link.caller.phase()
-            );
+            assert!(link.run_until(20.0, Link::both_connected), "never connected: {}", link.caller.phase());
             let before = link.caller.rates().unwrap();
             // The initiating end offers to receive no faster than 19 200.
             assert!(link.end(initiator).renegotiate(8));
             assert_eq!(link.end(initiator).status(), Status::Retraining);
             // The far end hears S, both are back at MP, and both come out.
-            let answered = link.run_until(1.0, |l| {
-                l.caller.status() == Status::Retraining && l.answerer.status() == Status::Retraining
-            });
-            assert!(
-                answered,
-                "{initiator:?} began, and the other end never answered"
-            );
-            assert!(
-                link.run_until(6.0, Link::both_connected),
-                "{initiator:?}: stuck at {} and {}",
-                link.caller.phase(),
-                link.answerer.phase()
-            );
+            let answered = link.run_until(1.0, |l| l.caller.status() == Status::Retraining && l.answerer.status() == Status::Retraining);
+            assert!(answered, "{initiator:?} began, and the other end never answered");
+            assert!(link.run_until(6.0, Link::both_connected), "{initiator:?}: stuck at {} and {}", link.caller.phase(), link.answerer.phase());
             let (call_tx, call_rx) = link.caller.rates().unwrap();
             let (answer_tx, answer_rx) = link.answerer.rates().unwrap();
             assert_eq!((call_tx, call_rx), (answer_rx, answer_tx), "{initiator:?}");
@@ -2233,15 +2010,7 @@ mod tests {
                 Role::Call => call_tx,
                 Role::Answer => answer_tx,
             };
-            assert_eq!(
-                kept,
-                if initiator == Role::Call {
-                    before.0
-                } else {
-                    before.1
-                },
-                "{initiator:?}"
-            );
+            assert_eq!(kept, if initiator == Role::Call { before.0 } else { before.1 }, "{initiator:?}");
             for m in [&link.caller, &link.answerer] {
                 assert_eq!(m.renegotiations(), 1);
                 assert_eq!(m.b1_errors(), 0, "{:?}", m.settings().role);
@@ -2253,33 +2022,14 @@ mod tests {
             link.caller.send_bits(&from_call);
             link.answerer.send_bits(&from_answer);
             link.run_until(0.8, |_| false);
-            assert!(
-                contains(&link.at_answer, &from_call),
-                "{initiator:?}: call to answer lost"
-            );
-            assert!(
-                contains(&link.at_call, &from_answer),
-                "{initiator:?}: answer to call lost"
-            );
+            assert!(contains(&link.at_answer, &from_call), "{initiator:?}: call to answer lost");
+            assert!(contains(&link.at_call, &from_answer), "{initiator:?}: answer to call lost");
             // Again from the other end: the end that answered the first one
             // is listening for S as it was before it.
-            let other = if initiator == Role::Call {
-                Role::Answer
-            } else {
-                Role::Call
-            };
+            let other = if initiator == Role::Call { Role::Answer } else { Role::Call };
             assert!(link.end(other).renegotiate(6));
-            assert!(
-                link.run_until(1.0, |l| l.caller.status() == Status::Retraining
-                    && l.answerer.status() == Status::Retraining),
-                "{other:?} began a second, and it was not heard"
-            );
-            assert!(
-                link.run_until(6.0, Link::both_connected),
-                "second: stuck at {} and {}",
-                link.caller.phase(),
-                link.answerer.phase()
-            );
+            assert!(link.run_until(1.0, |l| l.caller.status() == Status::Retraining && l.answerer.status() == Status::Retraining), "{other:?} began a second, and it was not heard");
+            assert!(link.run_until(6.0, Link::both_connected), "second: stuck at {} and {}", link.caller.phase(), link.answerer.phase());
             for m in [&link.caller, &link.answerer] {
                 assert_eq!(m.renegotiations(), 2);
             }
@@ -2298,10 +2048,7 @@ mod tests {
     fn a_renegotiation_the_far_end_begins_keeps_what_data_mode_could_carry() {
         for slipped in [false, true] {
             let mut link = Link::new(0.030, 45.0, 60.0);
-            assert!(
-                link.run_until(20.0, Link::both_connected),
-                "never connected"
-            );
+            assert!(link.run_until(20.0, Link::both_connected), "never connected");
             // Long enough in data mode for its readings to fill.
             link.run_until(2.5, |_| false);
             let before = link.answerer.rates().unwrap();
@@ -2312,16 +2059,9 @@ mod tests {
             if slipped {
                 link.slip(Role::Answer, true);
             }
-            assert!(
-                link.run_until(8.0, Link::both_connected),
-                "slipped {slipped}: stuck at {}",
-                link.answerer.phase()
-            );
+            assert!(link.run_until(8.0, Link::both_connected), "slipped {slipped}: stuck at {}", link.answerer.phase());
             let ours = link.answerer.ours.expect("no MP");
-            assert_eq!(
-                ours.call_to_answer, before.1,
-                "slipped {slipped}: the answer end's MP asked for less than data mode carried"
-            );
+            assert_eq!(ours.call_to_answer, before.1, "slipped {slipped}: the answer end's MP asked for less than data mode carried");
             assert_eq!(link.answerer.rates(), Some(before), "slipped {slipped}");
         }
     }
@@ -2333,10 +2073,7 @@ mod tests {
     #[test]
     fn a_renegotiation_that_goes_unanswered_asks_for_a_retrain() {
         let mut link = Link::new(0.030, 45.0, 60.0);
-        assert!(
-            link.run_until(20.0, Link::both_connected),
-            "never connected"
-        );
+        assert!(link.run_until(20.0, Link::both_connected), "never connected");
         assert!(link.caller.renegotiate(8));
         // The far end is gone: nothing comes back. The call end sends its S,
         // S-bar, TRN and MP into silence and never hears an E.
@@ -2347,81 +2084,42 @@ mod tests {
                 wanted = true;
                 break;
             }
-            assert!(
-                !matches!(link.caller.status(), Status::Failed(_)),
-                "it gave up instead of retraining"
-            );
+            assert!(!matches!(link.caller.status(), Status::Failed(_)), "it gave up instead of retraining");
         }
-        assert!(
-            wanted,
-            "the unanswered renegotiation never asked for a retrain"
-        );
+        assert!(wanted, "the unanswered renegotiation never asked for a retrain");
     }
 
     #[test]
     fn a_renegotiation_survives_a_voip_round_trip() {
         let mut link = Link::new(0.570, 45.0, 100.0);
-        assert!(
-            link.run_until(30.0, Link::both_connected),
-            "never connected: {}",
-            link.caller.phase()
-        );
+        assert!(link.run_until(30.0, Link::both_connected), "never connected: {}", link.caller.phase());
         assert!(link.answerer.renegotiate(10));
-        assert!(
-            link.run_until(1.0, |l| l.caller.status() == Status::Retraining),
-            "the call end never heard S"
-        );
-        assert!(
-            link.run_until(10.0, Link::both_connected),
-            "stuck at {} and {}",
-            link.caller.phase(),
-            link.answerer.phase()
-        );
+        assert!(link.run_until(1.0, |l| l.caller.status() == Status::Retraining), "the call end never heard S");
+        assert!(link.run_until(10.0, Link::both_connected), "stuck at {} and {}", link.caller.phase(), link.answerer.phase());
         assert_eq!(link.answerer.rates().map(|r| r.1), Some(10));
     }
 
     #[test]
     fn a_slip_in_data_mode_costs_only_the_data_in_flight() {
-        for (towards, dropped) in [
-            (Role::Call, true),
-            (Role::Answer, false),
-            (Role::Answer, true),
-        ] {
+        for (towards, dropped) in [(Role::Call, true), (Role::Answer, false), (Role::Answer, true)] {
             let mut link = Link::new(0.040, 45.0, 60.0);
-            assert!(
-                link.run_until(20.0, Link::both_connected),
-                "never connected"
-            );
+            assert!(link.run_until(20.0, Link::both_connected), "never connected");
             link.run_until(0.5, |_| false);
             link.slip(towards, dropped);
             let found = |l: &Link| match towards {
                 Role::Call => l.caller.found_again(),
                 Role::Answer => l.answerer.found_again(),
             };
-            assert!(
-                link.run_until(2.0, |l| found(l) == 1),
-                "{towards:?} dropped {dropped}: the frames were not found again"
-            );
-            assert!(
-                link.both_connected(),
-                "{towards:?} dropped {dropped}: {} and {}",
-                link.caller.phase(),
-                link.answerer.phase()
-            );
+            assert!(link.run_until(2.0, |l| found(l) == 1), "{towards:?} dropped {dropped}: the frames were not found again");
+            assert!(link.both_connected(), "{towards:?} dropped {dropped}: {} and {}", link.caller.phase(), link.answerer.phase());
             let (from_call, from_answer) = (pattern(4000, 37), pattern(4000, 13));
             link.at_call.clear();
             link.at_answer.clear();
             link.caller.send_bits(&from_call);
             link.answerer.send_bits(&from_answer);
             link.run_until(1.0, |_| false);
-            assert!(
-                contains(&link.at_answer, &from_call),
-                "{towards:?} dropped {dropped}: call to answer lost after the slip"
-            );
-            assert!(
-                contains(&link.at_call, &from_answer),
-                "{towards:?} dropped {dropped}: answer to call lost after the slip"
-            );
+            assert!(contains(&link.at_answer, &from_call), "{towards:?} dropped {dropped}: call to answer lost after the slip");
+            assert!(contains(&link.at_call, &from_answer), "{towards:?} dropped {dropped}: answer to call lost after the slip");
         }
     }
 
@@ -2429,12 +2127,7 @@ mod tests {
     fn an_e_that_never_arrives_is_found_from_the_data_after_it() {
         let mut link = Link::new(0.030, 45.0, 0.0);
         link.caller.listening.deaf_to_e = true;
-        assert!(
-            link.run_until(25.0, Link::both_connected),
-            "stuck at {} and {}",
-            link.caller.phase(),
-            link.answerer.phase()
-        );
+        assert!(link.run_until(25.0, Link::both_connected), "stuck at {} and {}", link.caller.phase(), link.answerer.phase());
         assert_eq!(link.caller.found_again(), 1);
         assert_eq!(link.answerer.found_again(), 0);
         let (from_call, from_answer) = (pattern(4000, 37), pattern(4000, 13));
@@ -2451,38 +2144,24 @@ mod tests {
     fn a_cleardown_from_either_end_ends_the_call_at_both() {
         for initiator in [Role::Call, Role::Answer] {
             let mut link = Link::new(0.030, 45.0, 0.0);
-            assert!(
-                link.run_until(20.0, Link::both_connected),
-                "never connected"
-            );
+            assert!(link.run_until(20.0, Link::both_connected), "never connected");
             assert!(link.end(initiator).clear_down());
-            let over = |l: &Link| {
-                l.caller.status() == Status::ClearedDown
-                    && l.answerer.status() == Status::ClearedDown
-            };
-            assert!(
-                link.run_until(4.0, over),
-                "{initiator:?}: at {:?} and {:?}",
-                link.caller.status(),
-                link.answerer.status()
-            );
+            let over = |l: &Link| l.caller.status() == Status::ClearedDown && l.answerer.status() == Status::ClearedDown;
+            assert!(link.run_until(4.0, over), "{initiator:?}: at {:?} and {:?}", link.caller.status(), link.answerer.status());
             assert_eq!(link.caller.phase(), "V.34 cleared down");
         }
     }
 
     #[test]
     fn s_is_heard_in_data_and_its_turn_to_s_bar_is_found() {
-        let unit = |p: Point| {
-            Complex::new(f64::from(p.0), f64::from(p.1)).scale(receiver::unit(Size::Four))
-        };
+        let unit = |p: Point| Complex::new(f64::from(p.0), f64::from(p.1)).scale(receiver::unit(Size::Four));
         // Scrambled four-point data -- data mode at 4800 -- is never S.
         let mut watch = SWatch::default();
         let mut seed = 99u32;
         for _ in 0..200_000 {
             seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
             let quarters = seed >> 16 & 3;
-            let y = unit(signals::s(0))
-                * [Complex::ONE, Complex::I, -Complex::ONE, -Complex::I][quarters as usize];
+            let y = unit(signals::s(0)) * [Complex::ONE, Complex::I, -Complex::ONE, -Complex::I][quarters as usize];
             assert_eq!(watch.feed(y), Watched::Nothing);
         }
         // S turned any way at all, then S-bar.
@@ -2495,8 +2174,7 @@ mod tests {
                 }
             }
             assert_eq!(heard, Some(S_HEARD + 1), "S turned {turn:?}");
-            let turned = (0..signals::S_BAR_SYMBOLS)
-                .position(|n| watch.feed(unit(signals::s_bar(n)) * turn) == Watched::SBar);
+            let turned = (0..signals::S_BAR_SYMBOLS).position(|n| watch.feed(unit(signals::s_bar(n)) * turn) == Watched::SBar);
             assert_eq!(turned, Some(1), "S-bar turned {turn:?}");
         }
     }
@@ -2507,43 +2185,22 @@ mod tests {
         for _ in 0..(6.0 * FS) as usize {
             caller.step(0.0);
         }
-        assert_eq!(
-            caller.status(),
-            Status::Failed("no J from the answer modem")
-        );
+        assert_eq!(caller.status(), Status::Failed("no J from the answer modem"));
         let mut answerer = Modem::new(settings(Role::Answer, 1.0), FS);
         for _ in 0..(4.0 * FS) as usize {
             answerer.step(0.0);
         }
-        assert_eq!(
-            answerer.status(),
-            Status::Failed("no S from the call modem")
-        );
+        assert_eq!(answerer.status(), Status::Failed("no S from the call modem"));
     }
 
     #[test]
     fn rates_follow_both_ends_limits() {
-        let call = Mp {
-            call_to_answer: 14,
-            answer_to_call: 10,
-            rates: Mp::rates_up_to(14),
-            asymmetric: true,
-            ..Mp::default()
-        };
-        let answer = Mp {
-            call_to_answer: 12,
-            answer_to_call: 14,
-            rates: Mp::rates_up_to(14) & !(1 << 11),
-            asymmetric: true,
-            ..Mp::default()
-        };
+        let call = Mp { call_to_answer: 14, answer_to_call: 10, rates: Mp::rates_up_to(14), asymmetric: true, ..Mp::default() };
+        let answer = Mp { call_to_answer: 12, answer_to_call: 14, rates: Mp::rates_up_to(14) & !(1 << 11), asymmetric: true, ..Mp::default() };
         // 12 is not enabled at the answer end, so call to answer steps down to
         // 11; answer to call is the call end's limit of 10.
         assert_eq!(negotiate(&call, &answer), (11, 10));
-        let symmetric = Mp {
-            asymmetric: false,
-            ..answer
-        };
+        let symmetric = Mp { asymmetric: false, ..answer };
         assert_eq!(negotiate(&call, &symmetric), (10, 10));
     }
 
@@ -2557,11 +2214,7 @@ mod tests {
         let mut nco = dsp::Nco::new(1200.0, FS);
         let (mut first, mut times) = (None, 0);
         for i in 0..silence + tone + silence {
-            let x = if (silence..silence + tone).contains(&i) {
-                amplitude * nco.step().1
-            } else {
-                0.0
-            };
+            let x = if (silence..silence + tone).contains(&i) { amplitude * nco.step().1 } else { 0.0 };
             if watch.feed(x, FS) {
                 first.get_or_insert((i - silence) as f64 / FS);
                 times += 1;
@@ -2588,25 +2241,13 @@ mod tests {
         let level = 5339.0 / 32768.0;
         let down = |db: f64| level * 10f64.powf(-db / 20.0);
         let watch = || RetrainWatch::new(Role::Call, FS).heard_before(Some(level));
-        assert_eq!(
-            tone_b_taken(&mut watch(), down(10.0)),
-            (None, 0),
-            "10 dB down"
-        );
+        assert_eq!(tone_b_taken(&mut watch(), down(10.0)), (None, 0), "10 dB down");
         for db in [0.0, 3.0] {
             let (at, times) = tone_b_taken(&mut watch(), down(db));
             let at = at.unwrap_or_else(|| panic!("{db} dB down was never taken for tone B"));
-            assert!(
-                at > 0.050 && at <= TAKEN_BY,
-                "{db} dB down: taken {:.1} ms in",
-                at * 1e3
-            );
+            assert!(at > 0.050 && at <= TAKEN_BY, "{db} dB down: taken {:.1} ms in", at * 1e3);
             assert_eq!(times, 1, "{db} dB down");
-            assert_eq!(
-                tone_b_taken(&mut RetrainWatch::new(Role::Call, FS), down(db)).0,
-                Some(at),
-                "{db} dB down"
-            );
+            assert_eq!(tone_b_taken(&mut RetrainWatch::new(Role::Call, FS), down(db)).0, Some(at), "{db} dB down");
         }
     }
 
@@ -2624,10 +2265,7 @@ mod tests {
         }
         let level = 5339.0 / 32768.0;
         for db in [0.0, 3.0, 10.0, 20.0] {
-            let (at, times) = tone_b_taken(
-                &mut RetrainWatch::new(Role::Call, FS).heard_before(None),
-                level * 10f64.powf(-db / 20.0),
-            );
+            let (at, times) = tone_b_taken(&mut RetrainWatch::new(Role::Call, FS).heard_before(None), level * 10f64.powf(-db / 20.0));
             let at = at.unwrap_or_else(|| panic!("{db} dB down was never taken for tone B"));
             assert!(at > 0.050, "{db} dB down: taken {:.1} ms in", at * 1e3);
             assert_eq!(times, 1, "{db} dB down");
@@ -2637,25 +2275,13 @@ mod tests {
         for (far, freq) in [(Role::Call, 1200.0), (Role::Answer, 2400.0)] {
             let mut watch = RetrainWatch::new(far, FS).heard_before(None);
             let detector = |f: f64| dsp::ToneDetector::new(f, 10.0, FS);
-            let mut before = Before {
-                on: detector(freq),
-                below: detector(freq - 150.0),
-                above: detector(freq + 150.0),
-                held: 0,
-            };
+            let mut before = Before { on: detector(freq), below: detector(freq - 150.0), above: detector(freq + 150.0), held: 0 };
             let mut seed = 0x2545_f491u32;
             let mut taken = Vec::new();
-            for (n, &(ms, amplitude, off)) in [
-                (40.0, 0.2, 0.0),
-                (54.0, 0.1, 0.0),
-                (56.0, 0.1, 0.0),
-                (80.0, 0.009, 0.0),
-                (300.0, 0.3, 0.0),
-                (120.0, 0.2, 60.0),
-                (200.0, 0.05, 0.0),
-            ]
-            .iter()
-            .enumerate()
+            for (n, &(ms, amplitude, off)) in
+                [(40.0, 0.2, 0.0), (54.0, 0.1, 0.0), (56.0, 0.1, 0.0), (80.0, 0.009, 0.0), (300.0, 0.3, 0.0), (120.0, 0.2, 60.0), (200.0, 0.05, 0.0)]
+                    .iter()
+                    .enumerate()
             {
                 let mut nco = dsp::Nco::new(freq + off, FS);
                 taken.push(false);
@@ -2664,18 +2290,11 @@ mod tests {
                     seed ^= seed >> 17;
                     seed ^= seed << 5;
                     let noise = (f64::from(seed) / f64::from(u32::MAX) - 0.5) * 1e-3;
-                    let x = noise
-                        + if (i as f64) < ms * FS / 1000.0 {
-                            amplitude * nco.step().1
-                        } else {
-                            0.0
-                        };
+                    let x = noise + if (i as f64) < ms * FS / 1000.0 { amplitude * nco.step().1 } else { 0.0 };
                     for d in [&mut before.on, &mut before.below, &mut before.above] {
                         d.feed(x);
                     }
-                    let clear = before.on.amplitude()
-                        > RETRAIN_TONE_CLEAR
-                            * before.below.amplitude().max(before.above.amplitude())
+                    let clear = before.on.amplitude() > RETRAIN_TONE_CLEAR * before.below.amplitude().max(before.above.amplitude())
                         && before.on.amplitude() > 0.008;
                     before.held = if clear { before.held + 1 } else { 0 };
                     let was = before.held == (RETRAIN_TONE_HELD * FS) as u64;
@@ -2684,10 +2303,7 @@ mod tests {
                 }
             }
             // Some taken and some not, or the comparison proves little.
-            assert!(
-                taken.contains(&true) && taken.contains(&false),
-                "{far:?}: {taken:?}"
-            );
+            assert!(taken.contains(&true) && taken.contains(&false), "{far:?}: {taken:?}");
         }
     }
 }

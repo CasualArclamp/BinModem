@@ -29,17 +29,10 @@ pub struct Shell {
 impl Shell {
     pub fn new(m: usize) -> Self {
         let m = m.max(1);
-        let g2: Vec<u64> = (0..=2 * (m - 1))
-            .map(|p| (m as i64 - (p as i64 - m as i64 + 1).abs()) as u64)
-            .collect();
+        let g2: Vec<u64> = (0..=2 * (m - 1)).map(|p| (m as i64 - (p as i64 - m as i64 + 1).abs()) as u64).collect();
         let convolve = |a: &[u64]| -> Vec<u64> {
             (0..2 * a.len() - 1)
-                .map(|p| {
-                    (0..=p)
-                        .filter(|&i| i < a.len() && p - i < a.len())
-                        .map(|i| a[i] * a[p - i])
-                        .sum()
-                })
+                .map(|p| (0..=p).filter(|&i| i < a.len() && p - i < a.len()).map(|i| a[i] * a[p - i]).sum())
                 .collect()
         };
         let g4 = convolve(&g2);
@@ -59,19 +52,11 @@ impl Shell {
     }
 
     fn g2(&self, p: i64) -> u64 {
-        if p < 0 {
-            0
-        } else {
-            self.g2.get(p as usize).copied().unwrap_or(0)
-        }
+        if p < 0 { 0 } else { self.g2.get(p as usize).copied().unwrap_or(0) }
     }
 
     fn g4(&self, p: i64) -> u64 {
-        if p < 0 {
-            0
-        } else {
-            self.g4.get(p as usize).copied().unwrap_or(0)
-        }
+        if p < 0 { 0 } else { self.g4.get(p as usize).copied().unwrap_or(0) }
     }
 
     /// Eight-ring combinations there are in all.
@@ -142,11 +127,7 @@ impl Shell {
         // Which of a share's pairs a pair is, the other way round.
         let index = |first: i64, second: i64| -> u64 {
             let total = first + second;
-            if total < m {
-                first as u64
-            } else {
-                (m - 1 - second) as u64
-            }
+            if total < m { first as u64 } else { (m - 1 - second) as u64 }
         };
         let c = r[0] + r[1];
         let b = c + r[2] + r[3];
@@ -223,10 +204,7 @@ mod tests {
     fn every_number_maps_to_rings_and_back() {
         for (m, k) in [(2, 5), (3, 11), (4, 13), (5, 17), (8, 23)] {
             let shell = Shell::new(m);
-            assert!(
-                shell.combinations() >= 1 << k,
-                "M {m} cannot carry {k} bits"
-            );
+            assert!(shell.combinations() >= 1 << k, "M {m} cannot carry {k} bits");
             let step = ((1u64 << k) / 5000).max(1);
             let mut r0 = 0;
             while r0 < 1 << k {
@@ -259,10 +237,7 @@ mod tests {
         assert_eq!(shell.map(0), [0; 8]);
         // The next eight are one ring up at each place in turn.
         let totals: Vec<usize> = (0..500).map(|r0| shell.map(r0).iter().sum()).collect();
-        assert!(
-            totals.windows(2).all(|w| w[0] <= w[1]),
-            "totals do not rise"
-        );
+        assert!(totals.windows(2).all(|w| w[0] <= w[1]), "totals do not rise");
         assert_eq!(totals[1..9], [1; 8]);
     }
 
@@ -283,11 +258,7 @@ mod tests {
         }
         for (x, &count) in counts.iter().enumerate() {
             let measured = count as f64 / 160_000.0;
-            assert!(
-                (measured - shares[x]).abs() < 0.01,
-                "ring {x}: {measured} against {}",
-                shares[x]
-            );
+            assert!((measured - shares[x]).abs() < 0.01, "ring {x}: {measured} against {}", shares[x]);
         }
     }
 }

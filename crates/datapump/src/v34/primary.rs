@@ -398,9 +398,7 @@ impl Source {
     /// nothing begun, if the symbol rate has no such data rate in Table 8.
     /// Cuts short whatever was going.
     pub fn page(&mut self, data: DataMode) -> bool {
-        let Some(params) = data.params(self.symbols.channel.band.rate, self.symbols.mode) else {
-            return false;
-        };
+        let Some(params) = data.params(self.symbols.channel.band.rate, self.symbols.mode) else { return false };
         self.symbols.begin(Some(Encoder::new(params)));
         true
     }
@@ -472,16 +470,10 @@ enum Stage {
     Idle,
     /// Phase 3: hunting for S, with 12.3.3's 2000 ms up at `deadline`
     /// samples.
-    Hunting3 {
-        deadline: u64,
-    },
-    Training3 {
-        deadline: u64,
-    },
+    Hunting3 { deadline: u64 },
+    Training3 { deadline: u64 },
     /// Phase 3's TRN, over at half-symbol sample `end`.
-    Trn {
-        end: u64,
-    },
+    Trn { end: u64 },
     HuntingPage,
     TrainingPage,
     /// B1, and the page after it.
@@ -663,9 +655,7 @@ impl Recipient {
     pub fn expect_phase3(&mut self) {
         self.leave();
         self.rx.hunt();
-        self.stage = Stage::Hunting3 {
-            deadline: self.now + (S_WITHIN_SECONDS * self.fs) as u64,
-        };
+        self.stage = Stage::Hunting3 { deadline: self.now + (S_WITHIN_SECONDS * self.fs) as u64 };
     }
 
     /// This end has gone quiet on the control channel: listen for a page in
@@ -673,9 +663,7 @@ impl Recipient {
     /// no such data rate in Table 8. The page comes as `Event::Trained`,
     /// `Event::PageStarted`, bits through `take_bits`, and `Event::PageEnded`.
     pub fn expect_page(&mut self, data: DataMode) -> bool {
-        let Some(params) = data.params(self.channel.band.rate, self.far) else {
-            return false;
-        };
+        let Some(params) = data.params(self.channel.band.rate, self.far) else { return false };
         self.leave();
         self.params = Some(params);
         self.rx.hunt();
@@ -747,11 +735,7 @@ impl Recipient {
     /// The share of phase 3's TRN bits that descrambled to ones, once the
     /// descrambler had filled; one when TRN had no length to judge.
     pub fn trn_share(&self) -> f64 {
-        if self.trn_bits == 0 {
-            1.0
-        } else {
-            self.trn_ones as f64 / self.trn_bits as f64
-        }
+        if self.trn_bits == 0 { 1.0 } else { self.trn_ones as f64 / self.trn_bits as f64 }
     }
 
     /// The last symbol equalised, while trained.
@@ -798,10 +782,8 @@ impl Recipient {
                 // 12.3.2.2: "the modem conditions its receiver to begin
                 // training its main channel equalizer using signal PP", and
                 // TRN follows at INFOh's size for INFOh's length.
-                self.rx
-                    .train(Reference::PpThenTrnAt(self.channel.trn_size), self.far, at);
-                let after_s_bar =
-                    signals::S_BAR_SYMBOLS + signals::PP_SYMBOLS + self.channel.trn_symbols();
+                self.rx.train(Reference::PpThenTrnAt(self.channel.trn_size), self.far, at);
+                let after_s_bar = signals::S_BAR_SYMBOLS + signals::PP_SYMBOLS + self.channel.trn_symbols();
                 self.trn_end = at + 2 * after_s_bar as u64;
                 self.stage = Stage::Training3 { deadline };
             }
@@ -902,9 +884,7 @@ impl Recipient {
                         // anything the source has to fill with, so nothing of
                         // the page is in what was lost.
                         self.b1_left = 0;
-                        self.events.push_back(Event::PageStarted {
-                            b1_errors: self.b1_errors,
-                        });
+                        self.events.push_back(Event::PageStarted { b1_errors: self.b1_errors });
                     }
                     self.take_decoded();
                 }
@@ -937,9 +917,7 @@ impl Recipient {
     /// The decoder's bits to where they go: B1's ones counted, and the page's
     /// kept for taking.
     fn take_decoded(&mut self) {
-        let Some(decoder) = self.decoder.as_mut() else {
-            return;
-        };
+        let Some(decoder) = self.decoder.as_mut() else { return };
         for bit in decoder.take_bits() {
             if self.b1_left > 0 {
                 self.b1_left -= 1;
@@ -948,9 +926,7 @@ impl Recipient {
                     // 12.5.2: "After receiving sequence B1, the modem shall
                     // unclamp Circuit 104, turn on Circuit 109, and begin
                     // receiving user data."
-                    self.events.push_back(Event::PageStarted {
-                        b1_errors: self.b1_errors,
-                    });
+                    self.events.push_back(Event::PageStarted { b1_errors: self.b1_errors });
                 }
             } else {
                 self.bits.push(bit);
@@ -967,23 +943,11 @@ mod tests {
     const FS: f64 = 16_000.0;
 
     fn channel(rate: SymbolRate, high: bool, trn_size: Size, trn_steps: u8) -> Channel {
-        Channel {
-            band: Band::new(rate, high),
-            pre_emphasis: 0,
-            reduction: 0,
-            trn_size,
-            trn_steps,
-        }
+        Channel { band: Band::new(rate, high), pre_emphasis: 0, reduction: 0, trn_size, trn_steps }
     }
 
     fn data_mode(rate: u32, code: Code) -> DataMode {
-        DataMode {
-            rate,
-            code,
-            nonlinear: false,
-            expanded: false,
-            precoding: [(0, 0); 3],
-        }
+        DataMode { rate, code, nonlinear: false, expanded: false, precoding: [(0, 0); 3] }
     }
 
     fn random_bits(count: usize, mut seed: u32) -> Vec<bool> {
@@ -1041,12 +1005,7 @@ mod tests {
         // 12.3.1.1 and 12.3.1.2 at every symbol rate, both TRN sizes, and
         // lengths from none to the 127 steps INFOh can ask for.
         for (n, rate) in SymbolRate::ALL.into_iter().enumerate() {
-            for (size, steps) in [
-                (Size::Four, 0u8),
-                (Size::Sixteen, 1),
-                (Size::Four, 7),
-                (Size::Sixteen, 127),
-            ] {
+            for (size, steps) in [(Size::Four, 0u8), (Size::Sixteen, 1), (Size::Four, 7), (Size::Sixteen, 127)] {
                 let channel = channel(rate, n % 2 == 1, size, steps);
                 let mut source = Source::new(channel, Mode::Call, FS);
                 assert!(!source.is_sending());
@@ -1066,24 +1025,15 @@ mod tests {
                 assert_eq!(got.len(), want.len() + 1, "{what}: {got:?}");
                 for ((segment, symbols), (wanted, expected)) in got.iter().zip(&want) {
                     assert_eq!(segment, wanted, "{what}");
-                    assert!(
-                        (symbols - expected).abs() < 1.01,
-                        "{what}: {segment:?} lasted {symbols:.2} symbols, not {expected:.2}"
-                    );
+                    assert!((symbols - expected).abs() < 1.01, "{what}: {segment:?} lasted {symbols:.2} symbols, not {expected:.2}");
                 }
                 assert_eq!(got.last().map(|s| s.0), Some(Sending::Flushing), "{what}");
                 // Nothing on the line for the first 70 ms, and nothing left
                 // once the source says it is idle.
                 let silent = (0.068 * FS) as usize;
-                assert!(
-                    samples[..silent].iter().all(|x| x.abs() < 1e-9),
-                    "{what}: something in the silence"
-                );
+                assert!(samples[..silent].iter().all(|x| x.abs() < 1e-9), "{what}: something in the silence");
                 let tail = &samples[samples.len() - 100..];
-                assert!(
-                    tail.iter().all(|x| x.abs() < 1e-12),
-                    "{what}: the line is not quiet once the source is idle"
-                );
+                assert!(tail.iter().all(|x| x.abs() < 1e-12), "{what}: the line is not quiet once the source is idle");
                 let peak = samples.iter().fold(0.0f64, |m, x| m.max(x.abs()));
                 assert!(peak > 0.5, "{what}: peak {peak}");
             }
@@ -1099,14 +1049,7 @@ mod tests {
             let channel = channel(rate, false, Size::Four, 4);
             let step = (0.035 * channel.band.baud()).round() as usize;
             assert_eq!(channel.turn_off_symbols(), step.div_ceil(8) * 8, "{rate:?}");
-            let data = data_mode(
-                if rate == SymbolRate::S2400 {
-                    19_200
-                } else {
-                    24_000
-                },
-                Code::States16,
-            );
+            let data = data_mode(if rate == SymbolRate::S2400 { 19_200 } else { 24_000 }, Code::States16);
             let mut source = Source::new(channel, Mode::Answer, FS);
             assert!(source.page(data));
             let bits = random_bits(6000, 3);
@@ -1117,55 +1060,24 @@ mod tests {
             let names: Vec<Sending> = got.iter().map(|s| s.0).collect();
             assert_eq!(
                 names,
-                [
-                    Sending::Silence,
-                    Sending::S,
-                    Sending::SBar,
-                    Sending::Pp,
-                    Sending::B1,
-                    Sending::Data,
-                    Sending::TurningOff,
-                    Sending::Flushing
-                ],
+                [Sending::Silence, Sending::S, Sending::SBar, Sending::Pp, Sending::B1, Sending::Data, Sending::TurningOff, Sending::Flushing],
                 "{rate:?}"
             );
             let framing = data.params(rate, Mode::Answer).unwrap().framing;
             let (b1, page, ones) = (got[4].1, got[5].1, got[6].1);
-            assert!(
-                (b1 - framing.symbols_per_data_frame() as f64).abs() < 1.01,
-                "{rate:?}: B1 lasted {b1:.1} symbols"
-            );
+            assert!((b1 - framing.symbols_per_data_frame() as f64).abs() < 1.01, "{rate:?}: B1 lasted {b1:.1} symbols");
             // The page's bits, in whole mapping frames of b or b - 1 bits.
             let frames = (page / 8.0).round();
-            assert!(
-                (page - 8.0 * frames).abs() < 1.01,
-                "{rate:?}: data lasted {page:.1} symbols"
-            );
+            assert!((page - 8.0 * frames).abs() < 1.01, "{rate:?}: data lasted {page:.1} symbols");
             let carried: usize = (0..frames as usize).map(|i| framing.bits_in(i)).sum();
-            assert!(
-                carried >= bits.len() && carried < bits.len() + framing.b,
-                "{rate:?}: {carried} bits in {frames} frames for {}",
-                bits.len()
-            );
+            assert!(carried >= bits.len() && carried < bits.len() + framing.b, "{rate:?}: {carried} bits in {frames} frames for {}", bits.len());
             let expect = channel.turn_off_symbols() as f64;
-            assert!(
-                (ones - expect).abs() < 1.01,
-                "{rate:?}: ones lasted {ones:.1} symbols, not {expect}"
-            );
-            assert!(
-                ones >= 0.035 * channel.band.baud() - 0.01,
-                "{rate:?}: less than 35 ms of ones"
-            );
-            assert!(
-                ones < 0.035 * channel.band.baud() + 8.0,
-                "{rate:?}: more than a mapping frame over 35 ms"
-            );
+            assert!((ones - expect).abs() < 1.01, "{rate:?}: ones lasted {ones:.1} symbols, not {expect}");
+            assert!(ones >= 0.035 * channel.band.baud() - 0.01, "{rate:?}: less than 35 ms of ones");
+            assert!(ones < 0.035 * channel.band.baud() + 8.0, "{rate:?}: more than a mapping frame over 35 ms");
             assert_eq!(source.pending_bits(), 0);
             let tail = &samples[samples.len() - 100..];
-            assert!(
-                tail.iter().all(|x| x.abs() < 1e-12),
-                "{rate:?}: the line is not quiet once the source is idle"
-            );
+            assert!(tail.iter().all(|x| x.abs() < 1e-12), "{rate:?}: the line is not quiet once the source is idle");
         }
     }
 
@@ -1173,18 +1085,9 @@ mod tests {
     fn a_data_mode_is_table_8s_row_or_nothing() {
         let mode = data_mode(33_600, Code::States64);
         assert!(mode.params(SymbolRate::S3200, Mode::Call).is_none());
-        let params = mode
-            .params(SymbolRate::S3429, Mode::Call)
-            .expect("33 600 at 3429");
-        assert_eq!(
-            (params.framing.n, params.framing.b, params.code, params.mode),
-            (1176, 79, Code::States64, Mode::Call)
-        );
-        let mut source = Source::new(
-            channel(SymbolRate::S3200, true, Size::Four, 2),
-            Mode::Call,
-            FS,
-        );
+        let params = mode.params(SymbolRate::S3429, Mode::Call).expect("33 600 at 3429");
+        assert_eq!((params.framing.n, params.framing.b, params.code, params.mode), (1176, 79, Code::States64, Mode::Call));
+        let mut source = Source::new(channel(SymbolRate::S3200, true, Size::Four, 2), Mode::Call, FS);
         assert!(!source.page(mode));
         assert!(!source.is_sending());
         assert!(source.page(data_mode(31_200, Code::States16)));
@@ -1237,12 +1140,7 @@ mod tests {
     /// channel for half the gap, and silence for the rest. The samples, and
     /// for each page the sample at which the source began carrying its last
     /// symbol out.
-    fn call(
-        channel: Channel,
-        mode: Mode,
-        data: DataMode,
-        pages: &[(f64, Vec<bool>)],
-    ) -> (Vec<f64>, Vec<usize>) {
+    fn call(channel: Channel, mode: Mode, data: DataMode, pages: &[(f64, Vec<bool>)]) -> (Vec<f64>, Vec<usize>) {
         let mut source = Source::new(channel, mode, FS);
         source.phase3();
         let (mut out, _) = burst(&mut source);
@@ -1251,20 +1149,11 @@ mod tests {
             out.extend(std::iter::repeat_n(0.0, (0.070 * FS) as usize));
             out.extend(control(mode, gap / 2.0));
             out.extend(std::iter::repeat_n(0.0, (gap / 2.0 * FS) as usize));
-            assert!(
-                source.page(data),
-                "{:?} has no {} bit/s",
-                channel.band.rate,
-                data.rate
-            );
+            assert!(source.page(data), "{:?} has no {} bit/s", channel.band.rate, data.rate);
             source.push_bits(bits);
             source.end_page();
             let (samples, changes) = burst(&mut source);
-            let flushing = changes
-                .iter()
-                .find(|(_, s)| *s == Sending::Flushing)
-                .expect("a turn-off")
-                .0;
+            let flushing = changes.iter().find(|(_, s)| *s == Sending::Flushing).expect("a turn-off").0;
             ends.push(out.len() + flushing);
             out.extend(samples);
         }
@@ -1286,11 +1175,7 @@ mod tests {
 
     impl Received {
         fn at(&self, wanted: impl Fn(&Event) -> bool) -> Vec<usize> {
-            self.events
-                .iter()
-                .filter(|(_, e)| wanted(e))
-                .map(|(i, _)| *i)
-                .collect()
+            self.events.iter().filter(|(_, e)| wanted(e)).map(|(i, _)| *i).collect()
         }
 
         fn phase3_well(&self) -> Option<bool> {
@@ -1361,11 +1246,7 @@ mod tests {
             SymbolRate::S3429 => (4800, 33_600),
         };
         let mid = (low + high) / 2 / 2400 * 2400;
-        [
-            (high, Code::States64),
-            (mid, Code::States32),
-            (low, Code::States16),
-        ]
+        [(high, Code::States64), (mid, Code::States32), (low, Code::States16)]
     }
 
     /// A line good enough for a data rate: about what V.34 needs at it, and
@@ -1383,97 +1264,41 @@ mod tests {
         // page's end seen within 6.6.2's 25 ms of the carrier going.
         for (n, rate) in SymbolRate::ALL.into_iter().enumerate() {
             for (m, (bits_per_second, code)) in rates(rate).into_iter().enumerate() {
-                let channel = channel(
-                    rate,
-                    (n + m) % 2 == 1,
-                    if m == 1 { Size::Sixteen } else { Size::Four },
-                    3 + m as u8,
-                );
-                let mode = if (n + m) % 3 == 0 {
-                    Mode::Answer
-                } else {
-                    Mode::Call
-                };
+                let channel = channel(rate, (n + m) % 2 == 1, if m == 1 { Size::Sixteen } else { Size::Four }, 3 + m as u8);
+                let mode = if (n + m) % 3 == 0 { Mode::Answer } else { Mode::Call };
                 // Expanded shaping in some; never non-linear encoding, which
                 // the recipient's MPh does not ask for: the receiver's slicer
                 // is linear, and a constellation whose outer points 9.7 has
                 // bent outward reads as lost from B1 on.
-                let data = DataMode {
-                    expanded: m == 2,
-                    ..data_mode(bits_per_second, code)
-                };
-                let what = format!(
-                    "{rate:?} high {} at {bits_per_second} {code:?} from {mode:?}",
-                    channel.band.high_carrier
-                );
+                let data = DataMode { expanded: m == 2, ..data_mode(bits_per_second, code) };
+                let what = format!("{rate:?} high {} at {bits_per_second} {code:?} from {mode:?}", channel.band.high_carrier);
                 let pages: Vec<(f64, Vec<bool>)> = [(1.4, 0.6), (2.2, 0.4), (1.0, 0.5)]
                     .into_iter()
                     .enumerate()
-                    .map(|(k, (gap, seconds))| {
-                        (
-                            gap,
-                            random_bits(
-                                (seconds * bits_per_second as f64) as usize,
-                                11 + k as u32 + n as u32 * 7,
-                            ),
-                        )
-                    })
+                    .map(|(k, (gap, seconds))| (gap, random_bits((seconds * bits_per_second as f64) as usize, 11 + k as u32 + n as u32 * 7)))
                     .collect();
                 let (sent, ends) = call(channel, mode, data, &pages);
                 let (ppm, delay) = ([37.0, -60.0, 22.0][m], 0.030);
-                let heard = listen(
-                    &line(&sent, ppm, 12.0, noise_for(bits_per_second), delay),
-                    channel,
-                    mode,
-                    Some(data),
-                );
-                assert_eq!(
-                    heard.phase3_well(),
-                    Some(true),
-                    "{what}: phase 3 {:?}",
-                    heard.events.first()
-                );
+                let heard = listen(&line(&sent, ppm, 12.0, noise_for(bits_per_second), delay), channel, mode, Some(data));
+                assert_eq!(heard.phase3_well(), Some(true), "{what}: phase 3 {:?}", heard.events.first());
                 let starts = heard.page_starts();
-                assert_eq!(
-                    starts.len(),
-                    pages.len(),
-                    "{what}: pages started {starts:?}"
-                );
+                assert_eq!(starts.len(), pages.len(), "{what}: pages started {starts:?}");
                 assert_eq!(heard.page_ends().len(), pages.len(), "{what}: pages ended");
                 for (k, (page, (_, bits))) in heard.pages.iter().zip(&pages).enumerate() {
                     assert_eq!(starts[k].1, 0, "{what} page {k}: B1 errors");
                     let wrong = wrong_bits(bits, page);
-                    assert_eq!(
-                        wrong,
-                        0,
-                        "{what} page {k}: {wrong} bits wrong of {} ({} decoded)",
-                        bits.len(),
-                        page.len()
-                    );
+                    assert_eq!(wrong, 0, "{what} page {k}: {wrong} bits wrong of {} ({} decoded)", bits.len(), page.len());
                     // What comes after the page is the turn-off's ones, and
                     // little else before the end is seen.
                     let extra = page.len() - bits.len();
-                    assert!(
-                        extra < (0.100 * bits_per_second as f64) as usize,
-                        "{what} page {k}: {extra} bits after the page"
-                    );
-                    assert!(
-                        page[bits.len()..bits.len() + extra * 3 / 4]
-                            .iter()
-                            .all(|b| *b),
-                        "{what} page {k}: the turn-off is not ones"
-                    );
+                    assert!(extra < (0.100 * bits_per_second as f64) as usize, "{what} page {k}: {extra} bits after the page");
+                    assert!(page[bits.len()..bits.len() + extra * 3 / 4].iter().all(|b| *b), "{what} page {k}: the turn-off is not ones");
                     // The end, against when the last symbol was centred on
                     // the line: the source began carrying it out at `ends`,
                     // and the pulse puts it on the line its lookahead later.
-                    let last = ends[k] as f64 * (1.0 + ppm * 1e-6)
-                        + Transmitter::lookahead() as f64 * samples_per_symbol(channel.band)
-                        + delay * FS;
+                    let last = ends[k] as f64 * (1.0 + ppm * 1e-6) + Transmitter::lookahead() as f64 * samples_per_symbol(channel.band) + delay * FS;
                     let latency = (heard.page_ends()[k] as f64 - last) / FS * 1000.0;
-                    assert!(
-                        (15.0..=27.0).contains(&latency),
-                        "{what} page {k}: the end seen {latency:.1} ms after the last symbol"
-                    );
+                    assert!((15.0..=27.0).contains(&latency), "{what} page {k}: the end seen {latency:.1} ms after the last symbol");
                 }
             }
         }
@@ -1508,12 +1333,7 @@ mod tests {
     /// control channel: the samples, and the samples at which the source was
     /// asked for the page's first data symbol and began carrying its last
     /// symbol out.
-    fn one_page(
-        channel: Channel,
-        mode: Mode,
-        data: DataMode,
-        bits: &[bool],
-    ) -> (Vec<f64>, usize, usize) {
+    fn one_page(channel: Channel, mode: Mode, data: DataMode, bits: &[bool]) -> (Vec<f64>, usize, usize) {
         let mut source = Source::new(channel, mode, FS);
         source.phase3();
         let (mut out, _) = burst(&mut source);
@@ -1524,14 +1344,7 @@ mod tests {
         source.push_bits(bits);
         source.end_page();
         let (samples, changes) = burst(&mut source);
-        let at = |wanted: Sending| {
-            out.len()
-                + changes
-                    .iter()
-                    .find(|(_, s)| *s == wanted)
-                    .expect("the segment")
-                    .0
-        };
+        let at = |wanted: Sending| out.len() + changes.iter().find(|(_, s)| *s == wanted).expect("the segment").0;
         let (start, end) = (at(Sending::Data), at(Sending::Flushing));
         out.extend(samples);
         out.extend(std::iter::repeat_n(0.0, FS as usize / 2));
@@ -1557,12 +1370,7 @@ mod tests {
             let (mut sent, start, _) = one_page(channel, Mode::Call, data, &bits);
             let at = 1.5;
             slip(&mut sent, start + (at * FS) as usize, inserted);
-            let heard = listen(
-                &line(&sent, ppm, 15.0, noise_for(bits_per_second) - 2.0, 0.020),
-                channel,
-                Mode::Call,
-                Some(data),
-            );
+            let heard = listen(&line(&sent, ppm, 15.0, noise_for(bits_per_second) - 2.0, 0.020), channel, Mode::Call, Some(data));
             let what = format!("{rate:?} at {bits_per_second}, inserted {inserted}");
             assert_eq!(heard.page_starts().len(), 1, "{what}: pages");
             assert_eq!(heard.page_ends().len(), 1, "{what}: ends");
@@ -1570,35 +1378,17 @@ mod tests {
             let got = &heard.pages[0];
             // Up to the slip, less a frame and the decoder's traceback.
             let before = ((at - 0.05) * bits_per_second as f64) as usize;
-            assert_eq!(
-                wrong_bits(&bits[..before], got),
-                0,
-                "{what}: bits wrong before the slip"
-            );
+            assert_eq!(wrong_bits(&bits[..before], got), 0, "{what}: bits wrong before the slip");
             // From a second after it: found again in what was decoded, and
             // right from there to the end.
             let from = ((at + 1.0) * bits_per_second as f64) as usize;
             let tail = &bits[from..];
-            let found = find(&got[before..], &tail[..64])
-                .unwrap_or_else(|| panic!("{what}: the page after the slip is not there"))
-                + before;
-            assert_eq!(
-                wrong_bits(tail, &got[found..]),
-                0,
-                "{what}: bits wrong after the slip"
-            );
+            let found = find(&got[before..], &tail[..64]).unwrap_or_else(|| panic!("{what}: the page after the slip is not there")) + before;
+            assert_eq!(wrong_bits(tail, &got[found..]), 0, "{what}: bits wrong after the slip");
             // What went: the slip, the receiver's finding it, and the
             // search's superframe -- under a second's worth.
-            assert!(
-                found <= from,
-                "{what}: {} bits more decoded than sent",
-                found - from
-            );
-            assert!(
-                from - found < bits_per_second as usize,
-                "{what}: {} bits lost to the slip",
-                from - found
-            );
+            assert!(found <= from, "{what}: {} bits more decoded than sent", found - from);
+            assert!(from - found < bits_per_second as usize, "{what}: {} bits lost to the slip", from - found);
         }
     }
 
@@ -1609,23 +1399,14 @@ mod tests {
         // 70 000 octets, 16.7 s at 33 600 bit/s. Every bit, at the fastest
         // rate with expanded shaping and at 28 800 on 3000 baud, the clocks
         // 45 and 55 ppm apart.
-        for (rate, bits_per_second, code, expanded, ppm) in [
-            (SymbolRate::S3429, 33_600, Code::States64, true, 45.0),
-            (SymbolRate::S3000, 28_800, Code::States32, false, -55.0),
-        ] {
+        for (rate, bits_per_second, code, expanded, ppm) in
+            [(SymbolRate::S3429, 33_600, Code::States64, true, 45.0), (SymbolRate::S3000, 28_800, Code::States32, false, -55.0)]
+        {
             let channel = channel(rate, true, Size::Sixteen, 8);
-            let data = DataMode {
-                expanded,
-                ..data_mode(bits_per_second, code)
-            };
+            let data = DataMode { expanded, ..data_mode(bits_per_second, code) };
             let bits = random_bits(70_000 * 8, 31);
             let (sent, _) = call(channel, Mode::Call, data, &[(1.0, bits.clone())]);
-            let heard = listen(
-                &line(&sent, ppm, 10.0, noise_for(bits_per_second), 0.050),
-                channel,
-                Mode::Call,
-                Some(data),
-            );
+            let heard = listen(&line(&sent, ppm, 10.0, noise_for(bits_per_second), 0.050), channel, Mode::Call, Some(data));
             let what = format!("{rate:?} at {bits_per_second}");
             assert_eq!(heard.phase3_well(), Some(true), "{what}");
             let starts = heard.page_starts();
@@ -1634,13 +1415,7 @@ mod tests {
             assert_eq!(heard.page_ends().len(), 1, "{what}: pages ended");
             assert_eq!(heard.slips, 0, "{what}: slips");
             let wrong = wrong_bits(&bits, &heard.pages[0]);
-            assert_eq!(
-                wrong,
-                0,
-                "{what}: {wrong} bits wrong of {} ({} decoded)",
-                bits.len(),
-                heard.pages[0].len()
-            );
+            assert_eq!(wrong, 0, "{what}: {wrong} bits wrong of {} ({} decoded)", bits.len(), heard.pages[0].len());
         }
     }
 
@@ -1652,11 +1427,7 @@ mod tests {
         let floor = 10f64.powf(-depth_db / 20.0);
         for i in 0..length {
             let edge = i.min(length - 1 - i);
-            let eased = if edge < ramp {
-                0.5 - 0.5 * (std::f64::consts::PI * edge as f64 / ramp as f64).cos()
-            } else {
-                1.0
-            };
+            let eased = if edge < ramp { 0.5 - 0.5 * (std::f64::consts::PI * edge as f64 / ramp as f64).cos() } else { 1.0 };
             samples[from + i] *= 1.0 - eased * (1.0 - floor);
         }
     }
@@ -1667,11 +1438,7 @@ mod tests {
         // here from the last symbol's centre on the line; and not off for a
         // carrier that dips 6 or 10 dB for 300 ms, the deeper of them 2 dB
         // above the threshold.
-        for (rate, bits_per_second) in [
-            (SymbolRate::S2400, 16_800),
-            (SymbolRate::S3000, 24_000),
-            (SymbolRate::S3429, 31_200),
-        ] {
+        for (rate, bits_per_second) in [(SymbolRate::S2400, 16_800), (SymbolRate::S3000, 24_000), (SymbolRate::S3429, 31_200)] {
             let channel = channel(rate, rate == SymbolRate::S3000, Size::Four, 2);
             let data = data_mode(bits_per_second, Code::States16);
             let bits = random_bits((1.2 * bits_per_second as f64) as usize, 41);
@@ -1681,25 +1448,16 @@ mod tests {
                 let mut samples = line(&sent, ppm, 12.0, 40.0, delay);
                 let on_line = |at: usize| (at as f64 * (1.0 + ppm * 1e-6) + delay * FS) as usize;
                 if depth_db > 0.0 {
-                    fade(
-                        &mut samples,
-                        on_line(start) + (0.5 * FS) as usize,
-                        0.3,
-                        depth_db,
-                    );
+                    fade(&mut samples, on_line(start) + (0.5 * FS) as usize, 0.3, depth_db);
                 }
                 let heard = listen(&samples, channel, Mode::Answer, Some(data));
                 let what = format!("{rate:?} at {bits_per_second}, fade {depth_db} dB");
                 assert_eq!(heard.page_starts().len(), 1, "{what}: pages started");
                 let ends = heard.page_ends();
                 assert_eq!(ends.len(), 1, "{what}: the page ended {} times", ends.len());
-                let last = on_line(end) as f64
-                    + Transmitter::lookahead() as f64 * samples_per_symbol(channel.band);
+                let last = on_line(end) as f64 + Transmitter::lookahead() as f64 * samples_per_symbol(channel.band);
                 let latency = (ends[0] as f64 - last) / FS * 1000.0;
-                assert!(
-                    (18.0..=25.5).contains(&latency),
-                    "{what}: the end seen {latency:.1} ms after the last symbol"
-                );
+                assert!((18.0..=25.5).contains(&latency), "{what}: the end seen {latency:.1} ms after the last symbol");
                 if depth_db == 0.0 {
                     assert_eq!(wrong_bits(&bits, &heard.pages[0]), 0, "{what}");
                 }
@@ -1722,19 +1480,10 @@ mod tests {
             let mut source = Source::new(channel, Mode::Answer, FS);
             source.phase3();
             let (mut sent, changes) = burst(&mut source);
-            let trn_end = changes
-                .iter()
-                .find(|(_, s)| *s == Sending::Flushing)
-                .expect("the flush")
-                .0;
+            let trn_end = changes.iter().find(|(_, s)| *s == Sending::Flushing).expect("the flush").0;
             sent.extend(std::iter::repeat_n(0.0, FS as usize / 4));
             let (ppm, delay) = (-80.0, 0.010);
-            let heard = listen(
-                &line(&sent, ppm, 10.0, 42.0, delay),
-                channel,
-                Mode::Answer,
-                None,
-            );
+            let heard = listen(&line(&sent, ppm, 10.0, 42.0, delay), channel, Mode::Answer, None);
             let what = format!("{rate:?} {size:?} x {steps}");
             let trained = heard
                 .events
@@ -1745,25 +1494,13 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("{what}: never trained"));
             assert!(trained > 35.0, "{what}: trained to {trained:.1} dB");
-            assert_eq!(
-                heard.phase3_well(),
-                Some(true),
-                "{what}: {:?}",
-                heard.events
-            );
+            assert_eq!(heard.phase3_well(), Some(true), "{what}: {:?}", heard.events);
             let over = heard.at(|e| matches!(e, Event::Phase3Over { .. }))[0];
             let expected = trn_end as f64 * (1.0 + ppm * 1e-6) + delay * FS;
             let late = (over as f64 - expected) / FS * 1000.0;
-            assert!(
-                (-10.0..=40.0).contains(&late),
-                "{what}: phase 3 over {late:.1} ms after TRN's end"
-            );
+            assert!((-10.0..=40.0).contains(&late), "{what}: phase 3 over {late:.1} ms after TRN's end");
             if steps > 0 {
-                assert!(
-                    (heard.trn_share - 1.0).abs() < 1e-9,
-                    "{what}: TRN ones {:.4}",
-                    heard.trn_share
-                );
+                assert!((heard.trn_share - 1.0).abs() < 1e-9, "{what}: TRN ones {:.4}", heard.trn_share);
             }
         }
     }
@@ -1774,19 +1511,8 @@ mod tests {
         let channel = channel(rate, false, Size::Sixteen, 6);
         // Nothing but noise: 12.3.3's 2000 ms, and then the recovery.
         let silence = vec![0.0; (2.5 * FS) as usize];
-        let heard = listen(
-            &line(&silence, 0.0, 10.0, 40.0, 0.0),
-            channel,
-            Mode::Call,
-            None,
-        );
-        assert!(
-            heard
-                .events
-                .iter()
-                .all(|(_, e)| !matches!(e, Event::Trained { .. })),
-            "trained on noise"
-        );
+        let heard = listen(&line(&silence, 0.0, 10.0, 40.0, 0.0), channel, Mode::Call, None);
+        assert!(heard.events.iter().all(|(_, e)| !matches!(e, Event::Trained { .. })), "trained on noise");
         let over = heard.at(|e| matches!(e, Event::Phase3Over { well: false }));
         assert_eq!(over.len(), 1, "{:?}", heard.events);
         let at = over[0] as f64 / FS;
@@ -1810,46 +1536,18 @@ mod tests {
             sent.push(tx.next_sample(|| symbols.pop_front().unwrap_or(Complex::ZERO)));
         }
         sent.extend(std::iter::repeat_n(0.0, FS as usize / 4));
-        let heard = listen(
-            &line(&sent, 20.0, 10.0, 40.0, 0.0),
-            channel,
-            Mode::Call,
-            None,
-        );
-        assert!(
-            heard
-                .events
-                .iter()
-                .any(|(_, e)| matches!(e, Event::Trained { .. })),
-            "PP did not train"
-        );
+        let heard = listen(&line(&sent, 20.0, 10.0, 40.0, 0.0), channel, Mode::Call, None);
+        assert!(heard.events.iter().any(|(_, e)| matches!(e, Event::Trained { .. })), "PP did not train");
         assert_eq!(heard.phase3_well(), Some(false), "{:?}", heard.events);
         assert!(heard.trn_share < 0.9, "TRN ones {:.3}", heard.trn_share);
         // And TRN at four points where sixteen were asked, as an INFOh misread
         // would have it: the point's own bits come out as noise.
-        let mut source = Source::new(
-            Channel {
-                trn_size: Size::Four,
-                ..channel
-            },
-            Mode::Call,
-            FS,
-        );
+        let mut source = Source::new(Channel { trn_size: Size::Four, ..channel }, Mode::Call, FS);
         source.phase3();
         let (mut sent, _) = burst(&mut source);
         sent.extend(std::iter::repeat_n(0.0, FS as usize / 4));
-        let heard = listen(
-            &line(&sent, 0.0, 10.0, 40.0, 0.0),
-            channel,
-            Mode::Call,
-            None,
-        );
-        assert_eq!(
-            heard.phase3_well(),
-            Some(false),
-            "four-point TRN read as sixteen: {:?}",
-            heard.events
-        );
+        let heard = listen(&line(&sent, 0.0, 10.0, 40.0, 0.0), channel, Mode::Call, None);
+        assert_eq!(heard.phase3_well(), Some(false), "four-point TRN read as sixteen: {:?}", heard.events);
         assert!(heard.trn_share < 0.9, "TRN ones {:.3}", heard.trn_share);
     }
 
@@ -1869,35 +1567,19 @@ mod tests {
         // 12 (data.rs), not anything here. What holds: everything before the
         // slip is right, the receiver did not think it slipped, and the end
         // is still seen.
-        for (rate, bits_per_second, high, inserted) in [
-            (SymbolRate::S2400, 19_200, false, false),
-            (SymbolRate::S3000, 21_600, true, false),
-            (SymbolRate::S3000, 14_400, false, true),
-        ] {
+        for (rate, bits_per_second, high, inserted) in [(SymbolRate::S2400, 19_200, false, false), (SymbolRate::S3000, 21_600, true, false), (SymbolRate::S3000, 14_400, false, true)] {
             let channel = channel(rate, high, Size::Four, 3);
             let data = data_mode(bits_per_second, Code::States16);
             let bits = random_bits(2 * bits_per_second as usize, 23);
             let (mut sent, start, _) = one_page(channel, Mode::Call, data, &bits);
             slip(&mut sent, start + FS as usize, inserted);
-            let heard = listen(
-                &line(&sent, 30.0, 15.0, noise_for(bits_per_second), 0.020),
-                channel,
-                Mode::Call,
-                Some(data),
-            );
+            let heard = listen(&line(&sent, 30.0, 15.0, noise_for(bits_per_second), 0.020), channel, Mode::Call, Some(data));
             let what = format!("{rate:?} at {bits_per_second}, inserted {inserted}");
             assert_eq!(heard.page_starts().len(), 1, "{what}: pages");
             assert_eq!(heard.page_ends().len(), 1, "{what}: ends");
-            assert_eq!(
-                heard.slips, 0,
-                "{what}: the receiver found a jump after all"
-            );
+            assert_eq!(heard.slips, 0, "{what}: the receiver found a jump after all");
             let before = ((1.0 - 0.05) * bits_per_second as f64) as usize;
-            assert_eq!(
-                wrong_bits(&bits[..before], &heard.pages[0]),
-                0,
-                "{what}: bits wrong before the slip"
-            );
+            assert_eq!(wrong_bits(&bits[..before], &heard.pages[0]), 0, "{what}: bits wrong before the slip");
         }
     }
 }

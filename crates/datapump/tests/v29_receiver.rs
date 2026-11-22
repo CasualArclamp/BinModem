@@ -46,9 +46,7 @@ struct Rng {
 
 impl Rng {
     fn new(seed: u64) -> Self {
-        Self {
-            state: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
-        }
+        Self { state: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1 }
     }
 
     fn next_u64(&mut self) -> u64 {
@@ -96,14 +94,7 @@ impl Shifter {
             let w = 0.54 - 0.46 * (TAU * d as f64 / (N - 1) as f64).cos();
             *tap = 2.0 / (PI * k as f64) * w;
         }
-        Self {
-            taps,
-            hist: vec![0.0; N],
-            pos: 0,
-            centre: m,
-            phase: 0.0,
-            step: hz / FS,
-        }
+        Self { taps, hist: vec![0.0; N], pos: 0, centre: m, phase: 0.0, step: hz / FS }
     }
 
     fn process(&mut self, x: f64) -> f64 {
@@ -132,12 +123,7 @@ fn offset(signal: &[f64], hz: f64, ppm: f64) -> Vec<f64> {
         // The shifter delays by half its length; the lead-in it eats is
         // silence, and the tail it needs is put on.
         let mut shifter = Shifter::new(hz);
-        signal
-            .iter()
-            .chain(std::iter::repeat_n(&0.0, 127))
-            .map(|&x| shifter.process(x))
-            .skip(127)
-            .collect()
+        signal.iter().chain(std::iter::repeat_n(&0.0, 127)).map(|&x| shifter.process(x)).skip(127).collect()
     };
     if ppm != 0.0 {
         let mut clock = Resampler::new(FS * (1.0 + ppm * 1e-6), FS);
@@ -239,10 +225,7 @@ fn listen(rate: Rate, line: &[f64], restarts: &[usize], watch: std::ops::Range<u
 }
 
 fn bits_of(bytes: &[u8]) -> Vec<bool> {
-    bytes
-        .iter()
-        .flat_map(|&b| (0..8).rev().map(move |i| b >> i & 1 != 0))
-        .collect()
+    bytes.iter().flat_map(|&b| (0..8).rev().map(move |i| b >> i & 1 != 0)).collect()
 }
 
 /// How much of a payload came back.
@@ -256,9 +239,7 @@ fn score(data: &[u8], bits: &[bool]) -> Score {
     let want = bits_of(data);
     let part = want.len() / PARTS;
     let found = |needle: &[bool]| bits.windows(needle.len()).any(|w| w == needle);
-    let parts = (0..PARTS)
-        .filter(|&p| found(&want[p * part..(p + 1) * part]))
-        .count();
+    let parts = (0..PARTS).filter(|&p| found(&want[p * part..(p + 1) * part])).count();
     // Where the payload lines up best, by its first 256 bits; everything
     // missing or after the end counts as wrong.
     let head = &want[..256];
@@ -276,11 +257,7 @@ fn score(data: &[u8], bits: &[bool]) -> Score {
         0.5
     } else {
         let got = &bits[best.1..];
-        let wrong = want
-            .iter()
-            .enumerate()
-            .filter(|&(i, b)| got.get(i) != Some(b))
-            .count();
+        let wrong = want.iter().enumerate().filter(|&(i, b)| got.get(i) != Some(b)).count();
         wrong as f64 / want.len() as f64
     };
     Score { parts, ber }
@@ -296,14 +273,7 @@ fn name(rate: Rate) -> &'static str {
 
 /// A burst after `lead` samples of line, with its carrier `hz` off and its
 /// clock `ppm` fast, and noise at `snr_db` on the whole line, scored.
-fn one(
-    rate: Rate,
-    lead: usize,
-    hz: f64,
-    ppm: f64,
-    snr_db: Option<f64>,
-    seed: u64,
-) -> (Score, Heard) {
+fn one(rate: Rate, lead: usize, hz: f64, ppm: f64, snr_db: Option<f64>, seed: u64) -> (Score, Heard) {
     let data = payload(seed);
     let sent = burst(rate, &data);
     let power = burst_power(&sent);
@@ -351,24 +321,10 @@ fn seven_hertz_and_two_hundred_ppm() {
     let mut failed = Vec::new();
     for rate in RATES {
         for snr in [None, Some(30.0)] {
-            let mut row = format!(
-                "{:>5} {:>6}:",
-                name(rate),
-                snr.map_or("clean".to_owned(), |s| format!("{s} dB"))
-            );
-            for (k, (hz, ppm)) in [(7.0, 200.0), (-7.0, -200.0), (7.0, -200.0), (-7.0, 200.0)]
-                .into_iter()
-                .enumerate()
-            {
+            let mut row = format!("{:>5} {:>6}:", name(rate), snr.map_or("clean".to_owned(), |s| format!("{s} dB")));
+            for (k, (hz, ppm)) in [(7.0, 200.0), (-7.0, -200.0), (7.0, -200.0), (-7.0, 200.0)].into_iter().enumerate() {
                 for phase in [0, 3] {
-                    let (s, _) = one(
-                        rate,
-                        phase,
-                        hz,
-                        ppm,
-                        snr,
-                        0x200 + 8 * k as u64 + phase as u64,
-                    );
+                    let (s, _) = one(rate, phase, hz, ppm, snr, 0x200 + 8 * k as u64 + phase as u64);
                     row.push_str(&format!("  {hz:+}/{ppm:+} {}", cell(s)));
                     if s.parts < PARTS {
                         failed.push((name(rate), snr, hz, ppm, phase, s.parts));
@@ -395,18 +351,9 @@ fn seven_hertz_and_two_hundred_ppm() {
 fn noise_at_each_rate() {
     const SEEDS: u64 = 4;
     let sweeps: [(Rate, &[f64]); 3] = [
-        (
-            Rate::R9600,
-            &[14.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 24.0, 30.0],
-        ),
-        (
-            Rate::R7200,
-            &[10.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 20.0, 26.0],
-        ),
-        (
-            Rate::R4800,
-            &[6.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 16.0, 20.0],
-        ),
+        (Rate::R9600, &[14.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 24.0, 30.0]),
+        (Rate::R7200, &[10.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 20.0, 26.0]),
+        (Rate::R4800, &[6.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 16.0, 20.0]),
     ];
     let mut works = Vec::new();
     let mut rates = Vec::new();
@@ -417,21 +364,11 @@ fn noise_at_each_rate() {
         for &snr in snrs.iter().rev() {
             let (mut parts, mut ber) = (0, 0.0);
             for seed in 0..SEEDS {
-                let (s, _) = one(
-                    rate,
-                    0,
-                    0.0,
-                    0.0,
-                    Some(snr),
-                    0x300 + seed + (snr as u64) * 16,
-                );
+                let (s, _) = one(rate, 0, 0.0, 0.0, Some(snr), 0x300 + seed + (snr as u64) * 16);
                 parts += s.parts;
                 ber += s.ber / SEEDS as f64;
             }
-            row.push_str(&format!(
-                "  {snr} dB {parts}/{} {ber:.0e}",
-                PARTS as u64 * SEEDS
-            ));
+            row.push_str(&format!("  {snr} dB {parts}/{} {ber:.0e}", PARTS as u64 * SEEDS));
             broken |= parts < PARTS * SEEDS as usize;
             if !broken {
                 lowest = Some(snr);
@@ -439,26 +376,11 @@ fn noise_at_each_rate() {
             rates.push((rate, snr, ber));
         }
         println!("{row}");
-        println!(
-            "{:>5}: works down to {}",
-            name(rate),
-            lowest.map_or("nowhere".to_owned(), |l| format!("{l} dB"))
-        );
+        println!("{:>5}: works down to {}", name(rate), lowest.map_or("nowhere".to_owned(), |l| format!("{l} dB")));
         works.push((rate, lowest));
     }
-    let at = |rate| {
-        works
-            .iter()
-            .find(|w| w.0 == rate)
-            .and_then(|w| w.1)
-            .unwrap_or(f64::INFINITY)
-    };
-    let ber = |rate, snr| {
-        rates
-            .iter()
-            .find(|r| r.0 == rate && r.1 == snr)
-            .map_or(0.5, |r| r.2)
-    };
+    let at = |rate| works.iter().find(|w| w.0 == rate).and_then(|w| w.1).unwrap_or(f64::INFINITY);
+    let ber = |rate, snr| rates.iter().find(|r| r.0 == rate && r.1 == snr).map_or(0.5, |r| r.2);
     assert!(at(Rate::R9600) <= 20.0, "9600 needs {} dB", at(Rate::R9600));
     assert!(at(Rate::R7200) <= 18.0, "7200 needs {} dB", at(Rate::R7200));
     assert!(at(Rate::R4800) <= 14.0, "4800 needs {} dB", at(Rate::R4800));
@@ -494,11 +416,7 @@ fn a_twenty_millisecond_slip() {
             ("seg2+80", seg2 + (80.0 * FS / BAUD) as usize),
         ];
         for snr in [None, Some(30.0)] {
-            let mut row = format!(
-                "{:>5} {:>6}:",
-                name(rate),
-                snr.map_or("clean".to_owned(), |s| format!("{s} dB"))
-            );
+            let mut row = format!("{:>5} {:>6}:", name(rate), snr.map_or("clean".to_owned(), |s| format!("{s} dB")));
             for (place, at) in places {
                 for kind in ["silence", "repeat", "drop"] {
                     let mut line: Vec<f64> = sent[..at].to_vec();
@@ -540,20 +458,13 @@ fn a_twenty_millisecond_slip() {
 fn a_burst_after_a_long_quiet_stretch_of_line_noise() {
     const QUIET: usize = 32_000;
     let mut failed = Vec::new();
-    for (rate, snrs) in [
-        (Rate::R9600, [30.0, 22.0]),
-        (Rate::R7200, [30.0, 18.0]),
-        (Rate::R4800, [30.0, 14.0]),
-    ] {
+    for (rate, snrs) in [(Rate::R9600, [30.0, 22.0]), (Rate::R7200, [30.0, 18.0]), (Rate::R4800, [30.0, 14.0])] {
         let mut row = format!("{:>5}:", name(rate));
         for snr in snrs {
             for seed in 0..2 {
                 let (s, heard) = one(rate, QUIET, 0.0, 0.0, Some(snr), 0x500 + seed + snr as u64);
                 let noise_ms = heard.on_in as f64 / FS * 1000.0;
-                row.push_str(&format!(
-                    "  {snr} dB {} carrier in the noise {noise_ms:.0} ms",
-                    cell(s)
-                ));
+                row.push_str(&format!("  {snr} dB {} carrier in the noise {noise_ms:.0} ms", cell(s)));
                 if s.parts < PARTS || heard.on_in > 0 {
                     failed.push((name(rate), snr, seed, s.parts, heard.on_in));
                 }
@@ -578,9 +489,7 @@ fn talker_echo_protection_in_front_of_the_burst() {
             let sent = burst(rate, &data);
             let power = burst_power(&sent);
             let amplitude = (2.0 * power).sqrt();
-            let mut line: Vec<f64> = (0..3200)
-                .map(|n| amplitude * (TAU * tone * n as f64 / FS).cos())
-                .collect();
+            let mut line: Vec<f64> = (0..3200).map(|n| amplitude * (TAU * tone * n as f64 / FS).cos()).collect();
             line.extend(std::iter::repeat_n(0.0, 320));
             let burst_at = line.len();
             line.extend_from_slice(&sent);
@@ -598,14 +507,7 @@ fn talker_echo_protection_in_front_of_the_burst() {
                 cell(s)
             ));
             if heard.rises.len() != 1 || heard.on_in > 0 || s.parts < PARTS {
-                failed.push((
-                    name(rate),
-                    tone,
-                    snr,
-                    heard.rises.len(),
-                    heard.on_in,
-                    s.parts,
-                ));
+                failed.push((name(rate), tone, snr, heard.rises.len(), heard.on_in, s.parts));
             }
         }
         println!("{row}");
@@ -649,11 +551,7 @@ fn several_bursts_in_a_row() {
                     snr.map_or("clean".to_owned(), |s| format!("{s} dB")),
                     if restarting { "restarted" } else { "left on " },
                     heard.rises.len(),
-                    scores
-                        .iter()
-                        .map(|s| cell(*s))
-                        .collect::<Vec<_>>()
-                        .join("  ")
+                    scores.iter().map(|s| cell(*s)).collect::<Vec<_>>().join("  ")
                 );
                 if heard.rises.len() != payloads.len() || scores.iter().any(|s| s.parts < PARTS) {
                     failed.push((name(rate), snr, restarting, heard.rises.len()));
@@ -674,25 +572,13 @@ fn a_line_with_an_echo_on_it() {
     let mut failed = Vec::new();
     for rate in RATES {
         let mut row = format!("{:>5}:", name(rate));
-        for (gain, delay) in [
-            (0.2, 7),
-            (0.35, 7),
-            (0.5, 7),
-            (0.2, 14),
-            (0.35, 14),
-            (0.5, 14),
-            (0.2, 21),
-        ] {
+        for (gain, delay) in [(0.2, 7), (0.35, 7), (0.5, 7), (0.2, 14), (0.35, 14), (0.5, 14), (0.2, 21)] {
             let data = payload(0x800 + delay as u64);
             let sent = burst(rate, &data);
             let mut line: Vec<f64> = (0..sent.len() + delay)
                 .map(|n| {
                     let direct = sent.get(n).copied().unwrap_or(0.0);
-                    let echo = n
-                        .checked_sub(delay)
-                        .and_then(|m| sent.get(m))
-                        .copied()
-                        .unwrap_or(0.0);
+                    let echo = n.checked_sub(delay).and_then(|m| sent.get(m)).copied().unwrap_or(0.0);
                     direct + gain * echo
                 })
                 .collect();
@@ -701,11 +587,7 @@ fn a_line_with_an_echo_on_it() {
             add_noise(&mut line, sigma(power, 30.0), 0x801 + delay as u64);
             let heard = listen(rate, &line, &[], 0..0);
             let s = score(&data, &heard.bits);
-            row.push_str(&format!(
-                "  {gain} at {:.2} ms {}",
-                delay as f64 / FS * 1000.0,
-                cell(s)
-            ));
+            row.push_str(&format!("  {gain} at {:.2} ms {}", delay as f64 / FS * 1000.0, cell(s)));
             if s.parts < PARTS {
                 failed.push((name(rate), gain, delay, s.parts));
             }
@@ -714,3 +596,4 @@ fn a_line_with_an_echo_on_it() {
     }
     assert!(failed.is_empty(), "lost: {failed:?}");
 }
+

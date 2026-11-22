@@ -46,14 +46,14 @@ use crate::v34::phase2::Role;
 use crate::v34::training::RetrainWatch;
 use crate::v90::encoder::Encoder;
 use crate::v90::encoder::Mapping as CodeMapping;
-use crate::v90::sequences::{Cp, CpFinder, Descriptor, DescriptorFinder, JA_UNIT_BITS, Jd, Layout};
+use crate::v90::sequences::{Cp, CpFinder, Descriptor, DescriptorFinder, Jd, JA_UNIT_BITS, Layout};
 use crate::v90::ucode::{self, Law};
 use crate::v92::UP_INTERVALS;
 use crate::v92::decoder::Decoder;
+use crate::v92::receiver::reference;
 use crate::v92::design::{Channel, design};
 use crate::v92::epsilon;
 use crate::v92::exchange::{Context, Exchange};
-use crate::v92::receiver::reference;
 use crate::v92::receiver::{ALIGN_WINDOW, Heard, Receiver, Slicer, Symbol, TRAIN_WINDOW};
 use crate::v92::sequences::{
     CpFamily, Cpd, J, JP_PRIME_BITS, Jp, SHORT_BITS, Suvd, UpFinder, trn2u_unit,
@@ -61,9 +61,7 @@ use crate::v92::sequences::{
 use crate::v92::up_signals::{Trn2uReader, Trn2uSize, TwoPointReader};
 use crate::v92::upchoice::choose;
 use crate::v92::upstream::UpEncoder;
-use crate::v92::{
-    FilterLimits, Parameters, PeerCp, PeerSuv, SequenceKind, Trellis, UP_RATES, up_rate,
-};
+use crate::v92::{FilterLimits, Parameters, PeerCp, PeerSuv, SequenceKind, Trellis, UP_RATES, up_rate};
 
 /// The network's rate: one codeword per 125 microseconds (5/V.92).
 pub const FS: f64 = 8000.0;
@@ -207,8 +205,7 @@ fn are_codewords(law: Law, samples: &[f64]) -> bool {
 
 /// The mean square of `samples`, or `None` of too few to mean anything.
 fn mean_square(samples: &[f64]) -> Option<f64> {
-    (samples.len() as u64 >= POWER_WINDOW / 2)
-        .then(|| samples.iter().map(|x| x * x).sum::<f64>() / samples.len() as f64)
+    (samples.len() as u64 >= POWER_WINDOW / 2).then(|| samples.iter().map(|x| x * x).sum::<f64>() / samples.len() as f64)
 }
 
 /// How far past the symbol it decides the refit's equaliser looks: one data
@@ -367,11 +364,7 @@ const FRACTIONAL_STEPS: usize = 8;
 const FRACTIONAL_HALF: i32 = 4;
 
 fn sinc(t: f64) -> f64 {
-    if t.abs() < 1e-9 {
-        1.0
-    } else {
-        (std::f64::consts::PI * t).sin() / (std::f64::consts::PI * t)
-    }
+    if t.abs() < 1e-9 { 1.0 } else { (std::f64::consts::PI * t).sin() / (std::f64::consts::PI * t) }
 }
 
 /// `received` read `delay` symbols later than it was sampled, through a
@@ -441,14 +434,8 @@ fn align_fractional(known: &[f64], received: &[f64]) -> Vec<f64> {
     let mut best: Option<(f64, Vec<f64>)> = None;
     for step in 0..FRACTIONAL_STEPS {
         let delay = step as f64 / FRACTIONAL_STEPS as f64;
-        let shifted = if step == 0 {
-            received.to_vec()
-        } else {
-            shift_by(received, delay)
-        };
-        let Some(channel) = Channel::estimate(known, &shifted, 16) else {
-            continue;
-        };
+        let shifted = if step == 0 { received.to_vec() } else { shift_by(received, delay) };
+        let Some(channel) = Channel::estimate(known, &shifted, 16) else { continue };
         let cost = spread(&channel.taps);
         if tracing() {
             eprintln!(
@@ -488,10 +475,7 @@ pub enum Status {
     /// be designed and sent.
     Phase4,
     /// In data mode: downstream and upstream rates in bit/s.
-    Connected {
-        downstream: u32,
-        upstream: u32,
-    },
+    Connected { downstream: u32, upstream: u32 },
     ClearedDown,
     Failed(&'static str),
 }
@@ -508,17 +492,11 @@ pub struct Habits {
 
 impl Habits {
     /// Short TRN1d, for the tests and for the second end of our own call.
-    pub const PROMPT: Self = Self {
-        trn1d: 0.3,
-        lookahead: 1,
-    };
+    pub const PROMPT: Self = Self { trn1d: 0.3, lookahead: 1 };
 
     /// What a live server sends: the analogue modem's equaliser wants the
     /// time, and the clause's own ceiling is four seconds.
-    pub const LIVE: Self = Self {
-        trn1d: 3.6,
-        lookahead: 1,
-    };
+    pub const LIVE: Self = Self { trn1d: 3.6, lookahead: 1 };
 }
 
 impl Default for Habits {
@@ -564,11 +542,7 @@ impl Settings {
     /// This end's Jd (Table 21): every downstream rate, and the look-ahead.
     #[must_use]
     pub fn jd(&self) -> Jd {
-        Jd {
-            rates: Jd::ALL_RATES,
-            lookahead: self.habits.lookahead,
-            ..Jd::default()
-        }
+        Jd { rates: Jd::ALL_RATES, lookahead: self.habits.lookahead, ..Jd::default() }
     }
 
     /// Jd's seventy-two bits, as they go out.
@@ -739,10 +713,7 @@ impl Source {
     /// Whether Phase 4's TRN2d has begun.
     #[must_use]
     pub fn in_phase4(&self) -> bool {
-        matches!(
-            self.out,
-            Out::Trn2d | Out::Suvd | Out::Cpd | Out::Ed | Out::B1d
-        )
+        matches!(self.out, Out::Trn2d | Out::Suvd | Out::Cpd | Out::Ed | Out::B1d)
     }
 
     /// Whether TRN2d has run its least length, which is when the exchange may
@@ -784,9 +755,7 @@ impl Source {
     /// False when CPt's rate does not fit its own constellations, which is the
     /// one thing 5.4.3 forbids and which leaves Phase 4 with nothing to send.
     pub fn set_cpt(&mut self, cpt: &Cp) -> bool {
-        let Some(mapping) = CodeMapping::from_cp(cpt) else {
-            return false;
-        };
+        let Some(mapping) = CodeMapping::from_cp(cpt) else { return false };
         self.phase4 = Some(Down4 {
             coder: Encoder::new(mapping, self.law),
             samples: VecDeque::new(),
@@ -878,9 +847,7 @@ impl Source {
             phase4.coder.push(&bits);
             if let Some(frame) = phase4.coder.pop(!ones && exhausted) {
                 for i in 0..INTERVALS {
-                    phase4
-                        .samples
-                        .push_back((frame.ucodes[i], frame.positive[i]));
+                    phase4.samples.push_back((frame.ucodes[i], frame.positive[i]));
                 }
             }
         };
@@ -1010,28 +977,13 @@ impl Source {
                     return 0.0;
                 }
                 Out::Sd | Out::SdBar => {
-                    let frames = if self.out == Out::Sd {
-                        SD_FRAMES
-                    } else {
-                        SD_BAR_FRAMES
-                    };
+                    let frames = if self.out == Out::Sd { SD_FRAMES } else { SD_BAR_FRAMES };
                     if self.count == frames * INTERVALS {
-                        self.start(if self.out == Out::Sd {
-                            Out::SdBar
-                        } else {
-                            Out::Trn1d
-                        });
+                        self.start(if self.out == Out::Sd { Out::SdBar } else { Out::Trn1d });
                         continue;
                     }
                     // {+W, +0, +W, -W, -0, -W}, turned over for S-bar-d.
-                    let pattern = [
-                        (w, true),
-                        (0, true),
-                        (w, true),
-                        (w, false),
-                        (0, false),
-                        (w, false),
-                    ];
+                    let pattern = [(w, true), (0, true), (w, true), (w, false), (0, false), (w, false)];
                     let (u, positive) = pattern[self.count % INTERVALS];
                     self.count += 1;
                     return self.level(u, positive ^ (self.out == Out::SdBar));
@@ -1079,11 +1031,7 @@ impl Source {
                                     self.bits.extend(self.last_bits());
                                 }
                                 None => {
-                                    let bits = if self.out == Out::Jd {
-                                        self.jd.clone()
-                                    } else {
-                                        self.jp.clone()
-                                    };
+                                    let bits = if self.out == Out::Jd { self.jd.clone() } else { self.jp.clone() };
                                     self.bits.extend(bits);
                                 }
                             },
@@ -1324,9 +1272,7 @@ impl Source {
 /// a long one is found at the last bit of that fill (Table 23).
 fn fill_left(family: &CpFamily, unit: usize) -> u32 {
     match family {
-        CpFamily::Suvu(_) | CpFamily::Cpus(_) => {
-            (SHORT_BITS.next_multiple_of(unit.max(1)) - SHORT_BITS) as u32
-        }
+        CpFamily::Suvu(_) | CpFamily::Cpus(_) => (SHORT_BITS.next_multiple_of(unit.max(1)) - SHORT_BITS) as u32,
         CpFamily::Cpu(_) | CpFamily::Cpt(_) => 0,
     }
 }
@@ -1655,14 +1601,8 @@ impl Modem {
             use std::sync::atomic::{AtomicU64, Ordering};
             static N: AtomicU64 = AtomicU64::new(0);
             let n = N.fetch_add(bits.len() as u64, Ordering::Relaxed);
-            if std::env::var_os("V92_TX_TRACE").is_some()
-                && (n == 0 || n % 4096 < bits.len() as u64)
-            {
-                eprintln!(
-                    "V92TX send_bits: +{} (total {})",
-                    bits.len(),
-                    n + bits.len() as u64
-                );
+            if std::env::var_os("V92_TX_TRACE").is_some() && (n == 0 || n % 4096 < bits.len() as u64) {
+                eprintln!("V92TX send_bits: +{} (total {})", bits.len(), n + bits.len() as u64);
             }
         }
         self.outbound.extend(bits.iter().copied());
@@ -1830,9 +1770,7 @@ impl Modem {
         // modem sends fills the band; in Phase 3 its Ru and Su are six-symbol
         // patterns, and a start-up that loses its place there has its own
         // deadlines to end it.
-        if matches!(self.status, Status::Phase4 | Status::Connected { .. })
-            && self.retrain_watch.feed(input, FS)
-        {
+        if matches!(self.status, Status::Phase4 | Status::Connected { .. }) && self.retrain_watch.feed(input, FS) {
             self.retrain_heard = true;
             self.note("V.92: tone A, the analogue modem is retraining".into());
         }
@@ -1866,8 +1804,7 @@ impl Modem {
         if self.upstream.is_some() && self.rx.symbols() >= self.four_at {
             self.four_at = u64::MAX;
             let fit_started = std::time::Instant::now();
-            if self.rx.train_on_trn2u(TRAIN_WINDOW, self.trn2u_from) && self.rx.install_phase_four()
-            {
+            if self.rx.train_on_trn2u(TRAIN_WINDOW, self.trn2u_from) && self.rx.install_phase_four() {
                 let fit_ms = fit_started.elapsed().as_secs_f64() * 1000.0;
                 self.upstream_drop_until = self.now + TRN2U_DROP_AFTER_FIT;
                 if self.rx.trn2u_sign_first() {
@@ -1900,9 +1837,7 @@ impl Modem {
             && let Some(from) = self.su_from
             && self.now >= from + SU_MEASURE_SYMBOLS as u64
         {
-            let samples = self
-                .rx
-                .history_range(from, from + SU_MEASURE_SYMBOLS as u64);
+            let samples = self.rx.history_range(from, from + SU_MEASURE_SYMBOLS as u64);
             let lag = epsilon::lag(&samples);
             if tracing() {
                 // Where the Su runs and the S-bar-u's half symbol are, seen
@@ -1940,17 +1875,12 @@ impl Modem {
             // decodes the whole exchange, and a bit that asked for a
             // constellation this end was not reading left Phase 4 waiting for
             // an SUVu' that could not arrive.
-            let jp = Jp {
-                epsilon,
-                eight_in_training: false,
-                eight_in_renegotiation: false,
-            };
+            let jp = Jp { epsilon, eight_in_training: false, eight_in_renegotiation: false };
             self.source.set_jp(&jp);
             // "shall finish the current Jd and then send Jp" (9.5.1.1.8). The
             // S-bar-u that answers Jp is (24 + epsilon)T (9.5.2.1.8), so the
             // step the next reversal takes is exactly what was just asked for.
-            self.rx
-                .expect_step(epsilon::step_direction() * f64::from(epsilon) / 65536.0);
+            self.rx.expect_step(epsilon::step_direction() * f64::from(epsilon) / 65536.0);
             self.source.change(Out::Jp);
             self.note(format!("V.92: Jp with epsilon {epsilon}"));
         }
@@ -1991,9 +1921,7 @@ impl Modem {
                     self.trn2_from = Some(base + aligned);
                     // 9.6.1.1.1's design is scheduled here: see `design_at`.
                     self.design_at = self.trn2_from.map(|at| at + DESIGN_AFTER);
-                    let taken = self
-                        .rx
-                        .train_verified_ahead(aligned, TRAIN_WINDOW, REFIT_AHEAD);
+                    let taken = self.rx.train_verified_ahead(aligned, TRAIN_WINDOW, REFIT_AHEAD);
                     if tracing() {
                         eprintln!(
                             "V92TRACE: refit at {aligned}, quality {quality:.3} -> {taken} at {:.1} dB (was {baseline:.1})",
@@ -2023,8 +1951,7 @@ impl Modem {
                     // a trial that lands in the gap between our Jp' and its
                     // TRN1u has nothing to fit. Past that the first fit stands.
                     self.refit_tries += 1;
-                    self.refit_from =
-                        (self.refit_tries < 3).then_some(from + REFIT_WINDOW as u64 / 2);
+                    self.refit_from = (self.refit_tries < 3).then_some(from + REFIT_WINDOW as u64 / 2);
                 }
             }
         }
@@ -2086,10 +2013,7 @@ impl Modem {
         }
         if let Some(at) = self.ja_deadline
             && self.now > at
-            && matches!(
-                self.stage,
-                Stage::AwaitRu | Stage::WaitMd | Stage::Training | Stage::ReadJa
-            )
+            && matches!(self.stage, Stage::AwaitRu | Stage::WaitMd | Stage::Training | Stage::ReadJa)
         {
             self.ja_deadline = None;
             self.fail("no Ja within 4.5 s and a round trip");
@@ -2129,8 +2053,7 @@ impl Modem {
                     // of this end's own signal comes back, which is all the
                     // upstream will have against it. Read well clear of Su.
                     let to = at.saturating_sub(SILENCE_BEFORE_SU);
-                    self.silence_power =
-                        mean_square(&self.rx.history_range(to.saturating_sub(POWER_WINDOW), to));
+                    self.silence_power = mean_square(&self.rx.history_range(to.saturating_sub(POWER_WINDOW), to));
                     self.note(format!("V.92: Su at {at}"));
                 }
             }
@@ -2229,9 +2152,7 @@ impl Modem {
             }
             return;
         }
-        let Some(exchange) = self.exchange.as_mut() else {
-            return;
-        };
+        let Some(exchange) = self.exchange.as_mut() else { return };
         if exchange.sending().is_some() || self.source.out() == Out::B1d {
             return;
         }
@@ -2248,22 +2169,14 @@ impl Modem {
         let unit = self.source.fill_unit();
         match kind {
             SequenceKind::Suv => {
-                let bits = Suvd {
-                    silence: false,
-                    ack,
-                }
-                .to_bits(unit);
+                let bits = Suvd { silence: false, ack }.to_bits(unit);
                 self.source.send(Out::Suvd, bits);
             }
             SequenceKind::Cp => {
                 let Some(mut cpd) = self.cpd.clone() else {
                     // Nothing to declare yet: keep the SUVs going rather than
                     // send a CPd that says nothing (9.6.1.1.2 allows the wait).
-                    let bits = Suvd {
-                        silence: false,
-                        ack,
-                    }
-                    .to_bits(unit);
+                    let bits = Suvd { silence: false, ack }.to_bits(unit);
                     self.source.send(Out::Suvd, bits);
                     return;
                 };
@@ -2304,10 +2217,7 @@ impl Modem {
         // symbols out is a design against noise.
         if self.trn2_from.is_none() {
             let base = self.rx.history_base();
-            let estimate = self
-                .trn2_estimate
-                .or(self.refit_from)
-                .and_then(|at| at.checked_sub(base));
+            let estimate = self.trn2_estimate.or(self.refit_from).and_then(|at| at.checked_sub(base));
             let Some(estimate) = estimate else {
                 self.note(format!(
                     "V.92: no estimate for the second TRN1u (now {}, base {base}, estimate {:?})",
@@ -2349,18 +2259,12 @@ impl Modem {
     /// Hand the source whatever the exchange has decided, once.
     fn apply_exchange(&mut self) {
         let now = self.now;
-        let Some(exchange) = self.exchange.as_mut() else {
-            return;
-        };
+        let Some(exchange) = self.exchange.as_mut() else { return };
         let kind = exchange.next_sequence(now);
         let ack = exchange.sequence_started(kind);
         if kind == SequenceKind::Suv {
             // Filled to a data frame's D bits (Table 31): see `phase4_out`.
-            let bits = Suvd {
-                silence: false,
-                ack,
-            }
-            .to_bits(self.source.fill_unit());
+            let bits = Suvd { silence: false, ack }.to_bits(self.source.fill_unit());
             self.source.send(Out::Suvd, bits);
         }
     }
@@ -2389,10 +2293,7 @@ impl Modem {
         // the handover keeps quoting. `train_on_trn2u` refines it afterwards.
         let was = self.rx.snr_db();
         if self.rx.begin_phase_four() {
-            self.note(format!(
-                "V.92: phase 4 receiver {was:.1} -> {:.1} dB",
-                self.rx.snr_db()
-            ));
+            self.note(format!("V.92: phase 4 receiver {was:.1} -> {:.1} dB", self.rx.snr_db()));
         }
         // 8.7.6's TRN2u begins at this symbol: the Phase 4 fit is designed on it
         // a little way in, and nothing is given to the finder until that fit is
@@ -2411,11 +2312,7 @@ impl Modem {
         // decision held against a four-point symbol is a wrong symbol fed back
         // for the next eight, which is the one way a decision-feedback
         // equaliser makes a line worse rather than better.
-        self.rx.set_slicer(if size == Trn2uSize::Eight {
-            Slicer::EightPoint
-        } else {
-            Slicer::FourPoint
-        });
+        self.rx.set_slicer(if size == Trn2uSize::Eight { Slicer::EightPoint } else { Slicer::FourPoint });
         let (inner, outer, gain, seen) = self.rx.measured_levels();
         if seen > 0 {
             self.note(format!(
@@ -2530,12 +2427,8 @@ impl Modem {
         let mut sent_scale = designed.scale;
         match std::env::var("V92_PRE").ok().as_deref() {
             Some("none") => {
-                designed.filters = crate::v92::Filters {
-                    z1: Vec::new(),
-                    p1: Vec::new(),
-                    z2: vec![1.0],
-                    p2: Vec::new(),
-                };
+                designed.filters =
+                    crate::v92::Filters { z1: Vec::new(), p1: Vec::new(), z2: vec![1.0], p2: Vec::new() };
                 // The far end is told to run the section we sent, at the
                 // amplitude we sent it at, so nothing was scaled: what the
                 // design's own scale folds back is not in play. The log said
@@ -2558,11 +2451,7 @@ impl Modem {
                 }
             }
             Some("b") => {
-                designed
-                    .filters
-                    .z2
-                    .iter_mut()
-                    .for_each(|value| *value = -*value);
+                designed.filters.z2.iter_mut().for_each(|value| *value = -*value);
                 if let Some(first) = designed.filters.z2.first_mut() {
                     *first += 1.0;
                 }
@@ -2596,9 +2485,7 @@ impl Modem {
         // A rate somebody chose: that rung and no judgement of it, if Ja
         // allows it and the design can be built at all. It is how to find out
         // what a line carries rather than what this end predicts of it.
-        if let Some(drn) = self
-            .pinned_up
-            .filter(|&drn| (1..=UP_RATES as u8).contains(&drn))
+        if let Some(drn) = self.pinned_up.filter(|&drn| (1..=UP_RATES as u8).contains(&drn))
             && allowed & (1 << (drn - 1)) != 0
             && let Some(choice) = choose(&designed, 0.0, 1 << (drn - 1), trellis)
         {
@@ -2695,23 +2582,15 @@ impl Modem {
     /// TRN2u found it, and the receiver TRN2u trained is then the right one
     /// for B1u too. Nothing is fitted and nothing changes.
     fn fit_for_data_mode(&mut self) {
-        let Some(parameters) = self.parameters.as_ref() else {
-            return;
-        };
+        let Some(parameters) = self.parameters.as_ref() else { return };
         let filters = &parameters.filters;
         let unit = filters.z2.len() == 1 && (filters.z2[0] - 1.0).abs() < f64::EPSILON;
         if unit && filters.z1.is_empty() && filters.p1.is_empty() && filters.p2.is_empty() {
             return;
         }
-        let Some(wire) = self.parameters_on_the_wire() else {
-            return;
-        };
-        let fitted = self.rx.train_for_data_mode(
-            TRAIN_WINDOW,
-            self.trn2u_from,
-            &wire.filters,
-            self.upstream_delay,
-        );
+        let Some(wire) = self.parameters_on_the_wire() else { return };
+        let fitted =
+            self.rx.train_for_data_mode(TRAIN_WINDOW, self.trn2u_from, &wire.filters, self.upstream_delay);
         match fitted {
             Some(snr) => self.note(format!(
                 "V.92: data mode receiver fitted through CPd's filters, {snr:.1} dB at a delay of {}",
@@ -2751,10 +2630,7 @@ impl Modem {
             self.queue_b1d();
         }
         let upstream = self.parameters.as_ref().map_or(0, Parameters::rate);
-        let downstream = self
-            .downstream
-            .as_ref()
-            .map_or(0, |encoder| encoder.mapping().rate());
+        let downstream = self.downstream.as_ref().map_or(0, |encoder| encoder.mapping().rate());
         // The receiver is *not* reconditioned here. 9.6.1.1.6 has it done
         // "after receiving E2u", and that is not pedantry: E2u is a data frame
         // of TRN2u's four points (8.7.2), so it still needs the equaliser
@@ -2771,15 +2647,10 @@ impl Modem {
         // holds SUVd' for a while before Ed. Then the receiver is B1u's
         // already and there is nothing left to wait for.
         self.b1u_pending = self.parameters.is_some() && self.upstream_data.is_none();
-        self.b1u_deadline = self
-            .b1u_pending
-            .then_some(self.now + (B1U_WAIT * FS) as u64);
+        self.b1u_deadline = self.b1u_pending.then_some(self.now + (B1U_WAIT * FS) as u64);
         // Data mode is on the line now (9.6.1.1.5-6): the stack above starts
         // handing DTE bits down and taking recovered bits up from here.
-        self.status = Status::Connected {
-            downstream,
-            upstream,
-        };
+        self.status = Status::Connected { downstream, upstream };
         self.stage = Stage::Phase4;
         self.fill_downstream();
     }
@@ -2809,19 +2680,12 @@ impl Modem {
                     mapping
                         .sets
                         .iter()
-                        .map(|set| (
-                            set.points().len(),
-                            set.points().first().copied(),
-                            set.points().last().copied()
-                        ))
+                        .map(|set| (set.points().len(), set.points().first().copied(), set.points().last().copied()))
                         .collect::<Vec<_>>()
                 );
             }
             let downstream = mapping.rate();
-            self.downstream = Some(crate::v90::encoder::Encoder::new(
-                mapping,
-                self.settings.law,
-            ));
+            self.downstream = Some(crate::v90::encoder::Encoder::new(mapping, self.settings.law));
             // 8.6.1: the data-mode scrambler starts afresh at B1d, and B1d is
             // 48 data frames of scrambled ones before the data starts.
             self.downstream_scrambler = Scrambler::new(Mode::Call);
@@ -2844,9 +2708,7 @@ impl Modem {
     /// TRN2u trained), and the decoder starts a data frame at what is now
     /// symbol 0.
     fn begin_b1u(&mut self) {
-        let Some(parameters) = self.parameters.clone() else {
-            return;
-        };
+        let Some(parameters) = self.parameters.clone() else { return };
         let mut levels: Vec<f64> = Vec::new();
         for set in &parameters.sets {
             for &point in set {
@@ -2871,11 +2733,7 @@ impl Modem {
             && let Some(wire) = self.parameters_on_the_wire()
             && let Ok(mut encoder) = UpEncoder::new(&wire)
         {
-            let symbols = encoder
-                .b1u()
-                .iter()
-                .map(|symbol| parameters.gain * symbol.u)
-                .collect();
+            let symbols = encoder.b1u().iter().map(|symbol| parameters.gain * symbol.u).collect();
             self.rx.expect_b1u(symbols, self.upstream_delay);
         }
         self.upstream_data = Some(Decoder::new(&parameters));
@@ -2944,9 +2802,7 @@ impl Modem {
             .ok()
             .and_then(|text| text.parse().ok())
             .unwrap_or(
-                self.upstream_delay
-                    + B1U_ORIGIN_AFTER_E2U
-                    + B1U_ACQUIRE_FRAMES * crate::v92::UP_INTERVALS,
+                self.upstream_delay + B1U_ORIGIN_AFTER_E2U + B1U_ACQUIRE_FRAMES * crate::v92::UP_INTERVALS,
             );
         self.b1u_pending = false;
         self.b1u_deadline = None;
@@ -2990,11 +2846,7 @@ impl Modem {
                 // end's scrambling chain needs a stream whether or not the
                 // terminal is typing.
                 let frame = encoder.next_frame(|| {
-                    let bit = if b1d {
-                        true
-                    } else {
-                        self.outbound.pop_front().unwrap_or(true)
-                    };
+                    let bit = if b1d { true } else { self.outbound.pop_front().unwrap_or(true) };
                     // What goes into the scrambler, which is the stream V.42 owns:
                     // 0x7E flags, the ADP, then the terminal's bits.
                     if let Some(file) = tx_trace_file()
@@ -3047,9 +2899,7 @@ impl Modem {
             }
             return;
         }
-        let Some(reader) = self.upstream.as_mut() else {
-            return;
-        };
+        let Some(reader) = self.upstream.as_mut() else { return };
         {
             use std::sync::atomic::{AtomicU64, Ordering};
             static N: AtomicU64 = AtomicU64::new(0);
@@ -3091,9 +2941,7 @@ impl Modem {
                 let width = self.upstream_size.bits() as u32;
                 let extended = self.parameters.as_ref().is_some_and(|p| p.extend_e2u);
                 let e2u = width * (UP_INTERVALS as u32 + u32::from(extended));
-                self.e2u_target = Some(
-                    fill_left(&family, trn2u_unit(self.upstream_size == Trn2uSize::Eight)) + e2u,
-                );
+                self.e2u_target = Some(fill_left(&family, trn2u_unit(self.upstream_size == Trn2uSize::Eight)) + e2u);
                 self.e2u_zeroes = 0;
                 self.up_sequence(family);
                 continue;
@@ -3104,9 +2952,7 @@ impl Modem {
             // (9.6.2.1.4), which can be long before this end's own Ed. It
             // cannot be before this end has sent an acknowledged sequence,
             // and zeros that stand there before then are not taken for it.
-            let Some(target) = self.e2u_target else {
-                continue;
-            };
+            let Some(target) = self.e2u_target else { continue };
             if bit {
                 // A one where the fill and E2u would be: the frame sync of
                 // the next SUVu or CPu.
@@ -3142,11 +2988,7 @@ impl Modem {
                 self.note(format!("V.92: SUVu, ack {}", suvu.ack));
                 if let Some(exchange) = self.exchange.as_mut() {
                     exchange.peer_suv(
-                        PeerSuv {
-                            ack: suvu.ack,
-                            silence: suvu.silence,
-                            wait_for_cp: suvu.wait_for_cpu,
-                        },
+                        PeerSuv { ack: suvu.ack, silence: suvu.silence, wait_for_cp: suvu.wait_for_cpu },
                         now,
                     );
                 }
@@ -3263,9 +3105,7 @@ impl Modem {
             // current CPt and sends E1u (9.5.2.1.10): so E1u arrives with
             // TRN2d already going out, and it still has to be read, because
             // TRN2u begins on the symbol after it (8.7.6).
-            Stage::Phase4
-                if self.upstream.is_none() && self.exchange.is_none() && self.no_dil() =>
-            {
+            Stage::Phase4 if self.upstream.is_none() && self.exchange.is_none() && self.no_dil() => {
                 let Some(bit) = self.reader.feed(symbol.value) else {
                     return;
                 };
@@ -3311,11 +3151,7 @@ impl Modem {
 
     fn heard_cp(&mut self, cp: Cp) {
         if self.cpt.is_none() {
-            self.note(format!(
-                "V.92: CPt drn {}, {} set(s)",
-                cp.drn,
-                cp.constellations.len()
-            ));
+            self.note(format!("V.92: CPt drn {}, {} set(s)", cp.drn, cp.constellations.len()));
         }
         // Phase 4's constellation is CPt's and nothing else's (V.90 8.6.5), so
         // this is the moment the downstream's coder can be built: `drn + 8` bits
@@ -3377,10 +3213,7 @@ impl Modem {
         self.cp_bits += 1;
         self.cp_ones += u64::from(bit);
         if tracing() && self.cp_bits.is_multiple_of(400) {
-            eprintln!(
-                "V92TRACE: CPt reader {} bits, {} ones",
-                self.cp_bits, self.cp_ones
-            );
+            eprintln!("V92TRACE: CPt reader {} bits, {} ones", self.cp_bits, self.cp_ones);
             self.cp_ones = 0;
         }
         if let Some(cp) = self.cps.feed(bit) {
@@ -3406,9 +3239,8 @@ impl Modem {
             // With a DIL, E1u is what R-bar-i answers (9.5.1.1.12). With
             // none, R-bar-i has gone out already, on the CPt (9.5.1.1.13),
             // and E1u is only where TRN2u begins.
-            let after_r_bar = self.no_dil()
-                && matches!(self.stage, Stage::RiBar | Stage::Phase4)
-                && self.upstream.is_none();
+            let after_r_bar =
+                self.no_dil() && matches!(self.stage, Stage::RiBar | Stage::Phase4) && self.upstream.is_none();
             if self.e1u_zeroes == E1U_ZEROES && fresh && self.cpt.is_some() && after_r_bar {
                 self.note("V.92: E1u".into());
                 self.begin_upstream();
@@ -3458,7 +3290,7 @@ mod tests {
     use crate::v90::sequences::Layout;
     use crate::v90::sign::Redundancy;
     use crate::v92::sequences::{DownFamily, DownFinder};
-    use crate::v92::up_signals::{Trn1u, TwoPointSender, ru, su};
+    use crate::v92::up_signals::{ru, su, Trn1u, TwoPointSender};
 
     /// A CPt of the shape the analogue modem sends in Phase 3: one constellation
     /// used in all six intervals, at the rate `drn` names.
@@ -3530,10 +3362,7 @@ mod tests {
                 return None;
             }
             self.at = 0;
-            let frame = CodeFrame {
-                ucodes: self.ucodes,
-                positive: self.positive,
-            };
+            let frame = CodeFrame { ucodes: self.ucodes, positive: self.positive };
             for bit in self.decoder.frame(frame) {
                 let out = self.scrambling.descramble(bit);
                 if let Some(family) = self.finder.feed(out) {
@@ -3582,10 +3411,7 @@ mod tests {
         }
         let mut far = FarEnd::new(&cpt);
         let mut found = None;
-        let suvd = Suvd {
-            silence: false,
-            ack: true,
-        };
+        let suvd = Suvd { silence: false, ack: true };
         source.send(Out::Suvd, suvd.to_bits(INTERVALS));
         for _ in 0..400 {
             if let Some(family) = far.feed(source.next()) {
@@ -3631,16 +3457,11 @@ mod tests {
         let mut seen: Vec<i64> = levels.iter().map(|l| (l.abs() * 512.0) as i64).collect();
         seen.sort_unstable();
         seen.dedup();
-        assert!(
-            seen.len() > 1,
-            "TRN2d carried only {seen:?}: a two-point stream"
-        );
+        assert!(seen.len() > 1, "TRN2d carried only {seen:?}: a two-point stream");
         for (i, level) in levels.iter().enumerate() {
             let points = cpt.points(i % INTERVALS);
             assert!(
-                points
-                    .iter()
-                    .any(|&u| (ucode::level(Law::Mu, u) - level.abs()).abs() < 0.5),
+                points.iter().any(|&u| (ucode::level(Law::Mu, u) - level.abs()).abs() < 0.5),
                 "TRN2d symbol {level} is not a point of CPt's interval {}",
                 i % INTERVALS
             );
@@ -3723,10 +3544,7 @@ mod tests {
         for _ in 0..TRN2D_LEAST {
             source.next();
         }
-        let suvd = Suvd {
-            silence: false,
-            ack: false,
-        };
+        let suvd = Suvd { silence: false, ack: false };
         let mut far = FarEnd::new(&cpt);
         let mut found = 0;
         source.send(Out::Suvd, suvd.to_bits(INTERVALS));
@@ -3761,16 +3579,10 @@ mod tests {
         let parameters = {
             let mut taps = [0.0f64; 16];
             taps[0] = 1.0;
-            let channel = Channel::estimate(
-                &[1.0, -1.0, 1.0, 1.0, -1.0, 1.0],
-                &[1.0, -1.0, 1.0, 1.0, -1.0, 1.0],
-                4,
-            )
-            .expect("a flat channel");
+            let channel = Channel::estimate(&[1.0, -1.0, 1.0, 1.0, -1.0, 1.0], &[1.0, -1.0, 1.0, 1.0, -1.0, 1.0], 4)
+                .expect("a flat channel");
             let designed = design(&channel, &settings.limits).expect("designable");
-            choose(&designed, 1e-6, 1, Trellis::Sixteen)
-                .expect("the slowest rung")
-                .parameters
+            choose(&designed, 1e-6, 1, Trellis::Sixteen).expect("the slowest rung").parameters
         };
         assert_eq!(parameters.drn, 1);
         let cpd = Cpd::from(&parameters);
@@ -3778,11 +3590,7 @@ mod tests {
         // the bits or the framing around them.
         let bits = cpd.to_bits(INTERVALS);
         let direct = Cpd::from_bits(&bits);
-        assert!(
-            direct.is_some(),
-            "Cpd::from_bits refused its own bits, {} of them",
-            bits.len()
-        );
+        assert!(direct.is_some(), "Cpd::from_bits refused its own bits, {} of them", bits.len());
         assert_eq!(direct.as_ref().map(|c| c.drn), Some(cpd.drn));
         assert_eq!(direct.as_ref().map(|c| c.moduli), Some(cpd.moduli));
         // And through the finder, with no line in between.
@@ -3794,11 +3602,7 @@ mod tests {
                 break;
             }
         }
-        assert!(
-            through.is_some(),
-            "the finder missed a CPd of {} bits",
-            bits.len()
-        );
+        assert!(through.is_some(), "the finder missed a CPd of {} bits", bits.len());
         let cpt = cpt(16, 16..=47);
         let mut source = Source::new(&settings);
         assert!(source.set_cpt(&cpt));
@@ -3862,12 +3666,7 @@ mod tests {
                 sender.push(&cp.to_bits_in(Layout::V92, UP_INTERVALS));
                 sender
             });
-            Self {
-                trn,
-                ja: Some(ja),
-                cp,
-                second_trn: Trn1u::new(),
-            }
+            Self { trn, ja: Some(ja), cp, second_trn: Trn1u::new() }
         }
 
         fn next(&mut self, n: u64) -> f64 {
@@ -3935,11 +3734,7 @@ mod tests {
     /// is read, CPt is read, circuit 107 comes on, and TRN2d follows.
     #[test]
     fn phase_3_runs_from_ru_to_phase_4() {
-        let cp = Cp {
-            drn: 16,
-            constellations: vec![(1u128 << 40) - 1],
-            ..Cp::default()
-        };
+        let cp = Cp { drn: 16, constellations: vec![(1u128 << 40) - 1], ..Cp::default() };
         let mut script = Script::new(&Descriptor::none(), 0x7ffff, Some(cp));
         let modem = run(&mut script, SU_START + 144 + 24 + 400 + 40 + 2400 + 1600);
         let notes = modem.clone().take_notes();
@@ -3947,12 +3742,7 @@ mod tests {
         assert!(modem.cpt().is_some(), "no CPt: {notes:?}");
         assert_eq!(modem.upstream_rates(), Some(0x7ffff), "mask: {notes:?}");
         assert!(modem.circuit107(), "circuit 107 never came on: {notes:?}");
-        assert_eq!(
-            modem.stage,
-            Stage::Phase4,
-            "phase {} notes {notes:?}",
-            modem.phase()
-        );
+        assert_eq!(modem.stage, Stage::Phase4, "phase {} notes {notes:?}", modem.phase());
     }
 
     /// 9.5.1.2.2: Su within 5100 ms of the start of TRN1d, however long TRN1d
@@ -3964,10 +3754,7 @@ mod tests {
     fn the_su_deadline_carries_the_whole_of_trn1d() {
         let mut settings = settings();
         settings.habits = Habits::LIVE;
-        assert!(
-            settings.habits.trn1d * FS >= TRN1D_MINIMUM as f64,
-            "TRN1d is at least 2040T"
-        );
+        assert!(settings.habits.trn1d * FS >= TRN1D_MINIMUM as f64, "TRN1d is at least 2040T");
         let mut modem = Modem::new(settings);
         let ja_read = 8000u64;
         modem.now = ja_read;
@@ -4001,9 +3788,7 @@ mod tests {
     fn the_jd_we_send_reads_back_as_a_jd_with_every_rate() {
         let bits = settings().jd_bits();
         let read = J::from_bits(&bits).expect("our own Jd does not check");
-        let J::Jd(jd) = read else {
-            panic!("our own Jd reads as a Jp")
-        };
+        let J::Jd(jd) = read else { panic!("our own Jd reads as a Jp") };
         assert_eq!(jd.rates, Jd::ALL_RATES);
         assert!(!jd.sixteen_in_training);
         assert_eq!(jd.lookahead, Habits::PROMPT.lookahead);
@@ -4037,16 +3822,8 @@ mod tests {
         source.change(Out::Dil);
         let produced: Vec<f64> = (0..2 * length).map(|_| source.next()).collect();
         assert!(produced.iter().any(|v| v.abs() > 0.0), "the DIL was silent");
-        assert_eq!(
-            produced[..length],
-            produced[length..],
-            "the DIL did not repeat"
-        );
-        assert_eq!(
-            source.out(),
-            Out::Dil,
-            "the DIL left the line with nothing to replace it"
-        );
+        assert_eq!(produced[..length], produced[length..], "the DIL did not repeat");
+        assert_eq!(source.out(), Out::Dil, "the DIL left the line with nothing to replace it");
 
         // 9.5.1.1.12: a CPt part way through a pass ends the DIL on the next
         // segment boundary (V.90 8.4.1), not at once and not at the end of the
@@ -4070,10 +3847,7 @@ mod tests {
                 break;
             }
             sent += 1;
-            assert!(
-                sent <= next_end,
-                "the DIL ran past the segment boundary it had reached"
-            );
+            assert!(sent <= next_end, "the DIL ran past the segment boundary it had reached");
         }
         assert_eq!(sent, next_end, "the DIL stopped mid-segment");
         assert_eq!(source.out(), Out::Ri, "the DIL was not followed by Ri");

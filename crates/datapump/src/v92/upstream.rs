@@ -265,10 +265,7 @@ mod tests {
             extend_e2u: false,
             gain,
             moduli: [m; UP_INTERVALS],
-            filters: Filters {
-                z2: vec![1.0],
-                ..Filters::default()
-            },
+            filters: Filters { z2: vec![1.0], ..Filters::default() },
             sets: vec![(0..levels).map(|index| (2 * index + 1) as u16).collect()],
             indices: [0; CONSTELLATION_FRAME],
         }
@@ -329,12 +326,7 @@ mod tests {
         // This is the property the decoder's Viterbi relies on.
         for frame in once.chunks(crate::v92::TRELLIS_FRAME) {
             let sum: i32 = frame.iter().map(|symbol| symbol.eta).sum();
-            assert_eq!(
-                sum.rem_euclid(2) == 1,
-                frame[0].y0,
-                "trellis frame at n {}",
-                frame[0].n
-            );
+            assert_eq!(sum.rem_euclid(2) == 1, frame[0].y0, "trellis frame at n {}", frame[0].n);
         }
     }
 
@@ -351,15 +343,8 @@ mod tests {
         // And the data frame after it starts one symbol further round.
         let after_plain = plain.next_symbol(|| false);
         let after_extended = extended.next_symbol(|| false);
-        assert_eq!(
-            crate::v92::interval(after_plain.n),
-            0,
-            "twelve symbols is a whole frame"
-        );
-        assert_eq!(
-            crate::v92::interval(after_extended.n),
-            (UP_INTERVALS + 1) % UP_INTERVALS
-        );
+        assert_eq!(crate::v92::interval(after_plain.n), 0, "twelve symbols is a whole frame");
+        assert_eq!(crate::v92::interval(after_extended.n), (UP_INTERVALS + 1) % UP_INTERVALS);
     }
 
     /// 8.7.4: RM and RM' consume no data bits, do not clock the differential
@@ -377,11 +362,7 @@ mod tests {
         let pattern = [3, 1, 2, 0, 3, 2, 1, 0, 3, 1, 2, 0];
         let symbols = encoder.force_k(pattern);
         assert_eq!(symbols.len(), UP_INTERVALS);
-        assert_eq!(
-            encoder.d(),
-            before,
-            "the differential encoder was clocked by RM"
-        );
+        assert_eq!(encoder.d(), before, "the differential encoder was clocked by RM");
         // And the chain did not reset: n carried on, so the interval did too.
         assert_eq!(symbols[0].n, 4);
     }
@@ -391,20 +372,13 @@ mod tests {
     #[test]
     fn fb1u_needs_a_previous_data_mode_and_uses_it() {
         let mut encoder = UpEncoder::new(&parameters(13, 128, 1.0)).expect("feasible");
-        assert!(
-            encoder.fb1u().is_err(),
-            "there was no previous mode to refuse"
-        );
+        assert!(encoder.fb1u().is_err(), "there was no previous mode to refuse");
         assert!(!encoder.has_old());
         encoder.retune(&parameters(7, 128, 1.0)).expect("feasible");
         assert!(encoder.has_old());
         let symbols = encoder.fb1u().expect("a rate change left an old chain");
         assert_eq!(symbols.len(), 48 * UP_INTERVALS);
-        assert_eq!(
-            encoder.rate(),
-            crate::v92::up_rate(7),
-            "the new mode is the current one"
-        );
+        assert_eq!(encoder.rate(), crate::v92::up_rate(7), "the new mode is the current one");
     }
 
     /// 9.9.2.1.2: a fast parameter exchange resets the scrambler and the
@@ -437,21 +411,13 @@ mod tests {
         let mut loud = UpEncoder::new(&parameters(13, 128, 2.0)).expect("feasible");
         let (mut one, mut other) = (Random::new(5), Random::new(5));
         for _ in 0..(40 * UP_INTERVALS) {
-            let (a, b) = (
-                quiet.next_symbol(|| one.next()),
-                loud.next_symbol(|| other.next()),
-            );
+            let (a, b) = (quiet.next_symbol(|| one.next()), loud.next_symbol(|| other.next()));
             assert_eq!(a.eta, b.eta, "the gain changed the point chosen");
             assert_eq!(a.v, b.v, "the gain changed the prefilter's output");
             // The one thing that is not linear is 8.8.3's bound on G x v(n),
             // which is there to keep a badly designed filter off the line.
             if a.v.abs() * 2.0 < crate::v92::precoder::OUTPUT_LIMIT {
-                assert!(
-                    (b.out - 2.0 * a.out).abs() < 1e-12,
-                    "out is not G x v: {} against {}",
-                    b.out,
-                    a.out
-                );
+                assert!((b.out - 2.0 * a.out).abs() < 1e-12, "out is not G x v: {} against {}", b.out, a.out);
             }
         }
     }

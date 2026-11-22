@@ -57,16 +57,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let bytes = fs::read(&path)?;
     let samples: Vec<f64> = bytes
-        .as_chunks::<2>()
-        .0
-        .iter()
+        .as_chunks::<2>().0.iter()
         .map(|p| f64::from(i16::from_le_bytes([p[0], p[1]])))
         .collect();
     let seconds = samples.len() as f64 / 8000.0;
-    println!(
-        "{path}: {} samples = {seconds:.2} s at 8000 Hz",
-        samples.len()
-    );
+    println!("{path}: {} samples = {seconds:.2} s at 8000 Hz", samples.len());
     let span = match numbers.as_slice() {
         [from, to] => (*from, *to),
         _ => (0.0, seconds),
@@ -80,12 +75,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let rms = (block.iter().map(|s| s * s).sum::<f64>() / block.len() as f64).sqrt();
                 let peak = block.iter().fold(0.0f64, |a, s| a.max(s.abs()));
                 if rms > 1.0 {
-                    println!(
-                        "{:8.3} s  rms {:8.1}  peak {:8.1}",
-                        n as f64 * 0.25,
-                        rms,
-                        peak
-                    );
+                    println!("{:8.3} s  rms {:8.1}  peak {:8.1}", n as f64 * 0.25, rms, peak);
                 }
             }
         }
@@ -97,9 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let (from, to) = limits(span, seconds);
             let mut found = 0;
             for (n, &level) in samples.iter().enumerate().take(to).skip(from) {
-                let Some(bit) = reader.feed(level) else {
-                    continue;
-                };
+                let Some(bit) = reader.feed(level) else { continue };
                 if let Some(family) = finder.feed(bit) {
                     found += 1;
                     let at = n as f64 / 8000.0;
@@ -124,9 +112,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 let level = symbol[UP_SPB / 2];
-                let Some(bit) = reader.feed(level) else {
-                    continue;
-                };
+                let Some(bit) = reader.feed(level) else { continue };
                 if let Some(family) = finder.feed(bit) {
                     found += 1;
                     println!("{:9.4} s  {family:?}", (n * UP_SPB) as f64 / 8000.0);
@@ -186,7 +172,10 @@ fn sync(samples: &[f64], span: (f64, f64)) {
                     runs.len()
                 );
                 for &(end, length) in runs.iter().take(4) {
-                    println!("        at {:.4} s, run {length}", end as f64 / 8000.0);
+                    println!(
+                        "        at {:.4} s, run {length}",
+                        end as f64 / 8000.0
+                    );
                     // What the sequence says after its sync, read with this
                     // same hypothesis: the first word of every framed sequence
                     // is its own table's, so the bits themselves are the test.

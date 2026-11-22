@@ -137,12 +137,7 @@ pub(super) enum Found {
     /// the first of the 32 it was found by was centred on `first`. Its
     /// changes repeat every period; its phases every other, a period holding
     /// 63 reversals.
-    Late {
-        at: f64,
-        phase: usize,
-        first: f64,
-        turn: f64,
-    },
+    Late { at: f64, phase: usize, first: f64, turn: f64 },
     /// Whether the conditioning went on well past where it was found -- past
     /// where the short turn-on's ends, if its start was found -- and the turn
     /// from all of it.
@@ -286,10 +281,7 @@ impl Hunt {
         // where things are in line samples.
         let at = index as f64 * self.tone_step;
         self.timing = self.timing.scale(self.timing_keep)
-            + Complex::from_polar(
-                y.norm_sqr() * (1.0 - self.timing_keep),
-                -TAU * (2.0 * at).fract(),
-            );
+            + Complex::from_polar(y.norm_sqr() * (1.0 - self.timing_keep), -TAU * (2.0 * at).fract());
         let mut found = self.listen_for_reversals(y, at);
         // Every symbol whose samples are in.
         while let Some(z) = self.read(self.next) {
@@ -323,15 +315,12 @@ impl Hunt {
             share > REVERSING && balance > BALANCE_ON && self.power > AUDIBLE * AUDIBLE
         };
         self.held = if self.reversing { self.held + 1 } else { 0 };
-        if self.held as f64 >= HOLD_SYMBOLS * self.sps
-            && !matches!(self.stage, Stage::Measuring { .. })
-        {
+        if self.held as f64 >= HOLD_SYMBOLS * self.sps && !matches!(self.stage, Stage::Measuring { .. }) {
             // Reversals: a burst's front, or a new burst's once the last
             // one's conditioning is over. Not while a burst's length is
             // being measured: the conditioning has runs of six reversals in
             // it, and that is nearly enough to be heard as reversals.
-            let new = self.reversals.is_none_or(|r| self.count > r + PATIENCE)
-                || self.stage != Stage::Looking;
+            let new = self.reversals.is_none_or(|r| self.count > r + PATIENCE) || self.stage != Stage::Looking;
             self.reversals = Some(self.count);
             if new {
                 self.stage = Stage::Looking;
@@ -361,11 +350,7 @@ impl Hunt {
         }
         let centre = -self.sps * self.timing.arg() / TAU - self.delay;
         let off = (near - centre).rem_euclid(self.sps);
-        let off = if off > self.sps / 2.0 {
-            off - self.sps
-        } else {
-            off
-        };
+        let off = if off > self.sps / 2.0 { off - self.sps } else { off };
         near - 0.25 * off
     }
 
@@ -386,10 +371,7 @@ impl Hunt {
 
     /// The symbol read `back` before the newest.
     fn back(&self, back: usize) -> Complex {
-        self.reads
-            .len()
-            .checked_sub(1 + back)
-            .map_or(Complex::ZERO, |i| self.reads[i].z)
+        self.reads.len().checked_sub(1 + back).map_or(Complex::ZERO, |i| self.reads[i].z)
     }
 
     /// Where the symbol that was the `count`th read is among those kept.
@@ -466,12 +448,7 @@ impl Hunt {
         // for, rather than the first, which may have been heard only in part.
         let newest = self.reads.len() - 1;
         let (at, first) = (self.reads[newest].at, self.reads[i].at);
-        Some(Found::Late {
-            at,
-            phase: (phase + PATTERN - 1) % PERIOD,
-            first,
-            turn,
-        })
+        Some(Found::Late { at, phase: (phase + PATTERN - 1) % PERIOD, first, turn })
     }
 
     fn measure(&mut self, from: usize, late: bool) -> Option<Found> {
@@ -480,27 +457,17 @@ impl Hunt {
             return None;
         }
         let i = self.index(from)?;
-        let (before, known) = if late {
-            (0, PATTERN)
-        } else {
-            (TURN_BEFORE, SHORT_CONDITIONING)
-        };
+        let (before, known) = if late { (0, PATTERN) } else { (TURN_BEFORE, SHORT_CONDITIONING) };
         let turn = turn_of(self.reads.range(i.saturating_sub(before)..i + known));
         // Whether the squares, the carrier's turn taken out, still point one
         // way: two-phase symbols do, eight or four phases do not.
         let window = self.reads.range(i + first..i + first + LENGTH_OVER);
-        let (sum, total) = window
-            .enumerate()
-            .fold((Complex::ZERO, 0.0), |(s, t), (k, r)| {
-                let back = Complex::from_polar(1.0, -2.0 * turn * k as f64);
-                (s + r.z * r.z * back, t + r.z.norm_sqr())
-            });
+        let (sum, total) = window.enumerate().fold((Complex::ZERO, 0.0), |(s, t), (k, r)| {
+            let back = Complex::from_polar(1.0, -2.0 * turn * k as f64);
+            (s + r.z * r.z * back, t + r.z.norm_sqr())
+        });
         let long = sum.abs() > COHERENT * total;
-        let turn = if long {
-            turn_of(self.reads.range(i.saturating_sub(before)..))
-        } else {
-            turn
-        };
+        let turn = if long { turn_of(self.reads.range(i.saturating_sub(before)..)) } else { turn };
         self.stage = Stage::Found;
         Some(Found::Length { long, turn })
     }
@@ -517,9 +484,7 @@ impl Hunt {
             return false;
         }
         let lead: f64 = (PATTERN..PATTERN + PREFIX).map(|b| -self.change(b)).sum();
-        let pattern: f64 = (0..PATTERN)
-            .map(|i| self.change(PATTERN - 1 - i) * self.pattern[i])
-            .sum();
+        let pattern: f64 = (0..PATTERN).map(|i| self.change(PATTERN - 1 - i) * self.pattern[i]).sum();
         lead / PREFIX as f64 > MATCHED && pattern / PATTERN as f64 > MATCHED
     }
 
@@ -531,16 +496,7 @@ impl Hunt {
         }
         let changes: Vec<f64> = (0..PATTERN).map(|i| self.change(PATTERN - 1 - i)).collect();
         let (best, phase) = (0..PERIOD)
-            .map(|p| {
-                (
-                    changes
-                        .iter()
-                        .enumerate()
-                        .map(|(i, c)| c * self.pattern[(p + i) % PERIOD])
-                        .sum::<f64>(),
-                    p,
-                )
-            })
+            .map(|p| (changes.iter().enumerate().map(|(i, c)| c * self.pattern[(p + i) % PERIOD]).sum::<f64>(), p))
             .fold((f64::NEG_INFINITY, 0), |a, b| if b.0 > a.0 { b } else { a });
         (best / PATTERN as f64 > MATCHED).then_some(phase)
     }
@@ -553,11 +509,7 @@ impl Hunt {
 /// first says which of the second's answers is the one.
 fn turn_of<'a>(reads: impl Iterator<Item = &'a Read>) -> f64 {
     let squares: Vec<Complex> = reads.map(|r| r.z * r.z).collect();
-    let lagged = |lag: usize| {
-        squares
-            .windows(lag + 1)
-            .fold(Complex::ZERO, |sum, w| sum + w[lag] * w[0].conj())
-    };
+    let lagged = |lag: usize| squares.windows(lag + 1).fold(Complex::ZERO, |sum, w| sum + w[lag] * w[0].conj());
     if squares.len() < 2 {
         return 0.0;
     }

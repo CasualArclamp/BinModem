@@ -948,11 +948,7 @@ mod tests {
             // A fifth of the way towards each neighbour, and still itself.
             for &(nre, nim) in &STATES {
                 let probe = (re + (nre - re) * 0.2, im + (nim - im) * 0.2);
-                assert_eq!(
-                    nearest_state(probe),
-                    i,
-                    "state {i} nudged towards a neighbour"
-                );
+                assert_eq!(nearest_state(probe), i, "state {i} nudged towards a neighbour");
             }
         }
     }
@@ -1091,10 +1087,7 @@ mod tests {
             }
             longest = longest.max(run);
         }
-        assert!(
-            longest < 30,
-            "a run of {longest} identical bits got through"
-        );
+        assert!(longest < 30, "a run of {longest} identical bits got through");
     }
 
     /// Which quadrant Y1Y2 names, from the codes Figure 1 puts against the
@@ -1117,22 +1110,10 @@ mod tests {
         // on a sign, which is the point -- the signs are the quadrant's, and
         // the quadrant comes from Y1Y2.
         const TABLE_3: [(f64, f64); 16] = [
-            (1.0, 1.0),
-            (3.0, 1.0),
-            (1.0, 3.0),
-            (3.0, 3.0), // Y1Y2 = 00
-            (1.0, 1.0),
-            (1.0, 3.0),
-            (3.0, 1.0),
-            (3.0, 3.0), // 01
-            (1.0, 1.0),
-            (1.0, 3.0),
-            (3.0, 1.0),
-            (3.0, 3.0), // 10
-            (1.0, 1.0),
-            (3.0, 1.0),
-            (1.0, 3.0),
-            (3.0, 3.0), // 11
+            (1.0, 1.0), (3.0, 1.0), (1.0, 3.0), (3.0, 3.0), // Y1Y2 = 00
+            (1.0, 1.0), (1.0, 3.0), (3.0, 1.0), (3.0, 3.0), // 01
+            (1.0, 1.0), (1.0, 3.0), (3.0, 1.0), (3.0, 3.0), // 10
+            (1.0, 1.0), (3.0, 1.0), (1.0, 3.0), (3.0, 3.0), // 11
         ];
         for (row, want) in TABLE_3.iter().enumerate() {
             let (y1, y2) = ((row >> 3) as u8 & 1, (row >> 2) as u8 & 1);

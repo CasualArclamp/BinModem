@@ -48,11 +48,7 @@ pub struct Shaping {
 
 impl Shaping {
     /// "When Sr = 0, spectral shaping is disabled" (5.4.5).
-    pub const NONE: Self = Self {
-        redundancy: Redundancy::None,
-        lookahead: 0,
-        filter: [0; 4],
-    };
+    pub const NONE: Self = Self { redundancy: Redundancy::None, lookahead: 0, filter: [0; 4] };
 
     /// Put this request into a CP or a CPt.
     pub fn apply(&self, cp: &mut Cp) {
@@ -63,11 +59,7 @@ impl Shaping {
 
     /// The request a CP makes.
     pub fn of(cp: &Cp) -> Self {
-        Self {
-            redundancy: cp.redundancy,
-            lookahead: cp.lookahead,
-            filter: cp.shaping,
-        }
+        Self { redundancy: cp.redundancy, lookahead: cp.lookahead, filter: cp.shaping }
     }
 }
 
@@ -84,12 +76,7 @@ const TRIED_FRAMES: usize = 700;
 /// wider notch without one takes more away from the band the line does
 /// carry. A second zero at 4 kHz, a2 = -1 too, asks for more than a sign in
 /// six can give, and leaves more than one zero does.
-const FILTERS: [[i8; 4]; 4] = [
-    [-64, 0, 0, 0],
-    [-64, 0, -32, 0],
-    [-64, 0, -48, 0],
-    [-60, 0, -40, 0],
-];
+const FILTERS: [[i8; 4]; 4] = [[-64, 0, 0, 0], [-64, 0, -32, 0], [-64, 0, -48, 0], [-60, 0, -40, 0]];
 
 /// What a request would cost and give: the choice it makes, and how much of
 /// the error TRN1d showed it would leave, as a share.
@@ -133,14 +120,7 @@ pub fn choose_with_slack(
     let noise = route.noise_at(law, f64::from(limit) / 32768.0);
     let mut below = u8::MAX;
     loop {
-        let asked = choose(
-            route,
-            law,
-            limit,
-            |drn| drn < below && enabled(drn),
-            most_lookahead,
-            leftover,
-        )?;
+        let asked = choose(route, law, limit, |drn| drn < below && enabled(drn), most_lookahead, leftover)?;
         let expected = noise * asked.left.sqrt();
         if dil::least_gap(&asked.choice.data, route) >= dil::SLACK * dil::SPACING * expected {
             return Some(asked);
@@ -177,27 +157,16 @@ pub fn choose(
     most_lookahead: u8,
     leftover: Option<&Leftover>,
 ) -> Option<Asked> {
-    let unshaped = dil::choose(route, law, limit, &enabled).map(|choice| Asked {
-        choice,
-        shaping: Shaping::NONE,
-        left: 1.0,
-    });
-    let Some(leftover) = leftover else {
-        return unshaped;
-    };
+    let unshaped = dil::choose(route, law, limit, &enabled).map(|choice| Asked { choice, shaping: Shaping::NONE, left: 1.0 });
+    let Some(leftover) = leftover else { return unshaped };
     // The magnitudes the shaper would be choosing signs for: the unshaped
     // choice's, or failing that, what a route half as noisy would carry.
-    let base = unshaped
-        .as_ref()
-        .map(|a| a.choice.clone())
-        .or_else(|| dil::choose(&scaled(route, 0.25), law, limit, &enabled))?;
+    let base = unshaped.as_ref().map(|a| a.choice.clone()).or_else(|| dil::choose(&scaled(route, 0.25), law, limit, &enabled))?;
     let base = Mapping::from_cp(&base.data)?;
     let lookahead = most_lookahead.min(3);
     let power = leftover.power;
     // What the response leaves of a signal, less what reading it put there.
-    let carried = |mapping: &Mapping| {
-        (left(&leftover.response, mapping, law) - leftover.misread).max(0.0) * power
-    };
+    let carried = |mapping: &Mapping| (left(&leftover.response, mapping, law) - leftover.misread).max(0.0) * power;
     let before = leftover.noise + carried(&base);
     if before <= 0.0 {
         return unshaped;
@@ -205,34 +174,16 @@ pub fn choose(
     let mut best = unshaped;
     for redundancy in [Redundancy::One, Redundancy::Two, Redundancy::Three] {
         let tried = FILTERS.map(|filter| {
-            let shaping = Shaping {
-                redundancy,
-                lookahead,
-                filter,
-            };
-            let mapping = Mapping {
-                redundancy,
-                lookahead: usize::from(lookahead),
-                shaping: filter,
-                ..base.clone()
-            };
+            let shaping = Shaping { redundancy, lookahead, filter };
+            let mapping = Mapping { redundancy, lookahead: usize::from(lookahead), shaping: filter, ..base.clone() };
             (shaping, (leftover.noise + carried(&mapping)) / before)
         });
-        let Some(&(shaping, share)) = tried.iter().min_by(|a, b| a.1.total_cmp(&b.1)) else {
-            continue;
-        };
+        let Some(&(shaping, share)) = tried.iter().min_by(|a, b| a.1.total_cmp(&b.1)) else { continue };
         if share >= 1.0 {
             continue;
         }
-        let Some(choice) = dil::choose_shaped(&scaled(route, share), law, limit, &enabled, shaping)
-        else {
-            continue;
-        };
-        let asked = Asked {
-            choice,
-            shaping,
-            left: share,
-        };
+        let Some(choice) = dil::choose_shaped(&scaled(route, share), law, limit, &enabled, shaping) else { continue };
+        let asked = Asked { choice, shaping, left: share };
         if best.as_ref().is_none_or(|b| asked.rate() > b.rate()) {
             best = Some(asked);
         }
@@ -265,11 +216,7 @@ pub fn left(response: &[f64], mapping: &Mapping, law: Law) -> f64 {
     let (mut error, mut power) = (0.0, 0.0);
     for m in lags..sent.len() - lags {
         // response[j] is lag j - L: the symbol j - L before this one.
-        let e: f64 = response
-            .iter()
-            .enumerate()
-            .map(|(j, c)| c * sent[m + lags - j])
-            .sum();
+        let e: f64 = response.iter().enumerate().map(|(j, c)| c * sent[m + lags - j]).sum();
         error += e * e;
         power += sent[m].powi(2);
     }
@@ -286,20 +233,12 @@ mod tests {
     /// leaves of a band-edge cut does: a tone at 4 kHz dying away either side.
     fn ring(size: f64) -> Vec<f64> {
         let lags = RESIDUE_LAGS as i64;
-        (-lags..=lags)
-            .map(|k| size * if k % 2 == 0 { 1.0 } else { -1.0 } * (-(k.abs() as f64) / 6.0).exp())
-            .collect()
+        (-lags..=lags).map(|k| size * if k % 2 == 0 { 1.0 } else { -1.0 } * (-(k.abs() as f64) / 6.0).exp()).collect()
     }
 
     fn mapping(redundancy: Redundancy, lookahead: usize, filter: [i8; 4]) -> Mapping {
-        let sets: [Constellation; INTERVALS] =
-            std::array::from_fn(|_| Constellation::new((30..100).step_by(2).collect()));
-        Mapping {
-            redundancy,
-            lookahead,
-            shaping: filter,
-            ..Mapping::best(sets, Redundancy::None)
-        }
+        let sets: [Constellation; INTERVALS] = std::array::from_fn(|_| Constellation::new((30..100).step_by(2).collect()));
+        Mapping { redundancy, lookahead, shaping: filter, ..Mapping::best(sets, Redundancy::None) }
     }
 
     /// 5.4.5.6: with a1 = -1 the filter the digital modem's metric runs on
@@ -310,26 +249,11 @@ mod tests {
         let response = ring(0.01);
         let unshaped = left(&response, &mapping(Redundancy::None, 0, [0; 4]), Law::Mu);
         let white: f64 = response.iter().map(|c| c * c).sum();
-        assert!(
-            (unshaped / white - 1.0).abs() < 0.1,
-            "{unshaped} against {white}"
-        );
+        assert!((unshaped / white - 1.0).abs() < 0.1, "{unshaped} against {white}");
         for redundancy in [Redundancy::One, Redundancy::Two, Redundancy::Three] {
-            let shaped = left(
-                &response,
-                &mapping(redundancy, 1, [-64, 0, -32, 0]),
-                Law::Mu,
-            );
-            println!(
-                "Sr {}: {:.1} dB",
-                redundancy.spent(),
-                10.0 * (shaped / unshaped).log10()
-            );
-            assert!(
-                shaped < 0.5 * unshaped,
-                "Sr {}: {shaped} against {unshaped}",
-                redundancy.spent()
-            );
+            let shaped = left(&response, &mapping(redundancy, 1, [-64, 0, -32, 0]), Law::Mu);
+            println!("Sr {}: {:.1} dB", redundancy.spent(), 10.0 * (shaped / unshaped).log10());
+            assert!(shaped < 0.5 * unshaped, "Sr {}: {shaped} against {unshaped}", redundancy.spent());
         }
     }
 
@@ -341,24 +265,12 @@ mod tests {
         let mut response = vec![0.0; 2 * RESIDUE_LAGS + 1];
         response[RESIDUE_LAGS] = 0.02;
         let unshaped = left(&response, &mapping(Redundancy::None, 0, [0; 4]), Law::Mu);
-        let shaped = left(
-            &response,
-            &mapping(Redundancy::Two, 1, [-64, 0, -32, 0]),
-            Law::Mu,
-        );
-        assert!(
-            (shaped / unshaped - 1.0).abs() < 1e-9,
-            "{shaped} against {unshaped}"
-        );
+        let shaped = left(&response, &mapping(Redundancy::Two, 1, [-64, 0, -32, 0]), Law::Mu);
+        assert!((shaped / unshaped - 1.0).abs() < 1e-9, "{shaped} against {unshaped}");
     }
 
     fn leftover(response: Vec<f64>, noise: f64) -> Leftover {
-        Leftover {
-            response,
-            noise,
-            power: ucode::level(Law::Mu, 79).powi(2),
-            misread: 0.0,
-        }
+        Leftover { response, noise, power: ucode::level(Law::Mu, 79).powi(2), misread: 0.0 }
     }
 
     /// Nothing measured, or nothing but noise: nothing asked for, and the
@@ -386,13 +298,7 @@ mod tests {
         let rate = |c: &Choice| sequences::data_rate(c.data.drn).unwrap();
         let ringing = leftover(ring(0.006), 2e-9);
         let asked = choose(&route, Law::Mu, 4024, |_| true, 1, Some(&ringing)).unwrap();
-        println!(
-            "{} unshaped, {} with {:?}, leaving {:.2}",
-            rate(&unshaped),
-            asked.rate(),
-            asked.shaping,
-            asked.left
-        );
+        println!("{} unshaped, {} with {:?}, leaving {:.2}", rate(&unshaped), asked.rate(), asked.shaping, asked.left);
         assert_ne!(asked.shaping.redundancy, Redundancy::None);
         assert!(asked.shaping.filter[0] <= -56, "{:?}", asked.shaping);
         assert_eq!(asked.shaping.lookahead, 1);
@@ -419,46 +325,18 @@ mod tests {
         for step in 0..60 {
             let noise = 1e-4 * 1.03f64.powi(step);
             let route = Route::clean(Law::Mu, noise);
-            let room = |a: &Asked| {
-                dil::least_gap(&a.choice.data, &route)
-                    / (dil::SPACING * route.noise_at(Law::Mu, 4024.0 / 32768.0) * a.left.sqrt())
-            };
-            let Some(best) = choose(&route, Law::Mu, 4024, |_| true, 1, None) else {
-                continue;
-            };
-            let slack = choose_with_slack(&route, Law::Mu, 4024, |_| true, 1, None)
-                .expect("nothing with room");
-            assert!(
-                room(&slack) >= dil::SLACK,
-                "noise {noise:.2e}: {} with room {:.3}",
-                slack.rate(),
-                room(&slack)
-            );
+            let room = |a: &Asked| dil::least_gap(&a.choice.data, &route) / (dil::SPACING * route.noise_at(Law::Mu, 4024.0 / 32768.0) * a.left.sqrt());
+            let Some(best) = choose(&route, Law::Mu, 4024, |_| true, 1, None) else { continue };
+            let slack = choose_with_slack(&route, Law::Mu, 4024, |_| true, 1, None).expect("nothing with room");
+            assert!(room(&slack) >= dil::SLACK, "noise {noise:.2e}: {} with room {:.3}", slack.rate(), room(&slack));
             if room(&best) >= dil::SLACK {
-                assert_eq!(
-                    slack,
-                    best,
-                    "noise {noise:.2e}: {} had room {:.3}",
-                    best.rate(),
-                    room(&best)
-                );
+                assert_eq!(slack, best, "noise {noise:.2e}: {} had room {:.3}", best.rate(), room(&best));
                 kept += 1;
             } else {
                 assert!(slack.rate() < best.rate(), "noise {noise:.2e}");
                 // The first rate down that has the room, not one further.
-                let between = choose(
-                    &route,
-                    Law::Mu,
-                    4024,
-                    |drn| drn > slack.choice.data.drn && drn < best.choice.data.drn,
-                    1,
-                    None,
-                );
-                assert!(
-                    between.as_ref().is_none_or(|b| room(b) < dil::SLACK),
-                    "noise {noise:.2e}: {:?} had room too",
-                    between.map(|b| b.rate())
-                );
+                let between = choose(&route, Law::Mu, 4024, |drn| drn > slack.choice.data.drn && drn < best.choice.data.drn, 1, None);
+                assert!(between.as_ref().is_none_or(|b| room(b) < dil::SLACK), "noise {noise:.2e}: {:?} had room too", between.map(|b| b.rate()));
                 lowered += 1;
             }
         }

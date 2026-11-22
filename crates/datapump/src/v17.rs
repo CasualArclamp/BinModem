@@ -260,15 +260,16 @@ pub fn bridge_turn(dibit: u8) -> u8 {
 /// and 12 to 14 are for further study and that a receiver shall ignore them,
 /// so nothing here reads them back.
 pub const BRIDGE_PATTERN: [bool; 16] = [
-    false, false, false, false, false, false, false, true, false, false, false, true, false, false,
-    false, true,
+    false, false, false, false, false, false, false, true,
+    false, false, false, true, false, false, false, true,
 ];
 
 /// Table 4 as printed: the scrambler's first sixteen dibits in segment 2,
 /// with binary ones going in, "00 01 00 01 ... 10 01 10 01", which it gives
 /// as the states C D C D ... B D B D.
 pub const TABLE_4: [u8; 16] = [
-    0b00, 0b01, 0b00, 0b01, 0b00, 0b01, 0b00, 0b01, 0b00, 0b01, 0b00, 0b01, 0b10, 0b01, 0b10, 0b01,
+    0b00, 0b01, 0b00, 0b01, 0b00, 0b01, 0b00, 0b01,
+    0b00, 0b01, 0b00, 0b01, 0b10, 0b01, 0b10, 0b01,
 ];
 
 /// Table 1/V.17, differential coding for the trellis code: `[Q1 Q2][Y1 Y2
@@ -379,9 +380,7 @@ impl Default for Conditioning {
 
 impl Conditioning {
     pub fn new() -> Self {
-        Self {
-            scrambler: table_4_scrambler(),
-        }
+        Self { scrambler: table_4_scrambler() }
     }
 
     /// The next dibit, the first bit in time the higher.
@@ -440,9 +439,7 @@ fn table_4_scrambler() -> Scrambler {
 /// and the first 38 of which are a resync's.
 pub fn segment_two() -> Vec<State> {
     let mut conditioning = Conditioning::new();
-    (0..train::EQUALIZER)
-        .map(|_| conditioning.next_state())
-        .collect()
+    (0..train::EQUALIZER).map(|_| conditioning.next_state()).collect()
 }
 
 /// The first group of segment 4 as the shared encoder must be given it, for
@@ -476,21 +473,13 @@ mod tests {
         // The resync as the page prints it: 256, 38, no bridge, 48, and the
         // 342 and 142 ms of its total columns.
         assert_eq!(
-            (
-                train::ALTERNATIONS,
-                Training::Resync.equalizer(),
-                Training::Resync.bridge(),
-                train::SCRAMBLED_ONES
-            ),
+            (train::ALTERNATIONS, Training::Resync.equalizer(), Training::Resync.bridge(), train::SCRAMBLED_ONES),
             (256, 38, 0, 48)
         );
         assert_eq!(train::RESYNC, 342);
         assert_eq!(Training::Resync.symbols(), 342);
         let seconds = train::RESYNC as f64 / BAUD;
-        assert!(
-            (seconds - 0.142).abs() < 0.001,
-            "a resync is {seconds:.4} s"
-        );
+        assert!((seconds - 0.142).abs() < 0.001, "a resync is {seconds:.4} s");
         // And the turn-off of Table 7: 32 and 48, 80 symbol intervals, 33 ms.
         let off = train::TURN_OFF_ONES + train::TURN_OFF_QUIET;
         assert_eq!(off, 80);
@@ -515,12 +504,7 @@ mod tests {
         // Figure 5/V.17 labels the four Q3 Y2 Y1 Y0: A 0110, B 0101, C 0010,
         // D 0001. `Coded` indexes Y0 Y1 Y2 Q3, the label backwards, and the
         // point it names there is the state's.
-        let printed = [
-            (State::A, 0b0110usize),
-            (State::B, 0b0101),
-            (State::C, 0b0010),
-            (State::D, 0b0001),
-        ];
+        let printed = [(State::A, 0b0110usize), (State::B, 0b0101), (State::C, 0b0010), (State::D, 0b0001)];
         for (state, label) in printed {
             let code = (0..4).fold(0, |a, i| a | ((label >> i & 1) << (3 - i)));
             assert_eq!(trellis::AT_7200.point(code), state.point(), "{state:?}");
@@ -544,10 +528,7 @@ mod tests {
                         ((px - x).powi(2) + (py - y).powi(2)).sqrt()
                     })
                     .fold(f64::INFINITY, f64::min);
-                assert!(
-                    nearest > 0.4 * coded.closest(),
-                    "{rate:?} {state:?} is {nearest} from a point"
-                );
+                assert!(nearest > 0.4 * coded.closest(), "{rate:?} {state:?} is {nearest} from a point");
             }
         }
     }
@@ -557,11 +538,7 @@ mod tests {
         // Table 1's Q1 Q2 = 11 is the quarter turn the code is invariant to:
         // every state turned once has the Y1 Y2 that row gives.
         for state in State::ALL {
-            assert_eq!(
-                state.turned(1).y1y2(),
-                TABLE_1[0b11][usize::from(state.y1y2())],
-                "{state:?}"
-            );
+            assert_eq!(state.turned(1).y1y2(), TABLE_1[0b11][usize::from(state.y1y2())], "{state:?}");
         }
     }
 
@@ -573,12 +550,7 @@ mod tests {
         for state in State::ALL {
             let here = state.point();
             let next = state.turned(1).point();
-            assert_eq!(
-                (-here.1, here.0),
-                next,
-                "{state:?} turned a quarter is not {:?}",
-                state.turned(1)
-            );
+            assert_eq!((-here.1, here.0), next, "{state:?} turned a quarter is not {:?}", state.turned(1));
         }
     }
 
@@ -588,22 +560,9 @@ mod tests {
         // is the worked example under 5.1.2.
         let got: Vec<State> = TABLE_4.iter().map(|d| four_phase_state(*d)).collect();
         let want = [
-            State::C,
-            State::D,
-            State::C,
-            State::D,
-            State::C,
-            State::D,
-            State::C,
-            State::D,
-            State::C,
-            State::D,
-            State::C,
-            State::D,
-            State::B,
-            State::D,
-            State::B,
-            State::D,
+            State::C, State::D, State::C, State::D, State::C, State::D,
+            State::C, State::D, State::C, State::D, State::C, State::D,
+            State::B, State::D, State::B, State::D,
         ];
         assert_eq!(got, want);
     }
@@ -627,10 +586,7 @@ mod tests {
             })
             .map(|b| descrambler.descramble(b))
             .collect();
-        assert!(
-            bits[23..].iter().all(|b| *b),
-            "segment 2 is not scrambled ones"
-        );
+        assert!(bits[23..].iter().all(|b| *b), "segment 2 is not scrambled ones");
     }
 
     #[test]
@@ -645,12 +601,7 @@ mod tests {
 
     #[test]
     fn the_bridge_pattern_is_the_sixteen_bits_of_table_5() {
-        let ones: Vec<usize> = BRIDGE_PATTERN
-            .iter()
-            .enumerate()
-            .filter(|(_, b)| **b)
-            .map(|(i, _)| i)
-            .collect();
+        let ones: Vec<usize> = BRIDGE_PATTERN.iter().enumerate().filter(|(_, b)| **b).map(|(i, _)| i).collect();
         assert_eq!(ones, vec![7, 11, 15], "B7, B11 and B15 and no others");
     }
 
@@ -665,11 +616,7 @@ mod tests {
                 let mut encoder = trellis::Encoder::new();
                 let code = encoder.encode(&trellis::AT_7200, &group);
                 let y = (code >> 1) & 0b11;
-                assert_eq!(
-                    y as u8,
-                    TABLE_1[usize::from(q)][usize::from(from.y1y2())],
-                    "{from:?} {q:02b}"
-                );
+                assert_eq!(y as u8, TABLE_1[usize::from(q)][usize::from(from.y1y2())], "{from:?} {q:02b}");
             }
         }
     }

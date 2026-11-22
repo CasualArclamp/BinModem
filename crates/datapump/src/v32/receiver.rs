@@ -40,14 +40,12 @@ use std::f64::consts::TAU;
 use std::sync::OnceLock;
 
 use dsp::Complex;
-use dsp::qam::{
-    Band, Constellation, Core, Heard, Options, Point, Slicer, Stage, Training, Via, Window,
-};
+use dsp::qam::{Band, Constellation, Core, Heard, Options, Point, Slicer, Stage, Training, Via, Window};
 
 use super::trellis::{self, Coded, Decoder};
 use super::{
-    BAUD, CARRIER, CHANGE_TO_DIBIT, CONSTELLATION_RMS, Coding, Mode, ROLLOFF, STATES, Scrambler,
-    TrnSequence, WITHIN_4800, bits_per_symbol, coding_for, point_spacing_at, signal_point,
+    BAUD, CARRIER, CHANGE_TO_DIBIT, CONSTELLATION_RMS, Coding, Mode, ROLLOFF, STATES, Scrambler, TrnSequence,
+    WITHIN_4800, bits_per_symbol, coding_for, point_spacing_at, signal_point,
 };
 
 /// Level at which the far carrier is declared present, and the lower level at
@@ -78,16 +76,8 @@ const FRESH: u32 = 16;
 /// V.34's first try, and its retry further in and searched wide for a slip
 /// (design.md 3.5). The retry is done by symbol 1170, inside the shortest TRN
 /// 5.2.3 allows.
-const FIRST: Window = Window {
-    align: (16, 256),
-    solve: (16, 512),
-    search: 8,
-};
-const RETRY: Window = Window {
-    align: (640, 1152),
-    solve: (640, 1152),
-    search: 200,
-};
+const FIRST: Window = Window { align: (16, 256), solve: (16, 512), search: 8 };
+const RETRY: Window = Window { align: (640, 1152), solve: (640, 1152), search: 200 };
 
 /// The one try made when S ends without S-bar (design.md 3.2).
 ///
@@ -107,11 +97,7 @@ const RETRY: Window = Window {
 /// 768 symbols fitted 22.3 dB and over 384 fits 26.3. A mistaken clock costs
 /// the square of the window's length; the rows' own noise, a few tenths of a
 /// decibel for halving it.
-const LAPSED: Window = Window {
-    align: (272, 528),
-    solve: (272, 656),
-    search: 330,
-};
+const LAPSED: Window = Window { align: (272, 528), solve: (272, 656), search: 330 };
 
 /// Half symbols from where S ended to TRN symbol 0, at the middle of the
 /// search [`LAPSED`] makes: TRN symbol 98 arriving as S ends.
@@ -148,28 +134,11 @@ fn tables() -> &'static Tables {
         let unit = |(x, y): (f64, f64)| Complex::new(x, y).scale(1.0 / CONSTELLATION_RMS);
         let four = Constellation::new(STATES.iter().copied().map(unit).collect());
         let sixteen = Constellation::new(
-            (0..16)
-                .map(|label| unit(signal_point(label / 4, label % 4)))
-                .collect(),
+            (0..16).map(|label| unit(signal_point(label / 4, label % 4))).collect(),
         );
-        let coded = [
-            trellis::AT_7200,
-            trellis::AT_9600,
-            trellis::AT_12000,
-            trellis::AT_14400,
-        ]
-        .map(|coded| {
-            Slicer::table(Constellation::new(
-                (0..coded.size())
-                    .map(|code| unit(coded.point(code)))
-                    .collect(),
-            ))
-        });
-        Tables {
-            four: Slicer::table(four),
-            sixteen: Slicer::table(sixteen),
-            coded,
-        }
+        let coded = [trellis::AT_7200, trellis::AT_9600, trellis::AT_12000, trellis::AT_14400]
+            .map(|coded| Slicer::table(Constellation::new((0..coded.size()).map(|code| unit(coded.point(code))).collect())));
+        Tables { four: Slicer::table(four), sixteen: Slicer::table(sixteen), coded }
     })
 }
 
@@ -346,18 +315,11 @@ impl Receiver {
     pub fn feed(&mut self, sample: f64) {
         self.core.feed(sample);
         let envelope = self.core.envelope();
-        self.carrier = if self.carrier {
-            envelope > CARRIER_OFF
-        } else {
-            envelope > CARRIER_ON
-        };
+        self.carrier = if self.carrier { envelope > CARRIER_OFF } else { envelope > CARRIER_ON };
         self.listen();
         // A training nothing has overtaken: the window it would have waited
         // for is in, so train on it now, from the samples the core kept.
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|(_, due)| self.core.halves() >= *due)
+        if self.pending.as_ref().is_some_and(|(_, due)| self.core.halves() >= *due)
             && let Some((training, _)) = self.pending.take()
         {
             self.core.train(training);
@@ -366,9 +328,7 @@ impl Receiver {
         // few hundred at once, from the end of the window it solved over.
         while let Some(point) = self.core.next() {
             let target = self.decide(&point);
-            let Some(symbol) = self.core.settle(target) else {
-                break;
-            };
+            let Some(symbol) = self.core.settle(target) else { break };
             self.last = symbol.point;
             if self.core.slips() != self.slips {
                 // Found again after a slip: the paths the trellis decoder
@@ -418,10 +378,7 @@ impl Receiver {
                     let measured = self.core.s_measured();
                     self.s_offset_hz = measured.map(|(turn, _)| turn * BAUD / TAU);
                     let start = at.saturating_add_signed(LAPSED_OFFSET);
-                    self.pending = Some((
-                        self.training(start, LAPSED, None, measured),
-                        due(start, LAPSED),
-                    ));
+                    self.pending = Some((self.training(start, LAPSED, None, measured), due(start, LAPSED)));
                     self.core.hunt();
                 }
                 Heard::Trained { via, .. } => {
@@ -441,13 +398,7 @@ impl Receiver {
     }
 
     /// Training on the far end's TRN, symbol 0 centred on half `start`.
-    fn training(
-        &self,
-        start: u64,
-        first: Window,
-        retry: Option<Window>,
-        measured: Option<(f64, f64)>,
-    ) -> Training {
+    fn training(&self, start: u64, first: Window, retry: Option<Window>, measured: Option<(f64, f64)>) -> Training {
         Training {
             targets: self.trn.clone(),
             start,
@@ -494,23 +445,14 @@ impl Receiver {
     /// two bits of each group, by how far it turned since the symbol before,
     /// and the point within it the other two.
     fn uncoded_bits(&mut self, label: usize) {
-        let (state, within) = if self.carried == 4 {
-            (label / 4, label % 4)
-        } else {
-            (label, WITHIN_4800)
-        };
+        let (state, within) = if self.carried == 4 { (label / 4, label % 4) } else { (label, WITHIN_4800) };
         let quadrant = state as u8;
         let Some(previous) = self.quadrant.replace(quadrant) else {
             return;
         };
         let change = (quadrant + 4 - previous) & 3;
         let dibit = CHANGE_TO_DIBIT[change as usize];
-        let group = [
-            dibit & 0b10 != 0,
-            dibit & 0b01 != 0,
-            within & 0b10 != 0,
-            within & 0b01 != 0,
-        ];
+        let group = [dibit & 0b10 != 0, dibit & 0b01 != 0, within & 0b10 != 0, within & 0b01 != 0];
         for &bit in group.iter().take(self.carried as usize) {
             let out = self.descrambler.descramble(bit);
             self.bits.push(out);
@@ -670,14 +612,7 @@ mod tests {
         // 45, and a fast search that got either wrong would decide some
         // points wrong on a perfect line.
         let tables = tables();
-        let every = [
-            &tables.four,
-            &tables.sixteen,
-            &tables.coded[0],
-            &tables.coded[1],
-            &tables.coded[2],
-            &tables.coded[3],
-        ];
+        let every = [&tables.four, &tables.sixteen, &tables.coded[0], &tables.coded[1], &tables.coded[2], &tables.coded[3]];
         let mut seed = 0x2545_f491u32;
         let mut uniform = || {
             seed ^= seed << 13;
@@ -686,28 +621,12 @@ mod tests {
             f64::from(seed) / f64::from(u32::MAX) - 0.5
         };
         for slicer in every {
-            let Slicer::Table(table) = slicer else {
-                panic!("V.32's constellations are tables")
-            };
-            assert!(
-                (table.power() - 1.0).abs() < 1e-12,
-                "{} points at power {}",
-                table.len(),
-                table.power()
-            );
-            assert!(
-                table.on_lattice(),
-                "{} points found no lattice",
-                table.len()
-            );
+            let Slicer::Table(table) = slicer else { panic!("V.32's constellations are tables") };
+            assert!((table.power() - 1.0).abs() < 1e-12, "{} points at power {}", table.len(), table.power());
+            assert!(table.on_lattice(), "{} points found no lattice", table.len());
             for _ in 0..50_000 {
                 let z = Complex::new(uniform(), uniform()).scale(4.0);
-                assert_eq!(
-                    table.nearest(z),
-                    table.nearest_exhaustive(z),
-                    "{} points at {z:?}",
-                    table.len()
-                );
+                assert_eq!(table.nearest(z), table.nearest_exhaustive(z), "{} points at {z:?}", table.len());
             }
         }
     }
@@ -717,45 +636,22 @@ mod tests {
         // The four are labelled by state, the sixteen by quadrant and place in
         // it, the coded by code: what the bits are read from.
         let tables = tables();
-        let Slicer::Table(four) = &tables.four else {
-            unreachable!()
-        };
+        let Slicer::Table(four) = &tables.four else { unreachable!() };
         for (state, &(x, y)) in STATES.iter().enumerate() {
-            assert_eq!(
-                four.nearest(Complex::new(x, y).scale(1.0 / CONSTELLATION_RMS)),
-                state
-            );
+            assert_eq!(four.nearest(Complex::new(x, y).scale(1.0 / CONSTELLATION_RMS)), state);
         }
-        let Slicer::Table(sixteen) = &tables.sixteen else {
-            unreachable!()
-        };
+        let Slicer::Table(sixteen) = &tables.sixteen else { unreachable!() };
         for state in 0..4 {
             for within in 0..4 {
                 let (x, y) = signal_point(state, within);
-                assert_eq!(
-                    sixteen.nearest(Complex::new(x, y).scale(1.0 / CONSTELLATION_RMS)),
-                    4 * state + within
-                );
+                assert_eq!(sixteen.nearest(Complex::new(x, y).scale(1.0 / CONSTELLATION_RMS)), 4 * state + within);
             }
         }
-        for (k, coded) in [
-            trellis::AT_7200,
-            trellis::AT_9600,
-            trellis::AT_12000,
-            trellis::AT_14400,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let Slicer::Table(table) = &tables.coded[k] else {
-                unreachable!()
-            };
+        for (k, coded) in [trellis::AT_7200, trellis::AT_9600, trellis::AT_12000, trellis::AT_14400].into_iter().enumerate() {
+            let Slicer::Table(table) = &tables.coded[k] else { unreachable!() };
             for code in 0..coded.size() {
                 let (x, y) = coded.point(code);
-                assert_eq!(
-                    table.nearest(Complex::new(x, y).scale(1.0 / CONSTELLATION_RMS)),
-                    code
-                );
+                assert_eq!(table.nearest(Complex::new(x, y).scale(1.0 / CONSTELLATION_RMS)), code);
             }
         }
     }

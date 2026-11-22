@@ -24,8 +24,8 @@
 
 use super::design::Design;
 use super::{
-    CONSTELLATION_FRAME, CONSTELLATION_POINTS, GAIN_LARGEST, Parameters, Trellis, UP_INTERVALS,
-    UP_RATES, up_bits,
+    CONSTELLATION_FRAME, CONSTELLATION_POINTS, GAIN_LARGEST, Parameters, Trellis, UP_INTERVALS, UP_RATES,
+    up_bits,
 };
 
 /// Standard deviations between a level and the decision boundary that a symbol
@@ -72,19 +72,13 @@ pub fn choose(design: &Design, noise: f64, ja: u32, trellis: Trellis) -> Option<
     // the prefilter's scaling -- variance by the square of it.
     let carried = design.scale * design.scale * noise.max(0.0);
     let sigma = (design.residual * design.residual + carried).sqrt();
-    let room = if sigma > 0.0 {
-        3f64.sqrt() / (MARGIN * sigma)
-    } else {
-        f64::INFINITY
-    };
+    let room = if sigma > 0.0 { 3f64.sqrt() / (MARGIN * sigma) } else { f64::INFINITY };
     let mask = if ja == 0 { (1u32 << UP_RATES) - 1 } else { ja };
     for drn in (1..=UP_RATES as u8).rev() {
         if mask & (1 << (drn - 1)) == 0 {
             continue;
         }
-        let Some(parameters) = build(design, drn, trellis) else {
-            continue;
-        };
+        let Some(parameters) = build(design, drn, trellis) else { continue };
         // 6.4.2's class feasibility and Table 30's fields, before the spacing
         // is looked at: a rung whose moduli the sets cannot carry is not a
         // rung at all.
@@ -97,11 +91,7 @@ pub fn choose(design: &Design, noise: f64, ja: u32, trellis: Trellis) -> Option<
         }
         let spacing = 2.0 * parameters.gain;
         let predicted = 2.0 * normal_tail(spacing / (2.0 * sigma.max(f64::MIN_POSITIVE)));
-        return Some(Choice {
-            parameters,
-            sigma,
-            predicted,
-        });
+        return Some(Choice { parameters, sigma, predicted });
     }
     None
 }
@@ -129,11 +119,7 @@ fn build(design: &Design, drn: u8, trellis: Trellis) -> Option<Parameters> {
     // enough.
     let mut levels = 1usize;
     for (i, &modulus) in moduli.iter().enumerate() {
-        let need = if i % 4 == 3 {
-            usize::from(modulus)
-        } else {
-            usize::from(modulus.div_ceil(2))
-        };
+        let need = if i % 4 == 3 { usize::from(modulus) } else { usize::from(modulus.div_ceil(2)) };
         levels = levels.max(need);
     }
     if levels > CONSTELLATION_POINTS {
@@ -200,8 +186,7 @@ fn normal_tail(x: f64) -> f64 {
     let t = 1.0 / (1.0 + 0.231_641_9 * z);
     let poly = t
         * (0.319_381_530
-            + t * (-0.356_563_782
-                + t * (1.781_477_937 + t * (-1.821_255_978 + t * 1.330_274_429))));
+            + t * (-0.356_563_782 + t * (1.781_477_937 + t * (-1.821_255_978 + t * 1.330_274_429))));
     let tail = 0.5 * (-0.5 * z * z).exp() * poly;
     if x >= 0.0 { tail } else { 1.0 - tail }
 }
@@ -224,15 +209,7 @@ mod tests {
         }
         let norm = taps.iter().map(|t| t * t).sum::<f64>().sqrt();
         taps.iter_mut().for_each(|t| *t /= norm);
-        design(
-            &Channel {
-                taps,
-                noise,
-                signal: 1.0,
-            },
-            &plan(),
-        )
-        .expect("designable")
+        design(&Channel { taps, noise, signal: 1.0 }, &plan()).expect("designable")
     }
 
     /// `gain_for` is 8.8.3's: a uniform set on a spacing of two, brought to a
@@ -241,16 +218,9 @@ mod tests {
     fn the_gain_brings_the_set_s_power_to_one() {
         for levels in [4usize, 8, 32, 64, 128] {
             let gain = gain_for(levels);
-            let power: f64 = (0..levels)
-                .map(|index| (2 * index + 1) as f64)
-                .map(|v| v * v)
-                .sum::<f64>()
-                / levels as f64;
-            assert!(
-                (gain * gain * power - 1.0).abs() < 1e-9,
-                "{levels}: {} against 1",
-                gain * gain * power
-            );
+            let power: f64 =
+                (0..levels).map(|index| (2 * index + 1) as f64).map(|v| v * v).sum::<f64>() / levels as f64;
+            assert!((gain * gain * power - 1.0).abs() < 1e-9, "{levels}: {} against 1", gain * gain * power);
             assert!(gain > 0.0 && gain <= GAIN_LARGEST, "{levels}: gain {gain}");
         }
     }
@@ -270,20 +240,12 @@ mod tests {
         // `ms(v G) = 1` if its prefilter is sent at the amplitude Q0.15 holds.
         let plain = build(&design, 5, Trellis::Sixteen).expect("a rung");
         let needed = plain.gain * design.scale;
-        assert!(
-            plain.gain * crate::v92::GAIN_SCALE <= f64::from(u16::MAX),
-            "an unfolded gain must fit"
-        );
+        assert!(plain.gain * crate::v92::GAIN_SCALE <= f64::from(u16::MAX), "an unfolded gain must fit");
         if needed * crate::v92::GAIN_SCALE > f64::from(u16::MAX) {
             // The one thing an unfolded CPd must be able to say is the truth:
             // `G` describes a unit prefilter, which is what `V92_PRE=none`
             // tells the far end to run.
-            let power: f64 = plain
-                .sets
-                .iter()
-                .flatten()
-                .map(|&p| f64::from(p) * f64::from(p))
-                .sum::<f64>()
+            let power: f64 = plain.sets.iter().flatten().map(|&p| f64::from(p) * f64::from(p)).sum::<f64>()
                 / plain.sets.iter().map(Vec::len).sum::<usize>() as f64;
             assert!((plain.gain * plain.gain * power - 1.0).abs() < 1e-6);
         }
@@ -303,28 +265,14 @@ mod tests {
             };
             let drn = choice.parameters.drn;
             assert_eq!(choice.parameters.rate(), up_rate(drn));
-            assert!(
-                drn <= previous,
-                "the rate went up with the noise: {drn} after {previous} at {noise}"
-            );
+            assert!(drn <= previous, "the rate went up with the noise: {drn} after {previous} at {noise}");
             previous = drn;
-            choice
-                .parameters
-                .fits()
-                .unwrap_or_else(|error| panic!("{noise}: {error}"));
+            choice.parameters.fits().unwrap_or_else(|error| panic!("{noise}: {error}"));
             seen.push((noise, drn));
         }
         println!("noise -> drn: {seen:?}");
-        assert!(
-            seen[0].1 >= 15,
-            "a quiet channel only reached drn {:?}",
-            seen[0]
-        );
-        assert!(
-            seen.last().expect("a trend").1 <= 8,
-            "a noisy channel still reached drn {:?}",
-            seen.last()
-        );
+        assert!(seen[0].1 >= 15, "a quiet channel only reached drn {:?}", seen[0]);
+        assert!(seen.last().expect("a trend").1 <= 8, "a noisy channel still reached drn {:?}", seen.last());
     }
 
     /// Every rung the choice can return obeys 6.4.1 and 6.4.2: the moduli
@@ -333,24 +281,14 @@ mod tests {
     fn every_rung_it_can_return_is_feasible() {
         for drn in 1..=UP_RATES as u8 {
             let design = design_for(0.0);
-            let Some(parameters) = build(&design, drn, Trellis::Sixteen) else {
-                continue;
-            };
-            parameters
-                .fits()
-                .unwrap_or_else(|error| panic!("drn {drn}: {error}"));
+            let Some(parameters) = build(&design, drn, Trellis::Sixteen) else { continue };
+            parameters.fits().unwrap_or_else(|error| panic!("drn {drn}: {error}"));
             assert_eq!(parameters.bits(), up_bits(drn));
-            assert!(
-                parameters.product() >= 1u128 << up_bits(drn),
-                "drn {drn}: the moduli cannot hold K bits"
-            );
+            assert!(parameters.product() >= 1u128 << up_bits(drn), "drn {drn}: the moduli cannot hold K bits");
             for i in 0..UP_INTERVALS {
                 let n = 2 * parameters.sets[0].len();
                 let step = usize::from(parameters.moduli[i]) * if i % 4 == 3 { 2 } else { 1 };
-                assert!(
-                    n >= step,
-                    "drn {drn}, interval {i}: N {n} is smaller than its class step {step}"
-                );
+                assert!(n >= step, "drn {drn}, interval {i}: N {n} is smaller than its class step {step}");
             }
         }
     }
@@ -360,13 +298,9 @@ mod tests {
     fn the_ja_mask_is_obeyed() {
         let design = design_for(1e-9);
         let only = 3u8;
-        let choice = choose(&design, 1e-9, 1u32 << (only - 1), Trellis::Sixteen)
-            .expect("one rung was offered");
+        let choice = choose(&design, 1e-9, 1u32 << (only - 1), Trellis::Sixteen).expect("one rung was offered");
         assert_eq!(choice.parameters.drn, only);
-        assert!(
-            choose(&design, 1e-9, 1u32 << 0, Trellis::Sixteen).is_some(),
-            "drn 1 is always offered"
-        );
+        assert!(choose(&design, 1e-9, 1u32 << 0, Trellis::Sixteen).is_some(), "drn 1 is always offered");
     }
 
     /// The residual the precoder could not cancel is noise as far as the choice
@@ -374,10 +308,7 @@ mod tests {
     #[test]
     fn residual_isi_counts_as_noise() {
         let clean = Design {
-            filters: Filters {
-                z2: vec![1.0],
-                ..Filters::default()
-            },
+            filters: Filters { z2: vec![1.0], ..Filters::default() },
             residual: 0.0,
             scale: 1.0,
             limited: false,
@@ -386,19 +317,10 @@ mod tests {
         // Three per cent of a spacing: worse than a good design, better than
         // a broken one, which is the case that should lose a rung or two
         // rather than everything.
-        let poor = Design {
-            residual: 0.03,
-            ..clean.clone()
-        };
+        let poor = Design { residual: 0.03, ..clean.clone() };
         let a = choose(&clean, 1e-7, 0, Trellis::Sixteen).expect("a clean design");
-        let b = choose(&poor, 1e-7, 0, Trellis::Sixteen)
-            .expect("a poor design still carries something");
-        assert!(
-            b.parameters.drn < a.parameters.drn,
-            "ISI cost nothing: {} against {}",
-            b.parameters.drn,
-            a.parameters.drn
-        );
+        let b = choose(&poor, 1e-7, 0, Trellis::Sixteen).expect("a poor design still carries something");
+        assert!(b.parameters.drn < a.parameters.drn, "ISI cost nothing: {} against {}", b.parameters.drn, a.parameters.drn);
         assert!(b.sigma > a.sigma);
     }
 }

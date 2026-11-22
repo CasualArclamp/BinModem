@@ -42,10 +42,7 @@ const SLACK: usize = 8;
 /// ceiling of −12 dBm0 on what the analogue modem may ask for).
 pub fn ours() -> Info0d {
     Info0d {
-        v34: Info0 {
-            constellation_1664: true,
-            ..Info0::default()
-        },
+        v34: Info0 { constellation_1664: true, ..Info0::default() },
         nominal_power: 4,
         max_power: 23,
         power_at_codec: true,
@@ -59,12 +56,7 @@ pub fn ours() -> Info0d {
 ///
 /// Short phase 2 is not asked for here; [`wish_short`] is the one that does.
 pub fn wish(pcm_upstream: bool) -> V92Wish {
-    V92Wish {
-        capable: true,
-        short_phase2: false,
-        pcm_upstream,
-        ..V92Wish::default()
-    }
+    V92Wish { capable: true, short_phase2: false, pcm_upstream, ..V92Wish::default() }
 }
 
 /// The same, asking for V.92's short phase 2 (9.4) as well when PCM upstream
@@ -73,10 +65,7 @@ pub fn wish(pcm_upstream: bool) -> V92Wish {
 /// one. It runs only if the analogue modem asks too, which it does on a
 /// connection it has a memo of.
 pub fn wish_short(pcm_upstream: bool) -> V92Wish {
-    V92Wish {
-        short_phase2: pcm_upstream,
-        ..wish(pcm_upstream)
-    }
+    V92Wish { short_phase2: pcm_upstream, ..wish(pcm_upstream) }
 }
 
 /// The digital modem, at the line's rate.
@@ -217,23 +206,15 @@ mod tests {
     #[test]
     fn at_twice_the_rate_every_other_sample_is_the_level_itself() {
         let mut up = Resampler::new(8000.0, 16_000.0);
-        let levels: Vec<f64> = (0..400)
-            .map(|k| ((k * 37 % 101) as f64 - 50.0) / 60.0)
-            .collect();
+        let levels: Vec<f64> = (0..400).map(|k| ((k * 37 % 101) as f64 - 50.0) / 60.0).collect();
         let mut out = Vec::new();
         for &l in &levels {
             up.process(l, &mut out);
         }
         // Find the delay, then check every level lands on a sample.
-        let delay = (0..64)
-            .find(|&d| (out[d] - levels[0]).abs() < 1e-9 && (out[d + 2] - levels[1]).abs() < 1e-9)
-            .expect("no alignment");
+        let delay = (0..64).find(|&d| (out[d] - levels[0]).abs() < 1e-9 && (out[d + 2] - levels[1]).abs() < 1e-9).expect("no alignment");
         for (k, &l) in levels.iter().enumerate().take(300) {
-            assert!(
-                (out[delay + 2 * k] - l).abs() < 1e-9,
-                "level {k}: {} for {l}",
-                out[delay + 2 * k]
-            );
+            assert!((out[delay + 2 * k] - l).abs() < 1e-9, "level {k}: {} for {l}", out[delay + 2 * k]);
         }
     }
 }

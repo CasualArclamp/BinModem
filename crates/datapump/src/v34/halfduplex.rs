@@ -255,10 +255,7 @@ enum Stage {
     Phase3,
     /// The tone exchange that repeats phase 3: the recipient's tone, the
     /// source's, 25 ms more and INFOh again (12.3.3, 12.4.3.1).
-    Recovering {
-        tone_heard: Option<u64>,
-        infoh_sent: bool,
-    },
+    Recovering { tone_heard: Option<u64>, infoh_sent: bool },
     Awaiting(Awaiting),
     /// MPh going, over and over; the far end's awaited (12.4.1.2, 12.4.2.3).
     Mph,
@@ -387,11 +384,7 @@ impl Modem {
             symbol_rate: SymbolRate::S2400,
             trn_size: Size::Four,
         };
-        let setup = Setup {
-            infoh: placeholder,
-            ours: phase2.capabilities(),
-            far: Info0::default(),
-        };
+        let setup = Setup { infoh: placeholder, ours: phase2.capabilities(), far: Info0::default() };
         let mut modem = Self::build(role, source, fs, setup);
         modem.phase2 = Some(phase2);
         modem.phase2_done = false;
@@ -477,10 +470,7 @@ impl Modem {
             // first silence to the channel coming back: a 12.7 retrain's
             // phase 3 and start-up included.
             _ if self.turn == Turn::Retrain => State::Retraining,
-            Stage::Phase2
-            | Stage::Phase3
-            | Stage::Recovering { .. }
-            | Stage::Awaiting(Awaiting::FirstPph) => State::Starting,
+            Stage::Phase2 | Stage::Phase3 | Stage::Recovering { .. } | Stage::Awaiting(Awaiting::FirstPph) => State::Starting,
             Stage::Awaiting(_) | Stage::Mph | Stage::AwaitE => match self.turn {
                 Turn::First => State::Starting,
                 Turn::Page => State::ToControl,
@@ -497,10 +487,7 @@ impl Modem {
     /// A name for the window.
     pub fn phase(&self) -> &'static str {
         match self.stage {
-            Stage::Phase2 => self
-                .phase2
-                .as_ref()
-                .map_or("V.34 phase 2", phase2h::Modem::phase),
+            Stage::Phase2 => self.phase2.as_ref().map_or("V.34 phase 2", phase2h::Modem::phase),
             Stage::Phase3 => "V.34 phase 3",
             Stage::Recovering { .. } => "V.34 phase 3 again",
             Stage::Awaiting(Awaiting::Ac | Awaiting::Responding) => "V.34 control retrain",
@@ -563,8 +550,7 @@ impl Modem {
     /// The control channel's rates in bit/s, what this end transmits at and
     /// what it receives at, once settled.
     pub fn control_rates(&self) -> Option<(u32, u32)> {
-        self.rates
-            .map(|(t, r)| (bits_per_second(t), bits_per_second(r)))
+        self.rates.map(|(t, r)| (bits_per_second(t), bits_per_second(r)))
     }
 
     /// This end's MPh as last sent, and the far end's as last received.
@@ -630,9 +616,7 @@ impl Modem {
     /// the channel comes back, and while this end is turning round.
     pub fn far_silent(&self) -> bool {
         self.stage == Stage::Control
-            && self
-                .far_off_since
-                .is_some_and(|since| (self.now - since) as f64 >= FAR_SILENT_SECONDS * self.fs)
+            && self.far_off_since.is_some_and(|since| (self.now - since) as f64 >= FAR_SILENT_SECONDS * self.fs)
     }
 
     /// Control channel bits to send, first in time first, taken only while
@@ -659,11 +643,7 @@ impl Modem {
     /// give up.
     pub fn take_control_bits(&mut self) -> Vec<bool> {
         let bits = self.control.receiver.take_bits();
-        if self.stage == Stage::Control {
-            bits
-        } else {
-            Vec::new()
-        }
+        if self.stage == Stage::Control { bits } else { Vec::new() }
     }
 
     /// Whether the far end's control carrier is on the line.
@@ -688,24 +668,17 @@ impl Modem {
 
     /// Page bits taken and not yet sent.
     pub fn pending_page_bits(&self) -> usize {
-        self.source
-            .as_ref()
-            .map_or(0, primary::Source::pending_bits)
+        self.source.as_ref().map_or(0, primary::Source::pending_bits)
     }
 
     /// The page's bits so far, at the recipient: those after B1, in order.
     pub fn take_page_bits(&mut self) -> Vec<bool> {
-        self.recipient
-            .as_mut()
-            .map(primary::Recipient::take_bits)
-            .unwrap_or_default()
+        self.recipient.as_mut().map(primary::Recipient::take_bits).unwrap_or_default()
     }
 
     /// Circuit 109 at the recipient: whether the page's carrier is there.
     pub fn page_carrier(&self) -> bool {
-        self.recipient
-            .as_ref()
-            .is_some_and(primary::Recipient::carrier)
+        self.recipient.as_ref().is_some_and(primary::Recipient::carrier)
     }
 
     /// Leave the control channel for the page: circuit 105 dropping. The
@@ -717,9 +690,7 @@ impl Modem {
         if self.stage != Stage::Control || self.data.is_none() {
             return false;
         }
-        self.control
-            .transmitter
-            .queue(Segment::Ones(control::TURN_OFF_SYMBOLS));
+        self.control.transmitter.queue(Segment::Ones(control::TURN_OFF_SYMBOLS));
         // Nothing more is coming that means anything: the recipient's
         // receiver would otherwise go on reading the source's ones, and
         // then the page's energy, as data. Hunting is what 12.5.2 and
@@ -826,14 +797,8 @@ impl Modem {
                     self.deaf_above = None;
                 }
             }
-            let heard = if self.deaf_above.is_some() {
-                0.0
-            } else {
-                input
-            };
-            let Some(phase2) = self.phase2.as_mut() else {
-                return 0.0;
-            };
+            let heard = if self.deaf_above.is_some() { 0.0 } else { input };
+            let Some(phase2) = self.phase2.as_mut() else { return 0.0 };
             let out = phase2.step(heard);
             match phase2.status() {
                 phase2h::Status::Running => {}
@@ -897,9 +862,7 @@ impl Modem {
         match self.stage {
             // 12.4.1.1 and 12.4.1.2: this end's PPh and ALT are going; MPh
             // within 120T.
-            Stage::Awaiting(Awaiting::FirstPph | Awaiting::Pph) if self.source_end => {
-                self.send_mph()
-            }
+            Stage::Awaiting(Awaiting::FirstPph | Awaiting::Pph) if self.source_end => self.send_mph(),
             // 12.4.2.1 to 12.4.2.3: PPh back, ALT for 16T, then MPh.
             Stage::Awaiting(Awaiting::FirstPph | Awaiting::Pph) => {
                 self.answer_pph();
@@ -947,11 +910,7 @@ impl Modem {
             // in data or a resynchronisation already answered, a source
             // that did not hear this end's Sh -- answered again, since the
             // source's own E is only ever sent after this end's reversal.
-            Stage::Awaiting(Awaiting::ShOrPph | Awaiting::Ac) | Stage::Control
-                if !self.source_end =>
-            {
-                self.answer_sh()
-            }
+            Stage::Awaiting(Awaiting::ShOrPph | Awaiting::Ac) | Stage::Control if !self.source_end => self.answer_sh(),
             Stage::AwaitE if !self.source_end && self.turn == Turn::Page => self.answer_sh(),
             Stage::Page if !self.source_end && !self.page_carrier() => {
                 if let Some(recipient) = self.recipient.as_mut() {
@@ -968,14 +927,8 @@ impl Modem {
     fn on_tone(&mut self) {
         match self.stage {
             Stage::Awaiting(Awaiting::FirstPph) if self.source_end => self.recover_source(),
-            Stage::Recovering {
-                tone_heard: None,
-                infoh_sent,
-            } if !self.source_end => {
-                self.stage = Stage::Recovering {
-                    tone_heard: Some(self.now),
-                    infoh_sent,
-                };
+            Stage::Recovering { tone_heard: None, infoh_sent } if !self.source_end => {
+                self.stage = Stage::Recovering { tone_heard: Some(self.now), infoh_sent };
             }
             _ => {}
         }
@@ -994,21 +947,14 @@ impl Modem {
     /// Everything the control transmitter has put on the line.
     fn sent(&mut self) {
         while let Some(sent) = self.control.transmitter.sent() {
-            let Sent::Ended { kind, .. } = sent else {
-                continue;
-            };
+            let Sent::Ended { kind, .. } = sent else { continue };
             match (kind, self.stage) {
                 (Kind::Ones, Stage::TurningOff) => self.begin_page(),
                 // 12.6.1.5, 12.6.1.6, 12.6.2.5: three seconds "after sending
                 // Sh followed by S-bar-h".
-                (Kind::ShBar, Stage::Awaiting(Awaiting::ShOrPph) | Stage::AwaitE) => {
-                    self.wait(THREE_SECONDS)
-                }
+                (Kind::ShBar, Stage::Awaiting(Awaiting::ShOrPph) | Stage::AwaitE) => self.wait(THREE_SECONDS),
                 // 12.4.3.2 and 12.4.4.2: three seconds after sending PPh.
-                (
-                    Kind::Pph,
-                    Stage::Awaiting(Awaiting::FirstPph | Awaiting::Pph | Awaiting::Responding),
-                ) => {
+                (Kind::Pph, Stage::Awaiting(Awaiting::FirstPph | Awaiting::Pph | Awaiting::Responding)) => {
                     self.wait(THREE_SECONDS);
                 }
                 _ => {}
@@ -1018,9 +964,7 @@ impl Modem {
 
     /// Everything the primary receiver has to report.
     fn primary_events(&mut self) {
-        let Some(recipient) = self.recipient.as_mut() else {
-            return;
-        };
+        let Some(recipient) = self.recipient.as_mut() else { return };
         let mut events = Vec::new();
         while let Some(event) = recipient.event() {
             events.push(event);
@@ -1040,9 +984,7 @@ impl Modem {
                         self.recover_recipient();
                     }
                 }
-                primary::Event::PageStarted { b1_errors } => {
-                    self.events.push_back(Event::PageStarted { b1_errors })
-                }
+                primary::Event::PageStarted { b1_errors } => self.events.push_back(Event::PageStarted { b1_errors }),
                 primary::Event::PageEnded => {
                     self.events.push_back(Event::PageEnded);
                     if self.stage == Stage::Page {
@@ -1097,20 +1039,12 @@ impl Modem {
     /// What is watched for rather than reported.
     fn poll(&mut self) {
         let gone = self.far_gone(self.far_level);
-        self.far_off_since = if gone {
-            self.far_off_since.or(Some(self.now))
-        } else {
-            None
-        };
+        self.far_off_since = if gone { self.far_off_since.or(Some(self.now)) } else { None };
         // The far carrier's level on the channel, followed up at once and
         // down slowly, and not at all once it has gone: a far end that has
         // been quiet a while is not the far end's level.
         if self.stage == Stage::Control && !gone {
-            self.far_level = self
-                .control
-                .receiver
-                .level()
-                .max(self.far_level * self.far_level_keep);
+            self.far_level = self.control.receiver.level().max(self.far_level * self.far_level_keep);
         }
 
         // 12.8.2: "After detecting signal AC for more than 100 ms", PPh and
@@ -1140,10 +1074,7 @@ impl Modem {
             && self.control.receiver.hearing_for() > RETRAIN_TONE_SECONDS
             && matches!(
                 self.stage,
-                Stage::Control
-                    | Stage::Mph
-                    | Stage::AwaitE
-                    | Stage::Awaiting(Awaiting::ShOrPph | Awaiting::Pph | Awaiting::ChangePph)
+                Stage::Control | Stage::Mph | Stage::AwaitE | Stage::Awaiting(Awaiting::ShOrPph | Awaiting::Pph | Awaiting::ChangePph)
             )
         {
             self.begin_phase2_again(false);
@@ -1154,11 +1085,7 @@ impl Modem {
             Stage::Phase3 if self.source_end => {
                 // 12.3.1.3: TRN over, the control channel follows -- 70 ms of
                 // silence and PPh (12.4.1.1).
-                if self
-                    .source
-                    .as_ref()
-                    .is_some_and(|s| s.sending() == Sending::Idle)
-                {
+                if self.source.as_ref().is_some_and(|s| s.sending() == Sending::Idle) {
                     self.begin_startup(self.turn_after_phase3());
                     // A tone already there is 12.3.3's recovery under way.
                     if self.control.receiver.hearing() == Hearing::Tone {
@@ -1167,25 +1094,14 @@ impl Modem {
                 }
             }
             Stage::Page if self.source_end && self.page_ending => {
-                if self
-                    .source
-                    .as_ref()
-                    .is_some_and(|s| s.sending() == Sending::Idle)
-                {
+                if self.source.as_ref().is_some_and(|s| s.sending() == Sending::Idle) {
                     self.page_ending = false;
                     // 12.6.1.1: a new rate wanted, PPh (12.4.1.1); otherwise
                     // Sh and S-bar-h.
-                    if self.renegotiate {
-                        self.begin_startup(Turn::Page)
-                    } else {
-                        self.begin_resync()
-                    }
+                    if self.renegotiate { self.begin_startup(Turn::Page) } else { self.begin_resync() }
                 }
             }
-            Stage::Recovering {
-                tone_heard,
-                infoh_sent,
-            } => {
+            Stage::Recovering { tone_heard, infoh_sent } => {
                 if self.source_end {
                     if self.tone_pending && !self.control.transmitter.is_sending() {
                         self.tone_pending = false;
@@ -1202,9 +1118,7 @@ impl Modem {
                         self.stage = Stage::Phase3;
                         self.deadline = None;
                     }
-                } else if tone_heard
-                    .is_some_and(|at| self.now >= at + self.seconds(TONE_BEFORE_INFOH))
-                {
+                } else if tone_heard.is_some_and(|at| self.now >= at + self.seconds(TONE_BEFORE_INFOH)) {
                     self.send_infoh();
                 }
             }
@@ -1226,19 +1140,9 @@ impl Modem {
             }
             // 12.2.1.4.3, 12.2.2.3.3: the source's tone not heard, INFOh
             // goes anyway.
-            Stage::Recovering {
-                infoh_sent: false, ..
-            } if !self.source_end => self.send_infoh(),
-            Stage::Recovering { .. } if self.source_end => {
-                self.fail("no INFOh after the recipient's tone")
-            }
-            Stage::Recovering { .. }
-            | Stage::Phase2
-            | Stage::Phase3
-            | Stage::Control
-            | Stage::TurningOff
-            | Stage::Page
-            | Stage::Failed => {}
+            Stage::Recovering { infoh_sent: false, .. } if !self.source_end => self.send_infoh(),
+            Stage::Recovering { .. } if self.source_end => self.fail("no INFOh after the recipient's tone"),
+            Stage::Recovering { .. } | Stage::Phase2 | Stage::Phase3 | Stage::Control | Stage::TurningOff | Stage::Page | Stage::Failed => {}
             // 12.4.3.2 to 12.4.3.4, 12.4.4.1 to 12.4.4.3, 12.6.1.5, 12.6.1.6,
             // 12.6.2.4, 12.6.2.5: "initiate a control channel retrain as
             // defined in 12.8.1".
@@ -1249,11 +1153,7 @@ impl Modem {
     /// What the start-up after phase 3 is to the join: the first, or the
     /// tail of a primary channel retrain (12.7) begun on the control channel.
     fn turn_after_phase3(&self) -> Turn {
-        if self.turn == Turn::Retrain {
-            Turn::Retrain
-        } else {
-            Turn::First
-        }
+        if self.turn == Turn::Retrain { Turn::Retrain } else { Turn::First }
     }
 
     /// The source's control channel start-up (12.4.1.1): 70 ms of silence,
@@ -1262,18 +1162,10 @@ impl Modem {
     /// may come instead of PPh (12.4.3.1), so that wait has its own name.
     fn begin_startup(&mut self, turn: Turn) {
         self.turn = turn;
-        self.control
-            .transmitter
-            .queue(Segment::Silence(control::SILENCE_SYMBOLS));
+        self.control.transmitter.queue(Segment::Silence(control::SILENCE_SYMBOLS));
         self.queue_pph();
-        self.control.transmitter.queue(Segment::Alt {
-            at_least: control::ALT_LEAST,
-        });
-        self.stage = Stage::Awaiting(if turn == Turn::Page {
-            Awaiting::Pph
-        } else {
-            Awaiting::FirstPph
-        });
+        self.control.transmitter.queue(Segment::Alt { at_least: control::ALT_LEAST });
+        self.stage = Stage::Awaiting(if turn == Turn::Page { Awaiting::Pph } else { Awaiting::FirstPph });
         self.deadline = None;
     }
 
@@ -1287,9 +1179,7 @@ impl Modem {
         tx.queue(Segment::Silence(control::SILENCE_SYMBOLS));
         tx.queue(Segment::Sh(control::SH_SYMBOLS));
         tx.queue(Segment::ShBar(control::SH_BAR_SYMBOLS));
-        tx.queue(Segment::Alt {
-            at_least: control::ALT_LEAST,
-        });
+        tx.queue(Segment::Alt { at_least: control::ALT_LEAST });
         self.stage = Stage::Awaiting(Awaiting::ShOrPph);
         self.deadline = None;
     }
@@ -1312,18 +1202,14 @@ impl Modem {
     /// 12.6.1.3, 12.6.2.1, 12.8.1).
     fn answer_pph(&mut self) {
         self.queue_pph();
-        self.control.transmitter.queue(Segment::Alt {
-            at_least: control::ALT_LEAST,
-        });
+        self.control.transmitter.queue(Segment::Alt { at_least: control::ALT_LEAST });
     }
 
     /// MPh, over and over, behind whatever is going (12.4.1.2, 12.4.2.3);
     /// E straight after the first if the far end's MPh is in already.
     fn send_mph(&mut self) {
         self.mph = self.make_mph();
-        self.control
-            .transmitter
-            .queue(Segment::Repeat(self.mph.to_bits()));
+        self.control.transmitter.queue(Segment::Repeat(self.mph.to_bits()));
         self.stage = Stage::Mph;
         // 12.4.3.3, 12.4.4.2: three seconds for the far MPh.
         self.wait(THREE_SECONDS);
@@ -1337,11 +1223,8 @@ impl Modem {
     fn maybe_e(&mut self) {
         match self.stage {
             Stage::Mph => {
-                let Some(since) = self.far_mph_since else {
-                    return;
-                };
-                let due =
-                    !self.source_end || self.far_e || self.now >= since + self.seconds(E_WAIT);
+                let Some(since) = self.far_mph_since else { return };
+                let due = !self.source_end || self.far_e || self.now >= since + self.seconds(E_WAIT);
                 if due && self.settle() {
                     self.queue_e(true);
                 }
@@ -1374,9 +1257,7 @@ impl Modem {
         let tx = &mut self.control.transmitter;
         tx.queue(Segment::Sh(control::SH_SYMBOLS));
         tx.queue(Segment::ShBar(control::SH_BAR_SYMBOLS));
-        tx.queue(Segment::Alt {
-            at_least: control::ALT_LEAST,
-        });
+        tx.queue(Segment::Alt { at_least: control::ALT_LEAST });
         self.queue_e(false);
     }
 
@@ -1413,9 +1294,7 @@ impl Modem {
     /// The 4T of ones are out: the page (12.5.1), or the wait for it
     /// (12.5.2).
     fn begin_page(&mut self) {
-        let Some(data) = self.data else {
-            return self.fail("no data mode for the page");
-        };
+        let Some(data) = self.data else { return self.fail("no data mode for the page") };
         let begun = match (self.source.as_mut(), self.recipient.as_mut()) {
             (Some(source), _) => source.page(data),
             (_, Some(recipient)) => recipient.expect_page(data),
@@ -1478,25 +1357,17 @@ impl Modem {
             return self.fail("phase 3 failed too often");
         }
         self.tone.send(&[]);
-        self.stage = Stage::Recovering {
-            tone_heard: None,
-            infoh_sent: false,
-        };
+        self.stage = Stage::Recovering { tone_heard: None, infoh_sent: false };
         self.wait(TONE_WAIT);
     }
 
     /// INFOh again, 25 ms into the tone after the source's is heard, or
     /// blind (12.2.1.2.6, 12.2.1.4.3).
     fn send_infoh(&mut self) {
-        let Stage::Recovering { tone_heard, .. } = self.stage else {
-            return;
-        };
+        let Stage::Recovering { tone_heard, .. } = self.stage else { return };
         self.tone.send(&self.infoh.to_bits());
         self.tone.silence();
-        self.stage = Stage::Recovering {
-            tone_heard,
-            infoh_sent: true,
-        };
+        self.stage = Stage::Recovering { tone_heard, infoh_sent: true };
         self.deadline = None;
     }
 
@@ -1512,14 +1383,8 @@ impl Modem {
         self.control.transmitter.clear();
         self.control.transmitter.queue(Segment::Silence(1));
         self.tone_pending = true;
-        self.infoh_rx = Some(dpsk::Receiver::half_duplex(
-            side_of(other(self.role)),
-            self.fs,
-        ));
-        self.stage = Stage::Recovering {
-            tone_heard: None,
-            infoh_sent: false,
-        };
+        self.infoh_rx = Some(dpsk::Receiver::half_duplex(side_of(other(self.role)), self.fs));
+        self.stage = Stage::Recovering { tone_heard: None, infoh_sent: false };
         self.wait(INFOH_WAIT);
     }
 
@@ -1536,11 +1401,7 @@ impl Modem {
         if infoh != self.infoh {
             self.infoh = infoh;
             self.channel = channel_of(&infoh);
-            self.source = Some(primary::Source::new(
-                self.channel,
-                mode_of(self.role),
-                self.fs,
-            ));
+            self.source = Some(primary::Source::new(self.channel, mode_of(self.role), self.fs));
         }
         if let Some(source) = self.source.as_mut() {
             source.phase3();
@@ -1551,12 +1412,8 @@ impl Modem {
 
     /// Phase 2 is done: INFOh, the far INFO0, and phase 3 on them.
     fn finish_phase2(&mut self) {
-        let Some(phase2) = self.phase2.as_ref() else {
-            return;
-        };
-        let Some(infoh) = phase2.infoh() else {
-            return self.fail("phase 2 done without INFOh");
-        };
+        let Some(phase2) = self.phase2.as_ref() else { return };
+        let Some(infoh) = phase2.infoh() else { return self.fail("phase 2 done without INFOh") };
         self.infoh = infoh;
         self.channel = channel_of(&infoh);
         self.ours = phase2.capabilities();
@@ -1574,8 +1431,7 @@ impl Modem {
             source.phase3();
             self.source = Some(source);
         } else {
-            let mut recipient =
-                primary::Recipient::new(self.channel, mode_of(other(self.role)), self.fs);
+            let mut recipient = primary::Recipient::new(self.channel, mode_of(other(self.role)), self.fs);
             recipient.expect_phase3();
             self.recipient = Some(recipient);
         }
@@ -1600,13 +1456,7 @@ impl Modem {
         self.tone.stop();
         self.infoh_rx = None;
         self.tone_pending = false;
-        self.phase2 = Some(phase2h::Modem::retrain(
-            self.role,
-            part_of(self.source_end),
-            self.fs,
-            self.ours,
-            self.far,
-        ));
+        self.phase2 = Some(phase2h::Modem::retrain(self.role, part_of(self.source_end), self.fs, self.ours, self.far));
         self.turn = Turn::Retrain;
         self.stage = Stage::Phase2;
         self.deadline = None;
@@ -1641,11 +1491,7 @@ impl Modem {
         // 2400 Bd's alone (Table 8), and a cap or a poor line asking for it
         // elsewhere would leave the two MPh with no rate in common.
         let least = rates.trailing_zeros() as u8 + 1;
-        let max_rate = probe::ceiling(rate)
-            .min(wide)
-            .min(by_line)
-            .min(self.cap)
-            .max(least);
+        let max_rate = probe::ceiling(rate).min(wide).min(by_line).min(self.cap).max(least);
         Mph {
             max_rate,
             control_rate: self.control_rate,
@@ -1662,15 +1508,9 @@ impl Modem {
     /// control channel's rates (12.4.1.3, 12.4.1.4, 12.4.2.4, 12.4.2.5).
     /// False, and the modem failed, if the two share no rate.
     fn settle(&mut self) -> bool {
-        let Some(far) = self.far_mph else {
-            return false;
-        };
+        let Some(far) = self.far_mph else { return false };
         let ours = self.mph;
-        let (source, recipient) = if self.source_end {
-            (&ours, &far)
-        } else {
-            (&far, &ours)
-        };
+        let (source, recipient) = if self.source_end { (&ours, &far) } else { (&far, &ours) };
         let Some(n) = mp::primary_rate(source, recipient) else {
             self.fail("the two MPh share no primary rate");
             return false;
@@ -1681,11 +1521,7 @@ impl Modem {
             nonlinear: recipient.non_linear,
             expanded: recipient.expanded_shaping,
             // The recipient's own MPh asks for none.
-            precoding: if self.source_end {
-                self.precoding
-            } else {
-                [(0, 0); 3]
-            },
+            precoding: if self.source_end { self.precoding } else { [(0, 0); 3] },
         });
         let (transmit, receive) = mp::control_rates(&ours, &far);
         self.control.transmitter.set_rate(rate_of(transmit));
@@ -1735,11 +1571,7 @@ fn channel_of(infoh: &InfoH) -> Channel {
 
 /// Phase 2's name for which end sends the page.
 fn part_of(source: bool) -> Part {
-    if source {
-        Part::Source
-    } else {
-        Part::Recipient
-    }
+    if source { Part::Source } else { Part::Recipient }
 }
 
 /// The other end of the call.

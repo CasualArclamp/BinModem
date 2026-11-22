@@ -23,7 +23,7 @@
 //! `order` must hold every Ucode up to a third of full scale but UINFO (79)
 //! exactly once. The report says what the DIL measures, next to today's.
 
-use datapump::v90::dil::{self, Analysis, LOUDEST, Route};
+use datapump::v90::dil::{self, Analysis, Route, LOUDEST};
 use datapump::v90::encoder::Mapping;
 use datapump::v90::sequences::Descriptor;
 use datapump::v90::ucode::{self, Law};
@@ -40,14 +40,8 @@ fn parse(text: &str) -> Result<(Descriptor, usize), String> {
     let mut h = None;
     let mut order = None;
     let mut passes = 2;
-    for line in text
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-    {
-        let (key, value) = line
-            .split_once(':')
-            .ok_or_else(|| format!("not key: value: {line}"))?;
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        let (key, value) = line.split_once(':').ok_or_else(|| format!("not key: value: {line}"))?;
         let value = value.trim();
         match key.trim() {
             "signs" => {
@@ -77,13 +71,8 @@ fn parse(text: &str) -> Result<(Descriptor, usize), String> {
                 )
             }
             "h" => {
-                let v: Vec<u8> = value
-                    .split_whitespace()
-                    .map(|n| n.parse().map_err(|e| format!("h: {e}")))
-                    .collect::<Result<_, _>>()?;
-                let v: [u8; 8] = v
-                    .try_into()
-                    .map_err(|_| "h wants eight numbers".to_owned())?;
+                let v: Vec<u8> = value.split_whitespace().map(|n| n.parse().map_err(|e| format!("h: {e}"))).collect::<Result<_, _>>()?;
+                let v: [u8; 8] = v.try_into().map_err(|_| "h wants eight numbers".to_owned())?;
                 h = Some(v);
             }
             "order" => {
@@ -122,51 +111,32 @@ fn problems(d: &Descriptor) -> Vec<String> {
     if d.h.iter().any(|&h| h > 15) {
         out.push("an H above 15".to_owned());
     }
-    let mut wanted: Vec<u8> = (0..128u8)
-        .filter(|&u| u != UINFO && ucode::level(Law::Mu, u) <= LOUDEST)
-        .collect();
+    let mut wanted: Vec<u8> = (0..128u8).filter(|&u| u != UINFO && ucode::level(Law::Mu, u) <= LOUDEST).collect();
     let mut got = d.ucodes.clone();
     got.sort_unstable();
     wanted.sort_unstable();
     if got != wanted {
-        out.push(format!(
-            "order is not every Ucode 0..=98 but {UINFO} once: {} given",
-            d.ucodes.len()
-        ));
+        out.push(format!("order is not every Ucode 0..=98 but {UINFO} once: {} given", d.ucodes.len()));
     }
     if let Some(w) = d.ucodes.windows(2).find(|w| w[0].abs_diff(w[1]) < 3) {
-        out.push(format!(
-            "neighbours {} and {} are closer than 3 apart",
-            w[0], w[1]
-        ));
+        out.push(format!("neighbours {} and {} are closer than 3 apart", w[0], w[1]));
     }
     if Descriptor::from_bits(&d.to_bits()).as_ref() != Some(d) {
         out.push("does not survive being sent".to_owned());
     }
     for &u in &d.ucodes {
         let len = d.segment_length(u);
-        let signs = (0..len)
-            .map(|n| d.signs[n % d.signs.len()])
-            .filter(|b| *b)
-            .count();
+        let signs = (0..len).map(|n| d.signs[n % d.signs.len()]).filter(|b| *b).count();
         if signs * 3 < len || signs * 3 > 2 * len {
-            out.push(format!(
-                "a Ucode {u} segment ({len} symbols) has {signs} positive"
-            ));
+            out.push(format!("a Ucode {u} segment ({len} symbols) has {signs} positive"));
             break;
         }
         // Every interval read at least once in every segment.
         let trained: Vec<bool> = (0..INTERVALS)
-            .map(|i| {
-                (0..len)
-                    .filter(|n| n % INTERVALS == i)
-                    .any(|n| d.training[n % d.training.len()])
-            })
+            .map(|i| (0..len).filter(|n| n % INTERVALS == i).any(|n| d.training[n % d.training.len()]))
             .collect();
         if trained.iter().any(|t| !t) {
-            out.push(format!(
-                "a Ucode {u} segment ({len} symbols) never trains some interval"
-            ));
+            out.push(format!("a Ucode {u} segment ({len} symbols) never trains some interval"));
             break;
         }
         if !(0..len).any(|n| !d.training[n % d.training.len()]) {
@@ -242,12 +212,7 @@ fn render_a_dil() {
     let seconds = pass.len() as f64 / 8000.0;
     let base = dil::design(Law::Mu, UINFO);
     let mut report = Vec::new();
-    for (noise, rob) in [
-        (0.0005, false),
-        (0.002, false),
-        (0.002, true),
-        (0.004, true),
-    ] {
+    for (noise, rob) in [(0.0005, false), (0.002, false), (0.002, true), (0.004, true)] {
         let ours = analyse(&d, noise, rob);
         let today = analyse(&base, noise, rob);
         report.push(format!(
@@ -263,17 +228,8 @@ fn render_a_dil() {
         samples.extend(pass.iter().map(|&s| s as f32));
     }
     datapump_line_write(&out, &samples);
-    println!(
-        "RESULT segments {} symbols {} seconds {seconds:.3} problems {:?}",
-        d.ucodes.len(),
-        pass.len(),
-        issues
-    );
-    println!(
-        "RESULT near 2100 Hz {:.4} near 2600 Hz {:.4}",
-        share_near(&pass, 2100.0),
-        share_near(&pass, 2600.0)
-    );
+    println!("RESULT segments {} symbols {} seconds {seconds:.3} problems {:?}", d.ucodes.len(), pass.len(), issues);
+    println!("RESULT near 2100 Hz {:.4} near 2600 Hz {:.4}", share_near(&pass, 2100.0), share_near(&pass, 2600.0));
     for r in report {
         println!("RESULT {r}");
     }

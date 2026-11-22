@@ -103,41 +103,21 @@ const LONG_AHEAD: usize = 50 - 14;
 /// symbol either way. It is done by symbol 76, inside the short turn-on's
 /// segment 5, and the core tracks from symbol 72, so a short burst's data,
 /// from symbol 80, is not missed.
-const COMMON: Window = Window {
-    align: (4, 72),
-    solve: (4, 72),
-    search: 8,
-};
+const COMMON: Window = Window { align: (4, 72), solve: (4, 72), search: 8 };
 
 /// The long turn-on's own training, counted from the same symbol: 256
 /// symbols of segment 4, solved by symbol 280 with 800 of conditioning still
 /// to come for the loops to settle on; and further in, searched a hundred
 /// symbols either way, for when a jitter buffer's slip spoils the first.
-const LONG: Window = Window {
-    align: (20, 276),
-    solve: (20, 276),
-    search: 8,
-};
-const LONG_RETRY: Window = Window {
-    align: (420, 676),
-    solve: (420, 676),
-    search: 200,
-};
+const LONG: Window = Window { align: (20, 276), solve: (20, 276), search: 8 };
+const LONG_RETRY: Window = Window { align: (420, 676), solve: (420, 676), search: 200 };
 
 /// The training for a burst whose conditioning was found without its start,
 /// counted from the newest symbol it was found by: 256 symbols from eight
 /// after it, and the retry further in, all well inside the long turn-on's
 /// conditioning for a start found up to 400 symbols into it.
-const LATE: Window = Window {
-    align: (8, 264),
-    solve: (8, 264),
-    search: 8,
-};
-const LATE_RETRY: Window = Window {
-    align: (300, 556),
-    solve: (300, 556),
-    search: 200,
-};
+const LATE: Window = Window { align: (8, 264), solve: (8, 264), search: 8 };
+const LATE_RETRY: Window = Window { align: (300, 556), solve: (300, 556), search: 200 };
 
 /// Segment 4's period, in symbols, and the symbols of it that a burst found
 /// without its start was found by (`hunt.rs`).
@@ -175,26 +155,10 @@ fn tables() -> &'static Tables {
         // within an eighth of a turn only if the table's own comes out on the
         // axis.
         let h = std::f64::consts::FRAC_1_SQRT_2;
-        let eight = [
-            (1.0, 0.0),
-            (h, h),
-            (0.0, 1.0),
-            (-h, h),
-            (-1.0, 0.0),
-            (-h, -h),
-            (0.0, -1.0),
-            (h, -h),
-        ];
+        let eight = [(1.0, 0.0), (h, h), (0.0, 1.0), (-h, h), (-1.0, 0.0), (-h, -h), (0.0, -1.0), (h, -h)];
         let four = [(1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0)];
-        let table = |points: &[(f64, f64)]| {
-            Slicer::table(Constellation::new(
-                points.iter().map(|&p| p.into()).collect(),
-            ))
-        };
-        Tables {
-            eight: table(&eight),
-            four: table(&four),
-        }
+        let table = |points: &[(f64, f64)]| Slicer::table(Constellation::new(points.iter().map(|&p| p.into()).collect()));
+        Tables { eight: table(&eight), four: table(&four) }
     })
 }
 
@@ -220,14 +184,9 @@ fn sequences(rate: Rate) -> &'static Sequences {
             let of = |turn_on: TurnOn| -> Vec<Complex> {
                 let mut tx = Transmitter::new(16_000.0);
                 tx.start(rate, turn_on);
-                (0..turn_on.symbols())
-                    .map(|_| tx.next_symbol().into())
-                    .collect()
+                (0..turn_on.symbols()).map(|_| tx.next_symbol().into()).collect()
             };
-            Sequences {
-                short: of(TurnOn::Short),
-                long: of(TurnOn::Long).split_off(LONG_AHEAD),
-            }
+            Sequences { short: of(TurnOn::Short), long: of(TurnOn::Long).split_off(LONG_AHEAD) }
         })
     });
     &both[usize::from(rate == Rate::R2400)]
@@ -244,11 +203,7 @@ fn late_targets(rate: Rate, phase: usize, count: usize) -> Vec<Complex> {
     (0..count)
         .map(|k| {
             let z = conditioning[(phase + k) % PERIOD];
-            if (phase % PERIOD + k) / PERIOD % 2 == 1 {
-                -z
-            } else {
-                z
-            }
+            if (phase % PERIOD + k) / PERIOD % 2 == 1 { -z } else { z }
         })
         .collect()
 }
@@ -443,19 +398,14 @@ impl Receiver {
             self.on_found(found);
         }
         self.follow_level();
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|(_, due)| self.core.halves() >= *due)
+        if self.pending.as_ref().is_some_and(|(_, due)| self.core.halves() >= *due)
             && let Some((training, _)) = self.pending.take()
         {
             self.core.train(training);
         }
         self.listen();
         while let Some(point) = self.core.next() {
-            let Some(symbol) = self.core.settle(point.nearest) else {
-                break;
-            };
+            let Some(symbol) = self.core.settle(point.nearest) else { break };
             self.last = symbol.point;
             if self.core.slips() != self.slips {
                 // Found again after a jump: the phase is found to within a
@@ -524,9 +474,7 @@ impl Receiver {
             Found::Conditioning { start, turn } => {
                 // A turn-on sequence, whatever was going on before: a burst
                 // that ended unnoticed, or reversals that were not one.
-                let Some(start) = self.half_at(start) else {
-                    return;
-                };
+                let Some(start) = self.half_at(start) else { return };
                 if self.burst != Burst::Reversals {
                     self.begin();
                 }
@@ -546,30 +494,19 @@ impl Receiver {
                     // Where a long turn-on has left taps, a short one keeps
                     // them: the core looks for the signal with them before
                     // taking what 68 rows solve to.
-                    accept_db: if self.taught {
-                        f64::INFINITY
-                    } else {
-                        ACCEPT_DB
-                    },
+                    accept_db: if self.taught { f64::INFINITY } else { ACCEPT_DB },
                     slicer: slicer_for(self.rate),
                     fallback: true,
                 };
                 self.pending = Some((training, due(start, COMMON)));
             }
-            Found::Late {
-                at,
-                phase,
-                first,
-                turn,
-            } => {
+            Found::Late { at, phase, first, turn } => {
                 // Only for a burst not already found: the conditioning of one
                 // that was goes on being segment 4 for a thousand symbols.
                 if !matches!(self.burst, Burst::Quiet | Burst::Reversals | Burst::Failed) {
                     return;
                 }
-                let Some(start) = self.half_at(at) else {
-                    return;
-                };
+                let Some(start) = self.half_at(at) else { return };
                 if self.burst != Burst::Reversals {
                     self.begin();
                 }
@@ -590,11 +527,7 @@ impl Receiver {
                 if self.taught
                     && let Some(from) = self.half_at(first)
                 {
-                    let window = Window {
-                        align: (0, LATE_LOOK),
-                        solve: (0, LATE_LOOK),
-                        search: 0,
-                    };
+                    let window = Window { align: (0, LATE_LOOK), solve: (0, LATE_LOOK), search: 0 };
                     let training = Training {
                         targets: late_targets(self.rate, phase + PERIOD - (LATE_BY - 1), LATE_LOOK),
                         start: from,
@@ -610,10 +543,7 @@ impl Receiver {
                 }
             }
             Found::Length { long, turn } => {
-                if !matches!(
-                    self.burst,
-                    Burst::Training | Burst::Tracking | Burst::Failed
-                ) {
+                if !matches!(self.burst, Burst::Training | Burst::Tracking | Burst::Failed) {
                     return;
                 }
                 let Some(start) = self.start else { return };
@@ -628,11 +558,7 @@ impl Receiver {
                 }
                 let (targets, first, retry) = match self.late {
                     None => (sequences(self.rate).long.clone(), LONG, LONG_RETRY),
-                    Some(phase) => (
-                        late_targets(self.rate, phase, LATE_RETRY.solve.1),
-                        LATE,
-                        LATE_RETRY,
-                    ),
+                    Some(phase) => (late_targets(self.rate, phase, LATE_RETRY.solve.1), LATE, LATE_RETRY),
                 };
                 self.long = true;
                 let training = Training {
@@ -669,32 +595,20 @@ impl Receiver {
     fn follow_level(&mut self) {
         let level = self.hunt.level();
         if self.burst == Burst::Quiet {
-            let seconds = if level < self.floor {
-                FLOOR_FALL_SECONDS
-            } else {
-                FLOOR_RISE_SECONDS
-            };
+            let seconds = if level < self.floor { FLOOR_FALL_SECONDS } else { FLOOR_RISE_SECONDS };
             self.floor += (level - self.floor) / (seconds * self.fs);
             return;
         }
         self.loudest = self.loudest.max(level) * (1.0 - 1.0 / (LOUDEST_SECONDS * self.fs));
         let off = (OFF_BELOW_LOUDEST * self.loudest)
-            .max(
-                (self.floor * self.loudest)
-                    .sqrt()
-                    .min(OFF_BELOW_LOUDEST_AT_MOST * self.loudest),
-            )
+            .max((self.floor * self.loudest).sqrt().min(OFF_BELOW_LOUDEST_AT_MOST * self.loudest))
             .max(CARRIER_OFF);
         if self.carrier {
             if level < off {
                 self.carrier = false;
                 self.went_off = off;
             }
-        } else if level
-            > (BACK_ON * self.went_off)
-                .min(0.8 * self.loudest)
-                .max(CARRIER_ON)
-        {
+        } else if level > (BACK_ON * self.went_off).min(0.8 * self.loudest).max(CARRIER_ON) {
             self.carrier = true;
         }
         self.off_for = if self.carrier { 0 } else { self.off_for + 1 };
@@ -796,11 +710,7 @@ impl Receiver {
 
 /// The core for a rate: its symbol rate on V.27 ter's 1800 Hz.
 fn core_for(fs: f64, rate: Rate) -> Core {
-    Core::new(
-        Band::new(fs, rate.baud(), CARRIER),
-        Options::fixed(),
-        slicer_for(rate),
-    )
+    Core::new(Band::new(fs, rate.baud(), CARRIER), Options::fixed(), slicer_for(rate))
 }
 
 /// The half-symbol sample by which a training from `start` has its window
@@ -829,15 +739,9 @@ mod tests {
             assert_eq!(short[..72], long[..72], "{rate:?}");
             // Reversals first, then segment 4 starting with no change.
             for k in 1..14 {
-                assert!(
-                    (short[k] + short[k - 1]).abs() < 1e-12,
-                    "{rate:?} symbol {k} is not a reversal"
-                );
+                assert!((short[k] + short[k - 1]).abs() < 1e-12, "{rate:?} symbol {k} is not a reversal");
             }
-            assert!(
-                (short[14] - short[13]).abs() < 1e-12,
-                "{rate:?} segment 4 does not start with 0 degrees"
-            );
+            assert!((short[14] - short[13]).abs() < 1e-12, "{rate:?} segment 4 does not start with 0 degrees");
             assert_eq!(short[COMMON.solve.1 - 1], long[COMMON.solve.1 - 1]);
         }
     }
@@ -852,15 +756,9 @@ mod tests {
             for from in [0, 1, 58, 126, 127, 300, 700] {
                 let made = late_targets(rate, from, 1074 - from);
                 let sign = made[0] * conditioning[from].conj();
-                assert!(
-                    (sign.abs() - 1.0).abs() < 1e-12 && sign.im.abs() < 1e-12,
-                    "{rate:?} from {from}"
-                );
+                assert!((sign.abs() - 1.0).abs() < 1e-12 && sign.im.abs() < 1e-12, "{rate:?} from {from}");
                 for (k, z) in made.iter().enumerate() {
-                    assert!(
-                        (*z - conditioning[from + k] * sign).abs() < 1e-12,
-                        "{rate:?} from {from}, symbol {k}"
-                    );
+                    assert!((*z - conditioning[from + k] * sign).abs() < 1e-12, "{rate:?} from {from}, symbol {k}");
                 }
             }
         }
@@ -871,20 +769,13 @@ mod tests {
         // Labels are phases -- eighths at 4800, quarters at 2400 -- which is
         // what the phase change is read from.
         for (rate, phases) in [(Rate::R4800, 8), (Rate::R2400, 4)] {
-            let Slicer::Table(table) = slicer_for(rate) else {
-                unreachable!()
-            };
+            let Slicer::Table(table) = slicer_for(rate) else { unreachable!() };
             assert_eq!(table.len(), phases);
             assert!((table.power() - 1.0).abs() < 1e-12);
             for k in 0..phases {
                 let z = Complex::from_polar(1.0, std::f64::consts::TAU * k as f64 / phases as f64);
                 assert_eq!(table.nearest(z), k, "{rate:?}");
-                assert_eq!(
-                    table.nearest(
-                        z * Complex::from_polar(1.0, 0.3 * std::f64::consts::PI / phases as f64)
-                    ),
-                    k
-                );
+                assert_eq!(table.nearest(z * Complex::from_polar(1.0, 0.3 * std::f64::consts::PI / phases as f64)), k);
             }
         }
     }

@@ -60,14 +60,9 @@ fn the_three_hundred_bit_per_second_channel() {
 
 #[test]
 fn the_two_tones_a_fax_call_starts_with() {
-    for (name, hz) in [
-        ("the calling tone", v21::CNG),
-        ("the called tone", v21::CED),
-    ] {
+    for (name, hz) in [("the calling tone", v21::CNG), ("the called tone", v21::CED)] {
         let mut tone = v21::Tone::new(hz, FS);
-        let out: Vec<f64> = (0..(FS * 0.5) as usize)
-            .map(|_| tone.next_sample())
-            .collect();
+        let out: Vec<f64> = (0..(FS * 0.5) as usize).map(|_| tone.next_sample()).collect();
         check(name, &out);
     }
 }

@@ -9,11 +9,7 @@ const FS: f64 = 16_000.0;
 
 fn server() -> Info0d {
     Info0d {
-        v34: Info0 {
-            constellation_1664: true,
-            rate_3429: true,
-            ..Info0::default()
-        },
+        v34: Info0 { constellation_1664: true, rate_3429: true, ..Info0::default() },
         nominal_power: 4,
         max_power: 23,
         power_at_codec: true,
@@ -24,21 +20,9 @@ fn server() -> Info0d {
 
 /// Phase 2 as it would have come out.
 fn settled() -> (analogue::Settings, digital::Settings) {
-    let probed = [Probed {
-        high_carrier: false,
-        pre_emphasis: 0,
-        max_rate: 12,
-    }; 6];
-    let info1d = Info1c {
-        probed,
-        ..Info1c::default()
-    };
-    let asked = Info1aPcm {
-        md_length: 0,
-        uinfo: 79,
-        upstream: SymbolRate::S3200,
-        frequency_offset: None,
-    };
+    let probed = [Probed { high_carrier: false, pre_emphasis: 0, max_rate: 12 }; 6];
+    let info1d = Info1c { probed, ..Info1c::default() };
+    let asked = Info1aPcm { md_length: 0, uinfo: 79, upstream: SymbolRate::S3200, frequency_offset: None };
     (
         analogue::Settings::new(&server(), &info1d, &asked, 0.02, true),
         digital::Settings::new(Law::Mu, &info1d, &asked, 0.02, true),
@@ -56,13 +40,7 @@ struct Call {
 impl Call {
     fn new(net: Network) -> Self {
         let (a, d) = settled();
-        Self {
-            net,
-            analogue: analogue::Modem::new(a, FS),
-            digital: digital::Modem::new(d),
-            up: Vec::new(),
-            ticks: 0,
-        }
+        Self { net, analogue: analogue::Modem::new(a, FS), digital: digital::Modem::new(d), up: Vec::new(), ticks: 0 }
     }
 
     /// One network sample: 125 microseconds.
@@ -83,12 +61,7 @@ impl Call {
             self.tick();
             let now = (self.analogue.phase(), self.digital.phase());
             if now != last {
-                println!(
-                    "{:7.3} s  analogue: {:28} digital: {}",
-                    self.ticks as f64 / 8000.0,
-                    now.0,
-                    now.1
-                );
+                println!("{:7.3} s  analogue: {:28} digital: {}", self.ticks as f64 / 8000.0, now.0, now.1);
                 last = now;
             }
             if done(self) {
@@ -124,27 +97,11 @@ fn check_connects(net: Network) -> Call {
 
 #[test]
 fn phases_3_and_4_connect_over_a_clean_network() {
-    let call = check_connects(
-        Network::new(Law::Mu, FS)
-            .with_delay(0.010, FS)
-            .with_noise(1e-5),
-    );
-    let analogue::Status::Connected {
-        downstream,
-        upstream,
-    } = call.analogue.status()
-    else {
-        unreachable!()
-    };
+    let call = check_connects(Network::new(Law::Mu, FS).with_delay(0.010, FS).with_noise(1e-5));
+    let analogue::Status::Connected { downstream, upstream } = call.analogue.status() else { unreachable!() };
     assert!(downstream >= 48_000, "downstream {downstream}");
     assert!(upstream >= 24_000, "upstream {upstream}");
-    assert_eq!(
-        call.digital.status(),
-        digital::Status::Connected {
-            downstream,
-            upstream
-        }
-    );
+    assert_eq!(call.digital.status(), digital::Status::Connected { downstream, upstream });
 }
 
 /// The CPt and CP that go out send a constellation field for every data frame
@@ -153,23 +110,13 @@ fn phases_3_and_4_connect_over_a_clean_network() {
 /// interval i"), and the digital modem here reads them and connects on them.
 #[test]
 fn the_cp_that_goes_out_has_six_fields_and_the_digital_modem_connects_on_it() {
-    let call = check_connects(
-        Network::new(Law::Mu, FS)
-            .with_delay(0.010, FS)
-            .with_noise(1e-5),
-    );
+    let call = check_connects(Network::new(Law::Mu, FS).with_delay(0.010, FS).with_noise(1e-5));
     let choice = call.analogue.choice().expect("nothing was asked for");
-    for (what, read, asked) in [
-        ("CPt", call.digital.cpt(), &choice.training),
-        ("CP", call.digital.cp(), &choice.data),
-    ] {
+    for (what, read, asked) in [("CPt", call.digital.cpt(), &choice.training), ("CP", call.digital.cp(), &choice.data)] {
         let read = read.unwrap_or_else(|| panic!("the digital modem read no {what}"));
         assert_eq!(read.intervals, [0, 1, 2, 3, 4, 5], "{what}");
         assert_eq!(read.constellations.len(), 6, "{what}");
-        assert_eq!(
-            read.constellations, asked.constellations,
-            "{what} as read is not {what} as sent"
-        );
+        assert_eq!(read.constellations, asked.constellations, "{what} as read is not {what} as sent");
     }
 }
 
@@ -192,11 +139,7 @@ fn contains(got: &[bool], sent: &[bool]) -> bool {
 
 #[test]
 fn data_crosses_both_ways() {
-    let mut call = check_connects(
-        Network::new(Law::Mu, FS)
-            .with_delay(0.010, FS)
-            .with_noise(1e-5),
-    );
+    let mut call = check_connects(Network::new(Law::Mu, FS).with_delay(0.010, FS).with_noise(1e-5));
     println!("digital phase 3 SNR {:?}", call.digital.phase3_snr());
     let down = pattern(20_000, 7);
     let up = pattern(8_000, 11);
@@ -207,10 +150,7 @@ fn data_crosses_both_ways() {
     got_down.extend(call.analogue.take_bits());
     got_up.extend(call.digital.take_bits());
     println!("received {} down, {} up", got_down.len(), got_up.len());
-    assert!(
-        contains(&got_down, &down),
-        "the downstream did not arrive whole"
-    );
+    assert!(contains(&got_down, &down), "the downstream did not arrive whole");
     assert!(contains(&got_up, &up), "the upstream did not arrive whole");
 }
 
@@ -248,21 +188,14 @@ impl FullCall {
             self.ticks += 1;
             let now = (self.analogue.phase(), self.digital.phase());
             if now != last {
-                println!(
-                    "{:7.3} s  analogue: {:28} digital: {}",
-                    self.ticks as f64 / 8000.0,
-                    now.0,
-                    now.1
-                );
+                println!("{:7.3} s  analogue: {:28} digital: {}", self.ticks as f64 / 8000.0, now.0, now.1);
                 last = now;
             }
             let up = |s: Status| matches!(s, Status::Connected { .. });
             if up(self.analogue.status()) && up(self.digital.status()) {
                 return true;
             }
-            if matches!(self.analogue.status(), Status::Failed(_))
-                || matches!(self.digital.status(), Status::Failed(_))
-            {
+            if matches!(self.analogue.status(), Status::Failed(_)) || matches!(self.digital.status(), Status::Failed(_)) {
                 return false;
             }
         }
@@ -273,23 +206,13 @@ impl FullCall {
 #[test]
 fn a_whole_v90_start_up_from_phase_2_connects() {
     use datapump::v90::startup::Status;
-    let mut call = FullCall::new(
-        Network::new(Law::Mu, FS)
-            .with_delay(0.020, FS)
-            .with_noise(1e-5),
-        server(),
-    );
+    let mut call = FullCall::new(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5), server());
     let ok = call.run(30.0);
     println!("{:?} {:?}", call.analogue.status(), call.digital.status());
     assert!(ok, "no connection");
     assert!(call.analogue.is_v90());
-    let Status::Connected { transmit, receive } = call.analogue.status() else {
-        unreachable!()
-    };
-    assert!(
-        receive >= 48_000 && transmit >= 24_000,
-        "{receive} down, {transmit} up"
-    );
+    let Status::Connected { transmit, receive } = call.analogue.status() else { unreachable!() };
+    assert!(receive >= 48_000 && transmit >= 24_000, "{receive} down, {transmit} up");
     // And the round trip phase 2 measured is the line's.
     let rtt = call.analogue.round_trip().unwrap();
     assert!((0.03..0.08).contains(&rtt), "round trip {rtt}");
@@ -298,18 +221,8 @@ fn a_whole_v90_start_up_from_phase_2_connects() {
 fn connects(net: Network, server: Info0d, seconds: f64) -> FullCall {
     let mut call = FullCall::new(net, server);
     let ok = call.run(seconds);
-    println!(
-        "{:?} {:?} ({})",
-        call.analogue.status(),
-        call.digital.status(),
-        call.analogue.last_failure().unwrap_or("")
-    );
-    assert!(
-        ok,
-        "no connection: {} / {}",
-        call.analogue.phase(),
-        call.digital.phase()
-    );
+    println!("{:?} {:?} ({})", call.analogue.status(), call.digital.status(), call.analogue.last_failure().unwrap_or(""));
+    assert!(ok, "no connection: {} / {}", call.analogue.phase(), call.digital.phase());
     call
 }
 
@@ -354,14 +267,7 @@ impl FullCall {
 
 #[test]
 fn a_robbed_bit_route_connects_and_carries_data() {
-    let mut call = connects(
-        Network::new(Law::Mu, FS)
-            .with_delay(0.020, FS)
-            .with_noise(1e-5)
-            .with_robbed_bit(2),
-        server(),
-        30.0,
-    );
+    let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5).with_robbed_bit(2), server(), 30.0);
     let v90 = call.analogue.v90().expect("not V.90");
     // What the DIL made of the robbed interval: half its codewords arrive
     // as a neighbour.
@@ -387,41 +293,21 @@ fn a_robbed_bit_route_connects_and_carries_data() {
 fn an_a_law_network_connects() {
     let mut a_law = server();
     a_law.a_law = true;
-    connects(
-        Network::new(Law::A, FS)
-            .with_delay(0.020, FS)
-            .with_noise(1e-5),
-        a_law,
-        30.0,
-    );
+    connects(Network::new(Law::A, FS).with_delay(0.020, FS).with_noise(1e-5), a_law, 30.0);
 }
 
 #[test]
 fn a_voip_length_round_trip_connects() {
     // 0.6 s each way: the round trip Rory's SIP trunk measures.
-    let call = connects(
-        Network::new(Law::Mu, FS)
-            .with_delay(0.600, FS)
-            .with_noise(1e-5),
-        server(),
-        40.0,
-    );
+    let call = connects(Network::new(Law::Mu, FS).with_delay(0.600, FS).with_noise(1e-5), server(), 40.0);
     let rtt = call.analogue.round_trip().unwrap();
     assert!((1.15..1.3).contains(&rtt), "round trip {rtt}");
 }
 
 #[test]
 fn a_noisy_loop_connects_slower() {
-    let call = connects(
-        Network::new(Law::Mu, FS)
-            .with_delay(0.020, FS)
-            .with_noise(3e-3),
-        server(),
-        30.0,
-    );
-    let datapump::v90::startup::Status::Connected { receive, .. } = call.analogue.status() else {
-        unreachable!()
-    };
+    let call = connects(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(3e-3), server(), 30.0);
+    let datapump::v90::startup::Status::Connected { receive, .. } = call.analogue.status() else { unreachable!() };
     assert!(receive < 50_000, "{receive} on a noisy loop");
 }
 
@@ -431,20 +317,13 @@ fn a_noisy_loop_connects_slower() {
 #[test]
 fn a_slip_in_data_mode_is_followed_and_data_after_it_arrives() {
     for inserted in [true, false] {
-        let net = Network::new(Law::Mu, FS)
-            .with_delay(0.020, FS)
-            .with_noise(1e-5)
-            .with_slips(9.0, inserted);
+        let net = Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5).with_slips(9.0, inserted);
         let mut call = connects(net, server(), 30.0);
         // Past the first slip, which is at nine seconds.
         call.run_until_seconds(10.0);
         assert_eq!(call.net.slips(), 1, "no slip happened");
         let v90 = call.analogue.v90().unwrap();
-        println!(
-            "inserted {inserted}: frames moved {}, receiver lost {}",
-            v90.frames_moved(),
-            v90.receiver().slips()
-        );
+        println!("inserted {inserted}: frames moved {}, receiver lost {}", v90.frames_moved(), v90.receiver().slips());
         assert!(v90.frames_moved() >= 1, "the frames were never found again");
         assert_eq!(call.carries_data(4.0), (true, true), "inserted {inserted}");
     }
@@ -456,19 +335,9 @@ fn a_slip_in_data_mode_is_followed_and_data_after_it_arrives() {
 fn a_retrain_from_either_end_comes_back_up() {
     use datapump::v90::startup::Status;
     for from_server in [true, false] {
-        let mut call = connects(
-            Network::new(Law::Mu, FS)
-                .with_delay(0.020, FS)
-                .with_noise(1e-5),
-            server(),
-            30.0,
-        );
+        let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5), server(), 30.0);
         let up = |s: Status| matches!(s, Status::Connected { .. });
-        assert!(if from_server {
-            call.digital.retrain()
-        } else {
-            call.analogue.retrain()
-        });
+        assert!(if from_server { call.digital.retrain() } else { call.analogue.retrain() });
         // Down, then up again.
         let start = call.ticks;
         let mut went_down = false;
@@ -481,22 +350,11 @@ fn a_retrain_from_either_end_comes_back_up() {
                 break;
             }
         }
-        println!(
-            "from the server {from_server}: {:?} {:?}",
-            call.analogue.status(),
-            call.digital.status()
-        );
+        println!("from the server {from_server}: {:?} {:?}", call.analogue.status(), call.digital.status());
         assert!(went_down, "the call never left data mode");
-        assert!(
-            up(call.analogue.status()) && up(call.digital.status()),
-            "the retrain never came back up"
-        );
+        assert!(up(call.analogue.status()) && up(call.digital.status()), "the retrain never came back up");
         assert!(call.analogue.is_v90());
-        assert_eq!(
-            call.carries_data(3.0),
-            (true, true),
-            "from the server {from_server}"
-        );
+        assert_eq!(call.carries_data(3.0), (true, true), "from the server {from_server}");
     }
 }
 
@@ -508,18 +366,8 @@ fn a_retrain_from_either_end_comes_back_up() {
 #[test]
 fn a_softphone_s_beep_after_the_server_has_gone_quiet_is_not_a_retrain() {
     for (db, retrains) in [(-10.0, 0), (0.0, 1)] {
-        let mut call = connects(
-            Network::new(Law::Mu, FS)
-                .with_delay(0.020, FS)
-                .with_noise(1e-5),
-            server(),
-            30.0,
-        );
-        let level = call
-            .analogue
-            .v90()
-            .and_then(|m| m.settings().tone_b_level)
-            .expect("phase 2 kept no level");
+        let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5), server(), 30.0);
+        let level = call.analogue.v90().and_then(|m| m.settings().tone_b_level).expect("phase 2 kept no level");
         call.analogue.take_notes();
         // The server stops, and the beep comes half a second into the quiet.
         let mut beep = dsp::Nco::new(1200.0, FS);
@@ -529,11 +377,7 @@ fn a_softphone_s_beep_after_the_server_has_gone_quiet_is_not_a_retrain() {
             call.up.clear();
             for x in call.net.down(0.0) {
                 let sounding = (0.5..0.7).contains(&(n as f64 / FS));
-                let x = x + if sounding {
-                    level * 10f64.powf(db / 20.0) * beep.step().1
-                } else {
-                    0.0
-                };
+                let x = x + if sounding { level * 10f64.powf(db / 20.0) * beep.step().1 } else { 0.0 };
                 call.up.push(call.analogue.step(x));
                 n += 1;
             }
@@ -541,11 +385,7 @@ fn a_softphone_s_beep_after_the_server_has_gone_quiet_is_not_a_retrain() {
         let notes = call.analogue.take_notes();
         println!("{db} dB: phase 2 heard tone B at {level:.4}; {notes:?}");
         assert_eq!(call.analogue.retrains(), retrains, "{db} dB: {notes:?}");
-        assert_eq!(
-            notes.iter().any(|n| n.contains("tone B")),
-            retrains > 0,
-            "{db} dB: {notes:?}"
-        );
+        assert_eq!(notes.iter().any(|n| n.contains("tone B")), retrains > 0, "{db} dB: {notes:?}");
     }
 }
 
@@ -592,13 +432,7 @@ impl FullCall {
 fn a_rate_renegotiation_from_either_end_settles_the_rates_asked_for() {
     // Over a short line, and over a VoIP call's 600 ms each way.
     for (from_server, delay) in [(true, 0.020), (false, 0.020), (true, 0.6), (false, 0.6)] {
-        let mut call = connects(
-            Network::new(Law::Mu, FS)
-                .with_delay(delay, FS)
-                .with_noise(1e-5),
-            server(),
-            40.0,
-        );
+        let mut call = connects(Network::new(Law::Mu, FS).with_delay(delay, FS).with_noise(1e-5), server(), 40.0);
         let (down, up) = call.rates();
         let began = call.ticks;
         if from_server {
@@ -606,53 +440,29 @@ fn a_rate_renegotiation_from_either_end_settles_the_rates_asked_for() {
         } else {
             assert!(call.analogue.renegotiate(40_000));
         }
-        assert!(
-            call.comes_back_up(10.0),
-            "from the server {from_server}: {} / {}",
-            call.analogue.phase(),
-            call.digital.phase()
-        );
+        assert!(call.comes_back_up(10.0), "from the server {from_server}: {} / {}", call.analogue.phase(), call.digital.phase());
         let (new_down, new_up) = call.rates();
-        println!(
-            "from the server {from_server}, {delay} s each way: {down}/{up} became {new_down}/{new_up} in {:.2} s",
-            (call.ticks - began) as f64 / 8000.0
-        );
+        println!("from the server {from_server}, {delay} s each way: {down}/{up} became {new_down}/{new_up} in {:.2} s", (call.ticks - began) as f64 / 8000.0);
         if from_server {
             assert_eq!(new_up, 19_200);
             assert_eq!(new_down, down);
         } else {
-            assert!(
-                (36_000..=40_000).contains(&new_down),
-                "downstream {new_down}"
-            );
+            assert!((36_000..=40_000).contains(&new_down), "downstream {new_down}");
             assert_eq!(new_up, up);
         }
         assert!(call.analogue.is_v90());
         assert_eq!(call.analogue.retrains(), 0, "a retrain happened");
         assert_eq!(call.analogue.renegotiations(), 1);
         assert_eq!(call.digital.v90().map(|m| m.renegotiations()), Some(1));
-        assert_eq!(
-            call.carries_data(3.0),
-            (true, true),
-            "from the server {from_server}"
-        );
+        assert_eq!(call.carries_data(3.0), (true, true), "from the server {from_server}");
         // And again, the other way round.
         if from_server {
             assert!(call.analogue.renegotiate(60_000));
         } else {
             assert!(call.digital.renegotiate(14));
         }
-        assert!(
-            call.comes_back_up(10.0),
-            "second, from the server {}",
-            !from_server
-        );
-        assert_eq!(
-            call.carries_data(3.0),
-            (true, true),
-            "second, from the server {}",
-            !from_server
-        );
+        assert!(call.comes_back_up(10.0), "second, from the server {}", !from_server);
+        assert_eq!(call.carries_data(3.0), (true, true), "second, from the server {}", !from_server);
     }
 }
 
@@ -661,35 +471,16 @@ fn a_rate_renegotiation_from_either_end_settles_the_rates_asked_for() {
 /// slower rate that carries data cleanly (9.6.2.1), with no retrain.
 #[test]
 fn a_line_gone_noisy_is_renegotiated_down() {
-    let mut call = connects(
-        Network::new(Law::Mu, FS)
-            .with_delay(0.020, FS)
-            .with_noise(1e-5),
-        server(),
-        30.0,
-    );
+    let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5), server(), 30.0);
     let (down, _) = call.rates();
     call.net.set_noise(1e-3);
-    assert!(
-        call.comes_back_up(10.0),
-        "{} / {}",
-        call.analogue.phase(),
-        call.digital.phase()
-    );
+    assert!(call.comes_back_up(10.0), "{} / {}", call.analogue.phase(), call.digital.phase());
     let (slower, _) = call.rates();
-    println!(
-        "{down} became {slower} after {} renegotiations",
-        call.analogue.renegotiations()
-    );
+    println!("{down} became {slower} after {} renegotiations", call.analogue.renegotiations());
     assert!(slower < down);
     // Settled: the rate holds, and data crosses.
     call.run_until_seconds(call.ticks as f64 / 8000.0 + 4.0);
-    assert_eq!(
-        call.rates().0,
-        slower,
-        "{} renegotiations",
-        call.analogue.renegotiations()
-    );
+    assert_eq!(call.rates().0, slower, "{} renegotiations", call.analogue.renegotiations());
     assert_eq!(call.carries_data(3.0), (true, true));
     assert_eq!(call.analogue.retrains(), 0);
 }
@@ -706,37 +497,17 @@ fn a_fall_back_tells_the_transcript_why_and_on_what_numbers() {
     let (down, _) = call.rates();
     call.analogue.take_notes();
     call.net.set_noise(1e-3);
-    assert!(
-        call.comes_back_up(10.0),
-        "{} / {}",
-        call.analogue.phase(),
-        call.digital.phase()
-    );
+    assert!(call.comes_back_up(10.0), "{} / {}", call.analogue.phase(), call.digital.phase());
     let (slower, _) = call.rates();
     let notes = call.analogue.take_notes();
     for note in &notes {
         println!("{note}");
     }
-    let why = notes
-        .iter()
-        .find(|n| n.starts_with("rate watch: "))
-        .unwrap_or_else(|| panic!("no reason given: {notes:#?}"));
-    for word in [
-        "looks short ",
-        "evidence ",
-        "worst block ",
-        "decisions' error ",
-        "receiver's error ",
-        "least gap ",
-        "expected ",
-        "worse ",
-    ] {
+    let why = notes.iter().find(|n| n.starts_with("rate watch: ")).unwrap_or_else(|| panic!("no reason given: {notes:#?}"));
+    for word in ["looks short ", "evidence ", "worst block ", "decisions' error ", "receiver's error ", "least gap ", "expected ", "worse "] {
         assert!(why.contains(word), "{why:?} does not say {word:?}");
     }
-    assert!(
-        why.ends_with(&format!("asked for {slower} bit/s, from {down}")),
-        "{why:?}, and the call came back at {slower}"
-    );
+    assert!(why.ends_with(&format!("asked for {slower} bit/s, from {down}")), "{why:?}, and the call came back at {slower}");
 }
 
 /// 9.7: a cleardown from either end ends the call at both.
@@ -744,62 +515,29 @@ fn a_fall_back_tells_the_transcript_why_and_on_what_numbers() {
 fn a_cleardown_from_either_end_ends_the_call_at_both() {
     use datapump::v90::startup::Status;
     for from_server in [true, false] {
-        let mut call = connects(
-            Network::new(Law::Mu, FS).with_delay(0.020, FS),
-            server(),
-            30.0,
-        );
-        assert!(if from_server {
-            call.digital.clear_down()
-        } else {
-            call.analogue.clear_down()
-        });
+        let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.020, FS), server(), 30.0);
+        assert!(if from_server { call.digital.clear_down() } else { call.analogue.clear_down() });
         let start = call.ticks;
         while call.ticks < start + 3 * 8000 {
             call.run_until_seconds((call.ticks + 80) as f64 / 8000.0);
-            if call.analogue.status() == Status::ClearedDown
-                && call.digital.status() == Status::ClearedDown
-            {
+            if call.analogue.status() == Status::ClearedDown && call.digital.status() == Status::ClearedDown {
                 break;
             }
         }
-        println!(
-            "from the server {from_server}: {:?} {:?} after {:.2} s",
-            call.analogue.status(),
-            call.digital.status(),
-            (call.ticks - start) as f64 / 8000.0
-        );
-        assert_eq!(
-            call.analogue.status(),
-            Status::ClearedDown,
-            "from the server {from_server}"
-        );
-        assert_eq!(
-            call.digital.status(),
-            Status::ClearedDown,
-            "from the server {from_server}"
-        );
+        println!("from the server {from_server}: {:?} {:?} after {:.2} s", call.analogue.status(), call.digital.status(), (call.ticks - start) as f64 / 8000.0);
+        assert_eq!(call.analogue.status(), Status::ClearedDown, "from the server {from_server}");
+        assert_eq!(call.digital.status(), Status::ClearedDown, "from the server {from_server}");
     }
 }
 
 #[test]
 fn a_sound_card_clock_120_ppm_off_is_followed_through_ten_seconds_of_data() {
-    let mut call = connects(
-        Network::new(Law::Mu, FS)
-            .with_delay(0.020, FS)
-            .with_noise(1e-5)
-            .with_clock(120.0),
-        server(),
-        30.0,
-    );
+    let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5).with_clock(120.0), server(), 30.0);
     let drift = call.analogue.v90().unwrap().receiver().drift_ppm();
     println!("drift read as {drift:.1} ppm");
     assert_eq!(call.carries_data(10.0), (true, true));
     let drift = call.analogue.v90().unwrap().receiver().drift_ppm();
-    assert!(
-        (drift.abs() - 120.0).abs() < 20.0,
-        "drift read as {drift:.1} ppm"
-    );
+    assert!((drift.abs() - 120.0).abs() < 20.0, "drift read as {drift:.1} ppm");
 }
 /// A softphone's jitter buffer slipping twenty milliseconds of the
 /// downstream every few seconds, over a VoIP call's round trip, landing in
@@ -808,17 +546,8 @@ fn a_sound_card_clock_120_ppm_off_is_followed_through_ten_seconds_of_data() {
 #[test]
 fn slips_during_the_start_up_are_followed() {
     let (mut dil_moved, mut frames_moved) = (0, 0);
-    for (period, inserted) in [
-        (5.9, false),
-        (2.9, true),
-        (4.3, true),
-        (3.1, false),
-        (2.3, true),
-    ] {
-        let net = Network::new(Law::Mu, FS)
-            .with_delay(0.6, FS)
-            .with_noise(1e-5)
-            .with_slips(period, inserted);
+    for (period, inserted) in [(5.9, false), (2.9, true), (4.3, true), (3.1, false), (2.3, true)] {
+        let net = Network::new(Law::Mu, FS).with_delay(0.6, FS).with_noise(1e-5).with_slips(period, inserted);
         let mut call = FullCall::new(net, server());
         let ok = call.run(25.0);
         let v90 = call.analogue.v90();
@@ -828,19 +557,8 @@ fn slips_during_the_start_up_are_followed() {
             v90.map(|m| m.dil_moved()),
             v90.map(|m| m.frames_moved())
         );
-        assert!(
-            ok,
-            "slips every {period} s: {} / {} ({:?})",
-            call.analogue.phase(),
-            call.digital.phase(),
-            call.analogue.last_failure()
-        );
-        assert_eq!(
-            call.analogue.retrains(),
-            0,
-            "slips every {period} s: {:?}",
-            call.analogue.last_failure()
-        );
+        assert!(ok, "slips every {period} s: {} / {} ({:?})", call.analogue.phase(), call.digital.phase(), call.analogue.last_failure());
+        assert_eq!(call.analogue.retrains(), 0, "slips every {period} s: {:?}", call.analogue.last_failure());
         assert!(call.net.slips() >= 2);
         dil_moved += v90.map_or(0, |m| m.dil_moved());
         frames_moved += v90.map_or(0, |m| m.frames_moved());
@@ -853,31 +571,12 @@ fn slips_during_the_start_up_are_followed() {
 /// V.34 in the retrain's INFO1a (9.2.2.1.9), and gets it.
 #[test]
 fn a_line_that_will_not_carry_pcm_comes_up_as_v34() {
-    let mut call = FullCall::new(
-        Network::new(Law::Mu, FS)
-            .with_delay(0.020, FS)
-            .with_noise(2e-2),
-        server(),
-    );
+    let mut call = FullCall::new(Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(2e-2), server());
     let ok = call.run(60.0);
-    println!(
-        "{:?} {:?}, {} retrains, last failure {:?}",
-        call.analogue.status(),
-        call.digital.status(),
-        call.analogue.retrains(),
-        call.analogue.last_failure()
-    );
-    assert!(
-        ok,
-        "no connection: {} / {}",
-        call.analogue.phase(),
-        call.digital.phase()
-    );
+    println!("{:?} {:?}, {} retrains, last failure {:?}", call.analogue.status(), call.digital.status(), call.analogue.retrains(), call.analogue.last_failure());
+    assert!(ok, "no connection: {} / {}", call.analogue.phase(), call.digital.phase());
     assert!(!call.analogue.is_v90());
-    assert_eq!(
-        call.analogue.last_failure(),
-        Some("the route cannot carry V.90's slowest rate")
-    );
+    assert_eq!(call.analogue.last_failure(), Some("the route cannot carry V.90's slowest rate"));
     assert_eq!(call.analogue.retrains(), 1);
     assert_eq!(call.carries_data(3.0), (true, true));
 }
@@ -914,17 +613,8 @@ fn a_softphone_with_a_gain_control_and_a_hasty_jitter_buffer_is_followed() {
             call.analogue.retrains(),
             v90.map(|m| m.dil_moved())
         );
-        assert!(
-            ok,
-            "slips every {period} s: {} / {}",
-            call.analogue.phase(),
-            call.digital.phase()
-        );
-        assert!(
-            call.analogue.is_v90(),
-            "slips every {period} s: {:?}",
-            call.analogue.last_failure()
-        );
+        assert!(ok, "slips every {period} s: {} / {}", call.analogue.phase(), call.digital.phase());
+        assert!(call.analogue.is_v90(), "slips every {period} s: {:?}", call.analogue.last_failure());
     }
 }
 
@@ -937,25 +627,12 @@ fn a_softphone_with_a_gain_control_and_a_hasty_jitter_buffer_is_followed() {
 fn a_server_that_sends_jd_at_the_last_moment_hears_s_in_time() {
     use datapump::v90::digital::Habits;
     for delay in [0.3, 0.6] {
-        let net = Network::new(Law::Mu, FS)
-            .with_delay(delay, FS)
-            .with_noise(1e-5);
+        let net = Network::new(Law::Mu, FS).with_delay(delay, FS).with_noise(1e-5);
         let mut call = FullCall::new(net, server());
-        call.digital =
-            datapump::v90::startup::Digital::new(server(), 0.0).with_habits(Habits::LIVE_SERVER);
+        call.digital = datapump::v90::startup::Digital::new(server(), 0.0).with_habits(Habits::LIVE_SERVER);
         let ok = call.run(40.0);
-        println!(
-            "{delay} s each way: {:?}, {} retrains, {:?}",
-            call.analogue.status(),
-            call.analogue.retrains(),
-            call.analogue.last_failure()
-        );
-        assert!(
-            ok,
-            "{delay} s each way: {} / {}",
-            call.analogue.phase(),
-            call.digital.phase()
-        );
+        println!("{delay} s each way: {:?}, {} retrains, {:?}", call.analogue.status(), call.analogue.retrains(), call.analogue.last_failure());
+        assert!(ok, "{delay} s each way: {} / {}", call.analogue.phase(), call.digital.phase());
         assert!(call.analogue.is_v90());
         assert_eq!(call.analogue.retrains(), 0, "{delay} s each way");
     }
@@ -967,15 +644,10 @@ fn a_server_that_sends_jd_at_the_last_moment_hears_s_in_time() {
 #[test]
 fn a_cut_in_the_training_stretch_is_trained_past() {
     use datapump::v90::digital::Habits;
-    let net = || {
-        Network::new(Law::Mu, FS)
-            .with_delay(0.3, FS)
-            .with_noise(1e-5)
-    };
+    let net = || Network::new(Law::Mu, FS).with_delay(0.3, FS).with_noise(1e-5);
     // Where TRN1d begins, in the network's own time.
     let mut call = FullCall::new(net(), server());
-    call.digital =
-        datapump::v90::startup::Digital::new(server(), 0.0).with_habits(Habits::LIVE_SERVER);
+    call.digital = datapump::v90::startup::Digital::new(server(), 0.0).with_habits(Habits::LIVE_SERVER);
     while call.digital.phase() != "V.90 phase 3: Jd" {
         call.run_until_seconds((call.ticks + 8) as f64 / 8000.0);
     }
@@ -983,22 +655,11 @@ fn a_cut_in_the_training_stretch_is_trained_past() {
     let cut = call.ticks as f64 / 8000.0 + 0.054 + 0.1;
     for inserted in [false, true] {
         let mut call = FullCall::new(net().with_slip_at(cut, inserted), server());
-        call.digital =
-            datapump::v90::startup::Digital::new(server(), 0.0).with_habits(Habits::LIVE_SERVER);
+        call.digital = datapump::v90::startup::Digital::new(server(), 0.0).with_habits(Habits::LIVE_SERVER);
         let ok = call.run(40.0);
-        println!(
-            "inserted {inserted}: {:?}, {} retrains, {:?}",
-            call.analogue.status(),
-            call.analogue.retrains(),
-            call.analogue.last_failure()
-        );
+        println!("inserted {inserted}: {:?}, {} retrains, {:?}", call.analogue.status(), call.analogue.retrains(), call.analogue.last_failure());
         assert_eq!(call.net.slips(), 1);
-        assert!(
-            ok,
-            "inserted {inserted}: {} / {}",
-            call.analogue.phase(),
-            call.digital.phase()
-        );
+        assert!(ok, "inserted {inserted}: {} / {}", call.analogue.phase(), call.digital.phase());
         assert_eq!(call.analogue.retrains(), 0, "inserted {inserted}");
     }
 }
@@ -1011,11 +672,7 @@ impl FullCall {
         let start = self.ticks;
         let end = self.ticks + (seconds * 8000.0) as u64;
         while self.ticks < end {
-            let up: Vec<f64> = if server_stops {
-                self.up.clone()
-            } else {
-                vec![0.0; self.up.len()]
-            };
+            let up: Vec<f64> = if server_stops { self.up.clone() } else { vec![0.0; self.up.len()] };
             let to_digital = self.net.up(&up);
             self.up.clear();
             let from_digital = self.digital.step(to_digital);
@@ -1051,13 +708,7 @@ impl FullCall {
 #[test]
 fn a_far_end_that_stops_sending_is_noticed_at_either_end() {
     for server_stops in [true, false] {
-        let mut call = connects(
-            Network::new(Law::Mu, FS)
-                .with_delay(0.6, FS)
-                .with_noise(1e-5),
-            server(),
-            40.0,
-        );
+        let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.6, FS).with_noise(1e-5), server(), 40.0);
         assert_eq!(call.carries_data(2.0), (true, true));
         assert!(call.analogue.carrier() && call.digital.carrier());
         let after = call.notices_silence(server_stops, 6.0);
@@ -1091,8 +742,7 @@ enum Stopped {
 fn a_far_end_that_stops_in_phase_4_ends_the_phase_and_is_never_taken_for_ed() {
     for stopped in [Stopped::Silence, Stopped::LastBlock, Stopped::Dc] {
         let mut call = Call::new(Network::new(Law::Mu, FS).with_delay(0.010, FS));
-        let mut last: std::collections::VecDeque<f64> =
-            std::collections::VecDeque::with_capacity(162);
+        let mut last: std::collections::VecDeque<f64> = std::collections::VecDeque::with_capacity(162);
         let mut froze: Option<u64> = None;
         let mut notes: Vec<(f64, String)> = Vec::new();
         while call.ticks < 30 * 8000 {
@@ -1127,29 +777,14 @@ fn a_far_end_that_stops_in_phase_4_ends_the_phase_and_is_never_taken_for_ed() {
         for (at, note) in &notes {
             println!("{stopped:?}: {at:7.3}  {note}");
         }
-        let froze =
-            froze.unwrap_or_else(|| panic!("{stopped:?}: no MP' before the far end stopped"));
-        assert_eq!(
-            call.analogue.status(),
-            analogue::Status::Failed("the far end stopped in phase 4"),
-            "{stopped:?}"
-        );
+        let froze = froze.unwrap_or_else(|| panic!("{stopped:?}: no MP' before the far end stopped"));
+        assert_eq!(call.analogue.status(), analogue::Status::Failed("the far end stopped in phase 4"), "{stopped:?}");
         let after = (call.ticks - froze) as f64 / 8000.0;
-        assert!(
-            (1.0..1.1).contains(&after),
-            "{stopped:?}: the phase ended {after} s after the far end stopped"
-        );
+        assert!((1.0..1.1).contains(&after), "{stopped:?}: the phase ended {after} s after the far end stopped");
         let froze = froze as f64 / 8000.0;
         let ed = |n: &str| n.starts_with("found Ed") || n.starts_with("found B1d");
-        assert!(
-            !notes.iter().any(|(at, n)| *at > froze && ed(n)),
-            "{stopped:?}: {notes:#?}"
-        );
-        assert_eq!(
-            notes.last().map(|n| n.1.as_str()),
-            Some("failed: the far end stopped in phase 4"),
-            "{stopped:?}"
-        );
+        assert!(!notes.iter().any(|(at, n)| *at > froze && ed(n)), "{stopped:?}: {notes:#?}");
+        assert_eq!(notes.last().map(|n| n.1.as_str()), Some("failed: the far end stopped in phase 4"), "{stopped:?}");
     }
 }
 
@@ -1168,16 +803,8 @@ fn a_softphone_line_keeps_its_carrier_through_data_and_renegotiations() {
         let end = call.ticks + (seconds * 8000.0) as u64;
         while call.ticks < end {
             call.run_until_seconds((call.ticks + 1) as f64 / 8000.0);
-            assert!(
-                call.analogue.carrier(),
-                "the analogue modem lost a server that is there, at {} s",
-                call.ticks / 8000
-            );
-            assert!(
-                call.digital.carrier(),
-                "the server lost a client that is there, at {} s",
-                call.ticks / 8000
-            );
+            assert!(call.analogue.carrier(), "the analogue modem lost a server that is there, at {} s", call.ticks / 8000);
+            assert!(call.digital.carrier(), "the server lost a client that is there, at {} s", call.ticks / 8000);
         }
     };
     watch(&mut call, 8.0);
@@ -1226,9 +853,7 @@ impl FullCall {
 }
 
 fn plain_line() -> Network {
-    Network::new(Law::Mu, FS)
-        .with_delay(0.020, FS)
-        .with_noise(1e-5)
+    Network::new(Law::Mu, FS).with_delay(0.020, FS).with_noise(1e-5)
 }
 
 /// The rate chosen at the end of the DIL leaves room, and on a clean line
@@ -1245,54 +870,27 @@ fn the_dil_choice_leaves_room_and_a_clean_line_loses_at_most_a_rung_for_it() {
     a_law.a_law = true;
     let lines = [
         ("20 ms", plain_line(), server()),
-        (
-            "10 ms",
-            Network::new(Law::Mu, FS)
-                .with_delay(0.010, FS)
-                .with_noise(1e-5),
-            server(),
-        ),
+        ("10 ms", Network::new(Law::Mu, FS).with_delay(0.010, FS).with_noise(1e-5), server()),
         ("0.6 s", voip_line(), server()),
-        (
-            "A-law",
-            Network::new(Law::A, FS)
-                .with_delay(0.020, FS)
-                .with_noise(1e-5),
-            a_law,
-        ),
+        ("A-law", Network::new(Law::A, FS).with_delay(0.020, FS).with_noise(1e-5), a_law),
     ];
     let mut lost = Vec::new();
     for (name, net, server) in lines {
         let mut call = FullCall::new(net, server);
         while call.analogue.v90().is_none_or(|v| v.choice().is_none()) {
-            assert!(
-                call.ticks < 40 * 8000,
-                "{name}: no choice at the end of the DIL"
-            );
+            assert!(call.ticks < 40 * 8000, "{name}: no choice at the end of the DIL");
             call.run_until_seconds((call.ticks + 8) as f64 / 8000.0);
         }
         let v = call.analogue.v90().unwrap();
         let (route, law) = (v.route().unwrap(), v.settings().law);
         let limit = datapump::v90::power_limit(&v.settings().server);
         let jd = v.far_jd().unwrap_or_default();
-        let best = shaping::choose(
-            route,
-            law,
-            limit,
-            |drn| jd.enables(drn),
-            jd.lookahead,
-            v.receiver().residue().leftover().as_ref(),
-        )
-        .unwrap();
+        let best = shaping::choose(route, law, limit, |drn| jd.enables(drn), jd.lookahead, v.receiver().residue().leftover().as_ref()).unwrap();
         let chosen = v.choice().unwrap();
         let expected = route.noise_at(law, f64::from(limit) / 32768.0) * v.shaping().1.sqrt();
         let room = dil::least_gap(&chosen.data, route) / (dil::SPACING * expected);
         let rungs = best.choice.data.drn - chosen.data.drn;
-        println!(
-            "{name}: {} bit/s where the best was {}, room {room:.2} of the spacing",
-            datapump::v90::rate_for(chosen.data.frame_bits() as u32),
-            best.rate()
-        );
+        println!("{name}: {} bit/s where the best was {}, room {room:.2} of the spacing", datapump::v90::rate_for(chosen.data.frame_bits() as u32), best.rate());
         assert!(room >= dil::SLACK, "{name}: room {room:.3}");
         assert!(rungs <= 1, "{name}: {rungs} rungs lost");
         lost.push(rungs);
@@ -1323,19 +921,10 @@ fn a_band_edge_cut_is_shaped_away() {
     let v90 = call.analogue.v90().unwrap();
     let (asked, left) = v90.shaping();
     let v34 = v90.settings().v34_receive;
-    println!(
-        "{down} down with {asked:?}, expected to leave {left:.2} of the error; V.34 would carry {v34}"
-    );
+    println!("{down} down with {asked:?}, expected to leave {left:.2} of the error; V.34 would carry {v34}");
     assert_ne!(asked.redundancy, Redundancy::None);
-    assert!(
-        asked.filter[0] <= -56,
-        "no zero at 4 kHz: {:?}",
-        asked.filter
-    );
-    assert_eq!(
-        asked.lookahead, 1,
-        "not the look-ahead our digital modem's Jd offers"
-    );
+    assert!(asked.filter[0] <= -56, "no zero at 4 kHz: {:?}", asked.filter);
+    assert_eq!(asked.lookahead, 1, "not the look-ahead our digital modem's Jd offers");
     assert!(down >= 48_000, "{down}");
     assert!(down > v34.max(33_600));
     // The CP and the CPt that went out ask for it, and the digital modem
@@ -1351,11 +940,7 @@ fn a_band_edge_cut_is_shaped_away() {
     // And the decisions are the better for it: data mode reads more cleanly
     // than TRN1d, unshaped, did.
     let rx = call.analogue.v90().unwrap().receiver();
-    println!(
-        "trained {:.1} dB, data mode {:.1} dB",
-        rx.trained_snr_db(),
-        rx.snr_db()
-    );
+    println!("trained {:.1} dB, data mode {:.1} dB", rx.trained_snr_db(), rx.snr_db());
     assert!(rx.snr_db() > rx.trained_snr_db() + 2.0);
     assert_eq!(call.carries_data(4.0), (true, true));
 }
@@ -1370,26 +955,13 @@ fn a_shaped_call_renegotiates_from_either_end() {
     let (asked, _) = call.analogue.v90().unwrap().shaping();
     let (down, _) = call.rates();
     assert!(call.analogue.renegotiate(down - 4000));
-    assert!(
-        call.comes_back_up(10.0),
-        "{} / {}",
-        call.analogue.phase(),
-        call.digital.phase()
-    );
+    assert!(call.comes_back_up(10.0), "{} / {}", call.analogue.phase(), call.digital.phase());
     let (slower, _) = call.rates();
     assert!(slower < down, "{slower} after asking for less than {down}");
-    assert_eq!(
-        call.digital.v90().unwrap().cp().map(Shaping::of),
-        Some(asked)
-    );
+    assert_eq!(call.digital.v90().unwrap().cp().map(Shaping::of), Some(asked));
     assert_eq!(call.carries_data(3.0), (true, true));
     assert!(call.digital.renegotiate(8));
-    assert!(
-        call.comes_back_up(10.0),
-        "{} / {}",
-        call.analogue.phase(),
-        call.digital.phase()
-    );
+    assert!(call.comes_back_up(10.0), "{} / {}", call.analogue.phase(), call.digital.phase());
     assert_eq!(call.carries_data(3.0), (true, true));
     assert_eq!(call.analogue.retrains(), 0);
 }
@@ -1474,10 +1046,7 @@ struct Downstream {
 
 impl Downstream {
     fn new() -> Self {
-        Self {
-            known: Known(0x1234_5678),
-            checked: Checked::default(),
-        }
+        Self { known: Known(0x1234_5678), checked: Checked::default() }
     }
 }
 
@@ -1488,18 +1057,11 @@ impl FullCall {
 
     /// Carry on until `done`, or for `seconds`, with known data going down
     /// all the while and what arrives of it checked. Whether `done` came.
-    fn known_data_until(
-        &mut self,
-        seconds: f64,
-        data: &mut Downstream,
-        mut done: impl FnMut(&Self) -> bool,
-    ) -> bool {
+    fn known_data_until(&mut self, seconds: f64, data: &mut Downstream, mut done: impl FnMut(&Self) -> bool) -> bool {
         let end = self.ticks + (seconds * 8000.0) as u64;
         while self.ticks < end {
             // Kept topped up: a digital modem with nothing to send sends ones.
-            while self.digital.accepts_bits()
-                && self.digital.pending_bits() < 4 * BLOCK_BITS as usize
-            {
+            while self.digital.accepts_bits() && self.digital.pending_bits() < 4 * BLOCK_BITS as usize {
                 let bits: Vec<bool> = (0..BLOCK_BITS).map(|_| data.known.next()).collect();
                 self.digital.send_bits(&bits);
             }
@@ -1564,11 +1126,7 @@ fn stepped_line() -> Network {
 /// disturbance begins.
 fn disturbed(net: Network) -> (FullCall, Downstream) {
     let mut call = connects(net, server(), 30.0);
-    assert!(
-        call.seconds() < DISTURBED_FROM - 1.0,
-        "connected at {:.1} s",
-        call.seconds()
-    );
+    assert!(call.seconds() < DISTURBED_FROM - 1.0, "connected at {:.1} s", call.seconds());
     let mut data = Downstream::new();
     call.known_data(DISTURBED_FROM - call.seconds(), &mut data);
     (call, data)
@@ -1588,12 +1146,7 @@ fn judged(call: &mut FullCall, data: &mut Downstream) -> (u64, u64) {
 fn falls_back(call: &mut FullCall, data: &mut Downstream) -> (u32, f64, u32, u64, u64) {
     let (fast, _) = call.rates();
     let began = call.seconds();
-    assert!(
-        call.comes_back_up_with(JUDGED, data),
-        "never renegotiated: {} / {}",
-        call.analogue.phase(),
-        call.digital.phase()
-    );
+    assert!(call.comes_back_up_with(JUDGED, data), "never renegotiated: {} / {}", call.analogue.phase(), call.digital.phase());
     let took = call.seconds() - began;
     // What the renegotiation dropped is not the line's doing.
     call.known_data(1.0, data);
@@ -1611,14 +1164,9 @@ fn falls_back(call: &mut FullCall, data: &mut Downstream) -> (u32, f64, u32, u64
 fn noise_that_comes_and_goes_is_renegotiated_down_to_a_rate_that_reads_it() {
     let (mut call, mut data) = disturbed(bursty_line());
     let (fast, took, slower, errored, blocks) = falls_back(&mut call, &mut data);
-    println!(
-        "{fast} became {slower} after {took:.1} s of bursts; then {errored} of {blocks} blocks errored"
-    );
+    println!("{fast} became {slower} after {took:.1} s of bursts; then {errored} of {blocks} blocks errored");
     assert!(slower < fast, "{slower} against {fast}");
-    assert_eq!(
-        errored, 0,
-        "{errored} of {blocks} blocks errored at {slower}"
-    );
+    assert_eq!(errored, 0, "{errored} of {blocks} blocks errored at {slower}");
     assert_eq!(call.analogue.renegotiations(), 1);
     assert_eq!(call.analogue.retrains(), 0);
     assert_eq!(call.rates().0, slower);
@@ -1639,31 +1187,15 @@ fn noise_that_comes_and_goes_is_renegotiated_down_to_a_rate_that_reads_it() {
 fn a_burst_shorter_than_the_block_is_still_held_against_the_rate() {
     let (mut call, mut data) = disturbed(plain_line().with_bursts(DISTURBED_FROM, 1.5, 0.03, 1e-3));
     let (fast, took, slower, errored, blocks) = falls_back(&mut call, &mut data);
-    println!(
-        "{fast} became {slower} {took:.1} s into bursts of 30 ms; then {errored} of {blocks} blocks errored"
-    );
+    println!("{fast} became {slower} {took:.1} s into bursts of 30 ms; then {errored} of {blocks} blocks errored");
     assert!(slower < fast, "{slower} against {fast}");
     assert_eq!(call.analogue.renegotiations(), 1);
     assert_eq!(call.analogue.retrains(), 0);
     // Ten milliseconds of it over the round trip is seen as well.
     falls_back_over_the_round_trip(voip_line().with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.01, 1e-3));
     // Five is not, at either round trip.
-    assert_eq!(
-        left_alone(
-            plain_line().with_bursts(DISTURBED_FROM, 1.5, 0.005, 1e-3),
-            WATCHED
-        ),
-        (0, 0),
-        "5 ms, 20 ms each way"
-    );
-    assert_eq!(
-        left_alone(
-            voip_line().with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.005, 1e-3),
-            WATCHED
-        ),
-        (0, 0),
-        "5 ms, 0.6 s each way"
-    );
+    assert_eq!(left_alone(plain_line().with_bursts(DISTURBED_FROM, 1.5, 0.005, 1e-3), WATCHED), (0, 0), "5 ms, 20 ms each way");
+    assert_eq!(left_alone(voip_line().with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.005, 1e-3), WATCHED), (0, 0), "5 ms, 0.6 s each way");
 }
 
 /// A floor that steps up to where the levels stand only about seven RMS
@@ -1676,14 +1208,9 @@ fn a_burst_shorter_than_the_block_is_still_held_against_the_rate() {
 fn a_floor_that_steps_up_is_renegotiated_down_to_a_rate_that_reads_it() {
     let (mut call, mut data) = disturbed(stepped_line());
     let (fast, took, slower, errored, blocks) = falls_back(&mut call, &mut data);
-    println!(
-        "{fast} became {slower} {took:.1} s after the step; then {errored} of {blocks} blocks errored"
-    );
+    println!("{fast} became {slower} {took:.1} s after the step; then {errored} of {blocks} blocks errored");
     assert!(slower < fast, "{slower} against {fast}");
-    assert_eq!(
-        errored, 0,
-        "{errored} of {blocks} blocks errored at {slower}"
-    );
+    assert_eq!(errored, 0, "{errored} of {blocks} blocks errored at {slower}");
     assert_eq!(call.analogue.renegotiations(), 1);
     assert_eq!(call.analogue.retrains(), 0);
     assert_eq!(call.rates().0, slower);
@@ -1709,10 +1236,7 @@ fn left_alone_with(net: Network, server: Info0d, seconds: f64) -> (u32, u32) {
     call.known_data(seconds, &mut data);
     let (errored, blocks) = data.checked.since(&before);
     let (renegotiations, retrains) = (call.analogue.renegotiations(), call.analogue.retrains());
-    println!(
-        "{rate}: {renegotiations} renegotiations, {retrains} retrains in {seconds} s; {errored} of {blocks} blocks errored, {} slips",
-        call.net.slips()
-    );
+    println!("{rate}: {renegotiations} renegotiations, {retrains} retrains in {seconds} s; {errored} of {blocks} blocks errored, {} slips", call.net.slips());
     (renegotiations, retrains)
 }
 
@@ -1742,11 +1266,7 @@ fn a_clean_line_and_a_drifting_clock_are_left_at_their_rates() {
 /// the rate.
 #[test]
 fn a_softphone_s_slips_are_left_at_their_rates_and_its_gain_control_never_engages() {
-    for (period, inserted, ceiling, in_the_start_up) in [
-        (2.9, true, 0.8, false),
-        (3.1, false, 0.8, false),
-        (2.9, true, 0.5, true),
-    ] {
+    for (period, inserted, ceiling, in_the_start_up) in [(2.9, true, 0.8, false), (3.1, false, 0.8, false), (2.9, true, 0.5, true)] {
         let net = Network::new(Law::Mu, FS)
             .with_delay(0.6, FS)
             .with_noise(1e-5)
@@ -1768,16 +1288,8 @@ fn a_softphone_s_slips_are_left_at_their_rates_and_its_gain_control_never_engage
         );
         let case = format!("ceiling {ceiling}, slips every {period} s, inserted {inserted}");
         assert_eq!((renegotiations, retrains), (0, 0), "{case}");
-        assert_eq!(
-            call.net.quietest_gain(),
-            started,
-            "{case}: the gain control engaged in data mode"
-        );
-        assert_eq!(
-            started < 1.0,
-            in_the_start_up,
-            "{case}: the start-up left the gain at {started}"
-        );
+        assert_eq!(call.net.quietest_gain(), started, "{case}: the gain control engaged in data mode");
+        assert_eq!(started < 1.0, in_the_start_up, "{case}: the start-up left the gain at {started}");
     }
 }
 
@@ -1797,15 +1309,14 @@ fn dropped_line_of(every: f64, length: f64, repeat: bool) -> Network {
 /// A VoIP call's round trip: 0.6 s each way, which comes up at 54 666 -- the
 /// rate Rory's own line comes up at, and the one with least margin to spare.
 fn voip_line() -> Network {
-    Network::new(Law::Mu, FS)
-        .with_delay(0.6, FS)
-        .with_noise(1e-5)
+    Network::new(Law::Mu, FS).with_delay(0.6, FS).with_noise(1e-5)
 }
 
 /// When a disturbance over that round trip begins: a start-up 0.6 s each way
 /// takes a dozen seconds, and what lands in one is the start-up's business,
 /// not data mode's.
 const VOIP_DISTURBED_FROM: f64 = 20.0;
+
 
 /// A packet of the downstream slipped every three seconds, thirty
 /// milliseconds of it: 240 codewords, which is 40 whole frames.
@@ -1831,14 +1342,11 @@ fn a_packet_lost_and_concealed_in_place_is_left_at_its_rate() {
     for length in [0.010, 0.020, 0.030] {
         for (every, repeat) in [(1.5, true), (3.0, true), (1.5, false), (3.0, false)] {
             let case = format!("{} ms every {every} s, repeat {repeat}", length * 1000.0);
-            assert_eq!(
-                left_alone(dropped_line_of(every, length, repeat), WATCHED),
-                (0, 0),
-                "{case}"
-            );
+            assert_eq!(left_alone(dropped_line_of(every, length, repeat), WATCHED), (0, 0), "{case}");
         }
     }
 }
+
 
 /// A packet lost and filled with digital silence is not held against the
 /// rate either. Several softphones play zeroes rather than conceal, and a
@@ -1854,15 +1362,8 @@ fn a_packet_lost_and_concealed_in_place_is_left_at_its_rate() {
 fn a_packet_lost_and_filled_with_silence_is_left_at_its_rate() {
     let short = plain_line().with_silent_dropout(DISTURBED_FROM, 1.5, 0.02);
     assert_eq!(left_alone(short, WATCHED), (0, 0), "20 ms each way");
-    let long = Network::new(Law::A, FS)
-        .with_delay(0.6, FS)
-        .with_noise(1e-5)
-        .with_silent_dropout(VOIP_DISTURBED_FROM, 1.5, 0.02);
-    assert_eq!(
-        left_alone_with(long, a_law_server(), WATCHED),
-        (0, 0),
-        "A-law, 0.6 s each way"
-    );
+    let long = Network::new(Law::A, FS).with_delay(0.6, FS).with_noise(1e-5).with_silent_dropout(VOIP_DISTURBED_FROM, 1.5, 0.02);
+    assert_eq!(left_alone_with(long, a_law_server(), WATCHED), (0, 0), "A-law, 0.6 s each way");
 }
 
 /// A hole does more than lose its own packet on one route: mu-law at 54 666
@@ -1902,12 +1403,7 @@ fn a_hole_that_costs_the_receiver_its_constellation_is_retrained_and_not_slowed(
     let mut data = Downstream::new();
     call.known_data(VOIP_DISTURBED_FROM - call.seconds(), &mut data);
     let before = data.checked;
-    assert!(
-        call.comes_back_up_with(WATCHED, &mut data),
-        "never came back: {} / {}",
-        call.analogue.phase(),
-        call.digital.phase()
-    );
+    assert!(call.comes_back_up_with(WATCHED, &mut data), "never came back: {} / {}", call.analogue.phase(), call.digital.phase());
     let (slower, _) = call.rates();
     let (renegotiations, retrains) = (call.analogue.renegotiations(), call.analogue.retrains());
     let (through, whole) = data.checked.since(&before);
@@ -1915,15 +1411,10 @@ fn a_hole_that_costs_the_receiver_its_constellation_is_retrained_and_not_slowed(
     let after = data.checked;
     call.known_data(JUDGED, &mut data);
     let (errored, blocks) = data.checked.since(&after);
-    println!(
-        "{fast} became {slower}; {through} of {whole} blocks errored getting there, then {errored} of {blocks}"
-    );
+    println!("{fast} became {slower}; {through} of {whole} blocks errored getting there, then {errored} of {blocks}");
     assert!(slower < fast, "{slower} against {fast}");
     assert_eq!((renegotiations, retrains), (0, 1));
-    assert!(
-        errored * 10 < blocks,
-        "{errored} of {blocks} blocks errored at {slower}"
-    );
+    assert!(errored * 10 < blocks, "{errored} of {blocks} blocks errored at {slower}");
 }
 
 /// The same server, A-law.
@@ -1943,11 +1434,7 @@ fn a_law_server() -> Info0d {
 #[test]
 fn a_slip_of_a_whole_number_of_frames_is_left_at_its_rate() {
     for inserted in [true, false] {
-        assert_eq!(
-            left_alone(slipped_line(inserted), WATCHED),
-            (0, 0),
-            "inserted {inserted}"
-        );
+        assert_eq!(left_alone(slipped_line(inserted), WATCHED), (0, 0), "inserted {inserted}");
     }
 }
 
@@ -1956,30 +1443,18 @@ fn a_slip_of_a_whole_number_of_frames_is_left_at_its_rate() {
 /// the rate after.
 fn falls_back_over_the_round_trip(net: Network) -> (u32, u32) {
     let mut call = connects(net, server(), 40.0);
-    assert!(
-        call.seconds() < VOIP_DISTURBED_FROM - 1.0,
-        "connected at {:.1} s",
-        call.seconds()
-    );
+    assert!(call.seconds() < VOIP_DISTURBED_FROM - 1.0, "connected at {:.1} s", call.seconds());
     let (fast, _) = call.rates();
     let mut data = Downstream::new();
     call.known_data(VOIP_DISTURBED_FROM - call.seconds(), &mut data);
-    assert!(
-        call.comes_back_up_with(20.0, &mut data),
-        "never renegotiated: {} / {}",
-        call.analogue.phase(),
-        call.digital.phase()
-    );
+    assert!(call.comes_back_up_with(20.0, &mut data), "never renegotiated: {} / {}", call.analogue.phase(), call.digital.phase());
     let (slower, _) = call.rates();
     // What the renegotiation dropped is not the line's doing.
     call.known_data(1.0, &mut data);
     let before = data.checked;
     call.known_data(JUDGED, &mut data);
     let (errored, blocks) = data.checked.since(&before);
-    println!(
-        "{fast} became {slower}; then {errored} of {blocks} blocks errored, {} slips",
-        call.net.slips()
-    );
+    println!("{fast} became {slower}; then {errored} of {blocks} blocks errored, {} slips", call.net.slips());
     assert!(slower < fast, "{slower} against {fast}");
     assert_eq!(call.analogue.renegotiations(), 1);
     assert_eq!(call.analogue.retrains(), 0);
@@ -1991,23 +1466,14 @@ fn falls_back_over_the_round_trip(net: Network) -> (u32, u32) {
 /// nothing like a packet, and the analogue modem renegotiates once for it.
 #[test]
 fn noise_between_lost_packets_is_still_seen() {
-    falls_back_over_the_round_trip(dropped_line(3.0, true).with_bursts(
-        VOIP_DISTURBED_FROM,
-        1.5,
-        0.1,
-        1e-3,
-    ));
+    falls_back_over_the_round_trip(dropped_line(3.0, true).with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.1, 1e-3));
 }
+
 
 /// The same between slipped frames.
 #[test]
 fn noise_between_slipped_frames_is_still_seen() {
-    falls_back_over_the_round_trip(slipped_line(true).with_bursts(
-        VOIP_DISTURBED_FROM,
-        1.5,
-        0.1,
-        1e-3,
-    ));
+    falls_back_over_the_round_trip(slipped_line(true).with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.1, 1e-3));
 }
 
 /// Bursts of noise between a softphone's slips: the slips are still not
@@ -2020,20 +1486,11 @@ fn bursts_of_noise_between_slips_are_still_seen() {
         .with_slips(2.9, true)
         .with_bursts(20.0, 1.5, 0.1, 1e-3);
     let mut call = connects(net, server(), 40.0);
-    assert!(
-        call.seconds() < 19.0,
-        "connected at {:.1} s",
-        call.seconds()
-    );
+    assert!(call.seconds() < 19.0, "connected at {:.1} s", call.seconds());
     let (fast, _) = call.rates();
     let mut data = Downstream::new();
     call.known_data(20.0 - call.seconds(), &mut data);
-    assert!(
-        call.comes_back_up_with(20.0, &mut data),
-        "never renegotiated: {} / {}",
-        call.analogue.phase(),
-        call.digital.phase()
-    );
+    assert!(call.comes_back_up_with(20.0, &mut data), "never renegotiated: {} / {}", call.analogue.phase(), call.digital.phase());
     let (slower, _) = call.rates();
     call.known_data(JUDGED, &mut data);
     println!("{fast} became {slower}; {} slips", call.net.slips());
@@ -2057,33 +1514,21 @@ fn a_renegotiation_steps_the_rate_down_by_no_more_than_eight_bits_a_frame() {
     let mut call = connects(plain_line(), server(), 30.0);
     let (down, _) = call.rates();
     call.net.set_noise(2e-3);
-    assert!(
-        call.comes_back_up(10.0),
-        "{} / {}",
-        call.analogue.phase(),
-        call.digital.phase()
-    );
+    assert!(call.comes_back_up(10.0), "{} / {}", call.analogue.phase(), call.digital.phase());
     let (stepped, _) = call.rates();
     println!("{down} became {stepped} in one renegotiation");
     assert_eq!(call.analogue.renegotiations(), 1);
     assert_eq!(down - stepped, 10_666, "{down} to {stepped} in one go");
     // And the line really is that much worse: the next renegotiation goes
     // further, with no retrain in between.
-    assert!(
-        call.comes_back_up(10.0),
-        "{} / {}",
-        call.analogue.phase(),
-        call.digital.phase()
-    );
+    assert!(call.comes_back_up(10.0), "{} / {}", call.analogue.phase(), call.digital.phase());
     let (slower, _) = call.rates();
-    println!(
-        "and then {slower}, after {} renegotiations",
-        call.analogue.renegotiations()
-    );
+    println!("and then {slower}, after {} renegotiations", call.analogue.renegotiations());
     assert!(slower < stepped, "{slower} against {stepped}");
     assert_eq!(call.analogue.retrains(), 0);
     assert_eq!(call.carries_data(3.0), (true, true));
 }
+
 
 /// How long a hole is watched for when what is being counted is the holes
 /// themselves: two minutes, eight times the shortest stretch a call takes to
@@ -2113,11 +1558,7 @@ fn every_hole_is_seen_on_the_line_and_nothing_else_is_ever_taken_for_one() {
         let net = plain_line().with_silent_dropout(DISTURBED_FROM, 1.5, length);
         let holes = holes_seen(net, server(), SOAKED);
         let made = (SOAKED / 1.5) as u32;
-        assert!(
-            holes >= made - 2,
-            "{} ms: {holes} holes of {made}",
-            length * 1000.0
-        );
+        assert!(holes >= made - 2, "{} ms: {holes} holes of {made}", length * 1000.0);
     }
     // And everything else the line does, for as long: made-up audio of both
     // kinds, noise that comes and goes, a floor that steps up, a slip, and
@@ -2189,31 +1630,15 @@ fn a_call_through_holes_never_renegotiates_however_long_it_goes_on() {
             // Once it has settled, it stays there: the rate never moves
             // again and the errors never grow.
             if let Some(rate) = settled {
-                assert_eq!(
-                    call.rate_now(),
-                    Some(rate),
-                    "{} ms, stretch {stretch}",
-                    length * 1000.0
-                );
-                assert!(
-                    errored * 10 < blocks,
-                    "{} ms, stretch {stretch}: {errored} of {blocks}",
-                    length * 1000.0
-                );
+                assert_eq!(call.rate_now(), Some(rate), "{} ms, stretch {stretch}", length * 1000.0);
+                assert!(errored * 10 < blocks, "{} ms, stretch {stretch}: {errored} of {blocks}", length * 1000.0);
                 worst = worst.max((errored, blocks));
-            } else if call.analogue.retrains() > 0
-                && let Some(rate) = call.rate_now()
-            {
+            } else if call.analogue.retrains() > 0 && let Some(rate) = call.rate_now() {
                 settled = Some(rate);
             }
         }
         let settled = settled.expect("never settled");
-        println!(
-            "{} ms: settled at {settled}, worst stretch {}/{}",
-            length * 1000.0,
-            worst.0,
-            worst.1
-        );
+        println!("{} ms: settled at {settled}, worst stretch {}/{}", length * 1000.0, worst.0, worst.1);
         assert_eq!(call.analogue.renegotiations(), 0, "{} ms", length * 1000.0);
     }
 }
@@ -2237,18 +1662,10 @@ fn a_call_through_holes_never_renegotiates_however_long_it_goes_on() {
 /// errors at all in any ten-second stretch of the two minutes after it.
 #[test]
 fn a_floor_that_steps_up_over_the_round_trip_is_read_right_the_first_time() {
-    let mut call = connects(
-        voip_line().with_rising_noise(VOIP_DISTURBED_FROM, 0.0, 6e-4),
-        server(),
-        40.0,
-    );
+    let mut call = connects(voip_line().with_rising_noise(VOIP_DISTURBED_FROM, 0.0, 6e-4), server(), 40.0);
     let mut data = Downstream::new();
     call.known_data(VOIP_DISTURBED_FROM - call.seconds(), &mut data);
-    assert!(
-        call.comes_back_up_with(20.0, &mut data),
-        "never renegotiated: {}",
-        call.analogue.phase()
-    );
+    assert!(call.comes_back_up_with(20.0, &mut data), "never renegotiated: {}", call.analogue.phase());
     let slower = call.rates().0;
     // What the renegotiation itself dropped is not the line's doing.
     call.known_data(1.0, &mut data);
@@ -2256,18 +1673,10 @@ fn a_floor_that_steps_up_over_the_round_trip_is_read_right_the_first_time() {
         let before = data.checked;
         call.known_data(10.0, &mut data);
         let (errored, blocks) = data.checked.since(&before);
-        assert_eq!(
-            errored, 0,
-            "stretch {stretch}: {errored} of {blocks} blocks errored at {slower}"
-        );
+        assert_eq!(errored, 0, "stretch {stretch}: {errored} of {blocks} blocks errored at {slower}");
     }
-    println!(
-        "stepped to 6e-4 over the round trip: 54666 became {slower}, nothing errored in {SOAKED} s"
-    );
-    assert_eq!(
-        (call.analogue.renegotiations(), call.analogue.retrains()),
-        (1, 0)
-    );
+    println!("stepped to 6e-4 over the round trip: 54666 became {slower}, nothing errored in {SOAKED} s");
+    assert_eq!((call.analogue.renegotiations(), call.analogue.retrains()), (1, 0));
     assert_eq!(call.rates().0, slower);
 }
 
@@ -2325,27 +1734,10 @@ fn a_retrain_storm_is_come_out_of_and_the_watch_stands_down_inside_it() {
     }
     let rate = call.rate_now().expect("never came back out of the storm");
     let back_at = back_at.expect("never came back out of the storm");
-    println!(
-        "out of the storm at {back_at:.0} s and {rate}, {} retrains; last stretch {}/{}",
-        call.analogue.retrains(),
-        last.0,
-        last.1
-    );
-    assert!(
-        call.analogue.retrains() > 1,
-        "no storm: {} retrains",
-        call.analogue.retrains()
-    );
-    assert!(
-        back_at < VOIP_DISTURBED_FROM + 100.0,
-        "came back only at {back_at:.0} s"
-    );
-    assert!(
-        last.0 * 10 < last.1,
-        "{} of {} blocks errored at {rate}",
-        last.0,
-        last.1
-    );
+    println!("out of the storm at {back_at:.0} s and {rate}, {} retrains; last stretch {}/{}", call.analogue.retrains(), last.0, last.1);
+    assert!(call.analogue.retrains() > 1, "no storm: {} retrains", call.analogue.retrains());
+    assert!(back_at < VOIP_DISTURBED_FROM + 100.0, "came back only at {back_at:.0} s");
+    assert!(last.0 * 10 < last.1, "{} of {} blocks errored at {rate}", last.0, last.1);
     assert_eq!(call.analogue.renegotiations(), 0);
 }
 
@@ -2370,24 +1762,11 @@ fn a_retrain_storm_is_come_out_of_and_the_watch_stands_down_inside_it() {
 #[test]
 fn a_burst_the_receiver_holds_its_loops_through_is_still_fallen_back_for() {
     let cases: [(&str, Network, Info0d); 3] = [
-        (
-            "0.6 s each way",
-            voip_line().with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.3, 1e-3),
-            server(),
-        ),
-        (
-            "0.6 s each way, a robbed bit",
-            voip_line()
-                .with_robbed_bit(0)
-                .with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.3, 1e-3),
-            server(),
-        ),
+        ("0.6 s each way", voip_line().with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.3, 1e-3), server()),
+        ("0.6 s each way, a robbed bit", voip_line().with_robbed_bit(0).with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.3, 1e-3), server()),
         (
             "A-law, 0.6 s each way",
-            Network::new(Law::A, FS)
-                .with_delay(0.6, FS)
-                .with_noise(1e-5)
-                .with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.3, 1e-3),
+            Network::new(Law::A, FS).with_delay(0.6, FS).with_noise(1e-5).with_bursts(VOIP_DISTURBED_FROM, 1.5, 0.3, 1e-3),
             a_law_server(),
         ),
     ];
@@ -2405,33 +1784,15 @@ fn a_burst_the_receiver_holds_its_loops_through_is_still_fallen_back_for() {
             stretches.push((call.rate_now(), data.checked.since(&before)));
         }
         // Once it has settled it stays there, and nothing errors again.
-        let settled = stretches
-            .last()
-            .expect("stretches")
-            .0
-            .expect("never came back up");
+        let settled = stretches.last().expect("stretches").0.expect("never came back up");
         // The stretch the last renegotiation itself fell in still carries
         // what it dropped, which is not the line's doing.
-        let after: Vec<_> = stretches
-            .iter()
-            .skip_while(|(rate, _)| *rate != Some(settled))
-            .skip(1)
-            .collect();
-        println!(
-            "{what}: {fast} became {settled}, settled for the last {} stretches of {SOAKED} s",
-            after.len()
-        );
-        assert!(
-            after.len() >= 8,
-            "{what}: settled at {settled} only for {} stretches",
-            after.len()
-        );
+        let after: Vec<_> = stretches.iter().skip_while(|(rate, _)| *rate != Some(settled)).skip(1).collect();
+        println!("{what}: {fast} became {settled}, settled for the last {} stretches of {SOAKED} s", after.len());
+        assert!(after.len() >= 8, "{what}: settled at {settled} only for {} stretches", after.len());
         for (n, (rate, (errored, blocks))) in after.iter().enumerate() {
             assert_eq!(*rate, Some(settled), "{what}, stretch {n} after settling");
-            assert_eq!(
-                *errored, 0,
-                "{what}, stretch {n}: {errored} of {blocks} at {settled}"
-            );
+            assert_eq!(*errored, 0, "{what}, stretch {n}: {errored} of {blocks} at {settled}");
         }
         assert!(settled < fast, "{what}: {settled} against {fast}");
         assert_eq!(call.analogue.retrains(), 0, "{what}");
@@ -2446,66 +1807,31 @@ fn a_burst_the_receiver_holds_its_loops_through_is_still_fallen_back_for() {
 #[test]
 fn the_rate_menu_colours_the_rates_and_pins_a_start_up_to_either() {
     use datapump::v90::analogue::Outlook;
-    let ten_ms = || {
-        Network::new(Law::Mu, FS)
-            .with_delay(0.010, FS)
-            .with_noise(1e-5)
-    };
+    let ten_ms = || Network::new(Law::Mu, FS).with_delay(0.010, FS).with_noise(1e-5);
     let mut call = connects(ten_ms(), server(), 40.0);
     let (alone, _) = call.rates();
-    let menu = call
-        .analogue
-        .rate_menu()
-        .expect("a menu once the DIL has been read");
+    let menu = call.analogue.rate_menu().expect("a menu once the DIL has been read");
     println!("{menu:?}");
-    let drn_of = |rate: u32| {
-        menu.rates
-            .iter()
-            .find(|r| r.1 == rate)
-            .map(|r| r.0)
-            .unwrap()
-    };
+    let drn_of = |rate: u32| menu.rates.iter().find(|r| r.1 == rate).map(|r| r.0).unwrap();
     let own = drn_of(alone);
     assert_eq!(menu.current, Some(own));
     for &(drn, rate, outlook) in &menu.rates {
         let expected = if drn <= own { Outlook::Good } else { outlook };
         assert_eq!(outlook, expected, "{rate}");
-        assert_ne!(
-            outlook,
-            Outlook::NotOffered,
-            "{rate}: this Jd offers every rate"
-        );
+        assert_ne!(outlook, Outlook::NotOffered, "{rate}: this Jd offers every rate");
     }
-    assert_eq!(
-        menu.outlook(own + 1),
-        Some(Outlook::Bad),
-        "the rung the room gave up"
-    );
+    assert_eq!(menu.outlook(own + 1), Some(Outlook::Bad), "the rung the room gave up");
     for drn in [own - 2, own + 1] {
         let mut call = FullCall::new(ten_ms(), server());
         call.analogue.set_pinned(Some(drn));
         let ok = call.run(40.0);
-        let notes: Vec<String> = call
-            .analogue
-            .take_notes()
-            .into_iter()
-            .filter(|n| n.contains("rate menu"))
-            .collect();
+        let notes: Vec<String> = call.analogue.take_notes().into_iter().filter(|n| n.contains("rate menu")).collect();
         assert!(ok, "pinned {drn}: no connection: {}", call.analogue.phase());
         let rate = datapump::v90::sequences::data_rate(drn).unwrap();
         println!("pinned {rate}: {notes:?}");
         assert_eq!(call.rates().0, rate);
-        let predicted = if drn < own {
-            "predicted good"
-        } else {
-            "predicted bad"
-        };
-        assert!(
-            notes.iter().any(|n| n.contains(&format!(
-                "asked for {rate} bit/s, {predicted}, where the DIL chose {alone}"
-            ))),
-            "{notes:?}"
-        );
+        let predicted = if drn < own { "predicted good" } else { "predicted bad" };
+        assert!(notes.iter().any(|n| n.contains(&format!("asked for {rate} bit/s, {predicted}, where the DIL chose {alone}"))), "{notes:?}");
     }
 }
 
@@ -2515,13 +1841,7 @@ fn the_rate_menu_colours_the_rates_and_pins_a_start_up_to_either() {
 #[test]
 fn the_rate_menu_in_data_mode_renegotiates_to_the_rate_chosen() {
     use datapump::v90::sequences::data_rate;
-    let mut call = connects(
-        Network::new(Law::Mu, FS)
-            .with_delay(0.010, FS)
-            .with_noise(1e-5),
-        server(),
-        40.0,
-    );
+    let mut call = connects(Network::new(Law::Mu, FS).with_delay(0.010, FS).with_noise(1e-5), server(), 40.0);
     let (down, up) = call.rates();
     let own = call.analogue.rate_menu().and_then(|m| m.current).unwrap();
     call.analogue.take_notes();
@@ -2529,31 +1849,12 @@ fn the_rate_menu_in_data_mode_renegotiates_to_the_rate_chosen() {
     for (drn, predicted) in [(own + 1, "predicted bad"), (own - 3, "predicted good")] {
         let rate = data_rate(drn).unwrap();
         assert!(call.analogue.renegotiate_to(drn), "{rate}");
-        assert!(
-            call.comes_back_up(10.0),
-            "{rate}: {} / {}",
-            call.analogue.phase(),
-            call.digital.phase()
-        );
+        assert!(call.comes_back_up(10.0), "{rate}: {} / {}", call.analogue.phase(), call.digital.phase());
         assert_eq!(call.rates(), (rate, up), "{rate}");
-        assert_eq!(
-            call.carries_data(3.0),
-            (true, true),
-            "after going to {rate}"
-        );
-        let notes: Vec<String> = call
-            .analogue
-            .take_notes()
-            .into_iter()
-            .filter(|n| n.contains("rate menu"))
-            .collect();
+        assert_eq!(call.carries_data(3.0), (true, true), "after going to {rate}");
+        let notes: Vec<String> = call.analogue.take_notes().into_iter().filter(|n| n.contains("rate menu")).collect();
         println!("{notes:?}");
-        assert!(
-            notes
-                .iter()
-                .any(|n| n.contains(&format!("asked for {rate} bit/s")) && n.contains(predicted)),
-            "{notes:?}"
-        );
+        assert!(notes.iter().any(|n| n.contains(&format!("asked for {rate} bit/s")) && n.contains(predicted)), "{notes:?}");
     }
     assert_eq!(call.analogue.retrains(), 0, "a retrain happened");
     assert_eq!(call.analogue.renegotiations(), 2);

@@ -24,14 +24,7 @@ use datapump::v92::up_signals::TwoPointReader;
 fn capture() -> Option<Vec<f64>> {
     let path = PathBuf::from(std::env::var_os("V92_CAPTURE")?);
     let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    Some(
-        bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|c| f64::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0)
-            .collect(),
-    )
+    Some(bytes.as_chunks::<2>().0.iter().map(|c| f64::from(i16::from_le_bytes([c[0], c[1]])) / 32768.0).collect())
 }
 
 /// Whether a CPt of any kind can be read out of a capture at all.
@@ -49,20 +42,14 @@ fn a_capture_carries_a_cpt() {
         eprintln!("set V92_CAPTURE to a raw s16le file at 8000 Hz");
         return;
     };
-    eprintln!(
-        "{} samples, {:.2} s at 8000 Hz",
-        levels.len(),
-        levels.len() as f64 / 8000.0
-    );
+    eprintln!("{} samples, {:.2} s at 8000 Hz", levels.len(), levels.len() as f64 / 8000.0);
     let mut reader = TwoPointReader::differential_with(Mode::Answer);
     let mut finder = CpFinder::v92(12);
     let mut bits = 0u64;
     let mut ones = 0u64;
     let mut found = 0;
     for (n, &level) in levels.iter().enumerate() {
-        let Some(bit) = reader.feed(level) else {
-            continue;
-        };
+        let Some(bit) = reader.feed(level) else { continue };
         bits += 1;
         ones += u64::from(bit);
         if let Some(cp) = finder.feed(bit) {
@@ -79,10 +66,7 @@ fn a_capture_carries_a_cpt() {
             }
         }
     }
-    eprintln!(
-        "{found} CPt(s) in {bits} bits, {}",
-        100.0 * ones as f64 / bits as f64
-    );
+    eprintln!("{found} CPt(s) in {bits} bits, {}", 100.0 * ones as f64 / bits as f64);
 }
 
 /// The same question through the receiver's own chain: find where the far end's
@@ -122,10 +106,7 @@ fn the_receiver_chain_reads_a_cpt_from_a_capture() {
         }
     }
     let (snr, at) = best;
-    eprintln!(
-        "best TRN1u fit {snr:.1} dB around sample {at} ({:.3} s)",
-        at as f64 / 8000.0
-    );
+    eprintln!("best TRN1u fit {snr:.1} dB around sample {at} ({:.3} s)", at as f64 / 8000.0);
     if snr < 12.0 {
         eprintln!("nothing to train on: no CPt was looked for");
         return;

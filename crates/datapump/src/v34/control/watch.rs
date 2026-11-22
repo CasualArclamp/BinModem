@@ -68,11 +68,7 @@ pub(super) enum Seen {
     Carrier(bool),
     /// A new signal, which began at half `since`. `turn` is the carrier's
     /// turn a symbol against ours, in radians, as the signal showed it.
-    Began {
-        hearing: Hearing,
-        since: u64,
-        turn: f64,
-    },
+    Began { hearing: Hearing, since: u64, turn: f64 },
     /// Sh turned half way round into S-bar-h at about half `at`.
     Reversal { at: u64, turn: f64 },
 }
@@ -162,8 +158,7 @@ impl Lag {
 
     /// The correlation as a share of the power, once the window is full.
     fn value(&self) -> Option<Complex> {
-        (self.products.len() == self.length && self.power > 0.0)
-            .then(|| self.sum.scale(1.0 / self.power))
+        (self.products.len() == self.length && self.power > 0.0).then(|| self.sum.scale(1.0 / self.power))
     }
 }
 
@@ -178,23 +173,15 @@ struct Signatures {
 
 impl Signatures {
     fn new() -> Self {
-        let period =
-            |f: &dyn Fn(usize) -> Complex| -> [Complex; PPH_PERIOD] { std::array::from_fn(f) };
+        let period = |f: &dyn Fn(usize) -> Complex| -> [Complex; PPH_PERIOD] { std::array::from_fn(f) };
         let tone = signature(&period(&|_| sh(0)));
         let alternating = signature(&period(&ac));
         let sh = signature(&period(&sh));
         let with_i = signature(&period(&|i| Reading::WithI.point(i)));
         let printed = signature(&period(&|i| Reading::AsPrinted.point(i)));
         Self {
-            every_two: [
-                (Hearing::Tone, tone[0] / tone[1]),
-                (Hearing::Ac, alternating[0] / alternating[1]),
-                (Hearing::Sh, sh[0] / sh[1]),
-            ],
-            every_eight: [
-                (Hearing::Pph(Reading::WithI), with_i),
-                (Hearing::Pph(Reading::AsPrinted), printed),
-            ],
+            every_two: [(Hearing::Tone, tone[0] / tone[1]), (Hearing::Ac, alternating[0] / alternating[1]), (Hearing::Sh, sh[0] / sh[1])],
+            every_eight: [(Hearing::Pph(Reading::WithI), with_i), (Hearing::Pph(Reading::AsPrinted), printed)],
         }
     }
 }
@@ -223,26 +210,16 @@ fn signature(pattern: &[Complex; PPH_PERIOD]) -> [f64; 3] {
     let n = PPH_PERIOD as f64;
     let lines: Vec<(f64, f64)> = (0..PPH_PERIOD)
         .map(|q| {
-            let s = pattern
-                .iter()
-                .enumerate()
-                .fold(Complex::ZERO, |sum, (k, x)| {
-                    sum + *x * Complex::from_polar(1.0, -std::f64::consts::TAU * (q * k) as f64 / n)
-                });
+            let s = pattern.iter().enumerate().fold(Complex::ZERO, |sum, (k, x)| {
+                sum + *x * Complex::from_polar(1.0, -std::f64::consts::TAU * (q * k) as f64 / n)
+            });
             let f = q as f64 / n;
-            (
-                f,
-                s.norm_sqr() * (raised(f).powi(2) + raised(f - 1.0).powi(2)),
-            )
+            (f, s.norm_sqr() * (raised(f).powi(2) + raised(f - 1.0).powi(2)))
         })
         .collect();
     let total: f64 = lines.iter().map(|l| l.1).sum();
     [1usize, 2, 4].map(|lag| {
-        lines
-            .iter()
-            .map(|&(f, p)| p * (std::f64::consts::TAU * f * lag as f64).cos())
-            .sum::<f64>()
-            / total
+        lines.iter().map(|&(f, p)| p * (std::f64::consts::TAU * f * lag as f64).cos()).sum::<f64>() / total
     })
 }
 
@@ -323,11 +300,7 @@ impl Watch {
         let index = self.count;
         self.count += 1;
         self.envelope = self.keep * self.envelope + (1.0 - self.keep) * half.abs();
-        let carrier = if self.carrier {
-            self.envelope > CARRIER_OFF
-        } else {
-            self.envelope > CARRIER_ON
-        };
+        let carrier = if self.carrier { self.envelope > CARRIER_OFF } else { self.envelope > CARRIER_ON };
         if carrier != self.carrier {
             self.carrier = carrier;
             self.seen.push_back(Seen::Carrier(carrier));
@@ -359,11 +332,7 @@ impl Watch {
                 self.turn = turn;
             }
             self.armed = class == Hearing::Sh;
-            self.seen.push_back(Seen::Began {
-                hearing: class,
-                since: self.since,
-                turn: self.turn,
-            });
+            self.seen.push_back(Seen::Began { hearing: class, since: self.since, turn: self.turn });
         } else if class == self.hearing
             && let Some(turn) = turn
         {
@@ -379,27 +348,19 @@ impl Watch {
         if !self.carrier {
             return (Hearing::Nothing, None);
         }
-        let [Some(one), Some(two), Some(four), Some(eight)] = self.lags.each_ref().map(Lag::value)
-        else {
+        let [Some(one), Some(two), Some(four), Some(eight)] = self.lags.each_ref().map(Lag::value) else {
             return (Hearing::Modulated, None);
         };
         // Turned back by the carrier's turn over the lag, and against how
         // much of the signal repeats at all.
-        let along = |c: Complex, lag: f64, turn: f64, whole: f64| {
-            (c * Complex::from_polar(1.0, -lag * turn)).re / whole
-        };
+        let along = |c: Complex, lag: f64, turn: f64, whole: f64| (c * Complex::from_polar(1.0, -lag * turn)).re / whole;
         // What repeats every two symbols repeats every four and eight too,
         // and scrambled data seldom comes near at even one of them: a false
         // tone, AC or Sh would drop a receiver out of its data.
         if [two, four, eight].iter().all(|c| c.abs() >= PERIODIC) {
             let turn = two.arg() / 2.0;
             let first = along(one, 1.0, turn, two.abs());
-            let best = self
-                .signatures
-                .every_two
-                .iter()
-                .map(|&(h, s)| (h, (first - s).abs()))
-                .min_by(|a, b| a.1.total_cmp(&b.1));
+            let best = self.signatures.every_two.iter().map(|&(h, s)| (h, (first - s).abs())).min_by(|a, b| a.1.total_cmp(&b.1));
             return match best {
                 Some((hearing, distance)) if distance < NEAR => (hearing, Some(turn)),
                 _ => (Hearing::Modulated, None),
@@ -408,25 +369,12 @@ impl Watch {
         if eight.abs() >= PERIODIC {
             let turn = eight.arg() / 8.0;
             let whole = eight.abs();
-            let v = [
-                along(one, 1.0, turn, whole),
-                along(two, 2.0, turn, whole),
-                along(four, 4.0, turn, whole),
-            ];
+            let v = [along(one, 1.0, turn, whole), along(two, 2.0, turn, whole), along(four, 4.0, turn, whole)];
             let best = self
                 .signatures
                 .every_eight
                 .iter()
-                .map(|&(h, s)| {
-                    (
-                        h,
-                        s.iter()
-                            .zip(&v)
-                            .map(|(a, b)| (a - b).powi(2))
-                            .sum::<f64>()
-                            .sqrt(),
-                    )
-                })
+                .map(|&(h, s)| (h, s.iter().zip(&v).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt()))
                 .min_by(|a, b| a.1.total_cmp(&b.1));
             return match best {
                 Some((hearing, distance)) if distance < NEAR => (hearing, Some(turn)),
@@ -439,17 +387,12 @@ impl Watch {
     /// Sh turning into S-bar-h: over the last two symbols, each half set
     /// against the one two symbols before it has turned half way round.
     fn reversal(&mut self, index: u64) {
-        let Some(short) = self.short.value() else {
-            return;
-        };
+        let Some(short) = self.short.value() else { return };
         let along = (short * Complex::from_polar(1.0, -2.0 * self.turn)).re;
         if along < REVERSED {
             self.armed = false;
             // The two symbols the correlation spans straddle the reversal.
-            self.seen.push_back(Seen::Reversal {
-                at: index.saturating_sub(2),
-                turn: self.turn,
-            });
+            self.seen.push_back(Seen::Reversal { at: index.saturating_sub(2), turn: self.turn });
         }
     }
 }
@@ -465,10 +408,7 @@ mod tests {
         // Tone and AC are the same and the opposite a symbol on; Sh's lines
         // at half the symbol rate come through the pulse at a quarter of the
         // power, which leaves a third.
-        assert!(
-            (two[0] - 1.0).abs() < 1e-9 && (two[1] + 1.0).abs() < 1e-9,
-            "{two:?}"
-        );
+        assert!((two[0] - 1.0).abs() < 1e-9 && (two[1] + 1.0).abs() < 1e-9, "{two:?}");
         assert!((two[2] - 1.0 / 3.0).abs() < 1e-9, "{two:?}");
         for (i, a) in two.iter().enumerate() {
             for b in &two[i + 1..] {
@@ -480,12 +420,7 @@ mod tests {
         // square wave is the opposite of itself four symbols on.
         assert!(with_i.iter().all(|v| v.abs() < 0.2), "{with_i:?}");
         assert!((printed[2] + 1.0).abs() < 1e-9, "{printed:?}");
-        let apart = with_i
-            .iter()
-            .zip(&printed)
-            .map(|(a, b)| (a - b).powi(2))
-            .sum::<f64>()
-            .sqrt();
+        let apart = with_i.iter().zip(&printed).map(|(a, b)| (a - b).powi(2)).sum::<f64>().sqrt();
         assert!(apart > 2.0 * NEAR, "{apart}");
     }
 }

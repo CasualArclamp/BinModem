@@ -208,11 +208,7 @@ fn transmitted_power(speed: Speed) -> f64 {
                 }
             }
         }
-        assert!(
-            count > 0,
-            "a clean call at {} never connected",
-            speed.name()
-        );
+        assert!(count > 0, "a clean call at {} never connected", speed.name());
         sum / count as f64
     })
 }
@@ -233,10 +229,7 @@ struct Rng {
 
 impl Rng {
     fn new(seed: u64) -> Self {
-        Self {
-            state: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1,
-            spare: None,
-        }
+        Self { state: seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1, spare: None }
     }
 
     fn next_u64(&mut self) -> u64 {
@@ -506,9 +499,9 @@ impl Path {
             .sum();
         let fill = direction.delay.max(1) - 1 + lead + drift + dropped;
         let received = direction.attenuation * direction.attenuation * power;
-        let noise = direction.snr_db.map_or(0.0, |snr| {
-            (FS / 2.0 / 2400.0 * received * 10f64.powf(-snr / 10.0)).sqrt()
-        });
+        let noise = direction
+            .snr_db
+            .map_or(0.0, |snr| (FS / 2.0 / 2400.0 * received * 10f64.powf(-snr / 10.0)).sqrt());
         let mut path = Self {
             attenuation: direction.attenuation,
             shifter,
@@ -540,11 +533,7 @@ impl Path {
     }
 
     fn schedule_slips(&mut self, from: usize, slips: &[(f64, Slip)]) {
-        self.slips.extend(
-            slips
-                .iter()
-                .map(|&(at, slip)| (from + (at * FS) as usize, slip)),
-        );
+        self.slips.extend(slips.iter().map(|&(at, slip)| (from + (at * FS) as usize, slip)));
         self.slips.make_contiguous().sort_by_key(|&(at, _)| at);
     }
 
@@ -553,8 +542,7 @@ impl Path {
         let from = self.now;
         self.schedule_slips(from, &direction.slips_in_data);
         for &(at, over, to_db) in &direction.gains_in_data {
-            self.gains
-                .push_back((from + (at * FS) as usize, (over * FS) as usize, to_db));
+            self.gains.push_back((from + (at * FS) as usize, (over * FS) as usize, to_db));
         }
         if let Some((at, seconds)) = direction.loss_in_data {
             // Loud: four times the power of the far end it replaces.
@@ -599,9 +587,7 @@ impl Path {
             made
         } else if let Some(arrived) = self.fifo.pop_front() {
             match self.loss {
-                Some((from, until, sigma)) if (from..until).contains(&self.now) => {
-                    sigma * self.rng.gaussian()
-                }
+                Some((from, until, sigma)) if (from..until).contains(&self.now) => sigma * self.rng.gaussian(),
                 _ => arrived + self.noise * self.rng.gaussian(),
             }
         } else {
@@ -647,11 +633,7 @@ impl Path {
                 let fade = 40.min(n / 2);
                 for (i, &x) in last.iter().enumerate() {
                     let edge = i.min(n - 1 - i);
-                    let scale = if edge < fade {
-                        edge as f64 / fade as f64
-                    } else {
-                        1.0
-                    };
+                    let scale = if edge < fade { edge as f64 / fade as f64 } else { 1.0 };
                     self.made_up.push_back(x * scale);
                 }
             }
@@ -674,18 +656,11 @@ enum Line {
     /// Two directions, each its own path. With `hybrid`, each modem also hears
     /// its own echo at once and the far hybrid's reflection of it that many
     /// samples later, as `v32_call.rs`'s line with length does.
-    TwoWire {
-        to_calling: Direction,
-        to_answering: Direction,
-        hybrid: Option<usize>,
-    },
+    TwoWire { to_calling: Direction, to_answering: Direction, hybrid: Option<usize> },
     /// A sound card looped back: both modems summed onto one wire and heard by
     /// both. The card reads `ppm` faster than it writes, so the crossing
     /// lengthens through the call, and the slips are the card's own.
-    Cable {
-        ppm: f64,
-        slips_in_data: Vec<(f64, Slip)>,
-    },
+    Cable { ppm: f64, slips_in_data: Vec<(f64, Slip)> },
 }
 
 impl Line {
@@ -701,14 +676,9 @@ impl Line {
     /// When the far end is lost, in seconds from the start of data.
     fn loss(&self) -> Option<f64> {
         match self {
-            Self::TwoWire {
-                to_calling,
-                to_answering,
-                ..
-            } => to_calling
-                .loss_in_data
-                .or(to_answering.loss_in_data)
-                .map(|(at, _)| at),
+            Self::TwoWire { to_calling, to_answering, .. } => {
+                to_calling.loss_in_data.or(to_answering.loss_in_data).map(|(at, _)| at)
+            }
             Self::Cable { .. } => None,
         }
     }
@@ -729,11 +699,7 @@ enum Wiring {
 impl Wiring {
     fn new(line: &Line, power: f64, seed: u64) -> Self {
         match line {
-            Line::TwoWire {
-                to_calling,
-                to_answering,
-                hybrid,
-            } => Self::TwoWire {
+            Line::TwoWire { to_calling, to_answering, hybrid } => Self::TwoWire {
                 to_calling: Box::new(Path::new(to_calling, power, seed ^ 0x5151)),
                 to_answering: Box::new(Path::new(to_answering, power, seed ^ 0xA3A3)),
                 hybrid: hybrid.map(|back| {
@@ -757,11 +723,7 @@ impl Wiring {
     /// What each end hears, given what each said last.
     fn step(&mut self, from_calling: f64, from_answering: f64) -> (f64, f64) {
         match self {
-            Self::TwoWire {
-                to_calling,
-                to_answering,
-                hybrid,
-            } => {
+            Self::TwoWire { to_calling, to_answering, hybrid } => {
                 let mut heard_by_calling = to_calling.carry(from_answering);
                 let mut heard_by_answering = to_answering.carry(from_calling);
                 if let Some((calling_sent, answering_sent)) = hybrid.as_mut() {
@@ -784,16 +746,8 @@ impl Wiring {
     fn data_starts(&mut self, line: &Line, power: f64) {
         match (self, line) {
             (
-                Self::TwoWire {
-                    to_calling,
-                    to_answering,
-                    ..
-                },
-                Line::TwoWire {
-                    to_calling: c,
-                    to_answering: a,
-                    ..
-                },
+                Self::TwoWire { to_calling, to_answering, .. },
+                Line::TwoWire { to_calling: c, to_answering: a, .. },
             ) => {
                 to_calling.data_starts(c, power);
                 to_answering.data_starts(a, power);
@@ -824,11 +778,7 @@ impl Wiring {
 
     fn underruns(&self) -> usize {
         match self {
-            Self::TwoWire {
-                to_calling,
-                to_answering,
-                ..
-            } => to_calling.underruns + to_answering.underruns,
+            Self::TwoWire { to_calling, to_answering, .. } => to_calling.underruns + to_answering.underruns,
             Self::Cable(wire) => wire.underruns,
         }
     }
@@ -881,11 +831,7 @@ impl Packed {
         let mut wrong = 0;
         for (j, &w) in block.words.iter().enumerate() {
             let used = (block.len - 64 * j).min(64);
-            let mask = if used == 64 {
-                u64::MAX
-            } else {
-                (1u64 << used) - 1
-            };
+            let mask = if used == 64 { u64::MAX } else { (1u64 << used) - 1 };
             wrong += ((w ^ self.word(at + 64 * j)) & mask).count_ones() as usize;
             if wrong > enough {
                 break;
@@ -995,31 +941,18 @@ const SLIP_COST_WINDOW: usize = (2.0 * FS) as usize;
 
 impl Reception {
     fn errored_share(&self) -> f64 {
-        if self.blocks == 0 {
-            1.0
-        } else {
-            1.0 - self.clean as f64 / self.blocks as f64
-        }
+        if self.blocks == 0 { 1.0 } else { 1.0 - self.clean as f64 / self.blocks as f64 }
     }
 
     fn ber(&self) -> f64 {
-        if self.bits == 0 {
-            0.5
-        } else {
-            self.errors as f64 / self.bits as f64
-        }
+        if self.bits == 0 { 0.5 } else { self.errors as f64 / self.bits as f64 }
     }
 
     /// Errored blocks ending in the two seconds after each slip.
     fn slip_costs(&self) -> Vec<usize> {
         self.slips
             .iter()
-            .map(|&at| {
-                self.errored
-                    .iter()
-                    .filter(|&&end| end > at && end <= at + SLIP_COST_WINDOW)
-                    .count()
-            })
+            .map(|&at| self.errored.iter().filter(|&&end| end > at && end <= at + SLIP_COST_WINDOW).count())
             .collect()
     }
 
@@ -1201,8 +1134,7 @@ impl Call {
             i += 1;
         }
 
-        let held =
-            first == Some(want) && !left && calling.retrains() == 0 && answering.retrains() == 0;
+        let held = first == Some(want) && !left && calling.retrains() == 0 && answering.retrains() == 0;
         let mut ends = [Reception::default(), Reception::default()];
         for (k, role) in [Role::Calling, Role::Answering].into_iter().enumerate() {
             // What the calling end received was sent by the answering end.
@@ -1229,12 +1161,7 @@ impl Call {
             }
             r.reception = median(&mut reception[k]);
             let path = wiring.heard_by(role);
-            r.slips = path
-                .slipped
-                .iter()
-                .copied()
-                .filter(|&at| at >= listening_from[k] && at < end)
-                .collect();
+            r.slips = path.slipped.iter().copied().filter(|&at| at >= listening_from[k] && at < end).collect();
             if self.trace {
                 let seconds = |at: &usize| (*at as f64 / FS * 100.0).round() / 100.0;
                 println!(
@@ -1243,10 +1170,7 @@ impl Call {
                     r.slip_costs()
                 );
                 if let Some(limiter) = path.limiter.as_ref() {
-                    println!(
-                        "{role:?} end: the limiter turned {} samples down",
-                        limiter.clamped
-                    );
+                    println!("{role:?} end: the limiter turned {} samples down", limiter.clamped);
                 }
             }
         }
@@ -1310,11 +1234,7 @@ impl Row {
             Pass::Ber => {
                 held()?;
                 let ber = worst(Reception::ber);
-                if ber <= 1e-5 {
-                    Ok(())
-                } else {
-                    Err(format!("BER {ber:.1e}"))
-                }
+                if ber <= 1e-5 { Ok(()) } else { Err(format!("BER {ber:.1e}")) }
             }
             Pass::Clean(share) => {
                 held()?;
@@ -1332,10 +1252,7 @@ impl Row {
                 if 1.0 - errored < share {
                     Err(format!("{:.1} % of blocks errored", 100.0 * errored))
                 } else if slip > 0.2 + 1e-9 {
-                    Err(format!(
-                        "a slip cost {:.0} ms of errored blocks",
-                        1000.0 * slip
-                    ))
+                    Err(format!("a slip cost {:.0} ms of errored blocks", 1000.0 * slip))
                 } else {
                     Ok(())
                 }
@@ -1346,9 +1263,7 @@ impl Row {
                 }
                 match o.retrain_after_loss {
                     Some(after) if after <= 1.6 => {}
-                    Some(after) => {
-                        return Err(format!("the retrain began {after:.2} s after the loss"));
-                    }
+                    Some(after) => return Err(format!("the retrain began {after:.2} s after the loss")),
                     None => return Err("no retrain after the loss".into()),
                 }
                 if o.last != [Status::Connected(rate); 2] {
@@ -1411,10 +1326,7 @@ fn run_all(rows: &[Row]) -> Vec<Outcome> {
                     .expect("a thread for the call")
             })
             .collect();
-        running
-            .into_iter()
-            .map(|h| h.join().expect("a call panicked"))
-            .collect()
+        running.into_iter().map(|h| h.join().expect("a call panicked")).collect()
     })
 }
 
@@ -1426,11 +1338,7 @@ fn check(test: &str) {
     let mut failed = String::new();
     for (row, outcome) in rows.iter().zip(&outcomes) {
         println!("{}", row.line(outcome));
-        assert_eq!(
-            outcome.underruns, 0,
-            "{}: the line model ran dry",
-            row.label
-        );
+        assert_eq!(outcome.underruns, 0, "{}: the line model ran dry", row.label);
         if let Err(why) = row.verdict(outcome) {
             let _ = writeln!(failed, "  {}: {why}", row.label);
         }
@@ -1443,23 +1351,12 @@ fn check(test: &str) {
 // ---------------------------------------------------------------------------
 
 fn call(speed: Speed, line: Line, data_s: f64, seed: u64) -> Call {
-    Call {
-        offer: speed.offer(),
-        speed,
-        line,
-        data_s,
-        seed,
-        trace: false,
-    }
+    Call { offer: speed.offer(), speed, line, data_s, seed, trace: false }
 }
 
 /// The same impairments both ways.
 fn both_ways(direction: Direction) -> Line {
-    Line::TwoWire {
-        to_calling: direction.clone(),
-        to_answering: direction,
-        hybrid: None,
-    }
+    Line::TwoWire { to_calling: direction.clone(), to_answering: direction, hybrid: None }
 }
 
 /// `slips` in a random order, spread over `seconds`: one to each equal slot of
@@ -1471,12 +1368,7 @@ fn spread(rng: &mut Rng, mut slips: Vec<Slip>, seconds: f64) -> Vec<(f64, Slip)>
     slips
         .into_iter()
         .enumerate()
-        .map(|(k, slip)| {
-            (
-                k as f64 * slot + 1.0 + rng.unit() * (slot - 3.0).max(0.0),
-                slip,
-            )
-        })
+        .map(|(k, slip)| (k as f64 * slot + 1.0 + rng.unit() * (slot - 3.0).max(0.0), slip))
         .collect()
 }
 
@@ -1492,11 +1384,7 @@ fn concealment(rng: &mut Rng, seconds: f64) -> Vec<(f64, Slip)> {
         if at >= seconds {
             break;
         }
-        let slip = if k % 2 == 0 {
-            Slip::Insert(PACKET, fills[(k / 2) % 3])
-        } else {
-            Slip::Drop(PACKET)
-        };
+        let slip = if k % 2 == 0 { Slip::Insert(PACKET, fills[(k / 2) % 3]) } else { Slip::Drop(PACKET) };
         slips.push((at, slip));
     }
     slips
@@ -1504,30 +1392,18 @@ fn concealment(rng: &mut Rng, seconds: f64) -> Vec<(f64, Slip)> {
 
 /// Five samples dropped and five repeated.
 fn one_sample_slips() -> Vec<Slip> {
-    std::iter::repeat_n(Slip::Drop(1), 5)
-        .chain(std::iter::repeat_n(Slip::Insert(1, Fill::Repeat), 5))
-        .collect()
+    std::iter::repeat_n(Slip::Drop(1), 5).chain(std::iter::repeat_n(Slip::Insert(1, Fill::Repeat), 5)).collect()
 }
 
 fn every_row() -> Vec<Row> {
     let mut rows = Vec::new();
-    let mut add = |test, label: String, call, pass| {
-        rows.push(Row {
-            test,
-            label,
-            call,
-            pass,
-        })
-    };
+    let mut add = |test, label: String, call, pass| rows.push(Row { test, label, call, pass });
     let everything = rate_signal(Rates::between(4800, 14_400));
 
     // Each rate on its own, offered alone, on a direct line with a one-sample
     // delay at its working SNR: the floor under everything else.
     for (k, speed) in Speed::ALL.into_iter().enumerate() {
-        let line = both_ways(Direction {
-            snr_db: Some(speed.working_snr()),
-            ..Direction::default()
-        });
+        let line = both_ways(Direction { snr_db: Some(speed.working_snr()), ..Direction::default() });
         add(
             "every_rate_holds_at_its_working_snr",
             speed.name().into(),
@@ -1537,16 +1413,10 @@ fn every_row() -> Vec<Row> {
     }
 
     // Both directions shifted up, then both shifted down.
-    for (k, speed) in [Speed::At4800, Speed::At9600T, Speed::At14400T]
-        .into_iter()
-        .enumerate()
-    {
+    for (k, speed) in [Speed::At4800, Speed::At9600T, Speed::At14400T].into_iter().enumerate() {
         for hz in [7.0, -7.0] {
-            let line = both_ways(Direction {
-                carrier_hz: hz,
-                snr_db: Some(speed.working_snr()),
-                ..Direction::default()
-            });
+            let line =
+                both_ways(Direction { carrier_hz: hz, snr_db: Some(speed.working_snr()), ..Direction::default() });
             add(
                 "seven_hertz_either_way",
                 format!("{hz:+.0} Hz {}", speed.name()),
@@ -1558,16 +1428,8 @@ fn every_row() -> Vec<Row> {
 
     // The far end's clock 200 ppm fast one way and 200 ppm slow the other.
     for (k, speed) in [Speed::At4800, Speed::At14400T].into_iter().enumerate() {
-        let direction = |ppm| Direction {
-            ppm,
-            snr_db: Some(speed.working_snr()),
-            ..Direction::default()
-        };
-        let line = Line::TwoWire {
-            to_calling: direction(-200.0),
-            to_answering: direction(200.0),
-            hybrid: None,
-        };
+        let direction = |ppm| Direction { ppm, snr_db: Some(speed.working_snr()), ..Direction::default() };
+        let line = Line::TwoWire { to_calling: direction(-200.0), to_answering: direction(200.0), hybrid: None };
         add(
             "two_hundred_ppm_either_way",
             format!("±200 ppm {}", speed.name()),
@@ -1578,10 +1440,7 @@ fn every_row() -> Vec<Row> {
 
     // Ten one-sample slips each way at random moments in a minute of data, 3 dB
     // above the working SNR.
-    for (k, speed) in [Speed::At4800, Speed::At9600T, Speed::At14400T]
-        .into_iter()
-        .enumerate()
-    {
+    for (k, speed) in [Speed::At4800, Speed::At9600T, Speed::At14400T].into_iter().enumerate() {
         let mut rng = Rng::new(0x400 + k as u64);
         let mut direction = || Direction {
             delay: 8,
@@ -1589,39 +1448,18 @@ fn every_row() -> Vec<Row> {
             slips_in_data: spread(&mut rng, one_sample_slips(), 60.0),
             ..Direction::default()
         };
-        let line = Line::TwoWire {
-            to_calling: direction(),
-            to_answering: direction(),
-            hybrid: None,
-        };
-        add(
-            "single_sample_slips",
-            speed.name().into(),
-            call(speed, line, 60.0, 0x400 + k as u64),
-            Pass::Slips(0.97),
-        );
+        let line = Line::TwoWire { to_calling: direction(), to_answering: direction(), hybrid: None };
+        add("single_sample_slips", speed.name().into(), call(speed, line, 60.0, 0x400 + k as u64), Pass::Slips(0.97));
     }
 
     // A jitter buffer slipping 20 ms every three to five seconds each way, for
     // a minute of data.
     for (k, speed) in [Speed::At14400T, Speed::At9600T].into_iter().enumerate() {
         let mut rng = Rng::new(0x500 + k as u64);
-        let mut direction = || Direction {
-            delay: 16,
-            slips_in_data: concealment(&mut rng, 60.0),
-            ..Direction::default()
-        };
-        let line = Line::TwoWire {
-            to_calling: direction(),
-            to_answering: direction(),
-            hybrid: None,
-        };
-        add(
-            "concealment_slips",
-            speed.name().into(),
-            call(speed, line, 60.0, 0x500 + k as u64),
-            Pass::Clean(0.97),
-        );
+        let mut direction =
+            || Direction { delay: 16, slips_in_data: concealment(&mut rng, 60.0), ..Direction::default() };
+        let line = Line::TwoWire { to_calling: direction(), to_answering: direction(), hybrid: None };
+        add("concealment_slips", speed.name().into(), call(speed, line, 60.0, 0x500 + k as u64), Pass::Clean(0.97));
     }
 
     // A 3 dB step up and one back down, a 6 dB ramp up over half a second and
@@ -1639,39 +1477,16 @@ fn every_row() -> Vec<Row> {
             limiter: true,
             ..Direction::default()
         };
-        let line = Line::TwoWire {
-            to_calling: direction(0.0),
-            to_answering: direction(1.0),
-            hybrid: None,
-        };
-        add(
-            "gain_steps_and_ramps",
-            speed.name().into(),
-            call(speed, line, 60.0, 0x600 + k as u64),
-            Pass::Clean(0.99),
-        );
+        let line = Line::TwoWire { to_calling: direction(0.0), to_answering: direction(1.0), hybrid: None };
+        add("gain_steps_and_ramps", speed.name().into(), call(speed, line, 60.0, 0x600 + k as u64), Pass::Clean(0.99));
     }
 
     // The sound card loopback with its two clocks apart, offering everything.
     for (k, ppm) in [0.0, 5.0, 20.0, 100.0].into_iter().enumerate() {
-        let line = Line::Cable {
-            ppm,
-            slips_in_data: Vec::new(),
-        };
-        let call = Call {
-            offer: everything,
-            speed: Speed::At14400T,
-            line,
-            data_s: 60.0,
-            seed: 0x700 + k as u64,
-            trace: false,
-        };
-        add(
-            "cable_with_drift",
-            format!("cable {ppm} ppm"),
-            call,
-            Pass::Ber,
-        );
+        let line = Line::Cable { ppm, slips_in_data: Vec::new() };
+        let call =
+            Call { offer: everything, speed: Speed::At14400T, line, data_s: 60.0, seed: 0x700 + k as u64, trace: false };
+        add("cable_with_drift", format!("cable {ppm} ppm"), call, Pass::Ber);
     }
 
     // The same card at 20 ppm dropping five samples, repeating five and
@@ -1680,29 +1495,14 @@ fn every_row() -> Vec<Row> {
         let mut rng = Rng::new(0x800);
         let mut slips = one_sample_slips();
         slips.extend(std::iter::repeat_n(Slip::Insert(160, Fill::Silence), 2));
-        let line = Line::Cable {
-            ppm: 20.0,
-            slips_in_data: spread(&mut rng, slips, 60.0),
-        };
-        let call = Call {
-            offer: everything,
-            speed: Speed::At14400T,
-            line,
-            data_s: 60.0,
-            seed: 0x800,
-            trace: false,
-        };
+        let line = Line::Cable { ppm: 20.0, slips_in_data: spread(&mut rng, slips, 60.0) };
+        let call = Call { offer: everything, speed: Speed::At14400T, line, data_s: 60.0, seed: 0x800, trace: false };
         // Two errored 100 ms blocks per fault, and no more: twelve faults in
         // 600 blocks is 96 % clean. A slip here costs the canceller 36-49 ms to
         // find where the echo went and the receiver a clean 64-symbol window
         // after that, 73-86 ms in all, so one that straddles a block boundary
         // errs two however good the receiver is. 97 % allowed 1.5 a fault.
-        add(
-            "cable_with_slips",
-            "cable 20 ppm, slips".into(),
-            call,
-            Pass::Clean(0.96),
-        );
+        add("cable_with_slips", "cable 20 ppm, slips".into(), call, Pass::Clean(0.96));
     }
 
     // Rory's line: 0.7 s each way, the two clocks 100 ppm apart, the
@@ -1719,17 +1519,8 @@ fn every_row() -> Vec<Row> {
             limiter,
             ..Direction::default()
         };
-        let line = Line::TwoWire {
-            to_calling: direction(-100.0, true),
-            to_answering: direction(100.0, false),
-            hybrid: None,
-        };
-        add(
-            "rorys_voip_line",
-            speed.name().into(),
-            call(speed, line, 60.0, 0x900 + k as u64),
-            Pass::Clean(0.95),
-        );
+        let line = Line::TwoWire { to_calling: direction(-100.0, true), to_answering: direction(100.0, false), hybrid: None };
+        add("rorys_voip_line", speed.name().into(), call(speed, line, 60.0, 0x900 + k as u64), Pass::Clean(0.95));
     }
 
     // `v32_call.rs`'s line with length -- a hybrid at each end, 20 ms each way,
@@ -1746,40 +1537,17 @@ fn every_row() -> Vec<Row> {
             snr_db: Some(speed.working_snr()),
             ..Direction::default()
         };
-        let line = Line::TwoWire {
-            to_calling: direction(-200.0),
-            to_answering: direction(200.0),
-            hybrid: Some(2 * delay),
-        };
-        add(
-            "hybrid_with_everything",
-            speed.name().into(),
-            call(speed, line, 30.0, 0xA00),
-            Pass::Held,
-        );
+        let line =
+            Line::TwoWire { to_calling: direction(-200.0), to_answering: direction(200.0), hybrid: Some(2 * delay) };
+        add("hybrid_with_everything", speed.name().into(), call(speed, line, 30.0, 0xA00), Pass::Held);
     }
 
     // Loud noise in place of the far end, both ways, for a second and a half,
     // four seconds into data at 14 400.
     {
-        let line = both_ways(Direction {
-            loss_in_data: Some((4.0, 1.5)),
-            ..Direction::default()
-        });
-        let call = Call {
-            offer: everything,
-            speed: Speed::At14400T,
-            line,
-            data_s: 30.0,
-            seed: 0xB00,
-            trace: false,
-        };
-        add(
-            "a_real_loss_still_retrains",
-            "14400T, 1.5 s lost".into(),
-            call,
-            Pass::OneRetrain(14_400),
-        );
+        let line = both_ways(Direction { loss_in_data: Some((4.0, 1.5)), ..Direction::default() });
+        let call = Call { offer: everything, speed: Speed::At14400T, line, data_s: 30.0, seed: 0xB00, trace: false };
+        add("a_real_loss_still_retrains", "14400T, 1.5 s lost".into(), call, Pass::OneRetrain(14_400));
     }
 
     rows
@@ -1922,10 +1690,7 @@ fn before_and_after_table() {
     for (row, outcome) in rows.iter().zip(&outcomes) {
         println!("{}", row.line(outcome));
         if outcome.underruns > 0 {
-            println!(
-                "  ({} samples short on the line: the line model ran dry)",
-                outcome.underruns
-            );
+            println!("  ({} samples short on the line: the line model ran dry)", outcome.underruns);
         }
     }
 }
@@ -1936,10 +1701,7 @@ fn before_and_after_table() {
 #[ignore = "a probe: set V32_LINE"]
 fn one_line_traced() {
     let want = std::env::var("V32_LINE").unwrap_or_default();
-    for mut row in every_row()
-        .into_iter()
-        .filter(|r| format!("{} {}", r.test, r.label).contains(&want))
-    {
+    for mut row in every_row().into_iter().filter(|r| format!("{} {}", r.test, r.label).contains(&want)) {
         println!("{} {}", row.test, row.label);
         row.call.trace = true;
         let outcome = row.call.run();

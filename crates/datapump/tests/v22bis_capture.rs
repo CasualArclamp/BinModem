@@ -114,7 +114,9 @@ fn replay() {
 
         let now = modem.status();
         if now != last {
-            println!("{t:>7.2}s  {last:?} -> {now:?}");
+            println!(
+                "{t:>7.2}s  {last:?} -> {now:?}"
+            );
             if matches!(now, Status::Connected(_)) && connected_at.is_nan() {
                 connected_at = t;
             }
@@ -130,37 +132,21 @@ fn replay() {
         }
     }
 
-    println!(
-        "\nfinal: {:?}, {} bytes recovered",
-        modem.status(),
-        bytes.len()
-    );
+    println!("\nfinal: {:?}, {} bytes recovered", modem.status(), bytes.len());
     let text: String = bytes
         .iter()
-        .map(|&b| {
-            if (0x20..0x7f).contains(&b) {
-                b as char
-            } else {
-                '.'
-            }
-        })
+        .map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' })
         .collect();
     for line in text.as_bytes().chunks(72).take(20) {
         println!("  {}", String::from_utf8_lossy(line));
     }
-    let printable = bytes
-        .iter()
-        .filter(|b| (0x20..0x7f).contains(&(**b as u32)))
-        .count();
+    let printable = bytes.iter().filter(|b| (0x20..0x7f).contains(&(**b as u32))).count();
     println!(
         "\n{printable} of {} bytes printable ({:.0}%). What we transmitted meanwhile \
          had rms {:.3}.",
         bytes.len(),
         100.0 * printable as f64 / bytes.len().max(1) as f64,
-        (sent
-            .iter()
-            .map(|s| f64::from(*s) * f64::from(*s))
-            .sum::<f64>()
+        (sent.iter().map(|s| f64::from(*s) * f64::from(*s)).sum::<f64>()
             / sent.len() as f64)
             .sqrt()
     );

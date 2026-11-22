@@ -42,30 +42,14 @@ pub fn label(point: Point) -> u8 {
 /// Table 13: Y4 Y3 Y2 Y1 for the labels of y(2m) (rows) and y(2m + 1)
 /// (columns), Y1 the least significant bit.
 const TABLE_13: [[u8; 8]; 8] = [
-    [
-        0b0000, 0b0000, 0b0001, 0b0001, 0b1000, 0b1000, 0b1001, 0b1001,
-    ],
-    [
-        0b0011, 0b0010, 0b0010, 0b0011, 0b1011, 0b1010, 0b1010, 0b1011,
-    ],
-    [
-        0b0101, 0b0101, 0b0100, 0b0100, 0b1101, 0b1101, 0b1100, 0b1100,
-    ],
-    [
-        0b0110, 0b0111, 0b0111, 0b0110, 0b1110, 0b1111, 0b1111, 0b1110,
-    ],
-    [
-        0b1000, 0b1000, 0b1001, 0b1001, 0b0000, 0b0000, 0b0001, 0b0001,
-    ],
-    [
-        0b1011, 0b1010, 0b1010, 0b1011, 0b0011, 0b0010, 0b0010, 0b0011,
-    ],
-    [
-        0b1101, 0b1101, 0b1100, 0b1100, 0b0101, 0b0101, 0b0100, 0b0100,
-    ],
-    [
-        0b1110, 0b1111, 0b1111, 0b1110, 0b0110, 0b0111, 0b0111, 0b0110,
-    ],
+    [0b0000, 0b0000, 0b0001, 0b0001, 0b1000, 0b1000, 0b1001, 0b1001],
+    [0b0011, 0b0010, 0b0010, 0b0011, 0b1011, 0b1010, 0b1010, 0b1011],
+    [0b0101, 0b0101, 0b0100, 0b0100, 0b1101, 0b1101, 0b1100, 0b1100],
+    [0b0110, 0b0111, 0b0111, 0b0110, 0b1110, 0b1111, 0b1111, 0b1110],
+    [0b1000, 0b1000, 0b1001, 0b1001, 0b0000, 0b0000, 0b0001, 0b0001],
+    [0b1011, 0b1010, 0b1010, 0b1011, 0b0011, 0b0010, 0b0010, 0b0011],
+    [0b1101, 0b1101, 0b1100, 0b1100, 0b0101, 0b0101, 0b0100, 0b0100],
+    [0b1110, 0b1111, 0b1111, 0b1110, 0b0110, 0b0111, 0b0111, 0b0110],
 ];
 
 /// The symbol-to-bit converter of 9.6.3.1: [Y4, Y3, Y2, Y1] as bits 3 to 0.
@@ -130,13 +114,7 @@ impl Code {
             // Figure 11: the output fed back into the first delay only; Y2, Y1,
             // Y4 and Y2 into the adders in turn.
             Self::States32 => {
-                let (d1, d2, d3, d4, d5) = (
-                    bit(state, 0),
-                    bit(state, 1),
-                    bit(state, 2),
-                    bit(state, 3),
-                    bit(state, 4),
-                );
+                let (d1, d2, d3, d4, d5) = (bit(state, 0), bit(state, 1), bit(state, 2), bit(state, 3), bit(state, 4));
                 let n1 = d5;
                 let n2 = d1 ^ y2;
                 let n3 = d2 ^ y1;
@@ -152,14 +130,8 @@ impl Code {
             // output back, and the sixth the fifth's output with Y2 and the
             // third delay's.
             Self::States64 => {
-                let (d1, d2, d3, d4, d5, d6) = (
-                    bit(state, 0),
-                    bit(state, 1),
-                    bit(state, 2),
-                    bit(state, 3),
-                    bit(state, 4),
-                    bit(state, 5),
-                );
+                let (d1, d2, d3, d4, d5, d6) =
+                    (bit(state, 0), bit(state, 1), bit(state, 2), bit(state, 3), bit(state, 4), bit(state, 5));
                 let s1 = d1 ^ d2;
                 let s3 = d2 ^ y1;
                 let n1 = y4 ^ s1 ^ (d3 & s3);
@@ -185,11 +157,7 @@ pub fn modulo(c0: (i64, i64), c1: (i64, i64)) -> bool {
 /// Table 12: the bit inversion at the start of half data frame `half` of a
 /// superframe of `j` data frames.
 pub fn inversion(j: usize, half: usize) -> bool {
-    let pattern: &[u8] = if j == 8 {
-        b"0111011111111010"
-    } else {
-        b"01110111111110"
-    };
+    let pattern: &[u8] = if j == 8 { b"0111011111111010" } else { b"01110111111110" };
     pattern[half % pattern.len()] == b'1'
 }
 
@@ -199,9 +167,7 @@ mod tests {
     use crate::v34::constellation::{QUARTER, clockwise, quarter};
 
     fn grid() -> impl Iterator<Item = Point> {
-        (-45..=45)
-            .step_by(2)
-            .flat_map(|x| (-45..=45).step_by(2).map(move |y| (x, y)))
+        (-45..=45).step_by(2).flat_map(|x| (-45..=45).step_by(2).map(move |y| (x, y)))
     }
 
     #[test]
@@ -264,10 +230,7 @@ mod tests {
                     arrivals[next as usize] += 1;
                 }
             }
-            assert!(
-                arrivals.iter().all(|&a| a == inputs),
-                "{code:?}: {arrivals:?}"
-            );
+            assert!(arrivals.iter().all(|&a| a == inputs), "{code:?}: {arrivals:?}");
         }
     }
 
@@ -275,9 +238,7 @@ mod tests {
     /// `a` and `b`, other than a point and itself.
     fn between(a: u8, b: u8) -> i64 {
         // One point labelled a; the labelling repeats, so one will do.
-        let origin = grid()
-            .find(|&p| label(p) == a)
-            .expect("every label is used");
+        let origin = grid().find(|&p| label(p) == a).expect("every label is used");
         grid()
             .filter(|&p| label(p) == b && p != origin)
             .map(|p| i64::from((p.0 - origin.0).pow(2) + (p.1 - origin.1).pow(2)))
@@ -295,9 +256,7 @@ mod tests {
             let mut out = Vec::new();
             for first in 0..8u8 {
                 for second in 0..8u8 {
-                    if convert(first, second) & code.inputs() == y
-                        && ((first ^ second) & 1 == 1) == y0
-                    {
+                    if convert(first, second) & code.inputs() == y && ((first ^ second) & 1 == 1) == y0 {
                         out.push((first, second));
                     }
                 }
@@ -314,8 +273,7 @@ mod tests {
             let mut best = i64::MAX;
             for &(a1, a2) in pa {
                 for &(b1, b2) in pb {
-                    best =
-                        best.min(same[a1 as usize][b1 as usize] + same[a2 as usize][b2 as usize]);
+                    best = best.min(same[a1 as usize][b1 as usize] + same[a2 as usize][b2 as usize]);
                 }
             }
             best
@@ -369,8 +327,7 @@ mod tests {
             }
             for &ya in &inputs {
                 for &yb in &inputs {
-                    let step =
-                        subset_distance(&pairs(code.output(a), ya), &pairs(code.output(b), yb));
+                    let step = subset_distance(&pairs(code.output(a), ya), &pairs(code.output(b), yb));
                     let total = d + step;
                     let (na, nb) = (code.next(a, ya), code.next(b, yb));
                     if na == nb {
@@ -391,10 +348,7 @@ mod tests {
         // times that at 16 and 32 states and five at 64 -- less the half bit
         // a 2D symbol the code costs, the 4.5 and 5.5 dB such codes are known
         // for. A wire misread off Figure 12 takes the 64-state code's to 16.
-        let d: Vec<i64> = [Code::States16, Code::States32, Code::States64]
-            .iter()
-            .map(|&c| free_distance(c))
-            .collect();
+        let d: Vec<i64> = [Code::States16, Code::States32, Code::States64].iter().map(|&c| free_distance(c)).collect();
         assert_eq!(d, vec![16, 16, 20]);
     }
 
@@ -416,9 +370,7 @@ mod tests {
                     let z = convert(turn(first), turn(second)) & code.inputs();
                     match turned[y as usize] {
                         None => turned[y as usize] = Some(z),
-                        Some(earlier) => {
-                            assert_eq!(earlier, z, "{code:?}: inputs {y:04b} turn two ways")
-                        }
+                        Some(earlier) => assert_eq!(earlier, z, "{code:?}: inputs {y:04b} turn two ways"),
                     }
                 }
             }
@@ -456,31 +408,21 @@ mod tests {
     fn inputs_the_code_ignores_change_nothing() {
         for state in 0..16u8 {
             for y in 0..16u8 {
-                assert_eq!(
-                    Code::States16.next(state, y),
-                    Code::States16.next(state, y & 0b0011)
-                );
+                assert_eq!(Code::States16.next(state, y), Code::States16.next(state, y & 0b0011));
             }
         }
         for state in 0..32u8 {
             for y in 0..16u8 {
-                assert_eq!(
-                    Code::States32.next(state, y),
-                    Code::States32.next(state, y & 0b1011)
-                );
+                assert_eq!(Code::States32.next(state, y), Code::States32.next(state, y & 0b1011));
             }
         }
     }
 
     #[test]
     fn the_inversion_patterns_are_table_12s() {
-        let eight: String = (0..16)
-            .map(|h| if inversion(8, h) { '1' } else { '0' })
-            .collect();
+        let eight: String = (0..16).map(|h| if inversion(8, h) { '1' } else { '0' }).collect();
         assert_eq!(eight, "0111011111111010");
-        let seven: String = (0..14)
-            .map(|h| if inversion(7, h) { '1' } else { '0' })
-            .collect();
+        let seven: String = (0..14).map(|h| if inversion(7, h) { '1' } else { '0' }).collect();
         assert_eq!(seven, "01110111111110");
     }
 
