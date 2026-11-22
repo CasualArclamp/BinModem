@@ -306,6 +306,9 @@ const TONE_B_BEFORE_INFO0: f64 = 0.100;
 /// No part of phase 2 takes this long, round trips and all.
 pub(crate) const GIVE_UP: f64 = 20.0;
 
+/// Why phase 2 stopped when [`Modem::expect_far_end_within`]'s time ran out.
+pub const FAR_END_SILENT: &str = "no INFO0 and no tone from the far end";
+
 /// Where phase 2 has got to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Stage {
@@ -517,6 +520,13 @@ pub struct Modem {
     /// Whether this phase 2 took V.92's short procedure (9.4), and has not
     /// since been sent back to the full one.
     short: bool,
+    /// When phase 2 gives up on a far end it has heard nothing from, if it
+    /// is to (see [`Self::expect_far_end_within`]).
+    far_deadline: Option<u64>,
+    /// Whether the far end's INFO0 or its tone has been heard at all.
+    heard_far: bool,
+    /// Whether phase 2 stopped at `far_deadline`.
+    far_silent: bool,
 }
 
 impl Modem {
@@ -570,6 +580,9 @@ impl Modem {
             sent_pcm_upstream: false,
             refused_info1a: None,
             short: false,
+            far_deadline: None,
+            heard_far: false,
+            far_silent: false,
         }
     }
 
@@ -642,6 +655,28 @@ impl Modem {
         modem.far_flags = self.far_flags;
         modem.full_phase2_only = true;
         modem
+    }
+
+    /// Give up, with [`FAR_END_SILENT`], if neither the far end's INFO0 nor
+    /// its tone has been heard `seconds` after the lead-in.
+    ///
+    /// For a phase 2 that follows V.92's short Phase 1. There the digital
+    /// modem goes on to Phase 2 75 ms after it hears TONEq (9.2.4.3), so its
+    /// INFO0d is on its way before this end's silence has even begun, and a
+    /// far end that has sent nothing a round trip and 9.4.2.2.2's 2500 ms
+    /// later is not in Phase 2 at all. A retrain needs its INFO0d (9.7.2.1
+    /// keeps the capabilities), so there is nothing for this phase 2 to fall
+    /// back to: it stops, and its owner decides. Without this a live server
+    /// that went silent after TONEq (live-1795315036) held the call for
+    /// [`GIVE_UP`].
+    pub fn expect_far_end_within(&mut self, seconds: f64) {
+        self.far_deadline = Some(self.silent_until + self.ms(seconds));
+    }
+
+    /// Whether phase 2 stopped because the far end said nothing (see
+    /// [`Self::expect_far_end_within`]).
+    pub fn far_end_silent(&self) -> bool {
+        self.far_silent
     }
 
     /// Ask for V.34 in INFO1a from now on, even of a V.90 digital modem
@@ -932,6 +967,13 @@ impl Modem {
         self.now += 1;
         let info = self.rx.feed(line);
         self.presence.feed(line);
+        // The tone has to stand as long as it does before a lost INFO0 is
+        // assumed. The server in live-1795315036 put ten milliseconds of
+        // its most negative codeword on the line as it went silent, and the
+        // narrow detector rang with that step for twenty.
+        if !self.heard_far && (info.is_some() || self.presence.stood(self.ms(TONE_B_BEFORE_INFO0))) {
+            self.heard_far = true;
+        }
         // A probing signal -- the far end's, or the echo of this end's own --
         // leaves the reversal detector sure the tone after it is far off
         // frequency, and it refuses that tone's reversal. Tone A reverses 50 ms
@@ -963,6 +1005,9 @@ impl Modem {
         if self.status == Status::Running {
             if self.now > self.ms(GIVE_UP) {
                 self.fail("phase 2 went on for twenty seconds");
+            } else if !self.heard_far && self.far_deadline.is_some_and(|d| self.now > d) {
+                self.far_silent = true;
+                self.fail(FAR_END_SILENT);
             } else {
                 self.timers();
                 if let Some(info) = info {
@@ -2372,6 +2417,45 @@ pub(crate) mod tests {
         assert!(!digital.short_phase2_agreed() && digital.recoveries() == 1);
         assert_eq!(analogue.status(), Status::Failed("no tone B reversal in short phase 2"));
         assert!(analogue.asks_for_retrain());
+    }
+
+    /// After a quick connect: a far end that sends nothing -- bar the step of
+    /// a full-scale codeword the live server in live-1795315036 left as it
+    /// went quiet -- is given up on when the time runs out, and not at
+    /// [`GIVE_UP`]; it is not a retrain, which would need its INFO0d.
+    #[test]
+    fn a_far_end_that_says_nothing_after_a_quick_connect_is_given_up_on() {
+        let lead_in = 0.075;
+        let mut analogue = Modem::v90(asking_short(analogue_v92(true)), FS, lead_in);
+        analogue.expect_far_end_within(3.4);
+        let mut stopped = None;
+        for n in 0..(GIVE_UP * FS) as usize {
+            // Ten milliseconds of the most negative codeword, early on.
+            let heard = if (1000..1160).contains(&n) { -0.98 } else { 0.0 };
+            analogue.step(heard);
+            if analogue.status() != Status::Running {
+                stopped = Some(n as f64 / FS);
+                break;
+            }
+        }
+        let at = stopped.expect("phase 2 never gave up");
+        assert!((lead_in + 3.4..lead_in + 3.5).contains(&at), "gave up at {at:.3} s");
+        assert_eq!(analogue.status(), Status::Failed(FAR_END_SILENT));
+        assert!(analogue.far_end_silent() && !analogue.asks_for_retrain());
+    }
+
+    /// The same deadline does nothing to a far end that is there: a short
+    /// phase 2 over a long round trip finishes as ever.
+    #[test]
+    fn the_quick_connect_deadline_leaves_a_far_end_that_answers_alone() {
+        let mut line = Line::new(0.750, 10.0, 20.0, 50.0);
+        let digital = Modem::v90(asking_short(digital_v92(true)), FS, 0.0);
+        let mut analogue = Modem::v90(asking_short(analogue_v92(true)), FS, 0.0);
+        analogue.expect_far_end_within(2.5 + 1.5);
+        let (digital, analogue) = run(&mut line, 12.0, digital, analogue);
+        assert_eq!(digital.status(), Status::Done, "digital: {}", digital.phase());
+        assert_eq!(analogue.status(), Status::Done, "analogue: {}", analogue.phase());
+        assert!(analogue.was_short() && !analogue.far_end_silent());
     }
 
     /// P2P P1 and P2S N-3: V.34's Table 14 has the transmit clock source in
