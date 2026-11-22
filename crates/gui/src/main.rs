@@ -14,6 +14,7 @@
 //!   binmodem --devices                        what audio this machine has
 //!   binmodem --telnet [host]                  a board over a socket, no modem
 //!   binmodem --answer --in <dev> --out <dev>  a board to dial, on the same cable
+//!   binmodem --com <port> [--telnet-in <port>] a modem on a COM port for DOSBox
 //! ```
 //!
 //! A modem is what this is for, so a modem is what it opens with. `--live` is
@@ -38,6 +39,7 @@
 mod answer;
 mod app;
 mod bbs;
+mod comport;
 mod crashlog;
 mod dialin;
 mod document;
@@ -206,7 +208,8 @@ fn parse() -> Result<Option<Args>, String> {
                      binmodem --sip <account>                   a call over SIP, with no sound card\n\
                      binmodem --accounts                        list the SIP accounts there are\n\
                      binmodem --telnet [host]                   a board over a socket, no modem\n\
-                     binmodem --answer --in <dev> --out <dev>   a board to dial, on the same cable"
+                     binmodem --answer --in <dev> --out <dev>   a board to dial, on the same cable\n\
+                     binmodem --com <port> [--telnet-in <port>] a modem on a COM port for DOSBox"
                 );
                 return Ok(None);
             }
@@ -254,6 +257,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let code = answer::run(raw[1..].to_vec());
         // ExitCode cannot be returned from here, and its value cannot be read
         // out of it either, so the two outcomes are told apart by identity.
+        std::process::exit(i32::from(code != std::process::ExitCode::SUCCESS));
+    }
+
+    // So is the modem on a COM port, which has no window either.
+    if raw.first().is_some_and(|a| a == "--com") {
+        let code = comport::run(raw.clone());
         std::process::exit(i32::from(code != std::process::ExitCode::SUCCESS));
     }
 
