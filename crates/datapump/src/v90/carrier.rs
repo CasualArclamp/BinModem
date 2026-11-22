@@ -382,7 +382,11 @@ mod tests {
 
     /// Samples fed until the far end is taken to have stopped, if it is
     /// within `most` of them.
-    fn until_stopped(w: &mut Stopped, most: usize, mut next: impl FnMut(usize) -> f64) -> Option<usize> {
+    fn until_stopped(
+        w: &mut Stopped,
+        most: usize,
+        mut next: impl FnMut(usize) -> f64,
+    ) -> Option<usize> {
         (0..most).find(|&n| {
             w.feed(next(n));
             w.stopped()
@@ -401,13 +405,19 @@ mod tests {
             assert!(!w.replaying() && !w.stopped(), "{what}");
             let after = until_stopped(&mut w, 32_000, |_| level).expect(what);
             let seconds = (after + 1) as f64 / LINE_FS;
-            assert!((0.99..1.01).contains(&seconds), "{what}: stopped after {seconds} s");
+            assert!(
+                (0.99..1.01).contains(&seconds),
+                "{what}: stopped after {seconds} s"
+            );
             // And a line holding still is not carrying anything from the
             // moment it is seen, long before it has been a second.
             let mut w = Stopped::new(LINE_FS);
             (0..8000).for_each(|_| w.feed(scrambled(&mut seed)));
             (0..80).for_each(|_| w.feed(level));
-            assert!(w.replaying(), "{what} was not seen within five milliseconds");
+            assert!(
+                w.replaying(),
+                "{what} was not seen within five milliseconds"
+            );
         }
     }
 
@@ -429,13 +439,17 @@ mod tests {
             if broken(n) {
                 scrambled(&mut seed)
             } else {
-                let jitter = f64::from(n.is_multiple_of(4) as u8) * if n.is_multiple_of(8) { step } else { -step };
+                let jitter = f64::from(n.is_multiple_of(4) as u8)
+                    * if n.is_multiple_of(8) { step } else { -step };
                 block[n % 324] + jitter
             }
         })
         .expect("never stopped");
         let seconds = (after - 1648) as f64 / LINE_FS;
-        assert!((1.0..1.05).contains(&seconds), "stopped after {seconds} s of replay");
+        assert!(
+            (1.0..1.05).contains(&seconds),
+            "stopped after {seconds} s of replay"
+        );
     }
 
     /// Nothing a working far end sends in phase 4 is a far end that has
@@ -447,24 +461,40 @@ mod tests {
     fn r_scrambled_sequences_concealment_and_holes_are_not_a_far_end_that_has_stopped() {
         let mut seed = 0x1234_5678;
         // R at the line rate: six symbols, twelve samples, over and over.
-        let r: Vec<f64> = (0..12).map(|k| if k < 6 { 0.12 } else { -0.12 } + 0.01 * k as f64).collect();
+        let r: Vec<f64> = (0..12)
+            .map(|k| if k < 6 { 0.12 } else { -0.12 } + 0.01 * k as f64)
+            .collect();
         let mut w = Stopped::new(LINE_FS);
         assert_eq!(until_stopped(&mut w, 48_000, |n| r[n % 12]), None, "R");
         assert!(!w.replaying(), "R");
         let mut w = Stopped::new(LINE_FS);
-        assert_eq!(until_stopped(&mut w, 48_000, |_| scrambled(&mut seed)), None, "scrambled");
+        assert_eq!(
+            until_stopped(&mut w, 48_000, |_| scrambled(&mut seed)),
+            None,
+            "scrambled"
+        );
         // Concealment: 40 ms of the line 10 ms back, every 1.1 s.
         let mut w = Stopped::new(LINE_FS);
         let mut line: Vec<f64> = Vec::new();
         let concealed = until_stopped(&mut w, 160_000, |n| {
-            let s = if n % 17_600 < 640 && line.len() > 160 { line[line.len() - 160] } else { scrambled(&mut seed) };
+            let s = if n % 17_600 < 640 && line.len() > 160 {
+                line[line.len() - 160]
+            } else {
+                scrambled(&mut seed)
+            };
             line.push(s);
             s
         });
         assert_eq!(concealed, None, "concealment");
         // Holes: 30 ms of nothing every 1.5 s.
         let mut w = Stopped::new(LINE_FS);
-        let holes = until_stopped(&mut w, 160_000, |n| if n % 24_000 < 480 { 0.0 } else { scrambled(&mut seed) });
+        let holes = until_stopped(&mut w, 160_000, |n| {
+            if n % 24_000 < 480 {
+                0.0
+            } else {
+                scrambled(&mut seed)
+            }
+        });
         assert_eq!(holes, None, "holes");
     }
 }

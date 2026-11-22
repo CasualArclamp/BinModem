@@ -186,8 +186,10 @@ impl Handshake {
         // no signal or a pure tone, and moving a clock on the strength of what
         // noise happens to turn by is how a receiver that was right becomes a
         // receiver that is wrong.
-        if matches!(self.state, State::OfferingDoubleDibit | State::Scrambled1200)
-            && rx.half_symbol_out()
+        if matches!(
+            self.state,
+            State::OfferingDoubleDibit | State::Scrambled1200
+        ) && rx.half_symbol_out()
         {
             rx.shift_half_symbol();
         }

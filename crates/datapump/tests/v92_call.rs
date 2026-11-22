@@ -28,10 +28,10 @@
 
 use datapump::v90::sequences::{Cp, Descriptor};
 use datapump::v90::ucode::{self, Law};
+use datapump::v92::FilterLimits;
 use datapump::v92::analogue;
 use datapump::v92::digital;
 use datapump::v92::epsilon;
-use datapump::v92::FilterLimits;
 
 use std::collections::VecDeque;
 
@@ -53,7 +53,11 @@ fn digital_settings(far_md: u8) -> digital::Settings {
 /// A CPt offering 40 000 bit/s, which is what an analogue end on a clean line
 /// asks for.
 fn cpt() -> Cp {
-    Cp { drn: 16, constellations: vec![(1u128 << 40) - 1], ..Cp::default() }
+    Cp {
+        drn: 16,
+        constellations: vec![(1u128 << 40) - 1],
+        ..Cp::default()
+    }
 }
 
 fn analogue_settings(md_length: u8) -> analogue::Settings {
@@ -205,7 +209,8 @@ impl Line {
     /// The far end's transmitter steps: ask the line for that much delay, to
     /// take effect where the digital end has not read yet.
     fn ask(&mut self, extra: f64) {
-        self.pending.push_back((self.sent.len() + LINE_ANCHOR, extra));
+        self.pending
+            .push_back((self.sent.len() + LINE_ANCHOR, extra));
     }
 
     fn ignoring_the_jp(mut self) -> Self {
@@ -239,7 +244,9 @@ impl Line {
         let fraction = at - centre as f64;
         let mut out = 0.0;
         for k in -32i64..=32 {
-            let Some(&x) = self.sent.get((centre + k) as usize) else { continue };
+            let Some(&x) = self.sent.get((centre + k) as usize) else {
+                continue;
+            };
             let t = fraction - k as f64;
             let sinc = if t.abs() < 1e-12 {
                 1.0
@@ -316,7 +323,8 @@ impl Call {
         if let Some(phase) = self.robbed {
             if self.octets % 6 == phase {
                 let (u, negative) = ucode::nearest(Law::Mu, (down * 32768.0).round() as i32);
-                let (u, negative) = ucode::from_octet(Law::Mu, ucode::octet(Law::Mu, u, negative) | 1);
+                let (u, negative) =
+                    ucode::from_octet(Law::Mu, ucode::octet(Law::Mu, u, negative) | 1);
                 down = ucode::level(Law::Mu, u) * if negative { -1.0 } else { 1.0 };
             }
             self.octets += 1;
@@ -390,27 +398,71 @@ fn phase_3_completes_and_the_digital_end_reaches_phase_4() {
         "--- digital ---\n{:#?}\n--- analogue ---\n{:#?}",
         call.digital_notes, call.analogue_notes
     );
-    assert!(reached, "digital {:?}, analogue {:?}", call.digital.phase(), call.analogue.phase());
+    assert!(
+        reached,
+        "digital {:?}, analogue {:?}",
+        call.digital.phase(),
+        call.analogue.phase()
+    );
 
     // The digital end's half.
-    assert!(call.digital.descriptor().is_some(), "no Ja: {:?}", call.digital_notes);
-    assert!(call.digital.cpt().is_some(), "no CPt: {:?}", call.digital_notes);
-    assert!(call.digital.circuit107(), "circuit 107 never came on: {:?}", call.digital_notes);
-    assert_eq!(call.digital.cpt().map(|cp| cp.drn), Some(cpt().drn), "the CPt this end sent");
+    assert!(
+        call.digital.descriptor().is_some(),
+        "no Ja: {:?}",
+        call.digital_notes
+    );
+    assert!(
+        call.digital.cpt().is_some(),
+        "no CPt: {:?}",
+        call.digital_notes
+    );
+    assert!(
+        call.digital.circuit107(),
+        "circuit 107 never came on: {:?}",
+        call.digital_notes
+    );
+    assert_eq!(
+        call.digital.cpt().map(|cp| cp.drn),
+        Some(cpt().drn),
+        "the CPt this end sent"
+    );
 
     // The analogue end's half.
-    assert!(call.analogue.far_jd().is_some(), "no Jd: {:?}", call.analogue_notes);
-    assert!(call.analogue.jp().is_some(), "no Jp: {:?}", call.analogue_notes);
-    assert!(call.analogue.circuit107(), "circuit 107 never came on: {:?}", call.analogue_notes);
+    assert!(
+        call.analogue.far_jd().is_some(),
+        "no Jd: {:?}",
+        call.analogue_notes
+    );
+    assert!(
+        call.analogue.jp().is_some(),
+        "no Jp: {:?}",
+        call.analogue_notes
+    );
+    assert!(
+        call.analogue.circuit107(),
+        "circuit 107 never came on: {:?}",
+        call.analogue_notes
+    );
     // 9.5.2.1.7-8: half a symbol at the S-bar-u after Su, then the epsilon Jp
     // carried at the one after Jp. That epsilon is the digital end's measurement
     // of Su (9.5.1.1.6-7): whatever the phase turned out to be, both ends have
     // to be talking about the same number, which is what this holds together.
     let delays = call.analogue.delays();
-    assert_eq!(delays.first(), Some(&0.5), "the half symbol the S-bar-u gives");
+    assert_eq!(
+        delays.first(),
+        Some(&0.5),
+        "the half symbol the S-bar-u gives"
+    );
     let epsilon = call.analogue.epsilon().expect("Jp carried an epsilon");
-    assert_eq!(delays.get(1), Some(&epsilon), "the analogue applied what Jp said");
-    assert!((0.0..1.0).contains(&epsilon), "a fraction of a symbol: {epsilon}");
+    assert_eq!(
+        delays.get(1),
+        Some(&epsilon),
+        "the analogue applied what Jp said"
+    );
+    assert!(
+        (0.0..1.0).contains(&epsilon),
+        "a fraction of a symbol: {epsilon}"
+    );
 }
 
 /// A CPt for 32 000 bit/s on thirty-two points, Ucodes 16 to 47: none of them
@@ -419,7 +471,11 @@ fn phase_3_completes_and_the_digital_end_reaches_phase_4() {
 /// end can decode.
 fn readable_cpt() -> Cp {
     let mask = (16..=47u8).fold(0u128, |mask, u| mask | 1 << u);
-    Cp { drn: 16, constellations: vec![mask], ..Cp::default() }
+    Cp {
+        drn: 16,
+        constellations: vec![mask],
+        ..Cp::default()
+    }
 }
 
 /// A DIL of four segments of twenty-four symbols, each a reference at U_INFO
@@ -452,7 +508,10 @@ fn pattern(length: usize, seed: u64) -> Vec<bool> {
 /// data mode, on the line every test here uses: a perfect wire down, and up a
 /// 3.4 kHz passband with the analogue end's own sub-symbol delays.
 fn connected_call(descriptor: Descriptor) -> Call {
-    connected(Call::new(digital_settings(0), analogue_for_data(descriptor)))
+    connected(Call::new(
+        digital_settings(0),
+        analogue_for_data(descriptor),
+    ))
 }
 
 /// The analogue end every call here that reaches data mode is made with.
@@ -484,7 +543,9 @@ fn connected(mut call: Call) -> Call {
 
 /// Where `wanted` is in `stream`, if it is there whole.
 fn found(stream: &[bool], wanted: &[bool]) -> Option<usize> {
-    stream.windows(wanted.len()).position(|window| window == wanted)
+    stream
+        .windows(wanted.len())
+        .position(|window| window == wanted)
 }
 
 /// Phase 4 between the two modems of this crate (9.6.1.1 against 9.6.2.1),
@@ -506,38 +567,88 @@ fn phase_4_completes_between_the_two_modems_and_the_downstream_carries_data() {
     for descriptor in [Descriptor::none(), a_dil()] {
         let asked = descriptor.len();
         let mut call = connected_call(descriptor);
-        let digital_said = |text: &str| call.digital_notes.iter().filter(|note| note.starts_with(text)).count();
-        let analogue_said = |text: &str| call.analogue_notes.iter().filter(|note| note.starts_with(text)).count();
-        let said = format!("a DIL of {asked}:\n{:#?}\n{:#?}", call.digital_notes, call.analogue_notes);
+        let digital_said = |text: &str| {
+            call.digital_notes
+                .iter()
+                .filter(|note| note.starts_with(text))
+                .count()
+        };
+        let analogue_said = |text: &str| {
+            call.analogue_notes
+                .iter()
+                .filter(|note| note.starts_with(text))
+                .count()
+        };
+        let said = format!(
+            "a DIL of {asked}:\n{:#?}\n{:#?}",
+            call.digital_notes, call.analogue_notes
+        );
 
         // 8.7.6: the upstream reader starts at E1u, and its fit on TRN2u is
         // made against TRN2u.
         assert_eq!(digital_said("V.92: E1u"), 1, "{said}");
-        assert_eq!(digital_said("V.92: phase 4 receiver fitted on TRN2u"), 1, "{said}");
+        assert_eq!(
+            digital_said("V.92: phase 4 receiver fitted on TRN2u"),
+            1,
+            "{said}"
+        );
         assert_eq!(digital_said("V.92: no phase 4 fit"), 0, "{said}");
 
         // 9.6.1.1.2 and 9.6.2.1.2: a CPd and a CPu each way, and the rates
         // they named are the rates each end says it is at.
-        assert!(digital_said("V.92: CPu drn 16") >= 1 && analogue_said("CPd for drn") >= 1, "{said}");
-        let upstream = call.analogue.parameters().map(datapump::v92::Parameters::rate).expect("a CPd was obeyed");
-        assert_eq!(call.digital.status(), digital::Status::Connected { downstream: 48_000, upstream }, "{said}");
-        assert_eq!(call.analogue.status(), analogue::Status::Connected { downstream: 48_000, upstream }, "{said}");
+        assert!(
+            digital_said("V.92: CPu drn 16") >= 1 && analogue_said("CPd for drn") >= 1,
+            "{said}"
+        );
+        let upstream = call
+            .analogue
+            .parameters()
+            .map(datapump::v92::Parameters::rate)
+            .expect("a CPd was obeyed");
+        assert_eq!(
+            call.digital.status(),
+            digital::Status::Connected {
+                downstream: 48_000,
+                upstream
+            },
+            "{said}"
+        );
+        assert_eq!(
+            call.analogue.status(),
+            analogue::Status::Connected {
+                downstream: 48_000,
+                upstream
+            },
+            "{said}"
+        );
 
         // 9.6.1.1.6: E2u, once, and where it is. Its last symbol left the
         // analogue modem on the tick before B1u's first; the line is 55
         // samples long (its 31-tap filter and the interpolator's forty), and
         // the digital modem's equaliser is no longer than its 48 taps.
         assert_eq!(digital_said("V.92: E2u"), 1, "{said}");
-        let (b1u, e2u) = (call.b1u_at.expect("B1u went out"), call.e2u_at.expect("E2u was read"));
-        assert!((b1u + 55..=b1u + 55 + 48).contains(&e2u), "B1u's first symbol at {b1u}, E2u read at {e2u}: {said}");
+        let (b1u, e2u) = (
+            call.b1u_at.expect("B1u went out"),
+            call.e2u_at.expect("E2u was read"),
+        );
+        assert!(
+            (b1u + 55..=b1u + 55 + 48).contains(&e2u),
+            "B1u's first symbol at {b1u}, E2u read at {e2u}: {said}"
+        );
 
         // 8.8.2: one Ed, of two frames, so the analogue modem's B1d begins on
         // the frame after the Ed it read, and all forty-eight frames are ones.
         assert_eq!(digital_said("V.92: Ed out"), 1, "{said}");
         assert_eq!(analogue_said("Ed, reading for B1d"), 1, "{said}");
         assert_eq!(analogue_said("B1d began"), 0, "{said}");
-        assert_eq!(analogue_said("B1d, 48 of 48 frames scrambled ones"), 1, "{said}");
-        assert!(call.analogue.circuit104() && call.analogue.circuit106() && call.analogue.circuit109());
+        assert_eq!(
+            analogue_said("B1d, 48 of 48 frames scrambled ones"),
+            1,
+            "{said}"
+        );
+        assert!(
+            call.analogue.circuit104() && call.analogue.circuit106() && call.analogue.circuit109()
+        );
 
         // And the downstream carries data: what the far DTE sends arrives bit
         // for bit, behind nothing but the ones of an idle line (V.90 8.6.1).
@@ -548,9 +659,16 @@ fn phase_4_completes_between_the_two_modems_and_the_downstream_carries_data() {
             call.tick();
             came_down.extend(call.analogue.take_bits());
         }
-        let at = found(&came_down, &down).unwrap_or_else(|| panic!("the downstream data did not arrive: {said}"));
-        assert!(came_down[..at].iter().all(|&bit| bit), "something other than idle ones came first");
-        assert!(came_down[at + down.len()..].iter().all(|&bit| bit), "and something other than idle ones after");
+        let at = found(&came_down, &down)
+            .unwrap_or_else(|| panic!("the downstream data did not arrive: {said}"));
+        assert!(
+            came_down[..at].iter().all(|&bit| bit),
+            "something other than idle ones came first"
+        );
+        assert!(
+            came_down[at + down.len()..].iter().all(|&bit| bit),
+            "and something other than idle ones after"
+        );
     }
 }
 
@@ -596,28 +714,65 @@ const B1U_JOIN_BITS: usize = 72;
 fn assert_carries_data(call: &mut Call, what: &str) {
     let (down, up) = (down_data(), up_data());
     let carried = carry(call);
-    let said = format!("{what}:\n{:#?}\n{:#?}", call.digital_notes, call.analogue_notes);
+    let said = format!(
+        "{what}:\n{:#?}\n{:#?}",
+        call.digital_notes, call.analogue_notes
+    );
 
-    let at = found(&carried.came_down, &down).unwrap_or_else(|| panic!("the downstream data did not arrive: {said}"));
-    assert!(carried.came_down[..at].iter().all(|&bit| bit), "{what}: something other than idle ones came down first");
-    assert!(carried.came_down[at + down.len()..].iter().all(|&bit| bit), "{what}: and something other than ones after");
+    let at = found(&carried.came_down, &down)
+        .unwrap_or_else(|| panic!("the downstream data did not arrive: {said}"));
+    assert!(
+        carried.came_down[..at].iter().all(|&bit| bit),
+        "{what}: something other than idle ones came down first"
+    );
+    assert!(
+        carried.came_down[at + down.len()..].iter().all(|&bit| bit),
+        "{what}: and something other than ones after"
+    );
 
     let at = found(&carried.went_up, &up).unwrap_or_else(|| {
         // How far from it the upstream is: B1u and an idle DTE are both ones,
         // so every block of what came up should be all ones.
-        let ones: Vec<usize> =
-            carried.went_up.chunks(360).take(24).map(|block| block.iter().filter(|&&bit| bit).count()).collect();
+        let ones: Vec<usize> = carried
+            .went_up
+            .chunks(360)
+            .take(24)
+            .map(|block| block.iter().filter(|&&bit| bit).count())
+            .collect();
         panic!("the upstream data did not arrive; ones in each 360 bits: {ones:?}\n{said}")
     });
-    assert!(at > B1U_JOIN_BITS, "{what}: the upstream data came before B1u had been read");
-    let zero = carried.went_up[B1U_JOIN_BITS..at].iter().position(|&bit| !bit);
-    assert_eq!(zero, None, "{what}: B1u and the idle line behind it are ones (8.7.1)");
-    assert!(carried.went_up[at + up.len()..].iter().all(|&bit| bit), "{what}: and something other than ones after");
+    assert!(
+        at > B1U_JOIN_BITS,
+        "{what}: the upstream data came before B1u had been read"
+    );
+    let zero = carried.went_up[B1U_JOIN_BITS..at]
+        .iter()
+        .position(|&bit| !bit);
+    assert_eq!(
+        zero, None,
+        "{what}: B1u and the idle line behind it are ones (8.7.1)"
+    );
+    assert!(
+        carried.went_up[at + up.len()..].iter().all(|&bit| bit),
+        "{what}: and something other than ones after"
+    );
 
     // No retrain: both ends are where they were (9.7).
-    assert!(matches!(call.digital.status(), digital::Status::Connected { .. }), "{said}");
-    assert!(matches!(call.analogue.status(), analogue::Status::Connected { .. }), "{said}");
-    assert!(!call.analogue_notes.iter().any(|note| note.contains("retrain")), "{said}");
+    assert!(
+        matches!(call.digital.status(), digital::Status::Connected { .. }),
+        "{said}"
+    );
+    assert!(
+        matches!(call.analogue.status(), analogue::Status::Connected { .. }),
+        "{said}"
+    );
+    assert!(
+        !call
+            .analogue_notes
+            .iter()
+            .any(|note| note.contains("retrain")),
+        "{said}"
+    );
 }
 
 /// V92-41's milestone: a V.92 call between the two modems of this crate, from
@@ -652,18 +807,39 @@ fn a_v92_call_connects_with_pcm_both_ways_and_carries_data() {
         let asked = descriptor.len();
         let what = format!("a DIL of {asked}");
         let mut call = connected_call(descriptor);
-        let (digital::Status::Connected { downstream, upstream }, analogue::Status::Connected { .. }) =
-            (call.digital.status(), call.analogue.status())
+        let (
+            digital::Status::Connected {
+                downstream,
+                upstream,
+            },
+            analogue::Status::Connected { .. },
+        ) = (call.digital.status(), call.analogue.status())
         else {
             panic!("{what}: not connected");
         };
-        println!("{what}: {downstream} bit/s down, {upstream} bit/s up, after {} symbols", call.ticks);
-        assert_eq!(call.analogue.status(), analogue::Status::Connected { downstream, upstream }, "{what}");
+        println!(
+            "{what}: {downstream} bit/s down, {upstream} bit/s up, after {} symbols",
+            call.ticks
+        );
+        assert_eq!(
+            call.analogue.status(),
+            analogue::Status::Connected {
+                downstream,
+                upstream
+            },
+            "{what}"
+        );
         assert!(downstream >= 48_000, "{what}: only {downstream} bit/s down");
         // On 6.1's ladder: (drn + 17) x 8000/6 for a drn of 1 to 19.
-        assert!((1..=19u8).any(|drn| datapump::v92::up_rate(drn) == upstream), "{what}: {upstream} is not a rung");
+        assert!(
+            (1..=19u8).any(|drn| datapump::v92::up_rate(drn) == upstream),
+            "{what}: {upstream} is not a rung"
+        );
         // The receiver that reads B1u is the one fitted for CPd's filters.
-        let fitted = call.digital_notes.iter().filter(|note| note.starts_with("V.92: data mode receiver fitted"));
+        let fitted = call
+            .digital_notes
+            .iter()
+            .filter(|note| note.starts_with("V.92: data mode receiver fitted"));
         assert_eq!(fitted.count(), 1, "{what}: {:#?}", call.digital_notes);
         assert_carries_data(&mut call, &what);
     }
@@ -682,17 +858,57 @@ fn the_rates_are_the_ones_the_two_ends_asked_for() {
     let call = connected(call);
     let said = format!("{:#?}\n{:#?}", call.digital_notes, call.analogue_notes);
     // What each end chose, and what the other read.
-    assert!(call.analogue_notes.iter().any(|note| note.contains("the CPu will ask for drn 16")), "{said}");
-    assert!(call.digital_notes.iter().any(|note| note.starts_with("V.92: CPu drn 16")), "{said}");
-    assert!(call.digital_notes.iter().any(|note| note.starts_with("V.92: upstream drn 1,")), "{said}");
-    assert!(call.analogue_notes.iter().any(|note| note.starts_with("CPd for drn 1,")), "{said}");
+    assert!(
+        call.analogue_notes
+            .iter()
+            .any(|note| note.contains("the CPu will ask for drn 16")),
+        "{said}"
+    );
+    assert!(
+        call.digital_notes
+            .iter()
+            .any(|note| note.starts_with("V.92: CPu drn 16")),
+        "{said}"
+    );
+    assert!(
+        call.digital_notes
+            .iter()
+            .any(|note| note.starts_with("V.92: upstream drn 1,")),
+        "{said}"
+    );
+    assert!(
+        call.analogue_notes
+            .iter()
+            .any(|note| note.starts_with("CPd for drn 1,")),
+        "{said}"
+    );
     // And the rates those are: (drn + 20) x 8000/6 down, (drn + 17) x 8000/6 up.
     let downstream = datapump::v90::sequences::data_rate(16).expect("drn 16 is a rate");
     let upstream = datapump::v92::up_rate(1);
     assert_eq!((downstream, upstream), (48_000, 24_000));
-    assert_eq!(call.digital.status(), digital::Status::Connected { downstream, upstream }, "{said}");
-    assert_eq!(call.analogue.status(), analogue::Status::Connected { downstream, upstream }, "{said}");
-    assert_eq!(call.analogue.parameters().map(datapump::v92::Parameters::rate), Some(upstream), "{said}");
+    assert_eq!(
+        call.digital.status(),
+        digital::Status::Connected {
+            downstream,
+            upstream
+        },
+        "{said}"
+    );
+    assert_eq!(
+        call.analogue.status(),
+        analogue::Status::Connected {
+            downstream,
+            upstream
+        },
+        "{said}"
+    );
+    assert_eq!(
+        call.analogue
+            .parameters()
+            .map(datapump::v92::Parameters::rate),
+        Some(upstream),
+        "{said}"
+    );
 }
 
 /// A VoIP call's round trip, 0.6 s each way, which is longer than any of the
@@ -710,22 +926,47 @@ fn a_voip_length_round_trip_connects_with_pcm_upstream() {
     let round_trip = 2.0 * EACH_WAY as f64 / 8000.0;
     let cps = |call: &Call| {
         (
-            call.digital_notes.iter().filter(|note| note.starts_with("V.92: CPd drn")).count(),
-            call.analogue_notes.iter().filter(|note| note.starts_with("CPu for drn")).count(),
+            call.digital_notes
+                .iter()
+                .filter(|note| note.starts_with("V.92: CPd drn"))
+                .count(),
+            call.analogue_notes
+                .iter()
+                .filter(|note| note.starts_with("CPu for drn"))
+                .count(),
         )
     };
     let near = connected_call(a_dil());
 
-    let digital = digital::Settings { round_trip, ..digital_settings(0) };
-    let analogue = analogue::Settings { round_trip, ..analogue_for_data(a_dil()) };
+    let digital = digital::Settings {
+        round_trip,
+        ..digital_settings(0)
+    };
+    let analogue = analogue::Settings {
+        round_trip,
+        ..analogue_for_data(a_dil())
+    };
     let mut call = connected(Call::new(digital, analogue).delayed_by(EACH_WAY));
     let said = format!("{:#?}\n{:#?}", call.digital_notes, call.analogue_notes);
     let allowed = ((20.0 + 6.0 * round_trip) * 8000.0) as u64;
-    println!("0.6 s each way: connected after {} symbols of {allowed}", call.ticks);
-    assert!(call.ticks < allowed, "{} symbols is over 20 s and six round trips: {said}", call.ticks);
+    println!(
+        "0.6 s each way: connected after {} symbols of {allowed}",
+        call.ticks
+    );
+    assert!(
+        call.ticks < allowed,
+        "{} symbols is over 20 s and six round trips: {said}",
+        call.ticks
+    );
     let (sent, least) = (cps(&call), cps(&near));
-    assert!(sent.0 >= 1 && sent.1 >= 1, "a CPd and a CPu went: {sent:?}\n{said}");
-    assert!(sent.0 <= least.0 && sent.1 <= least.1, "{sent:?} CPd and CPu against {least:?} with no delay: {said}");
+    assert!(
+        sent.0 >= 1 && sent.1 >= 1,
+        "a CPd and a CPu went: {sent:?}\n{said}"
+    );
+    assert!(
+        sent.0 <= least.0 && sent.1 <= least.1,
+        "{sent:?} CPd and CPu against {least:?} with no delay: {said}"
+    );
     assert_carries_data(&mut call, "0.6 s each way");
 }
 
@@ -752,8 +993,14 @@ const EACH_WAY: usize = 4800;
 #[ignore = "V92-41: with no DIL and a 1.2 s round trip the digital modem starts reading TRN2u before E1u has arrived, and the upstream is not read"]
 fn a_voip_length_round_trip_with_no_dil_connects_with_pcm_upstream() {
     let round_trip = 2.0 * EACH_WAY as f64 / 8000.0;
-    let digital = digital::Settings { round_trip, ..digital_settings(0) };
-    let analogue = analogue::Settings { round_trip, ..analogue_for_data(Descriptor::none()) };
+    let digital = digital::Settings {
+        round_trip,
+        ..digital_settings(0)
+    };
+    let analogue = analogue::Settings {
+        round_trip,
+        ..analogue_for_data(Descriptor::none())
+    };
     let mut call = connected(Call::new(digital, analogue).delayed_by(EACH_WAY));
     assert_carries_data(&mut call, "0.6 s each way, no DIL");
 }
@@ -799,12 +1046,19 @@ fn an_a_law_network_connects_with_pcm_both_ways() {
     for law in [Law::A, Law::Mu] {
         for descriptor in [Descriptor::none(), a_dil()] {
             let what = format!("{law:?}, a DIL of {}", descriptor.len());
-            let digital = digital::Settings { law, ..digital_settings(0) };
-            let analogue = analogue::Settings { law, ..analogue_for_data(descriptor) };
+            let digital = digital::Settings {
+                law,
+                ..digital_settings(0)
+            };
+            let analogue = analogue::Settings {
+                law,
+                ..analogue_for_data(descriptor)
+            };
             let line = Line::passing(0.0, datapump::v90::network::UP_CUTOFF);
             // A quarter of full scale, as `v90::network` brings a modem's
             // line level to its codec.
-            let mut call = connected(Call::on_a_line(digital, analogue, line).through_a_codec(law, 0.25));
+            let mut call =
+                connected(Call::on_a_line(digital, analogue, line).through_a_codec(law, 0.25));
             assert_carries_data(&mut call, &what);
         }
     }
@@ -819,9 +1073,17 @@ fn an_a_law_network_connects_with_pcm_both_ways() {
 fn every_upstream_sampling_phase_is_found_and_corrected() {
     for eighth in 0..8u8 {
         let offset = f64::from(eighth) / 8.0;
-        let descriptor = if eighth % 2 == 0 { Descriptor::none() } else { a_dil() };
+        let descriptor = if eighth % 2 == 0 {
+            Descriptor::none()
+        } else {
+            a_dil()
+        };
         let line = Line::new(offset);
-        let mut call = connected(Call::on_a_line(digital_settings(0), analogue_for_data(descriptor), line));
+        let mut call = connected(Call::on_a_line(
+            digital_settings(0),
+            analogue_for_data(descriptor),
+            line,
+        ));
         assert_carries_data(&mut call, &format!("a sampling phase of {offset}"));
     }
 }
@@ -832,7 +1094,8 @@ fn every_upstream_sampling_phase_is_found_and_corrected() {
 #[test]
 fn the_upstream_gain_at_the_codec_is_measured_and_used() {
     for gain in [0.25, 0.5, 1.0] {
-        let call = Call::new(digital_settings(0), analogue_for_data(Descriptor::none())).at_a_gain(gain);
+        let call =
+            Call::new(digital_settings(0), analogue_for_data(Descriptor::none())).at_a_gain(gain);
         let mut call = connected(call);
         assert_carries_data(&mut call, &format!("an upstream gain of {gain}"));
     }
@@ -855,10 +1118,17 @@ fn phase_3_completes_with_md() {
         "--- digital ---\n{:#?}\n--- analogue ---\n{:#?}",
         call.digital_notes, call.analogue_notes
     );
-    assert!(reached, "digital {:?}, analogue {:?}", call.digital.phase(), call.analogue.phase());
+    assert!(
+        reached,
+        "digital {:?}, analogue {:?}",
+        call.digital.phase(),
+        call.analogue.phase()
+    );
 
     assert!(
-        call.analogue_notes.iter().any(|note| note.contains("MD of 828 symbols")),
+        call.analogue_notes
+            .iter()
+            .any(|note| note.contains("MD of 828 symbols")),
         "no MD was sent: {:?}",
         call.analogue_notes
     );
@@ -867,8 +1137,16 @@ fn phase_3_completes_with_md() {
         "the digital end never waited out an MD: {:?}",
         call.digital_notes
     );
-    assert!(call.digital.cpt().is_some(), "no CPt: {:?}", call.digital_notes);
-    assert!(call.analogue.jp().is_some(), "no Jp: {:?}", call.analogue_notes);
+    assert!(
+        call.digital.cpt().is_some(),
+        "no CPt: {:?}",
+        call.digital_notes
+    );
+    assert!(
+        call.analogue.jp().is_some(),
+        "no Jp: {:?}",
+        call.analogue_notes
+    );
 }
 
 /// A digital end that never sends Sd leaves Ja unanswered, and AR1's 1500 ms --
@@ -879,7 +1157,10 @@ fn phase_3_completes_with_md() {
 fn a_digital_end_that_never_sends_sd_fails_analogue() {
     for round_trip in [0.0, 1.45] {
         let allowed = ((1.5 + round_trip) * 8000.0) as u64;
-        let mut modem = analogue::Modem::new(analogue::Settings { round_trip, ..analogue_settings(0) });
+        let mut modem = analogue::Modem::new(analogue::Settings {
+            round_trip,
+            ..analogue_settings(0)
+        });
         let mut ja_began = None;
         let mut failed = false;
         for _ in 0..60_000u64 {
@@ -896,14 +1177,24 @@ fn a_digital_end_that_never_sends_sd_fails_analogue() {
                     "AR1 at a {round_trip} s round trip: {} symbols after Ja began",
                     modem.elapsed() - began
                 );
-                assert!(modem.elapsed() <= began + allowed + 200, "and it is a deadline, not a mood");
+                assert!(
+                    modem.elapsed() <= began + allowed + 200,
+                    "and it is a deadline, not a mood"
+                );
                 failed = true;
                 break;
             }
         }
         let notes = modem.take_notes();
-        assert!(failed, "no failure in 60 000 symbols: {} notes {notes:?}", modem.phase());
-        assert!(notes.iter().any(|note| note.contains("no Sd reversal")), "{notes:?}");
+        assert!(
+            failed,
+            "no failure in 60 000 symbols: {} notes {notes:?}",
+            modem.phase()
+        );
+        assert!(
+            notes.iter().any(|note| note.contains("no Sd reversal")),
+            "{notes:?}"
+        );
     }
 }
 
@@ -954,7 +1245,10 @@ fn the_call_survives_a_far_end_that_is_a_fraction_of_a_symbol_out() {
             (offset + 0.5).rem_euclid(1.0)
         };
         let error = ((epsilon - wanted + 0.5).rem_euclid(1.0) - 0.5).abs();
-        assert!(error < 0.03, "offset {offset}: epsilon {epsilon:.3}, wanted {wanted:.3}");
+        assert!(
+            error < 0.03,
+            "offset {offset}: epsilon {epsilon:.3}, wanted {wanted:.3}"
+        );
     }
 }
 
@@ -990,9 +1284,15 @@ fn the_refit_follows_the_phase_step_the_s_bar_u_left() {
         call.analogue_notes
     );
     assert!(
-        call.digital_notes.iter().any(|note| note.contains("refit at the new phase")),
+        call.digital_notes
+            .iter()
+            .any(|note| note.contains("refit at the new phase")),
         "no refit: {:#?}",
         call.digital_notes
     );
-    assert!(call.digital.cpt().is_some(), "no CPt: {:#?}", call.digital_notes);
+    assert!(
+        call.digital.cpt().is_some(),
+        "no CPt: {:#?}",
+        call.digital_notes
+    );
 }

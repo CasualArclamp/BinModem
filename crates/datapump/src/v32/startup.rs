@@ -298,10 +298,7 @@ impl Listener {
         // whether or not its two states are opposite; what separates the cases
         // is the carrier. An opposite pair averages to nothing and leaves
         // none; an unequal pair leaves it standing above them.
-        match (
-            carrier > STANDING,
-            sidebands > STANDING_SIDEBAND,
-        ) {
+        match (carrier > STANDING, sidebands > STANDING_SIDEBAND) {
             (true, true) => Heard::Conditioning,
             (true, false) => Heard::Carrier,
             (false, true) => Heard::Alternation,
@@ -413,8 +410,7 @@ impl Rates {
 }
 
 /// Where each rate's bit lives, in the B-numbering both tables use.
-const RATE_BITS: [(u32, u32); 5] =
-    [(4800, 5), (7200, 9), (9600, 6), (12_000, 10), (14_400, 12)];
+const RATE_BITS: [(u32, u32); 5] = [(4800, 5), (7200, 9), (9600, 6), (12_000, 10), (14_400, 12)];
 
 fn bit(s: u16, b: u32) -> bool {
     s & (1 << (15 - b)) != 0
@@ -538,7 +534,11 @@ pub fn offers_trellis(s: u16) -> bool {
 /// both ends to have set it and anything else is the sixteen points.
 pub fn agreed_coding(theirs: u16, ours: u16, rate: u32) -> Coding {
     if is_v32bis(theirs) && is_v32bis(ours) {
-        return if rate == 4800 { Coding::Uncoded } else { Coding::Trellis };
+        return if rate == 4800 {
+            Coding::Uncoded
+        } else {
+            Coding::Trellis
+        };
     }
     if rate == 9600 && offers_trellis(theirs) && offers_trellis(ours) {
         Coding::Trellis
@@ -562,7 +562,9 @@ pub fn is_v32bis(s: u16) -> bool {
 /// Note 3 to Table 5 makes a rate signal with no rates in it a call for the
 /// connection to be cleared down.
 pub fn usable_rate(theirs: u16, ours: u16) -> u32 {
-    rates_offered(theirs).shared_with(rates_offered(ours)).highest()
+    rates_offered(theirs)
+        .shared_with(rates_offered(ours))
+        .highest()
 }
 
 /// The highest data rate a rate signal offers, in bits per second.
@@ -638,7 +640,6 @@ pub struct RateDetector {
     sequences: u32,
 }
 
-
 impl RateDetector {
     pub fn new() -> Self {
         Self::default()
@@ -678,7 +679,11 @@ impl RateDetector {
             self.locked = true;
             self.since = 0;
             self.sequences += 1;
-            self.agreed = if self.candidate == Some(group) { self.agreed + 1 } else { 1 };
+            self.agreed = if self.candidate == Some(group) {
+                self.agreed + 1
+            } else {
+                1
+            };
             self.candidate = Some(group);
             return Some(group);
         }
@@ -1168,8 +1173,7 @@ impl Startup {
     /// them, which gives it longer to drift. That is a loop that only turns
     /// one way.
     fn far_end_finished_training(&self) -> bool {
-        matches!(self.state, State::AwaitingR1 | State::AwaitingR2)
-            && self.seen_a_sequence
+        matches!(self.state, State::AwaitingR1 | State::AwaitingR2) && self.seen_a_sequence
     }
 
     pub fn far_end_quiet(&self) -> bool {
@@ -1417,7 +1421,9 @@ impl Startup {
             // This end's own first conditioning signal, which the far end is
             // silent for and the echo canceller learns from: all that is on
             // the line is this end's own S and TRN, uncancelled.
-            State::PreRoll | State::SendS | State::SendSBar | State::SendTrn if !self.trained => rx.idle(),
+            State::PreRoll | State::SendS | State::SendSBar | State::SendTrn if !self.trained => {
+                rx.idle()
+            }
             // The far end's conditioning signal is next. At the answering
             // modem, sending R1, that is the calling modem's S, for NT and
             // 256 symbols more, then S-bar, TRN and R2. At the calling modem,
@@ -1492,12 +1498,11 @@ impl Startup {
         // this end is sending a rate signal. Before that this end is sending a
         // conditioning signal of its own and hearing its own echo of it, which
         // stands a carrier and two sidebands up in exactly the same places.
-        self.since_conditioning =
-            if heard == Heard::Conditioning && self.state == State::SendRate {
-                0
-            } else {
-                self.since_conditioning.saturating_add(1)
-            };
+        self.since_conditioning = if heard == Heard::Conditioning && self.state == State::SendRate {
+            0
+        } else {
+            self.since_conditioning.saturating_add(1)
+        };
         // How long the far end has been sending something with no line in it,
         // which is its conditioning signal and then its rate signal. Broken by
         // anything else, so a gap starts the count again.
@@ -1523,10 +1528,9 @@ impl Startup {
                 // having: without this the calling modem hears the answer as
                 // its own cue and starts transmitting over it immediately.
                 let sidebands = self.listener.sideband_amplitude();
-                let tones =
-                    sidebands > AUDIBLE && sidebands > self.listener.answer_amplitude();
-                let heard_enough = self.hold(heard == Heard::AnswerTone)
-                    >= timing::HEARD_ANSWER_TONE;
+                let tones = sidebands > AUDIBLE && sidebands > self.listener.answer_amplitude();
+                let heard_enough =
+                    self.hold(heard == Heard::AnswerTone) >= timing::HEARD_ANSWER_TONE;
                 if tones || heard_enough {
                     self.enter(State::Aa);
                 }
@@ -1638,8 +1642,7 @@ impl Startup {
                     rx.hunt();
                 }
                 if let Some(s) = sequence.filter(|&s| is_rate_signal(s)) {
-                    self.agreed = usable_rate(s, self.offer)
-                        .min(offered_rate(self.offer));
+                    self.agreed = usable_rate(s, self.offer).min(offered_rate(self.offer));
                     self.coding = agreed_coding(s, self.offer, self.agreed);
                     if self.agreed == 0 {
                         self.state = State::Failed;
@@ -1676,9 +1679,7 @@ impl Startup {
                 // with the wrong one, this fired 104 ms early on a real call,
                 // abandoning a start-up that was going perfectly and then
                 // restarting it into the far end's conditioning signal.
-                if self.hold(heard == Heard::Alternation)
-                    > self.counted + timing::MIN_ALTERNATION
-                {
+                if self.hold(heard == Heard::Alternation) > self.counted + timing::MIN_ALTERNATION {
                     tx.set_signal(Signal::StateA);
                     self.enter(State::Aa);
                 }
@@ -1798,8 +1799,7 @@ impl Startup {
             State::AwaitingR2 => {
                 tx.set_signal(Signal::Silent);
                 if let Some(s) = sequence.filter(|&s| is_rate_signal(s)) {
-                    self.agreed = usable_rate(s, self.offer)
-                        .min(offered_rate(self.offer));
+                    self.agreed = usable_rate(s, self.offer).min(offered_rate(self.offer));
                     self.coding = agreed_coding(s, self.offer, self.agreed);
                     if self.agreed == 0 {
                         self.state = State::Failed;
@@ -1859,18 +1859,15 @@ impl Startup {
                         if let Some(s) = sequence.filter(|&s| is_end_signal(s)) {
                             if self.agreed == 0 {
                                 self.agreed = usable_rate(s, self.offer);
-                                self.coding =
-                                    agreed_coding(s, self.offer, self.agreed);
+                                self.coding = agreed_coding(s, self.offer, self.agreed);
                             }
                             // In whichever table the far end can read: it
                             // has just shown which by what it sent.
-                            tx.set_signal(Signal::Rate(end_signal(
-                                rate_signal_for(
-                                    self.agreed,
-                                    self.coding,
-                                    is_v32bis(s),
-                                ),
-                            )));
+                            tx.set_signal(Signal::Rate(end_signal(rate_signal_for(
+                                self.agreed,
+                                self.coding,
+                                is_v32bis(s),
+                            ))));
                             self.enter(State::SendEnd);
                         }
                     }
@@ -2009,8 +2006,7 @@ impl Startup {
                 // point along -- which is the point at which the decisions
                 // driving the equaliser are as likely to be wrong as right and
                 // nothing downstream can recover.
-                let bad =
-                    rx.residual_error() > UNSATISFACTORY_GAP * rx.point_spacing();
+                let bad = rx.residual_error() > UNSATISFACTORY_GAP * rx.point_spacing();
                 self.unsatisfactory = if bad { self.unsatisfactory + 1 } else { 0 };
                 if self.unsatisfactory > timing::UNSATISFACTORY {
                     // Going round again at the rate that just failed would
@@ -2134,12 +2130,9 @@ impl Startup {
         // a reversal that has already happened.
         let fs = self.sps * super::BAUD;
         self.listener = Listener::new(fs);
-        self.carrier_reversals =
-            ReversalDetector::new(super::CARRIER, 60.0, AUDIBLE, fs);
-        self.low_reversals =
-            ReversalDetector::new(super::CARRIER - OFFSET, 60.0, AUDIBLE, fs);
-        self.high_reversals =
-            ReversalDetector::new(super::CARRIER + OFFSET, 60.0, AUDIBLE, fs);
+        self.carrier_reversals = ReversalDetector::new(super::CARRIER, 60.0, AUDIBLE, fs);
+        self.low_reversals = ReversalDetector::new(super::CARRIER - OFFSET, 60.0, AUDIBLE, fs);
+        self.high_reversals = ReversalDetector::new(super::CARRIER + OFFSET, 60.0, AUDIBLE, fs);
         self.carrier_quiet = 0;
         self.sideband_quiet = 0;
         self.pending_carrier_reversal = false;
@@ -2442,7 +2435,8 @@ impl Modem {
             // A canceller that found no echo has learned nothing but the
             // line's noise, and would put it back from now on as this end's
             // own signal: see [`NOTHING_CANCELLED_DB`].
-            let removed = 10.0 * (self.heard_in_training / self.left_in_training.max(1e-30)).log10();
+            let removed =
+                10.0 * (self.heard_in_training / self.left_in_training.max(1e-30)).log10();
             if self.heard_in_training <= 1e-12 || removed <= NOTHING_CANCELLED_DB {
                 self.echo.reset();
             }
@@ -2741,9 +2735,12 @@ mod tests {
             let level = l.level();
             println!(
                 "{name:>14}: level {level:.3}  answer {:.3}  carrier {:.3}                   low {:.3}  high {:.3}   ratios {:.2} {:.2} {:.2}",
-                l.answer.amplitude(), l.carrier.amplitude(),
-                l.low.amplitude(), l.high.amplitude(),
-                l.answer.amplitude() / level, l.carrier.amplitude() / level,
+                l.answer.amplitude(),
+                l.carrier.amplitude(),
+                l.low.amplitude(),
+                l.high.amplitude(),
+                l.answer.amplitude() / level,
+                l.carrier.amplitude() / level,
                 l.low.amplitude().min(l.high.amplitude()) / level,
             );
         }
@@ -2757,10 +2754,7 @@ mod tests {
         assert_eq!(hear(Signal::StateC, Mode::Call), Heard::Carrier);
         assert_eq!(hear(Signal::AlternateAC, Mode::Answer), Heard::Alternation);
         assert_eq!(hear(Signal::AlternateCA, Mode::Answer), Heard::Alternation);
-        assert_eq!(
-            hear(Signal::ConditioningS, Mode::Call),
-            Heard::Conditioning
-        );
+        assert_eq!(hear(Signal::ConditioningS, Mode::Call), Heard::Conditioning);
         assert_eq!(
             hear(Signal::ConditioningSbar, Mode::Call),
             Heard::Conditioning
@@ -2784,12 +2778,19 @@ mod tests {
 
     #[test]
     fn a_rate_signal_says_what_it_offers() {
-        let r = rate_signal(Rates { at_4800: true, ..Rates::default() });
+        let r = rate_signal(Rates {
+            at_4800: true,
+            ..Rates::default()
+        });
         assert!(is_rate_signal(r), "{r:016b} lacks its synchronising bits");
         assert!(!is_end_signal(r));
         assert_eq!(offered_rate(r), 4800);
 
-        let both = rate_signal(Rates { at_4800: true, at_9600: true, ..Rates::default() });
+        let both = rate_signal(Rates {
+            at_4800: true,
+            at_9600: true,
+            ..Rates::default()
+        });
         assert_eq!(offered_rate(both), 9600, "the highest offered wins");
 
         let e = end_signal(r);

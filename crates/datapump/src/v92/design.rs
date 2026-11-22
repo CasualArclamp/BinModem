@@ -145,7 +145,11 @@ impl Channel {
         for n in taps - 1..length {
             signal += received[n] * received[n];
         }
-        Some(Self { taps: fitted, noise: power / count as f64, signal: signal / count as f64 })
+        Some(Self {
+            taps: fitted,
+            noise: power / count as f64,
+            signal: signal / count as f64,
+        })
     }
 
     /// The reciprocal of this channel's signal to noise, which is the ridge its
@@ -173,7 +177,10 @@ impl Channel {
     /// How much response a symbol's own position carries against the rest of
     /// it: zero for a channel with no memory, and infinity for none at all.
     pub fn severity(&self) -> f64 {
-        let peak = self.taps.iter().fold(0.0f64, |most, &tap| most.max(tap.abs()));
+        let peak = self
+            .taps
+            .iter()
+            .fold(0.0f64, |most, &tap| most.max(tap.abs()));
         if peak == 0.0 {
             return f64::INFINITY;
         }
@@ -206,7 +213,11 @@ pub struct Design {
 impl Design {
     /// The residual as a signal-to-interference ratio, in decibels.
     pub fn residual_db(&self) -> f64 {
-        if self.residual <= 0.0 { f64::INFINITY } else { -20.0 * self.residual.log10() }
+        if self.residual <= 0.0 {
+            f64::INFINITY
+        } else {
+            -20.0 * self.residual.log10()
+        }
     }
 }
 
@@ -239,7 +250,10 @@ pub fn design(channel: &Channel, limits: &FilterLimits) -> Result<Design, &'stat
     // with the ridge (raising it scales the inverse and the response's own main
     // tap by the same factor), so if a channel's prefilter does not fit Q0.15
     // the length is what has to give, not the ridge.
-    let lz2 = std::env::var("V92_LZ2").ok().and_then(|text| text.parse().ok()).unwrap_or(most.min(total));
+    let lz2 = std::env::var("V92_LZ2")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(most.min(total));
     let inverse = inverse(channel, lz2);
     // h is c convolved with z2: what is left for the precoder to cancel.
     let mut response = convolve(&channel.taps, &inverse);
@@ -270,7 +284,10 @@ pub fn design(channel: &Channel, limits: &FilterLimits) -> Result<Design, &'stat
         scale = largest / 0.99;
         z2.iter_mut().for_each(|value| *value /= scale);
     }
-    let mut filters = Filters { z2, ..Filters::default() };
+    let mut filters = Filters {
+        z2,
+        ..Filters::default()
+    };
 
     let mut unreached = 0.0f64;
     let mut limited = false;
@@ -325,7 +342,13 @@ pub fn design(channel: &Channel, limits: &FilterLimits) -> Result<Design, &'stat
         return Err("a prefilter coefficient does not fit q0.15");
     }
     filters.fits(limits)?;
-    Ok(Design { filters, residual: unreached.sqrt(), scale, limited, delay: main })
+    Ok(Design {
+        filters,
+        residual: unreached.sqrt(),
+        scale,
+        limited,
+        delay: main,
+    })
 }
 
 /// The least-squares inverse of the channel inside `length` taps.
@@ -409,14 +432,24 @@ mod tests {
     /// One tap at unit gain: nothing to equalise.
     #[test]
     fn an_ideal_channel_gets_a_pass_through_and_no_precoder() {
-        let channel = Channel { taps: vec![1.0], noise: 0.0, signal: 1.0 };
+        let channel = Channel {
+            taps: vec![1.0],
+            noise: 0.0,
+            signal: 1.0,
+        };
         let design = design(&channel, &limits(3, 3, 3)).expect("an ideal channel is designable");
         assert!(design.filters.z2[0] > 0.98, "{:?}", design.filters.z2[0]);
         assert_eq!(design.delay, 0, "an ideal channel adds no delay");
         // The rest of the section is nothing: an ideal channel needs one tap.
-        let rest = design.filters.z2[1..].iter().fold(0.0f64, |a, &tap| a.max(tap.abs()));
+        let rest = design.filters.z2[1..]
+            .iter()
+            .fold(0.0f64, |a, &tap| a.max(tap.abs()));
         assert!(rest < 1e-3, "the prefilter's tail is {rest}, not nothing");
-        assert!(design.filters.p1.is_empty(), "nothing to cancel: {:?}", design.filters.p1);
+        assert!(
+            design.filters.p1.is_empty(),
+            "nothing to cancel: {:?}",
+            design.filters.p1
+        );
         assert!(design.residual < 1e-3, "residual {}", design.residual);
     }
 
@@ -433,9 +466,18 @@ mod tests {
         }
         let norm = taps.iter().map(|t| t * t).sum::<f64>().sqrt();
         taps.iter_mut().for_each(|t| *t /= norm);
-        let channel = Channel { taps, noise: 1e-6, signal: 1.0 };
+        let channel = Channel {
+            taps,
+            noise: 1e-6,
+            signal: 1.0,
+        };
         let design = design(&channel, &limits(3, 3, 3)).expect("a loop is designable");
-        assert!(design.residual_db() > 25.0, "residual {:.1} dB, filters {:?}", design.residual_db(), design.filters);
+        assert!(
+            design.residual_db() > 25.0,
+            "residual {:.1} dB, filters {:?}",
+            design.residual_db(),
+            design.filters
+        );
     }
 
     /// 8.8.3 and Table 18 bits 14:17: the coefficients have to fit what the
@@ -447,12 +489,19 @@ mod tests {
         for k in 1..30 {
             taps[k] = 0.3 / k as f64;
         }
-        let channel = Channel { taps, noise: 1e-6, signal: 1.0 };
+        let channel = Channel {
+            taps,
+            noise: 1e-6,
+            signal: 1.0,
+        };
         for sections in 0..4u8 {
             for (total, most) in [(0u8, 0u8), (1, 1), (2, 2), (3, 3)] {
                 let limit = limits(sections, total, most);
                 let design = design(&channel, &limit).expect("designable");
-                design.filters.fits(&limit).unwrap_or_else(|error| panic!("{sections}/{total}/{most}: {error}"));
+                design
+                    .filters
+                    .fits(&limit)
+                    .unwrap_or_else(|error| panic!("{sections}/{total}/{most}: {error}"));
                 assert!(design.filters.total() <= usize::from(limit.total));
                 if sections & 1 == 0 {
                     assert!(design.filters.z1.is_empty(), "z1 was not offered");
@@ -466,12 +515,32 @@ mod tests {
     /// face when a CPd carries it.
     #[test]
     fn a_broken_set_is_caught_by_the_self_check() {
-        let too_long = Filters { z2: vec![1.0; 130], ..Filters::default() };
-        assert!(too_long.fits(&limits(0, 0, 0)).is_err(), "a 130-tap section is over Lmax 128");
-        let too_many = Filters { z2: vec![1.0; 100], p1: vec![0.5; 100], ..Filters::default() };
-        assert!(too_many.fits(&limits(0, 0, 3)).is_err(), "200 taps is over Ltot 192");
-        let unoffered = Filters { z1: vec![0.1], z2: vec![1.0], ..Filters::default() };
-        assert!(unoffered.fits(&limits(0, 3, 3)).is_err(), "z1 was not offered");
+        let too_long = Filters {
+            z2: vec![1.0; 130],
+            ..Filters::default()
+        };
+        assert!(
+            too_long.fits(&limits(0, 0, 0)).is_err(),
+            "a 130-tap section is over Lmax 128"
+        );
+        let too_many = Filters {
+            z2: vec![1.0; 100],
+            p1: vec![0.5; 100],
+            ..Filters::default()
+        };
+        assert!(
+            too_many.fits(&limits(0, 0, 3)).is_err(),
+            "200 taps is over Ltot 192"
+        );
+        let unoffered = Filters {
+            z1: vec![0.1],
+            z2: vec![1.0],
+            ..Filters::default()
+        };
+        assert!(
+            unoffered.fits(&limits(0, 3, 3)).is_err(),
+            "z1 was not offered"
+        );
     }
 
     /// 8.8.3's NOTE, end to end: the design is what makes the precoder's
@@ -487,10 +556,18 @@ mod tests {
         }
         let norm = taps.iter().map(|t| t * t).sum::<f64>().sqrt();
         taps.iter_mut().for_each(|t| *t /= norm);
-        let channel = Channel { taps: taps.clone(), noise: 1e-6, signal: 1.0 };
+        let channel = Channel {
+            taps: taps.clone(),
+            noise: 1e-6,
+            signal: 1.0,
+        };
         let plan = limits(3, 3, 3);
         let design = design(&channel, &plan).expect("designable");
-        assert!(design.residual_db() > 20.0, "residual {:.1} dB", design.residual_db());
+        assert!(
+            design.residual_db() > 20.0,
+            "residual {:.1} dB",
+            design.residual_db()
+        );
 
         let drn = 13u8;
         let parameters = Parameters {
@@ -542,21 +619,36 @@ mod tests {
             decoder.feed(seen * design.scale);
             received.extend(decoder.take_bits());
         }
-        assert!(received.len() > sent.len() / 2, "{} bits decoded of {}", received.len(), sent.len());
+        assert!(
+            received.len() > sent.len() / 2,
+            "{} bits decoded of {}",
+            received.len(),
+            sent.len()
+        );
         let shortest = sent.len().min(received.len());
         let at = (0..shortest.min(400))
             .find(|&offset| {
                 let length = shortest - offset;
                 length > 100
-                    && sent[offset..offset + length].iter().zip(&received[..length]).all(|(a, b)| a == b)
+                    && sent[offset..offset + length]
+                        .iter()
+                        .zip(&received[..length])
+                        .all(|(a, b)| a == b)
             })
             .unwrap_or_else(|| {
                 let errors = sent.iter().zip(&received).filter(|(a, b)| a != b).count();
                 panic!("the streams do not line up: {errors} of {shortest} bits wrong")
             });
         let length = shortest - at;
-        let errors = sent[at..].iter().zip(&received[..length]).filter(|(a, b)| a != b).count();
-        assert_eq!(errors, 0, "{errors} of {length} bits wrong through the designed channel");
+        let errors = sent[at..]
+            .iter()
+            .zip(&received[..length])
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(
+            errors, 0,
+            "{errors} of {length} bits wrong through the designed channel"
+        );
     }
 
     /// The whole upstream chain as a bench sees it: the analogue modem's
@@ -572,7 +664,11 @@ mod tests {
         }
         let norm = taps.iter().map(|t| t * t).sum::<f64>().sqrt();
         taps.iter_mut().for_each(|t| *t /= norm);
-        let channel = Channel { taps: taps.clone(), noise: 1e-6, signal: 1.0 };
+        let channel = Channel {
+            taps: taps.clone(),
+            noise: 1e-6,
+            signal: 1.0,
+        };
         let design = design(&channel, &limits(3, 3, 3)).expect("designable");
         let drn = 1u8;
         let choice = crate::v92::upchoice::choose(&design, 1e-6, 1 << (drn - 1), Trellis::Sixteen)
@@ -606,16 +702,28 @@ mod tests {
             received.extend(decoder.take_bits());
         }
         let shortest = sent.len().min(received.len());
-        assert!(shortest > 400, "{} bits decoded of {}", received.len(), sent.len());
+        assert!(
+            shortest > 400,
+            "{} bits decoded of {}",
+            received.len(),
+            sent.len()
+        );
         let at = (0..shortest.min(400))
             .find(|&offset| {
                 let length = shortest - offset;
                 length > 200
-                    && sent[offset..offset + length].iter().zip(&received[..length]).all(|(a, b)| a == b)
+                    && sent[offset..offset + length]
+                        .iter()
+                        .zip(&received[..length])
+                        .all(|(a, b)| a == b)
             })
             .unwrap_or(0);
         let length = shortest - at;
-        let errors = sent[at..].iter().zip(&received[..length]).filter(|(a, b)| a != b).count();
+        let errors = sent[at..]
+            .iter()
+            .zip(&received[..length])
+            .filter(|(a, b)| a != b)
+            .count();
         (errors, length)
     }
 
@@ -624,7 +732,10 @@ mod tests {
     #[test]
     fn a_designed_chain_survives_a_fine_quantiser() {
         let (errors, length) = through_the_line(|seen| (seen * 32768.0).round() / 32768.0);
-        assert_eq!(errors, 0, "{errors} of {length} bits wrong through a 16 bit line");
+        assert_eq!(
+            errors, 0,
+            "{errors} of {length} bits wrong through a 16 bit line"
+        );
     }
 
     /// Through the codec a PCM upstream line actually ends in: the same chain,
@@ -642,11 +753,16 @@ mod tests {
     fn a_mu_law_line_reads_back_through_the_codec() {
         let law = crate::v90::ucode::Law::Mu;
         let (errors, length) = through_the_line(|seen| {
-            let (u, negative) =
-                crate::v90::ucode::nearest(law, (seen * 32768.0).round().clamp(-32768.0, 32767.0) as i32);
+            let (u, negative) = crate::v90::ucode::nearest(
+                law,
+                (seen * 32768.0).round().clamp(-32768.0, 32767.0) as i32,
+            );
             crate::v90::ucode::amplitude(law, u, negative) as f64 / 32768.0
         });
-        assert_eq!(errors, 0, "{errors} of {length} bits wrong through the codec");
+        assert_eq!(
+            errors, 0,
+            "{errors} of {length} bits wrong through the codec"
+        );
     }
 
     /// [`Channel::estimate`] against a channel it was given: TRN1u's own
@@ -674,7 +790,11 @@ mod tests {
         }
         let channel = Channel::estimate(&known, &received, 8).expect("a two-level run is enough");
         for (k, &tap) in truth.iter().enumerate() {
-            assert!((channel.taps[k] - tap).abs() < 0.05, "tap {k}: {} against {tap}", channel.taps[k]);
+            assert!(
+                (channel.taps[k] - tap).abs() < 0.05,
+                "tap {k}: {} against {tap}",
+                channel.taps[k]
+            );
         }
         assert!(channel.noise < 1e-6, "noise {}", channel.noise);
         assert!(channel.severity() > 0.0);

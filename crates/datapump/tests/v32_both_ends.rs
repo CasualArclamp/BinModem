@@ -16,7 +16,9 @@
 //! The question it exists to answer is the one a waterfall cannot: whether the
 //! rate sequences crossed, and what they said.
 
-use datapump::v32::startup::{Heard, Listener, RateDetector, is_end_signal, is_rate_signal, offered_rate};
+use datapump::v32::startup::{
+    Heard, Listener, RateDetector, is_end_signal, is_rate_signal, offered_rate,
+};
 use datapump::v32::{Mode, Receiver};
 
 const FS: f64 = 16_000.0;
@@ -94,10 +96,7 @@ fn both_ends_of_a_call() {
 
     // Channel 0 carries what the answering modem sent, so it is read by a
     // receiver belonging to the calling end. Channel 1 is the reverse.
-    let mut ends = [
-        End::new("far ", Mode::Call),
-        End::new("near", Mode::Answer),
-    ];
+    let mut ends = [End::new("far ", Mode::Call), End::new("near", Mode::Answer)];
 
     for i in 0..arrived.len().min(sent.len()) {
         for (end, x) in ends.iter_mut().zip([arrived[i], sent[i]]) {
@@ -106,12 +105,7 @@ fn both_ends_of_a_call() {
             end.receiver.feed(x);
             for bit in end.receiver.take_bits() {
                 if let Some(word) = end.rates.feed(bit) {
-                    println!(
-                        "{:8.3}s  {}  {}",
-                        i as f64 / FS,
-                        end.name,
-                        describe(word)
-                    );
+                    println!("{:8.3}s  {}  {}", i as f64 / FS, end.name, describe(word));
                 }
             }
             if i % WINDOW == 0 {

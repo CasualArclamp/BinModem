@@ -34,17 +34,23 @@
 //! TONEq and INFO0a where 9.2.1.3 asks for 75 +/- 5 -- the measurement is
 //! recorded and the clause is left alone.
 
+use datapump::Bell103Rx;
 use datapump::v34::dpsk::{Receiver, Side};
 use datapump::v34::info::{Info, PcmFlags, SymbolRate};
-use datapump::Bell103Rx;
 use ec::hdlc::{Decoder as Hdlc, Fcs};
 use v8::quick::{AnspcmLevel, BitWatcher, Qc, Uqts};
 use v8::{Decoder, Heard, Menu};
 
-const VECTOR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/vectors/v92-56k.wav");
+const VECTOR: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/vectors/v92-56k.wav"
+);
 /// The V.90 recording, used only as a positive control: the same code that
 /// finds no menus in the V.92 file finds five CMs and three JMs in this one.
-const V90_VECTOR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/vectors/v90-56k.wav");
+const V90_VECTOR: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/vectors/v90-56k.wav"
+);
 
 /// V.21 signalling rate (8.2/V.92, V.21).
 const BAUD: f64 = 300.0;
@@ -108,7 +114,10 @@ struct Capture {
 impl Capture {
     fn read(path: &str) -> Self {
         let wav = line::wav::read(path).expect("could not read the vector");
-        Self { fs: f64::from(wav.sample_rate), x: wav.channel(0) }
+        Self {
+            fs: f64::from(wav.sample_rate),
+            x: wav.channel(0),
+        }
     }
 
     fn at(&self, t: f64) -> usize {
@@ -178,7 +187,9 @@ impl Capture {
     /// The first run of a V.21 carrier, which is whichever of its two tones
     /// the modem happens to be sending.
     fn carrier(&self, tones: (f64, f64), from: f64, to: f64) -> Option<(f64, f64)> {
-        self.run(from, to, |t| self.tone(tones.0, t, TONE_WINDOW).0 + self.tone(tones.1, t, TONE_WINDOW).0)
+        self.run(from, to, |t| {
+            self.tone(tones.0, t, TONE_WINDOW).0 + self.tone(tones.1, t, TONE_WINDOW).0
+        })
     }
 
     /// Every place the phase of `f` turns over inside `from..to`.
@@ -324,9 +335,15 @@ impl Quick2 {
             digital,
             lapm: bit(6),
             uqts: (!digital)
-                .then(|| Uqts::from_pattern((pattern(1) << 3) | (pattern(2) << 2) | (pattern(3) << 1) | pattern(4)))
+                .then(|| {
+                    Uqts::from_pattern(
+                        (pattern(1) << 3) | (pattern(2) << 2) | (pattern(3) << 1) | pattern(4),
+                    )
+                })
                 .flatten(),
-            level: digital.then(|| AnspcmLevel::from_pattern((pattern(1) << 1) | pattern(2))).flatten(),
+            level: digital
+                .then(|| AnspcmLevel::from_pattern((pattern(1) << 1) | pattern(2)))
+                .flatten(),
         })
     }
 
@@ -367,7 +384,10 @@ fn the_v8_menus_never_come_because_this_call_used_short_phase_1() {
     // function octet, no modulation octets, no PCM availability category and
     // no CJ -- so the question the plan asked of this capture, what the V.8
     // menus offered, has no answer in it.
-    for (label, tones) in [("V.21(L)", datapump::v8::LOW), ("V.21(H)", datapump::v8::HIGH)] {
+    for (label, tones) in [
+        ("V.21(L)", datapump::v8::LOW),
+        ("V.21(H)", datapump::v8::HIGH),
+    ] {
         let heard = menus(VECTOR, tones);
         assert!(heard.is_empty(), "{label} carried {heard:?}");
     }
@@ -389,7 +409,14 @@ fn the_v8_menus_never_come_because_this_call_used_short_phase_1() {
     assert_eq!(cm.len(), 5, "V.90's CMs");
     assert_eq!(jm.len(), 3, "V.90's JMs");
     assert_eq!(cm[0].pcm, Some(v8::Pcm::ANALOGUE));
-    assert_eq!(jm[0].pcm, Some(v8::Pcm { analogue: false, digital: true, v91: false }));
+    assert_eq!(
+        jm[0].pcm,
+        Some(v8::Pcm {
+            analogue: false,
+            digital: true,
+            v91: false
+        })
+    );
 }
 
 #[test]
@@ -405,7 +432,10 @@ fn a_qc1a_before_the_cm_is_looked_for() {
     // Both channels are swept, not just the one the plan named, so that the
     // answer does not depend on having guessed the opening right.
     let capture = capture();
-    for (label, tones) in [("V.21(L)", datapump::v8::LOW), ("V.21(H)", datapump::v8::HIGH)] {
+    for (label, tones) in [
+        ("V.21(L)", datapump::v8::LOW),
+        ("V.21(H)", datapump::v8::HIGH),
+    ] {
         let (_, bits) = capture.v21(tones, 0.0, 6.0);
         let mut watcher = BitWatcher::new();
         let found: Vec<Qc> = bits.iter().filter_map(|&bit| watcher.feed(bit)).collect();
@@ -418,12 +448,24 @@ fn a_qc1a_before_the_cm_is_looked_for() {
     // connect there. `BitWatcher` anchors the whole sixty-bit window instead,
     // and the ten ONEs Table 2 puts in front of every QC are what save it.
     let (at, bits) = capture.v21(datapump::v8::HIGH, 1.0, 1.7);
-    let sync = [false, true, false, true, false, true, false, true, false, true];
-    let hits: Vec<usize> =
-        bits.windows(sync.len()).enumerate().filter_map(|(i, w)| (w == sync).then_some(i)).collect();
+    let sync = [
+        false, true, false, true, false, true, false, true, false, true,
+    ];
+    let hits: Vec<usize> = bits
+        .windows(sync.len())
+        .enumerate()
+        .filter_map(|(i, w)| (w == sync).then_some(i))
+        .collect();
     let times: Vec<f64> = hits.iter().map(|&i| at + i as f64 / BAUD).collect();
-    assert_eq!(hits.len(), 1, "V.92 synchronisations on V.21(H) at {times:.3?}");
-    assert!(hits[0] >= 10 && !bits[hits[0] - 10..hits[0]].iter().all(|b| *b), "ten ONEs in front of it");
+    assert_eq!(
+        hits.len(),
+        1,
+        "V.92 synchronisations on V.21(H) at {times:.3?}"
+    );
+    assert!(
+        hits[0] >= 10 && !bits[hits[0] - 10..hits[0]].iter().all(|b| *b),
+        "ten ONEs in front of it"
+    );
 }
 
 #[test]
@@ -438,7 +480,11 @@ fn the_quick_connect_is_the_v8_bis_pair_qc2a_and_qca2d() {
     assert_eq!(frames.len(), 1, "V.21(H) frames: {frames:?}");
     let (qc2a_end, ref field) = frames[0];
     println!("QC2a closes at {qc2a_end:.3}: {field:02x?}");
-    assert_eq!(field.as_slice(), &[0x2d, 0x25], "QC2a identification octets");
+    assert_eq!(
+        field.as_slice(),
+        &[0x2d, 0x25],
+        "QC2a identification octets"
+    );
     let qc2a = Quick2::from_field(field).expect("QC2a does not read as an identification field");
     assert_eq!(qc2a.name(), "QC2a");
     assert!(qc2a.lapm, "P: the analogue modem asks for LAPM");
@@ -455,17 +501,27 @@ fn the_quick_connect_is_the_v8_bis_pair_qc2a_and_qca2d() {
     // Bit for bit the vector `spec-phase1-procedures.md` 3.3 derives for
     // QCA2d with P = 1 and LM = 01, worked out from the Recommendation
     // before this file was read.
-    assert_eq!(field.as_slice(), &[0x2d, 0xe2], "QCA2d identification octets");
+    assert_eq!(
+        field.as_slice(),
+        &[0x2d, 0xe2],
+        "QCA2d identification octets"
+    );
     let qca2d = Quick2::from_field(field).expect("QCA2d does not read as an identification field");
     assert_eq!(qca2d.name(), "QCA2d");
-    assert!(qca2d.lapm, "P: the digital modem agrees to LAPM, so 9.2.5 bypasses ODP/ADP");
+    assert!(
+        qca2d.lapm,
+        "P: the digital modem agrees to LAPM, so 9.2.5 bypasses ODP/ADP"
+    );
     assert_eq!(qca2d.level, Some(AnspcmLevel::Minus12), "LM = 01");
     // The order settles which figure this is: QC2a first, on V.21(H) with the
     // analogue modem's U_QTS, then QCA2d on V.21(L) with the digital modem's
     // LM. That is Figure 5 -- analogue calling, CRe answering -- and it is
     // also why the 75 ms of silence below follows the V.21(L) burst and not
     // the V.21(H) one.
-    assert!(qca2d_end > qc2a_end, "QCA2d closed at {qca2d_end:.3}, before QC2a's {qc2a_end:.3}");
+    assert!(
+        qca2d_end > qc2a_end,
+        "QCA2d closed at {qca2d_end:.3}, before QC2a's {qc2a_end:.3}"
+    );
 }
 
 #[test]
@@ -473,7 +529,9 @@ fn qts_follows_qca2d_by_seventy_five_milliseconds_and_runs_for_768_symbols() {
     let capture = capture();
 
     // The end of QCA2d: where the V.21(L) carrier stops. Measured at 1.946 s.
-    let (_, qca2d_off) = capture.carrier(datapump::v8::LOW, 1.7, 2.0).expect("no V.21(L) burst");
+    let (_, qca2d_off) = capture
+        .carrier(datapump::v8::LOW, 1.7, 2.0)
+        .expect("no V.21(L) burst");
 
     // QTS: a tone at 8000/6 with a companion at 4000 Hz, which is the whole
     // spectrum of a six-symbol pattern obeying x[n+3] = -x[n]. The 4 kHz
@@ -482,13 +540,20 @@ fn qts_follows_qca2d_by_seventy_five_milliseconds_and_runs_for_768_symbols() {
     let (qts_on, qts_off) = capture.span(F_FRAME_3RD, 2.0, 2.2).expect("no QTS");
     let (four_k, _) = capture.tone(4000.0, qts_on + 0.02, 0.05);
     let (third, _) = capture.tone(F_FRAME_3RD, qts_on + 0.02, 0.05);
-    assert!(four_k > FOUR_KHZ_PRESENT && four_k < third, "4 kHz {four_k:.4} against 8000/6 {third:.4}");
+    assert!(
+        four_k > FOUR_KHZ_PRESENT && four_k < third,
+        "4 kHz {four_k:.4} against 8000/6 {third:.4}"
+    );
 
     // 9.2.4.2: "the modem shall terminate transmission of CRe and shall
     // transmit QCA2d followed by silence for 75 +/- 5 ms and then QTS, QTS\
     // and ANSpcm". Measured 75 ms.
     let gap = qts_on - qca2d_off;
-    assert!((0.065..=0.085).contains(&gap), "{:.0} ms between QCA2d and QTS", gap * 1000.0);
+    assert!(
+        (0.065..=0.085).contains(&gap),
+        "{:.0} ms between QCA2d and QTS",
+        gap * 1000.0
+    );
 
     // QTS is 768T and QTS\ is 48T, and the join between them is a 180 degree
     // turn of the 8000/6 tone (8.3.6). Measured at 2.117 s, 96 ms after QTS
@@ -505,7 +570,11 @@ fn qts_follows_qca2d_by_seventy_five_milliseconds_and_runs_for_768_symbols() {
         QTS_LENGTH * 1000.0
     );
     let tail = qts_off - turns[0];
-    assert!((0.003..=0.015).contains(&tail), "QTS\\ ran {:.1} ms", tail * 1000.0);
+    assert!(
+        (0.003..=0.015).contains(&tail),
+        "QTS\\ ran {:.1} ms",
+        tail * 1000.0
+    );
 }
 
 #[test]
@@ -523,7 +592,10 @@ fn anspcm_reverses_every_3612_symbols_until_toneq_answers_it() {
     let turns = capture.reversals(F_ANSPCM, on, off, 0.010);
     println!("ANSpcm reversals at {turns:.3?}");
     assert_eq!(turns.len(), 2, "ANSpcm reversals at {turns:?}");
-    for (name, measured) in [("the first", turns[0] - on), ("the spacing", turns[1] - turns[0])] {
+    for (name, measured) in [
+        ("the first", turns[0] - on),
+        ("the spacing", turns[1] - turns[0]),
+    ] {
         assert!(
             (ANSPCM_REVERSAL - 0.020..=ANSPCM_REVERSAL + 0.020).contains(&measured),
             "{name}: {:.1} ms, not {:.1}",
@@ -542,10 +614,21 @@ fn anspcm_reverses_every_3612_symbols_until_toneq_answers_it() {
     // frames rather than at a carrier detector.
     let (toneq_on, toneq_off) = capture.span(F_TONEQ, 3.0, 3.4).expect("no TONEq");
     let wait = toneq_on - on;
-    assert!((0.95..=1.05).contains(&wait), "TONEq came {:.0} ms after ANSpcm", wait * 1000.0);
+    assert!(
+        (0.95..=1.05).contains(&wait),
+        "TONEq came {:.0} ms after ANSpcm",
+        wait * 1000.0
+    );
     assert!(toneq_off > off, "TONEq stopped before ANSpcm did");
-    assert!(toneq_off - off < 0.100, "TONEq ran {:.0} ms past ANSpcm", (toneq_off - off) * 1000.0);
-    assert!(toneq_off - toneq_on > 0.050, "9.2.1.3 asks for TONEq to run at least 50 ms");
+    assert!(
+        toneq_off - off < 0.100,
+        "TONEq ran {:.0} ms past ANSpcm",
+        (toneq_off - off) * 1000.0
+    );
+    assert!(
+        toneq_off - toneq_on > 0.050,
+        "9.2.1.3 asks for TONEq to run at least 50 ms"
+    );
 
     // 9.2.1.3 then asks for 75 +/- 5 ms of silence before Phase 2. This
     // modem takes 93 ms, measuring from where its 980 Hz falls away at
@@ -563,7 +646,11 @@ fn anspcm_reverses_every_3612_symbols_until_toneq_answers_it() {
         "ANSpcm {on:.3}..{off:.3}, TONEq {toneq_on:.3}..{toneq_off:.3}, then {:.0} ms to INFO0a",
         silence * 1000.0
     );
-    assert!((0.070..=0.115).contains(&silence), "{:.0} ms from TONEq to INFO0a", silence * 1000.0);
+    assert!(
+        (0.070..=0.115).contains(&silence),
+        "{:.0} ms from TONEq to INFO0a",
+        silence * 1000.0
+    );
 }
 
 #[test]
@@ -604,10 +691,40 @@ fn the_info_sequences_say_whether_v92_and_pcm_upstream_were_used() {
 
     // Both ends say V.92 (9.3), in the two bits that are the other way round
     // in the two layouts: INFO0a bit 26 and INFO0d bit 27.
-    let info0a = found.iter().find_map(|(_, _, i)| if let Info::Info0(x) = i { Some(*x) } else { None }).unwrap();
-    let info0d = found.iter().find_map(|(_, _, i)| if let Info::Info0d(x) = i { Some(*x) } else { None }).unwrap();
-    assert_eq!(info0a.pcm_flags(), PcmFlags { v92: true, short_phase2: false });
-    assert_eq!(info0d.pcm_flags(), PcmFlags { v92: true, short_phase2: true });
+    let info0a = found
+        .iter()
+        .find_map(|(_, _, i)| {
+            if let Info::Info0(x) = i {
+                Some(*x)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    let info0d = found
+        .iter()
+        .find_map(|(_, _, i)| {
+            if let Info::Info0d(x) = i {
+                Some(*x)
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert_eq!(
+        info0a.pcm_flags(),
+        PcmFlags {
+            v92: true,
+            short_phase2: false
+        }
+    );
+    assert_eq!(
+        info0d.pcm_flags(),
+        PcmFlags {
+            v92: true,
+            short_phase2: true
+        }
+    );
     // The server asked for short Phase 2 and the modem did not, so 9.4's
     // "all four" fails and both run the full one -- which is what the four
     // sequences above are.
@@ -623,7 +740,16 @@ fn the_info_sequences_say_whether_v92_and_pcm_upstream_were_used() {
     // and it is set. Read as V.90 the same bit would mean 3429 goes up on the
     // high carrier; the V.90 recording of this pair has it clear, so this is
     // not a habit of the server's.
-    let info1d = found.iter().find_map(|(_, _, i)| if let Info::Info1c(x) = i { Some(*x) } else { None }).unwrap();
+    let info1d = found
+        .iter()
+        .find_map(|(_, _, i)| {
+            if let Info::Info1c(x) = i {
+                Some(*x)
+            } else {
+                None
+            }
+        })
+        .unwrap();
     assert!(info1d.pcm_upstream(), "INFO1d bit 70");
     let rates: Vec<u8> = info1d.probed.iter().map(|p| p.max_rate).collect();
     assert_eq!(rates, vec![5, 6, 6, 7, 7, 9]);
@@ -636,13 +762,21 @@ fn the_info_sequences_say_whether_v92_and_pcm_upstream_were_used() {
     // recording.
     let asked = found
         .iter()
-        .find_map(|(_, _, i)| if let Info::Info1aPcm(x) = i { Some(*x) } else { None })
+        .find_map(|(_, _, i)| {
+            if let Info::Info1aPcm(x) = i {
+                Some(*x)
+            } else {
+                None
+            }
+        })
         .expect("no V.90 INFO1a");
     assert_eq!(asked.upstream, SymbolRate::S3200);
     assert_eq!(asked.uinfo, 78);
     assert_eq!(asked.md_length, 20);
     assert!(
-        !found.iter().any(|(_, _, i)| matches!(i, Info::Info1aPcmUp(_))),
+        !found
+            .iter()
+            .any(|(_, _, i)| matches!(i, Info::Info1aPcmUp(_))),
         "a Table 18 INFO1a after all"
     );
 }
@@ -667,13 +801,24 @@ fn if_pcm_upstream_was_used_ru_and_trn1u_are_on_the_tap() {
             .run(from, to, |t| {
                 let third = capture.tone(F_FRAME_3RD, t, TONE_WINDOW).0;
                 let fourth = capture.tone(4000.0, t, TONE_WINDOW).0;
-                if fourth > FOUR_KHZ_PRESENT { third } else { 0.0 }
+                if fourth > FOUR_KHZ_PRESENT {
+                    third
+                } else {
+                    0.0
+                }
             })
             .filter(|(on, off)| off - on > 0.050)
     };
-    assert!(period_6(2.0, 2.2).is_some(), "the detector cannot even find QTS");
+    assert!(
+        period_6(2.0, 2.2).is_some(),
+        "the detector cannot even find QTS"
+    );
     // Phase 3 begins after the 5.121 s INFO1a and would open with Ru, then
     // TRN1u (8.5.6, 8.5.7). Nothing of the sort is there: what follows is
     // V.34's own Phase 3 on a 3200-baud carrier, as V.90 has it.
-    assert_eq!(period_6(5.2, 12.0), None, "a period-6 upstream after INFO1a after all");
+    assert_eq!(
+        period_6(5.2, 12.0),
+        None,
+        "a period-6 upstream after INFO1a after all"
+    );
 }

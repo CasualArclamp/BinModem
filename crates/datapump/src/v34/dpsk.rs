@@ -107,9 +107,12 @@ impl Side {
         match (self, half_duplex, mh) {
             (_, true, _) => &[info::INFO0_BITS, info::INFOH_BITS],
             (Self::Call, false, false) => &[info::INFO0_BITS, info::INFO0D_BITS, info::INFO1C_BITS],
-            (Self::Call, false, true) => {
-                &[info::MH_BITS, info::INFO0_BITS, info::INFO0D_BITS, info::INFO1C_BITS]
-            }
+            (Self::Call, false, true) => &[
+                info::MH_BITS,
+                info::INFO0_BITS,
+                info::INFO0D_BITS,
+                info::INFO1C_BITS,
+            ],
             (Self::Answer, false, false) => &[info::INFO0_BITS, info::INFO1A_BITS],
             (Self::Answer, false, true) => &[info::MH_BITS, info::INFO0_BITS, info::INFO1A_BITS],
         }
@@ -247,7 +250,11 @@ impl Transmitter {
         let (cos, _) = self.carrier.step();
         let (guard, _) = self.guard.step();
         let sounding = self.history.iter().any(|s| *s != 0.0);
-        let guard = if sounding { guard * self.side.guard_amplitude() } else { 0.0 };
+        let guard = if sounding {
+            guard * self.side.guard_amplitude()
+        } else {
+            0.0
+        };
         baseband * cos * self.side.carrier_amplitude() + guard
     }
 }
@@ -481,7 +488,10 @@ impl Receiver {
                 let (re, im) = branch.previous_symbol;
                 let strength = ((at.0 * at.0 + at.1 * at.1) * (re * re + im * im)).sqrt();
                 self.scope_strength *= SCOPE_HOLD;
-                if strength >= self.scope_strength && strength.sqrt() > SCOPE_AUDIBLE * self.level && self.level > SCOPE_FLOOR {
+                if strength >= self.scope_strength
+                    && strength.sqrt() > SCOPE_AUDIBLE * self.level
+                    && self.level > SCOPE_FLOOR
+                {
                     self.scope_strength = strength;
                     self.scope = Some((
                         SCOPE_RADIUS * (at.0 * re + at.1 * im) / strength,
@@ -532,7 +542,12 @@ fn decide(
         // rest of the fill says nothing more, and whatever follows a sequence
         // may not be ones at all.
         let without_fill = length - info::FILL.len();
-        let heard = without_fill + if half_duplex && length == info::INFO0_BITS { FILL_HEARD } else { 0 };
+        let heard = without_fill
+            + if half_duplex && length == info::INFO0_BITS {
+                FILL_HEARD
+            } else {
+                0
+            };
         if bits.len() < heard {
             continue;
         }
@@ -605,7 +620,11 @@ mod tests {
             min_power_reduction: 2,
             additional_power_reduction: 3,
             md_length: 0,
-            probed: Probed { high_carrier: true, pre_emphasis: 4, max_rate: 14 },
+            probed: Probed {
+                high_carrier: true,
+                pre_emphasis: 4,
+                max_rate: 14,
+            },
             answer_to_call: SymbolRate::S3429,
             call_to_answer: SymbolRate::S3200,
             frequency_offset: Some(0.5),
@@ -649,12 +668,21 @@ mod tests {
 
     /// Run a transmitter into a duplex receiver through `line`, and collect
     /// what the receiver found.
-    fn through(side: Side, sequences: &[Vec<bool>], line: impl FnMut(usize, f64) -> f64) -> Vec<Info> {
+    fn through(
+        side: Side,
+        sequences: &[Vec<bool>],
+        line: impl FnMut(usize, f64) -> f64,
+    ) -> Vec<Info> {
         heard_by(Receiver::new(side, FS), side, sequences, line)
     }
 
     /// The same, into `rx`.
-    fn heard_by(mut rx: Receiver, side: Side, sequences: &[Vec<bool>], mut line: impl FnMut(usize, f64) -> f64) -> Vec<Info> {
+    fn heard_by(
+        mut rx: Receiver,
+        side: Side,
+        sequences: &[Vec<bool>],
+        mut line: impl FnMut(usize, f64) -> f64,
+    ) -> Vec<Info> {
         let mut tx = Transmitter::new(side, FS);
         for bits in sequences {
             tx.send(bits);
@@ -711,11 +739,28 @@ mod tests {
 
     #[test]
     fn both_sides_carry_both_their_sequences() {
-        let info1c = Info1c { md_length: 12, ..Info1c::default() };
-        let found = through(Side::Call, &[capabilities().to_bits(), info1c.to_bits()], |_, x| x);
-        assert_eq!(found, vec![Info::Info0(capabilities()), Info::Info1c(info1c)]);
-        let found = through(Side::Answer, &[capabilities().to_bits(), results().to_bits()], |_, x| x);
-        assert_eq!(found, vec![Info::Info0(capabilities()), Info::Info1a(results())]);
+        let info1c = Info1c {
+            md_length: 12,
+            ..Info1c::default()
+        };
+        let found = through(
+            Side::Call,
+            &[capabilities().to_bits(), info1c.to_bits()],
+            |_, x| x,
+        );
+        assert_eq!(
+            found,
+            vec![Info::Info0(capabilities()), Info::Info1c(info1c)]
+        );
+        let found = through(
+            Side::Answer,
+            &[capabilities().to_bits(), results().to_bits()],
+            |_, x| x,
+        );
+        assert_eq!(
+            found,
+            vec![Info::Info0(capabilities()), Info::Info1a(results())]
+        );
     }
 
     #[test]
@@ -764,7 +809,10 @@ mod tests {
         let mut answer = Transmitter::new(Side::Answer, FS);
         let mut hears_call = Receiver::new(Side::Call, FS);
         let mut hears_answer = Receiver::new(Side::Answer, FS);
-        let info1c = Info1c { min_power_reduction: 5, ..Info1c::default() };
+        let info1c = Info1c {
+            min_power_reduction: 5,
+            ..Info1c::default()
+        };
         call.send(&capabilities().to_bits());
         call.send(&info1c.to_bits());
         call.silence();
@@ -781,14 +829,27 @@ mod tests {
             from_call.extend(hears_call.feed(line));
             from_answer.extend(hears_answer.feed(line));
         }
-        assert_eq!(from_call, vec![Info::Info0(capabilities()), Info::Info1c(info1c)]);
-        assert_eq!(from_answer, vec![Info::Info0(capabilities()), Info::Info1a(results())]);
+        assert_eq!(
+            from_call,
+            vec![Info::Info0(capabilities()), Info::Info1c(info1c)]
+        );
+        assert_eq!(
+            from_answer,
+            vec![Info::Info0(capabilities()), Info::Info1a(results())]
+        );
     }
 
     #[test]
     fn a_quiet_noisy_line_still_carries_them() {
-        let found = through(Side::Answer, &[capabilities().to_bits(), results().to_bits()], quiet_and_noisy());
-        assert_eq!(found, vec![Info::Info0(capabilities()), Info::Info1a(results())]);
+        let found = through(
+            Side::Answer,
+            &[capabilities().to_bits(), results().to_bits()],
+            quiet_and_noisy(),
+        );
+        assert_eq!(
+            found,
+            vec![Info::Info0(capabilities()), Info::Info1a(results())]
+        );
     }
 
     #[test]
@@ -802,8 +863,17 @@ mod tests {
             for infoh in requests() {
                 let bits = [capabilities().to_bits(), infoh.to_bits()];
                 let expected = vec![Info::Info0(capabilities()), Info::InfoH(infoh)];
-                assert_eq!(heard_by(Receiver::half_duplex(side, FS), side, &bits, |_, x| x), expected, "{side:?}");
-                let noisy = heard_by(Receiver::half_duplex(side, FS), side, &bits, quiet_and_noisy());
+                assert_eq!(
+                    heard_by(Receiver::half_duplex(side, FS), side, &bits, |_, x| x),
+                    expected,
+                    "{side:?}"
+                );
+                let noisy = heard_by(
+                    Receiver::half_duplex(side, FS),
+                    side,
+                    &bits,
+                    quiet_and_noisy(),
+                );
                 assert_eq!(noisy, expected, "{side:?}, quiet and noisy");
             }
         }
@@ -831,7 +901,11 @@ mod tests {
                     let line = sends.next_sample() + 1.2 * other.next_sample();
                     found.extend(hears.feed(line));
                 }
-                assert_eq!(found, vec![Info::InfoH(infoh)], "from the {recipient:?} side");
+                assert_eq!(
+                    found,
+                    vec![Info::InfoH(infoh)],
+                    "from the {recipient:?} side"
+                );
             }
         }
     }
@@ -844,13 +918,40 @@ mod tests {
         for side in [Side::Call, Side::Answer] {
             let sent = [capabilities().to_bits(), plain.to_bits(), early.to_bits()];
             let found = heard_by(Receiver::half_duplex(side, FS), side, &sent, |_, x| x);
-            assert_eq!(found, vec![Info::Info0(capabilities()), Info::InfoH(plain), Info::InfoH(early)], "{side:?}");
+            assert_eq!(
+                found,
+                vec![
+                    Info::Info0(capabilities()),
+                    Info::InfoH(plain),
+                    Info::InfoH(early)
+                ],
+                "{side:?}"
+            );
         }
         // Duplex's results are not half-duplex's sequences, nor taken for
         // them.
-        let info1c = Info1c { md_length: 12, ..Info1c::default() };
-        assert_eq!(heard_by(Receiver::half_duplex(Side::Call, FS), Side::Call, &[info1c.to_bits()], |_, x| x), vec![]);
-        assert_eq!(heard_by(Receiver::half_duplex(Side::Answer, FS), Side::Answer, &[results().to_bits()], |_, x| x), vec![]);
+        let info1c = Info1c {
+            md_length: 12,
+            ..Info1c::default()
+        };
+        assert_eq!(
+            heard_by(
+                Receiver::half_duplex(Side::Call, FS),
+                Side::Call,
+                &[info1c.to_bits()],
+                |_, x| x
+            ),
+            vec![]
+        );
+        assert_eq!(
+            heard_by(
+                Receiver::half_duplex(Side::Answer, FS),
+                Side::Answer,
+                &[results().to_bits()],
+                |_, x| x
+            ),
+            vec![]
+        );
     }
 
     #[test]
@@ -862,12 +963,18 @@ mod tests {
             let heard_at = |mut rx: Receiver| {
                 let mut tx = Transmitter::new(side, FS);
                 tx.send(&capabilities().to_bits());
-                (0..FS as usize).find(|_| rx.feed(tx.next_sample()) == Some(Info::Info0(capabilities())))
+                (0..FS as usize)
+                    .find(|_| rx.feed(tx.next_sample()) == Some(Info::Info0(capabilities())))
             };
-            let duplex = heard_at(Receiver::new(side, FS)).expect("the duplex receiver heard nothing");
-            let half = heard_at(Receiver::half_duplex(side, FS)).expect("the half-duplex receiver heard nothing");
+            let duplex =
+                heard_at(Receiver::new(side, FS)).expect("the duplex receiver heard nothing");
+            let half = heard_at(Receiver::half_duplex(side, FS))
+                .expect("the half-duplex receiver heard nothing");
             let later = (half - duplex) as f64 * BAUD / FS;
-            assert!((later - FILL_HEARD as f64).abs() < 0.25, "{side:?}: {later:.2} symbols later");
+            assert!(
+                (later - FILL_HEARD as f64).abs() < 0.25,
+                "{side:?}: {later:.2} symbols later"
+            );
         }
     }
 
@@ -915,7 +1022,11 @@ mod tests {
         for side in [-1.0, 1.0] {
             let within = |offset: f64, low: f64, high: f64| {
                 let v = db(side * offset);
-                assert!((low..=high).contains(&v), "{} Hz: {v:.2} dB, not {low} to {high}", side * offset);
+                assert!(
+                    (low..=high).contains(&v),
+                    "{} Hz: {v:.2} dB, not {low} to {high}",
+                    side * offset
+                );
             };
             within(125.0, -0.75, 0.75);
             within(300.0, -4.0, -2.0);
@@ -933,8 +1044,13 @@ mod tests {
     /// because both its symbol-rate fields hold six.
     #[test]
     fn every_info1a_layout_reaches_the_caller_as_itself() {
-        let table18 =
-            Info1aPcmUp { sections: 3, ltot_code: 1, lmax_code: 0, md_length: 4, uinfo: 90 };
+        let table18 = Info1aPcmUp {
+            sections: 3,
+            ltot_code: 1,
+            lmax_code: 0,
+            md_length: 4,
+            uinfo: 90,
+        };
         let table10 = Info1aPcm {
             md_length: 20,
             uinfo: 78,
@@ -942,10 +1058,19 @@ mod tests {
             frequency_offset: Some(-0.5),
         };
         let sequences = [results().to_bits(), table18.to_bits(), table10.to_bits()];
-        let found = heard_by(Receiver::new(Side::Answer, FS), Side::Answer, &sequences, |_, x| x);
+        let found = heard_by(
+            Receiver::new(Side::Answer, FS),
+            Side::Answer,
+            &sequences,
+            |_, x| x,
+        );
         assert_eq!(
             found,
-            vec![Info::Info1a(results()), Info::Info1aPcmUp(table18), Info::Info1aPcm(table10)]
+            vec![
+                Info::Info1a(results()),
+                Info::Info1aPcmUp(table18),
+                Info::Info1aPcm(table10)
+            ]
         );
 
         // Table 18 is the one V.92 layout no phase can be in doubt about, so
@@ -978,7 +1103,10 @@ mod tests {
             },
             high_carrier: true,
         };
-        let low = Info1aV34Up { high_carrier: false, ..table19 };
+        let low = Info1aV34Up {
+            high_carrier: false,
+            ..table19
+        };
         for asked in [table19, low] {
             let bits = [asked.to_bits()];
             let full = Receiver::new(Side::Answer, FS);
@@ -1004,14 +1132,26 @@ mod tests {
     /// keeps a forty-bit window out of every start-up that will never hold.
     #[test]
     fn mh_frames_are_heard_back_to_back_only_when_asked_for() {
-        let sent = [Mh::req(), Mh::ack(T1::from_code(5)), Mh::clrd(Cleardown::IncomingCall)];
+        let sent = [
+            Mh::req(),
+            Mh::ack(T1::from_code(5)),
+            Mh::clrd(Cleardown::IncomingCall),
+        ];
         let bits: Vec<Vec<bool>> = sent.iter().map(Mh::to_bits).collect();
         let wanted: Vec<Info> = sent.iter().map(|&mh| Info::Mh(mh)).collect();
         for side in [Side::Call, Side::Answer] {
             let listening = Receiver::new(side, FS).with_mh();
-            assert_eq!(heard_by(listening, side, &bits, |_, x| x), wanted, "{side:?}");
+            assert_eq!(
+                heard_by(listening, side, &bits, |_, x| x),
+                wanted,
+                "{side:?}"
+            );
             let deaf = Receiver::new(side, FS);
-            assert_eq!(heard_by(deaf, side, &bits, |_, x| x), Vec::new(), "{side:?}");
+            assert_eq!(
+                heard_by(deaf, side, &bits, |_, x| x),
+                Vec::new(),
+                "{side:?}"
+            );
         }
 
         // And asking for them costs the phase 2 sequences nothing: a receiver

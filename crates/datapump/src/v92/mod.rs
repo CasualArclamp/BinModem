@@ -58,8 +58,8 @@ pub mod digital;
 pub mod down_source;
 pub mod epsilon;
 pub mod exchange;
-pub mod line;
 pub mod hold;
+pub mod line;
 pub mod memo;
 pub mod modulus;
 pub mod precoder;
@@ -164,7 +164,9 @@ pub const JA_MASK_ALL: u32 = (1 << UP_RATES) - 1;
 /// The table prints 46 666, not 46 667, which is the same floor of 46 666 2/3
 /// that [`up_rate`] takes -- see the test.
 pub fn ja_mask_bit(drn: u8) -> Option<u32> {
-    (1..=UP_RATES as u8).contains(&drn).then(|| u32::from(drn) - 1)
+    (1..=UP_RATES as u8)
+        .contains(&drn)
+        .then(|| u32::from(drn) - 1)
 }
 
 /// Whether a Ja mask offers `drn`.
@@ -180,7 +182,9 @@ pub fn ja_mask_with(mask: u32, drn: u8) -> u32 {
 
 /// Every drn a Ja mask offers, slowest first.
 pub fn ja_mask_drns(mask: u32) -> Vec<u8> {
-    (1..=UP_RATES as u8).filter(|&drn| ja_mask_has(mask, drn)).collect()
+    (1..=UP_RATES as u8)
+        .filter(|&drn| ja_mask_has(mask, drn))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -235,7 +239,10 @@ pub struct FilterSections {
 impl FilterSections {
     /// From INFO1a bits 12:13.
     pub fn from_code(code: u8) -> Self {
-        Self { z1: code & 1 != 0, p2: code & 2 != 0 }
+        Self {
+            z1: code & 1 != 0,
+            p2: code & 2 != 0,
+        }
     }
 
     /// Back to the two bits, for an INFO1a this end sends.
@@ -263,7 +270,11 @@ pub struct DownLevels {
 
 /// What `cp`'s first constellation is, on a codec of `law` trained at `uinfo`.
 #[must_use]
-pub fn down_levels(law: crate::v90::ucode::Law, uinfo: u8, cp: &crate::v90::sequences::Cp) -> Option<DownLevels> {
+pub fn down_levels(
+    law: crate::v90::ucode::Law,
+    uinfo: u8,
+    cp: &crate::v90::sequences::Cp,
+) -> Option<DownLevels> {
     use crate::v90::ucode::level;
     let points = cp.points(0);
     let (&lowest, &highest) = (points.first()?, points.last()?);
@@ -310,7 +321,8 @@ impl ScopePair {
     #[must_use]
     pub fn pair(&self) -> Option<(f64, f64)> {
         let scale = self.peak.max(1e-9);
-        self.any.then(|| (self.last[0] / scale, self.last[1] / scale))
+        self.any
+            .then(|| (self.last[0] / scale, self.last[1] / scale))
     }
 }
 
@@ -445,7 +457,9 @@ pub fn to_unsigned_q(value: f64, width: u32, fraction: u32) -> u32 {
 pub fn to_signed_q(value: f64, width: u32, fraction: u32) -> u32 {
     let scale = (1u64 << fraction) as f64;
     let span = 1i64 << width;
-    let raw = (value * scale).round().clamp(-(span / 2) as f64, (span / 2 - 1) as f64) as i64;
+    let raw = (value * scale)
+        .round()
+        .clamp(-(span / 2) as f64, (span / 2 - 1) as f64) as i64;
     (raw & (span - 1)) as u32
 }
 
@@ -559,7 +573,11 @@ impl Filters {
 
     /// The longest section, which 8.8.3 holds to L_max.
     pub fn most(&self) -> usize {
-        self.z1.len().max(self.p1.len()).max(self.z2.len()).max(self.p2.len())
+        self.z1
+            .len()
+            .max(self.p1.len())
+            .max(self.z2.len())
+            .max(self.p2.len())
     }
 
     /// Whether these fit what INFO1a announced (8.8.3, with Table 18 bits
@@ -708,7 +726,11 @@ impl Parameters {
                 return Err("a constellation set is not in ascending magnitude");
             }
         }
-        if self.indices.iter().any(|&index| usize::from(index) >= CONSTELLATION_SETS) {
+        if self
+            .indices
+            .iter()
+            .any(|&index| usize::from(index) >= CONSTELLATION_SETS)
+        {
             return Err("a constellation index is outside the printed 0 to 5");
         }
         for i in 0..UP_INTERVALS {
@@ -716,7 +738,11 @@ impl Parameters {
                 return Err("a constellation index points past the sets");
             };
             let n = 2 * points.len();
-            let wanted = if i % TRELLIS_FRAME == TRELLIS_FRAME - 1 { 2 } else { 1 } * usize::from(self.modulus(i));
+            let wanted = if i % TRELLIS_FRAME == TRELLIS_FRAME - 1 {
+                2
+            } else {
+                1
+            } * usize::from(self.modulus(i));
             if n < wanted {
                 return Err("an interval's constellation is too small for its modulus");
             }
@@ -783,7 +809,10 @@ impl Deadlines {
 
     /// What `name` is armed for, if it is.
     pub fn armed(&self, name: &'static str) -> Option<Deadline> {
-        self.slots.iter().find(|(slot, _)| *slot == name).map(|(_, deadline)| *deadline)
+        self.slots
+            .iter()
+            .find(|(slot, _)| *slot == name)
+            .map(|(_, deadline)| *deadline)
     }
 
     /// The earliest slot that has passed, as its name and its reason, or
@@ -867,7 +896,10 @@ mod tests {
         assert_eq!(rungs.len(), UP_RATES);
         for pair in rungs.windows(2) {
             let step = pair[1] - pair[0];
-            assert!(step == 1333 || step == 1334, "{pair:?} was a step of {step}");
+            assert!(
+                step == 1333 || step == 1334,
+                "{pair:?} was a step of {step}"
+            );
         }
         // 6.1 prints no table -- it is three lines of prose giving the range
         // and the step -- so the rungs below are derived from that step, and
@@ -890,14 +922,21 @@ mod tests {
         for drn in 1..=UP_RATES as u8 {
             let k = up_bits(drn);
             assert_eq!(k, 2 * (u32::from(drn) + 17), "drn {drn}");
-            assert!((36..=72).contains(&k) && k.is_multiple_of(2), "drn {drn} gave K = {k}");
+            assert!(
+                (36..=72).contains(&k) && k.is_multiple_of(2),
+                "drn {drn} gave K = {k}"
+            );
             // The rate is those bits spread over the frame. Both sides floor
             // the same fraction, so this holds exactly at every rung, which
             // `up_bits(drn) * 8000 == up_rate(drn) * 12` does not: only the
             // seven rungs with 3 | (drn + 17) land on a whole bit/s.
             assert_eq!(k * 8000 / UP_INTERVALS as u32, up_rate(drn), "drn {drn}");
             if (u32::from(drn) + UP_DRN_OFFSET).is_multiple_of(3) {
-                assert_eq!(u64::from(k) * 8000, u64::from(up_rate(drn)) * 12, "drn {drn}");
+                assert_eq!(
+                    u64::from(k) * 8000,
+                    u64::from(up_rate(drn)) * 12,
+                    "drn {drn}"
+                );
             }
         }
     }
@@ -919,7 +958,10 @@ mod tests {
             assert_eq!(trellis_index(n), printed_k[i]);
         }
         // B1u's first symbol "begins data frame interval 0" and is n = 0.
-        assert_eq!((interval(0), constellation_index(0), trellis_index(0)), (0, 0, 0));
+        assert_eq!(
+            (interval(0), constellation_index(0), trellis_index(0)),
+            (0, 0, 0)
+        );
     }
 
     /// 3.5 and Table 30: the Q formats read as the digit patterns the
@@ -953,7 +995,10 @@ mod tests {
         // and it round-trips there.
         assert_eq!(gain_from_4g(u16::MAX), GAIN_LARGEST);
         assert_eq!(four_g_from_gain(GAIN_LARGEST), u16::MAX);
-        assert!((gain_from_4g(u16::MAX) - 0.25).abs() < 1e-5, "4G stops just short of one");
+        assert!(
+            (gain_from_4g(u16::MAX) - 0.25).abs() < 1e-5,
+            "4G stops just short of one"
+        );
         assert!(gain_from_4g(u16::MAX) < 0.25);
     }
 
@@ -967,7 +1012,11 @@ mod tests {
         // Seven bits, so the field stops at 127 and there is no longer MD.
         assert_eq!(MD_LONGEST, 127);
         assert_eq!(md_symbols(MD_LONGEST), 35_052);
-        assert_eq!(u32::from(MD_LONGEST), (1u32 << 7) - 1, "bits 18:24 are seven");
+        assert_eq!(
+            u32::from(MD_LONGEST),
+            (1u32 << 7) - 1,
+            "bits 18:24 are seven"
+        );
         // 276 = 23 x 12, so an MD is always a whole number of data frames --
         // which 35 ms, or 280 symbols, would not be.
         assert!(MD_STEP_SYMBOLS.is_multiple_of(UP_INTERVALS));
@@ -992,15 +1041,40 @@ mod tests {
         }
         // The four combinations as Table 18 prints them: p1 and z2 are in all
         // of them, so the two bits are z1 and p2.
-        assert_eq!(FilterSections::from_code(0), FilterSections { z1: false, p2: false });
-        assert_eq!(FilterSections::from_code(1), FilterSections { z1: true, p2: false });
-        assert_eq!(FilterSections::from_code(2), FilterSections { z1: false, p2: true });
-        assert_eq!(FilterSections::from_code(3), FilterSections { z1: true, p2: true });
+        assert_eq!(
+            FilterSections::from_code(0),
+            FilterSections {
+                z1: false,
+                p2: false
+            }
+        );
+        assert_eq!(
+            FilterSections::from_code(1),
+            FilterSections {
+                z1: true,
+                p2: false
+            }
+        );
+        assert_eq!(
+            FilterSections::from_code(2),
+            FilterSections {
+                z1: false,
+                p2: true
+            }
+        );
+        assert_eq!(
+            FilterSections::from_code(3),
+            FilterSections { z1: true, p2: true }
+        );
         // And a CPd is held to what was announced (8.8.3). Code 0 offers
         // neither optional section, so those two refusals are what a z1 or a
         // p2 meets first.
         let announced = FilterLimits::from_info1a(0, 0, 0);
-        let mut filters = Filters { z2: vec![1.0; 128], p1: vec![0.0; 64], ..Filters::default() };
+        let mut filters = Filters {
+            z2: vec![1.0; 128],
+            p1: vec![0.0; 64],
+            ..Filters::default()
+        };
         assert_eq!(filters.fits(&announced), Ok(()));
         filters.z1.push(0.5);
         assert_eq!(
@@ -1020,14 +1094,28 @@ mod tests {
         // section sits well inside L_tot but over L_max. Both sections are
         // offered here, so neither case can trip on bits 12:13 instead.
         let both = FilterLimits::from_info1a(3, 0, 0);
-        let over_total = Filters { z2: vec![1.0; 128], p1: vec![0.0; 128], ..Filters::default() };
-        assert_eq!(over_total.most(), usize::from(both.most), "L_max is not what catches this");
+        let over_total = Filters {
+            z2: vec![1.0; 128],
+            p1: vec![0.0; 128],
+            ..Filters::default()
+        };
+        assert_eq!(
+            over_total.most(),
+            usize::from(both.most),
+            "L_max is not what catches this"
+        );
         assert_eq!(
             over_total.fits(&both),
             Err("the filters have more coefficients than this end offered")
         );
-        let over_section = Filters { z2: vec![1.0; 129], ..Filters::default() };
-        assert!(over_section.total() < usize::from(both.total), "L_tot is not what catches this");
+        let over_section = Filters {
+            z2: vec![1.0; 129],
+            ..Filters::default()
+        };
+        assert!(
+            over_section.total() < usize::from(both.total),
+            "L_tot is not what catches this"
+        );
         assert_eq!(
             over_section.fits(&both),
             Err("a filter section is longer than this end offered")
@@ -1044,20 +1132,32 @@ mod tests {
         deadlines.arm("TR6", 8000 * 26, "no B1d from the digital modem");
         deadlines.arm("TR3", 8000 * 5, "no Sd from the digital modem");
         deadlines.arm("TR4", 8000 * 9, "no Jd from the digital modem");
-        assert_eq!(deadlines.armed("TR3"), Some((8000 * 5, "no Sd from the digital modem")));
+        assert_eq!(
+            deadlines.armed("TR3"),
+            Some((8000 * 5, "no Sd from the digital modem"))
+        );
         assert_eq!(deadlines.armed("TR5"), None);
         // Nothing has passed yet, and a deadline exactly reached has not
         // passed -- the V.90 modems compare `now > at`.
         assert_eq!(deadlines.expired(8000 * 5), None);
         // Both Phase 3 timers gone by the time the modem looks: TR3 is what
         // is reported, because it would have fired first.
-        assert_eq!(deadlines.expired(8000 * 10), Some(("TR3", "no Sd from the digital modem")));
+        assert_eq!(
+            deadlines.expired(8000 * 10),
+            Some(("TR3", "no Sd from the digital modem"))
+        );
         deadlines.clear("TR3");
-        assert_eq!(deadlines.expired(8000 * 10), Some(("TR4", "no Jd from the digital modem")));
+        assert_eq!(
+            deadlines.expired(8000 * 10),
+            Some(("TR4", "no Jd from the digital modem"))
+        );
         // Re-arming restarts a timer rather than adding a second one.
         deadlines.arm("TR4", 8000 * 20, "no Jd from the digital modem");
         assert_eq!(deadlines.expired(8000 * 10), None);
-        assert_eq!(deadlines.expired(8000 * 30), Some(("TR4", "no Jd from the digital modem")));
+        assert_eq!(
+            deadlines.expired(8000 * 30),
+            Some(("TR4", "no Jd from the digital modem"))
+        );
         // And a retrain drops the lot.
         deadlines.clear_all();
         assert_eq!(deadlines.expired(8000 * 30), None);
@@ -1094,7 +1194,10 @@ mod tests {
         assert!((start_up_watchdog(0.05) - 20.3).abs() < 1e-9);
         // The project's VoIP rig, about 1.5 s each way round.
         assert!((start_up_watchdog(1.5) - 29.0).abs() < 1e-9);
-        assert!(start_up_watchdog(1.5) > 15.0 + 5.0 * 1.5, "looser than V.90's");
+        assert!(
+            start_up_watchdog(1.5) > 15.0 + 5.0 * 1.5,
+            "looser than V.90's"
+        );
     }
 
     /// Table 30 and 6.4: a set of parameters has to hold together on its own
@@ -1108,7 +1211,10 @@ mod tests {
             extend_e2u: false,
             gain: 1.0 / 16.0,
             moduli: [8; UP_INTERVALS],
-            filters: Filters { z2: vec![1.0], ..Filters::default() },
+            filters: Filters {
+                z2: vec![1.0],
+                ..Filters::default()
+            },
             sets: vec![(1..=16u16).map(|p| p * 100).collect()],
             indices: [0; CONSTELLATION_FRAME],
         };
@@ -1133,7 +1239,11 @@ mod tests {
         tight.moduli[3] = 16;
         tight.moduli[7] = 16;
         tight.moduli[11] = 16;
-        assert_eq!(tight.fits(), Ok(()), "now every class has a member, 32 = 2 x 16");
+        assert_eq!(
+            tight.fits(),
+            Ok(()),
+            "now every class has a member, 32 = 2 x 16"
+        );
 
         // The rest of the self-checks, each one a SHALL of 8.8.3 or a rule of
         // clause 6.
@@ -1149,7 +1259,11 @@ mod tests {
         broken = params.clone();
         broken.gain = 0.30;
         assert_eq!(broken.fits(), Err("the gain is larger than CPd can carry"));
-        assert_eq!(four_g_from_gain(0.30), u16::MAX, "what the clamp would have done");
+        assert_eq!(
+            four_g_from_gain(0.30),
+            u16::MAX,
+            "what the clamp would have done"
+        );
         broken.gain = GAIN_LARGEST;
         assert_eq!(broken.fits(), Ok(()), "the top of the field is still legal");
         broken = params.clone();
@@ -1160,10 +1274,16 @@ mod tests {
         assert!(broken.fits().is_err(), "LZ2 = 0 makes v(n) zero");
         broken = params.clone();
         broken.sets[0][0] = 0;
-        assert!(broken.fits().is_err(), "constellations shall not contain the zero point");
+        assert!(
+            broken.fits().is_err(),
+            "constellations shall not contain the zero point"
+        );
         broken = params.clone();
         broken.sets[0].swap(0, 1);
-        assert!(broken.fits().is_err(), "points are sent in ascending magnitude");
+        assert!(
+            broken.fits().is_err(),
+            "points are sent in ascending magnitude"
+        );
         broken = params.clone();
         broken.indices[2] = 1;
         assert!(broken.fits().is_err(), "there is no set 1");
@@ -1175,16 +1295,31 @@ mod tests {
         broken.sets = vec![params.sets[0].clone(); CONSTELLATION_SETS];
         assert_eq!(broken.fits(), Ok(()), "six sets is what CPd carries");
         broken.sets.push(params.sets[0].clone());
-        assert_eq!(broken.fits(), Err("there are more constellation sets than CPd carries"));
+        assert_eq!(
+            broken.fits(),
+            Err("there are more constellation sets than CPd carries")
+        );
         broken.sets.pop();
         broken.indices[0] = 6;
-        assert_eq!(broken.fits(), Err("a constellation index is outside the printed 0 to 5"));
+        assert_eq!(
+            broken.fits(),
+            Err("a constellation index is outside the printed 0 to 5")
+        );
         broken = params.clone();
-        broken.sets[0] = (1..=CONSTELLATION_POINTS as u16 + 1).map(|p| p * 8).collect();
-        assert_eq!(broken.fits(), Err("a constellation set has more points than CPd allows"));
+        broken.sets[0] = (1..=CONSTELLATION_POINTS as u16 + 1)
+            .map(|p| p * 8)
+            .collect();
+        assert_eq!(
+            broken.fits(),
+            Err("a constellation set has more points than CPd allows")
+        );
 
         // 255^12 is about 2^96, which is why the product is a u128.
-        let widest = Parameters { drn: 19, moduli: [255; UP_INTERVALS], ..params };
+        let widest = Parameters {
+            drn: 19,
+            moduli: [255; UP_INTERVALS],
+            ..params
+        };
         assert!(widest.product() > u128::from(u64::MAX));
         assert_eq!(widest.bits(), 72);
     }
@@ -1193,7 +1328,11 @@ mod tests {
     /// 3 = reserved".
     #[test]
     fn the_trellis_code_is_chosen_by_two_bits_and_three_is_reserved() {
-        for (code, expected, states) in [(0, Trellis::Sixteen, 16), (1, Trellis::ThirtyTwo, 32), (2, Trellis::SixtyFour, 64)] {
+        for (code, expected, states) in [
+            (0, Trellis::Sixteen, 16),
+            (1, Trellis::ThirtyTwo, 32),
+            (2, Trellis::SixtyFour, 64),
+        ] {
             let trellis = Trellis::from_code(code).expect("a defined code");
             assert_eq!(trellis, expected);
             assert_eq!(trellis.code(), code);
@@ -1226,7 +1365,11 @@ mod tests {
         for symbols in [RF_SYMBOLS, RF_BAR_SYMBOLS] {
             assert!(symbols.is_multiple_of(block), "{symbols} symbols");
         }
-        assert_eq!(RF_BAR_SYMBOLS / block, 2, "Rf-bar is 2 repetitions of the block");
+        assert_eq!(
+            RF_BAR_SYMBOLS / block,
+            2,
+            "Rf-bar is 2 repetitions of the block"
+        );
         // The two sign patterns 8.8.4 prints, left-most sign first. Rf-bar's
         // is Rf's inverted, which for a pattern of period four is the same as
         // a shift by two -- so nothing inside either one tells them apart, and
@@ -1236,8 +1379,16 @@ mod tests {
         let rf_bar: [i8; 12] = [-1, -1, 1, 1, -1, -1, 1, 1, -1, -1, 1, 1];
         for i in 0..block {
             assert_eq!(rf_bar[i], -rf[i], "symbol {i} is inverted");
-            assert_eq!(rf[(i + RF_SIGN_PERIOD) % block], rf[i], "symbol {i} repeats at four");
-            assert_eq!(rf_bar[i], rf[(i + 2) % block], "symbol {i} is a two-symbol shift");
+            assert_eq!(
+                rf[(i + RF_SIGN_PERIOD) % block],
+                rf[i],
+                "symbol {i} repeats at four"
+            );
+            assert_eq!(
+                rf_bar[i],
+                rf[(i + 2) % block],
+                "symbol {i} is a two-symbol shift"
+            );
         }
         let longest_run = |signs: &[i8]| {
             signs
@@ -1250,6 +1401,10 @@ mod tests {
         };
         assert_eq!(longest_run(&rf), 2, "no more than two alike inside Rf");
         let join: Vec<i8> = rf.iter().chain(&rf_bar).copied().collect();
-        assert_eq!(longest_run(&join), 4, "four alike where Rf turns into Rf-bar");
+        assert_eq!(
+            longest_run(&join),
+            4,
+            "four alike where Rf turns into Rf-bar"
+        );
     }
 }

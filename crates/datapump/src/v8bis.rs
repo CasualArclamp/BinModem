@@ -81,7 +81,14 @@ impl Probe {
         // Eight milliseconds: a tenth of the shortest thing there is to hear,
         // and narrow enough that the two pairs, 154 Hz apart at the nearest,
         // are told apart by a factor of seven.
-        Self { hz, step: TAU * hz / fs, phase: 0.0, re: 0.0, im: 0.0, alpha: 1.0 - (-1.0 / (0.008 * fs)).exp() }
+        Self {
+            hz,
+            step: TAU * hz / fs,
+            phase: 0.0,
+            re: 0.0,
+            im: 0.0,
+            alpha: 1.0 - (-1.0 / (0.008 * fs)).exp(),
+        }
     }
 
     fn feed(&mut self, x: f64) {
@@ -125,8 +132,16 @@ impl Ear {
         let (r1, r2) = Side::Responding.pair();
         Self {
             fs,
-            pairs: [Probe::new(i1, fs), Probe::new(i2, fs), Probe::new(r1, fs), Probe::new(r2, fs)],
-            tones: Signal::ALL.iter().map(|s| Probe::new(s.segment_2(), fs)).collect(),
+            pairs: [
+                Probe::new(i1, fs),
+                Probe::new(i2, fs),
+                Probe::new(r1, fs),
+                Probe::new(r2, fs),
+            ],
+            tones: Signal::ALL
+                .iter()
+                .map(|s| Probe::new(s.segment_2(), fs))
+                .collect(),
             power: 0.0,
             alpha: 1.0 - (-1.0 / (0.008 * fs)).exp(),
             pair: None,
@@ -138,7 +153,9 @@ impl Ear {
     /// Whose first segment is on the line now, once it has stood long enough
     /// to be one.
     fn pair_standing(&self) -> Option<Side> {
-        self.pair.filter(|(_, n)| *n as f64 >= PAIR_HELD * self.fs).map(|(side, _)| side)
+        self.pair
+            .filter(|(_, n)| *n as f64 >= PAIR_HELD * self.fs)
+            .map(|(side, _)| side)
     }
 
     fn feed(&mut self, x: f64) -> Option<(Signal, Side)> {
@@ -157,10 +174,16 @@ impl Ear {
         // Two equal tones of amplitude A have a root mean square of A, and
         // each probe reads A: so each of a pair is most of the line's power,
         // and neither is much louder than the other.
-        let standing = [Side::Initiating, Side::Responding].into_iter().enumerate().find(|(k, _)| {
-            let (a, b) = (self.pairs[2 * k].amplitude(), self.pairs[2 * k + 1].amplitude());
-            a > 0.55 * rms && b > 0.55 * rms && a < 2.5 * b && b < 2.5 * a
-        });
+        let standing = [Side::Initiating, Side::Responding]
+            .into_iter()
+            .enumerate()
+            .find(|(k, _)| {
+                let (a, b) = (
+                    self.pairs[2 * k].amplitude(),
+                    self.pairs[2 * k + 1].amplitude(),
+                );
+                a > 0.55 * rms && b > 0.55 * rms && a < 2.5 * b && b < 2.5 * a
+            });
         match (standing, self.pair) {
             (Some((_, side)), Some((was, n))) if was == side => self.pair = Some((side, n + 1)),
             (Some((_, side)), _) => self.pair = Some((side, 1)),
@@ -213,8 +236,16 @@ impl Ear {
 enum Piece {
     Silence(usize),
     /// Two tones at once, each at half of `level`.
-    Pair { hz: (f64, f64), samples: usize, level: f64 },
-    Tone { hz: f64, samples: usize, level: f64 },
+    Pair {
+        hz: (f64, f64),
+        samples: usize,
+        level: f64,
+    },
+    Tone {
+        hz: f64,
+        samples: usize,
+        level: f64,
+    },
     /// A stream of bits on this station's V.21 channel.
     Bits(Vec<bool>),
 }
@@ -241,7 +272,15 @@ impl Mouth {
             Side::Initiating => v21::CHANNEL_1,
             Side::Responding => v21::CHANNEL_2,
         };
-        Self { fs, side, fsk: v21::Sender::on(channel, fs), queue: VecDeque::new(), at: 0, sending_bits: false, tail: 0 }
+        Self {
+            fs,
+            side,
+            fsk: v21::Sender::on(channel, fs),
+            queue: VecDeque::new(),
+            at: 0,
+            sending_bits: false,
+            tail: 0,
+        }
     }
 
     fn busy(&self) -> bool {
@@ -249,13 +288,26 @@ impl Mouth {
     }
 
     fn silence(&mut self, seconds: f64) {
-        self.queue.push_back(Piece::Silence((seconds * self.fs) as usize));
+        self.queue
+            .push_back(Piece::Silence((seconds * self.fs) as usize));
     }
 
     fn signal(&mut self, signal: Signal) {
-        let level = if matches!(signal, Signal::MRe | Signal::CRe) { QUIET } else { LEVEL };
-        self.queue.push_back(Piece::Pair { hz: self.side.pair(), samples: (bis::SEGMENT_1 * self.fs) as usize, level });
-        self.queue.push_back(Piece::Tone { hz: signal.segment_2(), samples: (bis::SEGMENT_2 * self.fs) as usize, level });
+        let level = if matches!(signal, Signal::MRe | Signal::CRe) {
+            QUIET
+        } else {
+            LEVEL
+        };
+        self.queue.push_back(Piece::Pair {
+            hz: self.side.pair(),
+            samples: (bis::SEGMENT_1 * self.fs) as usize,
+            level,
+        });
+        self.queue.push_back(Piece::Tone {
+            hz: signal.segment_2(),
+            samples: (bis::SEGMENT_2 * self.fs) as usize,
+            level,
+        });
     }
 
     /// Queue a message: its preamble of mark unless an escape signal's
@@ -277,14 +329,19 @@ impl Mouth {
 
     fn next_sample(&mut self) -> f64 {
         loop {
-            let Some(piece) = self.queue.front() else { return 0.0 };
+            let Some(piece) = self.queue.front() else {
+                return 0.0;
+            };
             let t = self.at as f64 / self.fs;
             let (out, done) = match piece {
                 Piece::Silence(n) => (0.0, self.at + 1 >= *n),
-                Piece::Pair { hz, samples, level } => {
-                    (0.5 * level * ((TAU * hz.0 * t).sin() + (TAU * hz.1 * t).sin()), self.at + 1 >= *samples)
+                Piece::Pair { hz, samples, level } => (
+                    0.5 * level * ((TAU * hz.0 * t).sin() + (TAU * hz.1 * t).sin()),
+                    self.at + 1 >= *samples,
+                ),
+                Piece::Tone { hz, samples, level } => {
+                    (level * (TAU * hz * t).sin(), self.at + 1 >= *samples)
                 }
-                Piece::Tone { hz, samples, level } => (level * (TAU * hz * t).sin(), self.at + 1 >= *samples),
                 Piece::Bits(bits) => {
                     if !self.sending_bits {
                         self.fsk.set_transmitting(true);
@@ -476,7 +533,10 @@ impl Station {
     /// initiating one, opening with `signal`, which is MRe to have the caller
     /// choose the mode or CRe to be told what the caller can do.
     pub fn answering(capabilities: Message, signal: Signal, fs: f64) -> Self {
-        debug_assert!(matches!(signal, Signal::MRe | Signal::CRe), "an answering station opens with MRe or CRe");
+        debug_assert!(
+            matches!(signal, Signal::MRe | Signal::CRe),
+            "an answering station opens with MRe or CRe"
+        );
         let mut station = Self::new(Side::Initiating, capabilities, fs);
         station.opening = Some(signal);
         station.state = State::Opening;
@@ -500,7 +560,11 @@ impl Station {
     /// Whether anything of V.8 bis has been heard from the far end: a first
     /// segment standing now, or a signal or message before.
     pub fn heard_anything(&self) -> bool {
-        self.heard || self.ear.pair_standing().is_some_and(|side| side != self.side)
+        self.heard
+            || self
+                .ear
+                .pair_standing()
+                .is_some_and(|side| side != self.side)
     }
 
     /// What to answer a mode request and a capabilities request with.
@@ -554,7 +618,8 @@ impl Station {
     pub fn step(&mut self, sample: f64) -> f64 {
         if self.status == Status::Running {
             self.in_state += 1;
-            if let Some((signal, _)) = self.ear.feed(sample).filter(|(_, side)| *side != self.side) {
+            if let Some((signal, _)) = self.ear.feed(sample).filter(|(_, side)| *side != self.side)
+            {
                 self.heard_signal(signal);
             }
             let bit = self.rx.feed(sample);
@@ -604,7 +669,9 @@ impl Station {
                     // no frame at all; either way it is not one of 7.2.9's
                     // invalid frames and nothing is owed for it.
                     Err(FrameError::Aborted) => {}
-                    frame => match information(frame, &self.decoder).and_then(|octets| Message::decode(&octets)) {
+                    frame => match information(frame, &self.decoder)
+                        .and_then(|octets| Message::decode(&octets))
+                    {
                         Some(message) => self.heard_message(message),
                         None => self.heard_rubbish(),
                     },
@@ -659,12 +726,18 @@ impl Station {
                 let signal = self.opening.expect("only an answering station opens");
                 self.openings += 1;
                 self.send_signal(signal);
-                self.enter(if signal == Signal::MRe { State::SentMr } else { State::SentCr });
+                self.enter(if signal == Signal::MRe {
+                    State::SentMr
+                } else {
+                    State::SentCr
+                });
             }
             // "the answering station may retransmit MRe or CRe or clear down
             // the line" (10.2.2): as many times as it was told to, and then
             // the line is given to whatever comes after V.8 bis.
-            State::SentMr | State::SentCr if self.opening.is_some() && seconds >= OPENING_PATIENCE && !self.mouth.busy() => {
+            State::SentMr | State::SentCr
+                if self.opening.is_some() && seconds >= OPENING_PATIENCE && !self.mouth.busy() =>
+            {
                 if self.openings >= self.attempts {
                     self.fail("nothing at the far end answered");
                 } else {
@@ -674,7 +747,9 @@ impl Station {
             }
             // Back at the start after a transaction that went wrong, with
             // the far end gone quiet: nothing more is coming.
-            State::Initial if self.heard && seconds >= STATE_LIMIT => self.fail("the transaction was not finished"),
+            State::Initial if self.heard && seconds >= STATE_LIMIT => {
+                self.fail("the transaction was not finished")
+            }
             State::Initial | State::Opening | State::Done => {}
             _ if seconds >= STATE_LIMIT => self.fail("the far end stopped part of the way through"),
             _ => {}
@@ -736,7 +811,9 @@ impl Station {
         self.note(format!("heard {}", describe(&message)));
         self.escaped = false;
         match (self.state.clone(), message.kind) {
-            (State::Initial | State::SentMr | State::SentCl | State::SentClr, Kind::Ms) => self.judge(message),
+            (State::Initial | State::SentMr | State::SentCl | State::SentClr, Kind::Ms) => {
+                self.judge(message)
+            }
             (State::Initial | State::SentCr, Kind::Cl) => {
                 self.far = Some(message);
                 self.choose(self.far.clone(), false);
@@ -775,7 +852,10 @@ impl Station {
 
     /// This end's capabilities as a list of `kind`.
     fn list(&self, kind: Kind) -> Message {
-        Message { kind, ..self.capabilities.clone() }
+        Message {
+            kind,
+            ..self.capabilities.clone()
+        }
     }
 
     /// Send the MS: the fastest thing both ends have where the far end's
@@ -784,7 +864,10 @@ impl Station {
         // V.ARC before any of the ITU's, where both ends have said they
         // have it: this end only says so when it was told to prefer it. It
         // is never chosen blind, for a far end whose list has not been seen.
-        let varc = far.as_ref().and_then(Message::varc).and_then(|_| Message::select_varc(&self.capabilities));
+        let varc = far
+            .as_ref()
+            .and_then(Message::varc)
+            .and_then(|_| Message::select_varc(&self.capabilities));
         if let Some(ms) = varc {
             if answering_signal {
                 self.answer_signal(&ms);
@@ -869,7 +952,11 @@ fn describe(message: &Message) -> String {
     if let Some(data) = message.data_mode() {
         let mut list = list_of(&data);
         if let Some(offer) = message.varc() {
-            list = if list.is_empty() { offer.name().to_owned() } else { format!("{}, {list}", offer.name()) };
+            list = if list.is_empty() {
+                offer.name().to_owned()
+            } else {
+                format!("{}, {list}", offer.name())
+            };
         }
         text.push_str(&format!(" ({list})"));
     }
@@ -878,7 +965,9 @@ fn describe(message: &Message) -> String {
 
 /// What a list says its station can do, in words, for a panel.
 pub fn capabilities(message: &Message) -> String {
-    let mut text = message.data_mode().map_or_else(|| "no data mode".to_owned(), |data| list_of(&data));
+    let mut text = message
+        .data_mode()
+        .map_or_else(|| "no data mode".to_owned(), |data| list_of(&data));
     if let Some(offer) = message.varc() {
         text = format!("{}, {text}", offer.name());
     }
@@ -903,7 +992,12 @@ fn list_of(data: &Data) -> String {
         (data.v21, "V.21"),
         (data.v42, "V.42"),
     ];
-    named.iter().filter(|(has, _)| *has).map(|(_, name)| *name).collect::<Vec<_>>().join(", ")
+    named
+        .iter()
+        .filter(|(has, _)| *has)
+        .map(|(_, name)| *name)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]
@@ -916,22 +1010,54 @@ mod tests {
     fn caller() -> Message {
         Message::data(
             Kind::Cl,
-            Identification { v8: true, ack1: true, ..Identification::default() },
-            Data { v42: true, v34: true, v32bis: true, v22bis: true, v90_analogue: true, v92_analogue: true, ..Data::default() },
+            Identification {
+                v8: true,
+                ack1: true,
+                ..Identification::default()
+            },
+            Data {
+                v42: true,
+                v34: true,
+                v32bis: true,
+                v22bis: true,
+                v90_analogue: true,
+                v92_analogue: true,
+                ..Data::default()
+            },
         )
     }
 
     fn server() -> Message {
         Message::data(
             Kind::Cl,
-            Identification { v8: true, ack1: true, network: Some(Network { digital: true, ..Network::default() }), ..Identification::default() },
-            Data { v42: true, v34: true, v32bis: true, v90_digital: true, v92_digital: true, ..Data::default() },
+            Identification {
+                v8: true,
+                ack1: true,
+                network: Some(Network {
+                    digital: true,
+                    ..Network::default()
+                }),
+                ..Identification::default()
+            },
+            Data {
+                v42: true,
+                v34: true,
+                v32bis: true,
+                v90_digital: true,
+                v92_digital: true,
+                ..Data::default()
+            },
         )
     }
 
     /// Two stations on a line with `delay` seconds each way, run until both
     /// are finished or `seconds` have gone. What each heard and sent.
-    fn run(a: Station, b: Station, delay: f64, seconds: f64) -> (Station, Station, Vec<String>, Vec<String>) {
+    fn run(
+        a: Station,
+        b: Station,
+        delay: f64,
+        seconds: f64,
+    ) -> (Station, Station, Vec<String>, Vec<String>) {
         run_noisy(a, b, delay, seconds, 0.0, 1)
     }
 
@@ -957,7 +1083,10 @@ mod tests {
             noise * (x as f64 / (1u64 << 52) as f64 - 1.0)
         };
         for _ in 0..(seconds * FS) as usize {
-            let (heard_a, heard_b) = (to_a.pop_front().unwrap() + hiss(), to_b.pop_front().unwrap() + hiss());
+            let (heard_a, heard_b) = (
+                to_a.pop_front().unwrap() + hiss(),
+                to_b.pop_front().unwrap() + hiss(),
+            );
             to_b.push_back(a.step(heard_a));
             to_a.push_back(b.step(heard_b));
             said_a.extend(a.take_notes());
@@ -1026,7 +1155,10 @@ mod tests {
         // 30 bits of mark, 3 flags, 11 octets and 2 of FCS at 300 bit/s, and
         // whatever was stuffed: a little under half a second.
         let seconds = samples as f64 / FS - 0.1;
-        assert!((0.44..0.52).contains(&seconds), "{seconds:.3} s on the line");
+        assert!(
+            (0.44..0.52).contains(&seconds),
+            "{seconds:.3} s on the line"
+        );
     }
 
     /// Transaction 12 of Table 7, which is the one a caller takes control
@@ -1038,14 +1170,42 @@ mod tests {
         let b = Station::calling(caller(), FS).replying(OnMr::Ms, OnCr::Crd);
         let (a, b, said_a, said_b) = run(a, b, 0.02, 8.0);
         println!("answering: {said_a:#?}\ncalling: {said_b:#?}");
-        let kinds = |said: &[String]| said.iter().map(|s| s.split(" (").next().unwrap().to_owned()).collect::<Vec<_>>();
-        assert_eq!(kinds(&said_a), ["sent CRe", "heard CRd", "sent CL", "heard MS", "sent ACK(1)"]);
-        assert_eq!(kinds(&said_b), ["heard CRe", "sent CRd", "heard CL", "sent MS", "heard ACK(1)"]);
+        let kinds = |said: &[String]| {
+            said.iter()
+                .map(|s| s.split(" (").next().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kinds(&said_a),
+            [
+                "sent CRe",
+                "heard CRd",
+                "sent CL",
+                "heard MS",
+                "sent ACK(1)"
+            ]
+        );
+        assert_eq!(
+            kinds(&said_b),
+            [
+                "heard CRe",
+                "sent CRd",
+                "heard CL",
+                "sent MS",
+                "heard ACK(1)"
+            ]
+        );
         let (at_a, at_b) = (selection(&a), selection(&b));
-        assert!(at_a.answer && !at_b.answer, "the station that received MS answers (9.9)");
+        assert!(
+            at_a.answer && !at_b.answer,
+            "the station that received MS answers (9.9)"
+        );
         assert_eq!(at_a.modulation(), Some(Modulation::V92));
         assert_eq!(at_a.ms, at_b.ms);
-        assert!(at_a.ms.data_mode().unwrap().v92_analogue, "the caller's half is the one named");
+        assert!(
+            at_a.ms.data_mode().unwrap().v92_analogue,
+            "the caller's half is the one named"
+        );
         assert_eq!(b.far_capabilities(), Some(&server()));
     }
 
@@ -1057,12 +1217,37 @@ mod tests {
         let b = Station::calling(caller(), FS).replying(OnMr::Ms, OnCr::Cl);
         let (a, b, said_a, said_b) = run(a, b, 0.02, 8.0);
         println!("answering: {said_a:#?}\ncalling: {said_b:#?}");
-        let kinds = |said: &[String]| said.iter().map(|s| s.split(" (").next().unwrap().to_owned()).collect::<Vec<_>>();
-        assert_eq!(kinds(&said_a), ["sent CRe", "heard ESr", "heard CL", "sent MS", "heard ACK(1)"]);
-        assert_eq!(kinds(&said_b), ["heard CRe", "sent ESr", "sent CL", "heard MS", "sent ACK(1)"]);
+        let kinds = |said: &[String]| {
+            said.iter()
+                .map(|s| s.split(" (").next().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kinds(&said_a),
+            [
+                "sent CRe",
+                "heard ESr",
+                "heard CL",
+                "sent MS",
+                "heard ACK(1)"
+            ]
+        );
+        assert_eq!(
+            kinds(&said_b),
+            [
+                "heard CRe",
+                "sent ESr",
+                "sent CL",
+                "heard MS",
+                "sent ACK(1)"
+            ]
+        );
         assert!(selection(&b).answer && !selection(&a).answer);
         assert_eq!(selection(&a).modulation(), Some(Modulation::V92));
-        assert!(selection(&a).ms.data_mode().unwrap().v92_digital, "the server's half is the one named");
+        assert!(
+            selection(&a).ms.data_mode().unwrap().v92_digital,
+            "the server's half is the one named"
+        );
     }
 
     /// Transaction 3: CRe, ESr and CLR, CL-MS, ACK.
@@ -1072,9 +1257,33 @@ mod tests {
         let b = Station::calling(caller(), FS).replying(OnMr::Ms, OnCr::Clr);
         let (_, b, said_a, said_b) = run(a, b, 0.02, 8.0);
         println!("answering: {said_a:#?}\ncalling: {said_b:#?}");
-        let kinds = |said: &[String]| said.iter().map(|s| s.split(" (").next().unwrap().to_owned()).collect::<Vec<_>>();
-        assert_eq!(kinds(&said_a), ["sent CRe", "heard ESr", "heard CLR", "sent CL", "sent MS", "heard ACK(1)"]);
-        assert_eq!(kinds(&said_b), ["heard CRe", "sent ESr", "sent CLR", "heard CL", "heard MS", "sent ACK(1)"]);
+        let kinds = |said: &[String]| {
+            said.iter()
+                .map(|s| s.split(" (").next().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kinds(&said_a),
+            [
+                "sent CRe",
+                "heard ESr",
+                "heard CLR",
+                "sent CL",
+                "sent MS",
+                "heard ACK(1)"
+            ]
+        );
+        assert_eq!(
+            kinds(&said_b),
+            [
+                "heard CRe",
+                "sent ESr",
+                "sent CLR",
+                "heard CL",
+                "heard MS",
+                "sent ACK(1)"
+            ]
+        );
         assert!(selection(&b).answer);
         assert_eq!(b.far_capabilities(), Some(&server()));
     }
@@ -1087,9 +1296,19 @@ mod tests {
         let b = Station::calling(caller(), FS).replying(OnMr::Ms, OnCr::Cl);
         let (a, b, said_a, said_b) = run(a, b, 0.02, 8.0);
         println!("answering: {said_a:#?}\ncalling: {said_b:#?}");
-        let kinds = |said: &[String]| said.iter().map(|s| s.split(" (").next().unwrap().to_owned()).collect::<Vec<_>>();
-        assert_eq!(kinds(&said_a), ["sent MRe", "heard ESr", "heard MS", "sent ACK(1)"]);
-        assert_eq!(kinds(&said_b), ["heard MRe", "sent ESr", "sent MS", "heard ACK(1)"]);
+        let kinds = |said: &[String]| {
+            said.iter()
+                .map(|s| s.split(" (").next().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kinds(&said_a),
+            ["sent MRe", "heard ESr", "heard MS", "sent ACK(1)"]
+        );
+        assert_eq!(
+            kinds(&said_b),
+            ["heard MRe", "sent ESr", "sent MS", "heard ACK(1)"]
+        );
         assert!(selection(&a).answer);
         assert_eq!(selection(&b).modulation(), Some(Modulation::V92));
     }
@@ -1101,9 +1320,19 @@ mod tests {
         let b = Station::calling(caller(), FS).replying(OnMr::Mrd, OnCr::Cl);
         let (_, b, said_a, said_b) = run(a, b, 0.02, 8.0);
         println!("answering: {said_a:#?}\ncalling: {said_b:#?}");
-        let kinds = |said: &[String]| said.iter().map(|s| s.split(" (").next().unwrap().to_owned()).collect::<Vec<_>>();
-        assert_eq!(kinds(&said_a), ["sent MRe", "heard MRd", "sent MS", "heard ACK(1)"]);
-        assert_eq!(kinds(&said_b), ["heard MRe", "sent MRd", "heard MS", "sent ACK(1)"]);
+        let kinds = |said: &[String]| {
+            said.iter()
+                .map(|s| s.split(" (").next().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kinds(&said_a),
+            ["sent MRe", "heard MRd", "sent MS", "heard ACK(1)"]
+        );
+        assert_eq!(
+            kinds(&said_b),
+            ["heard MRe", "sent MRd", "heard MS", "sent ACK(1)"]
+        );
         assert!(selection(&b).answer);
     }
 
@@ -1111,14 +1340,39 @@ mod tests {
     /// it over V.92, by the same transaction as any other mode.
     #[test]
     fn two_stations_with_varc_choose_it() {
-        let offer = Offer { modulation: 0, two_wire: false };
+        let offer = Offer {
+            modulation: 0,
+            two_wire: false,
+        };
         let a = Station::answering(server().with_varc(offer), Signal::CRe, FS);
         let b = Station::calling(caller().with_varc(offer), FS).replying(OnMr::Ms, OnCr::Crd);
         let (a, b, said_a, said_b) = run(a, b, 0.02, 8.0);
         println!("answering: {said_a:#?}\ncalling: {said_b:#?}");
-        let kinds = |said: &[String]| said.iter().map(|s| s.split(" (").next().unwrap().to_owned()).collect::<Vec<_>>();
-        assert_eq!(kinds(&said_a), ["sent CRe", "heard CRd", "sent CL", "heard MS", "sent ACK(1)"]);
-        assert_eq!(kinds(&said_b), ["heard CRe", "sent CRd", "heard CL", "sent MS", "heard ACK(1)"]);
+        let kinds = |said: &[String]| {
+            said.iter()
+                .map(|s| s.split(" (").next().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kinds(&said_a),
+            [
+                "sent CRe",
+                "heard CRd",
+                "sent CL",
+                "heard MS",
+                "sent ACK(1)"
+            ]
+        );
+        assert_eq!(
+            kinds(&said_b),
+            [
+                "heard CRe",
+                "sent CRd",
+                "heard CL",
+                "sent MS",
+                "heard ACK(1)"
+            ]
+        );
         let (at_a, at_b) = (selection(&a), selection(&b));
         assert_eq!(at_a.varc(), Some(offer));
         assert_eq!(at_b.varc(), Some(offer));
@@ -1132,8 +1386,14 @@ mod tests {
     /// ask for what the other never listed.
     #[test]
     fn varc_at_one_end_only_changes_nothing() {
-        let offer = Offer { modulation: 0, two_wire: false };
-        for (answering, calling) in [(server().with_varc(offer), caller()), (server(), caller().with_varc(offer))] {
+        let offer = Offer {
+            modulation: 0,
+            two_wire: false,
+        };
+        for (answering, calling) in [
+            (server().with_varc(offer), caller()),
+            (server(), caller().with_varc(offer)),
+        ] {
             let a = Station::answering(answering, Signal::CRe, FS);
             let b = Station::calling(calling, FS).replying(OnMr::Ms, OnCr::Crd);
             let (a, b, said_a, said_b) = run(a, b, 0.02, 8.0);
@@ -1148,7 +1408,10 @@ mod tests {
     /// like any other mode it does not have (9.5).
     #[test]
     fn varc_asked_of_a_station_without_it_is_refused() {
-        let offer = Offer { modulation: 0, two_wire: false };
+        let offer = Offer {
+            modulation: 0,
+            two_wire: false,
+        };
         // A mode request is answered blind, and blind it is never V.ARC...
         let a = Station::answering(server(), Signal::MRe, FS);
         let b = Station::calling(caller().with_varc(offer), FS);
@@ -1169,8 +1432,14 @@ mod tests {
         // analogue modem for V.90.
         let analogue_only = Message::data(
             Kind::Cl,
-            Identification { ack1: true, ..Identification::default() },
-            Data { v90_analogue: true, ..Data::default() },
+            Identification {
+                ack1: true,
+                ..Identification::default()
+            },
+            Data {
+                v90_analogue: true,
+                ..Data::default()
+            },
         );
         let a = Station::answering(analogue_only.clone(), Signal::MRe, FS);
         let b = Station::calling(analogue_only, FS).replying(OnMr::Ms, OnCr::Cl);
@@ -1195,11 +1464,21 @@ mod tests {
                 sent.extend(a.take_notes());
                 seconds += 1.0 / FS;
             }
-            assert_eq!(a.status(), Status::Failed("nothing at the far end answered"));
-            assert_eq!(sent.iter().filter(|s| *s == "sent CRe").count(), attempts as usize, "{sent:?}");
+            assert_eq!(
+                a.status(),
+                Status::Failed("nothing at the far end answered")
+            );
+            assert_eq!(
+                sent.iter().filter(|s| *s == "sent CRe").count(),
+                attempts as usize,
+                "{sent:?}"
+            );
             // The first after 0.4 s of quiet, and three seconds from each
             // request to the next or to giving up.
-            assert!((seconds - about).abs() < 0.3, "{attempts} attempts gave up after {seconds:.1} s");
+            assert!(
+                (seconds - about).abs() < 0.3,
+                "{attempts} attempts gave up after {seconds:.1} s"
+            );
         }
     }
 
@@ -1223,8 +1502,16 @@ mod tests {
                 break;
             }
         }
-        assert_eq!(said_a.iter().filter(|s| *s == "sent CRe").count(), 3, "{said_a:?}");
-        assert_eq!(selection(&a).modulation(), Some(Modulation::V92), "{said_a:?} {said_b:?}");
+        assert_eq!(
+            said_a.iter().filter(|s| *s == "sent CRe").count(),
+            3,
+            "{said_a:?}"
+        );
+        assert_eq!(
+            selection(&a).modulation(),
+            Some(Modulation::V92),
+            "{said_a:?} {said_b:?}"
+        );
         assert_eq!(selection(&a).ms, selection(&b).ms);
     }
 
@@ -1241,7 +1528,10 @@ mod tests {
             let delay = 0.004 + seed as f64 * 0.0013;
             let (a, b, said_a, said_b) = run_noisy(a, b, delay, 9.0, 0.02, seed);
             assert!(
-                matches!((a.status(), b.status()), (Status::Selected(_), Status::Selected(_))),
+                matches!(
+                    (a.status(), b.status()),
+                    (Status::Selected(_), Status::Selected(_))
+                ),
                 "seed {seed}:\nanswering: {said_a:#?}\ncalling: {said_b:#?}"
             );
         }

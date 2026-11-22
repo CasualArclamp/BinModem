@@ -326,8 +326,14 @@ mod tests {
         // Nothing much above the band's top edge at 3845 Hz: look at 4100 to
         // 7900 Hz in 100 Hz steps against the carrier's neighbourhood.
         let inside = tone(settled, 1959.0).max(tone(settled, 1500.0)).max(1e-9);
-        let outside = (41..79).map(|k| tone(settled, 100.0 * k as f64)).fold(0.0, f64::max);
-        assert!(20.0 * (outside / inside).log10() < -35.0, "{} dB", 20.0 * (outside / inside).log10());
+        let outside = (41..79)
+            .map(|k| tone(settled, 100.0 * k as f64))
+            .fold(0.0, f64::max);
+        assert!(
+            20.0 * (outside / inside).log10() < -35.0,
+            "{} dB",
+            20.0 * (outside / inside).log10()
+        );
     }
 
     #[test]
@@ -353,7 +359,10 @@ mod tests {
         assert!(carrier > 0.3, "carrier {carrier}");
         // A root-raised cosine is 3 dB down at half the symbol rate.
         for edge in [lower, upper] {
-            assert!((20.0 * (edge / carrier).log10() + 3.0).abs() < 0.5, "{edge} against {carrier}");
+            assert!(
+                (20.0 * (edge / carrier).log10() + 3.0).abs() < 0.5,
+                "{edge} against {carrier}"
+            );
         }
         assert!(elsewhere < carrier * 0.01, "{elsewhere}");
     }
@@ -375,7 +384,8 @@ mod tests {
                             (got, emphasis_db(index, f))
                         })
                         .collect();
-                    let offset = points.iter().map(|(g, w)| g - w).sum::<f64>() / points.len() as f64;
+                    let offset =
+                        points.iter().map(|(g, w)| g - w).sum::<f64>() / points.len() as f64;
                     for (k, (got, want)) in points.iter().enumerate() {
                         assert!(
                             (got - want - offset).abs() < 1.0,
@@ -406,6 +416,9 @@ mod tests {
         };
         let (full, less) = (level(0), level(6));
         assert!((20.0 * (less / full).log10() + 6.0).abs() < 0.05);
-        assert!((full - 0.707).abs() < 0.05, "pre-emphasis keeps the power: {full}");
+        assert!(
+            (full - 0.707).abs() < 0.05,
+            "pre-emphasis keeps the power: {full}"
+        );
     }
 }

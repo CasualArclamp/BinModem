@@ -106,7 +106,10 @@ pub struct FrameBits {
 impl FrameBits {
     /// A frame of `len` bits whose value is `value`, b0 the least significant.
     pub fn new(value: u128, len: u32) -> Self {
-        debug_assert!(len <= LONGEST_FRAME, "a data frame does not hold that many bits");
+        debug_assert!(
+            len <= LONGEST_FRAME,
+            "a data frame does not hold that many bits"
+        );
         debug_assert!(value >> len == 0, "the value has bits above K");
         Self { value, len }
     }
@@ -114,14 +117,20 @@ impl FrameBits {
     /// The same, from the bits in the order they go on the wire: `bits[0]` is
     /// b0, first in time.
     pub fn from_bits(bits: &[bool]) -> Self {
-        debug_assert!(bits.len() as u32 <= LONGEST_FRAME, "a data frame is not that long");
+        debug_assert!(
+            bits.len() as u32 <= LONGEST_FRAME,
+            "a data frame is not that long"
+        );
         let mut value = 0u128;
         for (i, &bit) in bits.iter().enumerate() {
             if bit {
                 value |= 1u128 << i;
             }
         }
-        Self { value, len: bits.len() as u32 }
+        Self {
+            value,
+            len: bits.len() as u32,
+        }
     }
 
     /// K, the number of bits in the frame.
@@ -212,7 +221,10 @@ impl Moduli12 {
         if self.product == 0 {
             return 0;
         }
-        (0..=127).rev().find(|&k| self.product >= 1u128 << k).unwrap_or(0)
+        (0..=127)
+            .rev()
+            .find(|&k| self.product >= 1u128 << k)
+            .unwrap_or(0)
     }
 }
 
@@ -239,7 +251,9 @@ pub struct Encoder {
 
 impl Default for Encoder {
     fn default() -> Self {
-        Self { d_prev: D_BEFORE_THE_FIRST_FRAME }
+        Self {
+            d_prev: D_BEFORE_THE_FIRST_FRAME,
+        }
     }
 }
 
@@ -291,7 +305,11 @@ impl Encoder {
         let d = s ^ self.d_prev;
         // Step 4, on the previous frame's bit as printed (see
         // STEP4_USES_PREVIOUS_D).
-        let reflect = if STEP4_USES_PREVIOUS_D { self.d_prev } else { d };
+        let reflect = if STEP4_USES_PREVIOUS_D {
+            self.d_prev
+        } else {
+            d
+        };
         let mut r0 = if reflect { m - 1 - r } else { r };
         // Step 5: the mixed radix, interval 0 first. "Ki = Ri modulo Mi, where
         // 0 <= Ki < Mi; R(i+1) = (Ri - Ki)/Mi".
@@ -328,7 +346,9 @@ pub struct Decoder {
 
 impl Default for Decoder {
     fn default() -> Self {
-        Self { d_prev: D_BEFORE_THE_FIRST_FRAME }
+        Self {
+            d_prev: D_BEFORE_THE_FIRST_FRAME,
+        }
     }
 }
 
@@ -408,7 +428,10 @@ mod tests {
         }
 
         fn step(&mut self) -> u64 {
-            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             self.0
         }
 
@@ -445,7 +468,10 @@ mod tests {
         let mut saw_middle = false;
         for values in [EXACT, ODD, MIXED] {
             let moduli = Moduli12::new(values);
-            assert!(moduli.capacity() >= up_bits(19), "{values:?} cannot reach drn 19");
+            assert!(
+                moduli.capacity() >= up_bits(19),
+                "{values:?} cannot reach drn 19"
+            );
             for k in up_bits(1)..=up_bits(19) {
                 let mut encoder = Encoder::new();
                 let mut decoder = Decoder::new();
@@ -468,15 +494,24 @@ mod tests {
                     for (i, &label) in labels.iter().enumerate() {
                         assert!(label < moduli.modulus(i), "K{i} = {label} is outside M{i}");
                     }
-                    let heard = decoder.decode(&labels, &moduli, k).expect("a frame that fits");
+                    let heard = decoder
+                        .decode(&labels, &moduli, k)
+                        .expect("a frame that fits");
                     assert_eq!(heard, sent, "{values:?} at K = {k}, frame {frame}, R = {r}");
-                    assert_eq!(decoder.d(), encoder.d(), "the sign chains parted at frame {frame}");
+                    assert_eq!(
+                        decoder.d(),
+                        encoder.d(),
+                        "the sign chains parted at frame {frame}"
+                    );
                 }
             }
         }
         assert!(saw_top, "no frame took the largest value K holds");
         assert!(saw_last, "no frame took R = M - 1");
-        assert!(saw_middle, "no frame took the middle value of an odd product");
+        assert!(
+            saw_middle,
+            "no frame took the middle value of an odd product"
+        );
     }
 
     /// Step 2 splits [0, M) at (M - 1)/2, and the half R fell in is what step
@@ -489,12 +524,16 @@ mod tests {
         assert_eq!(moduli.product(), 8);
         for (r, sign) in [(0u128, false), (3, false), (4, true), (7, true)] {
             let mut encoder = Encoder::new();
-            encoder.encode(FrameBits::new(r, 3), &moduli).expect("a frame that fits");
+            encoder
+                .encode(FrameBits::new(r, 3), &moduli)
+                .expect("a frame that fits");
             assert_eq!(encoder.d(), sign, "R = {r} fell in the wrong half");
         }
         // An interval whose modulus is 1 carries nothing at all.
         let mut encoder = Encoder::new();
-        let labels = encoder.encode(FrameBits::new(7, 3), &moduli).expect("a frame that fits");
+        let labels = encoder
+            .encode(FrameBits::new(7, 3), &moduli)
+            .expect("a frame that fits");
         assert_eq!(labels, [1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
     }
 
@@ -517,14 +556,20 @@ mod tests {
         let reflected = encoder.encode(frame, &moduli).expect("a frame that fits");
         let mut encoder = Encoder::new();
         let plain = encoder.encode(frame, &moduli).expect("a frame that fits");
-        assert_eq!(reflected, plain, "the middle value moved under the reflection");
+        assert_eq!(
+            reflected, plain,
+            "the middle value moved under the reflection"
+        );
 
         // s(f) = 0 either way, because 2R is M - 1 and not more, so d(f)
         // follows d(f - 1).
         let mut decoder = Decoder::new();
         decoder.set_d(true);
         assert_eq!(decoder.decode(&reflected, &moduli, 6), Ok(frame));
-        assert!(decoder.d(), "the sign chain did not carry the previous frame's bit");
+        assert!(
+            decoder.d(),
+            "the sign chain did not carry the previous frame's bit"
+        );
 
         // The shortcut: read the half from R0 and undo the reflection with
         // d(f - 1). R0 is 52, which is the low half, so the shortcut reads
@@ -533,12 +578,20 @@ mod tests {
             .iter()
             .zip(moduli.values())
             .rev()
-            .fold(0, |acc, (&label, &modulus)| acc * u128::from(modulus) + u128::from(label));
+            .fold(0, |acc, (&label, &modulus)| {
+                acc * u128::from(modulus) + u128::from(label)
+            });
         assert_eq!(r0, middle);
         let true_sign = 2 * middle > m - 1;
-        assert!(!true_sign, "the middle value is not in the low half after all");
+        assert!(
+            !true_sign,
+            "the middle value is not in the low half after all"
+        );
         let shortcut_sign = (2 * r0 > m - 1) ^ true;
-        assert_ne!(shortcut_sign, true_sign, "the shortcut agreed, and the test proves nothing");
+        assert_ne!(
+            shortcut_sign, true_sign,
+            "the shortcut agreed, and the test proves nothing"
+        );
     }
 
     /// Why the differential step is there. An inverted line turns every index
@@ -558,9 +611,15 @@ mod tests {
             let labels = encoder.encode(sent, &moduli).expect("a frame that fits");
             let inverted: [u8; UP_INTERVALS] =
                 std::array::from_fn(|i| moduli.modulus(i) - 1 - labels[i]);
-            let heard = decoder.decode(&inverted, &moduli, k).expect("a frame that fits");
+            let heard = decoder
+                .decode(&inverted, &moduli, k)
+                .expect("a frame that fits");
             assert_eq!(heard, sent, "frame {frame} of an inverted line");
-            assert_eq!(decoder.d(), !encoder.d(), "the inversion did not stay inverted");
+            assert_eq!(
+                decoder.d(),
+                !encoder.d(),
+                "the inversion did not stay inverted"
+            );
         }
     }
 
@@ -582,7 +641,12 @@ mod tests {
             }
         }
         assert_eq!(collisions, 52, "the fold is not the one the doc describes");
-        assert_eq!(seen.len(), 53, "{} of {m} values of R0 are reachable", seen.len());
+        assert_eq!(
+            seen.len(),
+            53,
+            "{} of {m} values of R0 are reachable",
+            seen.len()
+        );
         // The pair the doc names: 51 and 53 both land on 51.
         assert_eq!(seen.get(&51), Some(&53));
 
@@ -598,12 +662,16 @@ mod tests {
         // where d(-1) = 0 leaves it at 53.
         let moduli = Moduli12::new([3, 5, 7, 1, 1, 1, 1, 1, 1, 1, 1, 1]);
         let frame = FrameBits::new(53, 6);
-        let labels = Encoder::new().encode(frame, &moduli).expect("a frame that fits");
+        let labels = Encoder::new()
+            .encode(frame, &moduli)
+            .expect("a frame that fits");
         let r0: u128 = labels
             .iter()
             .zip(moduli.values())
             .rev()
-            .fold(0, |acc, (&label, &modulus)| acc * u128::from(modulus) + u128::from(label));
+            .fold(0, |acc, (&label, &modulus)| {
+                acc * u128::from(modulus) + u128::from(label)
+            });
         assert_eq!(r0, 53, "step 4 is no longer read on the previous frame's d");
     }
 
@@ -641,7 +709,11 @@ mod tests {
         assert_eq!(broken.product(), 0);
         assert_eq!(broken.capacity(), 0);
         assert!(!broken.fits(0));
-        assert!(Encoder::new().encode(FrameBits::new(0, 0), &broken).is_err());
+        assert!(
+            Encoder::new()
+                .encode(FrameBits::new(0, 0), &broken)
+                .is_err()
+        );
 
         // And a label outside its own interval is not a frame this modulus
         // ever produced.
@@ -671,7 +743,10 @@ mod tests {
         assert!(!encoder.d(), "the memory did not start at zero");
         let first = encoder.encode(frame, &moduli).expect("a frame that fits");
         assert_eq!(first, [0, 0, 5, 1, 0, 1, 1, 1, 0, 0, 0, 1]);
-        assert!(encoder.d(), "R was over the middle and the sign did not turn");
+        assert!(
+            encoder.d(),
+            "R was over the middle and the sign did not turn"
+        );
 
         let second = encoder.encode(frame, &moduli).expect("a frame that fits");
         assert_eq!(second, [2, 4, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0]);
@@ -696,13 +771,18 @@ mod tests {
         assert_eq!(frame.value(), 9, "b0 was not the least significant bit");
         assert_eq!(frame.len(), 4);
         assert!(!frame.is_empty());
-        assert_eq!(frame.bits().collect::<Vec<_>>(), vec![true, false, false, true]);
+        assert_eq!(
+            frame.bits().collect::<Vec<_>>(),
+            vec![true, false, false, true]
+        );
         assert!(!frame.bit(4), "a bit above K is not part of the frame");
         assert_eq!(FrameBits::new(9, 4), frame);
 
         // In a frame, that puts b0 in interval 0's label.
         let moduli = Moduli12::new([16; UP_INTERVALS]);
-        let labels = Encoder::new().encode(frame, &moduli).expect("a frame that fits");
+        let labels = Encoder::new()
+            .encode(frame, &moduli)
+            .expect("a frame that fits");
         assert_eq!(labels[0], 9);
     }
 
@@ -713,7 +793,10 @@ mod tests {
     fn seventy_two_bits_need_u128() {
         let widest = Moduli12::new([255; UP_INTERVALS]);
         assert_eq!(widest.product(), 75_593_101_654_204_447_168_212_890_625);
-        assert!(widest.product() > u128::from(u64::MAX), "the product fitted in a u64");
+        assert!(
+            widest.product() > u128::from(u64::MAX),
+            "the product fitted in a u64"
+        );
         assert_eq!(widest.capacity(), 95);
         assert_eq!(up_bits(19), LONGEST_FRAME);
         assert!(widest.fits(LONGEST_FRAME));
@@ -737,14 +820,22 @@ mod tests {
             extend_e2u: false,
             gain: 0.1,
             moduli: MIXED,
-            filters: Filters { z2: vec![1.0], ..Default::default() },
+            filters: Filters {
+                z2: vec![1.0],
+                ..Default::default()
+            },
             sets: vec![(1..=72).map(|p| p * 100).collect()],
             indices: [0; CONSTELLATION_FRAME],
         };
-        parameters.fits().expect("the parameters are self-consistent");
+        parameters
+            .fits()
+            .expect("the parameters are self-consistent");
         let moduli = Moduli12::from(&parameters);
         assert_eq!(moduli.values(), &MIXED);
         assert_eq!(moduli.product(), parameters.product());
-        assert!(moduli.fits(parameters.bits()), "drn 13 does not fit its own moduli");
+        assert!(
+            moduli.fits(parameters.bits()),
+            "drn 13 does not fit its own moduli"
+        );
     }
 }

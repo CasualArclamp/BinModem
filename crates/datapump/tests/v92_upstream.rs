@@ -79,8 +79,15 @@ fn upstream(noise: f64, trellis: Trellis) -> (Option<u8>, usize, usize, f64) {
     }
     let channel = Channel::estimate(&known, &received, 48).expect("TRN1u is long enough to fit");
     if std::env::var_os("SPIKE_TRACE").is_some() {
-        let worst = taps.iter().zip(&channel.taps).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
-        eprintln!("estimate: worst tap error {worst:.3e}, fit noise {:.2e}", channel.noise);
+        let worst = taps
+            .iter()
+            .zip(&channel.taps)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f64, f64::max);
+        eprintln!(
+            "estimate: worst tap error {worst:.3e}, fit noise {:.2e}",
+            channel.noise
+        );
     }
     let plan = FilterLimits::from_info1a(3, 3, 3);
     let plan = design(&channel, &plan).expect("the loop is designable");
@@ -131,12 +138,21 @@ fn upstream(noise: f64, trellis: Trellis) -> (Option<u8>, usize, usize, f64) {
     let at = (0..shortest.min(400))
         .find(|&offset| {
             let length = shortest - offset;
-            length > 200 && sent[offset..offset + length].iter().zip(&back[..length]).all(|(a, b)| a == b)
+            length > 200
+                && sent[offset..offset + length]
+                    .iter()
+                    .zip(&back[..length])
+                    .all(|(a, b)| a == b)
         })
         .unwrap_or(0);
     let length = shortest.saturating_sub(at);
     if length == 0 {
-        return (Some(parameters.drn), sent.len(), back.len(), plan.residual_db());
+        return (
+            Some(parameters.drn),
+            sent.len(),
+            back.len(),
+            plan.residual_db(),
+        );
     }
     let positions: Vec<usize> = sent[at..]
         .iter()
@@ -160,12 +176,17 @@ fn the_designed_chain_carries_the_upper_ladder_over_a_loop() {
     // is a good local loop.
     for trellis in [Trellis::Sixteen, Trellis::ThirtyTwo, Trellis::SixtyFour] {
         let (drn, errors, length, residual) = upstream(1e-5, trellis);
-        let drn = drn.unwrap_or_else(|| panic!("{trellis:?}: nothing was chosen, residual {residual:.1} dB"));
+        let drn = drn.unwrap_or_else(|| {
+            panic!("{trellis:?}: nothing was chosen, residual {residual:.1} dB")
+        });
         println!(
             "{trellis:?}: drn {drn} ({} bit/s), {errors} of {length} bits wrong, residual {residual:.1} dB",
             up_rate(drn)
         );
-        assert!(drn >= 10, "{trellis:?}: only drn {drn}, which is not the upper half");
+        assert!(
+            drn >= 10,
+            "{trellis:?}: only drn {drn}, which is not the upper half"
+        );
         assert!(length > 2000, "{trellis:?}: only {length} bits came back");
         assert_eq!(errors, 0, "{trellis:?}: {errors} of {length} bits wrong");
     }
@@ -181,11 +202,20 @@ fn the_rung_falls_as_the_line_gets_worse() {
     for noise in [1e-7, 1e-6, 1e-5, 1e-4, 1e-3] {
         let (drn, _, _, _) = upstream(noise, Trellis::ThirtyTwo);
         let drn = drn.unwrap_or(0);
-        assert!(drn <= previous, "the rung went up with the noise: {drn} after {previous}");
+        assert!(
+            drn <= previous,
+            "the rung went up with the noise: {drn} after {previous}"
+        );
         previous = drn;
         seen.push((noise, drn));
     }
     println!("noise -> drn: {seen:?}");
-    assert!(seen.first().expect("a trend").1 >= 10, "a quiet loop only reached {seen:?}");
-    assert!(seen.last().expect("a trend").1 < seen.first().expect("a trend").1, "the noise cost nothing: {seen:?}");
+    assert!(
+        seen.first().expect("a trend").1 >= 10,
+        "a quiet loop only reached {seen:?}"
+    );
+    assert!(
+        seen.last().expect("a trend").1 < seen.first().expect("a trend").1,
+        "the noise cost nothing: {seen:?}"
+    );
 }

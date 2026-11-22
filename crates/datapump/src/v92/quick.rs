@@ -56,7 +56,14 @@ pub struct Answer {
 
 impl Answer {
     pub fn new(law: Law, uqts: u8, level: AnspcmLevel) -> Self {
-        Self { law, uqts, level, n: 0, toneq: ToneqDetector::new(FS), status: Status::Running }
+        Self {
+            law,
+            uqts,
+            level,
+            n: 0,
+            toneq: ToneqDetector::new(FS),
+            status: Status::Running,
+        }
     }
 
     pub fn status(&self) -> Status {
@@ -80,8 +87,9 @@ impl Answer {
         };
         // The first QTS symbol is data frame interval 0 (8.3.6), and ANSpcm
         // follows QTS-bar with nothing between them.
-        anspcm::qts_octet(self.law, self.uqts, n)
-            .unwrap_or_else(|| anspcm::anspcm_octet(self.level, self.law, n - anspcm::QTS_TOTAL as u64))
+        anspcm::qts_octet(self.law, self.uqts, n).unwrap_or_else(|| {
+            anspcm::anspcm_octet(self.level, self.law, n - anspcm::QTS_TOTAL as u64)
+        })
     }
 
     /// One network sample in, one level out: the codeword's own amplitude,
@@ -130,7 +138,11 @@ mod tests {
         assert_eq!(a.octet(0), anspcm::silence_octet(Law::Mu));
         assert_eq!(a.octet(SILENCE - 1), anspcm::silence_octet(Law::Mu));
         for n in 0..anspcm::QTS_TOTAL as u64 {
-            assert_eq!(Some(a.octet(SILENCE + n)), anspcm::qts_octet(Law::Mu, 79, n), "QTS symbol {n}");
+            assert_eq!(
+                Some(a.octet(SILENCE + n)),
+                anspcm::qts_octet(Law::Mu, 79, n),
+                "QTS symbol {n}"
+            );
         }
         for n in 0..700 {
             assert_eq!(

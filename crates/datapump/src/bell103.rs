@@ -158,7 +158,6 @@ impl Bell103Rx {
     }
 }
 
-
 /// A streaming Bell 103 transmitter: bits in, line samples out.
 ///
 /// Continuous-phase frequency shift keying. The phase carries across every
@@ -366,6 +365,20 @@ impl Modem {
         }
     }
 
+    /// A Bell 103 that picks up from where a Bell 212A gave up on 1200.
+    ///
+    /// Its carrier goes up at once and it waits only for the far end to sit
+    /// at idle mark. A 212A that falls back has already had its answer tone
+    /// heard (the answering end) or already heard one (the calling end), and
+    /// that tone is Bell 103's answering mark, so the waiting that a plain
+    /// 103 does before raising its carrier has been done.
+    pub fn marking(role: Role, fs: f64) -> Self {
+        let mut modem = Self::new(role, fs);
+        modem.tx.set_transmitting(true);
+        modem.phase = Phase::Marking;
+        modem
+    }
+
     /// Take one sample from the line and give back the one to put on it.
     pub fn step(&mut self, line: f64) -> f64 {
         if let Some(byte) = self.rx.feed(line)
@@ -499,10 +512,7 @@ impl Modem {
     /// determine each other -- and it keeps one interface for every pump.
     pub fn take_bits(&mut self) -> Vec<bool> {
         let bytes = std::mem::take(&mut self.received);
-        bytes
-            .iter()
-            .flat_map(|&b| self.framing.encode(b))
-            .collect()
+        bytes.iter().flat_map(|&b| self.framing.encode(b)).collect()
     }
 
     /// Queue bits for transmission.

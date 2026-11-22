@@ -30,7 +30,11 @@ fn dump_bits() {
 
     // Channel 1 was sent by the calling modem, so it is descrambled by a
     // receiver belonging to the answering end, and the reverse.
-    let mode = if channel == 1 { Mode::Answer } else { Mode::Call };
+    let mode = if channel == 1 {
+        Mode::Answer
+    } else {
+        Mode::Call
+    };
     let x = wav.channel(channel);
     let mut rx = Receiver::new(mode, FS);
     let mut bits: Vec<u8> = Vec::new();
@@ -45,8 +49,11 @@ fn dump_bits() {
     println!("{} bits from channel {channel} of {path}", bits.len());
     let text: String = bits.iter().map(|b| char::from(b'0' + b)).collect();
     std::fs::write(&out, &text).unwrap();
-    let times: String =
-        when.iter().map(|t| format!("{t:.4}\n")).collect::<Vec<_>>().concat();
+    let times: String = when
+        .iter()
+        .map(|t| format!("{t:.4}\n"))
+        .collect::<Vec<_>>()
+        .concat();
     std::fs::write(format!("{out}.time"), times).unwrap();
     println!("written to {out}");
 }

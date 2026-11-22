@@ -134,7 +134,12 @@ struct Sliding {
 
 impl Sliding {
     fn new(len: usize) -> Self {
-        Self { values: VecDeque::with_capacity(len + 1), len, sum: Complex::ZERO, pushed: 0 }
+        Self {
+            values: VecDeque::with_capacity(len + 1),
+            len,
+            sum: Complex::ZERO,
+            pushed: 0,
+        }
     }
 
     fn push(&mut self, value: Complex) -> Complex {
@@ -177,7 +182,9 @@ impl Look {
     /// Whether the window carries an alternation's three lines, `share` of
     /// its energy at least.
     fn lines(&self, share: f64) -> bool {
-        self.power > AUDIBLE && self.share > share && (CARRIER_SHARE.0..=CARRIER_SHARE.1).contains(&self.carrier)
+        self.power > AUDIBLE
+            && self.share > share
+            && (CARRIER_SHARE.0..=CARRIER_SHARE.1).contains(&self.carrier)
     }
 }
 
@@ -274,10 +281,14 @@ impl Hunt {
         // the lines take.
         let gain = |hz: f64| {
             let w = std::f64::consts::TAU * hz / fs;
-            let response = taps.iter().enumerate().fold(Complex::ZERO, |sum, (i, t)| sum + Complex::from_polar(*t, -w * i as f64));
+            let response = taps.iter().enumerate().fold(Complex::ZERO, |sum, (i, t)| {
+                sum + Complex::from_polar(*t, -w * i as f64)
+            });
             response.norm_sqr()
         };
-        let bins: f64 = (0..window).map(|k| gain(k as f64 * fs / window as f64)).sum();
+        let bins: f64 = (0..window)
+            .map(|k| gain(k as f64 * fs / window as f64))
+            .sum();
         let on_lines = (gain(0.0) + 2.0 * gain(BAUD / 2.0)) / bins;
         Self {
             fs,
@@ -351,7 +362,9 @@ impl Hunt {
             self.raw.pop_front();
         }
         let (cos, sin) = self.mixer.step();
-        let (re, im) = self.select.process((2.0 * sample * cos, -2.0 * sample * sin));
+        let (re, im) = self
+            .select
+            .process((2.0 * sample * cos, -2.0 * sample * sin));
         let b = Complex::new(re, im);
         self.power = self.keep * self.power + (1.0 - self.keep) * b.norm_sqr();
         let (cos, sin) = self.side.step();
@@ -361,7 +374,10 @@ impl Hunt {
             self.base.pop_front();
             self.good.pop_front();
         }
-        let before = n.checked_sub(self.window as u64).and_then(|m| self.baseband(m)).unwrap_or(Complex::ZERO);
+        let before = n
+            .checked_sub(self.window as u64)
+            .and_then(|m| self.baseband(m))
+            .unwrap_or(Complex::ZERO);
         let dc = self.carrier_line.push(b);
         let up = self.upper.push(b * down);
         let low = self.lower.push(b * down.conj());
@@ -378,7 +394,9 @@ impl Hunt {
             power: energy / w,
         };
         let limit = std::f64::consts::TAU * WIDEST_OFFSET_HZ * self.period / self.fs;
-        let good = look.lines(LINE_SHARE) && look.repeats.abs() > REPEATS && look.repeats.arg().abs() < limit;
+        let good = look.lines(LINE_SHARE)
+            && look.repeats.abs() > REPEATS
+            && look.repeats.arg().abs() < limit;
         self.good.push_back(good);
         self.follow(n, good, &look)
     }
@@ -392,7 +410,11 @@ impl Hunt {
     /// Whether the window ending at sample `index` was segment 2.
     fn was_good(&self, index: u64) -> bool {
         let first = self.taken - self.good.len() as u64;
-        index.checked_sub(first).and_then(|i| self.good.get(i as usize)).copied().unwrap_or(false)
+        index
+            .checked_sub(first)
+            .and_then(|i| self.good.get(i as usize))
+            .copied()
+            .unwrap_or(false)
     }
 
     fn follow(&mut self, n: u64, good: bool, look: &Look) -> Option<Found> {
@@ -447,7 +469,12 @@ impl Hunt {
         match armed.dip {
             None if turned < REVERSED => {
                 if let Some(crossing) = armed.crossing {
-                    armed.dip = Some(Dip { crossing, least: turned, at: n, lines: look.lines(REVERSED_SHARE) });
+                    armed.dip = Some(Dip {
+                        crossing,
+                        least: turned,
+                        at: n,
+                        lines: look.lines(REVERSED_SHARE),
+                    });
                 }
             }
             None => {}
@@ -473,7 +500,11 @@ impl Hunt {
                         let turn = self.turn(&armed, (join as u64).saturating_sub(2));
                         let join = join - self.delay;
                         let level = self.level(armed.energy, armed.off, armed.windows);
-                        return Some(Found::Reversal { at: join + self.sps / 2.0, turn, level });
+                        return Some(Found::Reversal {
+                            at: join + self.sps / 2.0,
+                            turn,
+                            level,
+                        });
                     }
                 } else {
                     armed.dip = Some(dip);
@@ -488,7 +519,11 @@ impl Hunt {
             let join = armed.last_good as f64 - self.delay;
             let turn = self.turn(&armed, armed.last_good);
             let level = self.level(armed.energy, armed.off, armed.windows);
-            return Some(Found::Lapsed { at: join + self.sps / 2.0, turn, level });
+            return Some(Found::Lapsed {
+                at: join + self.sps / 2.0,
+                turn,
+                level,
+            });
         }
         self.armed = Some(armed);
         None

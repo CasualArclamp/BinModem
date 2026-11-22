@@ -27,10 +27,10 @@ use crate::v34::frame::Framing;
 use crate::v34::info::{Info1aPcm, Info1c};
 use crate::v34::mp::{Mp, Trellis};
 use crate::v34::phase2::Role;
-use crate::v34::training::{RetrainWatch, SWatch, Watched};
 use crate::v34::qam::Band;
 use crate::v34::receiver::{self, Heard, Receiver, Reference};
 use crate::v34::signals::{self, Reader, Size};
+use crate::v34::training::{RetrainWatch, SWatch, Watched};
 use crate::v34::trellis::Code;
 
 use super::INTERVALS;
@@ -76,7 +76,10 @@ const SD_BAR_FRAMES: usize = 8;
 pub enum Status {
     Running,
     /// In data mode: downstream and upstream rates in bit/s.
-    Connected { downstream: u32, upstream: u32 },
+    Connected {
+        downstream: u32,
+        upstream: u32,
+    },
     /// One end or the other asked for a rate of nothing (9.7).
     ClearedDown,
     Failed(&'static str),
@@ -112,17 +115,26 @@ pub struct Habits {
 
 impl Habits {
     /// Short TRN1d, and the Recommendation's wait for S.
-    pub const PROMPT: Self = Self { trn1d: 0.3, s_wait_counts_round_trip: true };
+    pub const PROMPT: Self = Self {
+        trn1d: 0.3,
+        s_wait_counts_round_trip: true,
+    };
 
     /// TRN1d long enough for a far end to turn round (see [`TRN1D`]), and the
     /// Recommendation's wait for S. What a server that offers V.92 uses: the
     /// modems that needed it were V.92 ones. A plain V.90 server keeps
     /// [`Self::PROMPT`], which every V.90 call measured here was tuned on.
-    pub const PATIENT: Self = Self { trn1d: TRN1D, s_wait_counts_round_trip: true };
+    pub const PATIENT: Self = Self {
+        trn1d: TRN1D,
+        s_wait_counts_round_trip: true,
+    };
 
     /// What a live server did: four seconds of TRN1d, and a wait for S that
     /// did not allow for a second-long round trip.
-    pub const LIVE_SERVER: Self = Self { trn1d: 4.05, s_wait_counts_round_trip: false };
+    pub const LIVE_SERVER: Self = Self {
+        trn1d: 4.05,
+        s_wait_counts_round_trip: false,
+    };
 }
 
 impl Default for Habits {
@@ -161,7 +173,12 @@ impl Settings {
             round_trip,
             // Every rate, CP on four points, and the one look-ahead a digital
             // modem must have (5.4.5.5: "ld of 0 and 1 are mandatory").
-            jd: Jd { rates: Jd::ALL_RATES, sixteen_in_training: false, sixteen_in_renegotiation: false, lookahead: 1 },
+            jd: Jd {
+                rates: Jd::ALL_RATES,
+                sixteen_in_training: false,
+                sixteen_in_renegotiation: false,
+                lookahead: 1,
+            },
             wide,
             habits: Habits::default(),
         }
@@ -320,14 +337,29 @@ impl Source {
                     return 0.0;
                 }
                 Out::Sd | Out::SdBar => {
-                    let frames = if self.out == Out::Sd { SD_FRAMES } else { SD_BAR_FRAMES };
+                    let frames = if self.out == Out::Sd {
+                        SD_FRAMES
+                    } else {
+                        SD_BAR_FRAMES
+                    };
                     if self.count == frames * INTERVALS {
-                        self.start(if self.out == Out::Sd { Out::SdBar } else { Out::Trn1d });
+                        self.start(if self.out == Out::Sd {
+                            Out::SdBar
+                        } else {
+                            Out::Trn1d
+                        });
                         continue;
                     }
                     // {+W, +0, +W, -W, -0, -W} (8.4.4), turned over for
                     // S-bar-d.
-                    let pattern = [(w, true), (0, true), (w, true), (w, false), (0, false), (w, false)];
+                    let pattern = [
+                        (w, true),
+                        (0, true),
+                        (w, true),
+                        (w, false),
+                        (0, false),
+                        (w, false),
+                    ];
                     let (u, positive) = pattern[self.count % INTERVALS];
                     self.count += 1;
                     return self.level(u, positive ^ (self.out == Out::SdBar));
@@ -403,7 +435,11 @@ impl Source {
                     // from the data mode constellation of each data frame
                     // interval" (8.6.4).
                     let interval = (self.symbol % INTERVALS as u64) as usize;
-                    let ucode = if matches!(self.out, Out::Ri | Out::RiBar) { self.uinfo } else { self.r_codes[interval] };
+                    let ucode = if matches!(self.out, Out::Ri | Out::RiBar) {
+                        self.uinfo
+                    } else {
+                        self.r_codes[interval]
+                    };
                     self.count += 1;
                     return self.level(ucode, (interval < 3) ^ bar);
                 }
@@ -481,10 +517,17 @@ impl Source {
         let source: Vec<bool> = match self.out {
             Out::Trn2d | Out::B1d => vec![true; d],
             Out::Ed => vec![false; d],
-            Out::Mp => (0..d).map(|_| self.bits.pop_front().unwrap_or(false)).collect(),
-            _ => (0..d).map(|_| self.data.pop_front().unwrap_or(true)).collect(),
+            Out::Mp => (0..d)
+                .map(|_| self.bits.pop_front().unwrap_or(false))
+                .collect(),
+            _ => (0..d)
+                .map(|_| self.data.pop_front().unwrap_or(true))
+                .collect(),
         };
-        let bits: Vec<bool> = source.into_iter().map(|b| self.scrambler.scramble(b)).collect();
+        let bits: Vec<bool> = source
+            .into_iter()
+            .map(|b| self.scrambler.scramble(b))
+            .collect();
         if let Some(encoder) = self.encoder.as_mut() {
             encoder.push(&bits);
         }
@@ -494,7 +537,12 @@ impl Source {
     /// One data frame out.
     fn emit(&mut self, frame: Frame) {
         let law = self.law;
-        self.frame.extend(frame.amplitudes(law).iter().map(|&a| f64::from(a) / 32768.0));
+        self.frame.extend(
+            frame
+                .amplitudes(law)
+                .iter()
+                .map(|&a| f64::from(a) / 32768.0),
+        );
     }
 }
 
@@ -575,7 +623,12 @@ impl Modem {
             stage: Stage::AwaitS,
             status: Status::Running,
             deadline: None,
-            source: Source::new(settings.law, settings.uinfo, settings.jd, settings.habits.trn1d),
+            source: Source::new(
+                settings.law,
+                settings.uinfo,
+                settings.jd,
+                settings.habits.trn1d,
+            ),
             rx,
             reader: Reader::new(Mode::Answer),
             in_trn: true,
@@ -610,7 +663,10 @@ impl Modem {
         };
         // 9.4.1: B1 "within 15 s plus 5 round-trip delays after receiving
         // INFO1a".
-        modem.deadline = Some((modem.samples(15.0 + 5.0 * settings.round_trip), "no B1 from the analogue modem"));
+        modem.deadline = Some((
+            modem.samples(15.0 + 5.0 * settings.round_trip),
+            "no B1 from the analogue modem",
+        ));
         modem
     }
 
@@ -808,7 +864,12 @@ impl Modem {
         if self.trace && (self.stage, self.source.out) != before {
             eprintln!(
                 "[v90 {:8.3}] digital {:?} -> {:?}, line {:?} -> {:?}, s_heard {}",
-                self.now as f64 / FS, before.0, self.stage, before.1, self.source.out, self.s_heard,
+                self.now as f64 / FS,
+                before.0,
+                self.stage,
+                before.1,
+                self.source.out,
+                self.s_heard,
             );
         }
         out
@@ -820,7 +881,9 @@ impl Modem {
     /// as V.34's does: sooner, over a line where every millisecond of a
     /// round trip is already on the far end's clock.
     fn begin_renegotiation(&mut self, initiating: bool) {
-        let (Some(cp), Some(cpt)) = (self.cp.take(), self.cpt.as_ref()) else { return };
+        let (Some(cp), Some(cpt)) = (self.cp.take(), self.cpt.as_ref()) else {
+            return;
+        };
         let Some(training) = Mapping::for_renegotiation(cpt, &cp) else {
             self.fail("the renegotiation has no mapping to train on");
             return;
@@ -866,7 +929,11 @@ impl Modem {
     }
 
     fn renegotiation_size(&self) -> Size {
-        if self.settings.jd.sixteen_in_renegotiation { Size::Sixteen } else { Size::Four }
+        if self.settings.jd.sixteen_in_renegotiation {
+            Size::Sixteen
+        } else {
+            Size::Four
+        }
     }
 
     /// One end has asked for nothing: the call is over (9.7).
@@ -882,7 +949,11 @@ impl Modem {
         match self.stage {
             Stage::SendJd => {
                 if self.source.out == Out::Trn1d && self.s_deadline.is_none() {
-                    let trip = if self.settings.habits.s_wait_counts_round_trip { self.settings.round_trip } else { 0.0 };
+                    let trip = if self.settings.habits.s_wait_counts_round_trip {
+                        self.settings.round_trip
+                    } else {
+                        0.0
+                    };
                     self.s_deadline = Some(self.samples(S_WITHIN + trip));
                 }
                 if self.s_heard && self.source.out == Out::Jd && self.source.pending.is_none() {
@@ -906,7 +977,11 @@ impl Modem {
             Stage::Phase4Cp => {
                 // 9.4.1.4: an MP' sent, and CP' or E heard.
                 let heard_back = self.cp.as_ref().is_some_and(|cp| cp.acknowledge) || self.far_e;
-                if self.source.out == Out::Mp && self.source.acknowledged >= 1 && heard_back && self.source.pending.is_none() {
+                if self.source.out == Out::Mp
+                    && self.source.acknowledged >= 1
+                    && heard_back
+                    && self.source.pending.is_none()
+                {
                     self.source.change(Out::Ed);
                 }
             }
@@ -917,11 +992,21 @@ impl Modem {
                     && self.b1_left == 0
                     && self.decoder.is_some()
                 {
-                    let downstream = self.cp.as_ref().and_then(|cp| sequences::data_rate(cp.drn)).unwrap_or(0);
-                    self.status = Status::Connected { downstream, upstream: self.upstream_rate };
+                    let downstream = self
+                        .cp
+                        .as_ref()
+                        .and_then(|cp| sequences::data_rate(cp.drn))
+                        .unwrap_or(0);
+                    self.status = Status::Connected {
+                        downstream,
+                        upstream: self.upstream_rate,
+                    };
                     self.deadline = None;
                 }
-                if self.source.out == Out::Mp && self.source.acknowledged >= 1 && self.source.pending.is_none() {
+                if self.source.out == Out::Mp
+                    && self.source.acknowledged >= 1
+                    && self.source.pending.is_none()
+                {
                     self.source.change(Out::Ed);
                 }
             }
@@ -944,7 +1029,9 @@ impl Modem {
                     self.trn_symbols = 0;
                 }
             }
-            Heard::Untrained => self.fail("the analogue modem's training sequence did not train this end"),
+            Heard::Untrained => {
+                self.fail("the analogue modem's training sequence did not train this end")
+            }
             Heard::Symbol(symbol) => self.symbol(symbol),
         }
     }
@@ -993,7 +1080,11 @@ impl Modem {
     }
 
     fn cp_size(&self) -> Size {
-        if self.settings.jd.sixteen_in_training { Size::Sixteen } else { Size::Four }
+        if self.settings.jd.sixteen_in_training {
+            Size::Sixteen
+        } else {
+            Size::Four
+        }
     }
 
     fn symbol(&mut self, symbol: receiver::Symbol) {
@@ -1025,7 +1116,10 @@ impl Modem {
                         Watched::S => self.begin_renegotiation(false),
                         Watched::SBar => self.heard_far_s_bar(),
                         // S-bar missed: CP is surely under way by now.
-                        Watched::Nothing if self.s_watch.heard && self.s_watch.since > signals::S_SYMBOLS + 32 => {
+                        Watched::Nothing
+                            if self.s_watch.heard
+                                && self.s_watch.since > signals::S_SYMBOLS + 32 =>
+                        {
                             self.heard_far_s_bar();
                         }
                         Watched::Nothing => {}
@@ -1045,11 +1139,18 @@ impl Modem {
                     }
                     return;
                 }
-                let size = if self.renegotiating { self.renegotiation_size() } else { self.cp_size() };
+                let size = if self.renegotiating {
+                    self.renegotiation_size()
+                } else {
+                    self.cp_size()
+                };
                 for bit in self.reader.differential(symbol.decided, size) {
                     self.ones = if bit { self.ones + 1 } else { 0 };
                     // "20-bit E": twenty ones, which nothing in CP runs to.
-                    if self.stage == Stage::Phase4Cp && self.ones >= signals::E_BITS && self.cp.is_some() {
+                    if self.stage == Stage::Phase4Cp
+                        && self.ones >= signals::E_BITS
+                        && self.cp.is_some()
+                    {
                         self.heard_e();
                         return;
                     }
@@ -1122,15 +1223,28 @@ impl Modem {
 
     fn heard_e(&mut self) {
         self.far_e = true;
-        let (Some(ours), Some(cp)) = (self.source.mp, self.cp.as_ref()) else { return };
+        let (Some(ours), Some(cp)) = (self.source.mp, self.cp.as_ref()) else {
+            return;
+        };
         let rate = upstream_rate(cp, &ours);
         self.upstream_rate = u32::from(rate) * 2400;
-        let Some(framing) = Framing::new(self.settings.upstream.rate, self.upstream_rate, false, ours.expanded_shaping) else {
+        let Some(framing) = Framing::new(
+            self.settings.upstream.rate,
+            self.upstream_rate,
+            false,
+            ours.expanded_shaping,
+        ) else {
             self.fail("no upstream rate both ends allow");
             return;
         };
         // 9.4.1.6: B1 next, then data.
-        let params = Params { framing, code: Code::States16, nonlinear: ours.non_linear, precoding: [(0, 0); 3], mode: Mode::Answer };
+        let params = Params {
+            framing,
+            code: Code::States16,
+            nonlinear: ours.non_linear,
+            precoding: [(0, 0); 3],
+            mode: Mode::Answer,
+        };
         let decoder = UpstreamDecoder::new(params);
         self.rx.set_grid(decoder.grid_scale(), decoder.extent());
         self.b1_left = framing.n;
@@ -1149,9 +1263,16 @@ impl Modem {
         let snr = 10f64.powf(self.phase3_snr.unwrap_or(20.0).min(60.0) / 10.0);
         let bits = (1.0 + snr / 10f64.powf(0.6)).log2();
         let most = crate::v34::probe::ceiling(rate);
-        let most = if self.settings.wide { most } else { most.min(12) };
-        let upstream = ((bits * self.settings.upstream.baud() / 2400.0).floor() as u8).clamp(2, most);
-        let upstream = self.upstream_cap.map_or(upstream, |cap| upstream.min(cap.max(2)));
+        let most = if self.settings.wide {
+            most
+        } else {
+            most.min(12)
+        };
+        let upstream =
+            ((bits * self.settings.upstream.baud() / 2400.0).floor() as u8).clamp(2, most);
+        let upstream = self
+            .upstream_cap
+            .map_or(upstream, |cap| upstream.min(cap.max(2)));
         Mp {
             call_to_answer: 0,
             // 9.7: "drn = 0 indicates cleardown".
@@ -1176,7 +1297,10 @@ impl Modem {
 /// there and 4800 in bit 1.
 pub fn upstream_rate(cp: &Cp, mp: &Mp) -> u8 {
     let enabled = (u32::from(cp.upstream_rates) << 1) & u32::from(mp.rates);
-    (2..=mp.answer_to_call.min(14)).rev().find(|r| enabled >> (r - 1) & 1 == 1).unwrap_or(0)
+    (2..=mp.answer_to_call.min(14))
+        .rev()
+        .find(|r| enabled >> (r - 1) & 1 == 1)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -1188,7 +1312,8 @@ mod tests {
 
     /// A mapping with shaping on: Sr one, ld one, a zero at 4 kHz.
     fn shaped() -> Mapping {
-        let sets: [Constellation; INTERVALS] = std::array::from_fn(|_| Constellation::new((40..100).collect()));
+        let sets: [Constellation; INTERVALS] =
+            std::array::from_fn(|_| Constellation::new((40..100).collect()));
         let mut mapping = Mapping::best(sets, Redundancy::One);
         mapping.k = 30;
         mapping.lookahead = 1;
@@ -1198,18 +1323,28 @@ mod tests {
 
     /// The data frames coming out of `source`, read back as the analogue
     /// modem reads them: 5.4's decoder, and the scrambler undone.
-    fn read(source: &mut Source, frames: usize, decoder: &mut Decoder, descrambler: &mut Scrambler) -> Vec<Vec<bool>> {
+    fn read(
+        source: &mut Source,
+        frames: usize,
+        decoder: &mut Decoder,
+        descrambler: &mut Scrambler,
+    ) -> Vec<Vec<bool>> {
         (0..frames)
             .map(|_| {
                 let mut ucodes = [0u8; INTERVALS];
                 let mut positive = [false; INTERVALS];
                 for i in 0..INTERVALS {
-                    let (u, negative) = ucode::nearest(Law::Mu, (source.next() * 32768.0).round() as i32);
+                    let (u, negative) =
+                        ucode::nearest(Law::Mu, (source.next() * 32768.0).round() as i32);
                     ucodes[i] = u;
                     positive[i] = !negative;
                 }
                 let frame = Frame { ucodes, positive };
-                decoder.frame(frame).into_iter().map(|b| descrambler.descramble(b)).collect()
+                decoder
+                    .frame(frame)
+                    .into_iter()
+                    .map(|b| descrambler.descramble(b))
+                    .collect()
             })
             .collect()
     }
@@ -1231,7 +1366,10 @@ mod tests {
         let mut descrambler = Scrambler::new(Mode::Call);
         // TRN2d: scrambled ones, every frame of it.
         let trn2d = read(&mut source, TRN2D_FRAMES, &mut decoder, &mut descrambler);
-        assert!(trn2d.iter().all(|f| f.iter().all(|&b| b)), "TRN2d did not come back as ones");
+        assert!(
+            trn2d.iter().all(|f| f.iter().all(|&b| b)),
+            "TRN2d did not come back as ones"
+        );
         // A few MPs, and then Ed.
         let _ = read(&mut source, 40, &mut decoder, &mut descrambler);
         source.change(Out::Ed);
@@ -1239,7 +1377,11 @@ mod tests {
         let mut frames = 0;
         while zeros < ED_FRAMES {
             let frame = read(&mut source, 1, &mut decoder, &mut descrambler).remove(0);
-            zeros = if frame.iter().all(|&b| !b) { zeros + 1 } else { 0 };
+            zeros = if frame.iter().all(|&b| !b) {
+                zeros + 1
+            } else {
+                0
+            };
             frames += 1;
             assert!(frames < 100, "Ed never came whole");
         }
@@ -1250,9 +1392,13 @@ mod tests {
         let mut decoder = Decoder::new(shaped());
         let mut descrambler = Scrambler::new(Mode::Call);
         let b1d = read(&mut source, B1D_FRAMES, &mut decoder, &mut descrambler);
-        assert!(b1d.iter().all(|f| f.iter().all(|&b| b)), "B1d did not follow Ed");
+        assert!(
+            b1d.iter().all(|f| f.iter().all(|&b| b)),
+            "B1d did not follow Ed"
+        );
         let d = shaped().frame_bits();
-        let got: Vec<bool> = read(&mut source, sent.len() / d, &mut decoder, &mut descrambler).concat();
+        let got: Vec<bool> =
+            read(&mut source, sent.len() / d, &mut decoder, &mut descrambler).concat();
         assert_eq!(got[..], sent[..got.len()]);
     }
 }

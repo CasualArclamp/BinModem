@@ -30,16 +30,16 @@ use crate::v34::data::{Encoder as UpstreamEncoder, Params};
 use crate::v34::frame::Framing;
 use crate::v34::info::{Info0d, Info1aPcm, Info1c};
 use crate::v34::mp::{Finder, Found, Mp, Trellis};
+use crate::v34::phase2::Role;
 use crate::v34::qam::{Band, Transmitter};
 use crate::v34::receiver;
-use crate::v34::phase2::Role;
 use crate::v34::signals::{self, Sender, Size};
 use crate::v34::training::RetrainWatch;
 use crate::v34::trellis::Code;
 
 use super::INTERVALS;
-use super::dil::{self, Analysis, Choice, Route};
 use super::digital;
+use super::dil::{self, Analysis, Choice, Route};
 use super::encoder::{Decoder, Frame, Mapping};
 use super::pcm::{self, Heard, Leftover, Slicer};
 use super::sequences::{self, Cp, Descriptor, JD_BITS, JD_PRIME_BITS, Jd};
@@ -468,7 +468,10 @@ const PLACE_KEPT: usize = 48 * INTERVALS;
 pub enum Status {
     Running,
     /// In data mode: downstream and upstream rates in bit/s.
-    Connected { downstream: u32, upstream: u32 },
+    Connected {
+        downstream: u32,
+        upstream: u32,
+    },
     /// One end or the other asked for a rate of nothing (9.7).
     ClearedDown,
     Failed(&'static str),
@@ -538,12 +541,24 @@ impl RateMenu {
 /// widest-spaced levels that carry a rate the route has no room for, and
 /// None only if no spacing at all does.
 fn squeezed<T>(route: &Route, choose: impl Fn(&Route) -> Option<T>) -> Option<T> {
-    (0..12).find_map(|i| if i == 0 { choose(route) } else { choose(&shaping::scaled(route, 0.25f64.powi(i))) })
+    (0..12).find_map(|i| {
+        if i == 0 {
+            choose(route)
+        } else {
+            choose(&shaping::scaled(route, 0.25f64.powi(i)))
+        }
+    })
 }
 
 impl Settings {
     /// From the digital modem's INFO0d and INFO1d, and this end's INFO1a.
-    pub fn new(server: &Info0d, info1d: &Info1c, asked: &Info1aPcm, round_trip: f64, ours_wide: bool) -> Self {
+    pub fn new(
+        server: &Info0d,
+        info1d: &Info1c,
+        asked: &Info1aPcm,
+        round_trip: f64,
+        ours_wide: bool,
+    ) -> Self {
         let probed = info1d.probed[asked.upstream.index() as usize];
         Self {
             law: if server.a_law { Law::A } else { Law::Mu },
@@ -668,7 +683,8 @@ impl Source {
                 self.sender.restart();
             }
             Up::E => {
-                self.queue.extend(std::iter::repeat_n(true, signals::E_BITS));
+                self.queue
+                    .extend(std::iter::repeat_n(true, signals::E_BITS));
                 self.began = Some(Began::E);
             }
             _ => {}
@@ -680,7 +696,9 @@ impl Source {
     }
 
     fn differential(&mut self, size: Size) -> Complex {
-        let bits: Vec<bool> = (0..size.bits()).map(|_| self.queue.pop_front().unwrap_or(true)).collect();
+        let bits: Vec<bool> = (0..size.bits())
+            .map(|_| self.queue.pop_front().unwrap_or(true))
+            .collect();
         self.count += 1;
         grid(self.sender.differential(&bits), size)
     }
@@ -707,7 +725,11 @@ impl Source {
                         None => self.pending.is_some() && self.count.is_multiple_of(2),
                     };
                     if done {
-                        let next = if self.s_length.is_some() { Up::SBar } else { self.pending.take().unwrap_or(Up::SBar) };
+                        let next = if self.s_length.is_some() {
+                            Up::SBar
+                        } else {
+                            self.pending.take().unwrap_or(Up::SBar)
+                        };
                         self.start(next);
                         continue;
                     }
@@ -778,7 +800,11 @@ impl Source {
                 }
                 Up::E => {
                     if self.queue.is_empty() {
-                        let next = if self.encoder.is_some() { Up::Data } else { Up::Silence };
+                        let next = if self.encoder.is_some() {
+                            Up::Data
+                        } else {
+                            Up::Silence
+                        };
                         self.start(next);
                         continue;
                     }
@@ -799,7 +825,13 @@ impl Source {
                     let b1 = encoder.mapping_frames() < encoder.params().framing.p as u64;
                     let data = &mut self.data;
                     self.count += 1;
-                    return encoder.next_symbol(&mut || if b1 { true } else { data.pop_front().unwrap_or(true) });
+                    return encoder.next_symbol(&mut || {
+                        if b1 {
+                            true
+                        } else {
+                            data.pop_front().unwrap_or(true)
+                        }
+                    });
                 }
             }
         }
@@ -837,7 +869,11 @@ impl JdReader {
     /// One symbol's sign. True when this symbol ended a J'd.
     fn feed(&mut self, index: u64, positive: bool) -> bool {
         let before = self.descrambler.clone();
-        let mut bit = self.descrambler.descramble(if self.differential { positive ^ self.previous } else { positive });
+        let mut bit = self.descrambler.descramble(if self.differential {
+            positive ^ self.previous
+        } else {
+            positive
+        });
         if !self.differential && !bit {
             // TRN1d descrambles to ones: the first zero is Jd, which is
             // differential from here -- and was for the symbol that showed
@@ -866,7 +902,8 @@ impl JdReader {
         self.jd_bits.len() == JD_BITS
             && n >= JD_TAIL + JD_PRIME_BITS
             && bits[n - JD_PRIME_BITS..].iter().all(|b| !*b)
-            && bits[n - JD_PRIME_BITS - JD_TAIL..n - JD_PRIME_BITS] == self.jd_bits[JD_BITS - JD_TAIL..]
+            && bits[n - JD_PRIME_BITS - JD_TAIL..n - JD_PRIME_BITS]
+                == self.jd_bits[JD_BITS - JD_TAIL..]
     }
 }
 
@@ -1026,7 +1063,11 @@ fn describe_mp(mp: &Mp) -> String {
         u8::from(mp.acknowledge),
         if precoding { "on" } else { "off" },
         if mp.non_linear { "on" } else { "off" },
-        if mp.expanded_shaping { "expanded" } else { "minimum" },
+        if mp.expanded_shaping {
+            "expanded"
+        } else {
+            "minimum"
+        },
     )
 }
 
@@ -1095,7 +1136,10 @@ impl Decisions {
             sorted.sort_by(f64::total_cmp);
             sorted
         });
-        Self { levels, ..Self::default() }
+        Self {
+            levels,
+            ..Self::default()
+        }
     }
 
     /// One symbol of data mode, as the equaliser gave it, in interval `i`.
@@ -1181,7 +1225,14 @@ impl Decisions {
     fn storm(&mut self, missed: bool, value: f64) {
         let sound = value * value;
         let Some(mut storm) = self.storm else {
-            self.storm = missed.then_some(Storm { spanned: 0, ended: 0, misses: 1, sound, at_last: sound, garbled: sound });
+            self.storm = missed.then_some(Storm {
+                spanned: 0,
+                ended: 0,
+                misses: 1,
+                sound,
+                at_last: sound,
+                garbled: sound,
+            });
             return;
         };
         storm.spanned += 1;
@@ -1280,12 +1331,21 @@ impl Decisions {
     fn worst(&self) -> f64 {
         let mut blocks: Vec<f64> = self.recent.iter().map(|l| l.worst).collect();
         blocks.sort_by(f64::total_cmp);
-        blocks.iter().rev().nth(WORST_OF - 1).copied().unwrap_or_default().sqrt()
+        blocks
+            .iter()
+            .rev()
+            .nth(WORST_OF - 1)
+            .copied()
+            .unwrap_or_default()
+            .sqrt()
     }
 
     /// The error's RMS over all the recent looks.
     fn rms(&self) -> f64 {
-        let (power, symbols) = self.recent.iter().fold((0.0, 0), |(p, n), l| (p + l.power, n + l.symbols));
+        let (power, symbols) = self
+            .recent
+            .iter()
+            .fold((0.0, 0), |(p, n), l| (p + l.power, n + l.symbols));
         (power / symbols.max(1) as f64).sqrt()
     }
 }
@@ -1297,7 +1357,9 @@ fn trusted_symbols(descriptor: &Descriptor, law: Law) -> Vec<Trust> {
     let loud = |u: u8| level(u) > DIL_TRUSTED;
     // What a louder segment leaves behind is small, but not beside a
     // segment a great deal quieter.
-    let spills = |before: u8, u: u8| loud(before) || level(before) > (DIL_SPILL_RATIO * level(u)).max(DIL_SPILL_LEVEL);
+    let spills = |before: u8, u: u8| {
+        loud(before) || level(before) > (DIL_SPILL_RATIO * level(u)).max(DIL_SPILL_LEVEL)
+    };
     let mut out = Vec::with_capacity(descriptor.len());
     // The DIL repeats, so the first segment comes after the last.
     let mut before = descriptor.ucodes.last().copied();
@@ -1349,7 +1411,13 @@ fn find_place(frames: &Frames) -> Option<u64> {
         for &(index, value) in &frames.history {
             let i = ((index + shift) % INTERVALS as u64) as usize;
             current[i] = nearest(&frames.levels[i], value);
-            have = if i == 0 { 1 } else if have > 0 { have + 1 } else { 0 };
+            have = if i == 0 {
+                1
+            } else if have > 0 {
+                have + 1
+            } else {
+                0
+            };
             if i == INTERVALS - 1 && have == INTERVALS {
                 let frame = Frame {
                     ucodes: std::array::from_fn(|k| current[k].0),
@@ -1368,7 +1436,9 @@ fn find_place(frames: &Frames) -> Option<u64> {
 }
 
 fn slicer_for(levels: &Levels) -> Slicer {
-    Slicer::Levels(Box::new(std::array::from_fn(|i| levels[i].iter().map(|l| l.0).collect())))
+    Slicer::Levels(Box::new(std::array::from_fn(|i| {
+        levels[i].iter().map(|l| l.0).collect()
+    })))
 }
 
 /// Downstream data frames: TRN2d, MP, Ed, B1d and data.
@@ -1596,7 +1666,12 @@ impl Modem {
             start_deadline: (0, ""),
             sd_deadline: (u64::MAX, ""),
             sending_s: false,
-            tx: Transmitter::new(settings.upstream, settings.pre_emphasis, settings.power_reduction, fs),
+            tx: Transmitter::new(
+                settings.upstream,
+                settings.pre_emphasis,
+                settings.power_reduction,
+                fs,
+            ),
             source,
             rx,
             dil: descriptor.symbols().collect(),
@@ -1655,7 +1730,10 @@ impl Modem {
         // 9.4.2: B1d "within 15 s plus 5 round-trip delays after sending
         // INFO1a".
         modem.dil_left = modem.dil.len();
-        modem.start_deadline = (modem.samples(15.0 + 5.0 * settings.round_trip), "no B1d from the digital modem");
+        modem.start_deadline = (
+            modem.samples(15.0 + 5.0 * settings.round_trip),
+            "no B1d from the digital modem",
+        );
         modem.deadline = Some(modem.start_deadline);
         modem
     }
@@ -1716,13 +1794,19 @@ impl Modem {
     /// next one lays the levels out on a grid of its own. Scaled so the
     /// loudest level in use is one.
     pub fn pair(&self) -> Option<(f64, f64)> {
-        self.heard_any.then(|| (self.last[0] / self.scale(), self.last[1] / self.scale()))
+        self.heard_any
+            .then(|| (self.last[0] / self.scale(), self.last[1] / self.scale()))
     }
 
     /// What the scope's one is.
     fn scale(&self) -> f64 {
         let law = self.settings.law;
-        let loudest = |cp: &Cp| (0..INTERVALS).flat_map(|i| cp.points(i)).map(|u| ucode::level(law, u)).fold(0.0, f64::max);
+        let loudest = |cp: &Cp| {
+            (0..INTERVALS)
+                .flat_map(|i| cp.points(i))
+                .map(|u| ucode::level(law, u))
+                .fold(0.0, f64::max)
+        };
         match (self.frames.as_ref(), self.choice.as_ref()) {
             (Some(f), Some(c)) if f.ed => loudest(&c.data),
             (Some(_), Some(c)) => loudest(&c.training),
@@ -1831,11 +1915,14 @@ impl Modem {
         if !self.in_data_mode() {
             return false;
         }
-        let (Some(route), Some(choice)) = (self.route.as_ref(), self.choice.as_ref()) else { return false };
+        let (Some(route), Some(choice)) = (self.route.as_ref(), self.choice.as_ref()) else {
+            return false;
+        };
         let law = self.settings.law;
         let limit = super::power_limit(&self.settings.server);
         let jd = self.far_jd.unwrap_or_default();
-        let slow_enough = |drn: u8| jd.enables(drn) && sequences::data_rate(drn).is_some_and(|rate| rate <= most);
+        let slow_enough =
+            |drn: u8| jd.enables(drn) && sequences::data_rate(drn).is_some_and(|rate| rate <= most);
         // The shaping asked for at the start, and the errors it was expected
         // to leave, and then as much worse as data mode has found the line --
         // or as much of that as keeps the step inside the cap.
@@ -1843,8 +1930,11 @@ impl Modem {
         let mut worse = self.worse;
         let new = loop {
             let scaled = shaping::scaled(route, left * worse * worse);
-            let Some(new) = dil::choose_shaped(&scaled, law, limit, slow_enough, shaping) else { return false };
-            if worse <= 1.0 || sequences::data_rate(new.data.drn).is_some_and(|rate| rate >= least) {
+            let Some(new) = dil::choose_shaped(&scaled, law, limit, slow_enough, shaping) else {
+                return false;
+            };
+            if worse <= 1.0 || sequences::data_rate(new.data.drn).is_some_and(|rate| rate >= least)
+            {
                 break new;
             }
             worse = (worse / BELIEVED_LESS).max(1.0);
@@ -1870,7 +1960,9 @@ impl Modem {
         }
         let from = self.in_use.as_ref().map_or(0, |cp| cp.drn);
         let jd = self.far_jd.unwrap_or_default();
-        let Some(rate) = sequences::data_rate(drn) else { return false };
+        let Some(rate) = sequences::data_rate(drn) else {
+            return false;
+        };
         if drn == from || !jd.enables(drn) {
             return false;
         }
@@ -1879,21 +1971,29 @@ impl Modem {
             Some(Outlook::Bad) => ", predicted bad",
             _ => "",
         };
-        let (Some(route), Some(choice)) = (self.route.as_ref(), self.choice.as_ref()) else { return false };
+        let (Some(route), Some(choice)) = (self.route.as_ref(), self.choice.as_ref()) else {
+            return false;
+        };
         let law = self.settings.law;
         let limit = super::power_limit(&self.settings.server);
         let (shaping, left) = self.shaping;
         let believed = shaping::scaled(route, left * self.worse * self.worse);
         let training = choice.training.clone();
-        let Some(new) = squeezed(&believed, |r| dil::choose_shaped(r, law, limit, |d| d == drn, shaping)) else {
-            self.notes.push(format!("rate menu: nothing on this route carries {rate} bit/s"));
+        let Some(new) = squeezed(&believed, |r| {
+            dil::choose_shaped(r, law, limit, |d| d == drn, shaping)
+        }) else {
+            self.notes.push(format!(
+                "rate menu: nothing on this route carries {rate} bit/s"
+            ));
             return false;
         };
         let mut data = new.data;
         self.finish_cp(&mut data);
         self.choice = Some(Choice { data, training });
         let from = sequences::data_rate(from).unwrap_or(0);
-        self.notes.push(format!("rate menu: asked for {rate} bit/s, from {from}{predicted}"));
+        self.notes.push(format!(
+            "rate menu: asked for {rate} bit/s, from {from}{predicted}"
+        ));
         self.begin_renegotiation(true);
         true
     }
@@ -1920,7 +2020,10 @@ impl Modem {
             self.menu = self.predict();
         }
         let rates = self.menu.clone()?;
-        Some(RateMenu { rates, current: self.in_use.as_ref().map(|cp| cp.drn) })
+        Some(RateMenu {
+            rates,
+            current: self.in_use.as_ref().map(|cp| cp.drn),
+        })
     }
 
     fn predict(&self) -> Option<Vec<(u8, u32, Outlook)>> {
@@ -1930,10 +2033,18 @@ impl Modem {
         let jd = self.far_jd.unwrap_or_default();
         let leftover = self.rx.residue().leftover();
         let believed = shaping::scaled(route, self.worse * self.worse);
-        let good = shaping::choose_with_slack(&believed, law, limit, |d| jd.enables(d), jd.lookahead, leftover.as_ref())
-            .map_or(0, |a| a.choice.data.drn);
+        let good = shaping::choose_with_slack(
+            &believed,
+            law,
+            limit,
+            |d| jd.enables(d),
+            jd.lookahead,
+            leftover.as_ref(),
+        )
+        .map_or(0, |a| a.choice.data.drn);
         // As close as levels can stand: the fastest anything carries.
-        let any = dil::choose(&shaping::scaled(route, 1e-9), law, limit, |d| jd.enables(d)).map_or(0, |c| c.data.drn);
+        let any = dil::choose(&shaping::scaled(route, 1e-9), law, limit, |d| jd.enables(d))
+            .map_or(0, |c| c.data.drn);
         Some(
             (1..=u8::MAX)
                 .map_while(|drn| sequences::data_rate(drn).map(|rate| (drn, rate)))
@@ -1959,7 +2070,9 @@ impl Modem {
         if !self.in_data_mode() {
             return false;
         }
-        let Some(choice) = self.choice.as_mut() else { return false };
+        let Some(choice) = self.choice.as_mut() else {
+            return false;
+        };
         choice.data.drn = 0;
         self.clearing = true;
         self.begin_renegotiation(true);
@@ -1973,7 +2086,12 @@ impl Modem {
     /// Back from data mode to phase 4 (9.6.2.1.1, 9.6.2.2.1).
     fn begin_renegotiation(&mut self, initiating: bool) {
         self.notes.push(
-            if initiating { "rate renegotiation, begun by this end" } else { "rate renegotiation, begun by the digital modem's Rd" }.into(),
+            if initiating {
+                "rate renegotiation, begun by this end"
+            } else {
+                "rate renegotiation, begun by the digital modem's Rd"
+            }
+            .into(),
         );
         self.renegotiations += 1;
         self.renegotiating = true;
@@ -2001,7 +2119,9 @@ impl Modem {
 
     /// S for 128T, S-bar for 16T, and CP (9.6.2.1.1 to 9.6.2.1.3).
     fn send_s_then_cp(&mut self) {
-        let Some(choice) = self.choice.as_ref() else { return };
+        let Some(choice) = self.choice.as_ref() else {
+            return;
+        };
         let sixteen = self.far_jd.is_some_and(|jd| jd.sixteen_in_renegotiation);
         let source = &mut self.source;
         source.s_length = Some(signals::S_SYMBOLS);
@@ -2021,7 +2141,11 @@ impl Modem {
     /// constellations with data mode's shaping (8.6).
     fn turned(&mut self, from: u64) {
         self.awaiting_turn = false;
-        let (Some(route), Some(choice), Some(in_use)) = (self.route.as_ref(), self.choice.as_ref(), self.in_use.as_ref()) else {
+        let (Some(route), Some(choice), Some(in_use)) = (
+            self.route.as_ref(),
+            self.choice.as_ref(),
+            self.in_use.as_ref(),
+        ) else {
             return;
         };
         let Some(mapping) = Mapping::for_renegotiation(&choice.training, in_use) else {
@@ -2055,7 +2179,11 @@ impl Modem {
         let (Some(cp), Some(route)) = (self.in_use.as_ref(), self.route.as_ref()) else {
             return [f64::INFINITY; INTERVALS];
         };
-        std::array::from_fn(|i| cp.points(i).last().map_or(f64::INFINITY, |&u| route.levels[i][usize::from(u)]))
+        std::array::from_fn(|i| {
+            cp.points(i)
+                .last()
+                .map_or(f64::INFINITY, |&u| route.levels[i][usize::from(u)])
+        })
     }
 
     /// One end has asked for nothing: the call is over (9.7).
@@ -2074,7 +2202,11 @@ impl Modem {
 
     /// Data waiting to go, less what the next mapping frame takes at once.
     pub fn pending_bits(&self) -> usize {
-        let frame = self.source.encoder.as_ref().map_or(0, |e| e.params().framing.b);
+        let frame = self
+            .source
+            .encoder
+            .as_ref()
+            .map_or(0, |e| e.params().framing.b);
         self.source.data.len().saturating_sub(frame)
     }
 
@@ -2113,7 +2245,8 @@ impl Modem {
                     // more goes to it, and the call is over, as if it had
                     // cleared down: a retrain would only call into silence.
                     self.far_end_went = true;
-                    self.notes.push("the digital modem stopped sending: the call is over".into());
+                    self.notes
+                        .push("the digital modem stopped sending: the call is over".into());
                     self.cleared_down();
                 }
             }
@@ -2123,7 +2256,8 @@ impl Modem {
         // the digital modem retraining.
         if self.stage != Stage::Finished && self.retrain_watch.feed(line, self.fs) {
             if !self.wants_retrain {
-                self.notes.push("tone B: the digital modem is retraining".into());
+                self.notes
+                    .push("tone B: the digital modem is retraining".into());
             }
             self.wants_retrain = true;
         }
@@ -2134,7 +2268,9 @@ impl Modem {
             (true, None) => self.lost_since = Some(self.now),
             (false, Some(_)) => self.lost_since = None,
             (true, Some(since))
-                if self.now - since > (3.0 * self.fs) as u64 && self.stage == Stage::Data && !self.renegotiating =>
+                if self.now - since > (3.0 * self.fs) as u64
+                    && self.stage == Stage::Data
+                    && !self.renegotiating =>
             {
                 self.wants_retrain = true;
                 self.lost_since = None;
@@ -2167,7 +2303,10 @@ impl Modem {
                     self.notes.push(format!("sent {}", describe_cp(&cp)));
                 }
             }
-            Some(Began::E) => self.notes.push(format!("sent E: B1 and data next, up at {} bit/s", self.upstream_rate)),
+            Some(Began::E) => self.notes.push(format!(
+                "sent E: B1 and data next, up at {} bit/s",
+                self.upstream_rate
+            )),
             None => {}
         }
         out
@@ -2179,7 +2318,10 @@ impl Modem {
                 self.stage = Stage::AwaitSd;
                 self.rx.hunt(self.settings.uinfo);
                 // 9.3.2.4: S-bar-d within 1500 ms of the start of Ja.
-                self.sd_deadline = (self.samples(SD_WAIT + 2.0 * self.settings.round_trip), "no Sd from the digital modem");
+                self.sd_deadline = (
+                    self.samples(SD_WAIT + 2.0 * self.settings.round_trip),
+                    "no Sd from the digital modem",
+                );
                 self.deadline = Some(self.sd_deadline);
             }
             Stage::Data if self.clearing => {
@@ -2190,14 +2332,29 @@ impl Modem {
             Stage::Phase4 | Stage::Data => {
                 // 9.4.2.4: a CP' sent, and MP' or Ed heard: E once the
                 // current CP' is whole.
-                let heard_back = !self.awaiting_turn && self.frames.as_ref().is_some_and(|f| f.far_acknowledged || f.ed);
-                if self.source.up == Up::Cp && self.source.acknowledged >= 1 && heard_back && self.source.pending.is_none() {
+                let heard_back = !self.awaiting_turn
+                    && self
+                        .frames
+                        .as_ref()
+                        .is_some_and(|f| f.far_acknowledged || f.ed);
+                if self.source.up == Up::Cp
+                    && self.source.acknowledged >= 1
+                    && heard_back
+                    && self.source.pending.is_none()
+                {
                     self.prepare_upstream();
                     self.source.change(Up::E);
                 }
                 let receiving = self.frames.as_ref().is_some_and(|f| f.data);
-                if self.status == Status::Running && !self.renegotiating && receiving && self.source.up == Up::Data {
-                    self.status = Status::Connected { downstream: self.downstream_rate, upstream: self.upstream_rate };
+                if self.status == Status::Running
+                    && !self.renegotiating
+                    && receiving
+                    && self.source.up == Up::Data
+                {
+                    self.status = Status::Connected {
+                        downstream: self.downstream_rate,
+                        upstream: self.upstream_rate,
+                    };
                     self.deadline = None;
                     self.margin_at = self.samples(MARGIN_SETTLE);
                     self.short = 0;
@@ -2221,7 +2378,10 @@ impl Modem {
                     // 9.3.2.4: "terminate Ja and transmit silence".
                     self.source.change(Up::Silence);
                     self.stage = Stage::Training;
-                    self.deadline = Some((self.samples(4.5 + self.settings.round_trip), "no Jd from the digital modem"));
+                    self.deadline = Some((
+                        self.samples(4.5 + self.settings.round_trip),
+                        "no Jd from the digital modem",
+                    ));
                 }
             }
             Heard::Trained { .. } => {
@@ -2257,7 +2417,8 @@ impl Modem {
         match self.stage {
             Stage::AwaitJd | Stage::AwaitJdPrime => {
                 let jd_prime = self.jd.feed(symbol.index, symbol.positive());
-                let early = (JD_LATEST + S_AFTER_JD - self.settings.round_trip).max(0.0) * digital::FS;
+                let early =
+                    (JD_LATEST + S_AFTER_JD - self.settings.round_trip).max(0.0) * digital::FS;
                 if self.stage == Stage::AwaitJd && !self.sending_s && symbol.raw as f64 >= early {
                     self.send_s();
                 }
@@ -2266,7 +2427,11 @@ impl Modem {
                 {
                     // 9.3.2.7: S, and listen for J'd.
                     self.far_jd = Some(jd);
-                    self.source.size = if jd.sixteen_in_training { Size::Sixteen } else { Size::Four };
+                    self.source.size = if jd.sixteen_in_training {
+                        Size::Sixteen
+                    } else {
+                        Size::Four
+                    };
                     if !self.sending_s {
                         self.send_s();
                     }
@@ -2286,7 +2451,10 @@ impl Modem {
                 }
                 // A Jd stream that has stopped with no J'd read: the DIL is
                 // under way, and is looked for in what has arrived.
-                let gone = self.jd.last.is_some_and(|(end, _)| symbol.index + 1 > end + JD_GONE);
+                let gone = self
+                    .jd
+                    .last
+                    .is_some_and(|(end, _)| symbol.index + 1 > end + JD_GONE);
                 if gone && !self.jd_gone {
                     // Whatever is arriving is not two levels any more, and
                     // learning from it as if it were would ruin the
@@ -2294,7 +2462,10 @@ impl Modem {
                     self.jd_gone = true;
                     self.rx.set_slicer(Slicer::Free);
                 }
-                if gone && self.before_dil.len() >= DIL_START_WINDOW + INTERVALS && symbol.raw.is_multiple_of(64) {
+                if gone
+                    && self.before_dil.len() >= DIL_START_WINDOW + INTERVALS
+                    && symbol.raw.is_multiple_of(64)
+                {
                     self.find_dil_start();
                 }
             }
@@ -2323,7 +2494,8 @@ impl Modem {
         // so the DIL's first symbol is in interval 0, whatever a slip did to
         // the frames on the way.
         self.dil_interval = 0;
-        self.rx.set_frame_offset((INTERVALS as u64 - first % INTERVALS as u64) % INTERVALS as u64);
+        self.rx
+            .set_frame_offset((INTERVALS as u64 - first % INTERVALS as u64) % INTERVALS as u64);
         self.dil_read = vec![false; self.dil.len()];
         self.dil_left = self.dil.len();
         self.dil_recent.clear();
@@ -2342,7 +2514,9 @@ impl Modem {
     /// DIL fits what came after it closely and far better than anywhere else.
     fn find_dil_start(&mut self) {
         let arrived: Vec<(u64, f64)> = self.before_dil.iter().copied().collect();
-        let Some(&(newest, _)) = arrived.last() else { return };
+        let Some(&(newest, _)) = arrived.last() else {
+            return;
+        };
         let oldest = arrived[0].0;
         let mut fits = Vec::new();
         for first in oldest..=newest.saturating_sub(DIL_START_WINDOW as u64) {
@@ -2354,8 +2528,14 @@ impl Modem {
                 fits.push((first, fit));
             }
         }
-        let Some(&(first, fit)) = fits.iter().min_by(|a, b| a.1.total_cmp(&b.1)) else { return };
-        let next = fits.iter().filter(|f| f.0.abs_diff(first) > 1).map(|f| f.1).fold(f64::INFINITY, f64::min);
+        let Some(&(first, fit)) = fits.iter().min_by(|a, b| a.1.total_cmp(&b.1)) else {
+            return;
+        };
+        let next = fits
+            .iter()
+            .filter(|f| f.0.abs_diff(first) > 1)
+            .map(|f| f.1)
+            .fold(f64::INFINITY, f64::min);
         if fit > DIL_FIT || next < 4.0 * fit {
             return;
         }
@@ -2372,7 +2552,8 @@ impl Modem {
     fn fit_dil(&self, window: &[(u64, f64)], first: i64) -> Option<(f64, f64)> {
         let law = self.settings.law;
         let len = self.dil.len() as i64;
-        let (mut cost, mut power, mut agree, mut judged, mut trained) = (0.0, 0.0, 0usize, 0usize, 0usize);
+        let (mut cost, mut power, mut agree, mut judged, mut trained) =
+            (0.0, 0.0, 0usize, 0usize, 0usize);
         for &(raw, v) in window {
             let at = (raw as i64 - first).rem_euclid(len) as usize;
             let (u, positive) = self.dil[at];
@@ -2393,7 +2574,8 @@ impl Modem {
                 agree += 1;
             }
         }
-        (trained >= DIL_TRAINED_JUDGED && power > 0.0).then(|| (cost / power, agree as f64 / judged as f64))
+        (trained >= DIL_TRAINED_JUDGED && power > 0.0)
+            .then(|| (cost / power, agree as f64 / judged as f64))
     }
 
     /// Whether the DIL had to be found without J'd.
@@ -2431,7 +2613,11 @@ impl Modem {
     /// How much of the DIL has been read, of how much there is, and whether
     /// the reading is waiting to find where it went.
     pub fn dil_progress(&self) -> (usize, usize, bool) {
-        (self.dil.len() - self.dil_left, self.dil.len(), self.dil_lost.is_some())
+        (
+            self.dil.len() - self.dil_left,
+            self.dil.len(),
+            self.dil_lost.is_some(),
+        )
     }
 
     fn dil_symbol(&mut self, raw: u64, value: f64) {
@@ -2447,7 +2633,9 @@ impl Modem {
             return;
         }
         while self.dil_recent.len() > DIL_DELAY {
-            let Some((raw, value)) = self.dil_recent.pop_front() else { break };
+            let Some((raw, value)) = self.dil_recent.pop_front() else {
+                break;
+            };
             self.count_dil(raw, value);
             if self.stage != Stage::Dil {
                 return;
@@ -2467,7 +2655,8 @@ impl Modem {
         self.dil_left -= 1;
         let (u, positive) = self.dil[at];
         if self.dil_trusted[at] != Trust::Spoiled {
-            self.analysis.feed(u, positive, (at + self.dil_interval) % INTERVALS, value);
+            self.analysis
+                .feed(u, positive, (at + self.dil_interval) % INTERVALS, value);
         }
         if self.dil_left == 0 {
             self.finish_dil();
@@ -2480,7 +2669,12 @@ impl Modem {
     /// robs a bit, or a burst of noise, spoils the reading without moving
     /// anything.
     fn find_dil(&mut self) {
-        let window: Vec<(u64, f64)> = self.dil_recent.iter().skip(self.dil_recent.len().saturating_sub(DIL_SEARCH)).copied().collect();
+        let window: Vec<(u64, f64)> = self
+            .dil_recent
+            .iter()
+            .skip(self.dil_recent.len().saturating_sub(DIL_SEARCH))
+            .copied()
+            .collect();
         // (move, relative error) for each move whose signs agree.
         let fits: Vec<(i64, f64)> = (-DIL_MOST_MOVED..=DIL_MOST_MOVED)
             .filter_map(|m| {
@@ -2488,16 +2682,30 @@ impl Modem {
                 (agree >= DIL_SIGNS).then_some((m, fit))
             })
             .collect();
-        let Some(&(moved, fit)) = fits.iter().min_by(|a, b| a.1.total_cmp(&b.1)) else { return };
-        let next = fits.iter().filter(|f| (f.0 - moved).abs() > 1).map(|f| f.1).fold(f64::INFINITY, f64::min);
+        let Some(&(moved, fit)) = fits.iter().min_by(|a, b| a.1.total_cmp(&b.1)) else {
+            return;
+        };
+        let next = fits
+            .iter()
+            .filter(|f| (f.0 - moved).abs() > 1)
+            .map(|f| f.1)
+            .fold(f64::INFINITY, f64::min);
         // A move is only a move against staying put. Where the stretch is
         // too quiet to say whether it is where it was, everything since the
         // loss is asked instead -- waiting for a louder stretch can wait
         // until the DIL has wrapped round to its own quiet start, where the
         // true move cannot be judged either -- and failing that, wait.
-        if moved != 0 && !fits.iter().any(|f| f.0 == 0) && self.fit_dil(&window, self.dil_base).is_none() {
+        if moved != 0
+            && !fits.iter().any(|f| f.0 == 0)
+            && self.fit_dil(&window, self.dil_base).is_none()
+        {
             let gathered = self.dil_lost.unwrap_or(0);
-            let since: Vec<(u64, f64)> = self.dil_recent.iter().skip(self.dil_recent.len().saturating_sub(gathered)).copied().collect();
+            let since: Vec<(u64, f64)> = self
+                .dil_recent
+                .iter()
+                .skip(self.dil_recent.len().saturating_sub(gathered))
+                .copied()
+                .collect();
             match self.fit_dil(&since, self.dil_base) {
                 Some((fit, agree)) if fit > DIL_FIT || agree < DIL_SIGNS => {}
                 _ => return,
@@ -2510,14 +2718,19 @@ impl Modem {
         // Nothing moved: everything held is good. A move: only what it was
         // found from is sure to be past the slip, and the next pass has the
         // rest.
-        let recent: Vec<(u64, f64)> = if moved == 0 { self.dil_recent.drain(..).collect() } else { window };
+        let recent: Vec<(u64, f64)> = if moved == 0 {
+            self.dil_recent.drain(..).collect()
+        } else {
+            window
+        };
         self.dil_recent.clear();
         let next = recent.last().map_or(0, |r| r.0 as i64 + 1);
         if moved != 0 {
             self.dil_moved += 1;
             self.dil_base += moved;
             // The frames moved with it.
-            let offset = (self.rx.frame_offset() as i64 - moved).rem_euclid(INTERVALS as i64) as u64;
+            let offset =
+                (self.rx.frame_offset() as i64 - moved).rem_euclid(INTERVALS as i64) as u64;
             self.rx.set_frame_offset(offset);
         }
         let levels = self.dil_levels(next, 2 * self.dil.len());
@@ -2539,7 +2752,14 @@ impl Modem {
         // Shaped or not, whichever carries more (5.4.5): what the equaliser
         // left of TRN1d and Jd says what shaping would take away.
         let leftover = self.rx.residue().leftover();
-        let Some(asked) = shaping::choose_with_slack(&route, law, limit, |drn| jd.enables(drn), jd.lookahead, leftover.as_ref()) else {
+        let Some(asked) = shaping::choose_with_slack(
+            &route,
+            law,
+            limit,
+            |drn| jd.enables(drn),
+            jd.lookahead,
+            leftover.as_ref(),
+        ) else {
             self.route = Some(route);
             self.fail("the route cannot carry V.90's slowest rate");
             return;
@@ -2582,21 +2802,46 @@ impl Modem {
     /// which for a rate the DIL has no room for are closer than it would
     /// ever choose. The DIL's own choice where nothing carries it at all,
     /// and a line for the transcript either way.
-    fn pinned(&mut self, asked: shaping::Asked, route: &Route, leftover: Option<&Leftover>, drn: u8) -> shaping::Asked {
+    fn pinned(
+        &mut self,
+        asked: shaping::Asked,
+        route: &Route,
+        leftover: Option<&Leftover>,
+        drn: u8,
+    ) -> shaping::Asked {
         let own = asked.rate();
-        let Some(rate) = sequences::data_rate(drn) else { return asked };
+        let Some(rate) = sequences::data_rate(drn) else {
+            return asked;
+        };
         if asked.choice.data.drn == drn {
-            self.notes.push(format!("the rate menu's {rate} bit/s is what the DIL chose"));
+            self.notes.push(format!(
+                "the rate menu's {rate} bit/s is what the DIL chose"
+            ));
             return asked;
         }
         let law = self.settings.law;
         let limit = super::power_limit(&self.settings.server);
         let jd = self.far_jd.unwrap_or_default();
-        let found = squeezed(route, |r| shaping::choose(r, law, limit, |d| d == drn && jd.enables(d), jd.lookahead, leftover));
-        let predicted = if drn < asked.choice.data.drn { "predicted good" } else { "predicted bad" };
+        let found = squeezed(route, |r| {
+            shaping::choose(
+                r,
+                law,
+                limit,
+                |d| d == drn && jd.enables(d),
+                jd.lookahead,
+                leftover,
+            )
+        });
+        let predicted = if drn < asked.choice.data.drn {
+            "predicted good"
+        } else {
+            "predicted bad"
+        };
         match found {
             Some(found) => {
-                self.notes.push(format!("the rate menu asked for {rate} bit/s, {predicted}, where the DIL chose {own}"));
+                self.notes.push(format!(
+                    "the rate menu asked for {rate} bit/s, {predicted}, where the DIL chose {own}"
+                ));
                 found
             }
             None => {
@@ -2607,7 +2852,9 @@ impl Modem {
     }
 
     fn phase4_symbol(&mut self, symbol: pcm::Symbol) {
-        let (Some(route), Some(choice)) = (self.route.as_ref(), self.choice.as_ref()) else { return };
+        let (Some(route), Some(choice)) = (self.route.as_ref(), self.choice.as_ref()) else {
+            return;
+        };
         if self.trn2d_from.is_none() {
             let level = ucode::level(self.settings.law, self.settings.uinfo);
             let was_heard = self.r_watch.heard;
@@ -2661,8 +2908,12 @@ impl Modem {
             }
             looked = self.rd_watch.looked && symbol.interval() == INTERVALS - 1;
         }
-        let (Some(route), Some(choice)) = (self.route.as_ref(), self.choice.as_ref()) else { return };
-        let Some(frames) = self.frames.as_mut() else { return };
+        let (Some(route), Some(choice)) = (self.route.as_ref(), self.choice.as_ref()) else {
+            return;
+        };
+        let Some(frames) = self.frames.as_mut() else {
+            return;
+        };
         if symbol.index + 1 == frames.from {
             // TRN2d's first symbol is next: decide against CPt's levels.
             self.rx.set_slicer(slicer_for(&frames.levels));
@@ -2679,7 +2930,8 @@ impl Modem {
         if i == 0 {
             frames.carried = true;
         }
-        let present = frames.heard(symbol.line) && !(self.stage == Stage::Phase4 && self.stopped.replaying());
+        let present =
+            frames.heard(symbol.line) && !(self.stage == Stage::Phase4 && self.stopped.replaying());
         frames.carried &= present;
         if frames.data && self.stage == Stage::Data && !self.renegotiating {
             self.decisions.symbol(i, symbol.value);
@@ -2700,7 +2952,9 @@ impl Modem {
             frames.impossible.pop_front();
         }
         // Rd is no frame of data, and says nothing about where the frames are.
-        frames.impossible.push_back(!looked && !frames.decoder.could_have_sent(&frame));
+        frames
+            .impossible
+            .push_back(!looked && !frames.decoder.could_have_sent(&frame));
         if frames.impossible.iter().filter(|x| **x).count() >= PLACE_LOST
             && let Some(shift) = find_place(frames)
         {
@@ -2719,7 +2973,12 @@ impl Modem {
         // gives nothing else.
         let repeated = frames.last_frame.replace(frame) == Some(frame);
         let carried = frames.carried && !repeated;
-        let bits: Vec<bool> = frames.decoder.frame(frame).into_iter().map(|b| frames.descrambler.descramble(b)).collect();
+        let bits: Vec<bool> = frames
+            .decoder
+            .frame(frame)
+            .into_iter()
+            .map(|b| frames.descrambler.descramble(b))
+            .collect();
         if frames.data {
             if looked {
                 frames.held.push_back(bits);
@@ -2740,7 +2999,10 @@ impl Modem {
             }
             frames.b1d_left -= 1;
             if frames.b1d_left == 0 {
-                self.notes.push(format!("found B1d: data mode, down at {} bit/s", self.downstream_rate));
+                self.notes.push(format!(
+                    "found B1d: data mode, down at {} bit/s",
+                    self.downstream_rate
+                ));
                 frames.data = true;
                 self.stage = Stage::Data;
                 self.renegotiating = false;
@@ -2756,7 +3018,11 @@ impl Modem {
         // that took this end into data mode on a dead line. Only frames the
         // far end's signal carried are Ed.
         let zeros = bits.iter().all(|b| !*b);
-        frames.zero_frames = if zeros && carried && frames.mp.is_some() { frames.zero_frames + 1 } else { 0 };
+        frames.zero_frames = if zeros && carried && frames.mp.is_some() {
+            frames.zero_frames + 1
+        } else {
+            0
+        };
         if frames.zero_frames == 2 {
             // Ed: B1d next, at data mode's constellation, with the coding
             // started afresh (8.6.1).
@@ -2766,8 +3032,13 @@ impl Modem {
             self.in_use = Some(choice.data.clone());
             self.least_gap = dil::least_gap(&choice.data, route);
             self.downstream_rate = sequences::data_rate(choice.data.drn).unwrap_or(0);
-            self.notes.push(format!("found Ed: B1d next, down at {} bit/s", self.downstream_rate));
-            let Some(data) = Mapping::from_cp(&choice.data) else { return };
+            self.notes.push(format!(
+                "found Ed: B1d next, down at {} bit/s",
+                self.downstream_rate
+            ));
+            let Some(data) = Mapping::from_cp(&choice.data) else {
+                return;
+            };
             frames.decoder = Decoder::new(data);
             frames.levels = levels_for(&choice.data, route);
             let slicer = slicer_for(&frames.levels);
@@ -2871,9 +3142,19 @@ impl Modem {
                 // Nothing is being read at all: that is a receiver to train
                 // again.
                 self.wants_retrain = true;
-                self.tell_why("the levels stand within two of the receiver's own error", short, receiver, "retrain");
+                self.tell_why(
+                    "the levels stand within two of the receiver's own error",
+                    short,
+                    receiver,
+                    "retrain",
+                );
             } else {
-                self.fall_back("the levels stand short of margin, look after look", short, 0.0, receiver);
+                self.fall_back(
+                    "the levels stand short of margin, look after look",
+                    short,
+                    0.0,
+                    receiver,
+                );
             }
             return;
         }
@@ -2884,7 +3165,12 @@ impl Modem {
         if self.least_gap < 2.0 * self.decisions.rms() {
             // Nothing is being read at all: that is a receiver to train again.
             self.wants_retrain = true;
-            self.tell_why("disturbed, and the levels within two of the decisions' error", self.short, receiver, "retrain");
+            self.tell_why(
+                "disturbed, and the levels within two of the decisions' error",
+                self.short,
+                receiver,
+                "retrain",
+            );
             return;
         }
         // The next rate is chosen for the line as the worst of the recent
@@ -2913,7 +3199,12 @@ impl Modem {
         // be asked again, ending at 44 000, a rung below where main settles
         // in one go. The larger of the two lands at 45 333 first time, where
         // nothing errors at all afterwards.
-        self.fall_back("disturbed, misses enough to count", self.short, self.decisions.worst(), receiver);
+        self.fall_back(
+            "disturbed, misses enough to count",
+            self.short,
+            self.decisions.worst(),
+            receiver,
+        );
     }
 
     /// The error the DIL led this end to expect in data mode: the route's
@@ -2940,7 +3231,11 @@ impl Modem {
         let drn = self.in_use.as_ref().map_or(0, |cp| cp.drn);
         let least = sequences::data_rate(drn.saturating_sub(MOST_DROPPED)).unwrap_or(0);
         let asked = if self.renegotiate_within(most, least) {
-            let rate = self.choice.as_ref().and_then(|c| sequences::data_rate(c.data.drn)).unwrap_or(0);
+            let rate = self
+                .choice
+                .as_ref()
+                .and_then(|c| sequences::data_rate(c.data.drn))
+                .unwrap_or(0);
             format!("{rate} bit/s, from {from}")
         } else {
             // Nothing slower the route carries: train again from phase 2.
@@ -2985,10 +3280,17 @@ impl Modem {
 
     /// Data mode's upstream, as the digital modem's MP asks for it.
     fn prepare_upstream(&mut self) {
-        let (Some(mp), Some(choice)) = (self.far_mp(), self.choice.as_ref()) else { return };
+        let (Some(mp), Some(choice)) = (self.far_mp(), self.choice.as_ref()) else {
+            return;
+        };
         let rate = super::digital::upstream_rate(&choice.data, &mp);
         self.upstream_rate = u32::from(rate) * 2400;
-        let Some(framing) = Framing::new(self.settings.upstream.rate, self.upstream_rate, false, mp.expanded_shaping) else {
+        let Some(framing) = Framing::new(
+            self.settings.upstream.rate,
+            self.upstream_rate,
+            false,
+            mp.expanded_shaping,
+        ) else {
             self.fail("no upstream rate both ends allow");
             return;
         };
@@ -3045,12 +3347,19 @@ mod tests {
     /// Where a reader says J'd ended, if it does.
     fn jd_prime_at(signs: &[bool]) -> Option<usize> {
         let mut reader = JdReader::new();
-        signs.iter().enumerate().find_map(|(i, &s)| reader.feed(i as u64, s).then_some(i + 1))
+        signs
+            .iter()
+            .enumerate()
+            .find_map(|(i, &s)| reader.feed(i as u64, s).then_some(i + 1))
     }
 
     #[test]
     fn j_prime_is_read_after_whole_jds() {
-        let jd = Jd { rates: Jd::ALL_RATES, lookahead: 1, ..Jd::default() };
+        let jd = Jd {
+            rates: Jd::ALL_RATES,
+            lookahead: 1,
+            ..Jd::default()
+        };
         let (signs, end) = phase3_signs(&jd, 12);
         assert_eq!(jd_prime_at(&signs), Some(end));
     }
@@ -3061,7 +3370,11 @@ mod tests {
     /// beyond reading at all, and the DIL is found from its own levels.)
     #[test]
     fn j_prime_is_read_after_a_jd_a_slip_cut_into() {
-        let jd = Jd { rates: Jd::ALL_RATES, lookahead: 1, ..Jd::default() };
+        let jd = Jd {
+            rates: Jd::ALL_RATES,
+            lookahead: 1,
+            ..Jd::default()
+        };
         let (mut signs, end) = phase3_signs(&jd, 12);
         let last = end - JD_PRIME_BITS - JD_BITS;
         signs.drain(last - 60..last + 20);
@@ -3071,9 +3384,19 @@ mod tests {
     /// A watch on decisions against levels at 1 and 3, either sign, in every
     /// interval, begun.
     fn watching() -> Decisions {
-        let levels: Levels = std::array::from_fn(|_| vec![(1.0, 1, true), (-1.0, 1, false), (3.0, 3, true), (-3.0, 3, false)]);
+        let levels: Levels = std::array::from_fn(|_| {
+            vec![
+                (1.0, 1, true),
+                (-1.0, 1, false),
+                (3.0, 3, true),
+                (-3.0, 3, false),
+            ]
+        });
         let mut decisions = Decisions::new(&levels);
-        assert!(decisions.look(0).is_none(), "the first look only begins the watch");
+        assert!(
+            decisions.look(0).is_none(),
+            "the first look only begins the watch"
+        );
         decisions
     }
 
@@ -3119,7 +3442,11 @@ mod tests {
         // The error is the distance from the nearer level, outermost or not.
         let errors = [0.1, 0.75, 0.95, 0.9, 0.5, 0.85, 0.9, 0.1, 2.0, 6.0];
         let power: f64 = errors.iter().map(|e| e * e).sum();
-        assert!((decisions.look.power - power).abs() < 1e-9, "{} against {power}", decisions.look.power);
+        assert!(
+            (decisions.look.power - power).abs() < 1e-9,
+            "{} against {power}",
+            decisions.look.power
+        );
     }
 
     /// A stretch of misses dense enough to be garbage and short enough to be
@@ -3134,27 +3461,53 @@ mod tests {
         stretch(&mut decisions, 32, 160);
         assert!(decisions.look(0).is_none(), "held until the next is over");
         symbols(&mut decisions, 0);
-        assert!(decisions.look(0).is_none(), "the packet's look goes, and the one before it");
+        assert!(
+            decisions.look(0).is_none(),
+            "the packet's look goes, and the one before it"
+        );
         symbols(&mut decisions, 0);
-        assert!(decisions.look(0).is_none(), "and the look after it, while the loops come back");
+        assert!(
+            decisions.look(0).is_none(),
+            "and the look after it, while the loops come back"
+        );
         symbols(&mut decisions, 0);
-        assert!(decisions.look(0).is_some(), "and then the line is the line again");
+        assert!(
+            decisions.look(0).is_some(),
+            "and then the line is the line again"
+        );
         // A hundred milliseconds of noise: 800 decisions, a tenth missed.
         let mut decisions = watching();
         stretch(&mut decisions, 80, 800);
         assert!(decisions.look(0).is_none(), "held until the next is over");
         symbols(&mut decisions, 0);
-        assert_eq!(decisions.look(0).map(|l| l.misses), Some(80), "a burst of noise is the line's");
+        assert_eq!(
+            decisions.look(0).map(|l| l.misses),
+            Some(80),
+            "a burst of noise is the line's"
+        );
     }
 
     /// Levels a route's are like, rather than evenly spaced: a quiet pair a
     /// quarter of a unit apart and a loud pair two apart, either sign, in
     /// every interval.
     fn watching_uneven() -> Decisions {
-        let levels: Levels =
-            std::array::from_fn(|_| vec![(1.0, 1, true), (1.5, 2, true), (8.0, 3, true), (12.0, 4, true), (-1.0, 1, false), (-1.5, 2, false), (-8.0, 3, false), (-12.0, 4, false)]);
+        let levels: Levels = std::array::from_fn(|_| {
+            vec![
+                (1.0, 1, true),
+                (1.5, 2, true),
+                (8.0, 3, true),
+                (12.0, 4, true),
+                (-1.0, 1, false),
+                (-1.5, 2, false),
+                (-8.0, 3, false),
+                (-12.0, 4, false),
+            ]
+        });
         let mut decisions = Decisions::new(&levels);
-        assert!(decisions.look(0).is_none(), "the first look only begins the watch");
+        assert!(
+            decisions.look(0).is_none(),
+            "the first look only begins the watch"
+        );
         decisions
     }
 
@@ -3181,12 +3534,18 @@ mod tests {
             1 => 10.0,
             _ => 8.3,
         };
-        for (what, value, stands) in [("noise", &noise as &dyn Fn(usize) -> f64, true), ("made-up audio", &made_up, false)] {
+        for (what, value, stands) in [
+            ("noise", &noise as &dyn Fn(usize) -> f64, true),
+            ("made-up audio", &made_up, false),
+        ] {
             let mut decisions = watching_uneven();
             for n in 0..2000 {
                 decisions.symbol(n % INTERVALS, if n < 160 { value(n) } else { 8.3 });
             }
-            assert!(decisions.look(0).is_none(), "{what}: held until the next is over");
+            assert!(
+                decisions.look(0).is_none(),
+                "{what}: held until the next is over"
+            );
             for n in 0..2000 {
                 decisions.symbol(n % INTERVALS, 8.3);
             }
@@ -3211,14 +3570,25 @@ mod tests {
                 // the line alone, and these are what the equaliser puts out
                 // right through one.
                 decisions.symbol(n % INTERVALS, 8.3);
-                decisions.line(if (100..100 + gap).contains(&n) { 0.0 } else { 1.0 });
+                decisions.line(if (100..100 + gap).contains(&n) {
+                    0.0
+                } else {
+                    1.0
+                });
             }
-            assert!(decisions.look(0).is_none(), "gap {gap}: held until the next is over");
+            assert!(
+                decisions.look(0).is_none(),
+                "gap {gap}: held until the next is over"
+            );
             for n in 0..2000 {
                 decisions.symbol(n % INTERVALS, 8.3);
                 decisions.line(1.0);
             }
-            assert_eq!(decisions.look(0).is_some(), stands, "a gap of {gap} symbols");
+            assert_eq!(
+                decisions.look(0).is_some(),
+                stands,
+                "a gap of {gap} symbols"
+            );
         }
     }
 
@@ -3240,13 +3610,19 @@ mod tests {
             decisions.symbol(n % INTERVALS, 8.3);
             decisions.line(0.0);
         }
-        assert!(decisions.look(0).is_none(), "the hole spoiled the look it fell in");
+        assert!(
+            decisions.look(0).is_none(),
+            "the hole spoiled the look it fell in"
+        );
         for n in 0..2000 {
             decisions.symbol(n % INTERVALS, 8.3);
             decisions.line(1.0);
         }
         // Still a hole at the end of it, not a line the watch has learnt.
-        assert!(decisions.look(0).is_none(), "and the look after it, held for the loops");
+        assert!(
+            decisions.look(0).is_none(),
+            "and the look after it, held for the loops"
+        );
     }
 
     /// A look stands only once the look after it is over, and only if the
@@ -3281,14 +3657,24 @@ mod tests {
     /// how far the call falls.
     #[test]
     fn the_rate_is_chosen_for_the_worst_block_three_looks_reached() {
-        let look = |worst: f64| Look { symbols: 2000, misses: 3, power: 2000.0 * 0.01, worst, spoiled: false };
+        let look = |worst: f64| Look {
+            symbols: 2000,
+            misses: 3,
+            power: 2000.0 * 0.01,
+            worst,
+            spoiled: false,
+        };
         let mut decisions = watching();
         for worst in [0.01, 0.01, 0.04, 0.09, 1.0] {
             decisions.weigh(look(worst));
         }
         // 1.0 and 0.09 are above it, so 0.04 is the block three of them
         // reached, and its RMS is 0.2.
-        assert!((decisions.worst() - 0.2).abs() < 1e-9, "{}", decisions.worst());
+        assert!(
+            (decisions.worst() - 0.2).abs() < 1e-9,
+            "{}",
+            decisions.worst()
+        );
     }
 
     /// No one look is ever enough, however bad, nor a line that misses once
@@ -3298,8 +3684,20 @@ mod tests {
     /// for the worst block the recent looks saw.
     #[test]
     fn evidence_is_enough_after_bad_looks_close_together_and_never_after_one() {
-        let bad = Look { symbols: 2000, misses: 40, power: 2000.0 * 0.04, worst: 0.09, spoiled: false };
-        let margin = Look { symbols: 2000, misses: 2, power: 2000.0 * 0.01, worst: 0.012, spoiled: false };
+        let bad = Look {
+            symbols: 2000,
+            misses: 40,
+            power: 2000.0 * 0.04,
+            worst: 0.09,
+            spoiled: false,
+        };
+        let margin = Look {
+            symbols: 2000,
+            misses: 2,
+            power: 2000.0 * 0.01,
+            worst: 0.012,
+            spoiled: false,
+        };
         let mut decisions = watching();
         assert!(!decisions.weigh(bad));
         assert!(!decisions.weigh(bad));
@@ -3332,7 +3730,8 @@ mod tests {
     ///     --release --lib beep -- --ignored --nocapture
     /// ```
     fn arrived(name: &str) -> Option<Vec<f32>> {
-        let dir = std::env::var("V90_CAPTURES").expect("set V90_CAPTURES to the directory the captures are in");
+        let dir = std::env::var("V90_CAPTURES")
+            .expect("set V90_CAPTURES to the directory the captures are in");
         let path = std::path::Path::new(&dir).join(format!("{name}.wav"));
         if !path.exists() {
             println!("{} is not there, so not tried", path.display());
@@ -3383,25 +3782,47 @@ mod tests {
         for (name, start, beep, retrain) in calls {
             let Some(line) = arrived(name) else { continue };
             tried += 1;
-            let level = first_phase_2(&line, start).v90().and_then(|m| m.settings().tone_b_level);
+            let level = first_phase_2(&line, start)
+                .v90()
+                .and_then(|m| m.settings().tone_b_level);
             let level = level.unwrap_or_else(|| panic!("{name}: phase 2 kept no level"));
             let db = 20.0 * (level / (5339.0 / 32768.0)).log10();
-            assert!(db.abs() < 1.0, "{name}: phase 2 kept {level:.4}, {db:.1} dB off the server's tone B");
+            assert!(
+                db.abs() < 1.0,
+                "{name}: phase 2 kept {level:.4}, {db:.1} dB off the server's tone B"
+            );
             // Where a watch takes a stretch of the line for tone B, if it does.
             let taken = |mut watch: RetrainWatch, from: f64, to: f64| {
-                (sample(from)..sample(to).min(line.len())).find(|&i| watch.feed(f64::from(line[i]), FS)).map(|i| i as f64 / FS)
+                (sample(from)..sample(to).min(line.len()))
+                    .find(|&i| watch.feed(f64::from(line[i]), FS))
+                    .map(|i| i as f64 / FS)
             };
             let watch = || RetrainWatch::new(Role::Call, FS).heard_before(Some(level));
             let blind = || RetrainWatch::new(Role::Call, FS);
             // The beep, and a second of the line before it.
-            assert!(taken(blind(), beep - 1.0, beep + 0.5).is_some(), "{name}: the beep was never tone B even with no level");
-            assert_eq!(taken(watch(), beep - 1.0, beep + 0.5), None, "{name}: the beep at {beep} s was taken for tone B");
+            assert!(
+                taken(blind(), beep - 1.0, beep + 0.5).is_some(),
+                "{name}: the beep was never tone B even with no level"
+            );
+            assert_eq!(
+                taken(watch(), beep - 1.0, beep + 0.5),
+                None,
+                "{name}: the beep at {beep} s was taken for tone B"
+            );
             if let Some(tone) = retrain {
-                let at = taken(blind(), tone - 1.0, tone + 0.5).unwrap_or_else(|| panic!("{name}: the retrain at {tone} s was missed"));
-                assert_eq!(taken(watch(), tone - 1.0, tone + 0.5), Some(at), "{name}: the retrain at {tone} s");
+                let at = taken(blind(), tone - 1.0, tone + 0.5)
+                    .unwrap_or_else(|| panic!("{name}: the retrain at {tone} s was missed"));
+                assert_eq!(
+                    taken(watch(), tone - 1.0, tone + 0.5),
+                    Some(at),
+                    "{name}: the retrain at {tone} s"
+                );
                 // "For more than 50 ms" (9.5.2.2), counted from where the
                 // tone stands clear of the data's echo in its neighbours.
-                assert!(at - tone > 0.050 && at - tone <= 0.075, "{name}: the retrain at {tone} s was taken at {at:.4} s");
+                assert!(
+                    at - tone > 0.050 && at - tone <= 0.075,
+                    "{name}: the retrain at {tone} s was taken at {at:.4} s"
+                );
             }
         }
         assert!(tried > 0, "none of the captures was there");
@@ -3432,10 +3853,22 @@ mod tests {
                 (retrain.phase() != "V.34 tones").then(|| (i as f64 / FS, retrain.phase()))
             })
         };
-        assert_eq!(heard(first.again()), None, "the beep was taken for tone B in the retrain");
+        assert_eq!(
+            heard(first.again()),
+            None,
+            "the beep was taken for tone B in the retrain"
+        );
         let far = first.far_capabilities().expect("no INFO0d");
-        let (at, phase) = heard(phase2::Modem::v90_retrain(Pcm::Analogue, FS, far, first.far_info0d()))
-            .expect("with no level, the beep was not taken for tone B either");
-        assert!((40.06..40.2).contains(&at), "with no level, went on to {phase} at {at:.3} s");
+        let (at, phase) = heard(phase2::Modem::v90_retrain(
+            Pcm::Analogue,
+            FS,
+            far,
+            first.far_info0d(),
+        ))
+        .expect("with no level, the beep was not taken for tone B either");
+        assert!(
+            (40.06..40.2).contains(&at),
+            "with no level, went on to {phase} at {at:.3} s"
+        );
     }
 }

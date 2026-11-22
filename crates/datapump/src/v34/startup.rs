@@ -19,7 +19,10 @@ pub enum Status {
     /// Phase 4 is over but the two MPs left no data mode to run.
     Done,
     /// In data mode, at these rates in bit/s.
-    Connected { transmit: u32, receive: u32 },
+    Connected {
+        transmit: u32,
+        receive: u32,
+    },
     /// Back from data mode at MP, for a rate renegotiation or a cleardown.
     Retraining,
     /// A cleardown has ended the call.
@@ -82,11 +85,16 @@ impl Modem {
     }
 
     pub fn status(&self) -> Status {
-        match (self.phase2.status(), self.training.as_ref().map(training::Modem::status)) {
+        match (
+            self.phase2.status(),
+            self.training.as_ref().map(training::Modem::status),
+        ) {
             (phase2::Status::Failed(why), _) => Status::Failed(why),
             (_, Some(training::Status::Failed(why))) => Status::Failed(why),
             (_, Some(training::Status::Done)) => Status::Done,
-            (_, Some(training::Status::Connected { transmit, receive })) => Status::Connected { transmit, receive },
+            (_, Some(training::Status::Connected { transmit, receive })) => {
+                Status::Connected { transmit, receive }
+            }
             (_, Some(training::Status::Retraining)) => Status::Retraining,
             (_, Some(training::Status::ClearedDown)) => Status::ClearedDown,
             // Phase 2 running again after a call was up is a retrain, not a
@@ -100,12 +108,17 @@ impl Modem {
     /// Begin a full retrain from data mode (11.5): go back through phase 2 and
     /// train again. False, and nothing done, outside data mode.
     pub fn retrain(&mut self) -> bool {
-        self.training.as_mut().is_some_and(training::Modem::start_retrain)
+        self.training
+            .as_mut()
+            .is_some_and(training::Modem::start_retrain)
     }
 
     /// Data received.
     pub fn take_bits(&mut self) -> Vec<bool> {
-        self.training.as_mut().map(training::Modem::take_bits).unwrap_or_default()
+        self.training
+            .as_mut()
+            .map(training::Modem::take_bits)
+            .unwrap_or_default()
     }
 
     /// Data to send, once in data mode.
@@ -116,7 +129,9 @@ impl Modem {
     }
 
     pub fn pending_bits(&self) -> usize {
-        self.training.as_ref().map_or(0, training::Modem::pending_bits)
+        self.training
+            .as_ref()
+            .map_or(0, training::Modem::pending_bits)
     }
 
     /// Whether there is anything to send bits into.
@@ -132,17 +147,23 @@ impl Modem {
     /// Start a rate renegotiation from data mode, offering to receive no
     /// faster than `receive` times 2400 bit/s. False outside data mode.
     pub fn renegotiate(&mut self, receive: u8) -> bool {
-        self.training.as_mut().is_some_and(|t| t.renegotiate(receive))
+        self.training
+            .as_mut()
+            .is_some_and(|t| t.renegotiate(receive))
     }
 
     /// Rate renegotiations and cleardowns since the call began.
     pub fn renegotiations(&self) -> u32 {
-        self.training.as_ref().map_or(0, training::Modem::renegotiations)
+        self.training
+            .as_ref()
+            .map_or(0, training::Modem::renegotiations)
     }
 
     /// Clear the call down from data mode (11.7). False outside data mode.
     pub fn clear_down(&mut self) -> bool {
-        self.training.as_mut().is_some_and(training::Modem::clear_down)
+        self.training
+            .as_mut()
+            .is_some_and(training::Modem::clear_down)
     }
 
     /// Whether the far end's data signal is there.
@@ -162,7 +183,9 @@ impl Modem {
     /// Points in the constellation the far end is read against, once phase 3
     /// has trained the receiver.
     pub fn constellation_size(&self) -> Option<usize> {
-        self.training.as_ref().map(training::Modem::constellation_size)
+        self.training
+            .as_ref()
+            .map(training::Modem::constellation_size)
     }
 
     /// Signal to noise of the decisions being made, in decibels, once phase 3
@@ -174,7 +197,9 @@ impl Modem {
     /// The largest coordinate those points reach, in the units of
     /// [`Self::constellation_point`].
     pub fn constellation_peak(&self) -> Option<f64> {
-        self.training.as_ref().map(training::Modem::constellation_peak)
+        self.training
+            .as_ref()
+            .map(training::Modem::constellation_peak)
     }
 
     pub fn phase(&self) -> &'static str {
@@ -244,7 +269,9 @@ impl Modem {
             return out;
         }
         if self.phase2.status() == phase2::Status::Done {
-            self.training = self.settings().map(|settings| training::Modem::new(settings, self.fs));
+            self.training = self
+                .settings()
+                .map(|settings| training::Modem::new(settings, self.fs));
         }
         out
     }
@@ -256,7 +283,14 @@ impl Modem {
         let info1a = self.phase2.info1a()?;
         // This end has the 1664-point constellation, as its INFO0 says.
         let wide = far.constellation_1664;
-        Some(Settings::new(self.phase2.role(), &far, &info1c, &info1a, self.phase2.round_trip().unwrap_or(0.0), wide))
+        Some(Settings::new(
+            self.phase2.role(),
+            &far,
+            &info1c,
+            &info1a,
+            self.phase2.round_trip().unwrap_or(0.0),
+            wide,
+        ))
     }
 }
 
@@ -273,8 +307,10 @@ mod tests {
         let delay = (one_way * FS) as usize;
         let mut caller = Modem::new(Role::Call, FS);
         let mut answerer = Modem::new(Role::Answer, FS);
-        let mut to_answer: std::collections::VecDeque<f64> = std::iter::repeat_n(0.0, delay).collect();
-        let mut to_call: std::collections::VecDeque<f64> = std::iter::repeat_n(0.0, delay).collect();
+        let mut to_answer: std::collections::VecDeque<f64> =
+            std::iter::repeat_n(0.0, delay).collect();
+        let mut to_call: std::collections::VecDeque<f64> =
+            std::iter::repeat_n(0.0, delay).collect();
         let mut seed = 7u32;
         let mut noise = move || {
             seed ^= seed << 13;
@@ -303,14 +339,24 @@ mod tests {
     #[test]
     fn two_ends_go_from_info0_to_e() {
         let (caller, answerer, _, phases) = run(0.030, 25.0);
-        assert!(matches!(caller.status(), Status::Connected { .. }), "call modem went {phases:?}");
-        assert!(matches!(answerer.status(), Status::Connected { .. }), "answer modem stuck at {}", answerer.phase());
+        assert!(
+            matches!(caller.status(), Status::Connected { .. }),
+            "call modem went {phases:?}"
+        );
+        assert!(
+            matches!(answerer.status(), Status::Connected { .. }),
+            "answer modem stuck at {}",
+            answerer.phase()
+        );
         let (call, answer) = (caller.training().unwrap(), answerer.training().unwrap());
         assert_eq!(call.far_asked(), Some(Size::Sixteen));
         assert_eq!(call.rates(), answer.rates().map(|(tx, rx)| (rx, tx)));
         // Phase 2 settled 3429 symbols a second both ways on a clean line,
         // and that is what phases 3 and 4 ran at.
-        assert_eq!(call.settings().transmit.rate, crate::v34::info::SymbolRate::S3429);
+        assert_eq!(
+            call.settings().transmit.rate,
+            crate::v34::info::SymbolRate::S3429
+        );
         assert_eq!(call.rates(), Some((14, 14)));
     }
 
@@ -319,8 +365,10 @@ mod tests {
         let delay = (0.030 * FS) as usize;
         let mut caller = Modem::new(Role::Call, FS);
         let mut answerer = Modem::new(Role::Answer, FS);
-        let mut to_answer: std::collections::VecDeque<f64> = std::iter::repeat_n(0.0, delay).collect();
-        let mut to_call: std::collections::VecDeque<f64> = std::iter::repeat_n(0.0, delay).collect();
+        let mut to_answer: std::collections::VecDeque<f64> =
+            std::iter::repeat_n(0.0, delay).collect();
+        let mut to_call: std::collections::VecDeque<f64> =
+            std::iter::repeat_n(0.0, delay).collect();
         let from_call: Vec<bool> = (0..3000).map(|i| (i * 37 + 11) % 7 < 3).collect();
         let from_answer: Vec<bool> = (0..3000).map(|i| (i * 13 + 5) % 5 < 2).collect();
         let (mut at_call, mut at_answer) = (Vec::new(), Vec::new());
@@ -345,16 +393,37 @@ mod tests {
                 at_answer.extend(answerer.take_bits());
                 // The scope's constellation: 1408 points, minimum shaping.
                 assert_eq!(caller.constellation_size(), Some(1408));
-                assert!(caller.constellation_peak().is_some_and(|p| (1.3..2.0).contains(&p)), "{:?}", caller.constellation_peak());
+                assert!(
+                    caller
+                        .constellation_peak()
+                        .is_some_and(|p| (1.3..2.0).contains(&p)),
+                    "{:?}",
+                    caller.constellation_peak()
+                );
                 if after > (0.5 * FS) as usize {
                     break;
                 }
             }
         }
-        assert!(sent, "never connected: {} and {}", caller.phase(), answerer.phase());
-        let contains = |haystack: &[bool], needle: &[bool]| haystack.windows(needle.len()).any(|w| w == needle);
-        assert!(contains(&at_answer, &from_call), "call to answer lost ({} bits)", at_answer.len());
-        assert!(contains(&at_call, &from_answer), "answer to call lost ({} bits)", at_call.len());
+        assert!(
+            sent,
+            "never connected: {} and {}",
+            caller.phase(),
+            answerer.phase()
+        );
+        let contains = |haystack: &[bool], needle: &[bool]| {
+            haystack.windows(needle.len()).any(|w| w == needle)
+        };
+        assert!(
+            contains(&at_answer, &from_call),
+            "call to answer lost ({} bits)",
+            at_answer.len()
+        );
+        assert!(
+            contains(&at_call, &from_answer),
+            "answer to call lost ({} bits)",
+            at_call.len()
+        );
     }
 
     /// A call that is up, a retrain, and the call up again -- the whole of
@@ -366,8 +435,10 @@ mod tests {
         let delay = (0.030 * FS) as usize;
         let mut caller = Modem::new(Role::Call, FS);
         let mut answerer = Modem::new(Role::Answer, FS);
-        let mut to_answer: std::collections::VecDeque<f64> = std::iter::repeat_n(0.0, delay).collect();
-        let mut to_call: std::collections::VecDeque<f64> = std::iter::repeat_n(0.0, delay).collect();
+        let mut to_answer: std::collections::VecDeque<f64> =
+            std::iter::repeat_n(0.0, delay).collect();
+        let mut to_call: std::collections::VecDeque<f64> =
+            std::iter::repeat_n(0.0, delay).collect();
         let up = |m: &Modem| matches!(m.status(), Status::Connected { .. });
 
         let mut asked = false;
@@ -417,8 +488,10 @@ mod tests {
         let delay = (0.030 * FS) as usize;
         let mut caller = Modem::new(Role::Call, FS);
         let mut answerer = Modem::new(Role::Answer, FS);
-        let mut to_answer: std::collections::VecDeque<f64> = std::iter::repeat_n(0.0, delay).collect();
-        let mut to_call: std::collections::VecDeque<f64> = std::iter::repeat_n(0.0, delay).collect();
+        let mut to_answer: std::collections::VecDeque<f64> =
+            std::iter::repeat_n(0.0, delay).collect();
+        let mut to_call: std::collections::VecDeque<f64> =
+            std::iter::repeat_n(0.0, delay).collect();
         let up = |m: &Modem| matches!(m.status(), Status::Connected { .. });
         // When the answer modem began INFO1a, by its own clock.
         let mut info1a_at = None;
@@ -448,7 +521,12 @@ mod tests {
         }
         assert!(info1a_at.is_some(), "the answer modem never sent INFO1a");
         assert_eq!(failed, None, "the call modem gave up");
-        assert!(up(&caller) && up(&answerer), "never came up: {} and {}", caller.phase(), answerer.phase());
+        assert!(
+            up(&caller) && up(&answerer),
+            "never came up: {} and {}",
+            caller.phase(),
+            answerer.phase()
+        );
         // Phase 2 was run again by both; phase 3 and 4 settled as normal.
         assert!(caller.phase2().info1a().is_some());
         assert_eq!(caller.training().unwrap().rates(), Some((14, 14)));
@@ -482,7 +560,15 @@ mod tests {
         // The last gap before phase 3's S: phase 4's S follows a silence of
         // round trips, and INFO1a's is the one before that.
         let silences: Vec<f64> = gaps.iter().map(|(_, n)| *n as f64 / FS * 1000.0).collect();
-        let before_s = gaps.iter().rev().nth(1).map(|(_, n)| *n as f64 / FS * 1000.0).expect("no gaps");
-        assert!((65.0..=75.0).contains(&before_s), "{before_s:.1} ms; gaps {silences:?}");
+        let before_s = gaps
+            .iter()
+            .rev()
+            .nth(1)
+            .map(|(_, n)| *n as f64 / FS * 1000.0)
+            .expect("no gaps");
+        assert!(
+            (65.0..=75.0).contains(&before_s),
+            "{before_s:.1} ms; gaps {silences:?}"
+        );
     }
 }

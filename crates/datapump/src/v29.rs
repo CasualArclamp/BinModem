@@ -168,11 +168,17 @@ pub mod train {
 
 /// Figure 4: A, "a relative amplitude of 3 and ... the absolute phase
 /// reference of 180 degrees" (8.1).
-pub const A: Point = Point { eighths: 4, outer: false };
+pub const A: Point = Point {
+    eighths: 4,
+    outer: false,
+};
 
 /// Figure 4: C, "a relative amplitude of 3 and absolute phase of 0 degrees"
 /// (8.2).
-pub const C: Point = Point { eighths: 0, outer: false };
+pub const C: Point = Point {
+    eighths: 0,
+    outer: false,
+};
 
 /// Figure 4: B, the second point of segment 2, which depends on the rate.
 ///
@@ -181,18 +187,36 @@ pub const C: Point = Point { eighths: 0, outer: false };
 /// same slicer as the data.
 pub fn b(rate: Rate) -> Point {
     match rate {
-        Rate::R4800 => Point { eighths: 6, outer: false },
-        Rate::R7200 => Point { eighths: 7, outer: false },
-        Rate::R9600 => Point { eighths: 7, outer: true },
+        Rate::R4800 => Point {
+            eighths: 6,
+            outer: false,
+        },
+        Rate::R7200 => Point {
+            eighths: 7,
+            outer: false,
+        },
+        Rate::R9600 => Point {
+            eighths: 7,
+            outer: true,
+        },
     }
 }
 
 /// Figure 4: D, the second point of segment 3, always opposite B.
 pub fn d(rate: Rate) -> Point {
     match rate {
-        Rate::R4800 => Point { eighths: 2, outer: false },
-        Rate::R7200 => Point { eighths: 3, outer: false },
-        Rate::R9600 => Point { eighths: 3, outer: true },
+        Rate::R4800 => Point {
+            eighths: 2,
+            outer: false,
+        },
+        Rate::R7200 => Point {
+            eighths: 3,
+            outer: false,
+        },
+        Rate::R9600 => Point {
+            eighths: 3,
+            outer: true,
+        },
     }
 }
 
@@ -220,7 +244,9 @@ impl Conditioning {
     const INITIAL: u8 = 0b010_1010;
 
     pub fn new() -> Self {
-        Self { register: Self::INITIAL }
+        Self {
+            register: Self::INITIAL,
+        }
     }
 
     /// The register as Appendix I writes it, stage 1 first.
@@ -540,18 +566,30 @@ impl Transmitter {
 /// symbols short of the data, which is time for the training to be done
 /// before the data begins, and 48 bits or more for the descrambler to have
 /// the far end's register before the first data bit reaches it.
-const FIRST: Window = Window { align: (8, 200), solve: (8, 408), search: 8 };
+const FIRST: Window = Window {
+    align: (8, 200),
+    solve: (8, 408),
+    search: 8,
+};
 
 /// The second try, when the first fits nothing: the second half of the known
 /// sequence, searched a hundred symbols either way. A slip in the first
 /// half -- twenty milliseconds of a concealment is 48 symbols -- spoils the
 /// first try and moves the second half, which this finds.
-const RETRY: Window = Window { align: (216, 424), solve: (216, 424), search: 200 };
+const RETRY: Window = Window {
+    align: (216, 424),
+    solve: (216, 424),
+    search: 200,
+};
 
 /// The first try when segment 2 ended without turning into segment 3, which
 /// is then only guessed to begin where segment 2 stopped: searched sixty
 /// symbols either way, which a concealment across the join is well inside.
-const LAPSED: Window = Window { align: (8, 200), solve: (8, 408), search: 120 };
+const LAPSED: Window = Window {
+    align: (8, 200),
+    solve: (8, 408),
+    search: 120,
+};
 
 /// Symbols of segments 3 and 4 together: everything the far end sends that
 /// the receiver knows in advance, after segment 2.
@@ -633,7 +671,10 @@ fn known_sequence(rate: Rate) -> Vec<Point> {
     let mut tx = Transmitter::new(8000.0);
     tx.start(rate);
     let skipped = train::SILENCE + train::ALTERNATIONS;
-    (0..skipped + KNOWN as u32).filter_map(|_| tx.next_symbol()).skip(train::ALTERNATIONS as usize).collect()
+    (0..skipped + KNOWN as u32)
+        .filter_map(|_| tx.next_symbol())
+        .skip(train::ALTERNATIONS as usize)
+        .collect()
 }
 
 /// Q1 to Q4 of a symbol, by 2.2 backwards: the change of phase from the one
@@ -642,7 +683,12 @@ fn known_sequence(rate: Rate) -> Vec<Point> {
 fn carried(rate: Rate, previous: Point, decided: Point) -> ([bool; 4], std::ops::Range<usize>) {
     let change = (decided.eighths + 8 - previous.eighths) & 7;
     let tribit = TURN_TRIBIT[usize::from(change)];
-    let q = [decided.outer, tribit & 0b100 != 0, tribit & 0b010 != 0, tribit & 0b001 != 0];
+    let q = [
+        decided.outer,
+        tribit & 0b100 != 0,
+        tribit & 0b010 != 0,
+        tribit & 0b001 != 0,
+    ];
     match rate {
         Rate::R9600 => (q, 0..4),
         // 2.2.2: Q1 is always a ZERO.
@@ -817,7 +863,11 @@ impl Receiver {
     /// unit circle a scope draws its box at.
     pub fn constellation_peak(&self) -> f64 {
         let rms = self.rate.rms();
-        self.labels.iter().map(|p| p.xy()).map(|(x, y)| x.abs().max(y.abs()) / rms).fold(0.0, f64::max)
+        self.labels
+            .iter()
+            .map(|p| p.xy())
+            .map(|(x, y)| x.abs().max(y.abs()) / rms)
+            .fold(0.0, f64::max)
     }
 
     /// Mean distance of the symbols from the nearest point, in the units
@@ -862,7 +912,11 @@ impl Receiver {
                 // one (8, 10): whatever was being read is over either way.
                 self.core = None;
                 self.pending = None;
-                self.burst = Some(Burst { level, quiet: 0, heard: true });
+                self.burst = Some(Burst {
+                    level,
+                    quiet: 0,
+                    heard: true,
+                });
                 self.power = level.power;
             }
             Some(Found::Reversal { at, turn, level }) => self.join(at, turn, level, FIRST),
@@ -873,7 +927,10 @@ impl Receiver {
             core.feed(sample);
             // The training the join called for, now that its first window is
             // all in, from the samples the core kept.
-            if self.pending.as_ref().is_some_and(|(_, due)| core.halves() >= *due)
+            if self
+                .pending
+                .as_ref()
+                .is_some_and(|(_, due)| core.halves() >= *due)
                 && let Some((training, _)) = self.pending.take()
             {
                 core.train(training);
@@ -890,12 +947,20 @@ impl Receiver {
     fn join(&mut self, at: f64, turn: f64, level: Level, first: Window) {
         let half = self.fs / BAUD / 2.0;
         let now = self.hunt.taken() - 1;
-        let from = (at - CORE_FIRST_HALF - LEAD_HALVES * half).floor().max(self.hunt.first_kept() as f64) as u64;
-        let mut core = Core::new(Band::new(self.fs, BAUD, CARRIER), Options::fixed(), self.slicer.clone());
+        let from = (at - CORE_FIRST_HALF - LEAD_HALVES * half)
+            .floor()
+            .max(self.hunt.first_kept() as f64) as u64;
+        let mut core = Core::new(
+            Band::new(self.fs, BAUD, CARRIER),
+            Options::fixed(),
+            self.slicer.clone(),
+        );
         for index in from..now {
             core.feed(self.hunt.raw(index).unwrap_or(0.0));
         }
-        let start = ((at - from as f64 - CORE_FIRST_HALF) / half).round().max(0.0) as u64;
+        let start = ((at - from as f64 - CORE_FIRST_HALF) / half)
+            .round()
+            .max(0.0) as u64;
         let training = Training {
             targets: self.targets.clone(),
             start,
@@ -910,7 +975,11 @@ impl Receiver {
         self.pending = Some((training, due(start, first)));
         self.windows = (first, RETRY);
         self.core = Some(core);
-        let burst = self.burst.get_or_insert(Burst { level, quiet: 0, heard: true });
+        let burst = self.burst.get_or_insert(Burst {
+            level,
+            quiet: 0,
+            heard: true,
+        });
         burst.level = level;
         self.power = level.power;
     }
@@ -925,7 +994,11 @@ impl Receiver {
         for h in heard {
             match h {
                 Heard::Trained { via, .. } => {
-                    let end = if via == Via::Retry { self.windows.1.solve.1 } else { self.windows.0.solve.1 };
+                    let end = if via == Via::Retry {
+                        self.windows.1.solve.1
+                    } else {
+                        self.windows.0.solve.1
+                    };
                     self.prime(end);
                 }
                 // Nothing fitted: the join was not one, or the burst is too
@@ -974,7 +1047,9 @@ impl Receiver {
             return;
         }
         while let Some(point) = core.next() {
-            let Some(symbol) = core.settle(point.nearest) else { break };
+            let Some(symbol) = core.settle(point.nearest) else {
+                break;
+            };
             let decided = self.labels[point.label.unwrap_or(0)];
             if let Some(previous) = self.previous.replace(decided) {
                 let (q, data) = carried(self.rate, previous, decided);
@@ -997,11 +1072,16 @@ impl Receiver {
     /// While the burst is heard and nothing is trained yet, the line as it
     /// arrives, a symbol apart.
     fn show_arriving(&mut self) {
-        let Some(burst) = self.burst.filter(|b| b.heard && b.quiet == 0) else { return };
+        let Some(burst) = self.burst.filter(|b| b.heard && b.quiet == 0) else {
+            return;
+        };
         self.showing -= 1.0;
         if self.showing <= 0.0 {
             self.showing += self.fs / BAUD;
-            let z = self.hunt.newest().scale(1.0 / burst.level.power.max(1e-30).sqrt());
+            let z = self
+                .hunt
+                .newest()
+                .scale(1.0 / burst.level.power.max(1e-30).sqrt());
             self.last_symbol = (z.re, z.im);
         }
     }
@@ -1015,7 +1095,10 @@ impl Receiver {
         } else {
             burst.quiet = 0;
         }
-        let tracking = self.core.as_ref().is_some_and(|c| c.is_tracking() && !c.is_lost());
+        let tracking = self
+            .core
+            .as_ref()
+            .is_some_and(|c| c.is_tracking() && !c.is_lost());
         if burst.quiet as f64 >= QUIET_OFF_SECONDS * self.fs {
             burst.heard = false;
         } else if burst.quiet == 0 && !burst.heard && (tracking || self.hunt.is_armed()) {
@@ -1089,7 +1172,10 @@ mod tests {
             (1, true, 3.0 * sqrt2),
         ] {
             for turn in [0, 2, 4, 6] {
-                let p = Point { eighths: eighths + turn, outer };
+                let p = Point {
+                    eighths: eighths + turn,
+                    outer,
+                };
                 assert!(
                     (radius(p) - want).abs() < 1e-12,
                     "{p:?} is at {}, Table 2 says {want}",
@@ -1101,7 +1187,10 @@ mod tests {
         assert_eq!(Rate::R7200.constellation().len(), 8);
         assert_eq!(Rate::R4800.constellation().len(), 4);
         assert!(
-            Rate::R4800.constellation().iter().all(|p| (radius(*p) - 3.0).abs() < 1e-12),
+            Rate::R4800
+                .constellation()
+                .iter()
+                .all(|p| (radius(*p) - 3.0).abs() < 1e-12),
             "2.2.3: the amplitude is constant with a relative value of 3"
         );
     }
@@ -1166,7 +1255,10 @@ mod tests {
             conditions.push(format!("{:07b}", g.condition()));
             symbols.push(if g.next_bit() { 'D' } else { 'C' });
         }
-        assert_eq!(conditions[..4], ["0101010", "1010101", "1101010", "1110101"]);
+        assert_eq!(
+            conditions[..4],
+            ["0101010", "1010101", "1101010", "1110101"]
+        );
         assert_eq!(symbols, "CDCDCDC");
     }
 
@@ -1258,10 +1350,13 @@ mod tests {
         let up = up.expect("no carrier found");
         // Segment 1 is twenty milliseconds of nothing, so not before that.
         assert!((up as f64) > FS * 0.019, "found a carrier in the silence");
-        assert!((up as f64) < FS * 0.1, "took {} ms", up as f64 * 1000.0 / FS);
+        assert!(
+            (up as f64) < FS * 0.1,
+            "took {} ms",
+            up as f64 * 1000.0 / FS
+        );
         assert!(down.is_some(), "the carrier never went away");
     }
-
 
     #[test]
     fn a_line_forty_decibels_down_is_the_same_line_quieter() {
@@ -1305,7 +1400,6 @@ mod tests {
             );
         }
     }
-
 
     /// Run one burst through a transmitter whose carrier is `hz` off, into a
     /// receiver that started `skew` samples before it, down a line `scale`
@@ -1376,7 +1470,11 @@ mod tests {
         // made as soon as the interpolating filter's other half is there too.
         // If the core changed that, every burst would be trained in the wrong
         // place, so it is held here.
-        let mut core = Core::new(Band::new(FS, BAUD, CARRIER), Options::fixed(), table(Rate::R9600));
+        let mut core = Core::new(
+            Band::new(FS, BAUD, CARRIER),
+            Options::fixed(),
+            table(Rate::R9600),
+        );
         let reach = CORE_FIRST_HALF as usize / 2;
         for _ in 0..CORE_FIRST_HALF as usize + reach {
             core.feed(0.0);

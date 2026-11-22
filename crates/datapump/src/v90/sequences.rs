@@ -100,7 +100,9 @@ pub const DOWNSTREAM_RATES: usize = 22;
 /// The downstream rate a data mode `drn` names: "(drn+20)*8000/6 in CP"
 /// (Table 14/V.90), so 1 is 28 000 and 22 is 56 000. Zero is cleardown.
 pub fn data_rate(drn: u8) -> Option<u32> {
-    (1..=DOWNSTREAM_RATES as u8).contains(&drn).then(|| super::rate_for(u32::from(drn) + 20))
+    (1..=DOWNSTREAM_RATES as u8)
+        .contains(&drn)
+        .then(|| super::rate_for(u32::from(drn) + 20))
 }
 
 /// And the frame bits D it carries, which is `drn + 20`.
@@ -277,7 +279,13 @@ impl Descriptor {
     /// A descriptor asking for no DIL at all: "When N = 0, DIL is not
     /// transmitted", and the patterns then have "no significance".
     pub fn none() -> Self {
-        Self { signs: vec![false], training: vec![false], h: [0; 8], refs: [0; 8], ucodes: Vec::new() }
+        Self {
+            signs: vec![false],
+            training: vec![false],
+            h: [0; 8],
+            refs: [0; 8],
+            ucodes: Vec::new(),
+        }
     }
 
     /// How long a segment training `ucode` is, in symbols (8.4.1).
@@ -330,7 +338,10 @@ impl Descriptor {
             // "LSP - 1 = LTP - 1 = 0 when N = 0."
             (&[false][..], &[false][..])
         } else {
-            (&self.signs[..self.signs.len().clamp(1, 128)], &self.training[..self.training.len().clamp(1, 128)])
+            (
+                &self.signs[..self.signs.len().clamp(1, 128)],
+                &self.training[..self.training.len().clamp(1, 128)],
+            )
         };
         let mut information = Vec::new();
         put(&mut information, n as u32, 8);
@@ -349,7 +360,12 @@ impl Descriptor {
         // H1 to H8, then REF1 to REF8, then the training Ucodes: seven bits
         // each and a reserved bit after, two to a block, with "9 reserved bits
         // to fill the final 16 bits if N is odd".
-        for value in self.h.iter().chain(self.refs.iter()).chain(self.ucodes[..n].iter()) {
+        for value in self
+            .h
+            .iter()
+            .chain(self.refs.iter())
+            .chain(self.ucodes[..n].iter())
+        {
             put(&mut information, u32::from(*value & 0x7f), 7);
             information.push(false);
         }
@@ -412,7 +428,16 @@ impl Descriptor {
             let mask = v90_blocks * BLOCK;
             get(&information, mask, BLOCK) | get(&information, mask + BLOCK, 3) << BLOCK
         });
-        Some((Self { signs, training, h, refs, ucodes }, rates))
+        Some((
+            Self {
+                signs,
+                training,
+                h,
+                refs,
+                ucodes,
+            },
+            rates,
+        ))
     }
 }
 
@@ -428,7 +453,10 @@ impl Descriptor {
 /// no complaint, so it is an assertion here rather than a silent one: the
 /// `max` is only so that a shipped build limps instead of dividing by zero.
 fn pad_unit(bits: usize) -> usize {
-    debug_assert!(bits > 0, "a V.92 sequence fills to a whole number of symbols, not to none");
+    debug_assert!(
+        bits > 0,
+        "a V.92 sequence fills to a whole number of symbols, not to none"
+    );
     bits.max(1)
 }
 
@@ -529,18 +557,29 @@ pub const CP_TYPE_CPU: u32 = 1;
 impl Cp {
     /// A CP' of this.
     pub fn acknowledged(&self) -> Self {
-        Self { acknowledge: true, ..self.clone() }
+        Self {
+            acknowledge: true,
+            ..self.clone()
+        }
     }
 
     /// The frame bits D this CP's rate carries.
     pub fn frame_bits(&self) -> usize {
-        if self.data_mode { data_bits(self.drn) } else { training_bits(self.drn) }
+        if self.data_mode {
+            data_bits(self.drn)
+        } else {
+            training_bits(self.drn)
+        }
     }
 
     /// The Ucodes of the constellation data frame interval `i` uses, as the
     /// digital modem is to send them.
     pub fn points(&self, i: usize) -> Vec<u8> {
-        let mask = self.constellations.get(usize::from(self.intervals[i])).copied().unwrap_or(0);
+        let mask = self
+            .constellations
+            .get(usize::from(self.intervals[i]))
+            .copied()
+            .unwrap_or(0);
         (0..UCODES as u8).filter(|&u| mask >> u & 1 == 1).collect()
     }
 
@@ -584,7 +623,11 @@ impl Cp {
 
         information.push(self.a_law);
         // 36:48: the upstream rate mask in V.90, reserved in V.92.
-        let upstream = if layout == Layout::V92 { 0 } else { u32::from(self.upstream_rates) };
+        let upstream = if layout == Layout::V92 {
+            0
+        } else {
+            u32::from(self.upstream_rates)
+        };
         put(&mut information, upstream, 13);
         put(&mut information, u32::from(self.lookahead), 2);
 
@@ -601,8 +644,15 @@ impl Cp {
         // "Only the number of different constellations need to be sent", and
         // how many that is follows from the largest index.
         let count = usize::from(self.intervals.iter().copied().max().unwrap_or(0)) + 1;
-        let masks = self.constellations.iter().chain(self.codec.iter().flatten());
-        let wanted = if self.codec.is_some() { 2 * count } else { count };
+        let masks = self
+            .constellations
+            .iter()
+            .chain(self.codec.iter().flatten());
+        let wanted = if self.codec.is_some() {
+            2 * count
+        } else {
+            count
+        };
         for mask in masks.take(wanted) {
             for chord in 0..8 {
                 put(&mut information, (mask >> (16 * chord)) as u32 & 0xffff, 16);
@@ -655,7 +705,9 @@ impl Cp {
         let information = unframe(bits, CP_HEADER_BLOCKS + MASK_BLOCKS * masks)?;
         let mask = |k: usize| -> Mask {
             let from = CP_HEADER_BLOCKS * BLOCK + k * MASK_BLOCKS * BLOCK;
-            (0..MASK_BLOCKS).fold(0, |m, chord| m | Mask::from(get(&information, from + chord * BLOCK, 16)) << (16 * chord))
+            (0..MASK_BLOCKS).fold(0, |m, chord| {
+                m | Mask::from(get(&information, from + chord * BLOCK, 16)) << (16 * chord)
+            })
         };
         let constellations: Vec<Mask> = (0..count).map(mask).collect();
         let codec = codec.then(|| (count..2 * count).map(mask).collect());
@@ -663,10 +715,18 @@ impl Cp {
         // absolute bit 18 + i here, so V.90 reads 19, 20:24 and 30 where V.92
         // reads 19:20 and 21:25 and has nothing at all.
         let (data_mode, drn, silence, upstream_rates) = match layout {
-            Layout::V90 => {
-                (information[1], get(&information, 2, 5) as u8, information[12], get(&information, 17, 13) as u16)
-            }
-            Layout::V92 => (get(&information, 1, 2) == CP_TYPE_CPU, get(&information, 3, 5) as u8, false, 0),
+            Layout::V90 => (
+                information[1],
+                get(&information, 2, 5) as u8,
+                information[12],
+                get(&information, 17, 13) as u16,
+            ),
+            Layout::V92 => (
+                get(&information, 1, 2) == CP_TYPE_CPU,
+                get(&information, 3, 5) as u8,
+                false,
+                0,
+            ),
         };
         Some(Self {
             data_mode,
@@ -726,7 +786,12 @@ struct Finder<T> {
 }
 
 impl<T> Finder<T> {
-    fn new(header_blocks: usize, shape: Shape, length: fn(Shape, &[bool]) -> usize, parse: fn(Shape, &[bool]) -> Option<T>) -> Self {
+    fn new(
+        header_blocks: usize,
+        shape: Shape,
+        length: fn(Shape, &[bool]) -> usize,
+        parse: fn(Shape, &[bool]) -> Option<T>,
+    ) -> Self {
         Self {
             bits: Vec::new(),
             ones: 0,
@@ -770,7 +835,11 @@ impl<T> Finder<T> {
             self.starts.clear();
         }
         // Keep what the oldest candidate needs, or the last sync's worth.
-        let keep_from = self.starts.first().copied().unwrap_or(self.bits.len().saturating_sub(SYNC_ONES));
+        let keep_from = self
+            .starts
+            .first()
+            .copied()
+            .unwrap_or(self.bits.len().saturating_sub(SYNC_ONES));
         if keep_from > 4096 {
             self.bits.drain(..keep_from);
             for start in &mut self.starts {
@@ -850,9 +919,15 @@ impl DescriptorFinder {
     }
 
     fn reading(layout: Layout) -> Self {
-        let shape = Shape { layout, pad_unit: JA_UNIT_BITS };
+        let shape = Shape {
+            layout,
+            pad_unit: JA_UNIT_BITS,
+        };
         let parse = |shape: Shape, bits: &[bool]| Descriptor::from_bits_in(shape.layout, bits);
-        Self { finder: Finder::new(2, shape, descriptor_length, parse), upstream_rates: None }
+        Self {
+            finder: Finder::new(2, shape, descriptor_length, parse),
+            upstream_rates: None,
+        }
     }
 
     pub fn feed(&mut self, bit: bool) -> Option<Descriptor> {
@@ -877,7 +952,10 @@ pub struct CpFinder(Finder<Cp>);
 
 impl Default for CpFinder {
     fn default() -> Self {
-        Self(Self::finder(Shape { layout: Layout::V90, pad_unit: 1 }))
+        Self(Self::finder(Shape {
+            layout: Layout::V90,
+            pad_unit: 1,
+        }))
     }
 }
 
@@ -886,7 +964,10 @@ impl CpFinder {
     /// [`Cp::to_bits_in`] takes it. CPus (type 2, Table 24/V.92) is a
     /// different table and is not found here.
     pub fn v92(pad_unit_bits: usize) -> Self {
-        Self(Self::finder(Shape { layout: Layout::V92, pad_unit: pad_unit(pad_unit_bits) }))
+        Self(Self::finder(Shape {
+            layout: Layout::V92,
+            pad_unit: pad_unit(pad_unit_bits),
+        }))
     }
 
     fn finder(shape: Shape) -> Finder<Cp> {
@@ -909,7 +990,13 @@ impl CpFinder {
 /// sequence length to the next multiple of 6 symbols" -- a whole number of
 /// frames of D bits -- where V.34 pads to a fixed length.
 pub fn mp_bits(mp: &Mp, frame_bits: usize) -> Vec<bool> {
-    let v90 = Mp { call_to_answer: 0, auxiliary: false, asymmetric: false, rates: mp.rates & !1, ..*mp };
+    let v90 = Mp {
+        call_to_answer: 0,
+        auxiliary: false,
+        asymmetric: false,
+        rates: mp.rates & !1,
+        ..*mp
+    };
     let mut bits = v90.to_bits();
     // Up to and including "Fill bit: 0" after the CRC.
     let end = if mp.precoding.is_some() { 188 } else { 86 };
@@ -924,7 +1011,10 @@ mod tests {
     use super::*;
 
     fn bits_of(text: &str) -> Vec<bool> {
-        text.bytes().filter(|b| !b.is_ascii_whitespace()).map(|b| b == b'1').collect()
+        text.bytes()
+            .filter(|b| !b.is_ascii_whitespace())
+            .map(|b| b == b'1')
+            .collect()
     }
 
     fn text(bits: &[bool]) -> String {
@@ -953,7 +1043,8 @@ mod tests {
 
     /// Jd off a real digital modem, as the equaliser read it off the
     /// recording and descrambled it (tests/vectors/v90-56k.wav, 16.53 s).
-    const SERVER_JD: &str = "11111111111111111 0 1111111111111111 0 1111110000000010 0 0111011011101110 0000";
+    const SERVER_JD: &str =
+        "11111111111111111 0 1111111111111111 0 1111110000000010 0 0111011011101110 0000";
 
     #[test]
     fn a_real_jd_checks_and_enables_every_rate() {
@@ -972,7 +1063,10 @@ mod tests {
         assert_eq!(data_rate(22), Some(56_000));
         assert_eq!(data_rate(0), None, "cleardown");
         assert_eq!(data_rate(23), None);
-        let jd = Jd { rates: 1 << 16, ..Jd::default() };
+        let jd = Jd {
+            rates: 1 << 16,
+            ..Jd::default()
+        };
         let bits = jd.to_bits();
         // 49 333 is the first rate past the start bit at 34.
         assert!(bits[35] && !bits[34]);
@@ -999,7 +1093,13 @@ mod tests {
             }
         }
         ucodes.truncate(147);
-        Descriptor { signs, training, h: [20, 20, 20, 20, 20, 20, 11, 11], refs: [78; 8], ucodes }
+        Descriptor {
+            signs,
+            training,
+            h: [20, 20, 20, 20, 20, 20, 11, 11],
+            refs: [78; 8],
+            ucodes,
+        }
     }
 
     #[test]
@@ -1063,7 +1163,10 @@ mod tests {
             let mut spoiled = bits.clone();
             spoiled[i] = !spoiled[i];
             let back = Descriptor::from_bits(&spoiled);
-            assert!(back.is_none() || back != Descriptor::from_bits(&bits), "bit {i}");
+            assert!(
+                back.is_none() || back != Descriptor::from_bits(&bits),
+                "bit {i}"
+            );
         }
     }
 
@@ -1122,7 +1225,10 @@ mod tests {
 
     #[test]
     fn one_constellation_is_the_short_cp() {
-        let cp = Cp { constellations: vec![1 << 100 | 1 << 80], ..Cp::default() };
+        let cp = Cp {
+            constellations: vec![1 << 100 | 1 << 80],
+            ..Cp::default()
+        };
         let bits = cp.to_bits();
         assert_eq!(bits.len(), 292);
         assert!(!bits[19], "a CPt");
@@ -1146,10 +1252,20 @@ mod tests {
         let cp = a_cp();
         let mut stream: Vec<bool> = vec![true; 25];
         for acknowledge in [false, false, true] {
-            stream.extend(Cp { acknowledge, ..cp.clone() }.to_bits());
+            stream.extend(
+                Cp {
+                    acknowledge,
+                    ..cp.clone()
+                }
+                .to_bits(),
+            );
         }
         let mut finder = CpFinder::default();
-        let found: Vec<bool> = stream.iter().filter_map(|&b| finder.feed(b)).map(|c| c.acknowledge).collect();
+        let found: Vec<bool> = stream
+            .iter()
+            .filter_map(|&b| finder.feed(b))
+            .map(|c| c.acknowledge)
+            .collect();
         // The first is behind 25 ones, which make its sync something longer.
         assert_eq!(found, vec![false, true]);
     }
@@ -1158,7 +1274,11 @@ mod tests {
     /// 23/V.92: drn 16, one constellation holding Ucodes 0 to 79, everything
     /// else at its default.
     fn a_cpt() -> Cp {
-        Cp { drn: 16, constellations: vec![(1 << 80) - 1], ..Cp::default() }
+        Cp {
+            drn: 16,
+            constellations: vec![(1 << 80) - 1],
+            ..Cp::default()
+        }
     }
 
     /// A V.92 CP whose largest constellation index is `max`, and which
@@ -1179,16 +1299,35 @@ mod tests {
     fn a_v92_cpt_has_its_type_at_19_and_drn_at_21() {
         let cpt = a_cpt();
         let bits = cpt.to_bits_in(Layout::V92, JA_UNIT_BITS);
-        assert_eq!(bits.len(), 300, "290 bits filled to a multiple of twelve symbols");
-        assert!(!bits[CP_MARK], "bit 18 marks the CP family, not the SUV family");
+        assert_eq!(
+            bits.len(),
+            300,
+            "290 bits filled to a multiple of twelve symbols"
+        );
+        assert!(
+            !bits[CP_MARK],
+            "bit 18 marks the CP family, not the SUV family"
+        );
         assert_eq!(get(&bits, 19, 2), CP_TYPE_CPT);
         assert_eq!(get(&bits, 21, 5), 16, "drn at 21:25, where V.90 had 20:24");
         assert_eq!(text(&bits[18..34]), "0000000100000000");
         assert_eq!(text(&bits[35..51]), "0000000000000000");
-        assert_eq!(text(&bits[52..68]), "0000000000000100", "the Q3.13 ratio of one");
+        assert_eq!(
+            text(&bits[52..68]),
+            "0000000000000100",
+            "the Q3.13 ratio of one"
+        );
         assert_eq!(get(&bits, 273, 16), 0xAC4D, "the CRC the digest derived");
-        assert_eq!(text(&bits[272..]), "0101100100011010100000000000", "start bit, CRC, fill bit, padding");
-        assert_eq!(cpt.frame_bits(), 24, "(drn + 8) * 8000/6 is 32 000 in a CPt");
+        assert_eq!(
+            text(&bits[272..]),
+            "0101100100011010100000000000",
+            "start bit, CRC, fill bit, padding"
+        );
+        assert_eq!(
+            cpt.frame_bits(),
+            24,
+            "(drn + 8) * 8000/6 is 32 000 in a CPt"
+        );
         assert_eq!(Cp::from_bits_in(Layout::V92, &bits), Some(cpt));
     }
 
@@ -1196,12 +1335,24 @@ mod tests {
     /// data mode rate rather than a training one.
     #[test]
     fn a_v92_cpu_with_drn_22_puts_0_1_1_0_1_in_bits_21_to_25() {
-        let cpu = Cp { data_mode: true, drn: 22, ..a_cpt() };
+        let cpu = Cp {
+            data_mode: true,
+            drn: 22,
+            ..a_cpt()
+        };
         let bits = cpu.to_bits_in(Layout::V92, 24);
-        assert_eq!(text(&bits[21..26]), "01101", "twenty-two, least significant bit first");
+        assert_eq!(
+            text(&bits[21..26]),
+            "01101",
+            "twenty-two, least significant bit first"
+        );
         assert_eq!(get(&bits, 19, 2), CP_TYPE_CPU);
         assert_eq!(data_rate(22), Some(56_000), "(drn + 20) * 8000/6 in a CPu");
-        assert_eq!(bits.len(), 312, "290 bits filled to a multiple of twenty-four");
+        assert_eq!(
+            bits.len(),
+            312,
+            "290 bits filled to a multiple of twenty-four"
+        );
         assert_eq!(Cp::from_bits_in(Layout::V92, &bits), Some(cpu));
     }
 
@@ -1210,11 +1361,21 @@ mod tests {
     #[test]
     fn mask_bits_sit_where_table_23_puts_them() {
         for (u, at) in [(0u8, 137usize), (15, 152), (16, 154), (127, 271)] {
-            let cp = Cp { constellations: vec![1 << u], ..Cp::default() };
+            let cp = Cp {
+                constellations: vec![1 << u],
+                ..Cp::default()
+            };
             let bits = cp.to_bits_in(Layout::V92, JA_UNIT_BITS);
             assert!(bits[at], "Ucode {u} belongs at bit {at}");
-            assert_eq!(bits[136..272].iter().filter(|b| **b).count(), 1, "and nowhere else");
-            assert_eq!(Cp::from_bits_in(Layout::V92, &bits).unwrap().points(0), vec![u]);
+            assert_eq!(
+                bits[136..272].iter().filter(|b| **b).count(),
+                1,
+                "and nowhere else"
+            );
+            assert_eq!(
+                Cp::from_bits_in(Layout::V92, &bits).unwrap().points(0),
+                vec![u]
+            );
         }
     }
 
@@ -1237,7 +1398,10 @@ mod tests {
                 let bits = cp.to_bits_in(Layout::V92, unit);
                 assert_eq!(bits.len(), unpadded.div_ceil(unit) * unit);
                 assert_eq!(bits.len(), want, "index {max}, codec {codec}, unit {unit}");
-                assert_eq!(bits[128], codec, "bit 128 says whether the codec's own follow");
+                assert_eq!(
+                    bits[128], codec,
+                    "bit 128 says whether the codec's own follow"
+                );
                 assert_eq!(Cp::from_bits_in(Layout::V92, &bits), Some(cp.clone()));
             }
             // V.90's tail is "Fill bits: 000" whatever the frame is.
@@ -1252,7 +1416,8 @@ mod tests {
     fn a_v92_cpt_is_not_misread_through_the_v90_layout_or_back() {
         for drn in 0..=22u8 {
             let bits = Cp { drn, ..a_cpt() }.to_bits_in(Layout::V92, JA_UNIT_BITS);
-            let misread = Cp::from_bits(&bits).expect("the CRC checks either way, which is the hazard");
+            let misread =
+                Cp::from_bits(&bits).expect("the CRC checks either way, which is the hazard");
             assert_eq!(misread.drn, drn.wrapping_mul(2) % 32, "drn {drn} doubled");
             assert_eq!(Cp::from_bits_in(Layout::V92, &bits).unwrap().drn, drn);
         }
@@ -1274,7 +1439,11 @@ mod tests {
         let reserved: Vec<usize> = (26..=30).chain(36..=48).chain(129..=135).collect();
         let spoiled = with_bits_set(&bits, CP_HEADER_BLOCKS + MASK_BLOCKS, &reserved);
         assert_ne!(spoiled, bits);
-        assert_eq!(Cp::from_bits_in(Layout::V92, &spoiled), Some(cpt), "not one of them is interpreted");
+        assert_eq!(
+            Cp::from_bits_in(Layout::V92, &spoiled),
+            Some(cpt),
+            "not one of them is interpreted"
+        );
 
         let d = Descriptor::none();
         let bits = d.to_bits_in(Some(ALL_PCM_UPSTREAM_RATES));
@@ -1294,9 +1463,15 @@ mod tests {
     fn a_cp_marked_as_an_suv_or_a_cpus_is_refused() {
         let bits = a_cpt().to_bits_in(Layout::V92, JA_UNIT_BITS);
         let blocks = CP_HEADER_BLOCKS + MASK_BLOCKS;
-        assert!(Cp::from_bits(&bits).is_some(), "V.90's reading refuses none of this");
+        assert!(
+            Cp::from_bits(&bits).is_some(),
+            "V.90's reading refuses none of this"
+        );
         // Bit 18 set is an SUV (Tables 27 and 31/V.92), not a CP at all.
-        assert_eq!(Cp::from_bits_in(Layout::V92, &with_bits_set(&bits, blocks, &[CP_MARK])), None);
+        assert_eq!(
+            Cp::from_bits_in(Layout::V92, &with_bits_set(&bits, blocks, &[CP_MARK])),
+            None
+        );
         // Type 2 is CPus, a shorter table of its own; type 3 is unassigned.
         for (set, want) in [(&[20usize][..], 2), (&[19, 20][..], 3)] {
             let spoiled = with_bits_set(&bits, blocks, set);
@@ -1316,9 +1491,16 @@ mod tests {
         // and 205 + P, and the CRC at 222 + P.
         assert_eq!(get(&bits, 222, 16), 0xffff, "24 000 up to 44 000");
         assert_eq!(get(&bits, 239, 3), 0x7, "45 333, 46 666 and 48 000");
-        assert_eq!(get(&bits, 242, 13), 0, "and thirteen bits reserved above them");
+        assert_eq!(
+            get(&bits, 242, 13),
+            0,
+            "and thirteen bits reserved above them"
+        );
         assert_eq!(get(&bits, 256, 16), 0xB71C, "the CRC the digest derived");
-        assert_eq!(Descriptor::from_bits_in(Layout::V92, &bits), Some((d, Some(ALL_PCM_UPSTREAM_RATES))));
+        assert_eq!(
+            Descriptor::from_bits_in(Layout::V92, &bits),
+            Some((d, Some(ALL_PCM_UPSTREAM_RATES)))
+        );
         // The six rungs Table 20 prints, as it prints them: the ladder is
         // truncated, not rounded, so bit 206+P is 46 666 and not 46 667.
         assert_eq!(pcm_upstream_rate(0), Some(24_000));
@@ -1338,7 +1520,11 @@ mod tests {
     /// 290 -> 300, 817 -> 828 and 2687 -> 2688.
     #[test]
     fn v92_descriptor_lengths_pad_to_12_bits() {
-        for (n, lsp, ltp, want) in [(1usize, 16usize, 16usize, 300usize), (64, 16, 16, 828), (255, 128, 128, 2688)] {
+        for (n, lsp, ltp, want) in [
+            (1usize, 16usize, 16usize, 300usize),
+            (64, 16, 16, 828),
+            (255, 128, 128, 2688),
+        ] {
             let d = Descriptor {
                 signs: (0..lsp).map(|k| k % 3 == 0).collect(),
                 training: (0..ltp).map(|k| k % 5 == 0).collect(),
@@ -1350,7 +1536,10 @@ mod tests {
             let bits = d.to_bits_in(Some(rates));
             assert_eq!(bits.len(), want, "N = {n}");
             assert_eq!(bits.len() % JA_UNIT_BITS, 0);
-            assert_eq!(Descriptor::from_bits_in(Layout::V92, &bits), Some((d, Some(rates))));
+            assert_eq!(
+                Descriptor::from_bits_in(Layout::V92, &bits),
+                Some((d, Some(rates)))
+            );
         }
     }
 
@@ -1363,14 +1552,28 @@ mod tests {
         let cpt = a_cpt();
         let mut stream = vec![true; 24];
         for acknowledge in [false, true] {
-            stream.extend(Cp { acknowledge, ..cpt.clone() }.to_bits_in(Layout::V92, JA_UNIT_BITS));
+            stream.extend(
+                Cp {
+                    acknowledge,
+                    ..cpt.clone()
+                }
+                .to_bits_in(Layout::V92, JA_UNIT_BITS),
+            );
         }
         let mut finder = CpFinder::v92(JA_UNIT_BITS);
-        let found: Vec<bool> = stream.iter().filter_map(|&b| finder.feed(b)).map(|c| c.acknowledge).collect();
+        let found: Vec<bool> = stream
+            .iter()
+            .filter_map(|&b| finder.feed(b))
+            .map(|c| c.acknowledge)
+            .collect();
         assert_eq!(found, vec![false, true], "both of them, preamble and all");
 
         let mut v90 = CpFinder::default();
-        assert_eq!(stream.iter().filter_map(|&b| v90.feed(b)).count(), 1, "V.90 still skips the first");
+        assert_eq!(
+            stream.iter().filter_map(|&b| v90.feed(b)).count(),
+            1,
+            "V.90 still skips the first"
+        );
     }
 
     /// A CPu fills to twelve symbols of whatever TRN2u is carrying it, so the
@@ -1382,19 +1585,37 @@ mod tests {
     /// of the group here -- would be the one lost.
     #[test]
     fn a_group_of_cpu_is_found_whole_on_every_pad_unit() {
-        let cpu = Cp { data_mode: true, drn: 22, ..a_cpt() };
+        let cpu = Cp {
+            data_mode: true,
+            drn: 22,
+            ..a_cpt()
+        };
         for unit in [JA_UNIT_BITS, 24, 36] {
             let mut stream = vec![true; 24];
             for acknowledge in [false, false, true] {
-                let bits = Cp { acknowledge, ..cpu.clone() }.to_bits_in(Layout::V92, unit);
-                assert_eq!(bits.len() % unit, 0, "a CPu is whole units long at unit {unit}");
+                let bits = Cp {
+                    acknowledge,
+                    ..cpu.clone()
+                }
+                .to_bits_in(Layout::V92, unit);
+                assert_eq!(
+                    bits.len() % unit,
+                    0,
+                    "a CPu is whole units long at unit {unit}"
+                );
                 stream.extend(bits);
             }
             let mut finder = CpFinder::v92(unit);
             let found: Vec<Cp> = stream.iter().filter_map(|&b| finder.feed(b)).collect();
             assert_eq!(found.len(), 3, "three CPu at unit {unit}");
-            assert_eq!(found.iter().map(|c| c.acknowledge).collect::<Vec<_>>(), vec![false, false, true]);
-            assert!(found.iter().all(|c| c.drn == 22 && c.data_mode), "identical information at unit {unit}");
+            assert_eq!(
+                found.iter().map(|c| c.acknowledge).collect::<Vec<_>>(),
+                vec![false, false, true]
+            );
+            assert!(
+                found.iter().all(|c| c.drn == 22 && c.data_mode),
+                "identical information at unit {unit}"
+            );
         }
     }
 
@@ -1418,12 +1639,22 @@ mod tests {
                 found.push((got, finder.upstream_rates()));
             }
         }
-        assert_eq!(found, vec![(d.clone(), Some(masks[0])), (d.clone(), Some(masks[1]))]);
-        assert_eq!(stream.len() % JA_UNIT_BITS, 0, "and Ja is an integer multiple of twelve bits long");
+        assert_eq!(
+            found,
+            vec![(d.clone(), Some(masks[0])), (d.clone(), Some(masks[1]))]
+        );
+        assert_eq!(
+            stream.len() % JA_UNIT_BITS,
+            0,
+            "and Ja is an integer multiple of twelve bits long"
+        );
         // The same descriptor in V.90's layout ends differently and carries
         // no mask at all.
         let mut v90 = DescriptorFinder::default();
-        let plain: Vec<bool> = std::iter::repeat_n(true, 40).chain([false]).chain(d.to_bits()).collect();
+        let plain: Vec<bool> = std::iter::repeat_n(true, 40)
+            .chain([false])
+            .chain(d.to_bits())
+            .collect();
         assert_eq!(plain.iter().filter_map(|&b| v90.feed(b)).next(), Some(d));
         assert_eq!(v90.upstream_rates(), None);
     }
@@ -1440,9 +1671,16 @@ mod tests {
         assert_eq!(jp.len(), JD_BITS);
         let misread = Jd::from_bits(&jp).expect("the CRC checks, which is the hazard");
         assert_eq!(misread.rates, 0x8000, "epsilon read as a rate mask");
-        assert!(misread.sixteen_in_training, "and Jp's constellation bit read as V.90's");
+        assert!(
+            misread.sixteen_in_training,
+            "and Jp's constellation bit read as V.90's"
+        );
         assert!(is_jp(&jp) && !is_jd(&jp) && jp[J_IDENTIFIER]);
-        assert_eq!(Jd::from_bits_if(&jp, is_jd), None, "a V.92 reader refuses it");
+        assert_eq!(
+            Jd::from_bits_if(&jp, is_jd),
+            None,
+            "a V.92 reader refuses it"
+        );
 
         let jd = bits_of(SERVER_JD);
         assert!(is_jd(&jd) && !is_jp(&jd));
@@ -1474,7 +1712,10 @@ mod tests {
         assert_eq!(back.rates, Mp::rates_up_to(12) & !1);
         assert!(back.acknowledge && back.non_linear);
         // Type 1 fills from bit 188.
-        let typed = Mp { precoding: Some([(1, -1), (2, -2), (3, -3)]), ..mp };
+        let typed = Mp {
+            precoding: Some([(1, -1), (2, -2), (3, -3)]),
+            ..mp
+        };
         let bits = mp_bits(&typed, 40);
         assert_eq!(bits.len(), 200);
         assert_eq!(Mp::from_bits(&bits).unwrap().precoding, typed.precoding);

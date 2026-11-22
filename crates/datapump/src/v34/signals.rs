@@ -110,7 +110,10 @@ impl Sender {
     /// signal" (10.1.3.8), and the scrambler is this end's own: the call modem
     /// divides by GPC and the answer modem by GPA (clause 7).
     pub fn new(mode: Mode) -> Self {
-        Self { scrambler: Scrambler::new(mode), z: 0 }
+        Self {
+            scrambler: Scrambler::new(mode),
+            z: 0,
+        }
     }
 
     /// Start TRN again, with the scrambler back at zero.
@@ -145,7 +148,11 @@ impl Sender {
     pub fn differential(&mut self, bits: &[bool]) -> Point {
         let i = self.scrambled(bits[0]) | self.scrambled(bits[1]) << 1;
         self.z = (self.z + i) % 4;
-        let label = if bits.len() == 4 { self.scrambled(bits[2]) | self.scrambled(bits[3]) << 1 } else { 0 };
+        let label = if bits.len() == 4 {
+            self.scrambled(bits[2]) | self.scrambled(bits[3]) << 1
+        } else {
+            0
+        };
         clockwise(quarter(label as usize), self.z)
     }
 
@@ -179,7 +186,13 @@ pub struct Reader {
 /// four points sit at (+-1, +-1) and the sixteen at (+-1 or +-3, +-1 or +-3).
 pub fn decide(symbol: (f64, f64), size: Size) -> Point {
     let axis = |v: f64| match size {
-        Size::Four => if v < 0.0 { -1 } else { 1 },
+        Size::Four => {
+            if v < 0.0 {
+                -1
+            } else {
+                1
+            }
+        }
         Size::Sixteen => {
             if v < -2.0 {
                 -3
@@ -215,7 +228,10 @@ impl Reader {
     /// A reader for what the far end sends, which is scrambled by the far
     /// end's polynomial: `mode` is the far end's.
     pub fn new(mode: Mode) -> Self {
-        Self { descrambler: Scrambler::new(mode), z: 0 }
+        Self {
+            descrambler: Scrambler::new(mode),
+            z: 0,
+        }
     }
 
     /// Bits out of a TRN symbol, which should all descramble to ones once the
@@ -223,7 +239,10 @@ impl Reader {
     pub fn trn(&mut self, point: Point, size: Size) -> Vec<bool> {
         let (label, turn) = unmap(point, size);
         self.z = turn;
-        let mut out = vec![self.descrambler.descramble(turn & 1 == 1), self.descrambler.descramble(turn & 2 == 2)];
+        let mut out = vec![
+            self.descrambler.descramble(turn & 1 == 1),
+            self.descrambler.descramble(turn & 2 == 2),
+        ];
         if size == Size::Sixteen {
             out.push(self.descrambler.descramble(label & 1 == 1));
             out.push(self.descrambler.descramble(label & 2 == 2));
@@ -236,7 +255,10 @@ impl Reader {
         let (label, turn) = unmap(point, size);
         let i = (turn + 4 - self.z) % 4;
         self.z = turn;
-        let mut out = vec![self.descrambler.descramble(i & 1 == 1), self.descrambler.descramble(i & 2 == 2)];
+        let mut out = vec![
+            self.descrambler.descramble(i & 1 == 1),
+            self.descrambler.descramble(i & 2 == 2),
+        ];
         if size == Size::Sixteen {
             out.push(self.descrambler.descramble(label & 1 == 1));
             out.push(self.descrambler.descramble(label & 2 == 2));
@@ -253,7 +275,11 @@ mod tests {
     fn s_alternates_point_0_with_its_quarter_turn_and_s_bar_is_it_turned_round() {
         assert_eq!(s(0), (1, 1));
         assert_eq!(s(1), (-1, 1));
-        assert_eq!(s(S_SYMBOLS - 1), (-1, 1), "S ends on point 0 turned 90 degrees");
+        assert_eq!(
+            s(S_SYMBOLS - 1),
+            (-1, 1),
+            "S ends on point 0 turned 90 degrees"
+        );
         assert_eq!(s_bar(0), (-1, -1), "S-bar begins on point 0 turned 180");
         assert_eq!(s_bar(1), (1, -1));
         for n in 0..8 {
@@ -299,7 +325,10 @@ mod tests {
                 let point = sender.trn(size);
                 got.extend(reader.trn(point, size));
             }
-            assert!(got[23..].iter().all(|b| *b), "{size:?} TRN did not descramble to ones");
+            assert!(
+                got[23..].iter().all(|b| *b),
+                "{size:?} TRN did not descramble to ones"
+            );
             // Then J, which carries straight on from TRN.
             let bits: Vec<bool> = Size::Sixteen.j().repeat(4);
             let points = sender.sequence(&bits, Size::Four);
@@ -341,7 +370,11 @@ mod tests {
 
     #[test]
     fn the_patterns_are_tables_18_and_19() {
-        let text = |b: &[bool; 16]| b.iter().map(|&x| if x { '1' } else { '0' }).collect::<String>();
+        let text = |b: &[bool; 16]| {
+            b.iter()
+                .map(|&x| if x { '1' } else { '0' })
+                .collect::<String>()
+        };
         assert_eq!(text(&J_FOUR), "0000100110010001");
         assert_eq!(text(&J_SIXTEEN), "0000110110010001");
         assert_eq!(text(&J_PRIME), "1111100110010001");

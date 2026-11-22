@@ -665,7 +665,9 @@ impl Receiver {
             previous.1 + mu * (filtered.1 - previous.1),
         );
         self.countdown += self.gardner.interval();
-        let Some(symbol) = self.gardner.feed(at) else { return };
+        let Some(symbol) = self.gardner.feed(at) else {
+            return;
+        };
         self.on_symbol(symbol);
     }
 
@@ -867,7 +869,11 @@ impl Receiver {
         // 270 degrees; the double dibit alternates 00 and 11, which alternates
         // turns of 90 and 270. Both are sent at 1200 whatever rate is being
         // negotiated, so only the leading dibit is ever looked at.
-        self.unscrambled_run = if change == 3 { self.unscrambled_run + 1 } else { 0 };
+        self.unscrambled_run = if change == 3 {
+            self.unscrambled_run + 1
+        } else {
+            0
+        };
         self.zero_run = if change == 0 { self.zero_run + 1 } else { 0 };
         let alternating = change != self.previous_change
             && (change == 1 || change == 3)
@@ -891,7 +897,9 @@ impl Receiver {
     pub fn take_bytes(&mut self) -> Vec<u8> {
         let whole = self.bits.len() / 8;
         let bits: Vec<bool> = self.bits.drain(..whole * 8).collect();
-        bits.as_chunks::<8>().0.iter()
+        bits.as_chunks::<8>()
+            .0
+            .iter()
             .map(|c| c.iter().fold(0u8, |acc, &b| (acc << 1) | u8::from(b)))
             .collect()
     }
@@ -1059,7 +1067,6 @@ fn point_bits(point: (f64, f64), quadrant: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn the_channels_face_each_other() {
@@ -1240,7 +1247,10 @@ mod tests {
         for _ in 0..(fs as usize / 5) {
             rx.feed(0.0);
         }
-        assert!(!rx.carrier(), "carrier still claimed after the line went quiet");
+        assert!(
+            !rx.carrier(),
+            "carrier still claimed after the line went quiet"
+        );
     }
 
     #[test]
@@ -1262,7 +1272,10 @@ mod tests {
         for _ in 0..(fs as usize / 5) {
             rx.feed(tx.next_sample() * scale);
         }
-        assert!(rx.carrier(), "dropped a carrier still above the lower threshold");
+        assert!(
+            rx.carrier(),
+            "dropped a carrier still above the lower threshold"
+        );
     }
 
     #[test]
@@ -1332,6 +1345,9 @@ mod tests {
                 run = 0;
             }
         }
-        assert!(longest <= 64, "a run of {longest} ones escaped the detector");
+        assert!(
+            longest <= 64,
+            "a run of {longest} ones escaped the detector"
+        );
     }
 }

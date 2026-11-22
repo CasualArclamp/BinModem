@@ -17,11 +17,18 @@ use datapump::framing::AsyncBits;
 use datapump::v8::{HIGH, LOW, Modem, Role, Status};
 use v8::{CallFunction, Decoder, Heard, Menu, Modulation, Modulations, Protocol};
 
-const VECTOR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/vectors/fax-v34-cm.wav");
+const VECTOR: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../tests/vectors/fax-v34-cm.wav"
+);
 
 /// What this end offers: the three fax modulations it has pumps for.
 fn ours() -> Modulations {
-    Modulations::of(&[Modulation::V17, Modulation::V29HalfDuplex, Modulation::V27ter])
+    Modulations::of(&[
+        Modulation::V17,
+        Modulation::V29HalfDuplex,
+        Modulation::V27ter,
+    ])
 }
 
 fn recording() -> (f64, Vec<f32>) {
@@ -52,7 +59,9 @@ fn a_real_super_g3_call_menu_is_read_and_answered() {
     // E0 81 85 D4: the menu synchronisation; "transmit facsimile from call
     // terminal" (Table 4/T.30); a modulation octet with V.34 half-duplex; an
     // extension octet with V.17, V.29 half-duplex and V.27 ter.
-    let far = modem.far_menu().expect("no call menu was read off the recording");
+    let far = modem
+        .far_menu()
+        .expect("no call menu was read off the recording");
     assert_eq!(
         far,
         Menu {
@@ -76,7 +85,11 @@ fn a_real_super_g3_call_menu_is_read_and_answered() {
     let joint = joint.expect("nothing readable went out on the high channel");
     assert_eq!(joint.function, CallFunction::TransmitFax, "{joint:?}");
     assert_eq!(joint.modulations, ours(), "{joint:?}");
-    assert_eq!(modem.status(), Status::Negotiating, "the recording has no CJ in it");
+    assert_eq!(
+        modem.status(),
+        Status::Negotiating,
+        "the recording has no CJ in it"
+    );
     assert!(modem.has_the_line());
 }
 
@@ -162,6 +175,13 @@ fn an_answerer_offering_v34_answers_the_real_call_menu_with_it() {
         modem.step(0.0);
     }
     assert_eq!(modem.status(), Status::Agreed(Modulation::V34HalfDuplex));
-    assert_eq!(modem.joint_menu(), Some(joint), "the joint menu kept is not the one sent");
-    assert!(!modem.has_the_line(), "still holding the line after the handover");
+    assert_eq!(
+        modem.joint_menu(),
+        Some(joint),
+        "the joint menu kept is not the one sent"
+    );
+    assert!(
+        !modem.has_the_line(),
+        "still holding the line after the handover"
+    );
 }

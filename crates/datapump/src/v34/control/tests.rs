@@ -100,7 +100,9 @@ impl End {
             let tx = &mut end.modem.transmitter;
             tx.queue(Segment::Silence(SILENCE_SYMBOLS));
             tx.queue(Segment::Pph(reading));
-            tx.queue(Segment::Alt { at_least: ALT_LEAST });
+            tx.queue(Segment::Alt {
+                at_least: ALT_LEAST,
+            });
         }
         end
     }
@@ -112,10 +114,15 @@ impl End {
             match heard {
                 Heard::Pph { .. } if matches!(self.stage, Stage::Retrain { .. }) => {
                     let tx = &mut self.modem.transmitter;
-                    if let Stage::Retrain { initiator: true, .. } = self.stage {
+                    if let Stage::Retrain {
+                        initiator: true, ..
+                    } = self.stage
+                    {
                         // 12.8.1: PPh, ALT for 16T to 120T, MPh.
                         tx.queue(Segment::Pph(self.reading));
-                        tx.queue(Segment::Alt { at_least: ALT_LEAST });
+                        tx.queue(Segment::Alt {
+                            at_least: ALT_LEAST,
+                        });
                     }
                     tx.queue(Segment::Repeat(self.mph.clone()));
                     self.stage = Stage::Mph;
@@ -125,7 +132,9 @@ impl End {
                     if !self.source {
                         // 12.4.2.1 and 12.4.2.2: PPh, then ALT.
                         tx.queue(Segment::Pph(self.reading));
-                        tx.queue(Segment::Alt { at_least: ALT_LEAST });
+                        tx.queue(Segment::Alt {
+                            at_least: ALT_LEAST,
+                        });
                     }
                     // MPh as soon as ALT allows (12.4.1.2, 12.4.2.3).
                     tx.queue(Segment::Repeat(self.mph.clone()));
@@ -137,7 +146,9 @@ impl End {
                         // 12.6.2.2: Sh and S-bar-h back, ALT, E.
                         tx.queue(Segment::Sh(SH_SYMBOLS));
                         tx.queue(Segment::ShBar(SH_BAR_SYMBOLS));
-                        tx.queue(Segment::Alt { at_least: ALT_LEAST });
+                        tx.queue(Segment::Alt {
+                            at_least: ALT_LEAST,
+                        });
                     }
                     // 12.6.1.4: ALT for 16T at least, then E.
                     tx.queue(Segment::E);
@@ -147,14 +158,23 @@ impl End {
                 _ => {}
             }
         }
-        if self.stage == (Stage::Retrain { initiator: false, answered: false })
+        if self.stage
+            == (Stage::Retrain {
+                initiator: false,
+                answered: false,
+            })
             && self.modem.receiver.hearing() == Hearing::Ac
             && self.modem.receiver.hearing_for() > AC_SECONDS
         {
             // 12.8.2: PPh, then ALT for at least 16T.
             self.modem.transmitter.queue(Segment::Pph(self.reading));
-            self.modem.transmitter.queue(Segment::Alt { at_least: ALT_LEAST });
-            self.stage = Stage::Retrain { initiator: false, answered: true };
+            self.modem.transmitter.queue(Segment::Alt {
+                at_least: ALT_LEAST,
+            });
+            self.stage = Stage::Retrain {
+                initiator: false,
+                answered: true,
+            };
         }
         self.sync.extend(self.modem.receiver.take_sync_bits());
         self.data.extend(self.modem.receiver.take_bits());
@@ -169,13 +189,19 @@ impl End {
     }
 
     fn heard(&self, wanted: impl Fn(&Heard) -> bool) -> Vec<(u64, Heard)> {
-        self.heard.iter().copied().filter(|(_, h)| wanted(h)).collect()
+        self.heard
+            .iter()
+            .copied()
+            .filter(|(_, h)| wanted(h))
+            .collect()
     }
 
     /// Turn the control channel off (12.6.3): 4T of scrambled ones, then
     /// silence.
     fn turn_off(&mut self) {
-        self.modem.transmitter.queue(Segment::Ones(TURN_OFF_SYMBOLS));
+        self.modem
+            .transmitter
+            .queue(Segment::Ones(TURN_OFF_SYMBOLS));
     }
 
     /// Retrain the control channel (12.8), as the end that asks or the one
@@ -186,7 +212,10 @@ impl End {
         if initiator {
             self.modem.transmitter.queue(Segment::Ac);
         }
-        self.stage = Stage::Retrain { initiator, answered: false };
+        self.stage = Stage::Retrain {
+            initiator,
+            answered: false,
+        };
     }
 
     /// Resynchronise (12.6.1.1): 70 ms of silence, Sh, S-bar-h, then ALT
@@ -197,7 +226,9 @@ impl End {
             tx.queue(Segment::Silence(SILENCE_SYMBOLS));
             tx.queue(Segment::Sh(SH_SYMBOLS));
             tx.queue(Segment::ShBar(SH_BAR_SYMBOLS));
-            tx.queue(Segment::Alt { at_least: ALT_LEAST });
+            tx.queue(Segment::Alt {
+                at_least: ALT_LEAST,
+            });
         }
         self.stage = Stage::Resync;
     }
@@ -253,7 +284,14 @@ const VOICE_BAND_DB: f64 = 4.12;
 
 impl Conditions {
     fn clean() -> Self {
-        Self { one_way: 0.010, call_loss: 10.0, answer_loss: 10.0, echo: f64::INFINITY, snr: 80.0, ppm: 0.0 }
+        Self {
+            one_way: 0.010,
+            call_loss: 10.0,
+            answer_loss: 10.0,
+            echo: f64::INFINITY,
+            snr: 80.0,
+            ppm: 0.0,
+        }
     }
 
     /// A two-wire VoIP line: the answer end 20 dB quieter at the call end
@@ -261,7 +299,14 @@ impl Conditions {
     /// down in its own receiver -- 20 dB above the far end's at the call end
     /// -- noise, and the clocks 50 ppm apart.
     fn two_wire(snr: f64) -> Self {
-        Self { one_way: 0.100, call_loss: 10.0, answer_loss: 30.0, echo: 10.0, snr, ppm: 50.0 }
+        Self {
+            one_way: 0.100,
+            call_loss: 10.0,
+            answer_loss: 30.0,
+            echo: 10.0,
+            snr,
+            ppm: 50.0,
+        }
     }
 
     /// The noise, in decibels under the nominal level, across the whole band.
@@ -273,7 +318,13 @@ impl Conditions {
 impl Line {
     fn new(call: End, answer: End, conditions: Conditions) -> Self {
         let delay = ((conditions.one_way * FS) as usize).max(1);
-        let db = |x: f64| if x.is_finite() { 10f64.powf(-x / 20.0) } else { 0.0 };
+        let db = |x: f64| {
+            if x.is_finite() {
+                10f64.powf(-x / 20.0)
+            } else {
+                0.0
+            }
+        };
         let ratio = 1.0 + conditions.ppm * 1e-6;
         Self {
             call,
@@ -308,9 +359,14 @@ impl Line {
     /// One sample of the call end's clock.
     fn step(&mut self) {
         let noise = self.noise * self.uniform();
-        let heard_by_call = self.to_call.pop_front().unwrap_or(0.0) * self.answer_gain + self.echo * self.last_call + noise;
+        let heard_by_call = self.to_call.pop_front().unwrap_or(0.0) * self.answer_gain
+            + self.echo * self.last_call
+            + noise;
         let mut out = self.call.step(heard_by_call);
-        if self.page.is_some_and(|(from, to)| (from..to).contains(&self.n)) {
+        if self
+            .page
+            .is_some_and(|(from, to)| (from..to).contains(&self.n))
+        {
             // A page on the primary channel: loud and all over the band.
             out += 0.7 * self.uniform();
         }
@@ -322,13 +378,16 @@ impl Line {
         self.into_answer.extend(self.buffer.iter().copied());
         while let Some(x) = self.into_answer.pop_front() {
             let noise = self.noise * self.uniform();
-            let out = self.answer.step(x * self.call_gain + self.echo * self.last_answer + noise);
+            let out = self
+                .answer
+                .step(x * self.call_gain + self.echo * self.last_answer + noise);
             self.last_answer = out;
             self.buffer.clear();
             self.down.process(out, &mut self.buffer);
             self.out_of_answer.extend(self.buffer.iter().copied());
         }
-        self.to_call.push_back(self.out_of_answer.pop_front().unwrap_or(0.0));
+        self.to_call
+            .push_back(self.out_of_answer.pop_front().unwrap_or(0.0));
         self.n += 1;
     }
 
@@ -370,7 +429,9 @@ impl Line {
 }
 
 fn in_data(line: &Line) -> bool {
-    line.ends().iter().all(|e| e.modem.receiver.phase() == Phase::Data && e.modem.transmitter.on_air() == Some(Kind::Data))
+    line.ends().iter().all(|e| {
+        e.modem.receiver.phase() == Phase::Data && e.modem.transmitter.on_air() == Some(Kind::Data)
+    })
 }
 
 /// Both ends from silence to data, then `bits` each way; the line afterwards.
@@ -402,7 +463,12 @@ fn check_data(line: &Line, bits: usize) {
         let sent = pattern(bits, seed);
         let got = &end.data;
         let errors = got.iter().zip(&sent).filter(|(a, b)| a != b).count();
-        assert!(contains(got, &sent), "{:?} received {} bits, {errors} of the first wrong", end.modem.side(), got.len());
+        assert!(
+            contains(got, &sent),
+            "{:?} received {} bits, {errors} of the first wrong",
+            end.modem.side(),
+            got.len()
+        );
     }
 }
 
@@ -411,11 +477,27 @@ fn check_start_up(line: &Line, reading: Reading) {
     for end in line.ends() {
         let pph = end.heard(|h| matches!(h, Heard::Pph { .. }));
         assert_eq!(pph.len(), 1, "{:?}: {pph:?}", end.modem.side());
-        assert!(matches!(pph[0].1, Heard::Pph { reading: r, .. } if r == reading), "{:?}", pph[0]);
+        assert!(
+            matches!(pph[0].1, Heard::Pph { reading: r, .. } if r == reading),
+            "{:?}",
+            pph[0]
+        );
         let trained = end.heard(|h| matches!(h, Heard::Trained { .. }));
-        assert!(matches!(trained[..], [(_, Heard::Trained { on: Reference::Pph(r), .. })] if r == reading), "{trained:?}");
+        assert!(
+            matches!(trained[..], [(_, Heard::Trained { on: Reference::Pph(r), .. })] if r == reading),
+            "{trained:?}"
+        );
         assert_eq!(end.heard(|h| matches!(h, Heard::E { .. })).len(), 1);
-        assert!(end.heard(|h| matches!(h, Heard::Lost { .. } | Heard::Untrained { .. } | Heard::Ac { .. } | Heard::Tone { .. })).is_empty());
+        assert!(
+            end.heard(|h| matches!(
+                h,
+                Heard::Lost { .. }
+                    | Heard::Untrained { .. }
+                    | Heard::Ac { .. }
+                    | Heard::Tone { .. }
+            ))
+            .is_empty()
+        );
         assert!(end.modem.receiver.is_locked());
         // ALT from a scrambler at zero reads 0 1 0 1 from its first bit, as
         // this modem sends it, and the far end's MPh came whole.
@@ -439,18 +521,25 @@ fn pph_is_a_perfect_sequence_as_i_reads_it_and_a_square_wave_as_printed() {
     }
     // In eighths of a turn: 1 1 3 1 1 5 3 5 with I, 1 1 1 1 5 5 5 5 printed.
     let eighths = |reading: Reading| -> Vec<i64> {
-        (0..8).map(|i| (reading.point(i).arg() / (std::f64::consts::PI / 4.0)).round() as i64).map(|e| e.rem_euclid(8)).collect()
+        (0..8)
+            .map(|i| (reading.point(i).arg() / (std::f64::consts::PI / 4.0)).round() as i64)
+            .map(|e| e.rem_euclid(8))
+            .collect()
     };
     assert_eq!(eighths(Reading::WithI), vec![1, 1, 3, 1, 1, 5, 3, 5]);
     assert_eq!(eighths(Reading::AsPrinted), vec![1, 1, 1, 1, 5, 5, 5, 5]);
     let periodic = |reading: Reading, shift: usize| {
-        let sum = (0..PPH_PERIOD).fold(Complex::ZERO, |s, i| s + reading.point(i) * reading.point(i + shift).conj());
+        let sum = (0..PPH_PERIOD).fold(Complex::ZERO, |s, i| {
+            s + reading.point(i) * reading.point(i + shift).conj()
+        });
         sum.abs() / PPH_PERIOD as f64
     };
     for shift in 1..PPH_PERIOD {
         assert!(periodic(Reading::WithI, shift) < 1e-12, "shift {shift}");
     }
-    let printed: Vec<f64> = (1..PPH_PERIOD).map(|s| periodic(Reading::AsPrinted, s)).collect();
+    let printed: Vec<f64> = (1..PPH_PERIOD)
+        .map(|s| periodic(Reading::AsPrinted, s))
+        .collect();
     for (s, expected) in printed.iter().zip([0.5, 0.0, 0.5, 1.0, 0.5, 0.0, 0.5]) {
         assert!((s - expected).abs() < 1e-12, "{printed:?}");
     }
@@ -488,7 +577,11 @@ fn a_two_wire_line_carries_2400_both_ways_through_echo_delay_noise_and_a_clock_5
         assert!(snr_db > snr + 7.1 - 3.0, "at {snr} dB: {snr_db:.1} dB");
         for end in line.ends() {
             let drift = end.modem.receiver.drift_ppm();
-            assert!((drift.abs() - 50.0).abs() < 10.0, "{:?}: {drift:.1} ppm", end.modem.side());
+            assert!(
+                (drift.abs() - 50.0).abs() < 10.0,
+                "{:?}: {drift:.1} ppm",
+                end.modem.side()
+            );
         }
     }
 }
@@ -497,7 +590,10 @@ fn a_two_wire_line_carries_2400_both_ways_through_echo_delay_noise_and_a_clock_5
 fn the_answer_modem_can_be_the_source_and_a_noisy_line_still_carries_1200() {
     // Ten decibels of signal to noise in the voice band at the call end, 17
     // in a symbol's band, which four points at 1200 bit/s shrug off.
-    let conditions = Conditions { snr: 10.0, ..Conditions::two_wire(0.0) };
+    let conditions = Conditions {
+        snr: 10.0,
+        ..Conditions::two_wire(0.0)
+    };
     let line = Line::new(
         End::new(Side::Call, false, Rate::R1200, Reading::WithI),
         End::new(Side::Answer, true, Rate::R1200, Reading::WithI),
@@ -518,7 +614,10 @@ fn pph_as_printed_is_recognised_as_printed() {
     let line = start_up_and_send(line, 600);
     check_start_up(&line, Reading::AsPrinted);
     check_data(&line, 600);
-    assert_eq!(line.answer.modem.receiver.reference(), Some(Reference::Pph(Reading::AsPrinted)));
+    assert_eq!(
+        line.answer.modem.receiver.reference(),
+        Some(Reference::Pph(Reading::AsPrinted))
+    );
 }
 
 #[test]
@@ -544,21 +643,54 @@ fn a_20_ms_slip_in_the_middle_of_data_costs_only_the_bits_it_took() {
             line.run(0.5 + 1800.0 / bps);
             let got = &line.answer.data;
             let receiver = &line.answer.modem.receiver;
-            println!("{dropped} {rate:?}: {} bits, slips {}, {:?}", got.len(), receiver.slips(), line.answer.heard);
-            assert!(contains(got, &first), "{dropped} {rate:?}: the data before the slip");
-            assert!(contains(got, &last), "{dropped} {rate:?}: the data after the slip");
+            println!(
+                "{dropped} {rate:?}: {} bits, slips {}, {:?}",
+                got.len(),
+                receiver.slips(),
+                line.answer.heard
+            );
+            assert!(
+                contains(got, &first),
+                "{dropped} {rate:?}: the data before the slip"
+            );
+            assert!(
+                contains(got, &last),
+                "{dropped} {rate:?}: the data after the slip"
+            );
             // The slip did land in the middle stretch: it took bits out of
             // it or put some in twice. Twenty milliseconds are twelve whole
             // symbols at 600 baud and whole cycles of either carrier, so
             // nothing else is disturbed -- the receiver need not even find
             // the signal again.
-            assert!(!contains(got, &middle), "{dropped} {rate:?}: the slip missed");
+            assert!(
+                !contains(got, &middle),
+                "{dropped} {rate:?}: the slip missed"
+            );
             let expected = 3600 + if dropped { -1 } else { 1 } * (0.020 * bps) as i64;
-            let ours = got.windows(first.len()).position(|w| w == first).unwrap_or(0);
-            let tail = got[ours..].windows(last.len()).position(|w| w == last).unwrap_or(0) as i64 + 1200;
-            assert_eq!(tail, expected, "{dropped} {rate:?}: bits between the two ends");
-            assert!(receiver.phase() == Phase::Data && receiver.carrier(), "{dropped} {rate:?}: {:?}", receiver.phase());
-            assert!(line.answer.heard(|h| matches!(h, Heard::Lost { .. })).is_empty(), "{dropped} {rate:?}");
+            let ours = got
+                .windows(first.len())
+                .position(|w| w == first)
+                .unwrap_or(0);
+            let tail = got[ours..]
+                .windows(last.len())
+                .position(|w| w == last)
+                .unwrap_or(0) as i64
+                + 1200;
+            assert_eq!(
+                tail, expected,
+                "{dropped} {rate:?}: bits between the two ends"
+            );
+            assert!(
+                receiver.phase() == Phase::Data && receiver.carrier(),
+                "{dropped} {rate:?}: {:?}",
+                receiver.phase()
+            );
+            assert!(
+                line.answer
+                    .heard(|h| matches!(h, Heard::Lost { .. }))
+                    .is_empty(),
+                "{dropped} {rate:?}"
+            );
         }
     }
 }
@@ -582,7 +714,12 @@ fn a_resync_on_sh_after_a_page_brings_the_control_channel_back_at_its_rate() {
         line.page = Some((line.n, line.n + (1.5 * FS) as usize));
         line.run(1.6);
         for end in line.ends() {
-            assert_eq!(end.modem.receiver.phase(), Phase::Hunting, "{:?} still reading a page as data", end.modem.side());
+            assert_eq!(
+                end.modem.receiver.phase(),
+                Phase::Hunting,
+                "{:?} still reading a page as data",
+                end.modem.side()
+            );
         }
         // 12.6.1.1 and 12.6.2.1: Sh and S-bar-h, ALT, E, and data again.
         line.call.resync();
@@ -595,14 +732,19 @@ fn a_resync_on_sh_after_a_page_brings_the_control_channel_back_at_its_rate() {
         for (end, seed, from) in [(&line.answer, 21, before[1]), (&line.call, 23, before[0])] {
             let side = end.modem.side();
             println!("{side:?} {rate:?}: {:?}", end.heard);
-            assert!(contains(&end.data[from..], &pattern(1200, seed)), "{side:?} {rate:?}: the data after the resync");
+            assert!(
+                contains(&end.data[from..], &pattern(1200, seed)),
+                "{side:?} {rate:?}: the data after the resync"
+            );
             let order: Vec<&str> = end
                 .heard
                 .iter()
                 .filter_map(|(_, h)| match h {
                     Heard::Sh { .. } => Some("Sh"),
                     Heard::Reversal { .. } => Some("reversal"),
-                    Heard::Trained { on: Reference::Sh, .. } => Some("trained"),
+                    Heard::Trained {
+                        on: Reference::Sh, ..
+                    } => Some("trained"),
                     Heard::E { .. } => Some("E"),
                     _ => None,
                 })
@@ -629,20 +771,38 @@ fn ac_is_heard_and_lasts_past_the_100_ms_12_8_2_waits_for() {
     assert!(line.run_until(3.0, in_data), "never reached data");
     // Either end asks for a retrain.
     line.answer.modem.transmitter.queue(Segment::Ac);
-    let heard = |l: &Line| l.call.modem.receiver.hearing() == Hearing::Ac && l.call.modem.receiver.hearing_for() > AC_SECONDS;
-    assert!(line.run_until(0.5, heard), "the call end never heard AC for 100 ms");
+    let heard = |l: &Line| {
+        l.call.modem.receiver.hearing() == Hearing::Ac
+            && l.call.modem.receiver.hearing_for() > AC_SECONDS
+    };
+    assert!(
+        line.run_until(0.5, heard),
+        "the call end never heard AC for 100 ms"
+    );
     let ac = line.call.heard(|h| matches!(h, Heard::Ac { .. }));
     assert_eq!(ac.len(), 1, "{:?}", line.call.heard);
     // And stopped reading AC as data.
-    assert!(!line.call.heard(|h| matches!(h, Heard::Lost { .. })).is_empty());
+    assert!(
+        !line
+            .call
+            .heard(|h| matches!(h, Heard::Lost { .. }))
+            .is_empty()
+    );
     assert_eq!(line.call.modem.receiver.phase(), Phase::Hunting);
     // Heard soon after it reached the line: within 30 symbols.
-    let Some(Sent::Began { at: sent, .. }) = std::iter::from_fn(|| line.answer.modem.transmitter.sent()).last() else {
+    let Some(Sent::Began { at: sent, .. }) =
+        std::iter::from_fn(|| line.answer.modem.transmitter.sent()).last()
+    else {
         panic!("AC never went")
     };
-    let Heard::Ac { at } = ac[0].1 else { unreachable!() };
+    let Heard::Ac { at } = ac[0].1 else {
+        unreachable!()
+    };
     let late = at as f64 - sent as f64 - 0.100 * FS;
-    assert!(late.abs() < 30.0 * FS / BAUD, "AC heard {late:.0} samples after the line's delay");
+    assert!(
+        late.abs() < 30.0 * FS / BAUD,
+        "AC heard {late:.0} samples after the line's delay"
+    );
 }
 
 #[test]
@@ -662,9 +822,15 @@ fn a_retrain_on_ac_starts_again_from_data_and_changes_the_rates() {
         line.answer.modem.receiver.set_rate(Rate::R2400);
         line.call.retrain(initiator == Side::Call);
         line.answer.retrain(initiator == Side::Answer);
-        let back = line.run_until(3.0, |l| l.ends().iter().all(|e| e.stage == Stage::Data) && in_data(l));
+        let back = line.run_until(3.0, |l| {
+            l.ends().iter().all(|e| e.stage == Stage::Data) && in_data(l)
+        });
         for end in line.ends() {
-            println!("{initiator:?} initiating, {:?}: {:?}", end.modem.side(), end.heard);
+            println!(
+                "{initiator:?} initiating, {:?}: {:?}",
+                end.modem.side(),
+                end.heard
+            );
         }
         assert!(back, "{initiator:?} initiating: never back to data");
         // Queued only now, so that nothing of it can have gone before the
@@ -673,14 +839,37 @@ fn a_retrain_on_ac_starts_again_from_data_and_changes_the_rates() {
         line.call.modem.transmitter.send_bits(&pattern(2400, 41));
         line.answer.modem.transmitter.send_bits(&pattern(1200, 43));
         line.run(1.6);
-        for (end, seed, bits, from) in [(&line.answer, 41, 2400, before[1]), (&line.call, 43, 1200, before[0])] {
+        for (end, seed, bits, from) in [
+            (&line.answer, 41, 2400, before[1]),
+            (&line.call, 43, 1200, before[0]),
+        ] {
             let side = end.modem.side();
-            assert!(contains(&end.data[from..], &pattern(bits, seed)), "{side:?}: the data after the retrain");
+            assert!(
+                contains(&end.data[from..], &pattern(bits, seed)),
+                "{side:?}: the data after the retrain"
+            );
             let pph = end.heard(|h| matches!(h, Heard::Pph { .. }));
-            let trained = end.heard(|h| matches!(h, Heard::Trained { on: Reference::Pph(_), .. }));
-            assert_eq!((pph.len(), trained.len()), (2, 2), "{side:?}: {:?}", end.heard);
+            let trained = end.heard(|h| {
+                matches!(
+                    h,
+                    Heard::Trained {
+                        on: Reference::Pph(_),
+                        ..
+                    }
+                )
+            });
+            assert_eq!(
+                (pph.len(), trained.len()),
+                (2, 2),
+                "{side:?}: {:?}",
+                end.heard
+            );
         }
-        let responder = if initiator == Side::Call { &line.answer } else { &line.call };
+        let responder = if initiator == Side::Call {
+            &line.answer
+        } else {
+            &line.call
+        };
         assert_eq!(responder.heard(|h| matches!(h, Heard::Ac { .. })).len(), 1);
     }
 }
@@ -701,16 +890,30 @@ impl Shift {
             .map(|i| {
                 let n = i as i64 - 127;
                 let window = 0.54 - 0.46 * (std::f64::consts::TAU * i as f64 / 254.0).cos();
-                if n % 2 == 0 { 0.0 } else { window * 2.0 / (std::f64::consts::PI * n as f64) }
+                if n % 2 == 0 {
+                    0.0
+                } else {
+                    window * 2.0 / (std::f64::consts::PI * n as f64)
+                }
             })
             .collect();
-        Self { taps, history: std::iter::repeat_n(0.0, 255).collect(), phase: 0.0, step: std::f64::consts::TAU * hz / FS }
+        Self {
+            taps,
+            history: std::iter::repeat_n(0.0, 255).collect(),
+            phase: 0.0,
+            step: std::f64::consts::TAU * hz / FS,
+        }
     }
 
     fn process(&mut self, x: f64) -> f64 {
         self.history.pop_front();
         self.history.push_back(x);
-        let transformed: f64 = self.history.iter().zip(self.taps.iter().rev()).map(|(a, b)| a * b).sum();
+        let transformed: f64 = self
+            .history
+            .iter()
+            .zip(self.taps.iter().rev())
+            .map(|(a, b)| a * b)
+            .sum();
         self.phase = (self.phase + self.step) % std::f64::consts::TAU;
         self.history[127] * self.phase.cos() - transformed * self.phase.sin()
     }
@@ -750,7 +953,11 @@ fn a_carrier_7_hz_out_either_way_is_followed() {
             // The answer end's clock is 50 ppm fast, which moves the carriers
             // a tenth of a hertz more.
             let offset = end.modem.receiver.offset_hz();
-            assert!((offset - hz).abs() < 0.3, "{:?} at {hz} Hz: {offset:.2} Hz", end.modem.side());
+            assert!(
+                (offset - hz).abs() < 0.3,
+                "{:?} at {hz} Hz: {offset:.2} Hz",
+                end.modem.side()
+            );
         }
     }
 }
@@ -769,7 +976,13 @@ fn a_tone_is_heard_as_a_tone() {
         }
         assert_eq!(rx.hearing(), Hearing::Tone, "{side:?}");
         let heard: Vec<Heard> = std::iter::from_fn(|| rx.heard()).collect();
-        assert!(matches!(heard[..], [Heard::Carrier { on: true, .. }, Heard::Tone { .. }]), "{side:?}: {heard:?}");
+        assert!(
+            matches!(
+                heard[..],
+                [Heard::Carrier { on: true, .. }, Heard::Tone { .. }]
+            ),
+            "{side:?}: {heard:?}"
+        );
     }
 }
 
@@ -788,7 +1001,12 @@ fn long_data_and_noise_are_never_taken_for_a_signal() {
     line.answer.modem.transmitter.send_bits(&pattern(bits, 37));
     line.run(6.5);
     for end in line.ends() {
-        let after_e = end.heard.iter().skip_while(|(_, h)| !matches!(h, Heard::E { .. })).skip(1).count();
+        let after_e = end
+            .heard
+            .iter()
+            .skip_while(|(_, h)| !matches!(h, Heard::E { .. }))
+            .skip(1)
+            .count();
         assert_eq!(after_e, 0, "{:?}: {:?}", end.modem.side(), end.heard);
         let hearing = end.modem.receiver.hearing();
         assert_eq!(hearing, Hearing::Modulated, "{:?}", end.modem.side());
@@ -804,6 +1022,9 @@ fn long_data_and_noise_are_never_taken_for_a_signal() {
             rx.feed(0.05 * (f64::from(seed) / f64::from(u32::MAX) - 0.5));
         }
         let heard: Vec<Heard> = std::iter::from_fn(|| rx.heard()).collect();
-        assert!(matches!(heard[..], [Heard::Carrier { on: true, .. }]), "{side:?}: {heard:?}");
+        assert!(
+            matches!(heard[..], [Heard::Carrier { on: true, .. }]),
+            "{side:?}: {heard:?}"
+        );
     }
 }
