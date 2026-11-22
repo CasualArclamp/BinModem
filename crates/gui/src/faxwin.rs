@@ -64,6 +64,9 @@ pub struct Fax {
     pub jbig: bool,
     /// What the far end said, once it has said anything.
     pub far: Option<t30::Capabilities>,
+    /// The field it was read from, as it arrived: a DIS when this end is
+    /// sending, and the caller's DCS when this end is receiving.
+    far_field: Option<Vec<u8>>,
     pub far_identity: String,
     /// The far end's NSF, if it sent one.
     pub far_non_standard: Option<Vec<u8>>,
@@ -973,6 +976,7 @@ impl Fax {
         if going && !live {
             self.carried = None;
             self.far = None;
+            self.far_field = None;
             self.far_identity.clear();
             self.far_non_standard = None;
             self.trouble = None;
@@ -1010,10 +1014,23 @@ impl Fax {
         self.fax_class = frame.fax_class;
         // Only once a page is moving: until the command has settled it, the
         // coding the call reports is the MH every call starts from.
-        if frame.fax_progress.is_some() && frame.fax_rate > 0 {
+        //
+        // And only while the page's own modulation is the one in use. Between
+        // pages, and after the last, the modem is back on V.21 for the
+        // frames, with the page's rate and progress still held -- which used
+        // to put "V.21 14400" on the badge and the outcome.
+        let modulation = match (frame.modulation, self.carried) {
+            ("V.21", Some(c)) => Some(c.modulation),
+            ("V.21", None) => None,
+            (m, _) => Some(m),
+        };
+        if frame.fax_progress.is_some()
+            && frame.fax_rate > 0
+            && let Some(modulation) = modulation
+        {
             self.carried = Some(Carried {
                 coding: frame.fax_coding,
-                modulation: frame.modulation,
+                modulation,
                 rate: frame.fax_rate,
                 symbol_rate: frame.fax_symbol_rate,
                 correcting: frame.fax_error_correction,
@@ -1029,6 +1046,7 @@ impl Fax {
             self.far_non_standard = Some(fif.to_vec());
         }
         if let Some(fif) = frame.fax_capabilities.as_deref() {
+            self.far_field = Some(fif.to_vec());
             self.far = Some(t30::capabilities(fif));
         }
         if let Some(trouble) = frame.fax_trouble.as_deref() {
@@ -1280,14 +1298,14 @@ impl Fax {
                         row(ui, k, &v);
                     }
                 }
-                // On a V.34 call the answering end's field is the caller's
-                // DCS, whose rate bits T.30 has sent as zero (Table 2, Note
-                // 33): read as a DIS they say V.27 ter at 4800, which is not
-                // what the far end can do. The rate is the modem's, from its
-                // MPh exchange.
-                let v34 = self.symbol_rate > 0;
+                // Receiving, the field is the caller's DCS, not a DIS: its rate
+                // bits name the one modulation chosen for this call, which a
+                // DIS reading turns into "none this knows" and "nothing in
+                // common". On a V.34 call T.30 sends them as zero (Table 2,
+                // Note 33), and the rate is the modem's, from its MPh
+                // exchange. Either way they are said once, as this call.
                 for (k, v) in caps.rows() {
-                    if v34 && !self.sending && matches!(k, "modulations" | "fastest") {
+                    if !self.sending && matches!(k, "modulations" | "fastest") {
                         continue;
                     }
                     match (k, v.split_once("JBIG")) {
@@ -1306,13 +1324,13 @@ impl Fax {
                         _ => row(ui, k, &v),
                     }
                 }
-                ui.label(RichText::new("both ends").monospace().size(12.0).color(dim));
-                let shared = if v34 {
-                    Some(format!("V.34 at {} bit/s on {} baud", self.rate, self.symbol_rate))
-                } else {
-                    caps.best_shared(&self.ours())
-                        .map(|(m, rate)| format!("{} at {rate} bit/s", m.name()))
-                };
+                ui.label(
+                    RichText::new(if self.sending { "both ends" } else { "this call" })
+                        .monospace()
+                        .size(12.0)
+                        .color(dim),
+                );
+                let shared = self.shared(caps);
                 ui.label(
                     RichText::new(shared.clone().unwrap_or_else(|| "nothing in common".to_owned()))
                         .monospace()
@@ -1321,6 +1339,23 @@ impl Fax {
                 );
                 ui.end_row();
             });
+    }
+
+    /// What the two ends have settled on, for the far-end panel: the best
+    /// both have when this end is sending and has the far end's DIS, and
+    /// what the caller's DCS chose when receiving.
+    fn shared(&self, caps: &t30::Capabilities) -> Option<String> {
+        if self.symbol_rate > 0 {
+            return Some(format!("V.34 at {} bit/s on {} baud", self.rate, self.symbol_rate));
+        }
+        if self.sending {
+            return caps.best_shared(&self.ours()).map(|(m, rate)| format!("{} at {rate} bit/s", m.name()));
+        }
+        self.far_field
+            .as_deref()
+            .and_then(t30::command_rate)
+            .map(|(m, rate)| format!("{} at {rate} bit/s", m.name()))
+            .or_else(|| self.carried.map(|c| format!("{} at {} bit/s", c.modulation, c.rate)))
     }
 
     /// The page, large: the one going out, or the one arriving drawn a line
@@ -2768,5 +2803,45 @@ mod tests {
         assert_eq!(ago(5.0), "just now");
         assert_eq!(ago(250.0), "4 min ago");
         assert_eq!(ago(7300.0), "2 h ago");
+    }
+
+    #[test]
+    fn the_page_modulation_is_kept_when_the_modem_goes_back_to_v21_for_the_frames() {
+        let mut fax = Fax::new();
+        let mut frame = telemetry::Frame::new(16, 16, 16_000.0);
+        frame.state = telemetry::CallState::Negotiating;
+        frame.fax_phase = Some(fax::call::Phase::Receiving.name());
+        frame.fax_coding = "JBIG";
+        frame.fax_rate = 14_400;
+        frame.fax_error_correction = true;
+        frame.fax_progress = Some(0.5);
+        frame.modulation = "V.21";
+        fax.observe(&frame, 0.0);
+        assert_eq!(fax.carried, None, "V.21 taken for the page's modulation");
+        frame.modulation = "V.17";
+        fax.observe(&frame, 1.0);
+        frame.modulation = "V.21";
+        frame.fax_progress = Some(1.0);
+        fax.observe(&frame, 2.0);
+        let carried = fax.carried.expect("nothing carried");
+        assert_eq!((carried.modulation, carried.rate), ("V.17", 14_400));
+        assert_eq!(fax.calls[0].carried.map(|c| c.modulation), Some("V.17"));
+    }
+
+    #[test]
+    fn receiving_the_far_end_is_what_its_dcs_chose_not_nothing_in_common() {
+        let mut fax = Fax::new();
+        let mut frame = telemetry::Frame::new(16, 16, 16_000.0);
+        frame.state = telemetry::CallState::Negotiating;
+        frame.fax_phase = Some(fax::call::Phase::CheckingTraining.name());
+        frame.fax_sending = false;
+        // A DCS for V.17 at 14 400: bits 11 to 14 are 0001 (Table 2).
+        let mut dcs = vec![0u8; 3];
+        dcs[1] = 0b0010_0000;
+        assert_eq!(t30::command_rate(&dcs), Some((t30::Modulation::V17, 14_400)), "the field in this test");
+        frame.fax_capabilities = Some(dcs);
+        fax.observe(&frame, 0.0);
+        let caps = fax.far.clone().expect("no far end");
+        assert_eq!(fax.shared(&caps).as_deref(), Some("V.17 at 14400 bit/s"));
     }
 }
