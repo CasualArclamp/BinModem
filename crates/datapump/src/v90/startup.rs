@@ -82,6 +82,10 @@ pub struct Analogue {
     /// ranging exchange gives the round trip to the digital modem alone
     /// (9.4.1.1.4/V.92).
     remembered_round_trip: Option<f64>,
+    /// Whether this start-up came by V.92's quick connect (9.2/V.92): its
+    /// Ja then asks for no DIL, which is what keeps it quick. Every other
+    /// start-up, and every retrain, asks for one.
+    after_quick: bool,
 }
 
 impl Analogue {
@@ -102,7 +106,16 @@ impl Analogue {
             failed_v92: 0,
             pinned_up: None,
             remembered_round_trip: None,
+            after_quick: false,
         }
+    }
+
+    /// Whether this start-up came by V.92's quick connect: if it did, Ja
+    /// asks for no DIL and the CPt and CPu are made without one, as the fast
+    /// path wants; if not, Ja asks for V.90's DIL and they are chosen from
+    /// it. A retrain goes back to asking for one.
+    pub fn set_after_quick(&mut self, quick: bool) {
+        self.after_quick = quick;
     }
 
     /// The round trip an earlier call to the same place measured, in
@@ -303,6 +316,8 @@ impl Analogue {
     /// Back through V.90's phase 2.
     fn back_to_phase2(&mut self) {
         self.v92 = None;
+        // 9.7: a retrain is a full start-up, and its DIL is worth the time.
+        self.after_quick = false;
         if let Some(m) = self.v90.take() {
             self.renegotiations += m.renegotiations();
             self.holes += m.holes();
@@ -506,17 +521,26 @@ impl Analogue {
             && self.v34.training().is_none()
             && let (Some(asked), Some(server)) = (p2.info1a_pcm_up(), p2.far_info0d())
         {
-            // No DIL: the CPt is `cpt_for`'s guess, which the analogue modem
-            // swaps for a slower one if TRN1d says it cannot read it
-            // (`analogue::Modem::fit_cpt_to_line`, robbed bits), and SCR
-            // stands in for the DIL (9.5.2.1.10). Every upstream rate of 6.1
-            // is offered, and the digital modem's CPd chooses.
-            // A rate somebody pinned is asked for as it is: downstream by a
-            // CPt of just the levels it needs, upstream by a Ja that allows
-            // no other.
+            // A full start-up asks for V.90's DIL and chooses the CPt and the
+            // CPu from it (`v92::dil`): a robbed bit or a pad gets the
+            // constellations V.90 would give it, where a guess made without
+            // one has to be one every interval reads. A quick connect asks for
+            // none, which is what keeps it quick: the CPt is then `cpt_for`'s
+            // guess, which the analogue modem swaps for a slower one if TRN1d
+            // says it cannot read it (`analogue::Modem::fit_cpt_to_line`), and
+            // SCR stands in for the DIL (9.5.2.1.10). So does a full start-up
+            // whose DIL carries none of the rates Jd enables.
+            // Every upstream rate of 6.1 is offered, and the digital modem's
+            // CPd chooses. A rate somebody pinned is asked for as it is:
+            // downstream by a CPt of just the levels it needs (and as the
+            // DIL's ceiling), upstream by a Ja that allows no other.
+            let law = if server.a_law { Law::A } else { Law::Mu };
             let cpt = pcm_up::cpt_for(self.pinned.unwrap_or(DEFAULT_DOWN_DRN));
             let rates = self.pinned_up.map_or(0x7ffff, |drn| 1 << (drn - 1));
-            let mut settings = pcm_up::Settings::new(Descriptor::none(), rates, cpt);
+            let descriptor = if self.after_quick { Descriptor::none() } else { super::dil::design(law, asked.uinfo) };
+            let mut settings = pcm_up::Settings::new(descriptor, rates, cpt);
+            settings.read_dil = (!self.after_quick)
+                .then(|| crate::v92::dil::Reading { power_limit: super::power_limit(&server), pinned: self.pinned });
             settings.md_length = asked.md_length;
             settings.uinfo = asked.uinfo;
             settings.limits = FilterLimits::from_info1a(asked.sections, asked.ltot_code, asked.lmax_code);
@@ -525,13 +549,14 @@ impl Analogue {
             if p2.was_short() {
                 self.notes.push("V.92: short phase 2, no line probe".into());
             }
-            settings.law = if server.a_law { Law::A } else { Law::Mu };
+            settings.law = law;
             // Nobody chose a downstream rate: the line does.
             settings.rate_from_line = self.pinned.is_none();
             self.notes.push(format!(
-                "V.92: PCM upstream (Table 18), U_INFO {}, {}-law",
+                "V.92: PCM upstream (Table 18), U_INFO {}, {}-law, {}",
                 asked.uinfo,
-                if server.a_law { "A" } else { "mu" }
+                if server.a_law { "A" } else { "mu" },
+                if self.after_quick { "no DIL after a quick connect" } else { "asking for a DIL" }
             ));
             self.v92 = Some(Box::new(pcm_line::Line::new(settings, self.fs)));
             return out;

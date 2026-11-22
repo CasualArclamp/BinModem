@@ -397,6 +397,13 @@ pub struct Settings {
     /// Clear, CPt follows the DIL at once and is [`Self::cpt`]. With no DIL
     /// asked for there is nothing to wait for and this changes nothing.
     pub choice_follows_dil: bool,
+    /// Whether this modem reads the DIL itself and chooses the CPt and the
+    /// CPu from it ([`crate::v92::dil`]), inside the power and under the rate
+    /// this names: what an owner that set [`Self::choice_follows_dil`] would
+    /// do, done here. A route that carries none of the rates Jd enables
+    /// leaves the choice to [`Self::cpt`] and [`Self::rate_from_line`], as if
+    /// no DIL had been asked for. With no DIL asked for this changes nothing.
+    pub read_dil: Option<crate::v92::dil::Reading>,
     /// The round trip, from Phase 2's ranging: the deadlines that carry an RTD
     /// term use it.
     pub round_trip: f64,
@@ -435,6 +442,7 @@ impl Settings {
             cpt,
             cpu: None,
             choice_follows_dil: false,
+            read_dil: None,
             round_trip: 0.0,
             since_info1a: 0.0,
             law: Law::Mu,
@@ -1149,6 +1157,9 @@ pub struct Modem {
     jd_deadline: Option<u64>,
     su_by: Option<u64>,
     cpt_by: Option<u64>,
+    /// When the first CPt began, so that an Ri heard before the digital
+    /// modem could have read a whole one is not taken for its answer.
+    cpt_began: Option<u64>,
     start_up_by: u64,
     /// The level U_INFO stands for, as a fraction of full scale: the
     /// equaliser was trained to call it one, so this turns its output back
@@ -1268,6 +1279,7 @@ impl Modem {
             jd_deadline: None,
             su_by: None,
             cpt_by: None,
+            cpt_began: None,
             start_up_by,
             status: Status::Running,
             notes: Vec::new(),
@@ -1491,6 +1503,41 @@ impl Modem {
         true
     }
 
+    /// Whether the CPt waits for a choice made from the DIL: an owner's
+    /// ([`Settings::choice_follows_dil`]) or this modem's own
+    /// ([`Settings::read_dil`]).
+    fn waits_for_choice(&self) -> bool {
+        self.settings.choice_follows_dil || self.settings.read_dil.is_some()
+    }
+
+    /// [`Settings::read_dil`]: once a pass of the DIL has arrived, the CPt
+    /// and the CPu chosen from it. Done once; a route with nothing to choose
+    /// gives the choice back to [`Settings::cpt`] and the line.
+    fn read_own_dil(&mut self) {
+        let Some(reading) = self.settings.read_dil else { return };
+        // A pass and the margin `dil::route` finds the pass's start in.
+        let wanted = self.settings.descriptor.len() + crate::v92::dil::MARGIN;
+        if self.chosen || !self.dil_received() || self.dil.len() < wanted {
+            return;
+        }
+        let jd = self.far_jd.unwrap_or_default();
+        let s = &self.settings;
+        match crate::v92::dil::choose(&s.descriptor, s.law, self.unit, &self.dil, &jd, reading, &s.cpt) {
+            Ok(chosen) => {
+                if self.choose(chosen.training, chosen.data) {
+                    self.notes.push(chosen.note);
+                } else {
+                    self.notes.push("the DIL's choice came too late for the CPt".into());
+                    self.settings.read_dil = None;
+                }
+            }
+            Err(why) => {
+                self.notes.push(format!("nothing chosen from the DIL: {why}"));
+                self.settings.read_dil = None;
+            }
+        }
+    }
+
     /// How long this modem has been running, in symbols.
     #[must_use]
     pub fn elapsed(&self) -> u64 {
@@ -1509,6 +1556,7 @@ impl Modem {
         while let Some(heard) = self.rx.heard() {
             self.heard(heard);
         }
+        self.read_own_dil();
         if tracing() && self.now.is_multiple_of(2000) {
             eprintln!(
                 "V92ATRACE: {} symbols, {}, up {:?}, trained {}, snr {:.1}",
@@ -1630,7 +1678,7 @@ impl Modem {
                         // CPt is to come from it, has been read.
                         self.source.count >= self.trn1u_over_dil()
                             && self.dil_complete()
-                            && (self.chosen || !self.settings.choice_follows_dil)
+                            && (self.chosen || !self.waits_for_choice())
                     };
                     if due {
                         self.begin_cpt();
@@ -2178,6 +2226,7 @@ impl Modem {
         self.source.start(Up::Cpt);
         self.stage = Stage::Cpt;
         self.cpt_by = None;
+        self.cpt_began = Some(self.now);
         self.notes.push(format!("CPt for drn {}", self.settings.cpt.drn));
     }
 
@@ -2347,7 +2396,25 @@ impl Modem {
                     return;
                 }
                 let Some(bit) = self.reader.feed(symbol.value) else { return };
-                self.zeroes = if bit { 0 } else { self.zeroes + 1 };
+                // Counted from the end of a whole Jp only: the twelve bits
+                // after one are the next Jp's frame sync, which is ones, or
+                // Jp'. Twelve zeroes anywhere would do inside a Jp -- an
+                // epsilon of 32768 is fifteen of them -- and the DIL was then
+                // counted from the middle of the Jps, two thousand symbols
+                // before it came.
+                self.window.push_back(bit);
+                while self.window.len() > JD_BITS {
+                    self.window.pop_front();
+                }
+                let whole_jp = self.window.len() == JD_BITS
+                    && matches!(J::from_bits(&self.window.iter().copied().collect::<Vec<_>>()), Some(J::Jp(_)));
+                self.zeroes = if whole_jp {
+                    0
+                } else if bit || self.zeroes == usize::MAX {
+                    usize::MAX
+                } else {
+                    self.zeroes + 1
+                };
                 if self.zeroes == JP_PRIME_BITS {
                     self.jp_prime = true;
                     self.dil_left = self.settings.descriptor.len();
@@ -2391,7 +2458,18 @@ impl Modem {
     /// Ri: the digital modem has read a CPt, so the CPt series ends (A11).
     fn ri(&mut self, at: u64) {
         match self.stage {
+            // Ri answers a CPt the digital modem has read (9.5.1.1.12), so
+            // none can arrive before one whole CPt has gone out. What sounds
+            // like one sooner, with a DIL asked for, is the DIL: a segment of
+            // it can hold Ru's shape for the periods the hunt asks, and taking
+            // it for Ri cut the CPt short of being read at all. (SCR, in the
+            // DIL's place when none was asked for, never looks like Ru.)
             Stage::Cpt if !self.zero_dil_a10() => {
+                let whole = self.cpt_began.map_or(0, |began| began + self.source.cpt_bits.len() as u64);
+                if !self.settings.descriptor.is_empty() && self.now < whole {
+                    self.notes.push(format!("Ri at {at} is too soon to answer the CPt: the DIL"));
+                    return;
+                }
                 self.source.stop = true;
                 self.notes.push(format!("Ri at {at}, CPt ends"));
             }

@@ -3930,6 +3930,9 @@ impl Modem {
                 };
                 let mut analogue = v90::startup::Analogue::new(self.fs, lead_in).with_v92(wish, lead_in);
                 analogue.set_remembered_round_trip(memo.map(|memo| f64::from(memo.round_trip_ms) / 1000.0));
+                // DIL off only on the fast path: after a quick connect Ja asks
+                // for none, and on every other start-up for V.90's.
+                analogue.set_after_quick(self.quick.is_some_and(|q| q.role == PcmRole::Analogue));
                 // After a quick connect the digital modem is in Phase 2
                 // before this end is (9.2.4.3/V.92): a far end still silent
                 // a round trip and 9.4.2.2.2's wait later is not, and the

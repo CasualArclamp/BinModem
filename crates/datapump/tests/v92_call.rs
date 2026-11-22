@@ -783,6 +783,35 @@ fn a_robbed_bit_on_the_downstream_with_no_dil_still_connects() {
     }
 }
 
+/// The same route with V.90's DIL asked for, as a full start-up of
+/// `v90::startup` now makes it: the analogue modem reads the DIL itself
+/// (`v92::dil`), sees which interval has the robbed bit, and gives that one
+/// a ladder of its own while the other five keep theirs. The no-DIL rule
+/// above has to settle for 28 000 here; this is well above it.
+#[test]
+fn a_robbed_bit_on_the_downstream_with_a_dil_connects_above_28000() {
+    let law = Law::Mu;
+    let power_limit = datapump::v90::power_limit(&datapump::v90::server::ours());
+    for phase in [0, 3] {
+        let what = format!("a robbed bit in octet {phase} of six, with a DIL");
+        let analogue = analogue::Settings {
+            rate_from_line: true,
+            read_dil: Some(datapump::v92::dil::Reading { power_limit, pinned: None }),
+            ..analogue::Settings::new(datapump::v90::dil::design(law, 79), 0x7ffff, analogue::cpt_for(16))
+        };
+        let mut call = connected(Call::new(digital_settings(0), analogue).robbing_a_bit(phase));
+        let analogue::Status::Connected { downstream, .. } = call.analogue.status() else {
+            panic!("{what}: not connected");
+        };
+        let said = format!("{what}: {downstream} bit/s
+{:#?}", call.analogue_notes);
+        println!("{what}: {downstream} bit/s down after {} symbols", call.ticks);
+        assert!(call.analogue_notes.iter().any(|note| note.starts_with("the DIL chose")), "{said}");
+        assert!(downstream > 28_000, "{said}");
+        assert_carries_data(&mut call, &what);
+    }
+}
+
 /// The upstream through the central office's codec, which is what makes it a
 /// PCM upstream (clause 1): every sample the digital modem is given is a G.711
 /// level, A-law and mu-law in turn, and the downstream's codewords are the
@@ -996,3 +1025,4 @@ fn the_refit_follows_the_phase_step_the_s_bar_u_left() {
     );
     assert!(call.digital.cpt().is_some(), "no CPt: {:#?}", call.digital_notes);
 }
+

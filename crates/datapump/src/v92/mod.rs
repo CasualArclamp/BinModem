@@ -54,6 +54,7 @@ pub mod analogue;
 pub mod anspcm;
 pub mod decoder;
 pub mod design;
+pub mod dil;
 pub mod digital;
 pub mod down_source;
 pub mod epsilon;
