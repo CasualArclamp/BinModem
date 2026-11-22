@@ -463,6 +463,9 @@ pub struct ScopeApp {
     /// for it and so is to be shut again after.
     ringer: Option<crate::callprompt::Ringer>,
     ring_opened_monitor: bool,
+    /// What `--answer-as` said to press, for a call with nobody at the
+    /// keyboard: pressed once the question has been up for a moment.
+    answer_as: Option<crate::callprompt::Choice>,
     /// The file transfer window, and the two paths it works with.
     transfer_open: bool,
     send_path: String,
@@ -687,6 +690,7 @@ impl ScopeApp {
             prompt: crate::callprompt::CallPrompt::default(),
             ringer: None,
             ring_opened_monitor: false,
+            answer_as: None,
             transfer_open: false,
             line_was_open: false,
             send_path: String::new(),
@@ -1890,7 +1894,11 @@ impl ScopeApp {
         }
         ctx.request_repaint_after(std::time::Duration::from_millis(30));
         let fax_class = self.frame.fax_class;
-        if let Some(choice) = crate::callprompt::dialog(&ctx, &who, now - since, fax_class)
+        let pressed = crate::callprompt::dialog(&ctx, &who, now - since, fax_class);
+        // Long enough that the question is seen, the way a person would
+        // take it.
+        let scripted = self.answer_as.filter(|_| now - since > 2.5);
+        if let Some(choice) = pressed.or(scripted)
             && let Some(choice) = self.prompt.choose(choice, now)
         {
             self.take_call(choice, session);
@@ -4213,6 +4221,17 @@ impl ScopeApp {
         if scopes && !self.source.is_telnet() {
             self.tab = Tab::Scopes;
         }
+    }
+
+    /// What `--answer-as` asked for.
+    pub fn answer_as(&mut self, how: &str) -> Result<(), String> {
+        use crate::callprompt::Choice;
+        self.answer_as = Some(match how {
+            "fax" => Choice::Fax,
+            "modem" => Choice::Modem,
+            other => return Err(format!("--answer-as is fax or modem, not {other}")),
+        });
+        Ok(())
     }
 
     /// What `--fax` asked for: the Fax tab as the one to open on.

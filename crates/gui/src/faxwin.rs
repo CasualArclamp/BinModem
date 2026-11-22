@@ -364,6 +364,11 @@ impl Scan {
         self.rows += 1;
     }
 
+    /// Rows in a whole A4 sheet at this page's resolution.
+    fn sheet_rows(&self) -> usize {
+        (self.resolution.lines() as f64 / self.lines_per_row()).ceil() as usize
+    }
+
     /// Rows that can be drawn: all of them, unless the page has run longer
     /// than the largest texture the graphics card takes.
     fn shown(&self) -> usize {
@@ -382,7 +387,7 @@ impl Scan {
         let largest = ctx.input(|i| i.max_texture_side);
         let outgrown = self.rows > self.capacity && self.capacity < largest;
         if self.texture.is_none() || outgrown {
-            let sheet = (self.resolution.lines() as f64 / self.lines_per_row()).ceil() as usize;
+            let sheet = self.sheet_rows();
             self.capacity = sheet.max(self.rows + self.rows / 2).min(largest);
             let upto = self.shown();
             let mut pixels = self.pixels[..upto * SCAN_WIDTH].to_vec();
@@ -568,11 +573,17 @@ impl CallRecord {
         let hung_up = self.frames.iter().any(|f| f.frame == Frame::Dcn);
         // The last page: EOP, or under error correction the PPS before a
         // disconnect, which is all that can be seen of its EOP from here.
-        let last_page = match last_post {
-            Some(Frame::Eop) => true,
-            Some(Frame::Pps) => hung_up,
-            _ => false,
-        };
+        // Or a receiver that had confirmed the last page and was waiting for
+        // the far end to hang up, which T.30 reaches only after the last:
+        // a far end that puts the call down as it sends DCN cuts the DCN off.
+        let waiting_to_hang_up = !self.sending
+            && self.last_phase == Some(fax::call::Phase::AwaitingDisconnect.name());
+        let last_page = waiting_to_hang_up
+            || match last_post {
+                Some(Frame::Eop) => true,
+                Some(Frame::Pps) => hung_up,
+                _ => false,
+            };
         let phase = self
             .last_phase
             .and_then(fax::call::Phase::named)
@@ -2080,9 +2091,15 @@ fn draw_scan(ui: &mut egui::Ui, scan: &mut Scan, arriving: bool) {
     let Some(texture) = scan.texture(ui.ctx()) else { return };
     let shown = scan.shown();
     let bottom = shown as f32 / scan.capacity as f32;
+    // As wide as a whole sheet can be and still fit the room, so the page is
+    // seen filling its paper from the top rather than as a strip scrolling
+    // past. A page longer than a sheet scrolls, following the newest line.
+    let room = ui.available_size();
+    let sheet = scan.sheet_rows();
+    let width = room.x.min(room.y * SCAN_WIDTH as f32 / sheet as f32).max(120.0);
     egui::ScrollArea::vertical()
         .id_salt("fax-receive-scroll")
-        .max_height(ui.available_height())
+        .max_height(room.y)
         .auto_shrink([false, false])
         .stick_to_bottom(true)
         .show(ui, |ui| {
@@ -2090,8 +2107,15 @@ fn draw_scan(ui: &mut egui::Ui, scan: &mut Scan, arriving: bool) {
             // image widget: the texture is a whole sheet tall, and an image
             // widget keeps its proportions, so the top rows of a page came
             // out a few pels wide and widened as the rest arrived.
-            let size = picture_size(ui.available_width(), shown);
-            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+            let tall = picture_size(width, shown.max(sheet)).y;
+            let (area, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), tall), egui::Sense::hover());
+            let paper = egui::Rect::from_min_size(
+                egui::pos2(area.center().x - width / 2.0, area.top()),
+                egui::vec2(width, tall),
+            );
+            // The rest of the sheet, still to come.
+            ui.painter().rect_filled(paper, 0.0, UNSCANNED);
+            let rect = egui::Rect::from_min_size(paper.min, picture_size(width, shown));
             ui.painter().image(
                 texture.id(),
                 rect,
@@ -2924,12 +2948,12 @@ mod tests {
         // A page white for its top half and noise below: half its bits gone
         // is well into the bottom half, not the middle of the page.
         let mut seed = 7u32;
-        let lines: Vec<Vec<bool>> = (0..600)
+        let lines: Vec<Vec<bool>> = (0..300)
             .map(|y| {
                 (0..fax::page::WIDTH)
                     .map(|_| {
                         seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-                        y >= 300 && seed >> 31 == 1
+                        y >= 150 && seed >> 31 == 1
                     })
                     .collect()
             })
@@ -2941,7 +2965,8 @@ mod tests {
             fax.coding = coding;
             // Worked out on a thread: none until it is done.
             let mut reached = None;
-            for _ in 0..2000 {
+            // Generous: a debug build coding JBIG under a full test run is slow.
+            for _ in 0..12_000 {
                 reached = fax.line_reached(0, 0.5);
                 if reached.is_some() {
                     break;
@@ -2949,10 +2974,10 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
             let (half, of) = reached.expect("no line");
-            assert_eq!(of, 600);
-            assert!(half > 400.0, "{coding}: half the bits is line {half}");
+            assert_eq!(of, 300);
+            assert!(half > 200.0, "{coding}: half the bits is line {half}");
             let (all, _) = fax.line_reached(0, 1.0).unwrap();
-            assert!((all - 600.0).abs() < 1.0, "{coding}: every bit is line {all}");
+            assert!((all - 300.0).abs() < 1.0, "{coding}: every bit is line {all}");
         }
         fax.coding = "-";
         assert_eq!(fax.line_reached(0, 0.5), None, "a coding not known yet");
@@ -2967,5 +2992,31 @@ mod tests {
         let (a, b) = (paper_size(&standard), paper_size(&fine));
         assert!((a.x - b.x).abs() < 0.01 && (a.y / b.y - 1.0).abs() < 0.01, "{a:?} against {b:?}");
         assert!((a.y / a.x - 297.0 / 215.0).abs() < 0.02, "not A4: {a:?}");
+    }
+
+    #[test]
+    fn an_ecm_receive_whose_dcn_was_cut_off_is_still_confirmed() {
+        // Seen filming: the sender hangs up the SIP call as it sends DCN, so
+        // the receiver never hears it -- but it had already confirmed the
+        // last page and was waiting for the far end to hang up.
+        let near = |frame| Exchanged { frame, ours: true };
+        let far = |frame| Exchanged { frame, ours: false };
+        let mut call = CallRecord::new(false, 0.0, "");
+        call.frames = vec![
+            near(Frame::Csi),
+            near(Frame::Dis),
+            far(Frame::Dcs),
+            near(Frame::Cfr),
+            far(Frame::Pps),
+            near(Frame::Mcf),
+        ];
+        call.received = vec![(1, page_of(10))];
+        call.sheets = 1;
+        call.last_phase = Some(fax::call::Phase::AwaitingDisconnect.name());
+        call.ended = Some(40.0);
+        assert_eq!(call.verdict(), Verdict::Confirmed);
+        // Still receiving the page when the line went: not confirmed.
+        call.last_phase = Some(fax::call::Phase::Receiving.name());
+        assert!(matches!(call.verdict(), Verdict::Failed { phase: 'C', .. }), "{:?}", call.verdict());
     }
 }

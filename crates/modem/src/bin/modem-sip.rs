@@ -51,6 +51,11 @@ fn main() -> ExitCode {
     let mut answer = false;
     let mut memos: Option<PathBuf> = None;
     let mut drive = DEFAULT_DRIVE;
+    let mut page: Option<PathBuf> = None;
+    let mut fine = false;
+    let mut offer: Option<Vec<fax::t30::Modulation>> = None;
+    let mut ecm = true;
+    let mut jbig = true;
 
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut rest = args.iter();
@@ -90,6 +95,25 @@ fn main() -> ExitCode {
                     }
                 }
             }
+            "--page" => page = Some(PathBuf::from(value())),
+            "--fine" => fine = true,
+            "--no-ecm" => ecm = false,
+            "--no-jbig" => jbig = false,
+            "--offer" => {
+                let mut chosen = Vec::new();
+                for name in value().split(',') {
+                    chosen.push(match name.trim() {
+                        "v27ter" => fax::t30::Modulation::V27ter,
+                        "v29" => fax::t30::Modulation::V29,
+                        "v17" => fax::t30::Modulation::V17,
+                        other => {
+                            eprintln!("--offer takes v27ter, v29 and v17, not {other}");
+                            return ExitCode::FAILURE;
+                        }
+                    });
+                }
+                offer = Some(chosen);
+            }
             "--pages" => {
                 if let Some(f) = fax.as_mut() {
                     f.pages = value().parse().unwrap_or(1);
@@ -100,6 +124,7 @@ fn main() -> ExitCode {
                     "modem-sip [--accounts <file>] --account <name> --type <line>... \n\
                      \x20         [--send <text>] [--hold <s>] [--seconds <s>]\n\
                      \x20         [--fax g3|v34 [--pages <n>]] [--record <wav>] [--answer]\n\
+                     \x20         [--page <pbm> [--fine]] [--offer v27ter,v29,v17] [--no-ecm] [--no-jbig]\n\
                      \x20         [--memos <file>] [--drive <multiple>]\n\
                      \n\
                      Opens the SIP account, types each line at the modem a second apart,\n\
@@ -111,7 +136,10 @@ fn main() -> ExitCode {
                      --drive is how hard to drive the line, as a multiple of what the\n\
                      modem hands over: 0.1 unless told, which is the window's own.\n\
                      With --fax the modem is a fax machine with a test page to send:\n\
-                     type AT+FCLASS=1 and the ATD, and it exits 0 if a page went."
+                     type AT+FCLASS=1 and the ATD, and it exits 0 if a page went.\n\
+                     --page sends a P4 PBM 1728 pels wide in place of the test page, its\n\
+                     rows as lines at standard or, with --fine, at fine. --offer is the\n\
+                     modulations offered; --no-ecm and --no-jbig turn those off."
                 );
                 return ExitCode::SUCCESS;
             }
@@ -148,13 +176,67 @@ fn main() -> ExitCode {
         }
     };
 
-    run(&line, typed, send, hold, seconds, fax, record, answer, memos, drive)
+    let custom = match page.as_deref().map(|p| read_pbm(p, fine)).transpose() {
+        Ok(page) => page,
+        Err(e) => {
+            eprintln!("{e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let options = FaxOptions { page: custom, offer, ecm, jbig };
+    run(&line, typed, send, hold, seconds, fax, record, answer, memos, drive, options)
 }
 
 /// A fax to send instead of a data call.
 struct Fax {
     v34: bool,
     pages: usize,
+}
+
+/// What the fax sends and offers, beyond the test page's defaults.
+struct FaxOptions {
+    page: Option<fax::page::Page>,
+    offer: Option<Vec<fax::t30::Modulation>>,
+    ecm: bool,
+    jbig: bool,
+}
+
+/// A page from a P4 PBM: 1728 pels across, a row to a line, ink where the
+/// bit is set, as the format has it.
+fn read_pbm(path: &std::path::Path, fine: bool) -> Result<fax::page::Page, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut fields = Vec::new();
+    let mut at = 0;
+    while fields.len() < 3 && at < bytes.len() {
+        while at < bytes.len() && bytes[at].is_ascii_whitespace() {
+            at += 1;
+        }
+        if bytes.get(at) == Some(&b'#') {
+            while at < bytes.len() && bytes[at] != b'\n' {
+                at += 1;
+            }
+            continue;
+        }
+        let start = at;
+        while at < bytes.len() && !bytes[at].is_ascii_whitespace() {
+            at += 1;
+        }
+        fields.push(String::from_utf8_lossy(&bytes[start..at]).into_owned());
+    }
+    at += 1;
+    let width: usize = fields.get(1).and_then(|w| w.parse().ok()).unwrap_or(0);
+    let height: usize = fields.get(2).and_then(|h| h.parse().ok()).unwrap_or(0);
+    if fields.first().map(String::as_str) != Some("P4") || width != fax::page::WIDTH {
+        return Err(format!("{}: wants a P4 PBM {} pels wide", path.display(), fax::page::WIDTH));
+    }
+    let stride = width.div_ceil(8);
+    let data = bytes.get(at..at + stride * height).ok_or_else(|| format!("{}: cut short", path.display()))?;
+    let lines = data
+        .chunks(stride)
+        .map(|row| (0..width).map(|x| row[x / 8] >> (7 - x % 8) & 1 == 1).collect())
+        .collect();
+    let resolution = if fine { fax::page::Resolution::Fine } else { fax::page::Resolution::Standard };
+    Ok(fax::page::Page { lines, resolution })
 }
 
 /// A page with something on it to recognise at the far end: a frame, a
@@ -198,6 +280,7 @@ fn run(
     answer: bool,
     memos: Option<PathBuf>,
     drive: f32,
+    options: FaxOptions,
 ) -> ExitCode {
     let started = Instant::now();
     let note = |text: &str| eprintln!("[{:7.2}] {text}", started.elapsed().as_secs_f64());
@@ -212,7 +295,15 @@ fn run(
     if let Some(fax) = &fax {
         modem.fax_identification = "BINMODEM".to_owned();
         modem.fax_v34 = fax.v34;
-        modem.fax_pages = (0..fax.pages.max(1)).map(test_page).collect();
+        modem.fax_pages = match options.page.clone() {
+            Some(page) => vec![page; fax.pages.max(1)],
+            None => (0..fax.pages.max(1)).map(test_page).collect(),
+        };
+        if let Some(offer) = options.offer.clone() {
+            modem.fax_offer = offer;
+        }
+        modem.fax_error_correction = options.ecm;
+        modem.fax_jbig = options.jbig;
     }
     let mut fax_said = String::new();
     let mut fax_last = "";
