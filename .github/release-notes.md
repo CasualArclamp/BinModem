@@ -9,6 +9,17 @@ binmodem.exe --capture        replay the golden capture
 
 [docs/usage.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/usage.md) has the setup.
 
+## What's new in 5.3.0
+
+- **Bell 212A and Bell 202.** `AT+MS=B212` is 1200 bit/s DPSK with Bell's 2225 Hz answer tone, falling back to Bell 103 at either end. `AT+MS=B202` is 1200 bit/s FSK, half duplex.
+- **A steadier SIP line.** The modem is now stepped on a local clock, so a stall in what arrives never puts silence into what it sends. The jitter buffer holds 300 ms instead of 100: on a long international route the holes in data mode were packets that came late, not lost ones. `BINMODEM_SIP_JITTER` still sets it (1 to 25 packets).
+- **V.92 on real routes.** A robbed bit on the downstream (a T1 on the way) no longer stops Phase 4. A full start-up asks for a DIL and builds its constellations from it, so such a route gets about 49 000 bit/s down instead of falling back to 28 000; a quick connect still skips it. The Sd deadline allows for the round trip, R-bar-i is heard through short dropouts, and the downstream phase is chosen only once Sd is on every phase.
+- **Quick connect that fails falls back fast.** A server that goes silent after TONEq is dropped from the quick-connect memo, and the call starts V.8 again about 3.4 s later, inside the 60 s some ISPs allow.
+- **Phase 2 recovers a lost INFO0d** by sending INFO0a again, rather than waiting for one that is not coming.
+- **V.8 bis through dropouts.** A capabilities list a VoIP path has cut into is reported and answered with NAK(1), instead of vanishing.
+- **The distant panel says everything known about the far end**: phase 2's INFO sequences, the probed line and round trip, Jd and the PCM mode, kept after a call that never connected.
+- **Recording stops** when Stop is pressed after the far end has hung up, rather than at the next call.
+
 ## What's new in 5.2.0
 
 - **V.ARC compresses.** A V.ARC call had no compression at all: `+DS` and `+DS44` are about V.42, and V.ARC has its own retransmission in place of V.42. Its stream is now compressed with the best method both ends have, each direction for itself, and the window says which and what it has been worth.
