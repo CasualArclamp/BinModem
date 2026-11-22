@@ -392,6 +392,8 @@ impl Interpreter {
             // V.22bis at 1200 bit/s *is* V.22, and answering to both names
             // would be two entries for one thing. V.21 and Bell 103 are one
             // modem on two sets of tones, and both sets are there.
+            // B212 is Bell 212A, with a Bell 103 inside it; B202 is Bell 202,
+            // which V.250 has no name for and which takes the one others use.
             // V.32 and V.32bis are separate names because V.250 makes them
             // separate carriers, and the difference is real: V32 tops out at
             // 9600 and V32B at 14 400. A far end that will not hold the faster
@@ -403,7 +405,7 @@ impl Interpreter {
             // The last three are no Recommendation's: V.ARC, this modem's
             // own mode for a sound card wired to another one, as its
             // multicarrier, QAM and baseband modulations.
-            modulations: ["V92", "V90", "V34", "V32B", "V32", "V22B", "V21", "B103", "VARC", "VARCQ", "VARCP", "VARC2W", "VARCQ2W", "VARCP2W"]
+            modulations: ["V92", "V90", "V34", "V32B", "V32", "V22B", "V21", "B103", "B212", "B202", "VARC", "VARCQ", "VARCP", "VARC2W", "VARCQ2W", "VARCP2W"]
                 .iter()
                 .map(|s| (*s).to_owned())
                 .collect(),

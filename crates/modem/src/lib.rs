@@ -25,6 +25,8 @@ use at::result::ResultCode;
 use at::{Action, Interpreter};
 use datapump::AsyncBits;
 use datapump::bell103;
+use datapump::bell202;
+use datapump::bell212;
 use datapump::v21;
 use datapump::v22bis;
 use datapump::v32;
@@ -144,6 +146,11 @@ enum Pump {
     /// Bell 103 or V.21: 300 bit/s, two tones a direction, and nothing else
     /// at all. Which of the two is in the modem's `Plan`.
     Bell103(Box<bell103::Modem>),
+    /// Bell 212A: V.22's 1200 bit/s DPSK behind Bell's own handshake, and a
+    /// Bell 103 inside it for a far end that is one.
+    Bell212(Box<bell212::Modem>),
+    /// Bell 202: 1200 bit/s FSK on one band, the two ends taking turns.
+    Bell202(Box<bell202::Modem>),
     /// V.34: the line probed and ranged in phase 2, both receivers trained
     /// and data mode's parameters exchanged in phases 3 and 4, and data after.
     V34(Box<v34::startup::Modem>),
@@ -162,6 +169,8 @@ impl Pump {
             Self::V22bis(m) => m.step(line),
             Self::V32(m) => m.step(line),
             Self::Bell103(m) => m.step(line),
+            Self::Bell212(m) => m.step(line),
+            Self::Bell202(m) => m.step(line),
             Self::V34(m) => m.step(line),
             Self::V90(m) => m.step(line),
             Self::V90Server(m) => m.step(line),
@@ -188,6 +197,16 @@ impl Pump {
                 bell103::Status::Negotiating => Progress::Negotiating,
                 bell103::Status::Connected(rate) => Progress::both_ways(rate),
                 bell103::Status::Failed => Progress::Failed,
+            },
+            Self::Bell212(m) => match m.status() {
+                bell212::Status::Negotiating => Progress::Negotiating,
+                bell212::Status::Connected(rate) => Progress::both_ways(rate),
+                bell212::Status::Failed => Progress::Failed,
+            },
+            Self::Bell202(m) => match m.status() {
+                bell202::Status::Negotiating => Progress::Negotiating,
+                bell202::Status::Connected(rate) => Progress::both_ways(rate),
+                bell202::Status::Failed => Progress::Failed,
             },
             // Rates can differ each way, and V.34 is the one modulation here
             // where they do: each end asks for what it can receive (MP, 10.1.3),
@@ -230,7 +249,7 @@ impl Pump {
             Self::V34(m) => m.phase2().round_trip().map(|s| (s * 1000.0).round() as u32),
             Self::V90(m) => m.round_trip().map(|s| (s * 1000.0).round() as u32),
             Self::V90Server(m) => m.modem().round_trip().map(|s| (s * 1000.0).round() as u32),
-            Self::V22bis(_) | Self::Bell103(_) => None,
+            Self::V22bis(_) | Self::Bell103(_) | Self::Bell212(_) | Self::Bell202(_) => None,
         }
     }
 
@@ -245,6 +264,8 @@ impl Pump {
             // waiting for a carrier that had gone before it started waiting.
             Self::V32(m) => m.carrier(),
             Self::Bell103(m) => m.carrier(),
+            Self::Bell212(m) => m.carrier(),
+            Self::Bell202(m) => m.carrier(),
             Self::V34(m) => m.carrier(),
             Self::V90(m) => m.carrier(),
             Self::V90Server(m) => m.modem().carrier(),
@@ -256,6 +277,8 @@ impl Pump {
             Self::V22bis(m) => m.take_bits(),
             Self::V32(m) => m.take_bits(),
             Self::Bell103(m) => m.take_bits(),
+            Self::Bell212(m) => m.take_bits(),
+            Self::Bell202(m) => m.take_bits(),
             Self::V34(m) => m.take_bits(),
             Self::V90(m) => m.take_bits(),
             Self::V90Server(m) => m.modem_mut().take_bits(),
@@ -267,6 +290,8 @@ impl Pump {
             Self::V22bis(m) => m.send_bits(bits),
             Self::V32(m) => m.send_bits(bits),
             Self::Bell103(m) => m.send_bits(bits),
+            Self::Bell212(m) => m.send_bits(bits),
+            Self::Bell202(m) => m.send_bits(bits),
             Self::V34(m) => m.send_bits(bits),
             Self::V90(m) => m.send_bits(bits),
             Self::V90Server(m) => m.modem_mut().send_bits(bits),
@@ -284,7 +309,7 @@ impl Pump {
             Self::V34(m) => m.accepts_bits(),
             Self::V90(m) => m.accepts_bits(),
             Self::V90Server(m) => m.modem().accepts_bits(),
-            Self::V22bis(_) | Self::V32(_) | Self::Bell103(_) => true,
+            Self::V22bis(_) | Self::V32(_) | Self::Bell103(_) | Self::Bell212(_) | Self::Bell202(_) => true,
         }
     }
 
@@ -318,6 +343,8 @@ impl Pump {
             Self::V22bis(m) => m.pending_bits(),
             Self::V32(m) => m.pending_bits(),
             Self::Bell103(m) => m.pending_bits(),
+            Self::Bell212(m) => m.pending_bits(),
+            Self::Bell202(m) => m.pending_bits(),
             Self::V34(m) => m.pending_bits(),
             Self::V90(m) => m.pending_bits(),
             Self::V90Server(m) => m.modem().pending_bits(),
@@ -340,7 +367,8 @@ impl Pump {
             Self::V90(m) => m.v34().constellation_point(),
             // Upstream is V.34's, and that is what this end reads.
             Self::V90Server(m) => m.modem().constellation_point(),
-            Self::Bell103(_) => None,
+            Self::Bell212(m) => m.constellation_point(),
+            Self::Bell103(_) | Self::Bell202(_) => None,
         }
     }
 
@@ -349,6 +377,8 @@ impl Pump {
     fn discriminator(&self) -> Option<f64> {
         match self {
             Self::Bell103(m) => Some(m.level()),
+            Self::Bell212(m) => m.level(),
+            Self::Bell202(m) => Some(m.level()),
             _ => None,
         }
     }
@@ -357,6 +387,8 @@ impl Pump {
     fn line_framing_errors(&self) -> Option<u64> {
         match self {
             Self::Bell103(m) => Some(m.framing_errors()),
+            Self::Bell212(m) => m.framing_errors(),
+            Self::Bell202(m) => Some(m.framing_errors()),
             // The synchronous pumps hand up a bit stream and have no idea
             // where a character begins, so the framing is done above them and
             // the count belongs there.
@@ -368,6 +400,8 @@ impl Pump {
     fn take_symbol(&mut self) -> Option<f64> {
         match self {
             Self::Bell103(m) => m.take_symbol(),
+            Self::Bell212(m) => m.take_symbol(),
+            Self::Bell202(m) => m.take_symbol(),
             _ => None,
         }
     }
@@ -377,11 +411,12 @@ impl Pump {
     fn residual_error(&self) -> Option<f64> {
         match self {
             Self::V22bis(m) => Some(m.residual_error()),
+            Self::Bell212(m) => m.residual_error(),
             Self::V32(m) => Some(m.residual_error()),
             // V.34 keeps its error as a power in decibels; as a distance it
             // is the root of that.
             Self::V34(m) => m.snr_db().map(|db| 10f64.powf(-db / 20.0)),
-            Self::Bell103(_) | Self::V90(_) | Self::V90Server(_) => None,
+            Self::Bell103(_) | Self::Bell202(_) | Self::V90(_) | Self::V90Server(_) => None,
         }
     }
 
@@ -398,7 +433,13 @@ impl Pump {
     fn reception(&self) -> Option<f64> {
         match self {
             Self::V32(m) => Some(m.residual_error() / m.point_spacing()),
-            Self::V22bis(_) | Self::Bell103(_) | Self::V34(_) | Self::V90(_) | Self::V90Server(_) => None,
+            Self::V22bis(_)
+            | Self::Bell103(_)
+            | Self::Bell212(_)
+            | Self::Bell202(_)
+            | Self::V34(_)
+            | Self::V90(_)
+            | Self::V90Server(_) => None,
         }
     }
 
@@ -418,7 +459,9 @@ impl Pump {
                 }
                 _ => 4,
             },
-            Self::Bell103(_) => 2,
+            Self::Bell103(_) | Self::Bell202(_) => 2,
+            Self::Bell212(m) if m.is_bell103() => 2,
+            Self::Bell212(_) => 4,
             // Phase 3's TRN and J are four points, phase 4 is sixteen, and
             // data mode is however many hundred its rate and shaping make.
             Self::V34(m) => m.constellation_size().unwrap_or(2),
@@ -447,7 +490,9 @@ impl Pump {
                 },
                 _ => "4PSK",
             },
-            Self::Bell103(_) => "2FSK",
+            Self::Bell103(_) | Self::Bell202(_) => "2FSK",
+            Self::Bell212(m) if m.is_bell103() => "2FSK",
+            Self::Bell212(_) => "4PSK",
             Self::V34(m) => match m.constellation_size() {
                 Some(4) => "4PSK",
                 Some(16) => "16QAM",
@@ -484,6 +529,8 @@ impl Pump {
                 _ => "V.32",
             },
             Self::Bell103(m) => m.standard(),
+            Self::Bell212(m) => m.standard(),
+            Self::Bell202(_) => "Bell 202",
             Self::V34(_) => "V.34",
             // V.92 once PCM is going up as well as down (9.5, 9.6); V.90
             // until phase 2 says the far end is not a server.
@@ -503,9 +550,23 @@ impl Pump {
             Self::V22bis(m) => m.phase(),
             Self::V32(m) => m.phase(),
             Self::Bell103(m) => m.line_phase(),
+            Self::Bell212(m) => m.phase(),
+            Self::Bell202(m) => m.phase(),
             Self::V34(m) => m.phase(),
             Self::V90(m) => m.phase(),
             Self::V90Server(m) => m.phase(),
+        }
+    }
+
+    /// Whether the line format is start-stop characters, found by the pump
+    /// itself: Bell 103, Bell 202, and a 212A that fell back to 103. Error
+    /// control needs a synchronous bit pipe and these are not one (see where
+    /// this is asked in `advance_handshake`).
+    fn framed(&self) -> bool {
+        match self {
+            Self::Bell103(_) | Self::Bell202(_) => true,
+            Self::Bell212(m) => m.is_bell103(),
+            _ => false,
         }
     }
 
@@ -1519,6 +1580,8 @@ impl Modem {
                 "V32B" => "V.32bis",
                 "V32" => "V.32",
                 "B103" => "Bell 103",
+                "B212" => "Bell 212A",
+                "B202" => "Bell 202",
                 "V21" => "V.21",
                 _ => "V.22bis",
             },
@@ -2398,7 +2461,7 @@ impl Modem {
         // caller its Answerer Detection Pattern, so "answering" counts as a
         // reason on its own.
         let wants_ec = (self.want_error_control || self.role == Role::Answering)
-            && !matches!(self.pump, Some(Pump::Bell103(_)));
+            && !self.pump.as_ref().is_some_and(Pump::framed);
         // Announced but no stack yet: the CONNECT went out before the pump
         // reported connected, and returning here would skip the arm below that
         // builds the error-control stack. A V.92 call does exactly that -- its
@@ -2491,7 +2554,7 @@ impl Modem {
                 // apart into characters that were never there. So error
                 // control is off at 300 bit/s -- which is also how anyone ever
                 // dialled a board at 300 bit/s.
-                let framed = matches!(self.pump, Some(Pump::Bell103(_)));
+                let framed = self.pump.as_ref().is_some_and(Pump::framed);
                 // An answering modem with error control turned off still owes
                 // the caller an answer. 7.2.1.3 requires the answerer, on
                 // seeing the ODP, to "immediately send one of the Answerer
@@ -3390,7 +3453,8 @@ impl Modem {
             // V.8 does have a bit for V.21 (Table 4). But this modem's V.21
             // answers with V.25's tone, as a V.21 modem does, rather than
             // ANSam, and nothing after V.8 has been taught to skip it.
-            "B103" | "V21" => None,
+            // Nor for the Bell modems: V.8 is for V-series ones.
+            "B103" | "V21" | "B212" | "B202" => None,
             _ => Some(Modulation::V22bis),
         }) else {
             return Modulations::NONE;
@@ -3845,6 +3909,25 @@ impl Modem {
                     Role::Answering => bell103::Role::Answer,
                 };
                 Pump::Bell103(Box::new(bell103::Modem::with_plan(v21::DATA, hs_role, self.fs)))
+            }
+            "B212" => {
+                let hs_role = match role {
+                    Role::Calling => bell103::Role::Originate,
+                    Role::Answering => bell103::Role::Answer,
+                };
+                // A ceiling of 300 asks for the 103 inside it, and gets one.
+                if self.rate_range().1 < 1200 {
+                    Pump::Bell103(Box::new(bell103::Modem::new(hs_role, self.fs)))
+                } else {
+                    Pump::Bell212(Box::new(bell212::Modem::new(hs_role, self.fs)))
+                }
+            }
+            "B202" => {
+                let hs_role = match role {
+                    Role::Calling => bell103::Role::Originate,
+                    Role::Answering => bell103::Role::Answer,
+                };
+                Pump::Bell202(Box::new(bell202::Modem::new(hs_role, self.fs)))
             }
             _ => {
                 let hs_role = match role {
