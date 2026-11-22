@@ -2143,8 +2143,22 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         // them on the way; the modem finds out whether that is so, and
         // carries on as an ordinary call if it is not.
         let mut exact_sent: Option<Vec<f32>> = None;
+        // Nothing of a V.ARC call can arrive before the call is up, and what
+        // does is the last call's tail, still in the media path. Handed to
+        // the modem it chose V.ARC's form from a call with no description
+        // yet -- not linear, so G.711 -- and a linear call placed straight
+        // after another one came up as "does not carry G.711 codewords" and
+        // fell back to V.8 bis.
         if let Some(sip) = audio.sip()
             && modem.varc_wanted().is_some()
+            && !sip.up()
+        {
+            from_line.clear();
+            from_network.clear();
+        }
+        if let Some(sip) = audio.sip()
+            && modem.varc_wanted().is_some()
+            && sip.up()
         {
             let rate = if sip.linear() {
                 modem.varc_exact_line(true);
