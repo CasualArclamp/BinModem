@@ -134,6 +134,8 @@ struct Args {
     scopes: bool,
     /// Or on the Fax tab, which only a live line has.
     fax: bool,
+    /// Answer a ringing SIP call as this, after it has rung a moment.
+    answer_as: Option<String>,
     /// Whether the Setup row stays showing once a line is open: for a
     /// picture of a window that shows what line it is on.
     setup: bool,
@@ -154,6 +156,7 @@ fn parse() -> Result<Option<Args>, String> {
         typed: Vec::new(),
         scopes: false,
         fax: false,
+        answer_as: None,
         setup: false,
         record: false,
     };
@@ -189,6 +192,7 @@ fn parse() -> Result<Option<Args>, String> {
             "--type" => args.typed.push(value("--type")?),
             "--scopes" => args.scopes = true,
             "--fax" => args.fax = true,
+            "--answer-as" => args.answer_as = Some(value("--answer-as")?),
             "--setup" => args.setup = true,
             "--record" => args.record = true,
             "--in" => args.input = Some(value("--in")?),
@@ -203,6 +207,7 @@ fn parse() -> Result<Option<Args>, String> {
                      binmodem --in <dev> --out <dev>            and opened straight away\n\
                      binmodem ... --type <line> [--scopes]      typed at the modem once the line is open\n\
                      binmodem ... --fax                         open on the Fax tab, on a live line\n\
+                     binmodem ... --answer-as fax|modem         press that answer when a SIP call rings\n\
                      binmodem ... --record                      record the line from the start, into captures\n\
                      binmodem ... --setup                       leave the Setup row showing with a line open\n\
                      binmodem [path.wav]                        replay a capture\n\
@@ -265,6 +270,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let Some(mut args) = parse()? else { return Ok(()) };
     // Taken now, because `args` is picked apart below.
     let (typed, scopes, fax, setup) = (std::mem::take(&mut args.typed), args.scopes, args.fax, args.setup);
+    let answer_as = args.answer_as.take();
 
     let control = Arc::new(Control::default());
     let (sample_rate, title) = if args.live {
@@ -333,6 +339,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut app = app::ScopeApp::new(rx, ui_control, sink, sample_rate, source);
             app.script(typed, scopes);
             app.open_fax_tab(fax);
+            if let Some(how) = answer_as.as_deref() {
+                app.answer_as(how)?;
+            }
             app.keep_setup_showing(setup);
             Ok(Box::new(app))
         }),

@@ -454,6 +454,41 @@ const QUIET_LINE_PUBLISH: Duration = Duration::from_millis(100);
 /// waterfall and read the level as nothing in the middle of a call.
 const QUIET_LINE_AFTER: Duration = Duration::from_millis(500);
 
+/// White noise added to what the line delivers: Gaussian, at a set RMS.
+#[derive(Debug, Clone)]
+struct LineNoise {
+    rms: f32,
+    state: u64,
+}
+
+impl LineNoise {
+    /// From `BINMODEM_LINE_NOISE`, in dBFS RMS, if it is set and reads.
+    fn from_env() -> Option<Self> {
+        let dbfs: f32 = std::env::var("BINMODEM_LINE_NOISE").ok()?.trim().parse().ok()?;
+        Some(Self::at(dbfs))
+    }
+
+    fn at(dbfs: f32) -> Self {
+        Self { rms: 10f32.powf(dbfs / 20.0), state: 0x9E37_79B9_7F4A_7C15 }
+    }
+
+    /// A uniform number in (0, 1].
+    fn uniform(&mut self) -> f32 {
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 7;
+        self.state ^= self.state << 17;
+        ((self.state >> 40) as f32 + 1.0) / (1u64 << 24) as f32
+    }
+
+    fn add(&mut self, samples: &mut [f32]) {
+        for s in samples {
+            // Box and Muller: one normal deviate from two uniform ones.
+            let (u, v) = (self.uniform(), self.uniform());
+            *s += self.rms * (-2.0 * u.ln()).sqrt() * (std::f32::consts::TAU * v).cos();
+        }
+    }
+}
+
 /// What the line is doing, for the window to show.
 #[derive(Debug, Clone, Default)]
 pub struct LineState {
@@ -1235,6 +1270,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     let mut dialled_at: Option<Instant> = None;
 
     let mut from_line: Vec<f32> = Vec::with_capacity(4096);
+    // Noise added to everything heard, for a line that is too clean to be
+    // believed: BINMODEM_LINE_NOISE=-50 is white noise at -50 dBFS RMS.
+    let mut line_noise = LineNoise::from_env();
     let mut from_network: Vec<f32> = Vec::with_capacity(2048);
     let mut to_line: Vec<f32> = Vec::with_capacity(4096);
     // A V.ARC call's frames, at the sound card's own rate, and what of them
@@ -2001,6 +2039,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 Some(sip) => sip.receive_both(&mut from_line, &mut from_network),
                 None => audio.receive(&mut from_line),
             }
+        }
+        if let Some(noise) = line_noise.as_mut() {
+            noise.add(&mut from_line);
         }
         if from_line.is_empty() {
             // Nothing has arrived, so nothing can be stepped: the line is the
@@ -3099,5 +3140,22 @@ mod arriving_tests {
         session.push_fax_lines(batch(0, 40, 3));
         session.push_fax_lines(batch(1, 0, 2));
         assert_eq!(session.take_fax_lines(), Some(batch(1, 0, 2)));
+    }
+}
+
+#[cfg(test)]
+mod noise_tests {
+    use super::LineNoise;
+
+    #[test]
+    fn line_noise_is_at_the_level_asked_for_and_centred() {
+        let mut noise = LineNoise::at(-40.0);
+        let mut samples = vec![0.0f32; 200_000];
+        noise.add(&mut samples);
+        let mean = samples.iter().sum::<f32>() / samples.len() as f32;
+        let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+        let db = 20.0 * rms.log10();
+        assert!((db + 40.0).abs() < 0.2, "{db} dBFS");
+        assert!(mean.abs() < 0.001, "mean {mean}");
     }
 }
