@@ -182,7 +182,28 @@ pub struct Counters {
     /// Times the payload type changed mid-call, which means the far end
     /// switched codec under us.
     pub payload_changed: u64,
+    /// Packets [`Jitter::play`] needed and that had not arrived, with nothing
+    /// later in hand either: an inbound stall, or a far end that has stopped
+    /// sending. Concealed like a loss (and counted in `concealed`), but kept
+    /// apart from `lost` because nothing says the packet is gone -- when a
+    /// stall ends, the same packets turn up and are counted again in `late`.
+    pub starved: u64,
+    /// Times the stream was found again after every packet arriving for
+    /// [`LATE_BEFORE_REANCHOR`] in a row was too late to use: a far end that
+    /// paused and carried on with its numbering where it left off, so that
+    /// all of it now arrives behind the play-out point.
+    pub reanchored: u64,
 }
+
+/// Packets in a row that must arrive too late to use before the play-out
+/// point is moved back to meet the stream (see [`Counters::reanchored`]).
+///
+/// Fifty, a second of them. An inbound stall that ends in a burst makes a run
+/// of late packets as long as the stall less the buffer's depth, and those
+/// are rightly dropped: their time has gone and the modem has had silence in
+/// it. A run longer than any stall is a far end that paused, whose packets
+/// will go on arriving late for ever unless the buffer meets them.
+pub const LATE_BEFORE_REANCHOR: usize = 50;
 
 /// A fixed store of packets waiting their turn, in sequence order.
 #[derive(Debug)]
@@ -223,6 +244,17 @@ pub struct Jitter {
     other_run: usize,
     /// The payload type in force, to notice it changing.
     payload_type: Option<u8>,
+    /// For [`Jitter::play`]: the packet being handed over, and how far into
+    /// it the play-out point is. A clock asks for octets, not packets, so a
+    /// packet is usually handed over in several pieces.
+    current: Vec<u8>,
+    offset: usize,
+    /// Whether [`Jitter::play`] has had its `target` packets in hand since
+    /// the stream started or was found again. Until then what it hands over
+    /// is silence.
+    primed: bool,
+    /// Packets in a row that arrived too late to use.
+    late_run: usize,
     counters: Counters,
 }
 
@@ -250,6 +282,10 @@ impl Jitter {
             other_len: 0,
             other_run: 0,
             payload_type: None,
+            current: Vec::new(),
+            offset: 0,
+            primed: false,
+            late_run: 0,
             counters: Counters::default(),
         }
     }
@@ -294,8 +330,18 @@ impl Jitter {
             // put audio in front of the modem that belongs behind audio it
             // has already had, which is worse than the hole it would fill.
             self.counters.late += 1;
-            return;
+            self.late_run += 1;
+            if self.late_run < LATE_BEFORE_REANCHOR {
+                return;
+            }
+            // Unless everything has been late for longer than any stall: the
+            // far end paused and carried on numbering from where it stopped.
+            // Meet it, and prime again before handing any of it over.
+            self.counters.reanchored += 1;
+            self.next = extended;
+            self.primed = false;
         }
+        self.late_run = 0;
         if self.waiting.contains_key(&extended) {
             self.counters.duplicated += 1;
             return;
@@ -452,6 +498,91 @@ impl Jitter {
         out.len() - before
     }
 
+    /// Hand over exactly `octets` octets of the stream, in order, whatever
+    /// has arrived: what [`Media`](crate::media::Media) does now that the
+    /// modem is stepped on a clock of its own rather than by the arrivals.
+    ///
+    /// A packet that is due and has not arrived is concealed with `conceal`
+    /// for one packet's length, and the play-out point moves past it, so the
+    /// timeline keeps its length and a packet that turns up afterwards is
+    /// `late` and dropped. That is the whole difference from [`Self::drain`]:
+    /// there, an inbound stall stops the stream and the modem with it, so the
+    /// modem stops talking for as long as the far end is late; here the modem
+    /// hears silence for the stall and keeps talking through it. The far
+    /// end's receiver is not ours to make robust, and ours is: so the hole
+    /// goes in what we hear, never in what we send.
+    ///
+    /// Before the stream has `target` packets in hand -- at its start, or
+    /// after it has been found again -- this hands over silence, counted in
+    /// `concealed`. `frame` is the octets in one sample on every channel, so
+    /// a stretch of silence never ends in the middle of one.
+    pub fn play(&mut self, out: &mut Vec<u8>, octets: usize, conceal: u8, frame: usize) {
+        let frame = frame.max(1);
+        let mut left = octets;
+        while left > 0 {
+            if self.offset < self.current.len() {
+                let n = left.min(self.current.len() - self.offset);
+                out.extend_from_slice(&self.current[self.offset..self.offset + n]);
+                self.offset += n;
+                left -= n;
+                continue;
+            }
+            if !self.primed {
+                if self.waiting.len() <= self.target {
+                    // Waiting for the cushion: silence until it is there.
+                    out.resize(out.len() + left, conceal);
+                    self.counters.concealed += left as u64;
+                    return;
+                }
+                self.primed = true;
+            }
+            match self.waiting.keys().next().copied() {
+                Some(first) if first == self.next => {
+                    self.current = self.waiting.remove(&first).expect("just read the key");
+                }
+                Some(first) if first > self.next && first - self.next > MAX_DROPOUT => {
+                    // A new stream, not a gap: step to it (see `drain`).
+                    self.counters.resynced += 1;
+                    self.next = first;
+                    continue;
+                }
+                later => {
+                    // Due now and not here. With something later in hand it
+                    // is a loss; with nothing, the far end has stalled.
+                    if later.is_some() {
+                        self.counters.lost += 1;
+                    } else {
+                        self.counters.starved += 1;
+                    }
+                    let len = self.packet_len.max(frame).div_ceil(frame) * frame;
+                    self.counters.concealed += len as u64;
+                    self.current.clear();
+                    self.current.resize(len, conceal);
+                }
+            }
+            self.offset = 0;
+            self.next += 1;
+        }
+    }
+
+    /// Whether [`Self::play`] would hand over audio rather than the silence
+    /// before the stream: `target` packets are in hand, or have been.
+    pub fn ready(&self) -> bool {
+        self.primed || self.waiting.len() > self.target
+    }
+
+    /// Octets in hand ahead of the play-out point: the delay this is adding,
+    /// to the octet, for a clock that wants to keep it steady.
+    pub fn queued(&self) -> usize {
+        self.waiting.values().map(Vec::len).sum::<usize>() + self.current.len().saturating_sub(self.offset)
+    }
+
+    /// The octets in one packet of this stream, as learned from it; nought
+    /// before the first.
+    pub fn packet_len(&self) -> usize {
+        self.packet_len
+    }
+
     /// How many packets are waiting. The delay this is adding, in packets.
     pub fn depth(&self) -> usize {
         self.waiting.len()
@@ -486,6 +617,11 @@ impl Jitter {
         self.other_len = 0;
         self.other_run = 0;
         self.payload_type = None;
+        self.counters.abandoned += self.current.len().saturating_sub(self.offset) as u64;
+        self.current.clear();
+        self.offset = 0;
+        self.primed = false;
+        self.late_run = 0;
     }
 }
 
@@ -1070,5 +1206,101 @@ mod tests {
             drained_hard(&mut jitter, &mut out);
         }
         assert!(!out.is_empty(), "the line came up silent");
+    }
+
+    /// Played on a clock, the stream comes out exactly as it went in, in
+    /// whatever pieces the clock asks for -- silence until the cushion is
+    /// there, and then not one octet more or less than asked.
+    #[test]
+    fn played_on_a_clock_the_stream_comes_out_in_any_size_of_piece() {
+        let mut jitter = Jitter::new(2, 16);
+        let mut out = Vec::new();
+        jitter.push(10, PCMU, packet(1));
+        jitter.push(11, PCMU, packet(2));
+        assert!(!jitter.ready());
+        jitter.play(&mut out, 3, SILENCE, 1);
+        assert_eq!(out, [SILENCE; 3], "before the cushion, silence");
+        out.clear();
+        for sequence in 12..20u16 {
+            jitter.push(sequence, PCMU, packet(sequence as u8 - 9));
+        }
+        assert!(jitter.ready());
+        for size in [1, 5, 3, 7, 2, 6] {
+            jitter.play(&mut out, size, SILENCE, 1);
+        }
+        assert_eq!(out.len(), 24);
+        let want: Vec<u8> = (1..=6).flat_map(packet).collect();
+        assert_eq!(out, want);
+        assert_eq!(jitter.queued(), 16, "four packets still in hand");
+        assert_eq!(jitter.counters().concealed, 3);
+    }
+
+    /// A packet that is due and has not arrived is silence, the stream moves
+    /// past it, and when it turns up it is late and dropped: the modem's
+    /// timeline never stretches for a stall.
+    #[test]
+    fn a_stall_is_silence_now_and_the_late_packets_are_dropped() {
+        let mut jitter = Jitter::new(1, 16);
+        let mut out = Vec::new();
+        jitter.push(1, PCMU, packet(1));
+        jitter.push(2, PCMU, packet(2));
+        jitter.play(&mut out, 8, SILENCE, 1);
+        // Nothing more arrives for three packets' time.
+        jitter.play(&mut out, 12, SILENCE, 1);
+        assert_eq!(&out[8..], &[SILENCE; 12]);
+        assert_eq!(jitter.counters().starved, 3);
+        assert_eq!(jitter.counters().lost, 0);
+        // The stall ends in a burst: three of them too late, the rest in time.
+        for sequence in 3..=7u16 {
+            jitter.push(sequence, PCMU, packet(sequence as u8));
+        }
+        assert_eq!(jitter.counters().late, 3);
+        jitter.play(&mut out, 8, SILENCE, 1);
+        assert_eq!(&out[20..], [packet(6), packet(7)].concat());
+    }
+
+    /// A packet missing with later ones in hand is a loss, not a stall.
+    #[test]
+    fn a_gap_played_on_a_clock_is_a_loss() {
+        let mut jitter = Jitter::new(1, 16);
+        let mut out = Vec::new();
+        for sequence in [1u16, 3, 4] {
+            jitter.push(sequence, PCMU, packet(sequence as u8));
+        }
+        jitter.play(&mut out, 12, SILENCE, 1);
+        assert_eq!(out, [packet(1), vec![SILENCE; 4], packet(3)].concat());
+        assert_eq!((jitter.counters().lost, jitter.counters().starved), (1, 0));
+    }
+
+    /// A far end that pauses and carries on numbering from where it stopped
+    /// would arrive late for ever; after a second of nothing but late
+    /// packets the stream is met where it is.
+    #[test]
+    fn a_far_end_that_paused_is_found_again() {
+        let mut jitter = Jitter::new(1, 100);
+        let mut out = Vec::new();
+        jitter.push(1, PCMU, packet(1));
+        jitter.push(2, PCMU, packet(2));
+        // Five seconds of play-out with nothing arriving.
+        jitter.play(&mut out, 4 * 250, SILENCE, 1);
+        for sequence in 3..(3 + LATE_BEFORE_REANCHOR as u16 + 2) {
+            jitter.push(sequence, PCMU, packet(sequence as u8));
+        }
+        assert_eq!(jitter.counters().reanchored, 1);
+        out.clear();
+        jitter.play(&mut out, 8, SILENCE, 1);
+        let resumed = 3 + LATE_BEFORE_REANCHOR as u8 - 1;
+        assert_eq!(out, [packet(resumed), packet(resumed + 1)].concat());
+    }
+
+    /// Silence for a linear stream never ends partway through a sample.
+    #[test]
+    fn concealment_is_whole_samples() {
+        let mut jitter = Jitter::new(0, 16);
+        let mut out = Vec::new();
+        jitter.push(1, PCMU, vec![1; 6]);
+        jitter.play(&mut out, 6, 0, 4);
+        jitter.play(&mut out, 8, 0, 4);
+        assert_eq!(jitter.counters().concealed, 8);
     }
 }
