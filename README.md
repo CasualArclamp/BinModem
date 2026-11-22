@@ -230,7 +230,10 @@ and the calling side still wants a line with no echo and one clock. A second
 V.92 call to the same number starts up the short way (9.2 and 9.4, "quick
 connect"): QC1a and QCA1d in place of V.8's menus, a Phase 2 with no line
 probe, and no ODP/ADP, which takes about three seconds off the sixteen;
-`BINMODEM_V92_QC=0` turns it off and `always` asks every server. Eighteen agents read the Recommendation clause by clause off
+`BINMODEM_V92_QC=0` turns it off and `always` asks every server. A quick connect whose server sends
+no INFO0d or tone B within a round trip and 2.5 s of the hand-over forgets the memo, sends CM for a
+full start-up, and hangs up if that gets no JM either; `BINMODEM_V92_TONEQ_MS=<ms>` ends TONEq early
+as a test. Eighteen agents read the Recommendation clause by clause off
 the rendered pages, with V.8, V.8 bis and V.250's `+P` commands beside it, and
 four more read what the V.90 code here already does; the notes they wrote and
 the plan built from them are in [docs/design/v92](docs/design/v92) -- 62 work

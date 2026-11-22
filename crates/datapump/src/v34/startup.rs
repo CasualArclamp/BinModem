@@ -76,6 +76,11 @@ impl Modem {
         &self.phase2
     }
 
+    /// Phase 2, to be told something before it runs.
+    pub fn phase2_mut(&mut self) -> &mut phase2::Modem {
+        &mut self.phase2
+    }
+
     /// Phases 3 and 4, once phase 2 is over.
     pub fn training(&self) -> Option<&training::Modem> {
         self.training.as_ref()

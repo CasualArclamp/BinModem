@@ -18,6 +18,15 @@
 //!
 //! Only the first channel is fed in. The modem is being asked to do exactly
 //! what it did on the day, with the far end's own signal.
+//!
+//! A V.92 call placed with a memo of the number (`v92-connections.txt`)
+//! opened with a quick connect, and replays the same way only with the same
+//! memo: put its line in `MODEM_MEMO`, as in
+//! `MODEM_MEMO="uqts=70 law=mu rtd=849 pcm_up=1"`, along with
+//! `MODEM_COMMANDS="AT+MS=V92"`.
+//!
+//! `MODEM_PAD` adds that many seconds of silence after the recording, for
+//! what the modem would have done had the call gone on.
 
 use modem::Modem;
 
@@ -33,7 +42,10 @@ fn capture() -> Option<Vec<f32>> {
         wav.channels,
         wav.sample_rate
     );
-    Some(wav.channel(0))
+    let mut line = wav.channel(0);
+    let pad: f64 = std::env::var("MODEM_PAD").ok().and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    line.resize(line.len() + (pad.max(0.0) * FS) as usize, 0.0);
+    Some(line)
 }
 
 #[test]
@@ -49,6 +61,12 @@ fn probe_replay_call() {
         .unwrap_or_else(|_| "AT+MS=V22B,1,1200,2400".to_owned());
 
     let mut modem = Modem::new(FS);
+    if let Ok(text) = std::env::var("MODEM_MEMO") {
+        let memo = modem::Recognized::from_text(&text);
+        assert!(memo.is_some(), "MODEM_MEMO is not a memo line: {text}");
+        println!("  with the memo {text}: the call opens with a quick connect");
+        modem.set_quick_memo(memo);
+    }
     for command in commands.split(';') {
         for b in command.trim().bytes() {
             modem.feed_dte(b);

@@ -86,6 +86,41 @@ fn v92_quick_connect_wanted() -> QuickConnect {
     }
 }
 
+/// `BINMODEM_V92_TONEQ_MS` when a call is placed: end TONEq after that many
+/// milliseconds even while ANSpcm goes on, as a test (see
+/// [`v8line::Modem::with_toneq_cap`]). Unset, empty or not a number: TONEq
+/// lasts until ANSpcm stops, as 9.2.1.3/V.92 has it.
+fn v92_toneq_cap() -> Option<f64> {
+    let ms: f64 = std::env::var("BINMODEM_V92_TONEQ_MS").ok()?.trim().parse().ok()?;
+    (ms.is_finite() && ms > 0.0).then_some(ms / 1000.0)
+}
+
+/// How long after a quick connect's hand-over the analogue modem waits for
+/// the far end's INFO0d or tone B, beyond the round trip: 9.4.2.2.2/V.92's
+/// 2500 ms, which it gives the tone B reversal after INFO0a.
+///
+/// Sized against a 60 s budget: NetZero's POPs hang up on a call that has
+/// not connected within 60 s of answering. In live-1795315036 the hand-over
+/// came 8.8 s into the call, so with its 0.85 s round trip the CM goes out
+/// at about 12.2 s; a full start-up from V.8 reaches phase 3 about 10 s after
+/// its CM, which leaves the rest of the minute for phases 3 and 4. Waiting
+/// for phase 2's own 20 s limit instead put the CM at about 29 s, and a call
+/// that then needed a V.90 retrain as well would not have fitted.
+const QUICK_PHASE2_WAIT: f64 = 2.5;
+
+/// The round trip to allow for when the memo has none (an unmeasured one,
+/// from `BINMODEM_V92_QC=always`): about the longest the international SIP
+/// routes to US servers have shown.
+const QUICK_ROUND_TRIP: f64 = 1.5;
+
+/// How long CM goes on, beyond the round trip, after a quick connect the far
+/// end never followed into Phase 2: two CMs for it to answer (8.2.2) and two
+/// JMs for this end to believe (8.1.2), about 0.4 s each, with room to spare.
+/// Short for the same 60 s budget as [`QUICK_PHASE2_WAIT`]: a far end that
+/// answers no CM either is hung up on about 8.3 s after the hand-over
+/// (17.1 s into live-1795315036), so a redial still has time to work.
+const QUICK_RESCUE_PATIENCE: f64 = 4.0;
+
 /// Which end of the call this modem is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -1043,6 +1078,9 @@ pub struct Modem {
     memo_spent: bool,
     /// What this call's short Phase 1 settled, if it had one.
     quick: Option<v8line::Quick>,
+    /// Whether this call's V.8 is the CM sent after a quick connect the far
+    /// end never followed into Phase 2 (see [`Self::rescue_quick_connect`]).
+    quick_rescue: bool,
     /// What this call has taught, once it is a V.92 call in data mode (see
     /// [`Self::learned`]).
     learned: Option<Recognized>,
@@ -1200,6 +1238,7 @@ impl Modem {
             dialled: None,
             memo_spent: false,
             quick: None,
+            quick_rescue: false,
             learned: None,
             negotiation: None,
             bis: None,
@@ -2013,6 +2052,10 @@ impl Modem {
             // Taken on the sample that made them, and kept here, so that a
             // pump put away on this same sample still has its last lines told.
             self.line_notes.extend(m.take_notes());
+            if m.far_end_silent() && self.quick.is_some() {
+                self.rescue_quick_connect();
+                return out;
+            }
         }
         if let Pump::V90Server(m) = pump {
             // The server's V.92 Phases 3 and 4 tell their steps the same way.
@@ -3352,8 +3395,10 @@ impl Modem {
                 negotiation = match self.pcm_end {
                     Role::Answering => negotiation.answering_quick(datapump::v92::memo::DEFAULT_LEVEL),
                     Role::Calling => match (self.quick_memo, self.quick_connect) {
-                        (Some(memo), _) => negotiation.offering_quick(memo.qts()),
-                        (None, QuickConnect::Always) => negotiation.offering_quick(Recognized::unmeasured().qts()),
+                        (Some(memo), _) => negotiation.offering_quick(memo.qts()).with_toneq_cap(v92_toneq_cap()),
+                        (None, QuickConnect::Always) => negotiation
+                            .offering_quick(Recognized::unmeasured().qts())
+                            .with_toneq_cap(v92_toneq_cap()),
                         (None, _) => negotiation,
                     },
                 };
@@ -3694,7 +3739,14 @@ impl Modem {
             // the difference between this and a minute of silence.
             v8line::Status::Failed => {
                 self.negotiation = None;
-                self.end_call(Ended::NoAnswer);
+                // The far end answered, and then went quiet: see
+                // `rescue_quick_connect`.
+                if std::mem::take(&mut self.quick_rescue) {
+                    self.line_notes.push("V.92 quick connect: no JM to the CM either; hanging up".to_owned());
+                    self.end_call(Ended::CarrierLost);
+                } else {
+                    self.end_call(Ended::NoAnswer);
+                }
             }
         }
         out
@@ -3791,6 +3843,13 @@ impl Modem {
                 };
                 let mut analogue = v90::startup::Analogue::new(self.fs, lead_in).with_v92(wish, lead_in);
                 analogue.set_remembered_round_trip(memo.map(|memo| f64::from(memo.round_trip_ms) / 1000.0));
+                // After a quick connect the digital modem is in Phase 2
+                // before this end is (9.2.4.3/V.92): a far end still silent
+                // a round trip and 9.4.2.2.2's wait later is not, and the
+                // call is better off back at V.8 than at phase 2's limit.
+                if self.quick.is_some_and(|q| q.role == PcmRole::Analogue) {
+                    analogue.expect_far_end_within(QUICK_PHASE2_WAIT + self.quick_round_trip());
+                }
                 analogue.set_pinned(self.pinned_rate);
                 analogue.set_pinned_upstream(self.pinned_upstream);
                 Pump::V90(Box::new(analogue))
@@ -3869,6 +3928,47 @@ impl Modem {
         self.state = State::Handshaking;
     }
 
+    /// The round trip a quick connect to this number is expected to have:
+    /// the memo's, or [`QUICK_ROUND_TRIP`] when it has none.
+    fn quick_round_trip(&self) -> f64 {
+        self.quick_memo
+            .map(|memo| f64::from(memo.round_trip_ms) / 1000.0)
+            .filter(|&rtd| rtd > 0.0)
+            .unwrap_or(QUICK_ROUND_TRIP)
+    }
+
+    /// A quick connect whose far end never joined Phase 2: no INFO0d and no
+    /// tone B a round trip and 2.5 s after the hand-over (see
+    /// [`v90::startup::Analogue::expect_far_end_within`]). The memo that
+    /// asked for it is forgotten now rather than at hang-up, and the call
+    /// goes back to V.8 with a CM and no QC1a (see
+    /// [`v8line::Modem::resuming_at_cm`]): a full start-up if the far end
+    /// answers it, and the call ended a few seconds later if not.
+    ///
+    /// live-1795315036: a NetZero server heard TONEq, stopped ANSpcm, and 75
+    /// ms later sent 10 ms of the most negative codeword and then nothing,
+    /// and this end held the call in Phase 2 until the user hung up.
+    fn rescue_quick_connect(&mut self) {
+        let round_trip = self.quick_round_trip();
+        if let (Some(memos), Some(number)) = (self.memos.as_mut(), self.dialled.as_ref()) {
+            memos.forget(number);
+        }
+        self.memo_spent = false;
+        self.quick_memo = None;
+        self.line_notes.push(
+            "V.92 quick connect: no INFO0d or tone B after TONEq; memo dropped, CM for a full start-up".to_owned(),
+        );
+        self.pump = None;
+        self.quick = None;
+        self.declared_lapm = false;
+        self.pcm_role = None;
+        self.negotiation = self.v8_end().map(|n| n.resuming_at_cm(QUICK_RESCUE_PATIENCE + round_trip));
+        self.quick_rescue = self.negotiation.is_some();
+        if self.negotiation.is_none() {
+            self.end_call(Ended::CarrierLost);
+        }
+    }
+
     /// End the call and tell the terminal why.
     fn end_call(&mut self, why: Ended) {
         if std::env::var_os("MODEM_TRACE").is_some() {
@@ -3907,6 +4007,7 @@ impl Modem {
         self.pump = None;
         self.varc = None;
         self.negotiation = None;
+        self.quick_rescue = false;
         self.bis = None;
         self.rate = 0;
         self.transmit_rate = 0;

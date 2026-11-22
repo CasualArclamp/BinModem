@@ -425,3 +425,107 @@ fn a_modem_with_a_file_remembers_the_number_it_dialled() {
     assert!(kept.get("5559999").is_some());
     let _ = std::fs::remove_file(&file);
 }
+
+/// What became of a quick connect whose server goes quiet once it has
+/// heard TONEq, as the NetZero server in live-1795315036 did.
+struct Silenced {
+    notes: String,
+    /// Seconds from the dial to when the host stopped being heard.
+    quiet_at: f64,
+    /// Seconds from the dial to when the caller was back on hook, if it was.
+    ended_at: Option<f64>,
+}
+
+/// Dial a number the caller has a memo of (in `file`), and from the moment
+/// the host stops ANSpcm let nothing more of it reach the caller. With
+/// `restart`, the host also hangs up then and answers again, as a server
+/// whose quick connect went wrong might go back to ANSam and V.8 -- and from
+/// then on it is heard as usual.
+fn quick_connect_into_silence(pair: &mut Pair, file: &std::path::Path, restart: bool, seconds: f64) -> Silenced {
+    let mut memos = modem::memos::Memos::open(file);
+    memos.put("5551234", modem::Recognized { uqts: 70, a_law: false, round_trip_ms: 133, pcm_upstream: true });
+    pair.caller.remember_connections(Some(modem::memos::Memos::open(file)));
+    Pair::type_at(&mut pair.host, "ATA");
+    Pair::type_at(&mut pair.caller, "ATD5551234");
+    let mut notes = String::new();
+    let (mut was_anspcm, mut quiet, mut quiet_at) = (false, false, 0.0);
+    let (mut restarted, mut ended_at) = (false, None);
+    for i in 0..(seconds * FS) as usize {
+        let t = i as f64 / FS;
+        let heard = pair.to_caller.pop_front().unwrap_or(0.0);
+        pair.to_host.push_back(pair.caller.step(heard));
+        pair.caller_said.extend(pair.caller.take_dte());
+        let heard = pair.to_host.pop_front().unwrap_or(0.0);
+        let said = pair.host.step(heard);
+        pair.host_said.extend(pair.host.take_dte());
+        let anspcm = pair.host.line_phase() == "ANSpcm";
+        if was_anspcm && !anspcm && !quiet {
+            quiet = true;
+            quiet_at = t;
+            if restart {
+                pair.host.hang_up();
+                Pair::type_at(&mut pair.host, "ATA");
+                restarted = true;
+            }
+        }
+        was_anspcm |= anspcm;
+        pair.to_caller.push_back(if quiet && !restarted { 0.0 } else { said });
+        notes.push_str(&pair.notes());
+        if quiet && pair.caller.state() == State::Command {
+            ended_at = Some(t);
+            break;
+        }
+        if pair.caller.state() == State::Data && pair.host.state() == State::Data {
+            break;
+        }
+    }
+    notes.push_str(&pair.notes());
+    assert!(quiet, "the host never sent ANSpcm:\n{notes}");
+    Silenced { notes, quiet_at, ended_at }
+}
+
+/// live-1795315036: the server heard TONEq, stopped ANSpcm, and said nothing
+/// more. The caller gives up on that Phase 2 a round trip and 2.5 s in,
+/// forgets the memo there and then, sends CM in case the server has gone
+/// back to V.8, and when no JM comes either hangs up -- all well inside the
+/// twenty seconds phase 2 would otherwise have sat through.
+#[test]
+fn a_server_that_goes_silent_after_toneq_loses_its_memo_and_the_call_ends() {
+    let file = std::env::temp_dir().join(format!("binmodem-v92-silent-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&file);
+    let mut pair = v92_pair();
+    let run = quick_connect_into_silence(&mut pair, &file, false, 30.0);
+    let caller_saw = String::from_utf8_lossy(&pair.caller_said).into_owned();
+    let notes = format!("{}\nthe terminal saw {caller_saw:?}", run.notes);
+    assert!(run.notes.contains("no INFO0d or tone B after TONEq; memo dropped"), "{notes}");
+    assert!(run.notes.contains("no JM to the CM either"), "{notes}");
+    assert_eq!(pair.caller.state(), State::Command, "{notes}");
+    assert!(caller_saw.contains("NO CARRIER"), "{notes}");
+    let took = run.ended_at.expect("the caller never hung up") - run.quiet_at;
+    println!("on hook {took:.2} s after the server went quiet");
+    assert!(took < 12.0, "the call went on {took:.1} s after the server went quiet\n{notes}");
+    assert_eq!(modem::memos::Memos::open(&file).get("5551234"), None, "the memo is still there");
+    let _ = std::fs::remove_file(&file);
+}
+
+/// The same, with a server that does go back to ANSam: the caller's CM
+/// finds it, and the call is a full start-up -- V.8, the full Phase 2 --
+/// to V.92 data mode, with no memo left to try the short way again.
+#[test]
+fn a_server_that_restarts_v8_after_a_failed_quick_connect_still_connects() {
+    let file = std::env::temp_dir().join(format!("binmodem-v92-restart-{}.txt", std::process::id()));
+    let _ = std::fs::remove_file(&file);
+    let mut pair = v92_pair();
+    let run = quick_connect_into_silence(&mut pair, &file, true, 40.0);
+    assert!(run.notes.contains("memo dropped"), "{}", run.notes);
+    assert_eq!((pair.caller.state(), pair.host.state()), (State::Data, State::Data), "{}", run.notes);
+    assert_eq!((pair.caller.standard(), pair.host.standard()), ("V.92", "V.92"), "{}", run.notes);
+    assert_eq!(pair.caller.quick_connected(), None, "{}", run.notes);
+    assert!(!pair.caller.short_phase2(), "{}", run.notes);
+    carries_text(&mut pair, "after a quick connect went back to V.8", &run.notes);
+    hang_up(&mut pair);
+    // The call reached data mode, so it taught a memo afresh: a full
+    // start-up's, which is what a quick connect next time would rest on.
+    assert!(modem::memos::Memos::open(&file).get("5551234").is_some());
+    let _ = std::fs::remove_file(&file);
+}
