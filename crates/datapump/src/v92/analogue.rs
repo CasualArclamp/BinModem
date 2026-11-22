@@ -300,6 +300,32 @@ pub const UINFO: u8 = 79;
 /// arrives.
 pub const ZERO_DIL_A10_ORDER: bool = true;
 
+/// A gain on B1u and the data after it, from `BINMODEM_V92_UP_GAIN` in the
+/// environment, and 1 otherwise. An experiment switch, not a setting.
+///
+/// 8.8.3 has the digital modem choose G "assuming that, when the prefilter
+/// output multiplied by G has a mean-square value of 1, the analogue modem will
+/// transmit at the desired power" (3.8), which leaves the server to judge that
+/// power from the training. D-Modem does, and our data lands on its CPd's
+/// points at a scale of exactly 1 (`captures/dmodem-v92.wav`). Two V.92
+/// servers behind one ISP built constellations for an upstream about 9 dB
+/// louder: our B1u and data, put through `sip::Media`'s own 16 to 8 kHz
+/// conversion, land on their CPds' points only when scaled by 2.81 or 2.82
+/// (`live-1795260804`, `live-1795262282`), and both retrained as B1u reached
+/// them. Training is left alone because that is what a server measures; only
+/// what the CPd shapes is scaled. Whether a live call to them then connects is
+/// what this is for.
+fn up_gain() -> f64 {
+    static GAIN: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *GAIN.get_or_init(|| {
+        std::env::var("BINMODEM_V92_UP_GAIN")
+            .ok()
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .filter(|gain| gain.is_finite() && *gain > 0.0 && *gain <= 4.0)
+            .unwrap_or(1.0)
+    })
+}
+
 /// Whether V92_TRACE in the environment is set, so that a start-up that will not
 /// find its place is legible.
 fn tracing() -> bool {
@@ -682,13 +708,14 @@ impl Source {
             // when the prefilter output multiplied by G has a mean-square
             // value of 1, the analogue modem will transmit at the desired
             // power" (3.8).
-            Up::B1u => self.b1u.pop_front().unwrap_or(0.0),
+            Up::B1u => self.b1u.pop_front().unwrap_or(0.0) * up_gain(),
             Up::Data => {
                 let outbound = &mut self.outbound;
                 // Circuit 106 follows 105 from here (9.6.2.1.5). With nothing
                 // to send, circuit 103 rests at binary one, and the scrambler
                 // makes a signal of it.
-                self.encoder.as_mut().map_or(0.0, |encoder| encoder.next_symbol(|| outbound.pop_front().unwrap_or(true)).out)
+                let out = self.encoder.as_mut().map_or(0.0, |encoder| encoder.next_symbol(|| outbound.pop_front().unwrap_or(true)).out);
+                out * up_gain()
             }
         }
     }
@@ -2102,6 +2129,9 @@ impl Modem {
         }
         if self.cpd.as_ref().is_none_or(|previous| previous.ack != cpd.ack) {
             self.notes.push(format!("CPd for drn {}, {} bit/s, ack {}", merged.drn, parameters.rate(), cpd.ack));
+        }
+        if down_tracing() {
+            eprintln!("CPDFULL {merged:?}");
         }
         self.cpd = Some(merged);
         self.parameters = Some(parameters);

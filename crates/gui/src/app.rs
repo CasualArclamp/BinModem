@@ -205,6 +205,10 @@ impl Modulation {
             // V.ARC has no rates to choose among: each end loads the line
             // for what it measures, and nought is how +MS says "unspecified".
             8..=13 => &[0],
+            // Bell 212A, and the Bell 103 it carries for a far end that is
+            // one: a ceiling of 300 asks for the 103 outright.
+            14 => &[300, 1200],
+            15 => &[1200],
             // V.34 5.1: "2400 bit/s to 33 600 bit/s in multiples of 2400".
             _ => &[
                 2400, 4800, 7200, 9600, 12_000, 14_400, 16_800, 19_200, 21_600, 24_000, 26_400,
@@ -891,7 +895,7 @@ impl ScopeApp {
     ///
     /// Positions are what the rate lists, the ceilings and the default go by,
     /// so a new one goes on the end rather than where it might read best.
-    const CARRIERS: [(&'static str, &'static str); 14] = [
+    const CARRIERS: [(&'static str, &'static str); 16] = [
         ("B103", "Bell 103 - 300 bit/s"),
         ("V22B", "V.22bis - 1200 or 2400"),
         ("V32", "V.32 - 4800 or 9600"),
@@ -924,6 +928,14 @@ impl ScopeApp {
             "V.ARC/QAM two-wire - one carrier at 16000 baud on one pair of wires. The echo is taken out by the first canceller alone, so it settles lower than the multicarrier mode does",
         ),
         ("VARCP2W", "V.ARC/PCM two-wire - levels at baseband on one pair of wires, by the first canceller alone"),
+        (
+            "B212",
+            "Bell 212A - 1200 bit/s, V.22's DPSK with Bell's own handshake. A far end that is a Bell 103 gets 300",
+        ),
+        (
+            "B202",
+            "Bell 202 - 1200 bit/s FSK on one band, half duplex: the two ends take turns. No error control",
+        ),
     ];
 
     /// Boards to start from, because a text box on its own is a box nobody
@@ -4419,13 +4431,15 @@ impl ScopeApp {
     /// A modulation and nothing else. The rate is the modem's to find: every
     /// one of these settles on the fastest the line will carry, and a ceiling
     /// set on purpose is in the Advanced window with the rest of AT+MS.
-    const MODES: [(usize, &'static str); 14] = [
+    const MODES: [(usize, &'static str); 16] = [
         (7, "V.92"),
         (5, "V.90"),
         (4, "V.34"),
         (3, "V.32bis"),
         (2, "V.32"),
         (1, "V.22bis"),
+        (14, "Bell 212A"),
+        (15, "Bell 202"),
         (6, "V.21"),
         (0, "Bell 103"),
         // Not slower than the rest: not for the same kind of line at all.
@@ -5645,6 +5659,8 @@ fn family(modulation: &str) -> (Color32, Option<u32>, &'static str) {
     match name {
         "Bell 103" | "V.21" => (FSK, Some(300), "Frequency-shift keying: a pair of tones each way, 300 bit/s."),
         "V.22bis" => (QAM, Some(600), "QAM at 600 baud on two carriers, 1200 Hz calling and 2400 Hz answering."),
+        "Bell 212A" => (QAM, Some(600), "Four-phase DPSK at 600 baud, 1200 Hz calling and 2400 Hz answering: V.22's modulation."),
+        "Bell 202" => (FSK, Some(1200), "Frequency-shift keying, 1200 Hz mark and 2200 Hz space, one direction at a time."),
         "V.32" | "V.32bis" => (
             QAM,
             Some(2400),
@@ -6213,7 +6229,11 @@ mod modulation_tests {
             m.fit(i);
             assert_eq!(m.command(name), format!("AT+MS={name},1"));
         }
-        assert_eq!(ScopeApp::CARRIERS.len(), 14);
+        assert_eq!(ScopeApp::CARRIERS[14].0, "B212");
+        assert_eq!(Modulation::rates(14), &[300, 1200]);
+        assert_eq!(ScopeApp::CARRIERS[15].0, "B202");
+        assert_eq!(Modulation::rates(15), &[1200]);
+        assert_eq!(ScopeApp::CARRIERS.len(), 16);
     }
 
     /// The two V.32 carriers are two ceilings on one modulation, and the

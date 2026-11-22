@@ -146,6 +146,19 @@ impl Analogue {
         self
     }
 
+    /// Give up on a phase 2 that has heard nothing from the far end
+    /// `seconds` after the lead-in: one that follows V.92's short Phase 1
+    /// (see [`phase2::Modem::expect_far_end_within`]).
+    pub fn expect_far_end_within(&mut self, seconds: f64) {
+        self.v34.phase2_mut().expect_far_end_within(seconds);
+    }
+
+    /// Whether the start-up stopped in its first phase 2 because the far end
+    /// said nothing at all (see [`Self::expect_far_end_within`]).
+    pub fn far_end_silent(&self) -> bool {
+        self.v90.is_none() && self.v92.is_none() && self.v34.phase2().far_end_silent()
+    }
+
     /// Whether V.92's PCM upstream is what the call came to.
     pub fn is_v92(&self) -> bool {
         self.v92.is_some()

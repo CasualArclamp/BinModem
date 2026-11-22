@@ -49,7 +49,7 @@ Notation:
 | `datapump/src/v34/phase2.rs` tests | Phase 2 between two ends, including V.90 pairs (`a_v90_pair_settles_on_v90`, :1157) | `Line` (:1035), `run` (:1071) | several | included |
 | `modem/tests/v90_call.rs` | The whole modem driven by AT commands: dialling a V.90 server built from parts, and two `Modem`s with a softphone model at the answering end | `Server` (:19), `Call` (:90), `Pair` (:184) | 3 | **2.75–2.80 s** |
 | `modem/tests/call.rs` | Two `Modem`s on a summed 16 kHz line; V.34 at 33 600; sample loss; a 562 ms-each-way line | `Pair` (:13), `run_lossy` (:1302) | 56 (+2 ignored) | 1.55 s |
-| `modem/tests/replay.rs` | Replays a capture through the whole `Modem` (ignored; `MODEM_CAPTURE`, `MODEM_COMMANDS`) | none | 2 ignored | 0 |
+| `modem/tests/replay.rs` | Replays a capture through the whole `Modem` (ignored; `MODEM_CAPTURE`, `MODEM_COMMANDS`, `MODEM_MEMO` for a call that opened with a quick connect, `MODEM_PAD` for silence after the recording) | none | 2 ignored | 0 |
 
 CI (`.github/workflows/ci.yml`) runs `cargo clippy --workspace --all-targets -D warnings` and then
 `cargo test --workspace` in the **dev profile**. `Cargo.toml` has no `[profile.dev]` or

@@ -1282,6 +1282,102 @@ mod tests {
         assert_eq!(wrong, 0);
     }
 
+    /// Bits through an encoder and into the receiving end as V.34 lays it
+    /// out, rather than through our own decoder's shortcut: the non-linear
+    /// encoding taken back out of what arrives by phi of the average energy
+    /// of x (9-35), the noise-whitening filter 1 + h(1) z^-1 + h(2) z^-2 +
+    /// h(3) z^-3 that MP's coefficients were fitted for giving y back, and
+    /// only then the trellis. `energy` is what the receiver takes the average
+    /// energy of x to be, as a share of the mapper's; None measures it off
+    /// what was sent. The count of wrong bits, and of bits back.
+    fn through_a_receiver(p: Params, symbols: usize, snr_db: f64, energy: Option<f64>) -> (usize, usize) {
+        let mut encoder = Encoder::new(p);
+        let mut decoder = Decoder::new(Params { nonlinear: false, ..p });
+        let h: Vec<Complex> = p.precoding.iter().map(|&(re, im)| Complex::new(f64::from(re), f64::from(im)).scale(1.0 / 16384.0)).collect();
+        let mut seed = 0x1234_5678_u32;
+        let mut sent = Vec::new();
+        let sent_symbols: Vec<Complex> = (0..symbols)
+            .map(|_| {
+                encoder.next_symbol(&mut || {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    sent.push(seed & 1 == 1);
+                    seed & 1 == 1
+                })
+            })
+            .collect();
+        let unit = encoder.grid_scale();
+        let theta = p.theta();
+        let unbend = |w: Complex, e: f64| {
+            let mut x = w;
+            for _ in 0..8 {
+                x = w.scale(1.0 / projection(theta * x.norm_sqr() / e));
+            }
+            x
+        };
+        let mapper = encoder.energy;
+        let measured = sent_symbols.iter().map(|z| unbend(z.scale(unit), mapper).norm_sqr()).sum::<f64>() / symbols as f64;
+        let e = energy.map_or(measured, |share| share * mapper);
+        let mut noise_seed = 0x2545_f491_u32;
+        let sigma = 10f64.powf(-snr_db / 20.0) / 2f64.sqrt();
+        let mut gauss = move || {
+            let mut u = || {
+                noise_seed ^= noise_seed << 13;
+                noise_seed ^= noise_seed >> 17;
+                noise_seed ^= noise_seed << 5;
+                f64::from(noise_seed) / f64::from(u32::MAX)
+            };
+            let (a, b) = (u().max(1e-12), u());
+            (-2.0 * a.ln()).sqrt() * (std::f64::consts::TAU * b).cos()
+        };
+        let mut past = VecDeque::from(vec![Complex::ZERO; 3]);
+        for z in &sent_symbols {
+            let x = unbend((*z + Complex::new(gauss() * sigma, gauss() * sigma)).scale(unit), e);
+            let mut y = x;
+            for (xp, hp) in past.iter().zip(&h) {
+                y += *xp * *hp;
+            }
+            past.pop_back();
+            past.push_front(x);
+            decoder.feed(y.scale(1.0 / decoder.grid_scale()));
+        }
+        let got = decoder.take_bits();
+        let wrong = sent.iter().zip(&got).skip(23).filter(|(a, b)| a != b).count();
+        (wrong, got.len())
+    }
+
+    /// The upstream a NetZero V.90 server asked for in every MP of a live call
+    /// (live-1795315554): precoding, non-linear encoding, expanded shaping and
+    /// the 16-state code, at 16 800 and 19 200 bit/s, with three of the sets
+    /// of coefficients it sent. The server lost frames on that call, and this
+    /// is what says it was not this end's arithmetic: the receiving end as
+    /// V.34 lays it out reads every bit, whichever way it takes 9-35's
+    /// "average energy of the signal x(n)" -- the mapper's, which is what the
+    /// encoder bends by, or the precoded signal's, which the precoder's
+    /// corrections make a percent or two more.
+    #[test]
+    fn a_servers_precoded_non_linear_upstream_decodes_clean() {
+        let taps = [
+            [(-571, 4034), (-59, -469), (-967, -142)],
+            [(-3691, -255), (353, 1128), (-1589, -549)],
+            [(1511, -831), (759, 1573), (777, -95)],
+        ];
+        for rate in [SymbolRate::S3200, SymbolRate::S3000, SymbolRate::S2400] {
+            for primary in [16_800, 19_200] {
+                for h in taps {
+                    let mut p = params(rate, primary, Code::States16, true, true);
+                    p.precoding = h;
+                    for energy in [Some(1.0), None] {
+                        let (wrong, got) = through_a_receiver(p, 6000, 32.0, energy);
+                        assert!(got > 20_000, "{rate:?} at {primary}: {got} bits");
+                        assert_eq!(wrong, 0, "{rate:?} at {primary}, h {h:?}, energy {energy:?}: {wrong} of {got} wrong");
+                    }
+                }
+            }
+        }
+    }
+
     /// A scope's range is the unit-power peak, not the grid's: what the
     /// encoder sends reaches it and never passes it, and it is the decoder's
     /// own figure. Sized by the grid-unit [`peak`] instead, a half-duplex fax

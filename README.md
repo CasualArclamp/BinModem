@@ -69,7 +69,7 @@ been checked three other ways: two documents, two methods, one table.
 
 | | |
 |---|---|
-| **Modulations** | Bell 103 (300), V.21 (300), V.22 (1200), V.22bis (1200/2400), V.32 (4800/9600, both codings), V.32bis (7200/12000/14400), V.34 (4800 to 33600: shell mapping, 16/32/64-state 4D trellis codes, precoding, non-linear encoding), V.90 analogue and digital modems (28000 to 56000 PCM down, V.34 up: DIL analysis, modulus encoding, spectral shaping, rate renegotiation; the digital one answers through a softphone) |
+| **Modulations** | Bell 103 (300), Bell 212A (1200, falling back to 103), Bell 202 (1200 half duplex), V.21 (300), V.22 (1200), V.22bis (1200/2400), V.32 (4800/9600, both codings), V.32bis (7200/12000/14400), V.34 (4800 to 33600: shell mapping, 16/32/64-state 4D trellis codes, precoding, non-linear encoding), V.90 analogue and digital modems (28000 to 56000 PCM down, V.34 up: DIL analysis, modulus encoding, spectral shaping, rate renegotiation; the digital one answers through a softphone) |
 | **Negotiation** | V.8 CM/JM/CI/CJ and ANSam; V.25 answer tone told apart from it |
 | **Error control** | V.42 LAPM — detection, HDLC, XID, REJ/SREJ, mod-128 |
 | **Compression** | V.44 (LZJH) and V.42bis (BTLZ), both offered in one XID and the far end picks; V.42bis also followed in band |
@@ -230,7 +230,10 @@ and the calling side still wants a line with no echo and one clock. A second
 V.92 call to the same number starts up the short way (9.2 and 9.4, "quick
 connect"): QC1a and QCA1d in place of V.8's menus, a Phase 2 with no line
 probe, and no ODP/ADP, which takes about three seconds off the sixteen;
-`BINMODEM_V92_QC=0` turns it off and `always` asks every server. Eighteen agents read the Recommendation clause by clause off
+`BINMODEM_V92_QC=0` turns it off and `always` asks every server. A quick connect whose server sends
+no INFO0d or tone B within a round trip and 2.5 s of the hand-over forgets the memo, sends CM for a
+full start-up, and hangs up if that gets no JM either; `BINMODEM_V92_TONEQ_MS=<ms>` ends TONEq early
+as a test. Eighteen agents read the Recommendation clause by clause off
 the rendered pages, with V.8, V.8 bis and V.250's `+P` commands beside it, and
 four more read what the V.90 code here already does; the notes they wrote and
 the plan built from them are in [docs/design/v92](docs/design/v92) -- 62 work
