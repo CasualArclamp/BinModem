@@ -653,6 +653,12 @@ pub struct Session {
     /// Pages that arrived, with their numbers in the call, waiting for the
     /// window to take them.
     fax_received: Mutex<std::collections::VecDeque<(usize, fax::page::Page)>>,
+    /// The T.30 frames either end has sent, for the window's account of how
+    /// the call went.
+    fax_exchange: Mutex<Vec<fax::call::Exchanged>>,
+    /// Pick up the SIP call ringing here without a command: for a modem
+    /// already off hook and answering when the call arrives.
+    answer_call: AtomicBool,
     /// Lines of a page that is still arriving, waiting for the window.
     fax_arriving: Mutex<Option<Arriving>>,
 }
@@ -697,6 +703,8 @@ impl Default for Session {
             fax_v34: AtomicBool::new(true),
             fax_pages: Mutex::default(),
             fax_received: Mutex::default(),
+            fax_exchange: Mutex::default(),
+            answer_call: AtomicBool::new(false),
             fax_arriving: Mutex::default(),
             recording: AtomicBool::new(false),
             asked_for_a_line: AtomicBool::new(false),
@@ -799,6 +807,20 @@ impl Session {
     /// A page that arrived, with its number in the call, once and only once.
     pub fn take_fax_received(&self) -> Option<(usize, fax::page::Page)> {
         self.fax_received.lock().ok().and_then(|mut v| v.pop_front())
+    }
+
+    /// The T.30 frames since the window last asked, in order.
+    pub fn take_fax_exchange(&self) -> Vec<fax::call::Exchanged> {
+        self.fax_exchange.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+    }
+
+    /// Answer the SIP call ringing here, leaving the modem as it is.
+    pub fn answer_call(&self) {
+        self.answer_call.store(true, Ordering::Relaxed);
+    }
+
+    fn take_answer_call(&self) -> bool {
+        self.answer_call.swap(false, Ordering::Relaxed)
     }
 
     /// More lines of the page arriving.
@@ -1638,6 +1660,12 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         while let Some((sheet, page)) = modem.take_received_page() {
             session.set_fax_received(sheet, page);
         }
+        let exchanged = modem.take_fax_exchange();
+        if !exchanged.is_empty()
+            && let Ok(mut v) = session.fax_exchange.lock()
+        {
+            v.extend(exchanged);
+        }
 
         if session.take_hang_up() {
             tx.log(Direction::Note, "putting the call down");
@@ -1832,7 +1860,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 sip.dial(&number);
                 dialled_at = Some(Instant::now());
             }
-            if modem.take_answer_request() {
+            if modem.take_answer_request() || session.take_answer_call() {
                 sip.answer();
             }
             // A call on its way out is not a call the modem should still be

@@ -721,6 +721,11 @@ impl FaxCall {
         self.call.take_heard()
     }
 
+    /// The frames either end has sent since this was last asked.
+    pub fn take_exchange(&mut self) -> Vec<fax::call::Exchanged> {
+        self.call.take_exchange()
+    }
+
     /// Whether anything of the far end's is on the line.
     pub fn carrier(&self) -> bool {
         if let Some(HalfDuplex::Modem(modem)) = self.v34.as_ref() {

@@ -3607,6 +3607,16 @@ impl Modem {
             .or_else(|| self.fax_result.as_mut().and_then(FaxCall::take_received))
     }
 
+    /// The T.30 frames either end of a fax call has sent since this was last
+    /// asked, in order: the call in progress's, or the one that just ended.
+    pub fn take_fax_exchange(&mut self) -> Vec<fax::call::Exchanged> {
+        let mut out = self.fax_result.as_mut().map(FaxCall::take_exchange).unwrap_or_default();
+        if let Some(call) = self.fax.as_mut() {
+            out.extend(call.take_exchange());
+        }
+        out
+    }
+
     /// What this end tells a V.8 bis far end it can do: the data mode, the
     /// modulations `+MS` allows, and V.42 if error control is wanted.
     fn bis_capabilities(&self) -> v8::bis::Message {

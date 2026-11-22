@@ -37,6 +37,7 @@
 
 mod answer;
 mod app;
+mod callprompt;
 mod crashlog;
 mod dialin;
 mod document;
@@ -131,6 +132,8 @@ struct Args {
     /// whether to open on the scopes: for a call with nobody at the keyboard.
     typed: Vec<String>,
     scopes: bool,
+    /// Or on the Fax tab, which only a live line has.
+    fax: bool,
     /// Whether the Setup row stays showing once a line is open: for a
     /// picture of a window that shows what line it is on.
     setup: bool,
@@ -150,6 +153,7 @@ fn parse() -> Result<Option<Args>, String> {
         telnet: None,
         typed: Vec::new(),
         scopes: false,
+        fax: false,
         setup: false,
         record: false,
     };
@@ -184,6 +188,7 @@ fn parse() -> Result<Option<Args>, String> {
             }
             "--type" => args.typed.push(value("--type")?),
             "--scopes" => args.scopes = true,
+            "--fax" => args.fax = true,
             "--setup" => args.setup = true,
             "--record" => args.record = true,
             "--in" => args.input = Some(value("--in")?),
@@ -197,6 +202,7 @@ fn parse() -> Result<Option<Args>, String> {
                     "binmodem                                   a modem, line chosen in the window\n\
                      binmodem --in <dev> --out <dev>            and opened straight away\n\
                      binmodem ... --type <line> [--scopes]      typed at the modem once the line is open\n\
+                     binmodem ... --fax                         open on the Fax tab, on a live line\n\
                      binmodem ... --record                      record the line from the start, into captures\n\
                      binmodem ... --setup                       leave the Setup row showing with a line open\n\
                      binmodem [path.wav]                        replay a capture\n\
@@ -258,7 +264,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let Some(mut args) = parse()? else { return Ok(()) };
     // Taken now, because `args` is picked apart below.
-    let (typed, scopes, setup) = (std::mem::take(&mut args.typed), args.scopes, args.setup);
+    let (typed, scopes, fax, setup) = (std::mem::take(&mut args.typed), args.scopes, args.fax, args.setup);
 
     let control = Arc::new(Control::default());
     let (sample_rate, title) = if args.live {
@@ -326,6 +332,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             cc.egui_ctx.set_visuals(eframe::egui::Visuals::dark());
             let mut app = app::ScopeApp::new(rx, ui_control, sink, sample_rate, source);
             app.script(typed, scopes);
+            app.open_fax_tab(fax);
             app.keep_setup_showing(setup);
             Ok(Box::new(app))
         }),

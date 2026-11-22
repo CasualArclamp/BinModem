@@ -49,6 +49,8 @@ pub struct Progress {
     pub call: String,
     /// Who is at the other end.
     pub peer: Option<String>,
+    /// The same, as a person reads it: a number, and a name if one was given.
+    pub caller: Option<String>,
     /// Whether audio is flowing.
     pub media: bool,
     /// The companding law in force: what the far end is actually sending.
@@ -580,6 +582,7 @@ impl Line {
             public: status.public,
             call: status.call,
             peer: status.peer,
+            caller: status.caller,
             media: stats.connected,
             law: stats.connected.then(|| {
                 let law = stats.law.unwrap_or(crate::g711::Law::Mu.encoding_name());
