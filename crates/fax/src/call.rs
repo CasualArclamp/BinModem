@@ -232,6 +232,20 @@ impl Phase {
     }
 }
 
+/// How far through an ECM page the sending end is: the frames of the blocks
+/// before this one, and `burst` of this one's, out of all the page's frames.
+///
+/// By frames and not by blocks, because the last block is seldom full: a
+/// page of two and a bit blocks counted as three equal thirds said 50 % half
+/// way through the second block, with nearly three quarters of the page
+/// gone -- the far end's picture well ahead of this end's.
+pub fn ecm_progress(frames: usize, block: usize, burst: f64) -> f64 {
+    let start = (block * ecm::BLOCK_FRAMES).min(frames);
+    let end = (start + ecm::BLOCK_FRAMES).min(frames);
+    let done = start as f64 + burst.clamp(0.0, 1.0) * (end - start) as f64;
+    (done / frames.max(1) as f64).min(1.0)
+}
+
 /// T1: how long to keep trying in phase B before giving up (5.3.3.1).
 ///
 /// "35 s +/- 5 s", and it is generous on purpose: a machine at the other end
@@ -737,8 +751,7 @@ impl Call {
                 }
                 let burst = self.fast_at as f64 / self.fast_out.len() as f64;
                 if self.ecm && !self.ecm_frames.is_empty() {
-                    // Blocks done, and how far through the one on the line.
-                    return Some((self.ecm_block as f64 + burst) / self.ecm_blocks() as f64);
+                    return Some(ecm_progress(self.ecm_frames.len(), self.ecm_block, burst));
                 }
                 Some(burst)
             }
@@ -2183,6 +2196,21 @@ impl Call {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ecm_progress_goes_by_frames_so_a_short_last_block_is_short() {
+        let full = ecm::BLOCK_FRAMES;
+        // Two full blocks and ten frames.
+        let frames = 2 * full + 10;
+        assert_eq!(ecm_progress(frames, 0, 0.0), 0.0);
+        let middle = ecm_progress(frames, 1, 0.5);
+        let want = 1.5 * full as f64 / frames as f64;
+        assert!((middle - want).abs() < 1e-9, "{middle} against {want}");
+        assert!(middle > 0.7, "half way through the second block is most of the page");
+        assert!((ecm_progress(frames, 2, 1.0) - 1.0).abs() < 1e-9);
+        // One block alone is the burst itself.
+        assert!((ecm_progress(40, 0, 0.25) - 0.25).abs() < 1e-9);
+    }
+
     use super::*;
     use crate::frames;
     use crate::t30::Frame;
