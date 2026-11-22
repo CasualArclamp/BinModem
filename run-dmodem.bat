@@ -32,8 +32,10 @@ if not exist "%DMODEMD%" (
     pause
     exit /b 1
 )
-set BINMODEM=%HERE%target\release\binmodem.exe
-if not exist "%BINMODEM%" set BINMODEM=%HERE%dist\binmodem.exe
+rem The built exe in dist\ first: it is the one being tested, and target\
+rem can hold a build of whatever branch this checkout was last on.
+set BINMODEM=%HERE%dist\binmodem.exe
+if not exist "%BINMODEM%" set BINMODEM=%HERE%target\release\binmodem.exe
 
 if not exist "%HERE%captures" mkdir "%HERE%captures"
 rem dmodemd keeps its settings under LOCALAPPDATA; give it a corner of its own.

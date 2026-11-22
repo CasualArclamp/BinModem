@@ -2035,6 +2035,21 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     f.symbols.clear();
                 });
             }
+            // And a recording stopped while nothing arrives is stopped now.
+            // It was only ever kept past this point, with the samples, so a
+            // far end that hung up -- a BYE, and no audio after it -- left
+            // Stop pressed and nothing happening, and the recording running
+            // on until the next call brought samples to step it with.
+            let recording_now = session.recording();
+            if was_recording && !recording_now {
+                keep(&recording, &frames, &tx, &session);
+                recording = Vec::new();
+                frames = Vec::new();
+                was_recording = false;
+            }
+            if let Ok(mut state) = session.state.lock() {
+                state.recording = recording_now.then(|| recording.len() as f64 / 2.0 / FS);
+            }
             thread::sleep(Duration::from_millis(2));
             continue;
         }
