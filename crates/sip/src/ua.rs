@@ -176,6 +176,9 @@ pub struct Status {
     pub local: String,
     /// Who we are on a call with, if anyone.
     pub peer: Option<String>,
+    /// The far end as a person would want it read: its number, and its name
+    /// in front where the From header gives one.
+    pub caller: Option<String>,
     /// Where the call has got to, in words.
     pub call: String,
 }
@@ -2482,6 +2485,18 @@ impl Worker {
             .call
             .as_ref()
             .map(|c| c.remote.uri.to_string());
+        status.caller = self.call.as_ref().map(|c| caller_of(&c.remote));
+    }
+}
+
+/// Who a From or To header names, for a person to read: the number, or the
+/// host where there is no user part, with the display name in front of it
+/// when there is one that says something more.
+pub fn caller_of(address: &Address) -> String {
+    let number = address.uri.user.clone().unwrap_or_else(|| address.uri.host.clone());
+    match address.display.as_deref().map(str::trim).map(|d| d.trim_matches('"').trim()) {
+        Some(name) if !name.is_empty() && name != number => format!("{name} <{number}>"),
+        _ => number,
     }
 }
 
@@ -2699,6 +2714,18 @@ mod tests {
 
     use super::*;
     use crate::account::Transport;
+
+    #[test]
+    fn a_caller_is_its_number_with_its_name_in_front_when_it_has_one() {
+        let mut a = Address::new(Uri::parse("sip:0412345678@trunk.example").unwrap());
+        assert_eq!(caller_of(&a), "0412345678");
+        a.display = Some("\"Front desk\"".to_owned());
+        assert_eq!(caller_of(&a), "Front desk <0412345678>");
+        a.display = Some("0412345678".to_owned());
+        assert_eq!(caller_of(&a), "0412345678", "a name that is the number again");
+        let host = Address::new(Uri::parse("sip:pbx.example").unwrap());
+        assert_eq!(caller_of(&host), "pbx.example");
+    }
 
     #[test]
     fn a_failure_code_reads_as_a_sentence() {

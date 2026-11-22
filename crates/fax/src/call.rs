@@ -105,6 +105,14 @@ pub enum Line {
     V34PrimaryListen,
 }
 
+/// One frame of a call, and which end sent it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Exchanged {
+    pub frame: Frame,
+    /// Sent by this end rather than heard from the far one.
+    pub ours: bool,
+}
+
 /// How far the call has got.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
@@ -164,6 +172,57 @@ impl Phase {
             Self::Ending => "hanging up",
             Self::Done => "done",
             Self::Failed => "failed",
+        }
+    }
+
+    /// Every phase, in the order the enum has them.
+    pub const ALL: [Phase; 21] = [
+        Self::Calling,
+        Self::Listening,
+        Self::Commanding,
+        Self::Training,
+        Self::AwaitingConfirm,
+        Self::Sending,
+        Self::EndingPage,
+        Self::AwaitingReceipt,
+        Self::Answering,
+        Self::Identifying,
+        Self::AwaitingCommand,
+        Self::CheckingTraining,
+        Self::Confirming,
+        Self::Receiving,
+        Self::AwaitingPostMessage,
+        Self::Acknowledging,
+        Self::AwaitingDisconnect,
+        Self::TurningAround,
+        Self::Ending,
+        Self::Done,
+        Self::Failed,
+    ];
+
+    /// The phase a name from [`Phase::name`] belongs to.
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.name() == name)
+    }
+
+    /// T.30's letter for it (figure 1): A the call set up, B the
+    /// pre-message procedure, C the page, D the post-message procedure and
+    /// E the release.
+    pub fn letter(self) -> char {
+        match self {
+            Self::Calling | Self::Answering => 'A',
+            Self::Listening
+            | Self::Commanding
+            | Self::Training
+            | Self::AwaitingConfirm
+            | Self::Identifying
+            | Self::AwaitingCommand
+            | Self::CheckingTraining
+            | Self::Confirming
+            | Self::TurningAround => 'B',
+            Self::Sending | Self::Receiving => 'C',
+            Self::EndingPage | Self::AwaitingReceipt | Self::AwaitingPostMessage | Self::Acknowledging => 'D',
+            Self::AwaitingDisconnect | Self::Ending | Self::Done | Self::Failed => 'E',
         }
     }
 
@@ -323,8 +382,12 @@ pub struct Call {
     /// The far end's NSF, if it sent one: a T.35 country code and whatever
     /// its maker put after it.
     pub non_standard: Option<Vec<u8>>,
-    /// Every frame either end sent, for the log.
+    /// Every frame the far end sent, for the log.
     heard: Vec<Message>,
+    /// Every frame either end sent, in order, with which end sent it: what a
+    /// window needs to say how a call ended -- whether the last page was
+    /// confirmed, which is a frame the far end sends, or refused.
+    exchange: Vec<Exchanged>,
     /// This end's own identification, sent as a TSI or a CSI.
     identification: String,
 
@@ -497,6 +560,7 @@ impl Call {
             capability_field: None,
             non_standard: None,
             heard: Vec::new(),
+            exchange: Vec::new(),
             identification: identification.to_owned(),
             modulation: Modulation::V27ter,
             rate: 4800,
@@ -653,6 +717,11 @@ impl Call {
     /// Frames seen since this was last asked, for a log.
     pub fn take_heard(&mut self) -> Vec<Message> {
         std::mem::take(&mut self.heard)
+    }
+
+    /// Frames either end has sent since this was last asked, in order.
+    pub fn take_exchange(&mut self) -> Vec<Exchanged> {
+        std::mem::take(&mut self.exchange)
     }
 
     /// How far through the page the call is, as a fraction.
@@ -1337,6 +1406,7 @@ impl Call {
                 }
             }
         }
+        self.exchange.push(Exchanged { frame: message.frame, ours: false });
         self.heard.push(message);
     }
 
@@ -2052,6 +2122,8 @@ impl Call {
     /// Queue a burst of frames on the control channel: a second of flags
     /// ahead of it on V.21, and F.3.1.4's two, and a few, on V.34's.
     fn queue(&mut self, messages: &[Message]) {
+        self.exchange
+            .extend(messages.iter().map(|m| Exchanged { frame: m.frame, ours: true }));
         if self.v34 {
             self.sender.send_flagged(messages, crate::frames::V34_FLAGS);
             self.burst = messages.to_vec();
@@ -3143,5 +3215,25 @@ mod tests {
         carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingCommand);
         assert_eq!(said, vec![Frame::Rtn]);
         assert_eq!(call.phase(), Phase::AwaitingCommand, "a page it refused is not followed by the next");
+    }
+
+    #[test]
+    fn every_phase_is_found_by_its_name_and_has_a_letter() {
+        for phase in Phase::ALL {
+            assert_eq!(Phase::named(phase.name()), Some(phase));
+            assert!(('A'..='E').contains(&phase.letter()));
+        }
+        assert_eq!(Phase::named("nothing of the kind"), None);
+        assert_eq!(Phase::Sending.letter(), 'C');
+        assert_eq!(Phase::AwaitingReceipt.letter(), 'D');
+    }
+
+    #[test]
+    fn the_frames_both_ends_send_are_kept_in_order() {
+        let mut call = Call::answer(FS, "61399990000");
+        call.frame_arrived(Message::new(Frame::Mps, true));
+        let exchange = call.take_exchange();
+        assert_eq!(exchange.first(), Some(&Exchanged { frame: Frame::Mps, ours: false }));
+        assert!(call.take_exchange().is_empty(), "handed over twice");
     }
 }

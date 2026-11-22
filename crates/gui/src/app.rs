@@ -270,6 +270,9 @@ enum Tab {
     Transcript,
     /// The signal path, drawn: not there for a socket, which has none.
     Scopes,
+    /// T.30: the page going or arriving, the far end, and how each call
+    /// went. Only on a live line, which is the only thing that places one.
+    Fax,
 }
 
 /// The colours of the faceplate, said once.
@@ -448,9 +451,18 @@ pub struct ScopeApp {
     /// told of them.
     dialin: crate::dialin::Settings,
     dialin_sent: Option<crate::dialin::Settings>,
-    /// The fax window: a picture, the page it becomes, and the machine at
-    /// the far end of the call.
+    /// The Fax tab: a picture, the page it becomes, the machine at the far
+    /// end of the call, and how each call went.
     fax: crate::faxwin::Fax,
+    /// What the Fax tab asked of the modem, for the controls to do: the tab
+    /// draws where the session is not to hand.
+    fax_start: Option<crate::faxwin::Start>,
+    /// A SIP call ringing here, and the question it puts.
+    prompt: crate::callprompt::CallPrompt,
+    /// The ring, while one is ringing, and whether the monitor was opened
+    /// for it and so is to be shut again after.
+    ringer: Option<crate::callprompt::Ringer>,
+    ring_opened_monitor: bool,
     /// The file transfer window, and the two paths it works with.
     transfer_open: bool,
     send_path: String,
@@ -671,6 +683,10 @@ impl ScopeApp {
             dialin: crate::dialin::Settings::default(),
             dialin_sent: None,
             fax: crate::faxwin::Fax::new(),
+            fax_start: None,
+            prompt: crate::callprompt::CallPrompt::default(),
+            ringer: None,
+            ring_opened_monitor: false,
             transfer_open: false,
             line_was_open: false,
             send_path: String::new(),
@@ -1661,13 +1677,15 @@ impl ScopeApp {
             {
                 self.transfer_open = !self.transfer_open;
             }
-            if small_key(ui, self.fax.open, "Fax")
+            if small_key(ui, self.tab == Tab::Fax, "Fax")
                 .on_hover_text(
-                    "T.30: send a picture as a fax, and see what the machine answering can do",
+                    "T.30: send a picture or a PDF as a fax, receive one, and see what the \
+                     machine at the far end can do and how each call went. Again for the \
+                     terminal back",
                 )
                 .clicked()
             {
-                self.fax.open = !self.fax.open;
+                self.tab = if self.tab == Tab::Fax { Tab::Terminal } else { Tab::Fax };
             }
             if small_key(ui, self.network_open, "Network")
                 .on_hover_text(
@@ -1770,42 +1788,202 @@ impl ScopeApp {
         // sound-card line has neither.
         self.dialler_window(ui, &session, &state);
         self.credentials_window(ui, &session, state.sip.as_ref());
-        self.fax.observe(&self.frame);
+        let now = ui.input(|i| i.time);
+        self.fax.observe(&self.frame, now);
+        self.fax.exchanged(session.take_fax_exchange());
         // Lines before the page they belong to: a page handed over first
         // would be drawn from scratch and then its own last lines ignored.
-        if let Some(lines) = session.take_fax_lines() {
-            let now = ui.input(|i| i.time);
-            if self.fax.arriving(lines, now) {
-                // Open for a page as it starts rather than once it is over.
-                self.fax.open = true;
-            }
+        if let Some(lines) = session.take_fax_lines()
+            && self.fax.arriving(lines, now)
+        {
+            // The tab for a page as it starts rather than once it is over.
+            self.tab = Tab::Fax;
         }
         while let Some((sheet, page)) = session.take_fax_received() {
             self.fax.arrived(sheet, page);
-            self.fax.open = true;
         }
-        let on_hook = self.frame.state == telemetry::CallState::Idle;
-        if let Some(start) = self.fax.show(ui, on_hook) {
-            if matches!(start, crate::faxwin::Start::HangUp) {
-                // Not an AT command: a fax call sits in the handshake state
-                // where the interpreter does not read one, so the line thread
-                // puts it down directly.
-                session.hang_up();
-            } else {
-                self.fax.trouble = None;
-                // Who this end says it is, and what it is sending, before the
-                // call rather than in it: both go out inside the first frames
-                // this modem sends, which is well before the window is asked
-                // anything again.
-                session.set_fax_identification(self.fax.identification.trim());
-                session.set_fax_offer(&self.fax.ours());
-                session.set_fax_error_correction(self.fax.error_correction);
-                session.set_fax_jbig(self.fax.jbig);
-                session.set_fax_v34(self.fax.v34);
-                session.set_fax_pages(self.fax.pages().to_vec());
-                session.type_bytes(crate::faxwin::Fax::commands(&start).as_bytes());
+        if let Some(start) = self.fax_start.take() {
+            self.start_fax(start, &session);
+        }
+        self.incoming_call(ui, &session, state.sip.as_ref(), now);
+    }
+
+    /// What the Fax tab or the call prompt asked of the modem.
+    fn start_fax(&mut self, start: crate::faxwin::Start, session: &Arc<live::Session>) {
+        if matches!(start, crate::faxwin::Start::HangUp) {
+            // Not an AT command: a fax call sits in the handshake state
+            // where the interpreter does not read one, so the line thread
+            // puts it down directly.
+            self.fax.stopped();
+            session.hang_up();
+            return;
+        }
+        self.fax.trouble = None;
+        if let crate::faxwin::Start::Dial(number) = &start {
+            self.fax.dialled.clone_from(number);
+            self.dial_last.clone_from(number);
+        } else {
+            self.fax.dialled.clear();
+        }
+        self.arm_fax(session);
+        session.type_bytes(crate::faxwin::Fax::commands(&start).as_bytes());
+    }
+
+    /// Who this end says it is, and what it offers and sends, before the
+    /// call rather than in it: all of it goes out inside the first frames
+    /// this modem sends, which is well before the tab is asked anything
+    /// again.
+    fn arm_fax(&self, session: &Arc<live::Session>) {
+        session.set_fax_identification(self.fax.identification.trim());
+        session.set_fax_offer(&self.fax.ours());
+        session.set_fax_error_correction(self.fax.error_correction);
+        session.set_fax_jbig(self.fax.jbig);
+        session.set_fax_v34(self.fax.v34);
+        session.set_fax_pages(self.fax.pages().to_vec());
+    }
+
+    /// A SIP call ringing here: ring, ask, and do what was chosen.
+    ///
+    /// Nothing answers by itself. The question stays in the middle of the
+    /// window until a button is pressed or the caller gives up.
+    fn incoming_call(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &Arc<live::Session>,
+        sip: Option<&sip::Progress>,
+        now: f64,
+    ) {
+        let call = sip.map(|p| p.call.as_str());
+        let caller = sip.and_then(|p| p.caller.as_deref());
+        self.prompt.observe(call, caller, now);
+        let ctx = ui.ctx().clone();
+        match (self.prompt.ringing().is_some(), self.ringer.is_some()) {
+            (true, false) => {
+                self.ringer = Some(crate::callprompt::Ringer::new(self.sample_rate));
+                // The ring goes out where the line is heard. Not listening,
+                // it is opened for the ring and shut again after.
+                if self.monitor.is_none() {
+                    self.set_listening(true);
+                    self.ring_opened_monitor = self.monitor.is_some();
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                    egui::UserAttentionType::Critical,
+                ));
             }
+            (false, true) => {
+                self.ringer = None;
+                if std::mem::take(&mut self.ring_opened_monitor) {
+                    self.set_listening(false);
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                    egui::UserAttentionType::Reset,
+                ));
+            }
+            _ => {}
         }
+        let Some((who, since)) = self.prompt.ringing() else { return };
+        let who = who.to_owned();
+        if let Some(ringer) = self.ringer.as_mut() {
+            let mut ring = Vec::new();
+            ringer.fill(now, &mut ring);
+            self.sink.push(&ring);
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        let fax_class = self.frame.fax_class;
+        if let Some(choice) = crate::callprompt::dialog(&ctx, &who, now - since, fax_class)
+            && let Some(choice) = self.prompt.choose(choice, now)
+        {
+            self.take_call(choice, session);
+        }
+    }
+
+    /// Do what the call prompt was told.
+    fn take_call(&mut self, choice: crate::callprompt::Choice, session: &Arc<live::Session>) {
+        use crate::callprompt::Choice;
+        let on_hook = self.frame.state == telemetry::CallState::Idle;
+        match choice {
+            Choice::Decline => session.hang_up(),
+            // On hook, the class first and then ATA, whose answer request is
+            // what picks the SIP call up. A modem already off hook and
+            // answering -- Wait for a fax pressed before the call came --
+            // is left as it is and only the call is picked up.
+            Choice::Modem if on_hook => session.type_bytes(b"AT+FCLASS=0\rATA\r"),
+            Choice::Fax if on_hook => {
+                self.fax.dialled.clear();
+                self.arm_fax(session);
+                session.type_bytes(crate::faxwin::Fax::commands(&crate::faxwin::Start::Answer).as_bytes());
+                self.tab = Tab::Fax;
+            }
+            Choice::Fax => {
+                self.tab = Tab::Fax;
+                session.answer_call();
+            }
+            Choice::Modem => session.answer_call(),
+        }
+    }
+
+    /// The Fax tab, laid out as the Scopes tab is: on the left the call
+    /// card, the constellation and the far end; in the middle the page, as
+    /// large as there is room for, over the waterfall; on the right the
+    /// number, the progress, how the last call went, the document, the rates
+    /// and the calls so far.
+    fn fax_pane(&mut self, ui: &mut egui::Ui) {
+        const CARD_W: f32 = 420.0;
+        const SIDE_W: f32 = 340.0;
+        const WATERFALL: f32 = 150.0;
+        let dt = ui.input(|i| i.stable_dt).clamp(0.0, 0.25);
+        let measured = self.calm.update(&self.frame, dt);
+        let on_hook = self.frame.state == telemetry::CallState::Idle;
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(CARD_W);
+                egui::ScrollArea::vertical()
+                    .id_salt("fax-card")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_width(CARD_W - 14.0);
+                        self.call_card(ui, measured);
+                        ui.add_space(8.0);
+                        self.symbol_row(ui);
+                        self.fax.far_panel(ui);
+                    });
+            });
+            ui.separator();
+            let middle = (ui.available_width() - SIDE_W - 16.0).max(240.0);
+            ui.vertical(|ui| {
+                ui.set_width(middle);
+                let height = ui.available_height();
+                let page = egui::vec2(middle, (height - WATERFALL - 26.0).max(160.0));
+                ui.allocate_ui(page, |ui| {
+                    // The whole of the room, whatever is in it, so that the
+                    // waterfall stays put under it.
+                    ui.set_min_size(page);
+                    self.fax.page_panel(ui);
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("waterfall").strong());
+                    ui.label(
+                        RichText::new(format!("0 - {:.0} Hz · newest at the top", self.frame.display_hz))
+                            .small()
+                            .color(DIM),
+                    );
+                });
+                self.waterfall.paint(ui, WATERFALL, self.frame.modulation, self.row_secs);
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                ui.set_width(SIDE_W);
+                egui::ScrollArea::vertical()
+                    .id_salt("fax-side")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_width(SIDE_W - 14.0);
+                        if let Some(start) = self.fax.side_panel(ui, on_hook, &mut self.dial_number) {
+                            self.fax_start = Some(start);
+                        }
+                    });
+            });
+        });
     }
 
     /// PPP over the call, and a ping over that.
@@ -4037,6 +4215,13 @@ impl ScopeApp {
         }
     }
 
+    /// What `--fax` asked for: the Fax tab as the one to open on.
+    pub fn open_fax_tab(&mut self, fax: bool) {
+        if fax && self.source.is_live() {
+            self.tab = Tab::Fax;
+        }
+    }
+
     /// Type the next scripted line when it is due: the first a second and a
     /// half after the line opens, and one a second after that, which is
     /// longer than the modem takes to answer any command but a dial.
@@ -5381,6 +5566,9 @@ impl ScopeApp {
             if !self.source.is_telnet() {
                 ui.selectable_value(&mut self.tab, Tab::Scopes, "scopes");
             }
+            if self.source.is_live() {
+                ui.selectable_value(&mut self.tab, Tab::Fax, "fax");
+            }
             ui.separator();
             // A socket has no command state to be in, so saying which one it
             // was in would be answering a question nobody asked.
@@ -5463,6 +5651,7 @@ impl ScopeApp {
             }
             Tab::Transcript => self.transcript(ui),
             Tab::Scopes => self.scopes_pane(ui),
+            Tab::Fax => self.fax_pane(ui),
         }
     }
 
