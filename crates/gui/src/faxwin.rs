@@ -166,10 +166,6 @@ pub enum Start {
     HangUp,
 }
 
-/// The preview is drawn at a size a tab can hold, not at 1728 across: a
-/// third of it, the same as the page arriving.
-const PREVIEW_WIDTH: usize = 576;
-
 /// Texels across the picture of a page arriving: one for every pel, so the
 /// page is drawn a screen pixel a pel with nothing smoothed or averaged.
 const SCAN_WIDTH: usize = fax::page::WIDTH;
@@ -405,15 +401,6 @@ impl Scan {
         }
         self.texture.clone()
     }
-}
-
-/// A page's size on paper, in millimetres: its pels across at 8.04 to the
-/// millimetre and its lines down at its resolution's rate.
-fn paper_size(page: &Page) -> egui::Vec2 {
-    egui::vec2(
-        (page.width() as f64 / fax::page::PELS_PER_MM) as f32,
-        (page.height() as f64 / page.resolution.lines_per_mm()) as f32,
-    )
 }
 
 /// Write a page out as a picture, each line as many pixels tall as makes the
@@ -940,48 +927,33 @@ impl Fax {
         self.preview = None;
     }
 
-    /// The page shrunk to something a window can show.
-    ///
-    /// Averaged rather than sampled, so that a dithered photograph looks like
-    /// the tones it stands for instead of like a moire pattern -- which is
-    /// what a fax looks like to the eye at arm's length, and the only honest
-    /// way to show what is about to be sent.
-    fn thumbnail(page: &Page) -> egui::ColorImage {
-        // One preview pixel per block of the page, square in page pels, so
-        // the thumbnail has the same shape as the page and not the paper.
-        // Which is the right way round here: this is a picture of the data.
-        let across = (fax::page::WIDTH / PREVIEW_WIDTH).max(1);
-        let rows = (page.height() / across).max(1);
-        let mut pixels = Vec::with_capacity(PREVIEW_WIDTH * rows);
-        for ry in 0..rows {
-            for rx in 0..PREVIEW_WIDTH {
-                let mut ink = 0usize;
-                let mut n = 0usize;
-                let down = ry * across..((ry + 1) * across).min(page.height());
-                let along = rx * across..((rx + 1) * across).min(fax::page::WIDTH);
-                for line in &page.lines[down] {
-                    for &pel in &line[along.clone()] {
-                        ink += usize::from(pel);
-                        n += 1;
-                    }
-                }
-                let v = (255 - ink * 255 / n.max(1)) as u8;
-                pixels.push(Color32::from_rgb(v, v, v));
-            }
+    /// The page as it will go, a texel a pel and a row a line, black or
+    /// white -- nothing averaged, so what is checked is what is sent. At
+    /// most `largest` rows, the most the graphics card takes, and at least
+    /// one, blank, for a page with no lines.
+    fn thumbnail(page: &Page, largest: usize) -> egui::ColorImage {
+        let width = fax::page::WIDTH;
+        let rows = page.height().clamp(1, largest.max(1));
+        let mut pixels = Vec::with_capacity(width * rows);
+        for line in page.lines.iter().take(rows) {
+            pixels.extend((0..width).map(|x| {
+                if line.get(x).is_some_and(|pel| *pel) { Color32::BLACK } else { Color32::WHITE }
+            }));
         }
+        pixels.resize(width * rows, Color32::WHITE);
         egui::ColorImage {
-            size: [PREVIEW_WIDTH, rows],
+            size: [width, rows],
             pixels,
-            source_size: egui::Vec2::new(PREVIEW_WIDTH as f32, rows as f32),
+            source_size: egui::Vec2::new(width as f32, rows as f32),
         }
     }
 
     fn texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
         if self.preview.is_none() {
             let page = self.pages.get(self.showing)?;
-            let image = Self::thumbnail(page);
+            let image = Self::thumbnail(page, ctx.input(|i| i.max_texture_side));
             self.preview =
-                Some(ctx.load_texture("fax-page", image, egui::TextureOptions::LINEAR));
+                Some(ctx.load_texture("fax-page", image, egui::TextureOptions::NEAREST));
         }
         self.preview.clone()
     }
@@ -1455,41 +1427,53 @@ impl Fax {
             );
             return;
         };
-        let room = ui.available_size();
-        // The paper's shape, not the pels': a standard page has half the
-        // lines of a fine one over the same sheet, and drawn a texel a pel
-        // it came out half as tall.
-        let size = self.pages.get(self.showing).map_or(texture.size_vec2(), paper_size);
-        let scale = (room.x / size.x).min(room.y / size.y).max(0.01);
-        let (rect, _) = ui.allocate_exact_size(size * scale, egui::Sense::hover());
-        ui.painter().image(
-            texture.id(),
-            rect,
-            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            Color32::WHITE,
-        );
-        // What is still to go, shaded, and a green line where the page has
-        // got to.
-        if going
-            && self.sheet - 1 == self.showing
-            && let Some(fraction) = self.progress
-        {
-            // Down to the line the bits have reached, not as far down as
-            // the fraction of the bits: a blank stretch is a few bits a line
-            // and a dense one hundreds, so the two part company on any page
-            // with both.
-            let down = match self.line_reached(self.showing, fraction) {
-                Some((line, lines)) => line / lines.max(1) as f64,
-                None => fraction,
-            };
-            let y = rect.top() + rect.height() * down.clamp(0.0, 1.0) as f32;
-            ui.painter().rect_filled(
-                egui::Rect::from_min_max(egui::pos2(rect.left(), y), rect.max),
-                0.0,
-                Color32::from_rgba_unmultiplied(24, 28, 36, 200),
-            );
-            ui.painter().hline(rect.x_range(), y, egui::Stroke::new(2.0, BEST));
-        }
+        // A screen pixel a pel across and a line as many pixels down as make
+        // it square, never scaled: a page bigger than the room scrolls.
+        let ppp = ui.ctx().pixels_per_point();
+        let resolution = self.pages.get(self.showing).map_or(Resolution::Standard, |p| p.resolution);
+        let size = picture_size(ppp, resolution, texture.size()[1]);
+        let progress = (going && self.sheet - 1 == self.showing)
+            .then_some(self.progress)
+            .flatten()
+            .map(|fraction| {
+                // Down to the line the bits have reached, not as far down as
+                // the fraction of the bits: a blank stretch is a few bits a
+                // line and a dense one hundreds, so the two part company on
+                // any page with both.
+                match self.line_reached(self.showing, fraction) {
+                    Some((line, lines)) => line / lines.max(1) as f64,
+                    None => fraction,
+                }
+            });
+        egui::ScrollArea::both()
+            .id_salt("fax-send-scroll")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let (area, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width().max(size.x), size.y),
+                    egui::Sense::hover(),
+                );
+                let left = ((area.center().x - size.x / 2.0).max(area.left()) * ppp).round() / ppp;
+                let top = (area.top() * ppp).round() / ppp;
+                let rect = egui::Rect::from_min_size(egui::pos2(left, top), size);
+                ui.painter().image(
+                    texture.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+                // What is still to go, shaded, and a green line where the
+                // page has got to.
+                if let Some(down) = progress {
+                    let y = rect.top() + rect.height() * down.clamp(0.0, 1.0) as f32;
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_max(egui::pos2(rect.left(), y), rect.max),
+                        0.0,
+                        Color32::from_rgba_unmultiplied(24, 28, 36, 200),
+                    );
+                    ui.painter().hline(rect.x_range(), y, egui::Stroke::new(2.0, BEST));
+                }
+            });
     }
 
     /// The page arriving, drawn as it comes, or the last one that did, or a
@@ -2396,7 +2380,7 @@ mod tests {
         // wrong picture. A page that arrives is whatever length the far end
         // sent, including lengths nothing here would ever produce.
         for lines in [0, 1, 5, 6, 7, 11, 191, 1143, 2287] {
-            let image = Fax::thumbnail(&page_of(lines));
+            let image = Fax::thumbnail(&page_of(lines), 16384);
             assert_eq!(
                 image.pixels.len(),
                 image.size[0] * image.size[1],
@@ -2984,12 +2968,12 @@ mod tests {
     #[test]
     fn a_page_to_send_is_drawn_the_shape_of_its_paper_at_either_resolution() {
         // The same sheet at standard and at fine: half the lines, the same
-        // paper, the same picture.
-        let standard = Page { lines: lines_of(Resolution::Standard.lines(), false), resolution: Resolution::Standard };
-        let fine = Page { lines: lines_of(Resolution::Fine.lines(), false), resolution: Resolution::Fine };
-        let (a, b) = (paper_size(&standard), paper_size(&fine));
+        // paper, the same picture -- a pixel a pel, standard lines doubled.
+        let a = picture_size(1.0, Resolution::Standard, Resolution::Standard.lines());
+        let b = picture_size(1.0, Resolution::Fine, Resolution::Fine.lines());
         assert!((a.x - b.x).abs() < 0.01 && (a.y / b.y - 1.0).abs() < 0.01, "{a:?} against {b:?}");
-        assert!((a.y / a.x - 297.0 / 215.0).abs() < 0.02, "not A4: {a:?}");
+        assert!((a.y / a.x - 297.0 / 215.0).abs() < 0.07, "not A4: {a:?}");
+        assert_eq!(Fax::thumbnail(&Page { lines: lines_of(5, true), resolution: Resolution::Fine }, 16384).size, [1728, 5]);
     }
 
     #[test]
