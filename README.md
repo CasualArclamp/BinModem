@@ -259,6 +259,7 @@ cargo run -p gui --release -- --live
 
 Or `dist.bat`, which leaves a single `dist\binmodem.exe` holding the scope, the
 terminal, an answering board and a capture to replay, with nothing to install.
+[docs/quickstart.md](docs/quickstart.md) gets from a download to a first call.
 [docs/usage.md](docs/usage.md) has the rest — the AT interface, the live-line
 setup, ZMODEM and the telnet terminal.
 
