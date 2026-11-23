@@ -53,6 +53,11 @@ pub struct Fax {
     showing: usize,
     /// A small copy of that page for the window to draw.
     preview: Option<egui::TextureHandle>,
+    /// Pels to a texel across the preview, as it was made.
+    preview_scale: usize,
+    /// How big the page is drawn, the same for the page going and the page
+    /// arriving.
+    zoom: Zoom,
     pub resolution: Resolution,
     pub halftone: Halftone,
     /// Which modulations this end is willing to use.
@@ -255,13 +260,154 @@ fn pixels_per_line(resolution: Resolution) -> usize {
     (fax::page::PELS_PER_MM / resolution.lines_per_mm()).round().max(1.0) as usize
 }
 
-/// How big to draw `rows` lines of a page arriving, in points: a screen
-/// pixel a pel across and [`pixels_per_line`] down, never scaled.
-fn picture_size(ppp: f32, resolution: Resolution, rows: usize) -> egui::Vec2 {
-    egui::vec2(
-        SCAN_WIDTH as f32 / ppp,
-        (rows * pixels_per_line(resolution)) as f32 / ppp,
-    )
+/// How big to draw a picture `width` texels across and `rows` down, in
+/// points, each texel `m` screen pixels square: never a fraction of a pixel,
+/// so nothing is smoothed.
+fn picture_size(ppp: f32, width: usize, rows: usize, m: usize) -> egui::Vec2 {
+    egui::vec2((width * m) as f32 / ppp, (rows * m) as f32 / ppp)
+}
+
+/// Row `row` of a page drawn `n` pels to a texel, onto `out`.
+///
+/// The page is taken with each line repeated [`pixels_per_line`] times, so
+/// its pels are square, and each texel is the ink of the `n` by `n` block
+/// under it: black or white at 1:1, and grey where a block is part ink when
+/// shrunk, so a thin line fades rather than vanishing. A block past the
+/// last line counts only what is there.
+fn block_row(lines: &[Vec<bool>], ppl: usize, n: usize, row: usize, out: &mut Vec<Color32>) {
+    let width = SCAN_WIDTH.div_ceil(n);
+    let tall = lines.len() * ppl;
+    let (y0, y1) = (row * n, ((row + 1) * n).min(tall));
+    for tx in 0..width {
+        let (x0, x1) = (tx * n, ((tx + 1) * n).min(SCAN_WIDTH));
+        let mut ink = 0;
+        for sy in y0..y1 {
+            let line = &lines[sy / ppl];
+            for x in x0..x1 {
+                ink += usize::from(line.get(x).is_some_and(|pel| *pel));
+            }
+        }
+        let count = ((y1 - y0) * (x1 - x0)).max(1);
+        let v = (255 - ink * 255 / count) as u8;
+        out.push(Color32::from_rgb(v, v, v));
+    }
+}
+
+/// How much of a page the panel shows: whole screen pixels to a texel, or
+/// whole texels to a screen pixel, and nothing in between.
+///
+/// Until the wheel is turned over the page it fits the page across the
+/// panel, shrinking it by the least whole number that does; the wheel then
+/// steps through 1:7 .. 1:2, 1:1, 2:1 .. 8:1 about the pointer, and a
+/// double click goes back to fitting.
+#[derive(Default)]
+struct Zoom {
+    /// The level the wheel chose, if it has: below zero shrinks by one
+    /// more than its size, zero is 1:1, above it magnifies by one more.
+    level: Option<i32>,
+    /// Wheel turned but not yet a whole step.
+    wheel: f32,
+    /// Where the page was shown last frame and how far it was scrolled.
+    inner: Option<egui::Rect>,
+    offset: egui::Vec2,
+}
+
+/// Points of a touchpad's scrolling to a step of zoom, about a notch of a
+/// mouse wheel.
+const ZOOM_STEP: f32 = 50.0;
+
+impl Zoom {
+    /// The level that fits the page across `room` screen pixels: 1:1 when
+    /// it does, never magnified.
+    fn fit(room: f32) -> i32 {
+        1 - (SCAN_WIDTH as f32 / room.max(1.0)).ceil().max(1.0) as i32
+    }
+
+    /// Pels to a texel, and screen pixels to a texel, at `level`.
+    fn factors(level: i32) -> (usize, usize) {
+        if level < 0 { ((1 - level) as usize, 1) } else { (1, (level + 1) as usize) }
+    }
+
+    fn scale(level: i32) -> f32 {
+        let (n, m) = Self::factors(level);
+        m as f32 / n as f32
+    }
+
+    /// Take the wheel and a double click over the page, before it is
+    /// drawn: the pels to a texel, screen pixels to a texel, the level, and
+    /// where to scroll to keep the spot under the pointer still if the zoom
+    /// changed.
+    fn begin(&mut self, ui: &mut egui::Ui, room: f32) -> (usize, usize, i32, Option<egui::Vec2>) {
+        let fit = Self::fit(room);
+        let old = self.level.unwrap_or(fit);
+        let mut new = old;
+        let mut anchor = None;
+        let pointer = ui.input(|i| i.pointer.hover_pos());
+        match (self.inner, pointer) {
+            (Some(inner), Some(p)) if inner.contains(p) => {
+                // Steps from the wheel itself, a notch a step, and the
+                // scrolling it would have done taken away from the page.
+                self.wheel += ui.input_mut(|i| {
+                    i.smooth_scroll_delta = egui::Vec2::ZERO;
+                    i.raw
+                        .events
+                        .iter()
+                        .map(|e| match e {
+                            egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta, .. } => {
+                                delta.y / ZOOM_STEP
+                            }
+                            egui::Event::MouseWheel { delta, .. } => delta.y,
+                            _ => 0.0,
+                        })
+                        .sum::<f32>()
+                });
+                while self.wheel >= 1.0 {
+                    new += 1;
+                    self.wheel -= 1.0;
+                }
+                while self.wheel <= -1.0 {
+                    new -= 1;
+                    self.wheel += 1.0;
+                }
+                new = new.clamp(-6, 7);
+                if ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)) {
+                    self.level = None;
+                    new = fit;
+                } else if new != old {
+                    self.level = Some(new);
+                }
+                if new != old {
+                    let at = p - inner.min;
+                    let r = Self::scale(new) / Self::scale(old);
+                    anchor = Some(((self.offset + at) * r - at).max(egui::Vec2::ZERO));
+                }
+            }
+            _ => self.wheel = 0.0,
+        }
+        let (n, m) = Self::factors(new);
+        (n, m, new, anchor)
+    }
+
+    /// Where the page was shown, for the next frame's wheel, and the zoom
+    /// in the corner.
+    fn end(&mut self, ui: &egui::Ui, inner: egui::Rect, offset: egui::Vec2, level: i32) {
+        self.inner = Some(inner);
+        self.offset = offset;
+        let (n, m) = Self::factors(level);
+        let text = format!(
+            "{m}:{n}{} · wheel to zoom, double click to fit",
+            if self.level.is_none() { " fit" } else { "" }
+        );
+        let font = egui::FontId::monospace(11.0);
+        let galley = ui.painter().layout_no_wrap(text, font, Color32::from_gray(200));
+        let at = egui::pos2(inner.right() - galley.size().x - 18.0, inner.top() + 4.0);
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(at, galley.size()).expand(3.0),
+            3.0,
+            Color32::from_rgba_unmultiplied(13, 17, 23, 210),
+        );
+        ui.painter().galley(at, galley, Color32::from_gray(200));
+    }
 }
 
 /// A page arriving, drawn as it comes in.
@@ -288,6 +434,8 @@ struct Scan {
     texture: Option<egui::TextureHandle>,
     capacity: usize,
     uploaded: usize,
+    /// Pels to a texel, across and down the squared-up page.
+    scale: usize,
 }
 
 impl Scan {
@@ -310,20 +458,49 @@ impl Scan {
             texture: None,
             capacity: 0,
             uploaded: 0,
+            scale: 1,
         }
     }
 
-    /// Lines of the page under one row of the picture: one, since the
-    /// picture is drawn a pel a pixel and only repeated down at draw time.
-    fn lines_per_row(&self) -> f64 {
-        1.0
+    /// Texels across the picture.
+    fn width(&self) -> usize {
+        SCAN_WIDTH.div_ceil(self.scale)
     }
 
-    /// The lines under row `row`: at least one, since a row covers more than
-    /// a line at both resolutions.
+    /// Draw `n` pels to a texel from now on: every row again from the lines
+    /// kept, and a texture to match.
+    fn set_scale(&mut self, n: usize) {
+        let n = n.max(1);
+        if n == self.scale {
+            return;
+        }
+        self.scale = n;
+        self.pixels.clear();
+        self.rows = 0;
+        self.texture = None;
+        self.capacity = 0;
+        self.uploaded = 0;
+        self.finish_rows();
+    }
+
+    fn finish_rows(&mut self) {
+        let ppl = pixels_per_line(self.resolution);
+        while (self.rows + 1) * self.scale <= self.lines.len() * ppl {
+            self.finish_row();
+        }
+    }
+
+    /// Lines of the page under one row of the picture.
+    #[cfg(test)]
+    fn lines_per_row(&self) -> f64 {
+        self.scale as f64 / pixels_per_line(self.resolution) as f64
+    }
+
+    /// The lines under row `row`, whole or in part.
+    #[cfg(test)]
     fn span(&self, row: usize) -> std::ops::Range<usize> {
-        let k = self.lines_per_row();
-        (row as f64 * k).round() as usize..((row + 1) as f64 * k).round() as usize
+        let ppl = pixels_per_line(self.resolution);
+        row * self.scale / ppl..((row + 1) * self.scale).div_ceil(ppl)
     }
 
     /// Lines starting at line `from`, and every row they finish.
@@ -337,25 +514,18 @@ impl Scan {
             return;
         }
         self.lines.extend(lines.into_iter().skip(have - from));
-        while self.span(self.rows).end <= self.lines.len() {
-            self.finish_row();
-        }
+        self.finish_rows();
     }
 
-    /// The next line into the next row, black or white pel for pel.
+    /// The next row, from the lines under it.
     fn finish_row(&mut self) {
-        let span = self.span(self.rows);
-        for line in &self.lines[span] {
-            self.pixels.extend((0..SCAN_WIDTH).map(|x| {
-                if line.get(x).is_some_and(|pel| *pel) { Color32::BLACK } else { Color32::WHITE }
-            }));
-        }
+        block_row(&self.lines, pixels_per_line(self.resolution), self.scale, self.rows, &mut self.pixels);
         self.rows += 1;
     }
 
     /// Rows in a whole A4 sheet at this page's resolution.
     fn sheet_rows(&self) -> usize {
-        (self.resolution.lines() as f64 / self.lines_per_row()).ceil() as usize
+        (self.resolution.lines() * pixels_per_line(self.resolution)).div_ceil(self.scale)
     }
 
     /// Rows that can be drawn: all of them, unless the page has run longer
@@ -374,16 +544,17 @@ impl Scan {
             return None;
         }
         let largest = ctx.input(|i| i.max_texture_side);
+        let width = self.width();
         let outgrown = self.rows > self.capacity && self.capacity < largest;
         if self.texture.is_none() || outgrown {
             let sheet = self.sheet_rows();
             self.capacity = sheet.max(self.rows + self.rows / 2).min(largest);
             let upto = self.shown();
-            let mut pixels = self.pixels[..upto * SCAN_WIDTH].to_vec();
-            pixels.resize(SCAN_WIDTH * self.capacity, UNSCANNED);
+            let mut pixels = self.pixels[..upto * width].to_vec();
+            pixels.resize(width * self.capacity, UNSCANNED);
             self.texture = Some(ctx.load_texture(
                 "fax-arriving",
-                egui::ColorImage::new([SCAN_WIDTH, self.capacity], pixels),
+                egui::ColorImage::new([width, self.capacity], pixels),
                 egui::TextureOptions::NEAREST,
             ));
             self.uploaded = upto;
@@ -393,8 +564,8 @@ impl Scan {
             && let Some(texture) = self.texture.as_mut()
         {
             let strip = egui::ColorImage::new(
-                [SCAN_WIDTH, upto - self.uploaded],
-                self.pixels[self.uploaded * SCAN_WIDTH..upto * SCAN_WIDTH].to_vec(),
+                [width, upto - self.uploaded],
+                self.pixels[self.uploaded * width..upto * width].to_vec(),
             );
             texture.set_partial([0, self.uploaded], strip, egui::TextureOptions::NEAREST);
             self.uploaded = upto;
@@ -927,18 +1098,20 @@ impl Fax {
         self.preview = None;
     }
 
-    /// The page as it will go, a texel a pel and a row a line, black or
-    /// white -- nothing averaged, so what is checked is what is sent. At
-    /// most `largest` rows, the most the graphics card takes, and at least
-    /// one, blank, for a page with no lines.
-    fn thumbnail(page: &Page, largest: usize) -> egui::ColorImage {
-        let width = fax::page::WIDTH;
-        let rows = page.height().clamp(1, largest.max(1));
+    /// The page as it will go, `n` pels to a texel on the squared-up page
+    /// -- black or white at 1:1, nothing smoothed. At most `largest` rows,
+    /// the most the graphics card takes, and at least one, blank, for a page
+    /// with no lines.
+    fn thumbnail(page: &Page, largest: usize, n: usize) -> egui::ColorImage {
+        let n = n.max(1);
+        let width = SCAN_WIDTH.div_ceil(n);
+        let ppl = pixels_per_line(page.resolution);
+        let rows = (page.height() * ppl).div_ceil(n).clamp(1, largest.max(1));
         let mut pixels = Vec::with_capacity(width * rows);
-        for line in page.lines.iter().take(rows) {
-            pixels.extend((0..width).map(|x| {
-                if line.get(x).is_some_and(|pel| *pel) { Color32::BLACK } else { Color32::WHITE }
-            }));
+        if !page.lines.is_empty() {
+            for row in 0..rows {
+                block_row(&page.lines, ppl, n, row, &mut pixels);
+            }
         }
         pixels.resize(width * rows, Color32::WHITE);
         egui::ColorImage {
@@ -948,12 +1121,13 @@ impl Fax {
         }
     }
 
-    fn texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
-        if self.preview.is_none() {
+    fn texture(&mut self, ctx: &egui::Context, n: usize) -> Option<egui::TextureHandle> {
+        if self.preview.is_none() || self.preview_scale != n {
             let page = self.pages.get(self.showing)?;
-            let image = Self::thumbnail(page, ctx.input(|i| i.max_texture_side));
+            let image = Self::thumbnail(page, ctx.input(|i| i.max_texture_side), n);
             self.preview =
                 Some(ctx.load_texture("fax-page", image, egui::TextureOptions::NEAREST));
+            self.preview_scale = n;
         }
         self.preview.clone()
     }
@@ -1419,7 +1593,9 @@ impl Fax {
             self.showing = self.showing.saturating_add_signed(step).min(count.saturating_sub(1));
             self.preview = None;
         }
-        let Some(texture) = self.texture(ui.ctx()) else {
+        let ppp = ui.ctx().pixels_per_point();
+        let (n, m, level, anchor) = self.zoom.begin(ui, (ui.available_width() - 14.0) * ppp);
+        let Some(texture) = self.texture(ui.ctx(), n) else {
             ui.label(
                 RichText::new("Nothing to send yet. Browse for a picture or a PDF on the right.")
                     .small()
@@ -1427,11 +1603,9 @@ impl Fax {
             );
             return;
         };
-        // A screen pixel a pel across and a line as many pixels down as make
-        // it square, never scaled: a page bigger than the room scrolls.
-        let ppp = ui.ctx().pixels_per_point();
-        let resolution = self.pages.get(self.showing).map_or(Resolution::Standard, |p| p.resolution);
-        let size = picture_size(ppp, resolution, texture.size()[1]);
+        // Whole screen pixels to a texel or whole texels to a pixel, never
+        // smoothed: a page bigger than the room scrolls.
+        let size = picture_size(ppp, texture.size()[0], texture.size()[1], m);
         let progress = (going && self.sheet - 1 == self.showing)
             .then_some(self.progress)
             .flatten()
@@ -1445,10 +1619,11 @@ impl Fax {
                     None => fraction,
                 }
             });
-        egui::ScrollArea::both()
-            .id_salt("fax-send-scroll")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
+        let mut area = egui::ScrollArea::both().id_salt("fax-send-scroll").auto_shrink([false, false]);
+        if let Some(offset) = anchor {
+            area = area.scroll_offset(offset);
+        }
+        let out = area.show(ui, |ui| {
                 let (area, _) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width().max(size.x), size.y),
                     egui::Sense::hover(),
@@ -1474,6 +1649,7 @@ impl Fax {
                     ui.painter().hline(rect.x_range(), y, egui::Stroke::new(2.0, BEST));
                 }
             });
+        self.zoom.end(ui, out.inner_rect, out.state.offset, level);
     }
 
     /// The page arriving, drawn as it comes, or the last one that did, or a
@@ -1507,7 +1683,7 @@ impl Fax {
                 self.open(call, at.saturating_add_signed(step));
             }
             if let Some((_, _, scan)) = self.opened.as_mut() {
-                draw_scan(ui, scan, false);
+                draw_scan(ui, scan, false, &mut self.zoom);
             }
             return;
         }
@@ -1562,7 +1738,7 @@ impl Fax {
             None => self.scan.as_mut(),
         };
         match scan {
-            Some(scan) => draw_scan(ui, scan, arriving),
+            Some(scan) => draw_scan(ui, scan, arriving, &mut self.zoom),
             None => {
                 ui.label(
                     RichText::new(
@@ -2064,47 +2240,54 @@ impl Fax {
 /// A page arriving, or arrived, drawn the whole width of the panel and
 /// scrolling once it is taller than the room, following the newest line
 /// while the view is at the bottom.
-fn draw_scan(ui: &mut egui::Ui, scan: &mut Scan, arriving: bool) {
+fn draw_scan(ui: &mut egui::Ui, scan: &mut Scan, arriving: bool, zoom: &mut Zoom) {
+    // Whole screen pixels to a texel or whole texels to a pixel, never
+    // smoothed: fitted across the panel until the wheel says otherwise, and
+    // scrolling, following the newest line down.
+    let ppp = ui.ctx().pixels_per_point();
+    let room = ui.available_size();
+    let (n, m, level, anchor) = zoom.begin(ui, (room.x - 14.0) * ppp);
+    scan.set_scale(n);
     let Some(texture) = scan.texture(ui.ctx()) else { return };
     let shown = scan.shown();
     let bottom = shown as f32 / scan.capacity as f32;
-    // A screen pixel a pel, never scaled: a sheet wider or taller than the
-    // room scrolls, following the newest line down.
-    let ppp = ui.ctx().pixels_per_point();
-    let room = ui.available_size();
     let sheet = scan.sheet_rows();
-    egui::ScrollArea::both()
+    let width = scan.width();
+    let mut area = egui::ScrollArea::both()
         .id_salt("fax-receive-scroll")
         .max_height(room.y)
         .auto_shrink([false, false])
-        .stick_to_bottom(true)
-        .show(ui, |ui| {
-            // Painted into a rectangle of its own rather than through an
-            // image widget: the texture is a whole sheet tall, and an image
-            // widget keeps its proportions.
-            let full = picture_size(ppp, scan.resolution, shown.max(sheet));
-            let (area, _) = ui.allocate_exact_size(
-                egui::vec2(ui.available_width().max(full.x), full.y),
-                egui::Sense::hover(),
-            );
-            // On the pixel grid, so each texel lands on exactly one pixel
-            // across.
-            let left = ((area.center().x - full.x / 2.0).max(area.left()) * ppp).round() / ppp;
-            let top = (area.top() * ppp).round() / ppp;
-            let paper = egui::Rect::from_min_size(egui::pos2(left, top), full);
-            // The rest of the sheet, still to come.
-            ui.painter().rect_filled(paper, 0.0, UNSCANNED);
-            let rect = egui::Rect::from_min_size(paper.min, picture_size(ppp, scan.resolution, shown));
-            ui.painter().image(
-                texture.id(),
-                rect,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, bottom)),
-                Color32::WHITE,
-            );
-            if arriving {
-                ui.painter().hline(rect.x_range(), rect.bottom() - 1.0, egui::Stroke::new(2.0, BEST));
-            }
-        });
+        .stick_to_bottom(true);
+    if let Some(offset) = anchor {
+        area = area.scroll_offset(offset);
+    }
+    let out = area.show(ui, |ui| {
+        // Painted into a rectangle of its own rather than through an image
+        // widget: the texture is a whole sheet tall, and an image widget
+        // keeps its proportions.
+        let full = picture_size(ppp, width, shown.max(sheet), m);
+        let (area, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width().max(full.x), full.y),
+            egui::Sense::hover(),
+        );
+        // On the pixel grid, so each texel lands on whole pixels.
+        let left = ((area.center().x - full.x / 2.0).max(area.left()) * ppp).round() / ppp;
+        let top = (area.top() * ppp).round() / ppp;
+        let paper = egui::Rect::from_min_size(egui::pos2(left, top), full);
+        // The rest of the sheet, still to come.
+        ui.painter().rect_filled(paper, 0.0, UNSCANNED);
+        let rect = egui::Rect::from_min_size(paper.min, picture_size(ppp, width, shown, m));
+        ui.painter().image(
+            texture.id(),
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, bottom)),
+            Color32::WHITE,
+        );
+        if arriving {
+            ui.painter().hline(rect.x_range(), rect.bottom() - 1.0, egui::Stroke::new(2.0, BEST));
+        }
+    });
+    zoom.end(ui, out.inner_rect, out.state.offset, level);
 }
 
 #[cfg(test)]
@@ -2149,7 +2332,7 @@ mod tests {
         for resolution in [Resolution::Standard, Resolution::Fine] {
             let mut scan = Scan::new(0, 1, resolution);
             scan.extend(0, lines_of(resolution.lines(), false));
-            let size = picture_size(1.0, resolution, scan.rows);
+            let size = picture_size(1.0, scan.width(), scan.rows, 1);
             let tall = (size.y / size.x) as f64;
             assert!(
                 (tall - 297.0 / 215.0).abs() < 0.07,
@@ -2265,12 +2448,14 @@ mod tests {
     fn the_texture_has_room_for_a_sheet_and_grows_for_a_longer_page() {
         let ctx = egui::Context::default();
         let largest = ctx.input(|i| i.max_texture_side);
+        // Shrunk by three, so a sheet fits the test's small texture limit.
         let mut scan = Scan::new(0, 1, Resolution::Standard);
+        scan.set_scale(3);
         assert!(scan.texture(&ctx).is_none(), "a texture for nothing");
         scan.extend(0, lines_of(100, false));
         let texture = scan.texture(&ctx).expect("no texture");
-        assert_eq!(texture.size()[0], SCAN_WIDTH);
-        assert!(texture.size()[1] >= 795, "{} rows is not a sheet", texture.size()[1]);
+        assert_eq!(texture.size()[0], SCAN_WIDTH / 3);
+        assert!(texture.size()[1] >= 762, "{} rows is not a sheet", texture.size()[1]);
         assert_eq!(scan.uploaded, scan.rows);
 
         // Half as long again as a sheet.
@@ -2362,15 +2547,16 @@ mod tests {
             widths.push(rect.width());
             heights.push(rect.height());
         }
-        assert!((widths[0] - 1728.0).abs() < 0.5, "the first rows are {} across, not a point a pel", widths[0]);
+        // 1728 pels do not fit 640 points, so a third: 576 across.
+        assert!((widths[0] - 576.0).abs() < 0.5, "the first rows are {} across", widths[0]);
         assert!(
             widths.iter().all(|w| (w - widths[0]).abs() < 0.5),
             "the page changed width as it arrived: {widths:?}"
         );
         assert!(heights.windows(2).all(|h| h[0] < h[1]), "not growing downwards: {heights:?}");
-        // And a pel a pixel at the end: 1143 standard lines, two pixels
-        // each, by 1728 across.
-        assert!((heights[3] - 2286.0).abs() < 0.5, "a sheet {} tall", heights[3]);
+        // And whole pixels at the end: 1143 standard lines, two pixels
+        // each, shrunk by three.
+        assert!((heights[3] - 762.0).abs() < 0.5, "a sheet {} tall", heights[3]);
     }
 
     #[test]
@@ -2380,7 +2566,7 @@ mod tests {
         // wrong picture. A page that arrives is whatever length the far end
         // sent, including lengths nothing here would ever produce.
         for lines in [0, 1, 5, 6, 7, 11, 191, 1143, 2287] {
-            let image = Fax::thumbnail(&page_of(lines), 16384);
+            let image = Fax::thumbnail(&page_of(lines), 16384, 3);
             assert_eq!(
                 image.pixels.len(),
                 image.size[0] * image.size[1],
@@ -2969,11 +3155,21 @@ mod tests {
     fn a_page_to_send_is_drawn_the_shape_of_its_paper_at_either_resolution() {
         // The same sheet at standard and at fine: half the lines, the same
         // paper, the same picture -- a pixel a pel, standard lines doubled.
-        let a = picture_size(1.0, Resolution::Standard, Resolution::Standard.lines());
-        let b = picture_size(1.0, Resolution::Fine, Resolution::Fine.lines());
-        assert!((a.x - b.x).abs() < 0.01 && (a.y / b.y - 1.0).abs() < 0.01, "{a:?} against {b:?}");
-        assert!((a.y / a.x - 297.0 / 215.0).abs() < 0.07, "not A4: {a:?}");
-        assert_eq!(Fax::thumbnail(&Page { lines: lines_of(5, true), resolution: Resolution::Fine }, 16384).size, [1728, 5]);
+        let size = |resolution: Resolution, n| {
+            let page = Page { lines: lines_of(resolution.lines(), false), resolution };
+            let image = Fax::thumbnail(&page, 16384, n);
+            picture_size(1.0, image.size[0], image.size[1], 1)
+        };
+        for n in [1, 2, 3] {
+            let (a, b) = (size(Resolution::Standard, n), size(Resolution::Fine, n));
+            assert!((a.x - b.x).abs() < 0.01 && (a.y / b.y - 1.0).abs() < 0.01, "{a:?} against {b:?}");
+            assert!((a.y / a.x - 297.0 / 215.0).abs() < 0.07, "not A4: {a:?}");
+        }
+        let page = Page { lines: lines_of(5, true), resolution: Resolution::Fine };
+        assert_eq!(Fax::thumbnail(&page, 16384, 1).size, [1728, 5]);
+        assert_eq!(Fax::thumbnail(&page, 16384, 2).size, [864, 3]);
+        // Shrunk, a block all ink is still black, and black and white at 1:1.
+        assert!(Fax::thumbnail(&page, 16384, 2).pixels.iter().all(|p| *p == Color32::BLACK));
     }
 
     #[test]
