@@ -170,12 +170,9 @@ pub enum Start {
 /// third of it, the same as the page arriving.
 const PREVIEW_WIDTH: usize = 576;
 
-/// Pels of the page to one texel of the picture of it arriving, across it.
-const SCAN_ACROSS: usize = 3;
-
-/// Texels across that picture: a third of 1728, which is twice the preview of
-/// the page going out -- this one is for watching, and that one for checking.
-const SCAN_WIDTH: usize = fax::page::WIDTH / SCAN_ACROSS;
+/// Texels across the picture of a page arriving: one for every pel, so the
+/// page is drawn a screen pixel a pel with nothing smoothed or averaged.
+const SCAN_WIDTH: usize = fax::page::WIDTH;
 
 /// What the picture's texture holds below the last row drawn.
 const UNSCANNED: Color32 = Color32::from_rgb(24, 28, 36);
@@ -256,13 +253,19 @@ fn non_standard_rows(fif: &[u8]) -> Vec<(&'static str, String)> {
     ]
 }
 
-/// How big to draw `rows` rows of a page arriving, across `width` points.
-///
-/// The width is the width whatever the rows, and the rows are as tall as the
-/// width makes them: the page's own shape, scaled to fit across and growing
-/// only downwards.
-fn picture_size(width: f32, rows: usize) -> egui::Vec2 {
-    egui::vec2(width, rows as f32 * width / SCAN_WIDTH as f32)
+/// Screen pixels down for each line at `resolution`: as many as make the
+/// pels square, at least one -- two at standard, one at fine and above.
+fn pixels_per_line(resolution: Resolution) -> usize {
+    (fax::page::PELS_PER_MM / resolution.lines_per_mm()).round().max(1.0) as usize
+}
+
+/// How big to draw `rows` lines of a page arriving, in points: a screen
+/// pixel a pel across and [`pixels_per_line`] down, never scaled.
+fn picture_size(ppp: f32, resolution: Resolution, rows: usize) -> egui::Vec2 {
+    egui::vec2(
+        SCAN_WIDTH as f32 / ppp,
+        (rows * pixels_per_line(resolution)) as f32 / ppp,
+    )
 }
 
 /// A page arriving, drawn as it comes in.
@@ -314,14 +317,10 @@ impl Scan {
         }
     }
 
-    /// Lines of the page under one row of the picture.
-    ///
-    /// Three pels across is 3/8.04 mm of paper, and that much paper down the
-    /// page is 1.44 lines at standard and 2.87 at fine. Drawn that way a page
-    /// comes out the shape of the sheet at either resolution, rather than a
-    /// standard one half the height of the same page sent fine.
+    /// Lines of the page under one row of the picture: one, since the
+    /// picture is drawn a pel a pixel and only repeated down at draw time.
     fn lines_per_row(&self) -> f64 {
-        SCAN_ACROSS as f64 * self.resolution.lines_per_mm() / fax::page::PELS_PER_MM
+        1.0
     }
 
     /// The lines under row `row`: at least one, since a row covers more than
@@ -347,19 +346,13 @@ impl Scan {
         }
     }
 
-    /// Average the pels under the next row into it.
+    /// The next line into the next row, black or white pel for pel.
     fn finish_row(&mut self) {
         let span = self.span(self.rows);
-        let under = &self.lines[span];
-        for tx in 0..SCAN_WIDTH {
-            let mut ink = 0;
-            for line in under {
-                for x in tx * SCAN_ACROSS..(tx + 1) * SCAN_ACROSS {
-                    ink += usize::from(line.get(x).is_some_and(|pel| *pel));
-                }
-            }
-            let v = (255 - ink * 255 / (under.len() * SCAN_ACROSS)) as u8;
-            self.pixels.push(Color32::from_rgb(v, v, v));
+        for line in &self.lines[span] {
+            self.pixels.extend((0..SCAN_WIDTH).map(|x| {
+                if line.get(x).is_some_and(|pel| *pel) { Color32::BLACK } else { Color32::WHITE }
+            }));
         }
         self.rows += 1;
     }
@@ -395,7 +388,7 @@ impl Scan {
             self.texture = Some(ctx.load_texture(
                 "fax-arriving",
                 egui::ColorImage::new([SCAN_WIDTH, self.capacity], pixels),
-                egui::TextureOptions::LINEAR,
+                egui::TextureOptions::NEAREST,
             ));
             self.uploaded = upto;
         }
@@ -407,7 +400,7 @@ impl Scan {
                 [SCAN_WIDTH, upto - self.uploaded],
                 self.pixels[self.uploaded * SCAN_WIDTH..upto * SCAN_WIDTH].to_vec(),
             );
-            texture.set_partial([0, self.uploaded], strip, egui::TextureOptions::LINEAR);
+            texture.set_partial([0, self.uploaded], strip, egui::TextureOptions::NEAREST);
             self.uploaded = upto;
         }
         self.texture.clone()
@@ -2091,13 +2084,12 @@ fn draw_scan(ui: &mut egui::Ui, scan: &mut Scan, arriving: bool) {
     let Some(texture) = scan.texture(ui.ctx()) else { return };
     let shown = scan.shown();
     let bottom = shown as f32 / scan.capacity as f32;
-    // As wide as a whole sheet can be and still fit the room, so the page is
-    // seen filling its paper from the top rather than as a strip scrolling
-    // past. A page longer than a sheet scrolls, following the newest line.
+    // A screen pixel a pel, never scaled: a sheet wider or taller than the
+    // room scrolls, following the newest line down.
+    let ppp = ui.ctx().pixels_per_point();
     let room = ui.available_size();
     let sheet = scan.sheet_rows();
-    let width = room.x.min(room.y * SCAN_WIDTH as f32 / sheet as f32).max(120.0);
-    egui::ScrollArea::vertical()
+    egui::ScrollArea::both()
         .id_salt("fax-receive-scroll")
         .max_height(room.y)
         .auto_shrink([false, false])
@@ -2105,17 +2097,20 @@ fn draw_scan(ui: &mut egui::Ui, scan: &mut Scan, arriving: bool) {
         .show(ui, |ui| {
             // Painted into a rectangle of its own rather than through an
             // image widget: the texture is a whole sheet tall, and an image
-            // widget keeps its proportions, so the top rows of a page came
-            // out a few pels wide and widened as the rest arrived.
-            let tall = picture_size(width, shown.max(sheet)).y;
-            let (area, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), tall), egui::Sense::hover());
-            let paper = egui::Rect::from_min_size(
-                egui::pos2(area.center().x - width / 2.0, area.top()),
-                egui::vec2(width, tall),
+            // widget keeps its proportions.
+            let full = picture_size(ppp, scan.resolution, shown.max(sheet));
+            let (area, _) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width().max(full.x), full.y),
+                egui::Sense::hover(),
             );
+            // On the pixel grid, so each texel lands on exactly one pixel
+            // across.
+            let left = ((area.center().x - full.x / 2.0).max(area.left()) * ppp).round() / ppp;
+            let top = (area.top() * ppp).round() / ppp;
+            let paper = egui::Rect::from_min_size(egui::pos2(left, top), full);
             // The rest of the sheet, still to come.
             ui.painter().rect_filled(paper, 0.0, UNSCANNED);
-            let rect = egui::Rect::from_min_size(paper.min, picture_size(width, shown));
+            let rect = egui::Rect::from_min_size(paper.min, picture_size(ppp, scan.resolution, shown));
             ui.painter().image(
                 texture.id(),
                 rect,
@@ -2162,15 +2157,18 @@ mod tests {
 
     #[test]
     fn a_page_arriving_is_drawn_the_shape_of_the_sheet() {
-        // A whole A4 sheet at either resolution is the same picture, 297 mm
-        // down and 215 across -- not a standard page half the height of the
-        // same page sent fine.
+        // A whole A4 sheet at either resolution is the same picture, near
+        // enough 297 mm down and 215 across -- not a standard page half the
+        // height of the same page sent fine. Near enough: drawn a whole
+        // pixel to a pel, 7.7 lines to the millimetre come out as tall as
+        // 8.04 pels across, 4% short.
         for resolution in [Resolution::Standard, Resolution::Fine] {
             let mut scan = Scan::new(0, 1, resolution);
             scan.extend(0, lines_of(resolution.lines(), false));
-            let tall = scan.rows as f64 / SCAN_WIDTH as f64;
+            let size = picture_size(1.0, resolution, scan.rows);
+            let tall = (size.y / size.x) as f64;
             assert!(
-                (tall - 297.0 / 215.0).abs() < 0.01,
+                (tall - 297.0 / 215.0).abs() < 0.07,
                 "{resolution:?}: {} rows for {SCAN_WIDTH} across",
                 scan.rows
             );
@@ -2380,15 +2378,15 @@ mod tests {
             widths.push(rect.width());
             heights.push(rect.height());
         }
-        assert!(widths[0] > 500.0, "the first rows are {} across", widths[0]);
+        assert!((widths[0] - 1728.0).abs() < 0.5, "the first rows are {} across, not a point a pel", widths[0]);
         assert!(
             widths.iter().all(|w| (w - widths[0]).abs() < 0.5),
             "the page changed width as it arrived: {widths:?}"
         );
         assert!(heights.windows(2).all(|h| h[0] < h[1]), "not growing downwards: {heights:?}");
-        // And the page's own shape at the end: 795 rows of 576 across.
-        let whole = heights[3] / widths[3];
-        assert!((whole - 795.0 / 576.0).abs() < 0.01, "a sheet {whole} times as tall as it is wide");
+        // And a pel a pixel at the end: 1143 standard lines, two pixels
+        // each, by 1728 across.
+        assert!((heights[3] - 2286.0).abs() < 0.5, "a sheet {} tall", heights[3]);
     }
 
     #[test]
