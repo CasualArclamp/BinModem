@@ -1,27 +1,75 @@
-name: Build 32-bit Windows Binary
+name: Release (Windows XP 32-bit)
 
 on:
-  workflow_dispatch:
   push:
-    branches: [ "main" ]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
-  build-x86:
+  windows-x86:
+    name: binmodem-x86.exe
     runs-on: windows-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install Rust and 32-bit target
-        uses: dtolnay/rust-toolchain@stable
+      - name: Toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --target i686-pc-windows-msvc
+          rustup default stable
+          rustc --version
+
+      - name: Build
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static -C link-args=/SUBSYSTEM:WINDOWS,5.01"
+        run: cargo build --release -p gui --target i686-pc-windows-msvc
+
+      - name: No C runtime dependency
+        shell: pwsh
+        run: |
+          $exe = "target/i686-pc-windows-msvc/release/binmodem.exe"
+          $text = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
+          $runtime = [regex]::Matches($text, "[A-Za-z0-9_\-]+\.dll") |
+              ForEach-Object { $_.Value.ToLower() } |
+              Where-Object { $_ -match "vcruntime|api-ms-win-crt|msvcp|ucrtbase" } |
+              Sort-Object -Unique
+          if ($runtime) {
+              Write-Host "::error::imports a C runtime: $($runtime -join ', ')"
+              exit 1
+          }
+          "{0:N1} MB, no C runtime dependency" -f ((Get-Item $exe).Length / 1MB)
+
+      - name: Stage
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/i686-pc-windows-msvc/release/binmodem.exe dist/binmodem-x86.exe
+          (Get-FileHash dist/binmodem-x86.exe -Algorithm SHA256).Hash.ToLower() +
+              "  binmodem-x86.exe" | Set-Content -Encoding ascii dist/SHA256SUMS-x86.txt
+          Get-Content dist/SHA256SUMS-x86.txt
+
+      - uses: actions/upload-artifact@v4
         with:
-          targets: i686-pc-windows-msvc
+          name: binmodem-windows-x86
+          path: dist/*
 
-      - name: Build 32-bit release executable
-        run: cargo build --release --target i686-pc-windows-msvc
-
-      - name: Upload 32-bit executable
-        uses: actions/upload-artifact@v4
-        with:
-          name: binmodem-win32-x86
-          path: target/i686-pc-windows-msvc/release/*.exe
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if (gh release view "${{ github.ref_name }}" 2>$null) {
+            gh release upload "${{ github.ref_name }}" `
+                dist/binmodem-x86.exe dist/SHA256SUMS-x86.txt --clobber
+          } else {
+            gh release create "${{ github.ref_name }}" `
+                dist/binmodem-x86.exe dist/SHA256SUMS-x86.txt `
+                --title "${{ github.ref_name }}" `
+                --notes-file .github/release-notes.md
+          }
