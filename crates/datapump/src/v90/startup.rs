@@ -179,6 +179,12 @@ impl Analogue {
         }
     }
 
+    /// The scale [`Self::pair`]'s points are drawn at: V.92's held peak, or
+    /// one for V.90's, which come scaled to it.
+    pub fn pair_peak(&self) -> f64 {
+        self.v92().map_or(1.0, |m| m.pair_peak())
+    }
+
     /// How many points the downstream is being read against.
     pub fn points(&self) -> usize {
         match self.v92() {
@@ -858,9 +864,8 @@ impl Digital {
         if let Some(m) = self.x2.as_ref() {
             return Some(m.upstream_peak());
         }
-        if self.v92.is_some() {
-            // The pairs are scaled to one already.
-            return Some(1.0);
+        if let Some(m) = self.v92.as_ref() {
+            return Some(m.pair_peak());
         }
         match self.v90.as_ref() {
             Some(m) => Some(m.upstream_peak()),
