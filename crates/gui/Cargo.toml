@@ -3,10 +3,17 @@ name    = "gui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# `cargo run -p gui` is the modem; the other program is asked for by name.
+default-run = "binmodem"
 
 [[bin]]
 name = "binmodem"
 path = "src/main.rs"
+
+# The Review tab as a program of its own: no line, no modem.
+[[bin]]
+name = "dialsnoop"
+path = "src/snoop.rs"
 
 [dependencies]
 dsp       = { path = "../dsp" }
