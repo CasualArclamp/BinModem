@@ -201,6 +201,49 @@ exercised only against the fake trunk so far.
 Portable in principle — `cpal` for the audio, `eframe` for the window, no
 OS-specific code — but only built and run on Windows so far.
 
+### Reading a recording of somebody else's call
+
+`dialsnoop.exe recording.wav`, or the Review tab of the modem's own window
+(`binmodem --review recording.wav`), reads a WAV of a call it took no part in
+and lays it out: a waterfall with time running left to right, a box on each
+signal with a few letters beside it, and everything that was read out of the
+box that was clicked in a panel beside it -- its fields, its octets, and the
+symbols a receiver made of it. The recording plays from wherever it is
+clicked, and each signal has a key that plays it alone.
+
+It uses the modem's own receivers with the modem taken out, so what it reads
+is what this modem would have read at that end of the call:
+
+- **Set-up**: calling and answer tones, V.8 bis signals and messages, V.8's
+  CI, CM, JM and CJ, and V.92's quick-connect sequences.
+- **Phase 2**: the INFO sequences, tones A and B and their reversals, the
+  line probing with a level and signal to noise for each of its tones, and
+  the round trip from where the recording was made.
+- **V.34**: S, PP, TRN, J, MP and E from each end, data mode in each
+  direction at its own rate, rate renegotiations and retrains.
+- **V.90**: the analogue modem's Ja with the DIL it asks for, CPt and CP; the
+  digital modem's Sd, TRN1d, Jd, the DIL itself, Ri, TRN2d, MP, Ed and B1d;
+  and data mode both ways.
+- **What it carried**: V.42's XID, SABME, UA and I frames, and what is in
+  the frames as PPP or as text.
+
+How far it gets depends on the recording. With an end a channel -- a capture
+of the two RTP streams of a call, or one of this modem's own recordings --
+each end is nearly alone on its channel and can be followed into data mode
+and through it. With both ends on one channel, as a tap on the pair or a
+microphone at the speaker has it, it reads as far as the two share a band,
+which is the end of phase 2.
+
+Two tests have these modems call each other, on V.34 and on V.90, keep each
+end on its own channel, and give the reader the recording alone; it comes out
+with what each terminal typed. On recordings of real calls from 2016 it reads
+every handshake through the DIL and the rate the two ends settled on, and on
+one of them the ISP's login prompt out of a 48 000 bit/s downstream. It does
+not yet read most real V.90 data: the analogue modem's channel has the
+server's echo in it and nothing here cancels that, compressed data is shown as
+it is in the frames and not expanded, and V.92's PCM upstream and the
+modulations below V.34 are not followed past set-up.
+
 ## Work in progress
 
 - **V.90 between two of these through softphones** falls back to V.34. The
@@ -281,7 +324,9 @@ cargo run -p gui --release -- --live
 ```
 
 Or `dist.bat`, which leaves a single `dist\binmodem.exe` holding the scope, the
-terminal, an answering board and a capture to replay, with nothing to install.
+terminal, an answering board and a capture to replay, with nothing to install,
+and `dist\dialsnoop.exe` beside it, which reads a recording of a call and is
+nothing else.
 [docs/quickstart.md](docs/quickstart.md) gets from a download to a first call.
 [docs/usage.md](docs/usage.md) has the rest — the AT interface, the live-line
 setup, ZMODEM and the telnet terminal.

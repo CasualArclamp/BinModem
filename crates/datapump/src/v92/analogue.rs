@@ -136,14 +136,14 @@ const HALF_SYMBOL: f64 = 0.5;
 
 /// TRN1d begins 48T after the Sd-to-S-bar-d reversal: S-bar-d is 48T long
 /// (V.90 8.4.4), and the reversal is where it begins.
-const TRN1D_START: u64 = 48;
+pub const TRN1D_START: u64 = 48;
 
 /// Symbols of TRN1d gone by before the equaliser is fitted, and how far either
 /// side of the expected start the fit searches. Both are the digital modem's own
 /// numbers for its TRN1u (`v92::digital`), because the two fits are the same job
 /// on the same sequence.
-const TRAIN_AFTER: u64 = 1300;
-const TRAIN_SEARCH: u64 = 64;
+pub const TRAIN_AFTER: u64 = 1300;
+pub const TRAIN_SEARCH: u64 = 64;
 
 /// Jp's epsilon is a "16-bit unsigned integer covering the range [0, 1) symbol"
 /// (Table 22 bits 18:33), so one symbol is 2^16 of them.
@@ -164,11 +164,11 @@ const E2U_SYMBOLS: usize = UP_INTERVALS;
 
 /// "Ed consists of 2 data frames of scrambled binary zeros" (8.8.2), and a
 /// downstream data frame is six symbols.
-const ED_FRAMES: usize = 2;
+pub const ED_FRAMES: usize = 2;
 
 /// "B1d consists of 48 data frames of scrambled ones" (V.90 8.6.1, which 8.8.1
 /// adopts whole).
-const B1D_FRAMES: usize = 48;
+pub const B1D_FRAMES: usize = 48;
 
 /// How many of B1d's forty-eight frames have to read as the ones 8.6.1/V.90
 /// says they are for B1d to count as received (9.6.2.1.6).
@@ -180,7 +180,7 @@ const B1D_FRAMES: usize = 48;
 /// [`B1D_LOCK_FRAMES`]. Fewer than this is B1d not received, and B1d is sent
 /// once, so the answer is a retrain (9.6.2.2) [`B1D_GRACE`] later and not a
 /// wait for 9.6.2.2.1's watchdog.
-const B1D_CLEAN: usize = 36;
+pub const B1D_CLEAN: usize = 36;
 
 /// Whole frames of ones, read from zeroed memories, that say B1d began on the
 /// first of them.
@@ -224,7 +224,7 @@ const B1D_HUNT_FRAMES: usize = 6;
 /// symbols read across a frame boundary make K bits of nothing in particular.
 /// Ninety-six ones is four frames of a CPt at 32 000 bit/s, and no wrong
 /// alignment produces that many by chance.
-const LOCK_BITS: usize = 96;
+pub const LOCK_BITS: usize = 96;
 
 /// Which way up the equaliser hands over what the digital modem sent.
 ///
@@ -236,7 +236,7 @@ const LOCK_BITS: usize = 96;
 /// value. Phase 3 never noticed, because every bit it reads is differential.
 /// The 5.4 decoder's first symbol after a reset is not: its differential
 /// memory starts at zero (V.90 8.6.1, 8.6.5), so there the sign itself counts.
-const DOWN_SIGN: f64 = -1.0;
+pub const DOWN_SIGN: f64 = -1.0;
 // ---------------------------------------------------------------------------
 // Deadlines (9.5.2.2, and the start-up timer of 9.6.2.2.1)
 // ---------------------------------------------------------------------------
@@ -753,7 +753,7 @@ impl Source {
 /// spectral shape filter memory ... initialized to zero" (V.90 8.6.5, 8.6.1)
 /// -- so there is no reset.
 #[derive(Debug, Clone)]
-struct FrameReader {
+pub struct FrameReader {
     /// Each interval's constellation as its Ucodes and their levels, in
     /// fractions of full scale (Table 1/V.90).
     points: [Vec<(u8, f64)>; INTERVALS],
@@ -775,7 +775,7 @@ impl FrameReader {
     /// A reader for what a CPt or a CPu asks the digital modem to send, whose
     /// first frame begins `skip` symbols from now. `None` if the rate is more
     /// than the constellations carry (5.4.3/V.90).
-    fn new(cp: &Cp, law: Law, skip: usize) -> Option<Self> {
+    pub fn new(cp: &Cp, law: Law, skip: usize) -> Option<Self> {
         let mapping = CodeMapping::from_cp(cp)?;
         Some(Self {
             points: std::array::from_fn(|i| cp.points(i).into_iter().map(|u| (u, ucode::level(law, u))).collect()),
@@ -790,7 +790,7 @@ impl FrameReader {
 
     /// One symbol, as a signed fraction of full scale; and at the frame's
     /// sixth, the D descrambled bits the frame carried.
-    fn feed(&mut self, level: f64) -> Option<Vec<bool>> {
+    pub fn feed(&mut self, level: f64) -> Option<Vec<bool>> {
         if self.skip > 0 {
             self.skip -= 1;
             return None;
@@ -881,7 +881,7 @@ enum DownState {
 
 /// What the downstream reader has to report.
 #[derive(Debug, Clone)]
-enum DownEvent {
+pub enum DownEvent {
     /// TRN2d's frames have been found.
     Found,
     /// A CRC-good SUVd or CPd.
@@ -901,10 +901,12 @@ enum DownEvent {
 
 /// The downstream from TRN2d on (9.6.2.1.1, 9.6.2.1.6).
 #[derive(Debug, Clone)]
-struct Downstream {
+pub struct Downstream {
     /// A reader for B1d with every memory zero, on the constellations of the
-    /// CPu this end sends: what each [`Probe`] starts as.
-    fresh: FrameReader,
+    /// CPu this end sends: what each [`Probe`] starts as. A reader that
+    /// only overhears the call learns the CPu late, from the upstream, and
+    /// has none until then.
+    fresh: Option<FrameReader>,
     state: DownState,
 }
 
@@ -920,11 +922,27 @@ impl Downstream {
         // whole frame: so every one of the six alignments is tried.
         let candidates: Option<Vec<_>> =
             (0..INTERVALS).map(|skip| FrameReader::new(cpt, law, skip).map(|reader| (reader, 0))).collect();
-        Some(Self { fresh: FrameReader::new(cpu, law, 0)?, state: DownState::Hunting(candidates?) })
+        Some(Self { fresh: Some(FrameReader::new(cpu, law, 0)?), state: DownState::Hunting(candidates?) })
+    }
+
+    /// The same for something that only overhears the call: looking for
+    /// TRN2d on the constellations of `cpt`, with B1d's to be given by
+    /// [`Self::set_cpu`] once the CPu has been read off the upstream.
+    pub fn overheard(cpt: &Cp, law: Law) -> Option<Self> {
+        let candidates: Option<Vec<_>> =
+            (0..INTERVALS).map(|skip| FrameReader::new(cpt, law, skip).map(|reader| (reader, 0))).collect();
+        Some(Self { fresh: None, state: DownState::Hunting(candidates?) })
+    }
+
+    /// B1d and the data are read on the constellations of `cpu` from here.
+    /// False if they cannot carry its rate.
+    pub fn set_cpu(&mut self, cpu: &Cp, law: Law) -> bool {
+        self.fresh = FrameReader::new(cpu, law, 0);
+        self.fresh.is_some()
     }
 
     /// Whether TRN2d's frames have been found.
-    fn found(&self) -> bool {
+    pub fn found(&self) -> bool {
         !matches!(self.state, DownState::Hunting(_))
     }
 
@@ -1010,15 +1028,17 @@ impl Downstream {
                 training.zeros = 0;
             }
         }
-        if training.cpd_read {
+        if training.cpd_read
+            && let Some(fresh) = &self.fresh
+        {
             let born = training.frames;
-            training.probes.push(Probe { reader: self.fresh.clone(), born, frames: 0, clean: 0, after_ed });
+            training.probes.push(Probe { reader: fresh.clone(), born, frames: 0, clean: 0, after_ed });
         }
         (DownState::Training(training), event)
     }
 
     /// One symbol, as a signed fraction of full scale.
-    fn feed(&mut self, level: f64) -> Option<DownEvent> {
+    pub fn feed(&mut self, level: f64) -> Option<DownEvent> {
         let (state, event) = match std::mem::replace(&mut self.state, DownState::Lost) {
             DownState::Hunting(mut candidates) => {
                 let mut found = None;

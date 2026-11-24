@@ -468,6 +468,10 @@ pub struct Receiver {
     next_symbol: u64,
     size: Size,
     slicer: Slicer,
+    /// Where the far end precodes (9.6.2): the coefficients it was sent, and
+    /// the last three symbols as they were taken to have been sent, in grid
+    /// units, newest first. See [`Self::set_precoded_grid`].
+    precoded: Option<([Complex; 3], [Complex; 3])>,
     /// Carrier phase to take out of the next symbol, and its turn a symbol,
     /// in radians.
     rotation: f64,
@@ -556,6 +560,7 @@ impl Receiver {
             next_symbol: 0,
             size: Size::Four,
             slicer: Slicer::Points(Size::Four),
+            precoded: None,
             rotation: 0.0,
             turn: 0.0,
             slope: 1.0,
@@ -664,6 +669,57 @@ impl Receiver {
         self.set_slicer(Slicer::Grid { scale, limit });
     }
 
+    /// The same again for a far end that precodes: `h` is h(1), h(2) and h(3)
+    /// as the MP it was sent carries them, 14 bits after the point, and this
+    /// is called for B1's first symbol, where the precoder's memory is empty.
+    ///
+    /// A precoded symbol is a point of the grid less what a channel of
+    /// 1 + h(1) z^-1 + h(2) z^-2 + h(3) z^-3 would have added to it from the
+    /// three before, which with coefficients of a few hundredths and symbols
+    /// forty grid units out is a grid step or several. This equaliser makes
+    /// the channel flat, so what it puts out is that and not a point, and a
+    /// slicer with no memory decides it wrong and takes every loop with it.
+    /// So the decision is made with the channel put in from the symbols
+    /// already decided, and what the symbol should have been is the point
+    /// found less the same.
+    pub fn set_precoded_grid(&mut self, scale: f64, limit: i32, warp: Option<Warp>, h: [(i16, i16); 3]) {
+        self.set_bent_grid(scale, limit, warp);
+        let h = h.map(|(re, im)| Complex::new(f64::from(re), f64::from(im)).scale(1.0 / 16384.0));
+        if h.iter().any(|c| c.norm_sqr() > 0.0) {
+            self.precoded = Some((h, [Complex::ZERO; 3]));
+        }
+    }
+
+    /// The nearest point to `z` and where it would have arrived, by the
+    /// slicer, or with the far end's precoding allowed for.
+    fn decide_tracked(&mut self, z: Complex) -> (Point, Complex) {
+        let (scale, limit, warp) = match self.slicer {
+            Slicer::Grid { scale, limit } => (scale, limit, None),
+            Slicer::BentGrid { scale, limit, warp } => (scale, limit, Some(warp)),
+            Slicer::Points(_) => return self.slicer.decide(z),
+        };
+        let Some((h, past)) = self.precoded.as_mut() else {
+            return self.slicer.decide(z);
+        };
+        let arrived = z.scale(scale);
+        let flat = warp.map_or(arrived, |warp| warp.unbend(arrived));
+        let mut added = Complex::ZERO;
+        for (x, c) in past.iter().zip(h.iter()) {
+            added += *x * *c;
+        }
+        // The precoder moves a point by as much as it takes off, to the
+        // nearest 2w: with coefficients of a quarter and symbols forty units
+        // out that is ten units, and more than `limit` has room for.
+        let reach = h.iter().map(|c| c.re.abs() + c.im.abs()).sum::<f64>() * f64::from(limit);
+        let limit = limit + 2 * (reach / 2.0).ceil() as i32;
+        let odd = |v: f64| (2 * ((v - 1.0) / 2.0).round() as i32 + 1).clamp(-limit, limit);
+        let y = flat + added;
+        let point = (odd(y.re), odd(y.im));
+        let sent = Complex::new(f64::from(point.0), f64::from(point.1)) - added;
+        *past = [sent, past[0], past[1]];
+        (point, warp.map_or(sent, |warp| warp.bend(sent)).scale(1.0 / scale))
+    }
+
     /// The same, for a far end that uses non-linear encoding (9.7): decided
     /// with the bend taken out (see [`Slicer::BentGrid`]). With no bend, the
     /// plain grid.
@@ -685,6 +741,7 @@ impl Receiver {
     /// after it came in 25 dB down.
     fn set_slicer(&mut self, slicer: Slicer) {
         self.slicer = slicer;
+        self.precoded = None;
         self.lost = None;
         self.recent.clear();
     }
@@ -1041,7 +1098,7 @@ impl Receiver {
             .fold(Complex::ZERO, |sum, (i, w)| sum + *w * (wide[i + 2] - wide[i]).scale(0.5));
         let spin = Complex::from_polar(1.0, -self.rotation);
         let z = y * spin;
-        let (decided, target) = self.slicer.decide(z);
+        let (decided, target) = self.decide_tracked(z);
         let e = z - target;
         let squared = e.norm_sqr();
         // Half the way to the nearest other point, squared: an error past it
@@ -2233,5 +2290,48 @@ mod tests {
                 assert_eq!(wrong_bits(params, &data, &heard.pages[0]), 0, "{rate:?} silent {silent}");
             }
         }
+    }
+
+    #[test]
+    fn a_precoded_and_stretched_symbol_is_decided_where_it_was_sent() {
+        // The loops are steered by how far each symbol is from where the
+        // slicer says it should have been. For a far end that precodes and
+        // encodes non-linearly that is nowhere near a point of the grid, and
+        // a slicer told of both finds every symbol where it was sent.
+        let framing = Framing::new(SymbolRate::S3429, 31_200, false, true).expect("a rate Table 8 has");
+        let precoding = [(4096, -2048), (-1024, 512), (256, 0)];
+        let params = Params { framing, code: Code::States16, nonlinear: true, precoding, mode: Mode::Answer };
+        let decoder = Decoder::new(params);
+        let (scale, limit, bend) = (decoder.grid_scale(), decoder.extent(), decoder.warp());
+        assert!(bend.is_some());
+        let symbols: Vec<Complex> = {
+            let mut encoder = Encoder::new(params);
+            let mut seed = 77u32;
+            (0..4000)
+                .map(|_| {
+                    encoder.next_symbol(&mut || {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 17;
+                        seed ^= seed << 5;
+                        seed & 1 == 1
+                    })
+                })
+                .collect()
+        };
+        let band = Band::new(SymbolRate::S3429, false);
+        let out_by = |rx: &mut Receiver| {
+            let total: f64 = symbols.iter().map(|x| (rx.decide_tracked(*x).1 - *x).norm_sqr()).sum();
+            (total / symbols.len() as f64).sqrt() * scale
+        };
+        let mut told = Receiver::new(band, FS);
+        told.set_precoded_grid(scale, limit, bend, precoding);
+        // The precoder rounds what it takes off to 1/128 of a grid unit.
+        let out = out_by(&mut told);
+        assert!(out < 0.02, "{out}");
+        // And one told only of the grid is out by a good part of the
+        // half-step that is as far out as a decision can be.
+        let mut plain = Receiver::new(band, FS);
+        plain.set_grid(scale, limit);
+        assert!(out_by(&mut plain) > 0.5);
     }
 }
