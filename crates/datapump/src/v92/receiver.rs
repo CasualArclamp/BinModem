@@ -1086,8 +1086,8 @@ impl Receiver {
     /// frame's sign differentially, and with every class as 6.4.2 prints it an
     /// inverted line turns each Ki into Mi - 1 - Ki, which is that sign and
     /// nothing else, so it would read the same. With the first index of a pair
-    /// taken two further on (`precoder::PAIR_FIRST_INDEX_OFFSET`, which is a
-    /// measurement and not the clause) it does not: an inverted symbol stream
+    /// taken two further on (`BINMODEM_V92_PAIR_OFFSET=2`, which was this
+    /// crate's reading until issue 54) it does not: an inverted symbol stream
     /// decodes with one bit in six wrong, B1u as 300 ones in 360. Between this
     /// crate's two modems that was the upstream of every call in which a DIL
     /// had been asked for, whose E1u ends on the other sign from a call's
@@ -1894,16 +1894,14 @@ impl Receiver {
         let base = from as usize;
         let lo = base.saturating_sub(search as usize);
         let hi = base + search as usize;
+        let tracing = std::env::var_os("V92_TRACE").is_some();
         let mut best: Option<(f64, usize)> = None;
-        for start in lo..=hi {
-            if !self.fit(start) {
-                continue;
+        for (start, snr_db) in self.fit_snrs(lo, hi) {
+            if tracing && snr_db > 6.0 {
+                eprintln!("V92TRACE: candid {start} snr {snr_db:.1}");
             }
-            if std::env::var_os("V92_TRACE").is_some() && self.snr_db > 6.0 {
-                eprintln!("V92TRACE: candid {start} snr {:.1}", self.snr_db);
-            }
-            if best.is_none_or(|(snr, _)| self.snr_db > snr) {
-                best = Some((self.snr_db, start));
+            if best.is_none_or(|(snr, _)| snr_db > snr) {
+                best = Some((snr_db, start));
             }
         }
         if std::env::var_os("V92_TRACE").is_some() {
@@ -2554,6 +2552,105 @@ impl Receiver {
         true
     }
 
+    /// What [`Self::fit`] would measure at every alignment from `lo` to `hi`:
+    /// each one that fits, with its signal to noise ratio in dB.
+    ///
+    /// The same least squares, sum for sum, so the numbers are the ones
+    /// `fit` gives to the last bit; what differs is the work. A fit's normal
+    /// equations are sums of products of the line with itself over the
+    /// window, and moving the window on by a symbol moves every one of those
+    /// sums along the diagonal: the entry for taps i and j at one alignment
+    /// is the entry for taps i + 1 and j + 1 at the next. So only the first
+    /// row and column are new each time, forty-eight sums where a fit from
+    /// nothing makes twelve hundred, and the line and the reference are
+    /// made once instead of once a candidate.
+    ///
+    /// It matters because the search runs in the middle of a call. Made of
+    /// whole fits it took 90 ms, in which no sound left this end; the Su and
+    /// S-bar-u that answer Jd came next and went out that much late, and a
+    /// far end whose jitter buffer was shorter than that never heard the
+    /// reversal (issue 54).
+    fn fit_snrs(&self, lo: usize, hi: usize) -> Vec<(usize, f64)> {
+        let received: Vec<f64> = self.history.iter().copied().collect();
+        let longest = received.len().saturating_sub(lo).min(TRAIN_WINDOW);
+        let Some(whole) = reference_from(0, longest, self.reference_mode) else {
+            return Vec::new();
+        };
+        let mut found = Vec::new();
+        // The line's half of the normal equations, and the alignment and
+        // window it was made for.
+        let mut gram: Vec<f64> = Vec::new();
+        let mut made: Option<(usize, usize)> = None;
+        for start in lo..=hi {
+            let span = (start + TRAIN_WINDOW).min(received.len()).saturating_sub(start);
+            if span <= TRAIN_TAPS {
+                break;
+            }
+            let reference = &whole[..span];
+            let line = &received[start..start + span];
+            let taps = TRAIN_TAPS.min(span / 8).max(1);
+            let rows = taps - 1;
+            let product = |i: usize, j: usize| {
+                let mut sum = 0.0;
+                for n in rows..span {
+                    sum += line[n - i] * line[n - j];
+                }
+                sum
+            };
+            if start > 0 && made == Some((start - 1, span)) {
+                for i in (1..taps).rev() {
+                    for j in (1..taps).rev() {
+                        gram[i * taps + j] = gram[(i - 1) * taps + j - 1];
+                    }
+                }
+                for i in 0..taps {
+                    let sum = product(i, 0);
+                    gram[i * taps] = sum;
+                    gram[i] = sum;
+                }
+            } else {
+                gram = vec![0.0; taps * taps];
+                for i in 0..taps {
+                    for j in 0..=i {
+                        let sum = product(i, j);
+                        gram[i * taps + j] = sum;
+                        gram[j * taps + i] = sum;
+                    }
+                }
+            }
+            made = Some((start, span));
+            let a: Vec<Complex> = gram.iter().map(|&sum| Complex::new(sum, 0.0)).collect();
+            let b: Vec<Complex> = (0..taps)
+                .map(|i| {
+                    let mut sum = 0.0;
+                    for n in rows..span {
+                        sum += line[n - i] * reference[n];
+                    }
+                    Complex::new(sum, 0.0)
+                })
+                .collect();
+            let Some(solved) = solve_fit(&a, &b, taps) else { continue };
+            let mut signal = 0.0;
+            let mut noise = 0.0;
+            for n in rows..span {
+                let mut model = 0.0;
+                for (k, &tap) in solved.iter().enumerate() {
+                    model += tap * line[n - k];
+                }
+                let error = reference[n] - model;
+                noise += error * error;
+                signal += reference[n] * reference[n];
+            }
+            let count = span.saturating_sub(rows).max(1) as f64;
+            let (signal, noise) = (signal / count, noise / count);
+            let snr_db = if noise > 0.0 { 10.0 * (signal / noise).log10() } else { f64::INFINITY };
+            if snr_db.is_finite() && snr_db > 0.0 {
+                found.push((start, snr_db));
+            }
+        }
+        found
+    }
+
     /// One least-squares fit of the equaliser against the known sequence
     /// starting at `from`.
     fn fit(&mut self, from: usize) -> bool {
@@ -2696,44 +2793,9 @@ impl Receiver {
             }
             b[forward + i] = Complex::new(sum, 0.0);
         }
-        let trace: f64 = (0..taps).map(|i| a[i * taps + i].re).sum();
-        // A ridge that is small next to the line's own energy, and only as
-        // large as it has to be. The forward columns and the feedback ones are
-        // nearly the same numbers -- one is the line, the other the symbols it
-        // was made from -- so the system is close to singular by construction,
-        // and the ridge decides the split between them. Too small and the solve
-        // fails; too large and it takes the solution with it: 1e-6 relative
-        // measured 0.1 dB where 1e-9 measured 23.8 on the same window, because
-        // in a nearly singular system the ridge dominates the direction the
-        // equaliser wanted. So try the smallest and grow only if the solve
-        // refuses.
-        let scale = trace / taps as f64;
-        let mut base = a.clone();
-        // The design's own regulariser, on the feed-forward block alone: see
-        // [`FFE_RIDGE`]. Its size is a fraction of each tap's own column energy,
-        // so it means the same thing on any line.
-        let ffe_ridge = std::env::var("V92_FFE_RIDGE")
-            .ok()
-            .and_then(|text| text.parse::<f64>().ok())
-            .unwrap_or(FFE_RIDGE);
-        for i in 0..forward {
-            base[i * taps + i].re *= 1.0 + ffe_ridge;
-        }
-        let mut solved = None;
-        for ridge in ridges_in_use() {
-            let mut a = base.clone();
-            for i in 0..taps {
-                a[i * taps + i].re += ridge * scale;
-            }
-            if let Some(answer) = dsp::complex::solve_hermitian(&a, &b) {
-                solved = Some(answer);
-                break;
-            }
-        }
-        let Some(solved) = solved else {
+        let Some(solved) = solve_fit(&a, &b, forward) else {
             return false;
         };
-        let solved: Vec<f64> = solved.iter().map(|value| value.re).collect();
         self.forward = solved[..forward].to_vec();
         self.feedback = solved[forward..].to_vec();
         // The section starts where the training left it rather than at zero:
@@ -2768,6 +2830,48 @@ impl Receiver {
         self.stale = false;
         self.snr_db.is_finite() && self.snr_db > 0.0
     }
+}
+
+/// The solve both fits end in: the normal equations `a` and their right-hand
+/// side `b`, whose first `forward` unknowns are the feed-forward taps.
+fn solve_fit(a: &[Complex], b: &[Complex], forward: usize) -> Option<Vec<f64>> {
+    let taps = b.len();
+    let trace: f64 = (0..taps).map(|i| a[i * taps + i].re).sum();
+    // A ridge that is small next to the line's own energy, and only as
+    // large as it has to be. The forward columns and the feedback ones are
+    // nearly the same numbers -- one is the line, the other the symbols it
+    // was made from -- so the system is close to singular by construction,
+    // and the ridge decides the split between them. Too small and the solve
+    // fails; too large and it takes the solution with it: 1e-6 relative
+    // measured 0.1 dB where 1e-9 measured 23.8 on the same window, because
+    // in a nearly singular system the ridge dominates the direction the
+    // equaliser wanted. So try the smallest and grow only if the solve
+    // refuses.
+    let scale = trace / taps as f64;
+    let mut base = a.to_vec();
+    // The design's own regulariser, on the feed-forward block alone: see
+    // [`FFE_RIDGE`]. Its size is a fraction of each tap's own column energy,
+    // so it means the same thing on any line.
+    let ffe_ridge = std::env::var("V92_FFE_RIDGE")
+        .ok()
+        .and_then(|text| text.parse::<f64>().ok())
+        .unwrap_or(FFE_RIDGE);
+    for i in 0..forward {
+        base[i * taps + i].re *= 1.0 + ffe_ridge;
+    }
+    let mut solved = None;
+    for ridge in ridges_in_use() {
+        let mut a = base.clone();
+        for i in 0..taps {
+            a[i * taps + i].re += ridge * scale;
+        }
+        if let Some(answer) = dsp::complex::solve_hermitian(&a, b) {
+            solved = Some(answer);
+            break;
+        }
+    }
+    let solved = solved?;
+    Some(solved.iter().map(|value| value.re).collect())
 }
 
 /// How far the data-mode anchor may move the training's gain, either way.
@@ -3139,6 +3243,36 @@ mod tests {
             }
         }
         assert!(found > 0, "no CPt came back out of the chain, {:.1} dB", rx.snr_db());
+    }
+
+    /// The search's shortcut is the fit and not an estimate of it: at every
+    /// alignment it reports what a whole fit there measures, to the last bit.
+    #[test]
+    fn the_search_measures_what_a_fit_from_nothing_measures() {
+        let mut trn = crate::v92::up_signals::Trn1u::new();
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let (mut a1, mut a2) = (0.0, 0.0);
+        let mut rx = Receiver::new();
+        // Seven symbols of nothing first, so that the true alignment is
+        // inside the search and not at its edge.
+        for n in 0..1500 {
+            let x = if n < 7 { 0.0 } else { trn.next_symbol() };
+            a1 += 0.55 * (x - a1);
+            a2 += 0.55 * (a1 - a2);
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let noise = ((seed >> 33) as f64 / (1u64 << 31) as f64 - 0.5) * 0.02;
+            rx.feed(a2 + noise);
+        }
+        // Past the end of the history too, where the window shortens and
+        // nothing can be carried over from the alignment before.
+        let quick = rx.fit_snrs(0, 400);
+        assert!(quick.len() > 300, "only {} alignments fitted", quick.len());
+        for &(start, snr_db) in &quick {
+            assert!(rx.fit(start), "the whole fit at {start} failed");
+            assert_eq!(rx.snr_db.to_bits(), snr_db.to_bits(), "at {start}: {} against {snr_db}", rx.snr_db);
+        }
+        let best = quick.iter().fold((0, 0.0), |best, &(start, snr)| if snr > best.1 { (start, snr) } else { best });
+        assert!(best.1 > 30.0, "the best alignment, {}, fitted at {:.1} dB", best.0, best.1);
     }
 
     /// The training fit, over a channel with noise: TRN1u is known, so this is

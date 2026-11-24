@@ -55,8 +55,6 @@ set BINMODEM_SIP_FILE=%HERE%tools\dmodem\sip.txt
 if /i "%MS%"=="FAX" goto fax
 if /i "%MS%"=="FAX34" goto fax
 if /i "%MS%"=="V92" set BINMODEM_V92_PCM_UP=1
-rem D-Modem reads 6.4.2's classes as printed; see precoder::pair_first_index_offset.
-if /i "%MS%"=="V92" set BINMODEM_V92_PAIR_OFFSET=0
 cd /d "%HERE%"
 "%BINMODEM%" --sip dmodem --scopes --record --type "AT+MS=%MS%" --type "ATD sip:modem@127.0.0.1:5070"
 goto :eof
