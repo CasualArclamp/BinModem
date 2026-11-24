@@ -9,6 +9,15 @@ binmodem.exe --capture        replay the golden capture
 
 [docs/usage.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/usage.md) has the setup.
 
+## What's new in 5.4.2
+
+- **Fixed: the mode box follows `AT+MS` typed at the terminal.** `AT+MS=V34` typed there changed the next call and left the box, the command on the faceplate and the remembered settings on the old modulation. The window now takes the modulation, automode and rate limits from the modem whenever they change.
+- **Fixed: a V.ARC call dialled straight after another call in the same window, on a SIP line.** Samples left over from the first call reached V.ARC before the second was answered, and it fell back to V.8 bis. Nothing reaches it now until the call is up.
+- **A fax page is drawn at whole screen pixels, unsmoothed.** It is fitted across the panel by the least whole number that fits, and 1:1 when it does. The mouse wheel zooms in whole steps around the pointer, from 1:7 to 8:1, and a double click goes back to fit. The same for the page to send and the page arriving.
+- **A quick start guide**: [docs/quickstart.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/quickstart.md), from the download to a call between two windows.
+- **Scripted calls that type like a person.** `--type` lines can be steps: `@type`, `@key`, `@wait`, `@until <text>`, `@tab`, `@files` and `@receive`. Plain lines are typed as before.
+- **`modem-sip --answer --bbs <folder>`** answers as a small bulletin board: ANSI screens from the folder, a login, a menu, a scripted chat channel and a ZMODEM file area. `modem-sip` is built from source; the release is `binmodem.exe`.
+
 ## What's new in 5.4.1
 
 - **Fixed: a fax received with ECM was reported as failed.** The outcome said "disconnected in phase E, after page 1 was confirmed" although every page had arrived. A sender that hangs up as it sends its DCN cuts it off. The receiver had already confirmed the last page and was waiting for the far end to hang up, which T.30 only reaches after the last page, so that now counts as confirmed.
