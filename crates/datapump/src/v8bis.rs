@@ -52,6 +52,10 @@ const TURNAROUND: f64 = 0.090;
 /// The quiet before answering a message, which is recognised at its last
 /// flag: there is nothing left of it to wait out.
 const AFTER_MESSAGE: f64 = 0.020;
+/// How long the far end's channel may drop out of a message and the message
+/// still be the one being read: longer than the 2 to 4 ms holes a VoIP path's
+/// tone clamp leaves, and the band filter's few milliseconds of catching up.
+const CARRIER_HOLD: f64 = 0.012;
 /// "remain silent for a minimum of 400 ms" before MRe or CRe (10.2.2).
 const BEFORE_OPENING: f64 = 0.400;
 /// "more than 5 s" in any state but the two that are rest, and the station
@@ -426,6 +430,8 @@ pub struct Station {
     /// Whether the far end's V.21 carrier was there on the last sample:
     /// its channel's band measured against everything on the line.
     carrier: bool,
+    /// Samples since the far end's channel last held its share of the line.
+    quiet: usize,
     /// The line's mean square, to measure the channel against.
     power: f64,
     alpha: f64,
@@ -460,6 +466,7 @@ impl Station {
             escaped: false,
             heard: false,
             carrier: false,
+            quiet: 0,
             power: 0.0,
             alpha: 1.0 - (-1.0 / (0.008 * fs)).exp(),
         }
@@ -566,11 +573,29 @@ impl Station {
             // Measured: the channel's band holds 0.67 of the line's level
             // while a message is all there is on it, 0.46 or more with this
             // end's own message echoing beside it, and under 0.29 of noise.
-            let carrier = self.power > 1e-8 && self.rx.band_level() > 0.38 * self.power.sqrt();
-            if self.carrier && !carrier {
-                self.decoder = Decoder::new(Fcs::Bits16);
+            //
+            // A carrier that is gone for a moment has not stopped, though. A
+            // capture of a CL from a server across a VoIP trunk had twenty
+            // holes of 2 to 4 ms in 0.7 s of it -- most likely a DTMF clamp
+            // in the path, since the low channel's 980 and 1180 Hz sit beside
+            // DTMF's 941 and 1209 -- and each hole reset the decoder,
+            // so the frame was neither read nor answered: the far end gave
+            // up and answered with ANSam, and the transcript said nothing.
+            // So the band has to be gone for longer than a hole before the
+            // carrier is, and a frame a hole has spoiled fails its check and
+            // is answered with NAK(1) as 9.8 says.
+            let band = self.power > 1e-8 && self.rx.band_level() > 0.38 * self.power.sqrt();
+            if band {
+                self.quiet = 0;
+                self.carrier = true;
+            } else if self.carrier {
+                self.quiet += 1;
+                if self.quiet as f64 > CARRIER_HOLD * self.fs {
+                    self.decoder = Decoder::new(Fcs::Bits16);
+                    self.carrier = false;
+                }
             }
-            self.carrier = carrier;
+            let carrier = self.carrier;
             if let Some(bit) = bit.filter(|_| carrier)
                 && let Some(frame) = self.decoder.feed(bit)
             {
@@ -776,11 +801,28 @@ impl Station {
             None if far.is_some() => None,
             None => ours.best(),
         };
-        let Some(modulation) = modulation else {
-            self.fail("the two ends have no data mode in common");
-            return;
+        let ms = match modulation {
+            Some(modulation) => Message::select(&self.capabilities, modulation),
+            // A list with data in it and no modulation, from a far end that
+            // does V.8 after the transaction: it is leaving the modulation
+            // to V.8, not refusing one. Selecting data on those terms is
+            // the answer; saying nothing left the far end to time out, two
+            // seconds of every call to Netstalgia.
+            None => match far.as_ref().and_then(|far| {
+                far.data_mode()
+                    .filter(|d| d.best().is_none())
+                    .and_then(|_| Message::select_by_v8(&self.capabilities, far))
+            }) {
+                Some(ms) => {
+                    self.note("the far end's list names no modulation, so V.8 is to choose one".to_owned());
+                    ms
+                }
+                None => {
+                    self.fail("the two ends have no data mode in common");
+                    return;
+                }
+            },
         };
-        let ms = Message::select(&self.capabilities, modulation);
         if answering_signal {
             self.answer_signal(&ms);
         } else {
@@ -795,7 +837,12 @@ impl Station {
         let ours = self.capabilities.data_mode().unwrap_or_default();
         let can = match ms.varc() {
             Some(_) => self.capabilities.varc().is_some(),
-            None => ms.data_mode().is_some_and(|asked| ours.can_do(&asked)),
+            // An MS for data that names no modulation leaves it to V.8,
+            // which both ends must then do.
+            None => ms.data_mode().is_some_and(|asked| {
+                ours.can_do(&asked)
+                    || (asked.best().is_none() && ms.identify().v8 && self.capabilities.identify().v8)
+            }),
         };
         self.mouth.silence(AFTER_MESSAGE);
         if !can {
@@ -1022,6 +1069,29 @@ mod tests {
         assert_eq!(at_a.ms, at_b.ms);
         assert!(at_a.ms.data_mode().unwrap().v92_analogue, "the caller's half is the one named");
         assert_eq!(b.far_capabilities(), Some(&server()));
+    }
+
+    /// Netstalgia's V.92 server, octet for octet off a live call: a Revision
+    /// 1 CL whose data block is V.42 alone, with V.8 to follow and a
+    /// non-standard field. No modulation is not "nothing in common": the
+    /// caller selects data and V.42 and leaves the modulation to V.8.
+    #[test]
+    fn a_list_with_no_modulation_is_answered_with_data_left_to_v8() {
+        let cl = [0x12, 0xC9, 0x80, 0x80, 0x81, 0xC2, 0x09, 0xB5, 0x02, 0x00, 0x94, 0x81, 0x83, 0x42, 0x46, 0xE0];
+        let netstalgia = Message::decode(&cl).expect("the live CL decodes");
+        assert!(netstalgia.identify().v8);
+        assert_eq!(netstalgia.data_mode().and_then(|d| d.best()), None);
+        let a = Station::answering(netstalgia, Signal::CRe, FS);
+        let b = Station::calling(caller(), FS).replying(OnMr::Ms, OnCr::Crd);
+        let (a, b, said_a, said_b) = run(a, b, 0.02, 8.0);
+        println!("answering: {said_a:#?}\ncalling: {said_b:#?}");
+        let kinds = |said: &[String]| said.iter().map(|s| s.split(" (").next().unwrap().to_owned()).collect::<Vec<_>>();
+        assert!(kinds(&said_b).contains(&"sent MS".to_owned()), "{said_b:#?}");
+        let (at_a, at_b) = (selection(&a), selection(&b));
+        assert_eq!(at_b.modulation(), None, "V.8 chooses the modulation");
+        assert!(at_b.ms.data_mode().unwrap().v42);
+        assert!(at_b.ms.identify().v8);
+        assert!(!at_b.answer && at_a.answer);
     }
 
     /// Transaction 2: CRe, then ESr and CL, MS, ACK. Here the answering

@@ -9,6 +9,71 @@ binmodem.exe --capture        replay the golden capture
 
 [docs/usage.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/usage.md) has the setup.
 
+## What's new in 5.4.3
+
+Two faults in V.92 calls to a server that is not BinModem's own, reported with recordings by the people who run one ([#54](https://github.com/CasualArclamp/BinModem/issues/54)). Calls to such a server fell back to V.90.
+
+- **Fixed: PCM upstream data was unreadable to other V.92 servers.** Half of the upstream symbols were sent two constellation points away from where V.92 6.4.2 puts them, a reading fitted to one capture of one modem. They are now sent as the text has them. `BINMODEM_V92_PAIR_OFFSET=2` in the environment brings the old reading back; two BinModems connect either way.
+- **Fixed: over SIP, the server often never heard the caller's Su turn over, and retrained.** The caller stopped for about 90 ms to fit its equaliser, and its answer to Jd went out late in the burst of sound that followed, where a short jitter buffer discards it. The fit now takes about a quarter of the time, and Su waits 200 ms after it.
+- **Fixed: the S-bar-u that answers Jp could start part of the way through a period of Su.** It now starts on a twelve-symbol boundary.
+
+## What's new in 5.4.2
+
+- **Fixed: the mode box follows `AT+MS` typed at the terminal.** `AT+MS=V34` typed there changed the next call and left the box, the command on the faceplate and the remembered settings on the old modulation. The window now takes the modulation, automode and rate limits from the modem whenever they change.
+- **Fixed: a V.ARC call dialled straight after another call in the same window, on a SIP line.** Samples left over from the first call reached V.ARC before the second was answered, and it fell back to V.8 bis. Nothing reaches it now until the call is up.
+- **A fax page is drawn at whole screen pixels, unsmoothed.** It is fitted across the panel by the least whole number that fits, and 1:1 when it does. The mouse wheel zooms in whole steps around the pointer, from 1:7 to 8:1, and a double click goes back to fit. The same for the page to send and the page arriving.
+- **A quick start guide**: [docs/quickstart.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/quickstart.md), from the download to a call between two windows.
+- **Scripted calls that type like a person.** `--type` lines can be steps: `@type`, `@key`, `@wait`, `@until <text>`, `@tab`, `@files` and `@receive`. Plain lines are typed as before.
+- **`modem-sip --answer --bbs <folder>`** answers as a small bulletin board: ANSI screens from the folder, a login, a menu, a scripted chat channel and a ZMODEM file area. `modem-sip` is built from source; the release is `binmodem.exe`.
+
+## What's new in 5.4.1
+
+- **Fixed: a fax received with ECM was reported as failed.** The outcome said "disconnected in phase E, after page 1 was confirmed" although every page had arrived. A sender that hangs up as it sends its DCN cuts it off. The receiver had already confirmed the last page and was waiting for the far end to hang up, which T.30 only reaches after the last page, so that now counts as confirmed.
+- **The page arriving fits a whole sheet** to the Fax tab, with the rest of the sheet dark until it comes. A large window now shows the page filling its paper, where it used to show a strip scrolling past.
+- **For filming or testing with nobody at the keyboard:**
+  - `--answer-as fax` (or `modem`) presses that answer once an incoming SIP call has rung for 2.5 s.
+  - `BINMODEM_LINE_NOISE=-52` adds white noise at that level (dBFS RMS) to everything the line delivers.
+  - `modem-sip` sends a page of your own with `--page <file.pbm>` (and `--fine`), and chooses the modulations with `--offer v27ter,v29,v17`. `--no-ecm` and `--no-jbig` turn those off.
+
+## What's new in 5.4.0
+
+### A Fax tab, and calls that ask before they are answered
+
+- **Fax is a tab now**, beside terminal, transcript and scopes, laid out like Scopes:
+  - **Left:** the call card, the constellation, and the far end's DIS where V.8's would be.
+  - **Middle:** the page, as large as the window allows, over the waterfall.
+  - **Right:** the number (the dialler's own) and this end's TSI/CSI, then the call's progress, how the last call went, the document, the rates and the calls so far.
+- **How the call went, kept on screen** once it is over: confirmed (MCF), kept but retrain asked (RTP), refused (RTN), or disconnected in phase B, C or D and why. It also gives pages sent and received, the carrier and rate, the coding, ECM on or off, and how long it took. It is read from the T.30 frames both ends sent.
+- **Progress you can read**: the T.30 phase, page n of m, kB of the page gone, the line it has reached, and the time left at the agreed rate.
+- **The page going out is shaded to the line its bits have reached.** It is not drawn at the share of the bits sent, which runs ahead over blank paper and lags in dense parts. Receiving, the page is drawn a line at a time as before.
+- **The rate table goes fastest first**, with the rate and modulation the call agreed lit up.
+- **A list of the session's calls**: when, the far end, the result and the pages. A received fax opens in the big view and saves as one PDF or a PNG a page.
+- **An incoming SIP call rings and asks.** It rings on the monitor output (opened for the ring if Listen is off), flashes the taskbar, and puts the caller's number and name in the middle of the window with **Answer as modem**, **Answer as fax** and **Decline** (603). Nothing answers by itself. If the caller hangs up first, the ringing stops and the question goes.
+- **`binmodem --fax`** opens on the Fax tab.
+
+### Fixed
+
+- **ECM progress on a page larger than one block.** It counted every block as an equal share, and the last is seldom full, so an MMR page of two and a bit blocks read 50 % with three quarters gone.
+- **A page at standard resolution** is drawn the shape of its paper, not half its height.
+- **After a V.17 page** the badge and the outcome no longer say V.21, which carries the frames between pages.
+- **Receiving**, the far end's DCS is read as this call's choice. It used to be read as a DIS, which said "nothing in common" in the middle of a V.17 page.
+
+### On real lines
+
+- **V.17 to real fax machines.** Pages went at 14 400 to Telstra's FaxStream test line and were confirmed with MCF. Confirmed pages also went to Faxbeep, to Canon's test line in the US, and to a SpanDSP machine at JBIG with ECM. Telstra's line reports 36.8 dB signal to noise and calls the transmission level poor at -30.5 dBm.
+- **Received** at V.17 14 400 and at V.34 33 600 with JBIG and ECM between two windows.
+
+## What's new in 5.3.0
+
+- **Bell 212A and Bell 202.** `AT+MS=B212` is 1200 bit/s DPSK with Bell's 2225 Hz answer tone, falling back to Bell 103 at either end. `AT+MS=B202` is 1200 bit/s FSK, half duplex.
+- **A steadier SIP line.** The modem is now stepped on a local clock, so a stall in what arrives never puts silence into what it sends. The jitter buffer holds 300 ms instead of 100: on a long international route the holes in data mode were packets that came late, not lost ones. `BINMODEM_SIP_JITTER` still sets it (1 to 25 packets).
+- **V.92 on real routes.** A robbed bit on the downstream (a T1 on the way) no longer stops Phase 4. A full start-up asks for a DIL and builds its constellations from it, so such a route gets about 49 000 bit/s down instead of falling back to 28 000; a quick connect still skips it. The Sd deadline allows for the round trip, R-bar-i is heard through short dropouts, and the downstream phase is chosen only once Sd is on every phase.
+- **Quick connect that fails falls back fast.** A server that goes silent after TONEq is dropped from the quick-connect memo, and the call starts V.8 again about 3.4 s later, inside the 60 s some ISPs allow.
+- **Phase 2 recovers a lost INFO0d** by sending INFO0a again, rather than waiting for one that is not coming.
+- **V.8 bis through dropouts.** A capabilities list a VoIP path has cut into is reported and answered with NAK(1), instead of vanishing.
+- **The distant panel says everything known about the far end**: phase 2's INFO sequences, the probed line and round trip, Jd and the PCM mode, kept after a call that never connected.
+- **Recording stops** when Stop is pressed after the far end has hung up, rather than at the next call.
+
 ## What's new in 5.2.0
 
 - **V.ARC compresses.** A V.ARC call had no compression at all: `+DS` and `+DS44` are about V.42, and V.ARC has its own retransmission in place of V.42. Its stream is now compressed with the best method both ends have, each direction for itself, and the window says which and what it has been worth.
@@ -144,6 +209,6 @@ The picture is a call from the window to D-Modem on the same machine, over SIP w
 - **One ISP's V.90 pool sometimes stops dead** just as its modem takes up our constellation, at the end of phase 4 or in a renegotiation. Every CP we sent was checked against V.90 Table 14 bit for bit, and they are correct.
 - **Known:** after a V.90 call falls back to V.34, the V.34 retrain watch can still take the hang-up beep for tone B.
 - **V.92 has only carried data between softmodems:** two of these, and one of these with D-Modem. PCM upstream comes with V.92 chosen in the window; `AT+MS=V92` typed at a terminal still wants `BINMODEM_V92_PCM_UP=1`, and both ends have to ask for it. Against a real V.92 modem the server has reached Phase 3 and no further. Super G3 to D-Modem does not come up: it does not recognise our control channel's start. The calling side chooses its sample phase once and follows no clock, cancels no echo and asks for no DIL, so it wants a four-wire line with both ends on one clock, which a pair of virtual cables is and a telephone line is not. V.92's own rate renegotiation, cleardown and modem on hold are not built. From the window, a V.92 call to D-Modem sometimes fails in Phase 3 and comes up as V.90 or not at all (two of seven while this release was being filmed); the same call without a window has not done it, and the cause is not yet known.
-- **Not yet tried against real far ends:** V.17, and the V.29 and V.27 ter receivers, have been measured against our own modems and simulated lines only.
+- **Not yet tried against real far ends:** receiving from a real fax machine, and the V.29 and V.27 ter receivers, which have been measured against our own modems and simulated lines only. Sending at V.17 has now been confirmed by real machines.
 
 Checksums are in `SHA256SUMS.txt`.

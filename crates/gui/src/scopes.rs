@@ -53,6 +53,20 @@ const V21: &[(f64, &str, Color32)] = &[
     (1850.0, "1850 A-space", ANSWERING),
 ];
 
+/// Bell 212A's carriers are V.22's; its answer tone is Bell 103's mark.
+const BELL212: &[(f64, &str, Color32)] = &[
+    (1200.0, "1200 calling", CALLING),
+    (2225.0, "2225 answer tone", ANSWERING),
+    (2400.0, "2400 answering", ANSWERING),
+];
+
+/// One band for both ends, and the soft carrier turn-off below it.
+const BELL202: &[(f64, &str, Color32)] = &[
+    (900.0, "900 turn-off", SHARED),
+    (1200.0, "1200 mark", SHARED),
+    (2200.0, "2200 space", SHARED),
+];
+
 const V22BIS: &[(f64, &str, Color32)] = &[
     (1200.0, "1200 calling", CALLING),
     (2400.0, "2400 answering", ANSWERING),
@@ -78,6 +92,8 @@ pub fn markers(modulation: &str) -> &'static [(f64, &'static str, Color32)] {
         "Bell 103" => BELL103,
         "V.21" => V21,
         "V.22bis" => V22BIS,
+        "Bell 212A" => BELL212,
+        "Bell 202" => BELL202,
         "V.32" | "V.32bis" => V32,
         _ => &[],
     }
@@ -803,7 +819,10 @@ pub fn symbol_scope(
     // V.32's thirty-two points do. Eight of them have a coordinate a quarter
     // beyond the box and were being drawn off the edge of it, so a
     // thirty-two-point constellation showed twenty-four dots.
-    let fit = 1.0 / peak.max(1.0);
+    // PCM's pairs come as the receiver read them and the peak is theirs, so
+    // the whole picture is drawn against it, up or down; a constellation is
+    // only ever shrunk to fit.
+    let fit = if pairs { 1.0 / peak.max(1e-9) } else { 1.0 / peak.max(1.0) };
     let m = constellation.len().max(1);
     let at = |re: f32, im: f32| {
         pos2(

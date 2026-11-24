@@ -2376,6 +2376,17 @@ impl Modem {
         }
     }
 
+    /// An answering modem whose answer tone has already been sent: by
+    /// V.8's ANSam, on a call V.8 found no menu on. It starts at AC, which
+    /// is what a V.32bis Annex A automode answerer offers first.
+    pub fn past_answer_tone(mut self) -> Self {
+        if self.startup.state == State::AnswerTone {
+            self.tx.set_signal(Signal::AlternateAC);
+            self.startup.state = State::Ac;
+        }
+        self
+    }
+
     /// Take one sample from the line and give back the one to put on it.
     pub fn step(&mut self, line: f64) -> f64 {
         // The canceller is told what went out and what came back, and returns

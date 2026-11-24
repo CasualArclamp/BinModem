@@ -13,6 +13,8 @@ line     = { path = "../line" }
 v8       = { path = "../v8" }
 # For varc-link, V.ARC over a sound card with nothing else in the way.
 varc     = { path = "../varc" }
+# For modem-sip's bulletin board: a file down the call by ZMODEM.
+transfer = { path = "../transfer" }
 # For modem-sip, the call over SIP with no window on it.
 sip      = { path = "../sip" }
 

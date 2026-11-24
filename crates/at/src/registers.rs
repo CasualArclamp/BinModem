@@ -45,6 +45,10 @@ pub const SPECS: &[Spec] = &[
     Spec { number: 12, default: 50, min: 0, max: 255, clause: "extension",
            note: "escape sequence guard time in fiftieths of a second; \
                   Hayes/TIA-602, absent from V.250" },
+    Spec { number: 70, default: 0,  min: 0, max: 1,   clause: "extension",
+           note: "1 offers U.S. Robotics x2 when answering as a V.90 or V.92 \
+                  server (+MS=V90 or V92) on a mu-law line, to a caller that \
+                  offers V.34 and no PCM; 0 does not. BinModem's own" },
 ];
 
 pub fn spec_for(number: u8) -> Option<&'static Spec> {

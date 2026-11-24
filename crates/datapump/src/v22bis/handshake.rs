@@ -375,6 +375,15 @@ impl Modem {
         }
     }
 
+    /// An answering modem whose answer tone has already been sent: it
+    /// starts with unscrambled binary 1 (6.3.1.1.2 a).
+    pub fn past_answer_tone(mut self) -> Self {
+        if self.hs.state == State::AnswerTone {
+            self.hs.state = State::OfferingOnes;
+        }
+        self
+    }
+
     /// Take one sample from the line and give back the one to put on it.
     pub fn step(&mut self, line: f64) -> f64 {
         self.rx.feed(line);

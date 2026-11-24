@@ -49,6 +49,8 @@ pub struct Progress {
     pub call: String,
     /// Who is at the other end.
     pub peer: Option<String>,
+    /// The same, as a person reads it: a number, and a name if one was given.
+    pub caller: Option<String>,
     /// Whether audio is flowing.
     pub media: bool,
     /// The companding law in force: what the far end is actually sending.
@@ -74,9 +76,13 @@ pub struct Progress {
     /// makes a healthy call look like a damaged one, which is the opposite of
     /// what these numbers are for.
     pub underruns_mid_call: u64,
-    /// Octets of silence put in on purpose, to build the outgoing cushion
-    /// back up after it has been spent. Deliberate, and still silence.
-    pub cushioned: u64,
+    /// Octets of silence sent into the middle of what the modem was saying
+    /// (see `media::Stats::inserted`). Zero unless the modem loop stopped.
+    pub inserted: u64,
+    /// Packets the far end had not delivered when the modem needed them, with
+    /// nothing later in hand: inbound stalls, concealed in what the modem
+    /// heard while what it said went on unbroken.
+    pub starved: u64,
     /// What last went wrong, for as long as it is news: [`ERROR_SHOWN`] and
     /// then nothing, so that a call that failed a minute ago is not still
     /// written across the window in red.
@@ -408,11 +414,38 @@ impl Line {
                 ));
             }
         }
-        if stats.cushioned > 0 {
+        if stats.inserted > 0 {
             said.push(format!(
-                "sip: {} samples of silence were added on purpose to rebuild the                  outgoing cushion",
-                stats.cushioned
+                "sip: {} samples of silence were spliced into what the modem was sending, because it had said nothing for a second",
+                stats.inserted
             ));
+        }
+        if stats.jitter.starved > 0 {
+            said.push(format!(
+                "sip: {} packets had not arrived when the modem needed them (inbound stalls); it heard silence in their place and its own audio went on unbroken, {} of them turned up late",
+                stats.jitter.starved, stats.jitter.late
+            ));
+        }
+        if stats.sent_behind > 0 {
+            said.push(format!(
+                "sip: {} packets went out behind time because the modem loop ran late (nothing lost or added)",
+                stats.sent_behind
+            ));
+        }
+        if stats.fell_behind > 0 {
+            said.push(format!(
+                "sip: the modem loop fell more than a second behind its clock, and {} samples of play-out were skipped",
+                stats.fell_behind
+            ));
+        }
+        if stats.jitter.reanchored > 0 {
+            said.push(format!(
+                "sip: the far end's stream paused and was found again {} times",
+                stats.jitter.reanchored
+            ));
+        }
+        if stats.clock_ppm.abs() >= 1.0 {
+            said.push(format!("sip: the far end's clock ran {:+.0} ppm from ours", stats.clock_ppm));
         }
         if stats.jitter.overflowed > 0 {
             said.push(format!(
@@ -549,6 +582,7 @@ impl Line {
             public: status.public,
             call: status.call,
             peer: status.peer,
+            caller: status.caller,
             media: stats.connected,
             law: stats.connected.then(|| {
                 let law = stats.law.unwrap_or(crate::g711::Law::Mu.encoding_name());
@@ -566,7 +600,8 @@ impl Line {
             concealed: stats.jitter.concealed,
             underruns: stats.underruns,
             underruns_mid_call: stats.underruns_mid_call,
-            cushioned: stats.cushioned,
+            inserted: stats.inserted,
+            starved: stats.jitter.starved,
             last_error: self
                 .error
                 .lock()

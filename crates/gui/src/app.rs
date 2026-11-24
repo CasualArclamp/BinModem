@@ -205,10 +205,14 @@ impl Modulation {
             // V.ARC has no rates to choose among: each end loads the line
             // for what it measures, and nought is how +MS says "unspecified".
             8..=13 => &[0],
+            // Bell 212A, and the Bell 103 it carries for a far end that is
+            // one: a ceiling of 300 asks for the 103 outright.
+            14 => &[300, 1200],
+            15 => &[1200],
             // HST's forward channel: V.17's four trellis rates, 2400 baud.
-            14 => &[7200, 9600, 12_000, 14_400],
+            16 => &[7200, 9600, 12_000, 14_400],
             // The 1986 HST: 9600 and nothing else.
-            15 => &[9600],
+            17 => &[9600],
             // V.34 5.1: "2400 bit/s to 33 600 bit/s in multiples of 2400".
             _ => &[
                 2400, 4800, 7200, 9600, 12_000, 14_400, 16_800, 19_200, 21_600, 24_000, 26_400,
@@ -263,6 +267,27 @@ impl Modulation {
     }
 }
 
+/// What the mode box should change to, when the modem's `+MS` has changed.
+///
+/// `seen` is what the modem held a frame ago and `now` what it holds. Nothing
+/// when it has not changed, when it changed to what the window already shows
+/// (the window's own command arriving), or when it names a carrier the box
+/// has no entry for.
+fn follow(
+    seen: Option<&at::Modulation>,
+    now: &at::Modulation,
+    carrier: usize,
+    held: Modulation,
+) -> Option<(usize, Modulation)> {
+    if seen == Some(now) {
+        return None;
+    }
+    let index = ScopeApp::CARRIERS.iter().position(|(name, _)| *name == now.carrier)?;
+    let modulation =
+        Modulation { automode: now.automode, min_rate: now.min_rate, max_rate: now.max_rate };
+    (index != carrier || modulation != held).then_some((index, modulation))
+}
+
 /// Which view fills the lower panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -270,6 +295,9 @@ enum Tab {
     Transcript,
     /// The signal path, drawn: not there for a socket, which has none.
     Scopes,
+    /// T.30: the page going or arriving, the far end, and how each call
+    /// went. Only on a live line, which is the only thing that places one.
+    Fax,
 }
 
 /// The colours of the faceplate, said once.
@@ -398,6 +426,12 @@ pub struct ScopeApp {
     dial_open: bool,
     dial_number: String,
     dial_last: String,
+    /// The dialler's contacts (see `contacts`), and the row being edited:
+    /// which one (None for a new one), its name and its number.
+    contacts: Vec<crate::contacts::Contact>,
+    contact_edit: Option<(Option<usize>, String, String)>,
+    /// Whether the call now up has been noted against its contact.
+    call_noted: bool,
     /// The SIP account the line is open on, which is what the next run puts
     /// back; and the name the last run left, until the start-up has had its
     /// one chance to act on it.
@@ -448,15 +482,30 @@ pub struct ScopeApp {
     /// told of them.
     dialin: crate::dialin::Settings,
     dialin_sent: Option<crate::dialin::Settings>,
-    /// The fax window: a picture, the page it becomes, and the machine at
-    /// the far end of the call.
+    /// The Fax tab: a picture, the page it becomes, the machine at the far
+    /// end of the call, and how each call went.
     fax: crate::faxwin::Fax,
+    /// What the Fax tab asked of the modem, for the controls to do: the tab
+    /// draws where the session is not to hand.
+    fax_start: Option<crate::faxwin::Start>,
+    /// A SIP call ringing here, and the question it puts.
+    prompt: crate::callprompt::CallPrompt,
+    /// The ring, while one is ringing, and whether the monitor was opened
+    /// for it and so is to be shut again after.
+    ringer: Option<crate::callprompt::Ringer>,
+    ring_opened_monitor: bool,
+    /// What `--answer-as` said to press, for a call with nobody at the
+    /// keyboard: pressed once the question has been up for a moment.
+    answer_as: Option<crate::callprompt::Choice>,
     /// The file transfer window, and the two paths it works with.
     transfer_open: bool,
     send_path: String,
     receive_dir: String,
     /// Whether the line was open on the last frame, for noticing when it opens.
     line_was_open: bool,
+    /// What the modem's `+MS` held on the last frame, for noticing when a
+    /// command changes it.
+    selected_seen: Option<at::Modulation>,
     /// Where a telnet connection is aimed.
     host: String,
     tab: Tab,
@@ -484,6 +533,8 @@ pub struct ScopeApp {
     /// Whether a second V.92 call to the same place may start up the short
     /// way (the other tick under the mode list).
     quick_connect: bool,
+    /// Offer U.S. Robotics x2 as a V.90 or V.92 server (S70).
+    x2: bool,
     blank_seq: Option<u64>,
     last_row: Option<std::time::Instant>,
     /// When the call reached data, for how long it has been there.
@@ -494,6 +545,14 @@ pub struct ScopeApp {
     /// is due.
     script: std::collections::VecDeque<String>,
     script_due: Option<std::time::Instant>,
+    /// What has come in from the line lately, for a script's `@until`, and
+    /// how much of it an `@until` has already used.
+    heard: Vec<u8>,
+    heard_from: usize,
+    /// Keys a script's `@type` or `@key` has still to press, and when the
+    /// next is due.
+    typing: std::collections::VecDeque<u8>,
+    type_due: Option<std::time::Instant>,
     /// Whether the terminal's type is sized to the room it has.
     fit: bool,
     /// When the call first reached each step of the timeline, by the step's
@@ -651,6 +710,9 @@ impl ScopeApp {
             dial_open: false,
             dial_number: String::new(),
             dial_last: String::new(),
+            contacts: crate::contacts::load(),
+            contact_edit: None,
+            call_noted: false,
             // Both filled by `recall` below, out of the settings file.
             sip_line: None,
             sip_restore: None,
@@ -671,8 +733,14 @@ impl ScopeApp {
             dialin: crate::dialin::Settings::default(),
             dialin_sent: None,
             fax: crate::faxwin::Fax::new(),
+            fax_start: None,
+            prompt: crate::callprompt::CallPrompt::default(),
+            ringer: None,
+            ring_opened_monitor: false,
+            answer_as: None,
             transfer_open: false,
             line_was_open: false,
+            selected_seen: None,
             send_path: String::new(),
             receive_dir: "downloads".to_owned(),
             tab: Tab::Terminal,
@@ -690,6 +758,7 @@ impl ScopeApp {
             },
             sip_call_was_up: false,
             pcm_up: true,
+            x2: false,
             quick_connect: !matches!(
                 std::env::var("BINMODEM_V92_QC").as_deref().map(str::trim),
                 Ok("0" | "off" | "no" | "false")
@@ -700,6 +769,10 @@ impl ScopeApp {
             marks: std::collections::VecDeque::new(),
             script: std::collections::VecDeque::new(),
             script_due: None,
+            heard: Vec::new(),
+            heard_from: 0,
+            typing: std::collections::VecDeque::new(),
+            type_due: None,
             fit: true,
             step_at: [None; 6],
             remembered: String::new(),
@@ -895,7 +968,7 @@ impl ScopeApp {
     ///
     /// Positions are what the rate lists, the ceilings and the default go by,
     /// so a new one goes on the end rather than where it might read best.
-    const CARRIERS: [(&'static str, &'static str); 16] = [
+    const CARRIERS: [(&'static str, &'static str); 18] = [
         ("B103", "Bell 103 - 300 bit/s"),
         ("V22B", "V.22bis - 1200 or 2400"),
         ("V32", "V.32 - 4800 or 9600"),
@@ -928,6 +1001,14 @@ impl ScopeApp {
             "V.ARC/QAM two-wire - one carrier at 16000 baud on one pair of wires. The echo is taken out by the first canceller alone, so it settles lower than the multicarrier mode does",
         ),
         ("VARCP2W", "V.ARC/PCM two-wire - levels at baseband on one pair of wires, by the first canceller alone"),
+        (
+            "B212",
+            "Bell 212A - 1200 bit/s, V.22's DPSK with Bell's own handshake. A far end that is a Bell 103 gets 300",
+        ),
+        (
+            "B202",
+            "Bell 202 - 1200 bit/s FSK on one band, half duplex: the two ends take turns. No error control",
+        ),
         (
             "HST",
             "HST - USRobotics' own: 14400 one way and 450 the other, the two swapping ends as the traffic does, with MNP over both. Only another HST modem answers it",
@@ -1119,6 +1200,21 @@ impl ScopeApp {
         if state.open && !self.line_was_open {
             self.assert_settings(&session);
         }
+        // And after that the window follows the modem. `AT+MS=V34` typed at
+        // the terminal changes what the next call is, and a mode box still
+        // showing the old one is the drift the paragraph above is about.
+        // Only on a line that was already open: what a modem holds before the
+        // window has told it anything is a default, not somebody's choice.
+        if state.open
+            && self.line_was_open
+            && let Some(now) = &state.selected
+            && let Some((carrier, modulation)) =
+                follow(self.selected_seen.as_ref(), now, self.carrier, self.modulation)
+        {
+            self.carrier = carrier;
+            self.modulation = modulation;
+        }
+        self.selected_seen.clone_from(&state.selected);
         self.line_was_open = state.open;
 
         self.masthead(ui, Some(&state));
@@ -1661,13 +1757,15 @@ impl ScopeApp {
             {
                 self.transfer_open = !self.transfer_open;
             }
-            if small_key(ui, self.fax.open, "Fax")
+            if small_key(ui, self.tab == Tab::Fax, "Fax")
                 .on_hover_text(
-                    "T.30: send a picture as a fax, and see what the machine answering can do",
+                    "T.30: send a picture or a PDF as a fax, receive one, and see what the \
+                     machine at the far end can do and how each call went. Again for the \
+                     terminal back",
                 )
                 .clicked()
             {
-                self.fax.open = !self.fax.open;
+                self.tab = if self.tab == Tab::Fax { Tab::Terminal } else { Tab::Fax };
             }
             if small_key(ui, self.network_open, "Network")
                 .on_hover_text(
@@ -1770,42 +1868,206 @@ impl ScopeApp {
         // sound-card line has neither.
         self.dialler_window(ui, &session, &state);
         self.credentials_window(ui, &session, state.sip.as_ref());
-        self.fax.observe(&self.frame);
+        let now = ui.input(|i| i.time);
+        self.fax.observe(&self.frame, now);
+        self.fax.exchanged(session.take_fax_exchange());
         // Lines before the page they belong to: a page handed over first
         // would be drawn from scratch and then its own last lines ignored.
-        if let Some(lines) = session.take_fax_lines() {
-            let now = ui.input(|i| i.time);
-            if self.fax.arriving(lines, now) {
-                // Open for a page as it starts rather than once it is over.
-                self.fax.open = true;
-            }
+        if let Some(lines) = session.take_fax_lines()
+            && self.fax.arriving(lines, now)
+        {
+            // The tab for a page as it starts rather than once it is over.
+            self.tab = Tab::Fax;
         }
         while let Some((sheet, page)) = session.take_fax_received() {
             self.fax.arrived(sheet, page);
-            self.fax.open = true;
         }
-        let on_hook = self.frame.state == telemetry::CallState::Idle;
-        if let Some(start) = self.fax.show(ui, on_hook) {
-            if matches!(start, crate::faxwin::Start::HangUp) {
-                // Not an AT command: a fax call sits in the handshake state
-                // where the interpreter does not read one, so the line thread
-                // puts it down directly.
-                session.hang_up();
-            } else {
-                self.fax.trouble = None;
-                // Who this end says it is, and what it is sending, before the
-                // call rather than in it: both go out inside the first frames
-                // this modem sends, which is well before the window is asked
-                // anything again.
-                session.set_fax_identification(self.fax.identification.trim());
-                session.set_fax_offer(&self.fax.ours());
-                session.set_fax_error_correction(self.fax.error_correction);
-                session.set_fax_jbig(self.fax.jbig);
-                session.set_fax_v34(self.fax.v34);
-                session.set_fax_pages(self.fax.pages().to_vec());
-                session.type_bytes(crate::faxwin::Fax::commands(&start).as_bytes());
+        if let Some(start) = self.fax_start.take() {
+            self.start_fax(start, &session);
+        }
+        self.incoming_call(ui, &session, state.sip.as_ref(), now);
+    }
+
+    /// What the Fax tab or the call prompt asked of the modem.
+    fn start_fax(&mut self, start: crate::faxwin::Start, session: &Arc<live::Session>) {
+        if matches!(start, crate::faxwin::Start::HangUp) {
+            // Not an AT command: a fax call sits in the handshake state
+            // where the interpreter does not read one, so the line thread
+            // puts it down directly.
+            self.fax.stopped();
+            session.hang_up();
+            return;
+        }
+        self.fax.trouble = None;
+        if let crate::faxwin::Start::Dial(number) = &start {
+            self.fax.dialled.clone_from(number);
+            self.dial_last.clone_from(number);
+        } else {
+            self.fax.dialled.clear();
+        }
+        self.arm_fax(session);
+        session.type_bytes(crate::faxwin::Fax::commands(&start).as_bytes());
+    }
+
+    /// Who this end says it is, and what it offers and sends, before the
+    /// call rather than in it: all of it goes out inside the first frames
+    /// this modem sends, which is well before the tab is asked anything
+    /// again.
+    fn arm_fax(&self, session: &Arc<live::Session>) {
+        session.set_fax_identification(self.fax.identification.trim());
+        session.set_fax_offer(&self.fax.ours());
+        session.set_fax_error_correction(self.fax.error_correction);
+        session.set_fax_jbig(self.fax.jbig);
+        session.set_fax_v34(self.fax.v34);
+        session.set_fax_pages(self.fax.pages().to_vec());
+    }
+
+    /// A SIP call ringing here: ring, ask, and do what was chosen.
+    ///
+    /// Nothing answers by itself. The question stays in the middle of the
+    /// window until a button is pressed or the caller gives up.
+    fn incoming_call(
+        &mut self,
+        ui: &mut egui::Ui,
+        session: &Arc<live::Session>,
+        sip: Option<&sip::Progress>,
+        now: f64,
+    ) {
+        let call = sip.map(|p| p.call.as_str());
+        let caller = sip.and_then(|p| p.caller.as_deref());
+        self.prompt.observe(call, caller, now);
+        let ctx = ui.ctx().clone();
+        match (self.prompt.ringing().is_some(), self.ringer.is_some()) {
+            (true, false) => {
+                self.ringer = Some(crate::callprompt::Ringer::new(self.sample_rate));
+                // The ring goes out where the line is heard. Not listening,
+                // it is opened for the ring and shut again after.
+                if self.monitor.is_none() {
+                    self.set_listening(true);
+                    self.ring_opened_monitor = self.monitor.is_some();
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                    egui::UserAttentionType::Critical,
+                ));
             }
+            (false, true) => {
+                self.ringer = None;
+                if std::mem::take(&mut self.ring_opened_monitor) {
+                    self.set_listening(false);
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(
+                    egui::UserAttentionType::Reset,
+                ));
+            }
+            _ => {}
         }
+        let Some((who, since)) = self.prompt.ringing() else { return };
+        let who = who.to_owned();
+        if let Some(ringer) = self.ringer.as_mut() {
+            let mut ring = Vec::new();
+            ringer.fill(now, &mut ring);
+            self.sink.push(&ring);
+        }
+        ctx.request_repaint_after(std::time::Duration::from_millis(30));
+        let fax_class = self.frame.fax_class;
+        let pressed = crate::callprompt::dialog(&ctx, &who, now - since, fax_class);
+        // Long enough that the question is seen, the way a person would
+        // take it.
+        let scripted = self.answer_as.filter(|_| now - since > 2.5);
+        if let Some(choice) = pressed.or(scripted)
+            && let Some(choice) = self.prompt.choose(choice, now)
+        {
+            self.take_call(choice, session);
+        }
+    }
+
+    /// Do what the call prompt was told.
+    fn take_call(&mut self, choice: crate::callprompt::Choice, session: &Arc<live::Session>) {
+        use crate::callprompt::Choice;
+        let on_hook = self.frame.state == telemetry::CallState::Idle;
+        match choice {
+            Choice::Decline => session.hang_up(),
+            // On hook, the class first and then ATA, whose answer request is
+            // what picks the SIP call up. A modem already off hook and
+            // answering -- Wait for a fax pressed before the call came --
+            // is left as it is and only the call is picked up.
+            Choice::Modem if on_hook => session.type_bytes(b"AT+FCLASS=0\rATA\r"),
+            Choice::Fax if on_hook => {
+                self.fax.dialled.clear();
+                self.arm_fax(session);
+                session.type_bytes(crate::faxwin::Fax::commands(&crate::faxwin::Start::Answer).as_bytes());
+                self.tab = Tab::Fax;
+            }
+            Choice::Fax => {
+                self.tab = Tab::Fax;
+                session.answer_call();
+            }
+            Choice::Modem => session.answer_call(),
+        }
+    }
+
+    /// The Fax tab, laid out as the Scopes tab is: on the left the call
+    /// card, the constellation and the far end; in the middle the page, as
+    /// large as there is room for, over the waterfall; on the right the
+    /// number, the progress, how the last call went, the document, the rates
+    /// and the calls so far.
+    fn fax_pane(&mut self, ui: &mut egui::Ui) {
+        const CARD_W: f32 = 420.0;
+        const SIDE_W: f32 = 340.0;
+        const WATERFALL: f32 = 150.0;
+        let dt = ui.input(|i| i.stable_dt).clamp(0.0, 0.25);
+        let measured = self.calm.update(&self.frame, dt);
+        let on_hook = self.frame.state == telemetry::CallState::Idle;
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(CARD_W);
+                egui::ScrollArea::vertical()
+                    .id_salt("fax-card")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_width(CARD_W - 14.0);
+                        self.call_card(ui, measured);
+                        ui.add_space(8.0);
+                        self.symbol_row(ui);
+                        self.fax.far_panel(ui);
+                    });
+            });
+            ui.separator();
+            let middle = (ui.available_width() - SIDE_W - 16.0).max(240.0);
+            ui.vertical(|ui| {
+                ui.set_width(middle);
+                let height = ui.available_height();
+                let page = egui::vec2(middle, (height - WATERFALL - 26.0).max(160.0));
+                ui.allocate_ui(page, |ui| {
+                    // The whole of the room, whatever is in it, so that the
+                    // waterfall stays put under it.
+                    ui.set_min_size(page);
+                    self.fax.page_panel(ui);
+                });
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("waterfall").strong());
+                    ui.label(
+                        RichText::new(format!("0 - {:.0} Hz · newest at the top", self.frame.display_hz))
+                            .small()
+                            .color(DIM),
+                    );
+                });
+                self.waterfall.paint(ui, WATERFALL, self.frame.modulation, self.row_secs);
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                ui.set_width(SIDE_W);
+                egui::ScrollArea::vertical()
+                    .id_salt("fax-side")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_width(SIDE_W - 14.0);
+                        if let Some(start) = self.fax.side_panel(ui, on_hook, &mut self.dial_number) {
+                            self.fax_start = Some(start);
+                        }
+                    });
+            });
+        });
     }
 
     /// PPP over the call, and a ping over that.
@@ -2226,265 +2488,440 @@ impl ScopeApp {
             .resizable(false)
             .default_width(3.0 * KEY_W)
             .show(ui.ctx(), |ui| {
-                let width = 3.0 * KEY_W + 2.0 * ui.spacing().item_spacing.x;
+                // The keypad on the left and the contacts on the right. A
+                // contact double-clicked is a call placed from here, once the
+                // keypad side has said whether one can be.
+                let mut from_contacts = None;
+                ui.horizontal_top(|ui| {
+                    ui.vertical(|ui| {
+                        // The keypad's own width: a separator or a label in
+                        // here would otherwise take the whole row.
+                        ui.set_max_width(3.0 * KEY_W + 2.0 * ui.spacing().item_spacing.x);
+                        let width = 3.0 * KEY_W + 2.0 * ui.spacing().item_spacing.x;
 
-                // The number. Monospaced and large, because it is the one
-                // thing in this window that gets read back digit by digit
-                // before anybody presses anything.
-                let entry = ui
-                    .add(
-                        egui::TextEdit::singleline(&mut self.dial_number)
-                            .desired_width(width)
-                            .font(egui::FontId::monospace(17.0))
-                            .hint_text("number"),
-                    )
-                    .on_hover_text(
-                        "A telephone number as it is written down: the spaces, \
-                         brackets and dashes come out on the way to a URI. Or a \
-                         whole SIP address, which goes through untouched, so \
-                         sip:1000@pbx.local reaches an extension that has no \
-                         number at all",
-                    );
-                // Return dials, because a box somebody has just typed a
-                // number into and then has to go and find a button for is a
-                // box that gets typed into twice.
-                let entered =
-                    entry.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        // The number. Monospaced and large, because it is the one
+                        // thing in this window that gets read back digit by digit
+                        // before anybody presses anything.
+                        let entry = ui
+                            .add(
+                                egui::TextEdit::singleline(&mut self.dial_number)
+                                    .desired_width(width)
+                                    .font(egui::FontId::monospace(17.0))
+                                    .hint_text("number"),
+                            )
+                            .on_hover_text(
+                                "A telephone number as it is written down: the spaces, \
+                                 brackets and dashes come out on the way to a URI. Or a \
+                                 whole SIP address, which goes through untouched, so \
+                                 sip:1000@pbx.local reaches an extension that has no \
+                                 number at all",
+                            );
+                        // Return dials, because a box somebody has just typed a
+                        // number into and then has to go and find a button for is a
+                        // box that gets typed into twice.
+                        let entered =
+                            entry.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
-                ui.add_space(4.0);
-                for row in Self::KEYPAD {
-                    ui.horizontal(|ui| {
-                        for (digit, letters) in row {
-                            if key(ui, digit, letters).clicked() {
-                                self.dial_number = keypad(&self.dial_number, digit);
+                        ui.add_space(4.0);
+                        for row in Self::KEYPAD {
+                            ui.horizontal(|ui| {
+                                for (digit, letters) in row {
+                                    if key(ui, digit, letters).clicked() {
+                                        self.dial_number = keypad(&self.dial_number, digit);
+                                    }
+                                }
+                            });
+                        }
+
+                        ui.horizontal(|ui| {
+                            // R was a hook flash: a quarter of a second on-hook, which
+                            // told a switch something and tells a packet network
+                            // nothing whatever. So it redials instead -- a number that
+                            // did not answer is the one most likely to be wanted again
+                            // -- rather than sitting there as a key that does nothing.
+                            let redial = ui
+                                .add_enabled_ui(!self.dial_last.is_empty(), |ui| {
+                                    ui.add_sized(
+                                        [KEY_W, KEY_H],
+                                        egui::Button::new(RichText::new("R").size(15.0).color(bright)),
+                                    )
+                                })
+                                .inner
+                                .on_hover_text("Put the last number dialled back on the display")
+                                .on_disabled_hover_text("Nothing has been dialled yet");
+                            if redial.clicked() {
+                                self.dial_number.clone_from(&self.dial_last);
+                            }
+                            if ui
+                                .add_sized(
+                                    [KEY_W, KEY_H],
+                                    egui::Button::new(RichText::new("+").size(15.0).color(bright)),
+                                )
+                                .on_hover_text(
+                                    "The plus of an international number, which survives \
+                                     into the URI where the brackets and dashes do not",
+                                )
+                                .clicked()
+                            {
+                                self.dial_number = keypad(&self.dial_number, '+');
+                            }
+                            if ui
+                                .add_sized(
+                                    [KEY_W, KEY_H],
+                                    egui::Button::new(RichText::new("C").size(15.0).color(bright)),
+                                )
+                                .on_hover_text("Clear the display")
+                                .clicked()
+                            {
+                                self.dial_number = keypad(&self.dial_number, CLEAR);
+                            }
+                        });
+
+                        ui.add_space(6.0);
+                        if on_a_call {
+                            if ui
+                                .add_sized(
+                                    [width, 30.0],
+                                    egui::Button::new(RichText::new("Hang up").size(15.0)),
+                                )
+                                .on_hover_text(
+                                    "Put the call down: the modem, and the call under it, \
+                                     in one click and whatever either of them is doing",
+                                )
+                                .clicked()
+                            {
+                                // Not `ATH`, which is what this used to type. ATH ends
+                                // the modem's call and says nothing to the trunk, so
+                                // once the modem was on hook with a call still up --
+                                // which happened on a live call -- this button typed a
+                                // command that did nothing at all, and went on offering
+                                // to do it. This path puts down both.
+                                session.hang_up();
+                            }
+                        } else {
+                            let ready = line.is_some()
+                                && !self.dial_number.trim().is_empty()
+                                && missing.is_empty();
+                            // A greyed-out button that does not say why is a fault
+                            // report with the fault left out.
+                            let why_not = if line.is_none() {
+                                "There is no SIP line open. Press Connect, below"
+                                    .to_owned()
+                            } else if !missing.is_empty() {
+                                format!(
+                                    "{} still needs {}",
+                                    account.as_deref().unwrap_or("the account"),
+                                    missing.join(", ")
+                                )
+                            } else {
+                                "Type a number first".to_owned()
+                            };
+                            let call = ui
+                                .add_enabled_ui(ready, |ui| {
+                                    ui.add_sized(
+                                        [width, 30.0],
+                                        egui::Button::new(RichText::new("Call").size(15.0)),
+                                    )
+                                })
+                                .inner
+                                .on_hover_text(
+                                    "ATD -- place the call. It goes out through the \
+                                     terminal below, which is where a call placed by hand \
+                                     goes out from, so the transcript reads the same either \
+                                     way",
+                                )
+                                .on_disabled_hover_text(why_not);
+                            if (call.clicked() || entered) && ready {
+                                self.dial_last.clone_from(&self.dial_number);
+                                session.type_bytes(dial_command(&self.dial_number).as_bytes());
                             }
                         }
+
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.horizontal(|ui| {
+                            let registered = line.is_some_and(|p| p.registered);
+                            let (colour, word) = match (registers, registered) {
+                                (false, _) => (dim, "No registration"),
+                                (true, true) => (good, "Online"),
+                                (true, false) => (bad, "Offline"),
+                            };
+                            // A dot as well as a word, and painted rather than
+                            // written: what fonts are loaded here is the default set,
+                            // and a round glyph is not something to take on trust from
+                            // them.
+                            dot(ui, colour);
+                            let explained = match line {
+                                None => "No SIP line is open. Connect, below, opens one on \
+                                         the account named here"
+                                    .to_owned(),
+                                Some(progress) => match &progress.public {
+                                    Some(address) => format!(
+                                        "The trunk sees this machine at {address}. A wrong \
+                                         one is the usual reason a call connects and carries \
+                                         no audio"
+                                    ),
+                                    None => "The trunk has not said what address it sees us \
+                                             at. Until it has, a call can connect and carry \
+                                             nothing"
+                                        .to_owned(),
+                                },
+                            };
+                            ui.label(RichText::new(word).monospace().color(colour))
+                                .on_hover_text(explained);
+                            if let Some(name) = &account {
+                                ui.label(RichText::new(name).monospace().color(dim));
+                            }
+                        });
+                        // The two buttons on a row of their own, under the state they
+                        // act on. Beside it they made the row wider than the keypad,
+                        // and a window wider than the thing it is for looks like an
+                        // accident.
+                        ui.horizontal(|ui| {
+                            // Opening the line from the window somebody is actually
+                            // looking at. The line row above does the same thing, and
+                            // the two are two views of one line rather than two lines.
+                            if line.is_some() {
+                                if ui
+                                    .add(egui::Button::new("Disconnect").small())
+                                    .on_hover_text(
+                                        "Put the line down. The registration goes with it, \
+                                         so the trunk stops offering calls to this machine",
+                                    )
+                                    .clicked()
+                                {
+                                    session.close();
+                                }
+                            } else {
+                                let ready = account.is_some() && missing.is_empty();
+                                // A trunk answers a placeholder password with a refusal
+                                // and no explanation, so the button says what is wrong
+                                // rather than letting the trunk say nothing.
+                                let why_not = match &account {
+                                    None => "There are no accounts. Open Credentials and add \
+                                             one"
+                                        .to_owned(),
+                                    Some(name) => {
+                                        format!("{name} still needs {}", missing.join(", "))
+                                    }
+                                };
+                                let connect = ui
+                                    .add_enabled(ready, egui::Button::new("Connect").small())
+                                    .on_hover_text(if state.open {
+                                        "Register with the trunk and wait for a number to \
+                                         dial. This takes the line off the sound card: a call \
+                                         and a pair of devices cannot both be the line"
+                                    } else {
+                                        "Register with the trunk and wait for a number to dial"
+                                    })
+                                    .on_disabled_hover_text(why_not);
+                                if connect.clicked()
+                                    && let Some(name) = &account
+                                {
+                                    session.open_sip(name);
+                                    // The row shows the kind of line; which account
+                                    // it is on is this picker, so point it at the one
+                                    // the call is going out on.
+                                    self.chosen_line = 1;
+                                    if let Some(i) =
+                                        self.sip_edit.iter().position(|a| a.name == *name)
+                                    {
+                                        self.sip_chosen = i;
+                                    }
+                                }
+                            }
+                            if ui
+                                .small_button("Credentials")
+                                .on_hover_text(
+                                    "What the provider gave us: the SIP server, the \
+                                     username, the password and which transport to reach it \
+                                     over",
+                                )
+                                .clicked()
+                            {
+                                self.sip_open = !self.sip_open;
+                            }
+                        });
+                        // Where the call has got to, in the agent's own words, and
+                        // who is at the other end of it.
+                        if let Some(progress) = line.filter(|p| p.call != sip::ua::state::IDLE) {
+                            let said = match &progress.peer {
+                                Some(peer) => format!("{} -- {peer}", progress.call),
+                                None => progress.call.clone(),
+                            };
+                            ui.label(RichText::new(said).monospace().small().color(bright));
+                        }
+                        if let Some(why) = line.and_then(|p| p.last_error.as_ref()) {
+                            ui.label(RichText::new(why).small().color(bad));
+                        }
                     });
-                }
-
-                ui.horizontal(|ui| {
-                    // R was a hook flash: a quarter of a second on-hook, which
-                    // told a switch something and tells a packet network
-                    // nothing whatever. So it redials instead -- a number that
-                    // did not answer is the one most likely to be wanted again
-                    // -- rather than sitting there as a key that does nothing.
-                    let redial = ui
-                        .add_enabled_ui(!self.dial_last.is_empty(), |ui| {
-                            ui.add_sized(
-                                [KEY_W, KEY_H],
-                                egui::Button::new(RichText::new("R").size(15.0).color(bright)),
-                            )
-                        })
-                        .inner
-                        .on_hover_text("Put the last number dialled back on the display")
-                        .on_disabled_hover_text("Nothing has been dialled yet");
-                    if redial.clicked() {
-                        self.dial_number.clone_from(&self.dial_last);
-                    }
-                    if ui
-                        .add_sized(
-                            [KEY_W, KEY_H],
-                            egui::Button::new(RichText::new("+").size(15.0).color(bright)),
-                        )
-                        .on_hover_text(
-                            "The plus of an international number, which survives \
-                             into the URI where the brackets and dashes do not",
-                        )
-                        .clicked()
-                    {
-                        self.dial_number = keypad(&self.dial_number, '+');
-                    }
-                    if ui
-                        .add_sized(
-                            [KEY_W, KEY_H],
-                            egui::Button::new(RichText::new("C").size(15.0).color(bright)),
-                        )
-                        .on_hover_text("Clear the display")
-                        .clicked()
-                    {
-                        self.dial_number = keypad(&self.dial_number, CLEAR);
-                    }
+                    ui.separator();
+                    from_contacts = self.contacts_column(ui, dim);
                 });
-
-                ui.add_space(6.0);
-                if on_a_call {
-                    if ui
-                        .add_sized(
-                            [width, 30.0],
-                            egui::Button::new(RichText::new("Hang up").size(15.0)),
-                        )
-                        .on_hover_text(
-                            "Put the call down: the modem, and the call under it, \
-                             in one click and whatever either of them is doing",
-                        )
-                        .clicked()
-                    {
-                        // Not `ATH`, which is what this used to type. ATH ends
-                        // the modem's call and says nothing to the trunk, so
-                        // once the modem was on hook with a call still up --
-                        // which happened on a live call -- this button typed a
-                        // command that did nothing at all, and went on offering
-                        // to do it. This path puts down both.
-                        session.hang_up();
-                    }
-                } else {
-                    let ready = line.is_some()
-                        && !self.dial_number.trim().is_empty()
-                        && missing.is_empty();
-                    // A greyed-out button that does not say why is a fault
-                    // report with the fault left out.
-                    let why_not = if line.is_none() {
-                        "There is no SIP line open. Press Connect, below"
-                            .to_owned()
-                    } else if !missing.is_empty() {
-                        format!(
-                            "{} still needs {}",
-                            account.as_deref().unwrap_or("the account"),
-                            missing.join(", ")
-                        )
-                    } else {
-                        "Type a number first".to_owned()
-                    };
-                    let call = ui
-                        .add_enabled_ui(ready, |ui| {
-                            ui.add_sized(
-                                [width, 30.0],
-                                egui::Button::new(RichText::new("Call").size(15.0)),
-                            )
-                        })
-                        .inner
-                        .on_hover_text(
-                            "ATD -- place the call. It goes out through the \
-                             terminal below, which is where a call placed by hand \
-                             goes out from, so the transcript reads the same either \
-                             way",
-                        )
-                        .on_disabled_hover_text(why_not);
-                    if (call.clicked() || entered) && ready {
+                if let Some(number) = from_contacts {
+                    self.dial_number = number;
+                    if line.is_some() && missing.is_empty() && !on_a_call {
                         self.dial_last.clone_from(&self.dial_number);
                         session.type_bytes(dial_command(&self.dial_number).as_bytes());
                     }
                 }
-
-                ui.add_space(6.0);
-                ui.separator();
-                ui.horizontal(|ui| {
-                    let registered = line.is_some_and(|p| p.registered);
-                    let (colour, word) = match (registers, registered) {
-                        (false, _) => (dim, "No registration"),
-                        (true, true) => (good, "Online"),
-                        (true, false) => (bad, "Offline"),
-                    };
-                    // A dot as well as a word, and painted rather than
-                    // written: what fonts are loaded here is the default set,
-                    // and a round glyph is not something to take on trust from
-                    // them.
-                    dot(ui, colour);
-                    let explained = match line {
-                        None => "No SIP line is open. Connect, below, opens one on \
-                                 the account named here"
-                            .to_owned(),
-                        Some(progress) => match &progress.public {
-                            Some(address) => format!(
-                                "The trunk sees this machine at {address}. A wrong \
-                                 one is the usual reason a call connects and carries \
-                                 no audio"
-                            ),
-                            None => "The trunk has not said what address it sees us \
-                                     at. Until it has, a call can connect and carry \
-                                     nothing"
-                                .to_owned(),
-                        },
-                    };
-                    ui.label(RichText::new(word).monospace().color(colour))
-                        .on_hover_text(explained);
-                    if let Some(name) = &account {
-                        ui.label(RichText::new(name).monospace().color(dim));
-                    }
-                });
-                // The two buttons on a row of their own, under the state they
-                // act on. Beside it they made the row wider than the keypad,
-                // and a window wider than the thing it is for looks like an
-                // accident.
-                ui.horizontal(|ui| {
-                    // Opening the line from the window somebody is actually
-                    // looking at. The line row above does the same thing, and
-                    // the two are two views of one line rather than two lines.
-                    if line.is_some() {
-                        if ui
-                            .add(egui::Button::new("Disconnect").small())
-                            .on_hover_text(
-                                "Put the line down. The registration goes with it, \
-                                 so the trunk stops offering calls to this machine",
-                            )
-                            .clicked()
-                        {
-                            session.close();
-                        }
-                    } else {
-                        let ready = account.is_some() && missing.is_empty();
-                        // A trunk answers a placeholder password with a refusal
-                        // and no explanation, so the button says what is wrong
-                        // rather than letting the trunk say nothing.
-                        let why_not = match &account {
-                            None => "There are no accounts. Open Credentials and add \
-                                     one"
-                                .to_owned(),
-                            Some(name) => {
-                                format!("{name} still needs {}", missing.join(", "))
-                            }
-                        };
-                        let connect = ui
-                            .add_enabled(ready, egui::Button::new("Connect").small())
-                            .on_hover_text(if state.open {
-                                "Register with the trunk and wait for a number to \
-                                 dial. This takes the line off the sound card: a call \
-                                 and a pair of devices cannot both be the line"
-                            } else {
-                                "Register with the trunk and wait for a number to dial"
-                            })
-                            .on_disabled_hover_text(why_not);
-                        if connect.clicked()
-                            && let Some(name) = &account
-                        {
-                            session.open_sip(name);
-                            // The row shows the kind of line; which account
-                            // it is on is this picker, so point it at the one
-                            // the call is going out on.
-                            self.chosen_line = 1;
-                            if let Some(i) =
-                                self.sip_edit.iter().position(|a| a.name == *name)
-                            {
-                                self.sip_chosen = i;
-                            }
-                        }
-                    }
-                    if ui
-                        .small_button("Credentials")
-                        .on_hover_text(
-                            "What the provider gave us: the SIP server, the \
-                             username, the password and which transport to reach it \
-                             over",
-                        )
-                        .clicked()
-                    {
-                        self.sip_open = !self.sip_open;
-                    }
-                });
-                // Where the call has got to, in the agent's own words, and
-                // who is at the other end of it.
-                if let Some(progress) = line.filter(|p| p.call != sip::ua::state::IDLE) {
-                    let said = match &progress.peer {
-                        Some(peer) => format!("{} -- {peer}", progress.call),
-                        None => progress.call.clone(),
-                    };
-                    ui.label(RichText::new(said).monospace().small().color(bright));
-                }
-                if let Some(why) = line.and_then(|p| p.last_error.as_ref()) {
-                    ui.label(RichText::new(why).small().color(bad));
-                }
             });
         self.dial_open = open;
+    }
+
+    /// The dialler's right-hand column: the contacts, each with how the last
+    /// call to it went. A click puts the number on the display; a double
+    /// click asks for it to be called, which is returned for the caller to
+    /// place, since only the keypad side knows whether a call can go out.
+    fn contacts_column(&mut self, ui: &mut egui::Ui, dim: Color32) -> Option<String> {
+        const WIDTH: f32 = 250.0;
+        let mut call = None;
+        let mut changed = false;
+        let now = crate::contacts::now();
+        ui.vertical(|ui| {
+            ui.set_width(WIDTH);
+            ui.label(RichText::new("contacts").monospace().color(dim));
+            if self.contacts.is_empty() && self.contact_edit.is_none() {
+                ui.label(
+                    RichText::new("None yet. Type a number and press Add.")
+                        .small()
+                        .color(dim),
+                );
+            }
+            egui::ScrollArea::vertical().max_height(KEY_H * 6.0).show(ui, |ui| {
+                // Full width, text from the left: a list, not a row of buttons.
+                ui.with_layout(egui::Layout::top_down_justified(egui::Align::LEFT), |ui| {
+                for (i, contact) in self.contacts.iter().enumerate() {
+                    let selected = crate::contacts::key(&contact.number)
+                        == crate::contacts::key(&self.dial_number)
+                        && !self.dial_number.trim().is_empty();
+                    let under = contact
+                        .last
+                        .as_ref()
+                        .map_or_else(|| "not called yet".to_owned(), |l| crate::contacts::describe(l, now));
+                    let mut text = egui::text::LayoutJob::default();
+                    let body = ui.style().text_styles[&egui::TextStyle::Body].clone();
+                    let colour = ui.visuals().text_color();
+                    text.append(&contact.name, 0.0, egui::TextFormat::simple(body, colour));
+                    text.append(
+                        &format!("   {}\n", contact.number),
+                        0.0,
+                        egui::TextFormat::simple(egui::FontId::monospace(12.0), dim),
+                    );
+                    text.append(&under, 0.0, egui::TextFormat::simple(egui::FontId::monospace(11.0), dim));
+                    let row = ui
+                        .add(egui::Button::selectable(selected, text))
+                        .on_hover_text("Click to put the number on the display, double-click to call it");
+                    if row.double_clicked() {
+                        call = Some(contact.number.clone());
+                    } else if row.clicked() {
+                        self.dial_number.clone_from(&contact.number);
+                        self.contact_edit = None;
+                    }
+                    if row.secondary_clicked() {
+                        self.contact_edit = Some((Some(i), contact.name.clone(), contact.number.clone()));
+                    }
+                }
+                });
+            });
+
+            let chosen = crate::contacts::find(&self.contacts, &self.dial_number);
+            if let Some((which, name, number)) = self.contact_edit.as_mut() {
+                ui.add(egui::TextEdit::singleline(name).desired_width(WIDTH).hint_text("name"));
+                ui.add(
+                    egui::TextEdit::singleline(number)
+                        .desired_width(WIDTH)
+                        .font(egui::FontId::monospace(13.0))
+                        .hint_text("number"),
+                );
+                let which = *which;
+                let (name, number) = (name.trim().to_owned(), number.trim().to_owned());
+                ui.horizontal(|ui| {
+                    let can_save = !number.is_empty();
+                    if ui.add_enabled(can_save, egui::Button::new("Save").small()).clicked() {
+                        let name = if name.is_empty() { number.clone() } else { name.clone() };
+                        match which {
+                            Some(i) if i < self.contacts.len() => {
+                                // A changed number is a different place: what
+                                // the last call there did says nothing of it.
+                                if crate::contacts::key(&self.contacts[i].number) != crate::contacts::key(&number) {
+                                    self.contacts[i].last = None;
+                                }
+                                self.contacts[i].name = name;
+                                self.contacts[i].number = number.clone();
+                            }
+                            _ => self.contacts.push(crate::contacts::Contact { name, number: number.clone(), last: None }),
+                        }
+                        self.dial_number = number.clone();
+                        self.contact_edit = None;
+                        changed = true;
+                    }
+                    if ui.small_button("Cancel").clicked() {
+                        self.contact_edit = None;
+                    }
+                    if let Some(i) = which
+                        && ui.small_button("Delete").clicked()
+                    {
+                        if i < self.contacts.len() {
+                            self.contacts.remove(i);
+                        }
+                        self.contact_edit = None;
+                        changed = true;
+                    }
+                });
+            } else {
+                ui.horizontal(|ui| {
+                    if ui
+                        .small_button("Add")
+                        .on_hover_text("A new contact, starting from the number on the display")
+                        .clicked()
+                    {
+                        self.contact_edit = Some((None, String::new(), self.dial_number.trim().to_owned()));
+                    }
+                    if let Some(i) = chosen
+                        && ui
+                            .small_button("Edit")
+                            .on_hover_text("Change the name or number of the contact on the display (or right-click it)")
+                            .clicked()
+                    {
+                        let c = &self.contacts[i];
+                        self.contact_edit = Some((Some(i), c.name.clone(), c.number.clone()));
+                    }
+                });
+            }
+        });
+        if changed && let Err(e) = crate::contacts::save(&self.contacts) {
+            self.contact_edit = None;
+            eprintln!("contacts: could not save: {e}");
+        }
+        call
+    }
+
+    /// A call this end placed has come up: note how against its contact.
+    /// Once a call, when the rates are known; answered calls are not
+    /// anybody's last call out.
+    fn note_last_call(&mut self) {
+        let f = &self.frame;
+        match f.state {
+            telemetry::CallState::Idle => self.call_noted = false,
+            telemetry::CallState::Connected if !self.call_noted && !f.leds.aa && !self.dial_last.is_empty() => {
+                if let Some(down) = f.bit_rate {
+                    self.call_noted = true;
+                    let last = crate::contacts::Last {
+                        mode: f.modulation.replace(' ', ""),
+                        down,
+                        up: f.tx_bit_rate.unwrap_or(down),
+                        when: crate::contacts::now(),
+                    };
+                    if crate::contacts::record(&mut self.contacts, &self.dial_last, last)
+                        && let Err(e) = crate::contacts::save(&self.contacts)
+                    {
+                        eprintln!("contacts: could not save: {e}");
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     /// The accounts themselves: what the provider gave us, and what this end
@@ -3155,6 +3592,8 @@ impl ScopeApp {
         let (mode, two_wire) = if self.v8bis { self.varc_bis } else { (0, false) };
         out.push(format!("AT+VARCBIS={mode},{}", u8::from(two_wire)));
         out.extend(self.protection.commands());
+        // After AT&F, which puts S70 back to 0.
+        out.push(format!("ATS70={}", u8::from(self.x2)));
         out
     }
 
@@ -4050,22 +4489,80 @@ impl ScopeApp {
         }
     }
 
+    /// What `--answer-as` asked for.
+    pub fn answer_as(&mut self, how: &str) -> Result<(), String> {
+        use crate::callprompt::Choice;
+        self.answer_as = Some(match how {
+            "fax" => Choice::Fax,
+            "modem" => Choice::Modem,
+            other => return Err(format!("--answer-as is fax or modem, not {other}")),
+        });
+        Ok(())
+    }
+
+    /// What `--fax` asked for: the Fax tab as the one to open on.
+    pub fn open_fax_tab(&mut self, fax: bool) {
+        if fax && self.source.is_live() {
+            self.tab = Tab::Fax;
+        }
+    }
+
     /// Type the next scripted line when it is due: the first a second and a
     /// half after the line opens, and one a second after that, which is
     /// longer than the modem takes to answer any command but a dial.
     fn run_script(&mut self) {
         let Source::Live(session) = &self.source else { return };
-        if self.script.is_empty() || !session.state().open {
+        let session = Arc::clone(session);
+        if !session.state().open {
             return;
         }
         let now = std::time::Instant::now();
-        let due = *self.script_due.get_or_insert(now + std::time::Duration::from_millis(1500));
-        if now >= due
-            && let Some(line) = self.script.pop_front()
-        {
-            session.type_bytes(format!("{line}\r").as_bytes());
-            self.script_due = Some(now + std::time::Duration::from_secs(1));
+        // A line being typed, a key at a time at a person's speed.
+        if let Some(&key) = self.typing.front() {
+            if self.type_due.is_none_or(|due| now >= due) {
+                session.type_bytes(&[key]);
+                self.typing.pop_front();
+                self.type_due = Some(now + std::time::Duration::from_millis(key_gap(key)));
+                if self.typing.is_empty() {
+                    self.script_due = Some(now + std::time::Duration::from_millis(500));
+                }
+            }
+            return;
         }
+        let due = *self.script_due.get_or_insert(now + std::time::Duration::from_millis(1500));
+        if now < due {
+            return;
+        }
+        let Some(line) = self.script.front().cloned() else { return };
+        match script_step(&line) {
+            Step::Until(text) => {
+                let looked = &self.heard[self.heard_from.min(self.heard.len())..];
+                if let Some(at) = looked.windows(text.len().max(1)).position(|w| w == text.as_bytes()) {
+                    self.heard_from += at + text.len();
+                    self.script.pop_front();
+                }
+                return;
+            }
+            Step::Wait(seconds) => {
+                self.script_due = Some(now + std::time::Duration::from_secs_f64(seconds));
+            }
+            Step::Type(keys) => self.typing.extend(keys),
+            Step::Files(open) => self.transfer_open = open,
+            Step::Receive => session.receive_into(self.receive_dir.trim().into()),
+            Step::Tab(name) => {
+                self.tab = match name.as_str() {
+                    "scopes" => Tab::Scopes,
+                    "fax" => Tab::Fax,
+                    "transcript" => Tab::Transcript,
+                    _ => Tab::Terminal,
+                };
+            }
+            Step::Now(bytes) => {
+                session.type_bytes(&bytes);
+                self.script_due = Some(now + std::time::Duration::from_secs(1));
+            }
+        }
+        self.script.pop_front();
     }
 
     /// The type's size: fitted to the room, or set by hand.
@@ -4340,6 +4837,15 @@ impl ScopeApp {
             // enough to label which one it is in.
             if !data.is_empty() {
                 self.console.feed_screen(&data);
+                if !self.script.is_empty() || !self.typing.is_empty() {
+                    self.heard.extend_from_slice(&data);
+                    const KEEP: usize = 64 * 1024;
+                    if self.heard.len() > KEEP {
+                        let gone = self.heard.len() - KEEP;
+                        self.heard.drain(..gone);
+                        self.heard_from = self.heard_from.saturating_sub(gone);
+                    }
+                }
             }
             // Some of what arrives is a question rather than something to
             // draw, and a board that asks one and hears nothing concludes it
@@ -4444,18 +4950,20 @@ impl ScopeApp {
     /// A modulation and nothing else. The rate is the modem's to find: every
     /// one of these settles on the fastest the line will carry, and a ceiling
     /// set on purpose is in the Advanced window with the rest of AT+MS.
-    const MODES: [(usize, &'static str); 16] = [
+    const MODES: [(usize, &'static str); 18] = [
         (7, "V.92"),
         (5, "V.90"),
         (4, "V.34"),
         (3, "V.32bis"),
         (2, "V.32"),
         (1, "V.22bis"),
+        (14, "Bell 212A"),
+        (15, "Bell 202"),
         (6, "V.21"),
         (0, "Bell 103"),
         // Not a Recommendation's, and only for another of its kind.
-        (14, "HST"),
-        (15, "HST 9600"),
+        (16, "HST"),
+        (17, "HST 9600"),
         // Not slower than the rest: not for the same kind of line at all.
         (8, "V.ARC"),
         (9, "V.ARC/QAM"),
@@ -4543,6 +5051,22 @@ impl ScopeApp {
             {
                 self.quick_connect = quick;
                 session.set_quick_connect(quick);
+            }
+            // U.S. Robotics' own 56k of 1997, for its modems that never had
+            // V.90. Only a server can offer it, and only to a caller that
+            // offers V.34 and no PCM: a V.90 caller still gets V.90.
+            let server = matches!(Self::CARRIERS[self.carrier].0, "V90" | "V92");
+            let mut x2 = self.x2;
+            if ui
+                .add_enabled(server, egui::Checkbox::new(&mut x2, "x2"))
+                .on_hover_text(
+                    "Answering as a V.90 or V.92 server: offer U.S. Robotics x2 to a caller that offers V.34 and no V.90, as a USR modem from before its V.90 upgrade does. Up to 56000 down, V.34 up. Mu-law lines only. Same as ATS70=1. Takes effect from the next call.",
+                )
+                .on_disabled_hover_text("Choose V.90 or V.92 above to offer x2 as a server")
+                .clicked()
+            {
+                self.x2 = x2;
+                session.set_x2(x2);
             }
 
             ui.separator();
@@ -5395,6 +5919,9 @@ impl ScopeApp {
             if !self.source.is_telnet() {
                 ui.selectable_value(&mut self.tab, Tab::Scopes, "scopes");
             }
+            if self.source.is_live() {
+                ui.selectable_value(&mut self.tab, Tab::Fax, "fax");
+            }
             ui.separator();
             // A socket has no command state to be in, so saying which one it
             // was in would be answering a question nobody asked.
@@ -5477,6 +6004,7 @@ impl ScopeApp {
             }
             Tab::Transcript => self.transcript(ui),
             Tab::Scopes => self.scopes_pane(ui),
+            Tab::Fax => self.fax_pane(ui),
         }
     }
 
@@ -5491,12 +6019,14 @@ impl ScopeApp {
         let dim = Color32::from_rgb(140, 150, 165);
         let bright = Color32::from_rgb(220, 225, 235);
         ui.add_space(6.0);
-        ui.label(RichText::new("distant").strong());
+        // Not only V.8's menu: everything the far end has said about itself
+        // and everything the two ends settled, from V.8 bis to XID.
+        ui.label(RichText::new("distant modem and call").strong());
         ui.add_space(4.0);
         if self.frame.distant.is_empty() {
             ui.label(
                 RichText::new(
-                    "Nothing said yet. A far end describes itself in the V.8 menu, in the detection phase, and in XID -- and a call that gets none of the way through says nothing at all.",
+                    "Nothing said yet. A far end describes itself in V.8 bis and V.8, in phase 2's INFO sequences, in Jd and CP, in the detection phase and in XID -- and a call that gets none of the way through says nothing at all.",
                 )
                 .small()
                 .color(dim),
@@ -5671,6 +6201,8 @@ fn family(modulation: &str) -> (Color32, Option<u32>, &'static str) {
     match name {
         "Bell 103" | "V.21" => (FSK, Some(300), "Frequency-shift keying: a pair of tones each way, 300 bit/s."),
         "V.22bis" => (QAM, Some(600), "QAM at 600 baud on two carriers, 1200 Hz calling and 2400 Hz answering."),
+        "Bell 212A" => (QAM, Some(600), "Four-phase DPSK at 600 baud, 1200 Hz calling and 2400 Hz answering: V.22's modulation."),
+        "Bell 202" => (FSK, Some(1200), "Frequency-shift keying, 1200 Hz mark and 2200 Hz space, one direction at a time."),
         "V.32" | "V.32bis" => (
             QAM,
             Some(2400),
@@ -5717,9 +6249,64 @@ fn stage(ui: &mut egui::Ui, health: Color32, name: &str, text: String) -> egui::
     .response
 }
 
+/// One line of a `--type` script.
+#[derive(Debug, Clone, PartialEq)]
+enum Step {
+    /// Typed at once and Enter after it, a second before the next line: an
+    /// AT command, as scripts always typed them.
+    Now(Vec<u8>),
+    /// `@type text` (and Enter) or `@key k` (just that): keys pressed one at
+    /// a time at a person's speed.
+    Type(Vec<u8>),
+    /// `@wait 2.5`: seconds of nothing.
+    Wait(f64),
+    /// `@until text`: nothing until the line has shown that text.
+    Until(String),
+    /// `@tab scopes` (or terminal, transcript, fax): show that tab.
+    Tab(String),
+    /// `@files` and `@files off`: the file transfer window open or shut.
+    Files(bool),
+    /// `@receive`: take a file the far end sends by ZMODEM, into the folder
+    /// the file window names.
+    Receive,
+}
+
+fn script_step(line: &str) -> Step {
+    if let Some(text) = line.strip_prefix("@until ") {
+        return Step::Until(text.to_owned());
+    }
+    if line == "@receive" {
+        return Step::Receive;
+    }
+    if line == "@files" || line == "@files off" {
+        return Step::Files(line == "@files");
+    }
+    if let Some(name) = line.strip_prefix("@tab ") {
+        return Step::Tab(name.trim().to_owned());
+    }
+    if let Some(seconds) = line.strip_prefix("@wait ") {
+        return Step::Wait(seconds.trim().parse().unwrap_or(1.0));
+    }
+    if let Some(text) = line.strip_prefix("@type ") {
+        return Step::Type(text.bytes().chain(std::iter::once(b'\r')).collect());
+    }
+    if let Some(key) = line.strip_prefix("@key ") {
+        return Step::Type(key.as_bytes().to_vec());
+    }
+    Step::Now(format!("{line}\r").into_bytes())
+}
+
+/// How long after a key the next is pressed, in milliseconds: a person
+/// typing, uneven but steady, a little slower after a space.
+fn key_gap(key: u8) -> u64 {
+    let base = 70 + u64::from(key).wrapping_mul(37) % 80;
+    if key == b' ' { base + 60 } else { base }
+}
+
 impl eframe::App for ScopeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.poll();
+        self.note_last_call();
         // Anything the last frame changed, kept for the next run. Cheap when
         // nothing moved, which is almost every frame.
         self.remember();
@@ -6205,7 +6792,7 @@ const _: () = assert!(FFT_SIZE / 2 == SPECTRUM_BINS);
 
 #[cfg(test)]
 mod modulation_tests {
-    use super::{Modulation, ScopeApp};
+    use super::{Modulation, ScopeApp, follow};
 
     /// The rate lists are indexed by the same number the carrier box is, so
     /// the two orders have to stay together. Nothing else enforces it.
@@ -6226,8 +6813,8 @@ mod modulation_tests {
         // downstream is whatever the route allows, and +MS does not name it.
         assert_eq!(ScopeApp::CARRIERS[5].0, "V90");
         assert_eq!(Modulation::rates(5), Modulation::rates(4));
-        assert_eq!(ScopeApp::CARRIERS[14].0, "HST");
-        assert_eq!(Modulation::rates(14), &[7200, 9600, 12_000, 14_400]);
+        assert_eq!(ScopeApp::CARRIERS[16].0, "HST");
+        assert_eq!(Modulation::rates(16), &[7200, 9600, 12_000, 14_400]);
         assert_eq!(ScopeApp::CARRIERS[6].0, "V21");
         assert_eq!(Modulation::rates(6), &[300]);
         // V.92's are V.90's: the same V.34 upstream unless PCM upstream is on.
@@ -6241,9 +6828,13 @@ mod modulation_tests {
             m.fit(i);
             assert_eq!(m.command(name), format!("AT+MS={name},1"));
         }
-        assert_eq!(ScopeApp::CARRIERS.len(), 16);
-        assert_eq!(ScopeApp::CARRIERS[15].0, "HST96");
-        assert_eq!(Modulation::rates(15), &[9600]);
+        assert_eq!(ScopeApp::CARRIERS[14].0, "B212");
+        assert_eq!(Modulation::rates(14), &[300, 1200]);
+        assert_eq!(ScopeApp::CARRIERS[15].0, "B202");
+        assert_eq!(Modulation::rates(15), &[1200]);
+        assert_eq!(ScopeApp::CARRIERS.len(), 18);
+        assert_eq!(ScopeApp::CARRIERS[17].0, "HST96");
+        assert_eq!(Modulation::rates(17), &[9600]);
     }
 
     /// The two V.32 carriers are two ceilings on one modulation, and the
@@ -6260,6 +6851,34 @@ mod modulation_tests {
         let mut listed: Vec<usize> = ScopeApp::MODES.iter().map(|m| m.0).collect();
         listed.sort_unstable();
         assert_eq!(listed, (0..ScopeApp::CARRIERS.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_mode_box_follows_a_typed_ms() {
+        let ms = |carrier: &str, automode, min_rate, max_rate| at::Modulation {
+            carrier: carrier.into(),
+            automode,
+            min_rate,
+            max_rate,
+        };
+        let held = Modulation::default();
+        let v22b = ms("V22B", true, 0, 0);
+        // AT+MS=V34 typed under a box showing V.22bis: the box moves.
+        let typed = ms("V34", true, 0, 0);
+        assert_eq!(follow(Some(&v22b), &typed, 1, held), Some((4, held)));
+        // A ceiling typed with it comes too.
+        let capped = ms("V22B", false, 1200, 1200);
+        assert_eq!(
+            follow(Some(&v22b), &capped, 1, held),
+            Some((1, Modulation { automode: false, min_rate: 1200, max_rate: 1200 }))
+        );
+        // Nothing changed at the modem, so whatever the window is composing
+        // is left alone.
+        assert_eq!(follow(Some(&typed), &typed, 1, held), None);
+        // The window's own command arriving is not news to it.
+        assert_eq!(follow(Some(&v22b), &typed, 4, held), None);
+        // A name the box has no entry for moves nothing.
+        assert_eq!(follow(Some(&v22b), &ms("V23C", true, 0, 0), 1, held), None);
     }
 
     #[test]
@@ -6324,6 +6943,19 @@ mod modulation_tests {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_script_line_says_what_to_do() {
+        assert_eq!(script_step("ATD123"), Step::Now(b"ATD123\r".to_vec()));
+        assert_eq!(script_step("@type rory"), Step::Type(b"rory\r".to_vec()));
+        assert_eq!(script_step("@key c"), Step::Type(b"c".to_vec()));
+        assert_eq!(script_step("@wait 2.5"), Step::Wait(2.5));
+        assert_eq!(script_step("@until login: "), Step::Until("login: ".to_owned()));
+        assert_eq!(script_step("@tab scopes"), Step::Tab("scopes".to_owned()));
+        assert_eq!(script_step("@receive"), Step::Receive);
+        assert_eq!(script_step("@files off"), Step::Files(false));
+        assert!((40..=250).contains(&key_gap(b'a')) && key_gap(b' ') > key_gap(b'a').min(149));
+    }
+
     use super::*;
 
     /// What one machine with both cables installed actually reports.

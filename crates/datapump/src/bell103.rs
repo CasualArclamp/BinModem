@@ -366,6 +366,29 @@ impl Modem {
         }
     }
 
+    /// A Bell 103 that picks up from where a Bell 212A gave up on 1200.
+    ///
+    /// Its carrier goes up at once and it waits only for the far end to sit
+    /// at idle mark. A 212A that falls back has already had its answer tone
+    /// heard (the answering end) or already heard one (the calling end), and
+    /// that tone is Bell 103's answering mark, so the waiting that a plain
+    /// 103 does before raising its carrier has been done.
+    pub fn marking(role: Role, fs: f64) -> Self {
+        let mut modem = Self::new(role, fs);
+        modem.tx.set_transmitting(true);
+        modem.phase = Phase::Marking;
+        modem
+    }
+
+    /// [`Self::marking`] on another set of tones: V.21's answering mark, sent
+    /// at once by an answerer whose answer tone has already been sent.
+    pub fn marking_with_plan(plan: Plan, role: Role, fs: f64) -> Self {
+        let mut modem = Self::with_plan(plan, role, fs);
+        modem.tx.set_transmitting(true);
+        modem.phase = Phase::Marking;
+        modem
+    }
+
     /// Take one sample from the line and give back the one to put on it.
     pub fn step(&mut self, line: f64) -> f64 {
         if let Some(byte) = self.rx.feed(line)

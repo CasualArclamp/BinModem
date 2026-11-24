@@ -260,6 +260,21 @@ const JD_WITHIN: f64 = 4.5;
 /// has to have been read by then.
 const SU_WITHIN: f64 = 5.0;
 
+/// How long after the fit on TRN1d the first Su is held back.
+///
+/// A6 lets this end choose its moment: Su goes out "no later than 5000 ms
+/// after the silence of A3 began", and the digital modem repeats Jd until it
+/// comes. The moment straight after Jd is the one bad one. The fit is the one
+/// place in Phase 3 where this end stops to think, and on a line that is a
+/// packet stream whatever is made while the sound catches up leaves late.
+/// Jd is read some twenty milliseconds after the fit, and the 144T of Su and
+/// the 24.5T of S-bar-u that follow are over in twenty-one more: a far end
+/// with an 80 ms jitter buffer threw the whole of them away as late and heard
+/// only the Su that runs on after them, with no reversal in it (issue 54).
+/// A fifth of a second is several times what the fit takes on a slow machine,
+/// and a twenty-fifth of what A6 allows.
+const SU_HOLD: f64 = 0.2;
+
 /// A11: CPt "shall start within 5000 ms of sending the S-bar-u of A8".
 const CPT_WITHIN: f64 = 5.0;
 
@@ -299,6 +314,32 @@ pub const UINFO: u8 = 79;
 /// which is only the right reading for a far end that stays silent until a CPt
 /// arrives.
 pub const ZERO_DIL_A10_ORDER: bool = true;
+
+/// A gain on B1u and the data after it, from `BINMODEM_V92_UP_GAIN` in the
+/// environment, and 1 otherwise. An experiment switch, not a setting.
+///
+/// 8.8.3 has the digital modem choose G "assuming that, when the prefilter
+/// output multiplied by G has a mean-square value of 1, the analogue modem will
+/// transmit at the desired power" (3.8), which leaves the server to judge that
+/// power from the training. D-Modem does, and our data lands on its CPd's
+/// points at a scale of exactly 1 (`captures/dmodem-v92.wav`). Two V.92
+/// servers behind one ISP built constellations for an upstream about 9 dB
+/// louder: our B1u and data, put through `sip::Media`'s own 16 to 8 kHz
+/// conversion, land on their CPds' points only when scaled by 2.81 or 2.82
+/// (`live-1795260804`, `live-1795262282`), and both retrained as B1u reached
+/// them. Training is left alone because that is what a server measures; only
+/// what the CPd shapes is scaled. Whether a live call to them then connects is
+/// what this is for.
+fn up_gain() -> f64 {
+    static GAIN: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *GAIN.get_or_init(|| {
+        std::env::var("BINMODEM_V92_UP_GAIN")
+            .ok()
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .filter(|gain| gain.is_finite() && *gain > 0.0 && *gain <= 4.0)
+            .unwrap_or(1.0)
+    })
+}
 
 /// Whether V92_TRACE in the environment is set, so that a start-up that will not
 /// find its place is legible.
@@ -371,6 +412,13 @@ pub struct Settings {
     /// Clear, CPt follows the DIL at once and is [`Self::cpt`]. With no DIL
     /// asked for there is nothing to wait for and this changes nothing.
     pub choice_follows_dil: bool,
+    /// Whether this modem reads the DIL itself and chooses the CPt and the
+    /// CPu from it ([`crate::v92::dil`]), inside the power and under the rate
+    /// this names: what an owner that set [`Self::choice_follows_dil`] would
+    /// do, done here. A route that carries none of the rates Jd enables
+    /// leaves the choice to [`Self::cpt`] and [`Self::rate_from_line`], as if
+    /// no DIL had been asked for. With no DIL asked for this changes nothing.
+    pub read_dil: Option<crate::v92::dil::Reading>,
     /// The round trip, from Phase 2's ranging: the deadlines that carry an RTD
     /// term use it.
     pub round_trip: f64,
@@ -409,6 +457,7 @@ impl Settings {
             cpt,
             cpu: None,
             choice_follows_dil: false,
+            read_dil: None,
             round_trip: 0.0,
             since_info1a: 0.0,
             law: Law::Mu,
@@ -674,13 +723,14 @@ impl Source {
             // when the prefilter output multiplied by G has a mean-square
             // value of 1, the analogue modem will transmit at the desired
             // power" (3.8).
-            Up::B1u => self.b1u.pop_front().unwrap_or(0.0),
+            Up::B1u => self.b1u.pop_front().unwrap_or(0.0) * up_gain(),
             Up::Data => {
                 let outbound = &mut self.outbound;
                 // Circuit 106 follows 105 from here (9.6.2.1.5). With nothing
                 // to send, circuit 103 rests at binary one, and the scrambler
                 // makes a signal of it.
-                self.encoder.as_mut().map_or(0.0, |encoder| encoder.next_symbol(|| outbound.pop_front().unwrap_or(true)).out)
+                let out = self.encoder.as_mut().map_or(0.0, |encoder| encoder.next_symbol(|| outbound.pop_front().unwrap_or(true)).out);
+                out * up_gain()
             }
         }
     }
@@ -1121,7 +1171,12 @@ pub struct Modem {
     sd_deadline: Option<u64>,
     jd_deadline: Option<u64>,
     su_by: Option<u64>,
+    /// The symbol before which the first Su does not start ([`SU_HOLD`]).
+    su_from: Option<u64>,
     cpt_by: Option<u64>,
+    /// When the first CPt began, so that an Ri heard before the digital
+    /// modem could have read a whole one is not taken for its answer.
+    cpt_began: Option<u64>,
     start_up_by: u64,
     /// The level U_INFO stands for, as a fraction of full scale: the
     /// equaliser was trained to call it one, so this turns its output back
@@ -1240,7 +1295,9 @@ impl Modem {
             sd_deadline: None,
             jd_deadline: None,
             su_by: None,
+            su_from: None,
             cpt_by: None,
+            cpt_began: None,
             start_up_by,
             status: Status::Running,
             notes: Vec::new(),
@@ -1338,6 +1395,12 @@ impl Modem {
     #[must_use]
     pub fn pair(&self) -> Option<(f64, f64)> {
         self.scope.pair()
+    }
+
+    /// The scale [`Self::pair`]'s points are drawn at.
+    #[must_use]
+    pub fn pair_peak(&self) -> f64 {
+        self.scope.peak()
     }
 
     /// The downstream's levels and their power, once there is a constellation
@@ -1464,6 +1527,41 @@ impl Modem {
         true
     }
 
+    /// Whether the CPt waits for a choice made from the DIL: an owner's
+    /// ([`Settings::choice_follows_dil`]) or this modem's own
+    /// ([`Settings::read_dil`]).
+    fn waits_for_choice(&self) -> bool {
+        self.settings.choice_follows_dil || self.settings.read_dil.is_some()
+    }
+
+    /// [`Settings::read_dil`]: once a pass of the DIL has arrived, the CPt
+    /// and the CPu chosen from it. Done once; a route with nothing to choose
+    /// gives the choice back to [`Settings::cpt`] and the line.
+    fn read_own_dil(&mut self) {
+        let Some(reading) = self.settings.read_dil else { return };
+        // A pass and the margin `dil::route` finds the pass's start in.
+        let wanted = self.settings.descriptor.len() + crate::v92::dil::MARGIN;
+        if self.chosen || !self.dil_received() || self.dil.len() < wanted {
+            return;
+        }
+        let jd = self.far_jd.unwrap_or_default();
+        let s = &self.settings;
+        match crate::v92::dil::choose(&s.descriptor, s.law, self.unit, &self.dil, &jd, reading, &s.cpt) {
+            Ok(chosen) => {
+                if self.choose(chosen.training, chosen.data) {
+                    self.notes.push(chosen.note);
+                } else {
+                    self.notes.push("the DIL's choice came too late for the CPt".into());
+                    self.settings.read_dil = None;
+                }
+            }
+            Err(why) => {
+                self.notes.push(format!("nothing chosen from the DIL: {why}"));
+                self.settings.read_dil = None;
+            }
+        }
+    }
+
     /// How long this modem has been running, in symbols.
     #[must_use]
     pub fn elapsed(&self) -> u64 {
@@ -1482,6 +1580,7 @@ impl Modem {
         while let Some(heard) = self.rx.heard() {
             self.heard(heard);
         }
+        self.read_own_dil();
         if tracing() && self.now.is_multiple_of(2000) {
             eprintln!(
                 "V92ATRACE: {} symbols, {}, up {:?}, trained {}, snr {:.1}",
@@ -1543,6 +1642,15 @@ impl Modem {
                 if self.stage == Stage::Opening && self.source.count >= self.lead_in {
                     self.begin_ru();
                 }
+                // A6: Jd has been read, and Su answers it.
+                if self.stage == Stage::Jd
+                    && self.far_jd.is_some()
+                    && self.su_from.is_none_or(|from| self.now >= from)
+                {
+                    self.source.start(Up::Su);
+                    self.su_short = true;
+                    self.stage = Stage::Su;
+                }
             }
             Up::Ru => {
                 if self.source.count >= RU_SYMBOLS {
@@ -1603,7 +1711,7 @@ impl Modem {
                         // CPt is to come from it, has been read.
                         self.source.count >= self.trn1u_over_dil()
                             && self.dil_complete()
-                            && (self.chosen || !self.settings.choice_follows_dil)
+                            && (self.chosen || !self.waits_for_choice())
                     };
                     if due {
                         self.begin_cpt();
@@ -1624,6 +1732,22 @@ impl Modem {
                     self.source.start(Up::SuBar);
                     self.delays.push(HALF_SYMBOL);
                     self.su_short = false;
+                } else if self.stage == Stage::AfterJp
+                    && self.source.count.is_multiple_of(UP_INTERVALS as u64)
+                    && let Some(jp) = self.jp
+                {
+                    // A8: Jp has been read. 8.5.6 has Su in whole twelves, so
+                    // the Su running on is turned over at the end of one and
+                    // not at whichever symbol Jp's last bit arrived on: turned
+                    // over part of the way through a period it is a jump of
+                    // phase and not a reversal, and the digital modem cannot
+                    // time it. Jp comes in frames of seventy-two symbols, and
+                    // an Su started the moment Jd was read happened to keep
+                    // step with them; one started at any other time does not.
+                    self.source.start(Up::SuBar);
+                    // "S-bar-u for 24T plus epsilon" is a lasting delay of the
+                    // transmitter, not extra symbols (8.5.6).
+                    self.delays.push(f64::from(jp.epsilon) / EPSILON_STEPS);
                 }
             }
             Up::SuBar => {
@@ -2055,6 +2179,9 @@ impl Modem {
         if self.cpd.as_ref().is_none_or(|previous| previous.ack != cpd.ack) {
             self.notes.push(format!("CPd for drn {}, {} bit/s, ack {}", merged.drn, parameters.rate(), cpd.ack));
         }
+        if down_tracing() {
+            eprintln!("CPDFULL {merged:?}");
+        }
         self.cpd = Some(merged);
         self.parameters = Some(parameters);
         self.exchange.peer_cp(PeerCp { ack: cpd.ack }, self.now);
@@ -2148,6 +2275,7 @@ impl Modem {
         self.source.start(Up::Cpt);
         self.stage = Stage::Cpt;
         self.cpt_by = None;
+        self.cpt_began = Some(self.now);
         self.notes.push(format!("CPt for drn {}", self.settings.cpt.drn));
     }
 
@@ -2270,6 +2398,7 @@ impl Modem {
         let base = self.rx.symbols() - self.rx.history_len() as u64;
         let at = from.saturating_sub(base);
         if self.rx.train_near(at, TRAIN_SEARCH) {
+            self.su_from = Some(self.now + (SU_HOLD * FS) as u64);
             self.reader = TwoPointReader::differential_with(Mode::Call);
             self.window.clear();
             self.stage = Stage::Jd;
@@ -2317,7 +2446,25 @@ impl Modem {
                     return;
                 }
                 let Some(bit) = self.reader.feed(symbol.value) else { return };
-                self.zeroes = if bit { 0 } else { self.zeroes + 1 };
+                // Counted from the end of a whole Jp only: the twelve bits
+                // after one are the next Jp's frame sync, which is ones, or
+                // Jp'. Twelve zeroes anywhere would do inside a Jp -- an
+                // epsilon of 32768 is fifteen of them -- and the DIL was then
+                // counted from the middle of the Jps, two thousand symbols
+                // before it came.
+                self.window.push_back(bit);
+                while self.window.len() > JD_BITS {
+                    self.window.pop_front();
+                }
+                let whole_jp = self.window.len() == JD_BITS
+                    && matches!(J::from_bits(&self.window.iter().copied().collect::<Vec<_>>()), Some(J::Jp(_)));
+                self.zeroes = if whole_jp {
+                    0
+                } else if bit || self.zeroes == usize::MAX {
+                    usize::MAX
+                } else {
+                    self.zeroes + 1
+                };
                 if self.zeroes == JP_PRIME_BITS {
                     self.jp_prime = true;
                     self.dil_left = self.settings.descriptor.len();
@@ -2329,28 +2476,26 @@ impl Modem {
     }
 
     fn heard_frame(&mut self, j: J) {
+        if std::env::var_os("V92_J_TRACE").is_some() {
+            eprintln!("V92JTRACE: {:?} at {} in {:?}", j, self.now, self.stage);
+        }
         match (self.stage, j) {
             (Stage::Jd, J::Jd(jd)) if self.far_jd.is_none() => {
                 self.far_jd = Some(jd);
                 self.su_by = None;
                 self.jd_deadline = None;
-                // A6: Su at once, for 144T. This end may wait up to 5 s for a
-                // better moment and has no reason to.
-                self.source.start(Up::Su);
-                self.su_short = true;
-                self.stage = Stage::Su;
                 self.notes.push(format!("Jd read, lookahead {}", jd.lookahead));
+                // A6: Su for 144T, once the fit is far enough behind
+                // ([`SU_HOLD`]); `advance` starts it.
             }
             (Stage::Su, J::Jp(jp)) if self.jp.is_none() => {
                 self.jp = Some(jp);
                 // A8: circuit 107 comes on when a CRC-valid Jp with bit 47 set
                 // arrives.
                 self.circuit107 = true;
+                // The S-bar-u that answers it starts where the Su in flight
+                // next completes a twelfth symbol; `advance` sends it.
                 self.stage = Stage::AfterJp;
-                self.source.start(Up::SuBar);
-                // "S-bar-u for 24T plus epsilon" is a lasting delay of the
-                // transmitter, not extra symbols (8.5.6).
-                self.delays.push(f64::from(jp.epsilon) / EPSILON_STEPS);
                 self.cpt_by = Some(self.now + ((CPT_WITHIN + self.settings.round_trip) * FS) as u64);
                 self.notes.push(format!("Jp read, epsilon {} and 107 on", jp.epsilon));
             }
@@ -2361,7 +2506,18 @@ impl Modem {
     /// Ri: the digital modem has read a CPt, so the CPt series ends (A11).
     fn ri(&mut self, at: u64) {
         match self.stage {
+            // Ri answers a CPt the digital modem has read (9.5.1.1.12), so
+            // none can arrive before one whole CPt has gone out. What sounds
+            // like one sooner, with a DIL asked for, is the DIL: a segment of
+            // it can hold Ru's shape for the periods the hunt asks, and taking
+            // it for Ri cut the CPt short of being read at all. (SCR, in the
+            // DIL's place when none was asked for, never looks like Ru.)
             Stage::Cpt if !self.zero_dil_a10() => {
+                let whole = self.cpt_began.map_or(0, |began| began + self.source.cpt_bits.len() as u64);
+                if !self.settings.descriptor.is_empty() && self.now < whole {
+                    self.notes.push(format!("Ri at {at} is too soon to answer the CPt: the DIL"));
+                    return;
+                }
                 self.source.stop = true;
                 self.notes.push(format!("Ri at {at}, CPt ends"));
             }
@@ -2934,6 +3090,8 @@ mod phase4_tests {
         /// after the DIL's last it takes to choose them.
         choice: Option<(Cp, Cp, u32)>,
         notes: Vec<String>,
+        /// Every symbol the modem has sent, from its first step.
+        line: Vec<f64>,
     }
 
     impl Call {
@@ -2966,6 +3124,7 @@ mod phase4_tests {
                 cpts: Vec::new(),
                 choice: None,
                 notes: Vec::new(),
+                line: Vec::new(),
             }
         }
 
@@ -3046,6 +3205,7 @@ mod phase4_tests {
                 *n += 1;
             }
             let up = self.modem.step(down);
+            self.line.push(up);
             // `phase` names the signal the symbol just sent belongs to.
             let phase = self.modem.phase();
             let over_dil = phase == "V.92 phase 3: TRN1u over the DIL";
@@ -3155,6 +3315,51 @@ mod phase4_tests {
             assert!(zeros.iter().all(|&bit| !bit), "E2u is scrambled zeros (8.7.2): {zeros:?}");
             1 + e2u / width + e2u_symbols
         }
+    }
+
+    /// A6 to A8 as the line sees them (issue 54). The first Su waits out
+    /// [`SU_HOLD`] after the fit on TRN1d, so that it never leaves in the
+    /// burst of sound that follows the fit; and what goes out is 144T of Su,
+    /// 24T of S-bar-u, Su for a whole number of twelves and 24T of S-bar-u
+    /// again, each a clean reversal of the one before, whatever symbol Jp's
+    /// last bit arrived on.
+    #[test]
+    fn su_waits_out_the_fit_and_turns_over_on_whole_twelves() {
+        let mut call = Call::new(settings());
+        let (mut trained, mut jd, mut ticks) = (None, None, 0u64);
+        let mut sent = Vec::new();
+        while call.modem.phase() != "V.92 phase 3: TRN1u over the DIL" {
+            assert!(ticks < 60_000, "no second TRN1u: {:?}", call.notes);
+            call.tick();
+            ticks += 1;
+            if trained.is_none() && call.notes.iter().any(|note| note.starts_with("TRN1d trained")) {
+                trained = Some(ticks);
+            }
+            if jd.is_none() && call.notes.iter().any(|note| note.starts_with("Jd read")) {
+                jd = Some(ticks);
+            }
+            let up = call.line[call.line.len() - 1];
+            if jd.is_some() && (!sent.is_empty() || up != 0.0) {
+                sent.push((ticks, up));
+            }
+        }
+        // The symbol that changed the phase is TRN1u's first.
+        sent.pop();
+        let (trained, jd) = (trained.expect("trained"), jd.expect("Jd"));
+        let from = sent[0].0;
+        assert!(jd < from, "Jd was read at {jd} and Su began at {from}");
+        assert!(from - trained >= (SU_HOLD * FS) as u64, "Su began {} symbols after the fit", from - trained);
+        assert!(from - trained < (SU_HOLD * FS) as u64 + 16, "Su began {} symbols after the fit", from - trained);
+
+        let levels: Vec<f64> = sent.iter().map(|&(_, up)| up).collect();
+        let running = levels.len() - (SU_SYMBOLS + 2 * SU_BAR_SYMBOLS) as usize;
+        assert!(running > 0 && running.is_multiple_of(UP_INTERVALS), "the Su that runs on was {running} symbols");
+        let mut wanted = Vec::new();
+        for (length, bar) in [(SU_SYMBOLS as usize, false), (SU_BAR_SYMBOLS as usize, true), (running, false), (SU_BAR_SYMBOLS as usize, true)] {
+            wanted.extend((0..length as u64).map(|n| su(n, bar)));
+        }
+        assert_eq!(levels, wanted, "Su, S-bar-u, Su, S-bar-u");
+        assert_eq!(call.modem.delays().len(), 2, "the half symbol and epsilon: {:?}", call.modem.delays());
     }
 
     /// 9.6.2.1 from end to end: the whole of Phase 4 against a digital modem

@@ -108,6 +108,7 @@ fn the_analogue_modem_asks_for_v90_and_names_its_training_codeword() {
                 Info::Info1aPcmUp(_) => "INFO1a (V.92 PCM upstream)",
                 Info::Info1aV34Up(_) => "INFO1a (V.92 Table 19)",
                 Info::Mh(_) => "MH",
+                Info::X2Marker(_) => "x2 marker",
             };
             (*side, kind)
         })

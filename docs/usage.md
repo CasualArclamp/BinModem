@@ -48,6 +48,24 @@ exactly those and nothing else — the modem has one interface, and a button
 that reached past it would be able to ask for things a terminal could not. The
 scopes show the call as it happens rather than a recording of somebody else's.
 
+`AT+MS=B212` is Bell 212A: 1200 bit/s, V.22's four-phase DPSK behind Bell's
+own handshake. The answering end waits two seconds and sends 2225 Hz, which is
+also Bell 103's answering mark; a calling 212A answers that with scrambled
+ones at 1200, a calling 103 with its 1270 Hz mark, and the answering end goes
+whichever way it heard. A calling 212A that offers 1200 and hears only a steady
+mark back falls back to 103 too, so a B212 reaches a 103 at either end at
+300. `AT+MS=B212,1,300,300` asks for the 103 outright. Error control runs at
+1200, as over V.22, and not at 300.
+
+`AT+MS=B202` is Bell 202: 1200 bit/s FSK, mark 1200 Hz and space 2200 Hz,
+both ends in the one band and so taking turns. An end with something to send
+waits for a quiet line, raises its carrier for 33 ms, sends, and ends with
+10 ms of the 900 Hz soft carrier turn-off; the answering end waits longer for
+quiet than the calling end, so two ends with something to say at once do not
+both key. There is no error control over it, no reverse channel, and no
+carrier to lose: an idle half-duplex line has none, so the call is up until a
+hang-up says otherwise. Neither Bell modem uses V.8.
+
 An ordinary `ATD` now negotiates before it starts. V.250 6.4.1 names the
 mechanism — `<automode>` "enables or disables automatic modulation negotiation
 (e.g., Annex A/V.32 bis or ITU-T Rec. V.8)" — and it is on by default, so the

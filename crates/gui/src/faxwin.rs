@@ -1,4 +1,5 @@
-//! The fax window: a picture, a page, and what the machine at the far end is.
+//! The Fax tab: a picture, a page, what the machine at the far end is, and
+//! how each call went.
 //!
 //! Everything the page needs is done here and now, before any line is
 //! involved: a fax is a page long before it is a signal, and the part that
@@ -9,7 +10,8 @@ use eframe::egui;
 use egui::{Color32, RichText};
 use fax::coding::Coding;
 use fax::page::{Grey, Halftone, Page, Resolution};
-use fax::t30;
+use fax::call::Exchanged;
+use fax::t30::{self, Frame};
 use std::sync::Arc;
 
 use crate::document;
@@ -21,7 +23,6 @@ use crate::live::Arriving;
 /// nobody wants printed.
 #[derive(Default)]
 pub struct Fax {
-    pub open: bool,
     /// Where the picture came from, and what went wrong if it did not.
     pub path: String,
     pub trouble: Option<String>,
@@ -42,10 +43,21 @@ pub struct Fax {
     /// of a call is tens of milliseconds a frame spent recomputing numbers
     /// that cannot have changed.
     coded_bits: [usize; 4],
+    /// The same, a page at a time, for the time left on the page going.
+    coded_pages: Vec<[usize; 4]>,
+    /// Where each line of a page ends in its bits, in the coding a call is
+    /// sending it in, worked out the first time a call sends that page that
+    /// way.
+    line_ends: Vec<Option<LineMap>>,
     /// Which of the pages the preview is of.
     showing: usize,
     /// A small copy of that page for the window to draw.
     preview: Option<egui::TextureHandle>,
+    /// Pels to a texel across the preview, as it was made.
+    preview_scale: usize,
+    /// How big the page is drawn, the same for the page going and the page
+    /// arriving.
+    zoom: Zoom,
     pub resolution: Resolution,
     pub halftone: Halftone,
     /// Which modulations this end is willing to use.
@@ -61,6 +73,9 @@ pub struct Fax {
     pub jbig: bool,
     /// What the far end said, once it has said anything.
     pub far: Option<t30::Capabilities>,
+    /// The field it was read from, as it arrived: a DIS when this end is
+    /// sending, and the caller's DCS when this end is receiving.
+    far_field: Option<Vec<u8>>,
     pub far_identity: String,
     /// The far end's NSF, if it sent one.
     pub far_non_standard: Option<Vec<u8>>,
@@ -83,9 +98,21 @@ pub struct Fax {
     pub sending: bool,
     /// Whether the modem is a fax rather than a modem just now.
     pub fax_class: bool,
-    /// The number to dial, and what this end calls itself.
-    pub number: String,
+    /// What this end calls itself. The number to dial is the dialler's.
     pub identification: String,
+    /// The calls since the window opened, the last the one in progress if
+    /// one is.
+    pub calls: Vec<CallRecord>,
+    /// A page of an earlier call opened from the list: which call, which of
+    /// its pages, and its picture.
+    opened: Option<(usize, usize, Scan)>,
+    /// Which page the big picture shows.
+    pub view: View,
+    /// Lines arriving: when the page's count was taken, the count, and lines
+    /// a second since.
+    pace: Option<(f64, usize, f64)>,
+    /// Who the call in progress is to, until the far end says who it is.
+    pub dialled: String,
     /// What this call's page is going, or went, in -- kept from the moment a
     /// page starts moving until the call is over, so that it does not blink
     /// out in the turnaround between one page and the next.
@@ -104,6 +131,15 @@ pub struct Fax {
     pub saved: Option<String>,
 }
 
+/// A page's line ends in one coding: being worked out on a thread of its
+/// own -- a dense page at fine is most of a second of coding and decoding,
+/// which the window would otherwise spend frozen as the page starts -- or
+/// ready, with the page's bits in all.
+enum LineMap {
+    Working(&'static str, std::sync::mpsc::Receiver<(Vec<usize>, usize)>),
+    Ready(&'static str, Vec<usize>, usize),
+}
+
 /// What the pages to send are made from.
 enum Source {
     /// A picture: grey with square pixels, fitted to the paper as one page.
@@ -116,7 +152,7 @@ enum Source {
 /// What a page is carried in: its coding, the modulation under it and its
 /// rates, and whether error correction is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Carried {
+pub struct Carried {
     coding: &'static str,
     modulation: &'static str,
     rate: u32,
@@ -135,18 +171,9 @@ pub enum Start {
     HangUp,
 }
 
-/// The preview is drawn at a size a window can hold, not at 1728 across.
-const PREVIEW_WIDTH: usize = 288;
-
-/// Pels of the page to one texel of the picture of it arriving, across it.
-const SCAN_ACROSS: usize = 3;
-
-/// Texels across that picture: a third of 1728, which is twice the preview of
-/// the page going out -- this one is for watching, and that one for checking.
-const SCAN_WIDTH: usize = fax::page::WIDTH / SCAN_ACROSS;
-
-/// How tall the picture of a page arriving gets before it scrolls, in points.
-const SCAN_HEIGHT: f32 = 440.0;
+/// Texels across the picture of a page arriving: one for every pel, so the
+/// page is drawn a screen pixel a pel with nothing smoothed or averaged.
+const SCAN_WIDTH: usize = fax::page::WIDTH;
 
 /// What the picture's texture holds below the last row drawn.
 const UNSCANNED: Color32 = Color32::from_rgb(24, 28, 36);
@@ -227,13 +254,160 @@ fn non_standard_rows(fif: &[u8]) -> Vec<(&'static str, String)> {
     ]
 }
 
-/// How big to draw `rows` rows of a page arriving, across `width` points.
+/// Screen pixels down for each line at `resolution`: as many as make the
+/// pels square, at least one -- two at standard, one at fine and above.
+fn pixels_per_line(resolution: Resolution) -> usize {
+    (fax::page::PELS_PER_MM / resolution.lines_per_mm()).round().max(1.0) as usize
+}
+
+/// How big to draw a picture `width` texels across and `rows` down, in
+/// points, each texel `m` screen pixels square: never a fraction of a pixel,
+/// so nothing is smoothed.
+fn picture_size(ppp: f32, width: usize, rows: usize, m: usize) -> egui::Vec2 {
+    egui::vec2((width * m) as f32 / ppp, (rows * m) as f32 / ppp)
+}
+
+/// Row `row` of a page drawn `n` pels to a texel, onto `out`.
 ///
-/// The width is the width whatever the rows, and the rows are as tall as the
-/// width makes them: the page's own shape, scaled to fit across and growing
-/// only downwards.
-fn picture_size(width: f32, rows: usize) -> egui::Vec2 {
-    egui::vec2(width, rows as f32 * width / SCAN_WIDTH as f32)
+/// The page is taken with each line repeated [`pixels_per_line`] times, so
+/// its pels are square, and each texel is the ink of the `n` by `n` block
+/// under it: black or white at 1:1, and grey where a block is part ink when
+/// shrunk, so a thin line fades rather than vanishing. A block past the
+/// last line counts only what is there.
+fn block_row(lines: &[Vec<bool>], ppl: usize, n: usize, row: usize, out: &mut Vec<Color32>) {
+    let width = SCAN_WIDTH.div_ceil(n);
+    let tall = lines.len() * ppl;
+    let (y0, y1) = (row * n, ((row + 1) * n).min(tall));
+    for tx in 0..width {
+        let (x0, x1) = (tx * n, ((tx + 1) * n).min(SCAN_WIDTH));
+        let mut ink = 0;
+        for sy in y0..y1 {
+            let line = &lines[sy / ppl];
+            for x in x0..x1 {
+                ink += usize::from(line.get(x).is_some_and(|pel| *pel));
+            }
+        }
+        let count = ((y1 - y0) * (x1 - x0)).max(1);
+        let v = (255 - ink * 255 / count) as u8;
+        out.push(Color32::from_rgb(v, v, v));
+    }
+}
+
+/// How much of a page the panel shows: whole screen pixels to a texel, or
+/// whole texels to a screen pixel, and nothing in between.
+///
+/// Until the wheel is turned over the page it fits the page across the
+/// panel, shrinking it by the least whole number that does; the wheel then
+/// steps through 1:7 .. 1:2, 1:1, 2:1 .. 8:1 about the pointer, and a
+/// double click goes back to fitting.
+#[derive(Default)]
+struct Zoom {
+    /// The level the wheel chose, if it has: below zero shrinks by one
+    /// more than its size, zero is 1:1, above it magnifies by one more.
+    level: Option<i32>,
+    /// Wheel turned but not yet a whole step.
+    wheel: f32,
+    /// Where the page was shown last frame and how far it was scrolled.
+    inner: Option<egui::Rect>,
+    offset: egui::Vec2,
+}
+
+/// Points of a touchpad's scrolling to a step of zoom, about a notch of a
+/// mouse wheel.
+const ZOOM_STEP: f32 = 50.0;
+
+impl Zoom {
+    /// The level that fits the page across `room` screen pixels: 1:1 when
+    /// it does, never magnified.
+    fn fit(room: f32) -> i32 {
+        1 - (SCAN_WIDTH as f32 / room.max(1.0)).ceil().max(1.0) as i32
+    }
+
+    /// Pels to a texel, and screen pixels to a texel, at `level`.
+    fn factors(level: i32) -> (usize, usize) {
+        if level < 0 { ((1 - level) as usize, 1) } else { (1, (level + 1) as usize) }
+    }
+
+    fn scale(level: i32) -> f32 {
+        let (n, m) = Self::factors(level);
+        m as f32 / n as f32
+    }
+
+    /// Take the wheel and a double click over the page, before it is
+    /// drawn: the pels to a texel, screen pixels to a texel, the level, and
+    /// where to scroll to keep the spot under the pointer still if the zoom
+    /// changed.
+    fn begin(&mut self, ui: &mut egui::Ui, room: f32) -> (usize, usize, i32, Option<egui::Vec2>) {
+        let fit = Self::fit(room);
+        let old = self.level.unwrap_or(fit);
+        let mut new = old;
+        let mut anchor = None;
+        let pointer = ui.input(|i| i.pointer.hover_pos());
+        match (self.inner, pointer) {
+            (Some(inner), Some(p)) if inner.contains(p) => {
+                // Steps from the wheel itself, a notch a step, and the
+                // scrolling it would have done taken away from the page.
+                self.wheel += ui.input_mut(|i| {
+                    i.smooth_scroll_delta = egui::Vec2::ZERO;
+                    i.raw
+                        .events
+                        .iter()
+                        .map(|e| match e {
+                            egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta, .. } => {
+                                delta.y / ZOOM_STEP
+                            }
+                            egui::Event::MouseWheel { delta, .. } => delta.y,
+                            _ => 0.0,
+                        })
+                        .sum::<f32>()
+                });
+                while self.wheel >= 1.0 {
+                    new += 1;
+                    self.wheel -= 1.0;
+                }
+                while self.wheel <= -1.0 {
+                    new -= 1;
+                    self.wheel += 1.0;
+                }
+                new = new.clamp(-6, 7);
+                if ui.input(|i| i.pointer.button_double_clicked(egui::PointerButton::Primary)) {
+                    self.level = None;
+                    new = fit;
+                } else if new != old {
+                    self.level = Some(new);
+                }
+                if new != old {
+                    let at = p - inner.min;
+                    let r = Self::scale(new) / Self::scale(old);
+                    anchor = Some(((self.offset + at) * r - at).max(egui::Vec2::ZERO));
+                }
+            }
+            _ => self.wheel = 0.0,
+        }
+        let (n, m) = Self::factors(new);
+        (n, m, new, anchor)
+    }
+
+    /// Where the page was shown, for the next frame's wheel, and the zoom
+    /// in the corner.
+    fn end(&mut self, ui: &egui::Ui, inner: egui::Rect, offset: egui::Vec2, level: i32) {
+        self.inner = Some(inner);
+        self.offset = offset;
+        let (n, m) = Self::factors(level);
+        let text = format!(
+            "{m}:{n}{} · wheel to zoom, double click to fit",
+            if self.level.is_none() { " fit" } else { "" }
+        );
+        let font = egui::FontId::monospace(11.0);
+        let galley = ui.painter().layout_no_wrap(text, font, Color32::from_gray(200));
+        let at = egui::pos2(inner.right() - galley.size().x - 18.0, inner.top() + 4.0);
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(at, galley.size()).expand(3.0),
+            3.0,
+            Color32::from_rgba_unmultiplied(13, 17, 23, 210),
+        );
+        ui.painter().galley(at, galley, Color32::from_gray(200));
+    }
 }
 
 /// A page arriving, drawn as it comes in.
@@ -260,6 +434,8 @@ struct Scan {
     texture: Option<egui::TextureHandle>,
     capacity: usize,
     uploaded: usize,
+    /// Pels to a texel, across and down the squared-up page.
+    scale: usize,
 }
 
 impl Scan {
@@ -282,24 +458,49 @@ impl Scan {
             texture: None,
             capacity: 0,
             uploaded: 0,
+            scale: 1,
+        }
+    }
+
+    /// Texels across the picture.
+    fn width(&self) -> usize {
+        SCAN_WIDTH.div_ceil(self.scale)
+    }
+
+    /// Draw `n` pels to a texel from now on: every row again from the lines
+    /// kept, and a texture to match.
+    fn set_scale(&mut self, n: usize) {
+        let n = n.max(1);
+        if n == self.scale {
+            return;
+        }
+        self.scale = n;
+        self.pixels.clear();
+        self.rows = 0;
+        self.texture = None;
+        self.capacity = 0;
+        self.uploaded = 0;
+        self.finish_rows();
+    }
+
+    fn finish_rows(&mut self) {
+        let ppl = pixels_per_line(self.resolution);
+        while (self.rows + 1) * self.scale <= self.lines.len() * ppl {
+            self.finish_row();
         }
     }
 
     /// Lines of the page under one row of the picture.
-    ///
-    /// Three pels across is 3/8.04 mm of paper, and that much paper down the
-    /// page is 1.44 lines at standard and 2.87 at fine. Drawn that way a page
-    /// comes out the shape of the sheet at either resolution, rather than a
-    /// standard one half the height of the same page sent fine.
+    #[cfg(test)]
     fn lines_per_row(&self) -> f64 {
-        SCAN_ACROSS as f64 * self.resolution.lines_per_mm() / fax::page::PELS_PER_MM
+        self.scale as f64 / pixels_per_line(self.resolution) as f64
     }
 
-    /// The lines under row `row`: at least one, since a row covers more than
-    /// a line at both resolutions.
+    /// The lines under row `row`, whole or in part.
+    #[cfg(test)]
     fn span(&self, row: usize) -> std::ops::Range<usize> {
-        let k = self.lines_per_row();
-        (row as f64 * k).round() as usize..((row + 1) as f64 * k).round() as usize
+        let ppl = pixels_per_line(self.resolution);
+        row * self.scale / ppl..((row + 1) * self.scale).div_ceil(ppl)
     }
 
     /// Lines starting at line `from`, and every row they finish.
@@ -313,26 +514,18 @@ impl Scan {
             return;
         }
         self.lines.extend(lines.into_iter().skip(have - from));
-        while self.span(self.rows).end <= self.lines.len() {
-            self.finish_row();
-        }
+        self.finish_rows();
     }
 
-    /// Average the pels under the next row into it.
+    /// The next row, from the lines under it.
     fn finish_row(&mut self) {
-        let span = self.span(self.rows);
-        let under = &self.lines[span];
-        for tx in 0..SCAN_WIDTH {
-            let mut ink = 0;
-            for line in under {
-                for x in tx * SCAN_ACROSS..(tx + 1) * SCAN_ACROSS {
-                    ink += usize::from(line.get(x).is_some_and(|pel| *pel));
-                }
-            }
-            let v = (255 - ink * 255 / (under.len() * SCAN_ACROSS)) as u8;
-            self.pixels.push(Color32::from_rgb(v, v, v));
-        }
+        block_row(&self.lines, pixels_per_line(self.resolution), self.scale, self.rows, &mut self.pixels);
         self.rows += 1;
+    }
+
+    /// Rows in a whole A4 sheet at this page's resolution.
+    fn sheet_rows(&self) -> usize {
+        (self.resolution.lines() * pixels_per_line(self.resolution)).div_ceil(self.scale)
     }
 
     /// Rows that can be drawn: all of them, unless the page has run longer
@@ -351,17 +544,18 @@ impl Scan {
             return None;
         }
         let largest = ctx.input(|i| i.max_texture_side);
+        let width = self.width();
         let outgrown = self.rows > self.capacity && self.capacity < largest;
         if self.texture.is_none() || outgrown {
-            let sheet = (self.resolution.lines() as f64 / self.lines_per_row()).ceil() as usize;
+            let sheet = self.sheet_rows();
             self.capacity = sheet.max(self.rows + self.rows / 2).min(largest);
             let upto = self.shown();
-            let mut pixels = self.pixels[..upto * SCAN_WIDTH].to_vec();
-            pixels.resize(SCAN_WIDTH * self.capacity, UNSCANNED);
+            let mut pixels = self.pixels[..upto * width].to_vec();
+            pixels.resize(width * self.capacity, UNSCANNED);
             self.texture = Some(ctx.load_texture(
                 "fax-arriving",
-                egui::ColorImage::new([SCAN_WIDTH, self.capacity], pixels),
-                egui::TextureOptions::LINEAR,
+                egui::ColorImage::new([width, self.capacity], pixels),
+                egui::TextureOptions::NEAREST,
             ));
             self.uploaded = upto;
         }
@@ -370,10 +564,10 @@ impl Scan {
             && let Some(texture) = self.texture.as_mut()
         {
             let strip = egui::ColorImage::new(
-                [SCAN_WIDTH, upto - self.uploaded],
-                self.pixels[self.uploaded * SCAN_WIDTH..upto * SCAN_WIDTH].to_vec(),
+                [width, upto - self.uploaded],
+                self.pixels[self.uploaded * width..upto * width].to_vec(),
             );
-            texture.set_partial([0, self.uploaded], strip, egui::TextureOptions::LINEAR);
+            texture.set_partial([0, self.uploaded], strip, egui::TextureOptions::NEAREST);
             self.uploaded = upto;
         }
         self.texture.clone()
@@ -407,6 +601,375 @@ fn write_pdf(pages: &[fax::pdf::Sheet<'_>], path: &std::path::Path) -> Result<()
 /// Whether a name chosen to save to asks for a PDF.
 fn names_pdf(path: &std::path::Path) -> bool {
     path.extension().is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+}
+
+/// Which page the big picture shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum View {
+    /// Whatever the call is doing: the page going out while one goes, the
+    /// page arriving while one arrives.
+    #[default]
+    Follow,
+    Sending,
+    Received,
+}
+
+/// One fax call, from its first phase to the account of how it went.
+#[derive(Debug, Clone)]
+pub struct CallRecord {
+    /// This end dialled and sent, rather than answered and received.
+    pub sending: bool,
+    /// By the window's clock.
+    pub started: f64,
+    pub ended: Option<f64>,
+    /// What the far end called itself, or the number dialled until it says.
+    pub far: String,
+    /// Every T.30 frame of the call, either end's, in order.
+    pub frames: Vec<Exchanged>,
+    /// The last phase the call was in before it was over: where it ended,
+    /// if it ended badly.
+    pub last_phase: Option<&'static str>,
+    pub trouble: Option<String>,
+    /// The highest page number the call reached.
+    pub sheets: usize,
+    pub carried: Option<Carried>,
+    /// Put down with Stop rather than ended by the procedure.
+    pub stopped_here: bool,
+    /// The pages that arrived, with their numbers in the call.
+    pub received: Vec<(usize, Page)>,
+}
+
+/// How a call came out, as far as T.30 says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Verdict {
+    /// Still going.
+    Going,
+    /// The last page answered with MCF, and the call ended as one should.
+    Confirmed,
+    /// The last page answered with RTP (kept, but train again) or RTN (not
+    /// kept: train again and send it again).
+    RetrainAsked(Frame),
+    /// It ended somewhere else: the T.30 phase it was in, and why.
+    Failed { phase: char, why: String },
+}
+
+impl CallRecord {
+    fn new(sending: bool, started: f64, far: &str) -> Self {
+        Self {
+            sending,
+            started,
+            ended: None,
+            far: far.to_owned(),
+            frames: Vec::new(),
+            last_phase: None,
+            trouble: None,
+            sheets: 0,
+            carried: None,
+            stopped_here: false,
+            received: Vec::new(),
+        }
+    }
+
+    /// A frame the receiving end sends in answer to a page.
+    fn is_response(frame: Frame) -> bool {
+        matches!(frame, Frame::Mcf | Frame::Rtp | Frame::Rtn | Frame::Ppr)
+    }
+
+    /// A frame the sending end sends after a page.
+    fn is_post_message(frame: Frame) -> bool {
+        matches!(frame, Frame::Mps | Frame::Eop | Frame::Eom | Frame::Pps)
+    }
+
+    /// The last answer to a page, from whichever end received.
+    fn last_response(&self) -> Option<Frame> {
+        self.frames
+            .iter()
+            .rev()
+            .find(|f| f.ours != self.sending && Self::is_response(f.frame))
+            .map(|f| f.frame)
+    }
+
+    /// Pages the receiving end said it had: MCF or RTP straight after an MPS,
+    /// EOP or EOM, counted once however many times the command went. Under
+    /// error correction a page is many blocks and many MCFs, so there it is
+    /// the page the call reached, less one if the last was not confirmed.
+    pub fn confirmed_pages(&self) -> usize {
+        if self.frames.iter().any(|f| f.frame == Frame::Pps) {
+            let last_good = self.last_response() == Some(Frame::Mcf);
+            return if last_good { self.sheets } else { self.sheets.saturating_sub(1) };
+        }
+        let mut asked = false;
+        let mut count = 0;
+        for f in &self.frames {
+            if f.ours == self.sending && matches!(f.frame, Frame::Mps | Frame::Eop | Frame::Eom) {
+                asked = true;
+            } else if asked && f.ours != self.sending && Self::is_response(f.frame) {
+                count += usize::from(matches!(f.frame, Frame::Mcf | Frame::Rtp));
+                asked = false;
+            }
+        }
+        count
+    }
+
+    pub fn verdict(&self) -> Verdict {
+        if self.ended.is_none() {
+            return Verdict::Going;
+        }
+        let last_post = self
+            .frames
+            .iter()
+            .rev()
+            .find(|f| f.ours == self.sending && Self::is_post_message(f.frame))
+            .map(|f| f.frame);
+        let hung_up = self.frames.iter().any(|f| f.frame == Frame::Dcn);
+        // The last page: EOP, or under error correction the PPS before a
+        // disconnect, which is all that can be seen of its EOP from here.
+        // Or a receiver that had confirmed the last page and was waiting for
+        // the far end to hang up, which T.30 reaches only after the last:
+        // a far end that puts the call down as it sends DCN cuts the DCN off.
+        let waiting_to_hang_up = !self.sending
+            && self.last_phase == Some(fax::call::Phase::AwaitingDisconnect.name());
+        let last_page = waiting_to_hang_up
+            || match last_post {
+                Some(Frame::Eop) => true,
+                Some(Frame::Pps) => hung_up,
+                _ => false,
+            };
+        let phase = self
+            .last_phase
+            .and_then(fax::call::Phase::named)
+            .map_or('A', fax::call::Phase::letter);
+        let why = || {
+            self.trouble.clone().unwrap_or_else(|| {
+                if self.stopped_here {
+                    "stopped at this end".to_owned()
+                } else if self.frames.is_empty() {
+                    "no fax machine answered".to_owned()
+                } else {
+                    "the line went down".to_owned()
+                }
+            })
+        };
+        match self.last_response() {
+            Some(Frame::Mcf) if last_page && self.trouble.is_none() => Verdict::Confirmed,
+            Some(frame @ (Frame::Rtp | Frame::Rtn)) if last_page || self.trouble.is_none() => {
+                Verdict::RetrainAsked(frame)
+            }
+            Some(Frame::Mcf) => Verdict::Failed {
+                phase,
+                why: format!("{}, after page {} was confirmed", why(), self.confirmed_pages()),
+            },
+            _ => Verdict::Failed { phase, why: why() },
+        }
+    }
+
+    /// The verdict in a line, and the colour to draw it in.
+    pub fn headline(&self) -> (String, Color32) {
+        let pages = |n: usize| if n == 1 { "1 page".to_owned() } else { format!("{n} pages") };
+        match self.verdict() {
+            Verdict::Going => (
+                if self.sending { "sending" } else { "receiving" }.to_owned(),
+                GOOD,
+            ),
+            Verdict::Confirmed if self.sending => (
+                format!("Confirmed: the far end took {} (MCF)", pages(self.confirmed_pages())),
+                BEST,
+            ),
+            Verdict::Confirmed => (
+                format!("Received {}, confirmed (MCF)", pages(self.received.len().max(self.confirmed_pages()))),
+                BEST,
+            ),
+            Verdict::RetrainAsked(Frame::Rtp) => (
+                "Page kept, but the far end asked to train again (RTP)".to_owned(),
+                GOOD,
+            ),
+            Verdict::RetrainAsked(_) => (
+                "Page refused: the far end asked to train again and resend (RTN)".to_owned(),
+                POOR,
+            ),
+            Verdict::Failed { phase, why } => (
+                format!("Disconnected in phase {phase} ({}): {why}", phase_said(phase)),
+                POOR,
+            ),
+        }
+    }
+
+    /// The rest, in a line: pages each way, the carrier and coding, error
+    /// correction, and how long.
+    pub fn details(&self, now: f64) -> String {
+        let mut parts = vec![
+            format!("{} sent", if self.sending { self.confirmed_pages() } else { 0 }),
+            format!("{} received", self.received.len()),
+        ];
+        if let Some(c) = self.carried {
+            parts.push(match c.symbol_rate {
+                0 => format!("{} {}", c.modulation, c.rate),
+                baud => format!("{} {} on {baud} baud", c.modulation, c.rate),
+            });
+            parts.push(c.coding.to_owned());
+            parts.push(if c.correcting { "ECM" } else { "no ECM" }.to_owned());
+        }
+        parts.push(clock(self.ended.unwrap_or(now) - self.started));
+        parts.join(" · ")
+    }
+
+    /// The result in a word or two, for the session list.
+    pub fn short(&self) -> (&'static str, Color32) {
+        match self.verdict() {
+            Verdict::Going => ("...", GOOD),
+            Verdict::Confirmed => ("MCF", BEST),
+            Verdict::RetrainAsked(Frame::Rtp) => ("RTP", GOOD),
+            Verdict::RetrainAsked(_) => ("RTN", POOR),
+            Verdict::Failed { phase: 'A', .. } => ("no fax", POOR),
+            Verdict::Failed { phase: 'B', .. } => ("failed B", POOR),
+            Verdict::Failed { phase: 'C', .. } => ("failed C", POOR),
+            Verdict::Failed { phase: 'D', .. } => ("failed D", POOR),
+            Verdict::Failed { .. } => ("failed E", POOR),
+        }
+    }
+}
+
+/// What T.30's phase letters stand for.
+fn phase_said(phase: char) -> &'static str {
+    match phase {
+        'A' => "call set-up",
+        'B' => "before the page",
+        'C' => "during the page",
+        'D' => "after the page",
+        _ => "hanging up",
+    }
+}
+
+/// Seconds as minutes and seconds.
+fn clock(seconds: f64) -> String {
+    let s = seconds.max(0.0).round() as u64;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// How long ago, for the session list: the window has no calendar, only
+/// the seconds since it opened, and "4 min ago" says what is wanted.
+fn ago(seconds: f64) -> String {
+    match seconds.max(0.0) as u64 {
+        0..60 => "just now".to_owned(),
+        s @ 60..3600 => format!("{} min ago", s / 60),
+        s => format!("{} h ago", s / 3600),
+    }
+}
+
+/// Which of the four codings a name is, as `coded_bits` orders them.
+fn coding_index(coding: &str) -> Option<usize> {
+    ["MH", "MR", "MMR", "JBIG"].iter().position(|c| *c == coding)
+}
+
+/// How far through a fax the sending end is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SendProgress {
+    pub page_bits: usize,
+    pub done_bits: usize,
+    /// Seconds left on this page, and on the pages after it, at the rate.
+    pub page_left: f64,
+    pub rest_left: f64,
+}
+
+/// `bits` is what each page codes to, `sheet` the page going (from one) and
+/// `fraction` how far through it.
+pub fn send_progress(bits: &[usize], sheet: usize, fraction: f64, rate: u32) -> Option<SendProgress> {
+    let page_bits = *bits.get(sheet.checked_sub(1)?)?;
+    if rate == 0 {
+        return None;
+    }
+    let done_bits = (fraction.clamp(0.0, 1.0) * page_bits as f64).round() as usize;
+    let rate = f64::from(rate);
+    Some(SendProgress {
+        page_bits,
+        done_bits,
+        page_left: (page_bits - done_bits) as f64 / rate,
+        rest_left: bits[sheet..].iter().sum::<usize>() as f64 / rate,
+    })
+}
+
+/// One row of the table of how long the fax takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateRow {
+    pub rate: u32,
+    pub modulation: &'static str,
+    /// Bits in the smallest coding this end will send at that rate, and in
+    /// MH, which every machine reads.
+    pub least: usize,
+    pub most: usize,
+}
+
+/// Fastest first, and at the same rate the better modulation first.
+fn modulation_rank(modulation: &str) -> u8 {
+    match modulation {
+        "V.34" => 0,
+        "V.17" => 1,
+        "V.29" => 2,
+        _ => 3,
+    }
+}
+
+/// Every rate this end will send at, fastest first. V.34 carries the
+/// packed coding, since it always has error correction (T.30 F.3); the rest
+/// carry `best`.
+pub fn rate_rows(v34: bool, ours: &[t30::Modulation], packed: usize, best: usize, mh: usize) -> Vec<RateRow> {
+    let mut rows = Vec::new();
+    if v34 {
+        rows.push(RateRow { rate: 33_600, modulation: "V.34", least: packed, most: mh });
+    }
+    for m in ours {
+        for rate in m.rates() {
+            rows.push(RateRow { rate: *rate, modulation: m.name(), least: best, most: mh });
+        }
+    }
+    rows.sort_by(|a, b| {
+        b.rate
+            .cmp(&a.rate)
+            .then(modulation_rank(a.modulation).cmp(&modulation_rank(b.modulation)))
+    });
+    rows
+}
+
+/// Whether a row is what the call agreed on. Spaces aside, since V.27 ter
+/// is written both ways.
+pub fn agreed(row: &RateRow, carried: Option<Carried>) -> bool {
+    carried.is_some_and(|c| {
+        let same = |a: &str, b: &str| a.replace(' ', "") == b.replace(' ', "");
+        same(row.modulation, c.modulation) && (row.rate == c.rate || row.modulation == "V.34")
+    })
+}
+
+/// Write pages out: one PDF if the name ends in `.pdf`, and otherwise a PNG
+/// each, `fax.png` becoming `fax-1.png` and so on by the page's number.
+/// Returns what to say about it.
+fn save_pages(pages: &[(usize, &[Vec<bool>], Resolution)], path: &std::path::Path) -> String {
+    if names_pdf(path) {
+        let sheets: Vec<fax::pdf::Sheet<'_>> = pages.iter().map(|(_, lines, r)| (*lines, *r)).collect();
+        return match write_pdf(&sheets, path) {
+            Ok(()) if sheets.len() == 1 => format!("saved to {}", path.display()),
+            Ok(()) => format!("{} pages saved to {}", sheets.len(), path.display()),
+            Err(e) => e,
+        };
+    }
+    if let [(_, lines, resolution)] = pages {
+        return match write_page(lines, *resolution, path) {
+            Ok(()) => format!("saved to {}", path.display()),
+            Err(e) => e,
+        };
+    }
+    let stem = path.file_stem().map_or_else(|| "fax".into(), |s| s.to_string_lossy());
+    let named = |sheet: usize| path.with_file_name(format!("{stem}-{sheet}.png"));
+    let mut written = 0;
+    let mut trouble = None;
+    for (sheet, lines, resolution) in pages {
+        match write_page(lines, *resolution, &named(*sheet)) {
+            Ok(()) => written += 1,
+            Err(e) => trouble = Some(e),
+        }
+    }
+    trouble.unwrap_or_else(|| {
+        format!("{written} pages saved as {}", path.with_file_name(format!("{stem}-N.png")).display())
+    })
 }
 
 impl Fax {
@@ -519,65 +1082,98 @@ impl Fax {
             },
         };
         self.coded_bits = [0; 4];
+        self.coded_pages.clear();
+        self.line_ends = (0..pages.len()).map(|_| None).collect();
         for page in &pages {
             let codings = [Coding::ModifiedHuffman, Coding::ModifiedRead, Coding::Mmr, Coding::Jbig];
-            for (total, coding) in self.coded_bits.iter_mut().zip(codings) {
-                *total += coding.encode(&page.lines, page.resolution, 0).len();
+            let mut each = [0; 4];
+            for ((total, one), coding) in self.coded_bits.iter_mut().zip(each.iter_mut()).zip(codings) {
+                *one = coding.encode(&page.lines, page.resolution, 0).len();
+                *total += *one;
             }
+            self.coded_pages.push(each);
         }
         self.showing = self.showing.min(pages.len().saturating_sub(1));
         self.pages = pages;
         self.preview = None;
     }
 
-    /// The page shrunk to something a window can show.
-    ///
-    /// Averaged rather than sampled, so that a dithered photograph looks like
-    /// the tones it stands for instead of like a moire pattern -- which is
-    /// what a fax looks like to the eye at arm's length, and the only honest
-    /// way to show what is about to be sent.
-    fn thumbnail(page: &Page) -> egui::ColorImage {
-        // One preview pixel per block of the page, square in page pels, so
-        // the thumbnail has the same shape as the page and not the paper.
-        // Which is the right way round here: this is a picture of the data.
-        let across = (fax::page::WIDTH / PREVIEW_WIDTH).max(1);
-        let rows = (page.height() / across).max(1);
-        let mut pixels = Vec::with_capacity(PREVIEW_WIDTH * rows);
-        for ry in 0..rows {
-            for rx in 0..PREVIEW_WIDTH {
-                let mut ink = 0usize;
-                let mut n = 0usize;
-                let down = ry * across..((ry + 1) * across).min(page.height());
-                let along = rx * across..((rx + 1) * across).min(fax::page::WIDTH);
-                for line in &page.lines[down] {
-                    for &pel in &line[along.clone()] {
-                        ink += usize::from(pel);
-                        n += 1;
-                    }
-                }
-                let v = (255 - ink * 255 / n.max(1)) as u8;
-                pixels.push(Color32::from_rgb(v, v, v));
+    /// The page as it will go, `n` pels to a texel on the squared-up page
+    /// -- black or white at 1:1, nothing smoothed. At most `largest` rows,
+    /// the most the graphics card takes, and at least one, blank, for a page
+    /// with no lines.
+    fn thumbnail(page: &Page, largest: usize, n: usize) -> egui::ColorImage {
+        let n = n.max(1);
+        let width = SCAN_WIDTH.div_ceil(n);
+        let ppl = pixels_per_line(page.resolution);
+        let rows = (page.height() * ppl).div_ceil(n).clamp(1, largest.max(1));
+        let mut pixels = Vec::with_capacity(width * rows);
+        if !page.lines.is_empty() {
+            for row in 0..rows {
+                block_row(&page.lines, ppl, n, row, &mut pixels);
             }
         }
+        pixels.resize(width * rows, Color32::WHITE);
         egui::ColorImage {
-            size: [PREVIEW_WIDTH, rows],
+            size: [width, rows],
             pixels,
-            source_size: egui::Vec2::new(PREVIEW_WIDTH as f32, rows as f32),
+            source_size: egui::Vec2::new(width as f32, rows as f32),
         }
     }
 
-    fn texture(&mut self, ctx: &egui::Context) -> Option<egui::TextureHandle> {
-        if self.preview.is_none() {
+    fn texture(&mut self, ctx: &egui::Context, n: usize) -> Option<egui::TextureHandle> {
+        if self.preview.is_none() || self.preview_scale != n {
             let page = self.pages.get(self.showing)?;
-            let image = Self::thumbnail(page);
+            let image = Self::thumbnail(page, ctx.input(|i| i.max_texture_side), n);
             self.preview =
-                Some(ctx.load_texture("fax-page", image, egui::TextureOptions::LINEAR));
+                Some(ctx.load_texture("fax-page", image, egui::TextureOptions::NEAREST));
+            self.preview_scale = n;
         }
         self.preview.clone()
     }
 
-    /// Take what the modem knows about the call in progress.
-    pub fn observe(&mut self, frame: &telemetry::Frame) {
+    /// Take what the modem knows about the call in progress, at `now` by the
+    /// window's clock.
+    ///
+    /// A call starts when the modem has a fax call in a phase that is not
+    /// over, and ends when the phase is over or the modem is on hook again.
+    pub fn observe(&mut self, frame: &telemetry::Frame, now: f64) {
+        let over = |p: &str| {
+            matches!(
+                fax::call::Phase::named(p),
+                Some(fax::call::Phase::Done | fax::call::Phase::Failed)
+            )
+        };
+        let going = frame.state != telemetry::CallState::Idle && frame.fax_phase.is_some_and(|p| !over(p));
+        let live = self.calls.last().is_some_and(|c| c.ended.is_none());
+        if going && !live {
+            self.carried = None;
+            self.far = None;
+            self.far_field = None;
+            self.far_identity.clear();
+            self.far_non_standard = None;
+            self.trouble = None;
+            self.pace = None;
+            self.view = View::Follow;
+            self.opened = None;
+            self.calls.push(CallRecord::new(frame.fax_sending, now, &self.dialled));
+        }
+        if let Some(call) = self.calls.last_mut().filter(|c| c.ended.is_none()) {
+            call.sending = frame.fax_sending;
+            if let Some(p) = frame.fax_phase.filter(|p| !over(p) && *p != "hanging up") {
+                call.last_phase = Some(p);
+            }
+            call.sheets = call.sheets.max(frame.fax_sheet);
+            if !frame.fax_identity.trim().is_empty() {
+                frame.fax_identity.trim().clone_into(&mut call.far);
+            }
+            if let Some(trouble) = frame.fax_trouble.as_deref() {
+                call.trouble = Some(trouble.to_owned());
+            }
+            if !going {
+                call.ended = Some(now);
+            }
+        }
         self.phase = frame.fax_phase;
         self.progress = frame.fax_progress;
         self.rate = frame.fax_rate;
@@ -591,14 +1187,30 @@ impl Fax {
         self.fax_class = frame.fax_class;
         // Only once a page is moving: until the command has settled it, the
         // coding the call reports is the MH every call starts from.
-        if frame.fax_progress.is_some() && frame.fax_rate > 0 {
+        //
+        // And only while the page's own modulation is the one in use. Between
+        // pages, and after the last, the modem is back on V.21 for the
+        // frames, with the page's rate and progress still held -- which used
+        // to put "V.21 14400" on the badge and the outcome.
+        let modulation = match (frame.modulation, self.carried) {
+            ("V.21", Some(c)) => Some(c.modulation),
+            ("V.21", None) => None,
+            (m, _) => Some(m),
+        };
+        if frame.fax_progress.is_some()
+            && frame.fax_rate > 0
+            && let Some(modulation) = modulation
+        {
             self.carried = Some(Carried {
                 coding: frame.fax_coding,
-                modulation: frame.modulation,
+                modulation,
                 rate: frame.fax_rate,
                 symbol_rate: frame.fax_symbol_rate,
                 correcting: frame.fax_error_correction,
             });
+            if let Some(call) = self.calls.last_mut().filter(|c| c.ended.is_none()) {
+                call.carried = self.carried;
+            }
         }
         if !frame.fax_identity.is_empty() {
             self.far_identity = frame.fax_identity.clone();
@@ -607,10 +1219,19 @@ impl Fax {
             self.far_non_standard = Some(fif.to_vec());
         }
         if let Some(fif) = frame.fax_capabilities.as_deref() {
+            self.far_field = Some(fif.to_vec());
             self.far = Some(t30::capabilities(fif));
         }
         if let Some(trouble) = frame.fax_trouble.as_deref() {
             self.trouble = Some(trouble.to_owned());
+        }
+    }
+
+    /// T.30 frames either end sent. They belong to the last call, which may
+    /// have been seen to end a moment before its last frames arrived.
+    pub fn exchanged(&mut self, frames: Vec<Exchanged>) {
+        if let Some(call) = self.calls.last_mut() {
+            call.frames.extend(frames);
         }
     }
 
@@ -640,6 +1261,12 @@ impl Fax {
             let mut scan = Scan::of(sheet, &page);
             scan.page = self.scan.as_ref().map_or(u64::MAX, |scan| scan.page);
             self.scan = Some(scan);
+        }
+        if let Some(call) = self.calls.last_mut() {
+            match call.received.iter_mut().find(|(s, _)| *s == sheet) {
+                Some(kept) => kept.1 = page.clone(),
+                None => call.received.push((sheet, page.clone())),
+            }
         }
         self.incoming = Some(page);
         self.saved = None;
@@ -783,514 +1410,283 @@ impl Fax {
         });
     }
 
-    /// Draw the window. Returns what the user asked the modem to do.
-    pub fn show(&mut self, ui: &mut egui::Ui, on_hook: bool) -> Option<Start> {
-        let dim = Color32::from_rgb(140, 150, 165);
-        let bright = Color32::from_rgb(220, 225, 235);
-        let mut open = self.open;
-        let mut start = None;
-        egui::Window::new("T.30 - fax")
-            .open(&mut open)
-            .resizable(false)
-            .default_width(620.0)
-            .show(ui.ctx(), |ui| {
-                ui.horizontal(|ui| {
-                    if ui
-                        .button("Browse")
-                        .on_hover_text(
-                            "A picture, sent as one page, or a PDF, sent a page to a sheet \
-                             at the size it is printed -- up to 50 of its pages",
-                        )
-                        .clicked()
-                        && let Some(chosen) = rfd::FileDialog::new()
-                            .add_filter("pictures and PDFs", &["png", "jpg", "jpeg", "bmp", "gif", "pdf"])
-                            .add_filter("PDFs", &["pdf"])
-                            .add_filter("pictures", &["png", "jpg", "jpeg", "bmp", "gif"])
-                            .pick_file()
-                    {
-                        self.load(&chosen);
-                    }
-                    let shown = if self.path.is_empty() {
-                        "no picture or PDF".to_owned()
-                    } else {
-                        self.path.clone()
-                    };
-                    ui.label(RichText::new(shown).monospace().color(dim));
-                });
-                if let Some(trouble) = &self.trouble {
-                    ui.label(
-                        RichText::new(trouble).color(Color32::from_rgb(235, 100, 90)),
-                    );
-                }
-
-                ui.separator();
-                let mut again = false;
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("paper").monospace().color(dim));
-                    for r in [Resolution::Standard, Resolution::Fine] {
-                        if ui
-                            .selectable_label(self.resolution == r, r.name())
-                            .clicked()
-                        {
-                            self.resolution = r;
-                            again = true;
-                        }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("ink   ").monospace().color(dim));
-                    for h in [Halftone::Threshold, Halftone::Diffuse] {
-                        if ui.selectable_label(self.halftone == h, h.name()).clicked() {
-                            self.halftone = h;
-                            again = true;
-                        }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("offer ").monospace().color(dim));
-                    ui.checkbox(&mut self.v27ter, "V.27ter")
-                        .on_hover_text(
-                            "2400 and 4800, and the one every fax has. Left \
-                             unticked with nothing else ticked, it is offered \
-                             anyway",
-                        );
-                    ui.checkbox(&mut self.v29, "V.29").on_hover_text(
-                        "7200 and 9600. Untick it to hold a call to V.27ter, \
-                         which is slower and more forgiving of a bad line",
-                    );
-                    ui.checkbox(&mut self.v17, "V.17").on_hover_text(
-                        "7200 to 14 400, trellis coded. Untick it to hold a                          call to V.29 and V.27ter",
-                    );
-                    ui.checkbox(&mut self.v34, "V.34").on_hover_text(
-                        "Super G3: V.8 in front of the call, and the page over V.34's half-duplex mode at up to 33 600, with the T.30 frames on its 1200 bit/s control channel. Used only when the far end has it; answering, it means ANSam in place of the called tone. Untick it for the plain tones and V.17 down",
-                    );
-                    ui.checkbox(&mut self.error_correction, "ECM").on_hover_text(
-                        "Error correction mode, T.30 Annex A: the page goes in numbered frames, and any the far end cannot read are sent again instead of printed as streaks. Used only when the far end offers it too",
-                    );
-                    ui.add_enabled(self.error_correction, egui::Checkbox::new(&mut self.jbig, "JBIG"))
-                        .on_hover_text(
-                            "T.85's JBIG: every pel predicted from the ones around it and arithmetic coded, a good deal smaller than MMR on a picture. Only with ECM, and only when the far end offers it too; unticked, a page goes in MMR",
-                        );
-                });
-                if again {
-                    self.render();
-                }
-
-                ui.separator();
-                let texture = self.texture(ui.ctx());
-                let count = self.pages.len();
-                let heading = match self.pages.as_slice() {
-                    [] => "page to send".to_owned(),
-                    [page] => format!(
-                        "page to send: {} lines, {}",
-                        page.height(),
-                        page.resolution.name()
-                    ),
-                    _ => format!("{count} pages to send, {}", self.resolution.name()),
-                };
-                let mut step = 0isize;
-                egui::CollapsingHeader::new(RichText::new(heading).color(dim))
-                    .id_salt("fax-send")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        ui.horizontal_top(|ui| {
-                            ui.vertical(|ui| {
-                                if let Some(texture) = texture {
-                                    let size = texture.size_vec2();
-                                    let height = (size.y * 260.0 / size.x).min(340.0);
-                                    ui.add(
-                                        egui::Image::new(&texture)
-                                            .fit_to_exact_size(egui::vec2(260.0, height)),
-                                    );
-                                } else {
-                                    ui.label(
-                                        RichText::new("Nothing to send yet.")
-                                            .small()
-                                            .color(dim),
-                                    );
-                                }
-                                if count > 1 {
-                                    ui.horizontal(|ui| {
-                                        if ui
-                                            .add_enabled(self.showing > 0, egui::Button::new("<"))
-                                            .on_hover_text("the page before")
-                                            .clicked()
-                                        {
-                                            step = -1;
-                                        }
-                                        ui.label(
-                                            RichText::new(format!("page {} of {count}", self.showing + 1))
-                                                .monospace()
-                                                .color(bright),
-                                        );
-                                        if ui
-                                            .add_enabled(self.showing + 1 < count, egui::Button::new(">"))
-                                            .on_hover_text("the page after")
-                                            .clicked()
-                                        {
-                                            step = 1;
-                                        }
-                                    });
-                                }
-                            });
-                            ui.vertical(|ui| {
-                                if let Some(page) = self.pages.get(self.showing) {
-                                    let [mh, mr, mmr, jbig] = self.coded_bits;
-                                    let (what, said) = &self.source_said;
-                                    let rows = [
-                                        (*what, said.clone()),
-                                        (
-                                            "page",
-                                            format!("{} by {} pels", page.width(), page.height()),
-                                        ),
-                                        ("ink", format!("{:.1}% of the paper", page.coverage() * 100.0)),
-                                    ];
-                                    egui::Grid::new("fax-page")
-                                        .num_columns(2)
-                                        .spacing([10.0, 4.0])
-                                        .show(ui, |ui| {
-                                            for (k, v) in rows {
-                                                ui.label(RichText::new(k).monospace().color(dim));
-                                                ui.label(
-                                                    RichText::new(v).monospace().color(bright),
-                                                );
-                                                ui.end_row();
-                                            }
-                                            // Each coding in its colour, JBIG in the
-                                            // green of the best there is.
-                                            ui.label(RichText::new("coded").monospace().color(dim));
-                                            ui.horizontal(|ui| {
-                                                for (name, bits) in [("MH", mh), ("MR", mr), ("MMR", mmr), ("JBIG", jbig)] {
-                                                    ui.label(
-                                                        RichText::new(format!("{name} {}k", bits / 1000))
-                                                            .monospace()
-                                                            .color(coding_colour(name)),
-                                                    );
-                                                }
-                                                // The figures and the times under
-                                                // them are for the whole fax.
-                                                let whole = match count {
-                                                    1 => "bits".to_owned(),
-                                                    _ => format!("bits, all {count} pages"),
-                                                };
-                                                ui.label(RichText::new(whole).monospace().color(dim));
-                                            });
-                                            ui.end_row();
-                                            // What it costs at each rate this end is
-                                            // willing to use, which is the number
-                                            // anybody actually wants from this window:
-                                            // from the smallest coding this end will
-                                            // send -- JBIG or MMR under error
-                                            // correction, MR without -- to MH, which
-                                            // every machine reads. V.34 first, which
-                                            // has error correction always (T.30 F.3).
-                                            let packed = if self.jbig { jbig.min(mmr) } else { mmr };
-                                            let best = if self.error_correction { packed } else { mr };
-                                            let mut times: Vec<(u32, usize, &str)> = Vec::new();
-                                            if self.v34 {
-                                                times.push((33_600, packed, "V.34"));
-                                            }
-                                            for m in self.ours() {
-                                                for rate in m.rates() {
-                                                    times.push((*rate, best, m.name()));
-                                                }
-                                            }
-                                            for (rate, least, name) in times {
-                                                ui.label(
-                                                    RichText::new(format!("at {rate}"))
-                                                        .monospace()
-                                                        .color(dim),
-                                                );
-                                                ui.horizontal(|ui| {
-                                                    ui.label(
-                                                        RichText::new(format!(
-                                                            "{:.0} to {:.0} s",
-                                                            least as f64 / f64::from(rate),
-                                                            mh as f64 / f64::from(rate),
-                                                        ))
-                                                        .monospace()
-                                                        .color(bright),
-                                                    );
-                                                    ui.label(
-                                                        RichText::new(name)
-                                                            .monospace()
-                                                            .color(modulation_colour(name)),
-                                                    );
-                                                });
-                                                ui.end_row();
-                                            }
-                                        });
-                                }
-                            });
-                        });
-                    });
-                if step != 0 {
-                    self.showing = self.showing.saturating_add_signed(step).min(count.saturating_sub(1));
-                    self.preview = None;
-                }
-
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("dial ").monospace().color(dim));
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.number)
-                            .desired_width(150.0)
-                            .hint_text("a fax number"),
-                    );
-                    ui.label(RichText::new("as").monospace().color(dim));
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.identification)
-                            .desired_width(140.0)
-                            .hint_text("this end's number"),
-                    )
-                    .on_hover_text(
-                        "Sent as a TSI or a CSI. Digits, spaces and a plus, \
-                         and blank is allowed: plenty of machines send nothing",
-                    );
-                    ui.add_enabled_ui(on_hook, |ui| {
-                        if ui
-                            .button("Send fax")
-                            .on_hover_text(
-                                "AT+FCLASS=1 and then ATD. The calling tone \
-                                 goes out, whatever answers says what it is, \
-                                 and then the page follows",
-                            )
-                            .clicked()
-                        {
-                            start = Some(Start::Dial(self.number.trim().to_owned()));
-                        }
-                        if ui
-                            .button("Wait for a fax")
-                            .on_hover_text(
-                                "AT+FCLASS=1 and then ATA. This end answers \
-                                 with the 2100 Hz tone, says what it can \
-                                 receive, and keeps whatever arrives",
-                            )
-                            .clicked()
-                        {
-                            start = Some(Start::Answer);
-                        }
-                    });
-                });
-                if let Some(stop) = self.call_progress(ui, on_hook, dim, bright) {
-                    start = Some(stop);
-                }
-
-                self.receive_row(ui, dim, bright);
-
-                ui.separator();
-                ui.label(RichText::new("the machine at the far end").color(dim));
-                match self.far.as_ref() {
-                    None => {
-                        ui.label(
-                            RichText::new(
-                                "Nothing yet. It says what it is in a DIS, which \
-                                 arrives a few seconds into the call.",
-                            )
-                            .small()
-                            .color(dim),
-                        );
-                    }
-                    Some(caps) => {
-                        egui::Grid::new("fax-far")
-                            .num_columns(2)
-                            .spacing([10.0, 4.0])
-                            .show(ui, |ui| {
-                                if !self.far_identity.is_empty() {
-                                    ui.label(
-                                        RichText::new("identity").monospace().color(dim),
-                                    );
-                                    ui.label(
-                                        RichText::new(&self.far_identity)
-                                            .monospace()
-                                            .color(bright),
-                                    );
-                                    ui.end_row();
-                                }
-                                if let Some(fif) = self.far_non_standard.as_deref() {
-                                    for (k, v) in non_standard_rows(fif) {
-                                        ui.label(RichText::new(k).monospace().color(dim));
-                                        ui.label(RichText::new(v).monospace().color(bright));
-                                        ui.end_row();
-                                    }
-                                }
-                                // On a V.34 call the answering end's field is
-                                // the caller's DCS, whose rate bits T.30 has
-                                // sent as zero (Table 2, Note 33): read as a
-                                // DIS they say V.27 ter at 4800, which is not
-                                // what the far end can do. The rate is the
-                                // modem's, from its MPh exchange.
-                                let v34 = self.symbol_rate > 0;
-                                for (k, v) in caps.rows() {
-                                    if v34 && !self.sending && matches!(k, "modulations" | "fastest") {
-                                        continue;
-                                    }
-                                    ui.label(RichText::new(k).monospace().color(dim));
-                                    match (k, v.split_once("JBIG")) {
-                                        // The best coding there is, in its green,
-                                        // where the far end says it has it.
-                                        ("coding", Some((before, after))) => {
-                                            ui.horizontal(|ui| {
-                                                ui.spacing_mut().item_spacing.x = 0.0;
-                                                ui.label(RichText::new(before).monospace().color(bright));
-                                                ui.label(RichText::new("JBIG").monospace().strong().color(BEST));
-                                                ui.label(RichText::new(after).monospace().color(bright));
-                                            });
-                                        }
-                                        _ => {
-                                            ui.label(RichText::new(v).monospace().color(bright));
-                                        }
-                                    }
-                                    ui.end_row();
-                                }
-                                ui.label(RichText::new("both ends").monospace().color(dim));
-                                let shared = if v34 {
-                                    Some(format!(
-                                        "V.34 at {} bit/s on {} baud",
-                                        self.rate, self.symbol_rate
-                                    ))
-                                } else {
-                                    caps.best_shared(&self.ours())
-                                        .map(|(m, rate)| format!("{} at {rate} bit/s", m.name()))
-                                };
-                                ui.label(
-                                    RichText::new(
-                                        shared.clone().unwrap_or_else(|| "nothing in common".to_owned()),
-                                    )
-                                    .monospace()
-                                    .color(match shared {
-                                        Some(_) => Color32::from_rgb(90, 220, 130),
-                                        None => Color32::from_rgb(235, 100, 90),
-                                    }),
-                                );
-                                ui.end_row();
-                            });
-                    }
-                }
-            });
-        self.open = open;
-        start
+    /// The call in progress, if one is.
+    fn live(&self) -> Option<&CallRecord> {
+        self.calls.last().filter(|c| c.ended.is_none())
     }
 
-    /// Where the call has got to, and how much of the page has moved.
-    fn call_progress(
-        &mut self,
-        ui: &mut egui::Ui,
-        on_hook: bool,
-        dim: Color32,
-        bright: Color32,
-    ) -> Option<Start> {
-        if on_hook {
-            self.carried = None;
-            // A modem stays whatever class it was last told, which is also a
-            // good way to dial a bulletin board and greet it with a calling
-            // tone. Worth saying, since nothing else on the panel does.
-            if self.fax_class {
+    /// Which picture the page panel shows, once Follow is decided.
+    fn shown_view(&self) -> View {
+        match self.view {
+            View::Follow => match self.live() {
+                Some(call) if call.sending => View::Sending,
+                Some(_) => View::Received,
+                None if self.opened.is_some() || self.scan.is_some() => View::Received,
+                None if !self.pages.is_empty() => View::Sending,
+                None => View::Received,
+            },
+            view => view,
+        }
+    }
+
+    /// Put down the call, and say it was this end that did.
+    pub fn stopped(&mut self) {
+        if let Some(call) = self.calls.last_mut().filter(|c| c.ended.is_none()) {
+            call.stopped_here = true;
+        }
+    }
+
+    /// The far end, where the Scopes tab has V.8's: who it says it is, what
+    /// it says it can do, and what the two ends have in common.
+    pub fn far_panel(&self, ui: &mut egui::Ui) {
+        let dim = Color32::from_rgb(140, 150, 165);
+        let bright = Color32::from_rgb(220, 225, 235);
+        ui.add_space(6.0);
+        ui.label(RichText::new("the fax machine at the far end").strong());
+        let Some(caps) = self.far.as_ref() else {
+            ui.label(
+                RichText::new(
+                    "Nothing yet. It says what it is in a DIS, which arrives a few \
+                     seconds into the call.",
+                )
+                .small()
+                .color(dim),
+            );
+            return;
+        };
+        egui::Grid::new("fax-far")
+            .num_columns(2)
+            .spacing([10.0, 3.0])
+            .show(ui, |ui| {
+                let row = |ui: &mut egui::Ui, k: &str, v: &str| {
+                    ui.label(RichText::new(k).monospace().size(12.0).color(dim));
+                    ui.label(RichText::new(v).monospace().size(12.0).color(bright));
+                    ui.end_row();
+                };
+                if !self.far_identity.is_empty() {
+                    row(ui, "identity", &self.far_identity);
+                }
+                if let Some(fif) = self.far_non_standard.as_deref() {
+                    for (k, v) in non_standard_rows(fif) {
+                        row(ui, k, &v);
+                    }
+                }
+                // Receiving, the field is the caller's DCS, not a DIS: its rate
+                // bits name the one modulation chosen for this call, which a
+                // DIS reading turns into "none this knows" and "nothing in
+                // common". On a V.34 call T.30 sends them as zero (Table 2,
+                // Note 33), and the rate is the modem's, from its MPh
+                // exchange. Either way they are said once, as this call.
+                for (k, v) in caps.rows() {
+                    if !self.sending && matches!(k, "modulations" | "fastest") {
+                        continue;
+                    }
+                    match (k, v.split_once("JBIG")) {
+                        // The best coding there is, in its green, where the
+                        // far end says it has it.
+                        ("coding", Some((before, after))) => {
+                            ui.label(RichText::new(k).monospace().size(12.0).color(dim));
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 0.0;
+                                ui.label(RichText::new(before).monospace().size(12.0).color(bright));
+                                ui.label(RichText::new("JBIG").monospace().size(12.0).strong().color(BEST));
+                                ui.label(RichText::new(after).monospace().size(12.0).color(bright));
+                            });
+                            ui.end_row();
+                        }
+                        _ => row(ui, k, &v),
+                    }
+                }
                 ui.label(
-                    RichText::new(
-                        "The modem is in fax class. AT+FCLASS=0 makes it a \
-                         modem again.",
-                    )
-                    .small()
+                    RichText::new(if self.sending { "both ends" } else { "this call" })
+                        .monospace()
+                        .size(12.0)
+                        .color(dim),
+                );
+                let shared = self.shared(caps);
+                ui.label(
+                    RichText::new(shared.clone().unwrap_or_else(|| "nothing in common".to_owned()))
+                        .monospace()
+                        .size(12.0)
+                        .color(if shared.is_some() { BEST } else { Color32::from_rgb(235, 100, 90) }),
+                );
+                ui.end_row();
+            });
+    }
+
+    /// What the two ends have settled on, for the far-end panel: the best
+    /// both have when this end is sending and has the far end's DIS, and
+    /// what the caller's DCS chose when receiving.
+    fn shared(&self, caps: &t30::Capabilities) -> Option<String> {
+        if self.symbol_rate > 0 {
+            return Some(format!("V.34 at {} bit/s on {} baud", self.rate, self.symbol_rate));
+        }
+        if self.sending {
+            return caps.best_shared(&self.ours()).map(|(m, rate)| format!("{} at {rate} bit/s", m.name()));
+        }
+        self.far_field
+            .as_deref()
+            .and_then(t30::command_rate)
+            .map(|(m, rate)| format!("{} at {rate} bit/s", m.name()))
+            .or_else(|| self.carried.map(|c| format!("{} at {} bit/s", c.modulation, c.rate)))
+    }
+
+    /// The page, large: the one going out, or the one arriving drawn a line
+    /// at a time, or a page of an earlier call opened from the list.
+    pub fn page_panel(&mut self, ui: &mut egui::Ui) {
+        let dim = Color32::from_rgb(140, 150, 165);
+        let bright = Color32::from_rgb(220, 225, 235);
+        let shown = self.shown_view();
+        ui.horizontal(|ui| {
+            for (view, name) in [(View::Follow, "follow the call"), (View::Sending, "to send"), (View::Received, "received")] {
+                if ui.selectable_label(self.view == view, name).clicked() {
+                    self.view = view;
+                }
+            }
+            ui.separator();
+            if let Some(trouble) = &self.trouble {
+                ui.label(RichText::new(trouble).small().color(Color32::from_rgb(235, 100, 90)));
+            }
+        });
+        match shown {
+            View::Sending => self.sending_page(ui, dim, bright),
+            _ => self.received_page(ui, dim, bright),
+        }
+    }
+
+    /// The page to send, as big as the panel allows, with what has gone
+    /// shaded off while it goes.
+    fn sending_page(&mut self, ui: &mut egui::Ui, dim: Color32, bright: Color32) {
+        // Following the call: the page in view is the page going.
+        let going = self.live().is_some_and(|c| c.sending) && self.sheet > 0;
+        if going && self.sheet - 1 != self.showing && self.sheet <= self.pages.len() {
+            self.showing = self.sheet - 1;
+            self.preview = None;
+        }
+        let count = self.pages.len();
+        let mut step = 0isize;
+        ui.horizontal(|ui| {
+            if count > 1 {
+                if ui.add_enabled(self.showing > 0, egui::Button::new("<")).clicked() {
+                    step = -1;
+                }
+                ui.label(RichText::new(format!("page {} of {count}", self.showing + 1)).monospace().color(bright));
+                if ui.add_enabled(self.showing + 1 < count, egui::Button::new(">")).clicked() {
+                    step = 1;
+                }
+            }
+            if let Some(page) = self.pages.get(self.showing) {
+                ui.label(
+                    RichText::new(format!(
+                        "{} · {} by {} pels · {:.1}% ink",
+                        page.resolution.name(),
+                        page.width(),
+                        page.height(),
+                        page.coverage() * 100.0
+                    ))
+                    .monospace()
                     .color(dim),
                 );
             }
-            return None;
-        }
-        let what = match self.phase {
-            Some(p) => p.to_owned(),
-            None => "a call, but not a fax".to_owned(),
-        };
-        let side = if self.sending { "sending" } else { "receiving" };
-        let mut stop = None;
-        ui.horizontal(|ui| {
-            if ui
-                .button("Stop")
-                .on_hover_text(
-                    "put the call down now. A fax has no terminal to type ATH \
-                     at, so this is the way out of one that has stalled",
-                )
-                .clicked()
-            {
-                stop = Some(Start::HangUp);
-            }
-            ui.label(RichText::new(format!("{side}: {what}")).small().color(bright));
-            if self.sending && self.sheets > 1 {
-                ui.label(
-                    RichText::new(format!("page {} of {}", self.sheet, self.sheets))
-                        .small()
-                        .color(dim),
-                );
-            }
-            if !self.sending && self.sheet > 1 {
-                ui.label(RichText::new(format!("page {}", self.sheet)).small().color(dim));
-            }
-            if !self.sending && self.lines > 0 {
-                ui.label(
-                    RichText::new(format!("{} lines", self.lines))
-                        .small()
-                        .color(dim),
-                );
-            }
         });
-        // What the page is going in, where it can be seen from across the
-        // room: the coding, the modulation and its rates, and error
-        // correction, each in green when it is the best a fax has. V.34
-        // picks its symbol rate as well as its bit rate, and the two together
-        // say how crowded the constellation is.
-        if let Some(c) = self.carried {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{side} in")).color(bright));
-                badge(
-                    ui,
-                    c.coding,
-                    coding_colour(c.coding),
-                    "The page's coding, best first: JBIG (T.85), MMR (T.6), MR and \
-                     MH (T.4). JBIG and MMR go only with error correction, and only \
-                     when both ends have them",
-                );
-                ui.label(RichText::new("over").color(bright));
-                let carrier = if c.symbol_rate > 0 {
-                    format!("{} {} bit/s on {} baud", c.modulation, c.rate, c.symbol_rate)
-                } else {
-                    format!("{} {} bit/s", c.modulation, c.rate)
-                };
-                badge(
-                    ui,
-                    &carrier,
-                    modulation_colour(c.modulation),
-                    "What carries the page, fastest first: V.34 half-duplex (Super \
-                     G3) to 33 600, V.17 to 14 400, V.29 to 9600, V.27 ter to 4800",
-                );
-                badge(
-                    ui,
-                    if c.correcting { "ECM" } else { "no ECM" },
-                    if c.correcting { BEST } else { POOR },
-                    "Error correction mode: frames the far end could not read are \
-                     asked for and sent again, rather than printed as streaks",
-                );
-                if c.coding == "JBIG" && c.modulation == "V.34" && c.correcting {
-                    ui.label(RichText::new("best mode").strong().color(BEST)).on_hover_text(
-                        "JBIG over V.34 with error correction: the smallest page \
-                         at the fastest rate a fax has",
-                    );
+        if step != 0 {
+            self.showing = self.showing.saturating_add_signed(step).min(count.saturating_sub(1));
+            self.preview = None;
+        }
+        let ppp = ui.ctx().pixels_per_point();
+        let (n, m, level, anchor) = self.zoom.begin(ui, (ui.available_width() - 14.0) * ppp);
+        let Some(texture) = self.texture(ui.ctx(), n) else {
+            ui.label(
+                RichText::new("Nothing to send yet. Browse for a picture or a PDF on the right.")
+                    .small()
+                    .color(dim),
+            );
+            return;
+        };
+        // Whole screen pixels to a texel or whole texels to a pixel, never
+        // smoothed: a page bigger than the room scrolls.
+        let size = picture_size(ppp, texture.size()[0], texture.size()[1], m);
+        let progress = (going && self.sheet - 1 == self.showing)
+            .then_some(self.progress)
+            .flatten()
+            .map(|fraction| {
+                // Down to the line the bits have reached, not as far down as
+                // the fraction of the bits: a blank stretch is a few bits a
+                // line and a dense one hundreds, so the two part company on
+                // any page with both.
+                match self.line_reached(self.showing, fraction) {
+                    Some((line, lines)) => line / lines.max(1) as f64,
+                    None => fraction,
                 }
             });
+        let mut area = egui::ScrollArea::both().id_salt("fax-send-scroll").auto_shrink([false, false]);
+        if let Some(offset) = anchor {
+            area = area.scroll_offset(offset);
         }
-        if let Some(fraction) = self.progress {
-            ui.add(
-                egui::ProgressBar::new(fraction as f32)
-                    .desired_height(8.0)
-                    .show_percentage(),
-            );
-        }
-        stop
+        let out = area.show(ui, |ui| {
+                let (area, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width().max(size.x), size.y),
+                    egui::Sense::hover(),
+                );
+                let left = ((area.center().x - size.x / 2.0).max(area.left()) * ppp).round() / ppp;
+                let top = (area.top() * ppp).round() / ppp;
+                let rect = egui::Rect::from_min_size(egui::pos2(left, top), size);
+                ui.painter().image(
+                    texture.id(),
+                    rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+                // What is still to go, shaded, and a green line where the
+                // page has got to.
+                if let Some(down) = progress {
+                    let y = rect.top() + rect.height() * down.clamp(0.0, 1.0) as f32;
+                    ui.painter().rect_filled(
+                        egui::Rect::from_min_max(egui::pos2(rect.left(), y), rect.max),
+                        0.0,
+                        Color32::from_rgba_unmultiplied(24, 28, 36, 200),
+                    );
+                    ui.painter().hline(rect.x_range(), y, egui::Stroke::new(2.0, BEST));
+                }
+            });
+        self.zoom.end(ui, out.inner_rect, out.state.offset, level);
     }
 
-    /// The page arriving, drawn as it comes, or the page that last arrived.
-    fn receive_row(&mut self, ui: &mut egui::Ui, dim: Color32, bright: Color32) {
-        ui.separator();
+    /// The page arriving, drawn as it comes, or the last one that did, or a
+    /// page opened from the list.
+    fn received_page(&mut self, ui: &mut egui::Ui, dim: Color32, bright: Color32) {
         let now = ui.input(|i| i.time);
+        if let Some((call, at, _)) = &self.opened {
+            let (call, at) = (*call, *at);
+            let pages = self.calls.get(call).map_or(0, |c| c.received.len());
+            let mut step = 0isize;
+            let mut close = false;
+            ui.horizontal(|ui| {
+                let far = self.calls.get(call).map_or("", |c| c.far.as_str());
+                ui.label(RichText::new(format!("from an earlier call, {far}")).color(dim));
+                if pages > 1 {
+                    if ui.add_enabled(at > 0, egui::Button::new("<")).clicked() {
+                        step = -1;
+                    }
+                    ui.label(RichText::new(format!("page {} of {pages}", at + 1)).monospace().color(bright));
+                    if ui.add_enabled(at + 1 < pages, egui::Button::new(">")).clicked() {
+                        step = 1;
+                    }
+                }
+                close = ui.button("Back to the call").clicked();
+            });
+            if close {
+                self.opened = None;
+                return;
+            }
+            if step != 0 {
+                self.open(call, at.saturating_add_signed(step));
+            }
+            if let Some((_, _, scan)) = self.opened.as_mut() {
+                draw_scan(ui, scan, false, &mut self.zoom);
+            }
+            return;
+        }
         let arriving = self.looking.is_none()
             && self
                 .scan
@@ -1298,149 +1694,62 @@ impl Fax {
                 .is_some_and(|scan| self.incoming.is_none() && now - scan.last_line < STILL_ARRIVING);
         let pages = self.earlier.len() + usize::from(self.scan.is_some());
         let at = self.looking.as_ref().map_or(self.earlier.len(), |(i, _)| *i);
-        // "Page" alone for a call of one page, and its number for any other.
-        let named = |sheet: usize| {
-            if pages > 1 || sheet > 1 {
-                format!("page {sheet}")
-            } else {
-                "page".to_owned()
-            }
-        };
-        let heading = match (&self.looking, self.scan.as_ref(), self.incoming.is_some(), arriving) {
-            (Some((_, scan)), _, _, _) => {
-                format!("{} received: {} lines", named(scan.sheet), scan.lines.len())
-            }
-            (None, None, _, _) => "page received".to_owned(),
-            (None, Some(scan), _, true) => {
-                format!("{} arriving: {} lines", named(scan.sheet), scan.lines.len())
-            }
-            (None, Some(scan), true, false) => {
-                format!("{} received: {} lines", named(scan.sheet), scan.lines.len())
-            }
-            // A call that ended part way down a page, or one whose page has
-            // stopped and not yet been handed over.
-            (None, Some(scan), false, false) => {
-                format!("{}, as far as it came: {} lines", named(scan.sheet), scan.lines.len())
-            }
-        };
         let (mut save, mut save_all, mut step) = (false, false, 0isize);
-        egui::CollapsingHeader::new(RichText::new(heading).color(dim))
-            .id_salt("fax-receive")
-            .default_open(true)
-            .show(ui, |ui| {
-                if pages > 1 {
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(at > 0, egui::Button::new("<"))
-                            .on_hover_text("the page before")
-                            .clicked()
-                        {
-                            step = -1;
-                        }
-                        ui.label(
-                            RichText::new(format!("{} of {pages} pages", at + 1))
-                                .monospace()
-                                .color(bright),
-                        );
-                        if ui
-                            .add_enabled(at + 1 < pages, egui::Button::new(">"))
-                            .on_hover_text("the page after, and the last is the one arriving")
-                            .clicked()
-                        {
-                            step = 1;
-                        }
-                    });
+        ui.horizontal(|ui| {
+            let heading = match (self.looking.as_ref().map(|(_, s)| s).or(self.scan.as_ref()), arriving) {
+                (None, _) => "page received".to_owned(),
+                (Some(scan), true) => format!("page {} arriving: {} lines", scan.sheet.max(1), scan.lines.len()),
+                (Some(scan), false) => format!("page {} received: {} lines", scan.sheet.max(1), scan.lines.len()),
+            };
+            ui.label(RichText::new(heading).color(dim));
+            if pages > 1 {
+                if ui.add_enabled(at > 0, egui::Button::new("<")).clicked() {
+                    step = -1;
                 }
-                let (scan, page) = match self.looking.as_mut() {
-                    Some((i, scan)) => (Some(scan), self.earlier.get(*i).map(|(_, page)| page)),
-                    None => (self.scan.as_mut(), self.incoming.as_ref()),
-                };
-                let Some(scan) = scan else {
-                    ui.label(
-                        RichText::new(
-                            "Nothing yet. Press Wait for a fax, and a page \
-                             that arrives is drawn here a line at a time as it \
-                             comes in.",
-                        )
-                        .small()
-                        .color(dim),
-                    );
-                    return;
-                };
-                if let Some(texture) = scan.texture(ui.ctx()) {
-                    let shown = scan.shown();
-                    let bottom = shown as f32 / scan.capacity as f32;
-                    egui::ScrollArea::vertical()
-                        .id_salt("fax-receive-scroll")
-                        .max_height(SCAN_HEIGHT)
-                        // Following the newest line while the view is at the
-                        // bottom, and staying put once scrolled up to look.
-                        .stick_to_bottom(true)
-                        .show(ui, |ui| {
-                            // The whole width of the panel from the first row,
-                            // and only ever taller. Painted into a rectangle of
-                            // its own rather than through an image widget: that
-                            // keeps the texture's proportions, and the texture
-                            // is a whole sheet tall, so the top ten rows of a
-                            // page came out a few pels wide and widened as the
-                            // rest arrived.
-                            let size = picture_size(ui.available_width(), shown);
-                            let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
-                            ui.painter().image(
-                                texture.id(),
-                                rect,
-                                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, bottom)),
-                                Color32::WHITE,
-                            );
-                            if arriving {
-                                // Where the page has got to.
-                                ui.painter().hline(
-                                    rect.x_range(),
-                                    rect.bottom() - 1.0,
-                                    egui::Stroke::new(2.0, Color32::from_rgb(90, 220, 130)),
-                                );
-                            }
-                        });
+                ui.label(RichText::new(format!("{} of {pages}", at + 1)).monospace().color(bright));
+                if ui.add_enabled(at + 1 < pages, egui::Button::new(">")).clicked() {
+                    step = 1;
                 }
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(scan.resolution.name())
-                            .monospace()
-                            .color(bright),
-                    );
-                    if let Some(page) = page {
-                        ui.label(
-                            RichText::new(format!(
-                                "{:.1}% of the paper is ink",
-                                page.coverage() * 100.0
-                            ))
-                            .monospace()
-                            .color(dim),
-                        );
-                    }
-                    save = ui
-                        .button("Save")
-                        .on_hover_text(
-                            "This page, as a PDF or a PNG, whichever the name \
-                             ends in -- as far as it has got, if it is still \
-                             arriving or the call ended part way down it",
-                        )
-                        .clicked();
-                    if pages > 1 {
-                        save_all = ui
-                            .button(format!("Save all {pages}"))
-                            .on_hover_text(
-                                "Every page of the call: in one PDF, a page to a \
-                                 sheet, or each to its own PNG with the page's \
-                                 number after the name chosen",
-                            )
-                            .clicked();
-                    }
-                });
-                if let Some(saved) = &self.saved {
-                    ui.label(RichText::new(saved).small().color(dim));
-                }
-            });
+            }
+            if self.in_view().is_some() {
+                save = ui
+                    .button("Save")
+                    .on_hover_text(
+                        "This page, as a PDF or a PNG, whichever the name ends in -- as far as \
+                         it has got, if it is still arriving or the call ended part way down it",
+                    )
+                    .clicked();
+            }
+            if pages > 1 {
+                save_all = ui
+                    .button(format!("Save all {pages}"))
+                    .on_hover_text(
+                        "Every page of the call: in one PDF, a page to a sheet, or each to \
+                         its own PNG with the page's number after the name chosen",
+                    )
+                    .clicked();
+            }
+            if let Some(saved) = &self.saved {
+                ui.label(RichText::new(saved).small().color(dim));
+            }
+        });
+        let scan = match self.looking.as_mut() {
+            Some((_, scan)) => Some(scan),
+            None => self.scan.as_mut(),
+        };
+        match scan {
+            Some(scan) => draw_scan(ui, scan, arriving, &mut self.zoom),
+            None => {
+                ui.label(
+                    RichText::new(
+                        "Nothing yet. Press Wait for a fax, or answer a call as a fax, and a \
+                         page that arrives is drawn here a line at a time as it comes in.",
+                    )
+                    .small()
+                    .color(dim),
+                );
+            }
+        }
         if arriving {
             // The green line goes when the page stops, and nothing else may
             // be about to ask for a frame when it does.
@@ -1472,6 +1781,449 @@ impl Fax {
         }
     }
 
+    /// Open page `at` of an earlier call's received pages.
+    fn open(&mut self, call: usize, at: usize) {
+        let Some((sheet, page)) = self.calls.get(call).and_then(|c| c.received.get(at)) else {
+            return;
+        };
+        self.opened = Some((call, at, Scan::of(*sheet, page)));
+        self.view = View::Received;
+    }
+
+    /// Everything to the right of the page: the number and the keys, how far
+    /// the call has got, how the last one went, the document, the rates and
+    /// the calls so far. Returns what was asked of the modem.
+    pub fn side_panel(&mut self, ui: &mut egui::Ui, on_hook: bool, number: &mut String) -> Option<Start> {
+        let dim = Color32::from_rgb(140, 150, 165);
+        let bright = Color32::from_rgb(220, 225, 235);
+        let now = ui.input(|i| i.time);
+        let mut start = None;
+
+        egui::Grid::new("fax-dial").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
+            ui.label(RichText::new("fax number").color(dim)).on_hover_text(
+                "The dialler's number: the same one the Dial keypad edits, and what Send fax dials",
+            );
+            ui.add(egui::TextEdit::singleline(number).desired_width(180.0).hint_text("from the dialler"));
+            ui.end_row();
+            ui.label(RichText::new("this end (TSI/CSI)").color(dim)).on_hover_text(
+                "What this end calls itself: sent as a TSI when sending and a CSI when \
+                 receiving, and shown at the far end. Digits, spaces and a plus; blank is \
+                 allowed, and plenty of machines send nothing",
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut self.identification)
+                    .desired_width(180.0)
+                    .hint_text("e.g. +61 3 9999 0000"),
+            );
+            ui.end_row();
+        });
+        ui.horizontal(|ui| {
+            ui.add_enabled_ui(on_hook, |ui| {
+                if ui
+                    .button("Send fax")
+                    .on_hover_text(
+                        "AT+FCLASS=1 and then ATD to the number above. The calling tone goes \
+                         out, whatever answers says what it is, and then the pages follow",
+                    )
+                    .clicked()
+                {
+                    start = Some(Start::Dial(number.trim().to_owned()));
+                }
+                if ui
+                    .button("Wait for a fax")
+                    .on_hover_text(
+                        "AT+FCLASS=1 and then ATA. This end answers with the 2100 Hz tone, \
+                         says what it can receive, and keeps whatever arrives",
+                    )
+                    .clicked()
+                {
+                    start = Some(Start::Answer);
+                }
+            });
+            if ui
+                .add_enabled(!on_hook, egui::Button::new("Stop"))
+                .on_hover_text(
+                    "Put the call down now. A fax has no terminal to type ATH at, so this is \
+                     the way out of one that has stalled",
+                )
+                .clicked()
+            {
+                start = Some(Start::HangUp);
+            }
+        });
+
+        ui.separator();
+        if on_hook {
+            if self.fax_class {
+                ui.label(
+                    RichText::new("The modem is in fax class. AT+FCLASS=0 makes it a modem again.")
+                        .small()
+                        .color(dim),
+                );
+            }
+        } else {
+            self.call_progress(ui, now, dim, bright);
+        }
+        if let Some(call) = self.calls.last().filter(|c| c.ended.is_some()) {
+            let (headline, colour) = call.headline();
+            egui::Frame::group(ui.style()).stroke(egui::Stroke::new(1.0, colour)).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new("last call").small().color(dim));
+                ui.label(RichText::new(headline).strong().color(colour));
+                ui.label(RichText::new(call.details(now)).monospace().size(12.0).color(bright));
+                if !call.far.is_empty() {
+                    ui.label(RichText::new(format!("far end {}", call.far)).monospace().size(12.0).color(dim));
+                }
+            });
+        }
+
+        ui.separator();
+        self.document(ui, dim, bright);
+
+        ui.separator();
+        self.rate_table(ui, dim, bright);
+
+        ui.separator();
+        self.session_list(ui, now, dim, bright);
+        start
+    }
+
+    /// How far through the call: the phase, the page, the bits or lines,
+    /// and the time left at the agreed rate.
+    fn call_progress(&mut self, ui: &mut egui::Ui, now: f64, dim: Color32, bright: Color32) {
+        let what = self.phase.unwrap_or("a call, but not a fax");
+        let phase = self.phase.and_then(fax::call::Phase::named).map(fax::call::Phase::letter);
+        let side = if self.sending { "sending" } else { "receiving" };
+        ui.label(
+            RichText::new(match phase {
+                Some(p) => format!("{side} · phase {p}: {what}"),
+                None => format!("{side}: {what}"),
+            })
+            .strong()
+            .color(bright),
+        );
+        if let Some(c) = self.live().and_then(|call| call.carried) {
+            ui.horizontal_wrapped(|ui| {
+                badge(
+                    ui,
+                    c.coding,
+                    coding_colour(c.coding),
+                    "The page's coding, best first: JBIG (T.85), MMR (T.6), MR and MH (T.4). \
+                     JBIG and MMR go only with error correction, and only when both ends have them",
+                );
+                let carrier = if c.symbol_rate > 0 {
+                    format!("{} {} on {} Bd", c.modulation, c.rate, c.symbol_rate)
+                } else {
+                    format!("{} {}", c.modulation, c.rate)
+                };
+                badge(
+                    ui,
+                    &carrier,
+                    modulation_colour(c.modulation),
+                    "What carries the page, fastest first: V.34 half-duplex (Super G3) to \
+                     33 600, V.17 to 14 400, V.29 to 9600, V.27 ter to 4800",
+                );
+                badge(
+                    ui,
+                    if c.correcting { "ECM" } else { "no ECM" },
+                    if c.correcting { BEST } else { POOR },
+                    "Error correction mode: frames the far end could not read are asked for \
+                     and sent again, rather than printed as streaks",
+                );
+            });
+        }
+        let Some(fraction) = self.progress else { return };
+        let mut said = Vec::new();
+        if self.sending {
+            let bits: Vec<usize> = match self.coding_now() {
+                Some(i) => self.coded_pages.iter().map(|p| p[i]).collect(),
+                None => Vec::new(),
+            };
+            let pages = self.sheets.max(self.sheet).max(1);
+            said.push(format!("page {} of {pages}", self.sheet.max(1)));
+            if let Some(p) = send_progress(&bits, self.sheet, fraction, self.rate) {
+                said.push(format!("{:.1} of {:.1} kB", p.done_bits as f64 / 8000.0, p.page_bits as f64 / 8000.0));
+                if let Some((line, lines)) = self.line_reached(self.sheet - 1, fraction) {
+                    said.push(format!("line {} of {lines}", line.floor() as usize));
+                }
+                said.push(format!("{} left on this page", clock(p.page_left)));
+                if p.rest_left > 0.0 {
+                    said.push(format!("about {} for the rest", clock(p.rest_left)));
+                }
+            } else {
+                said.push(format!("{:.0}%", fraction * 100.0));
+            }
+        } else {
+            said.push(format!("page {}", self.sheet.max(1)));
+            // How fast lines are arriving, measured over the page so far.
+            match self.pace {
+                Some((_, l0, _)) if self.lines < l0 => self.pace = Some((now, self.lines, 0.0)),
+                Some((t0, l0, _)) if now - t0 > 2.0 => {
+                    let per_second = (self.lines - l0) as f64 / (now - t0);
+                    self.pace = Some((t0, l0, per_second));
+                }
+                None => self.pace = Some((now, self.lines, 0.0)),
+                _ => {}
+            }
+            let expected = self.scan.as_ref().map_or(Resolution::Standard, |s| s.resolution).lines();
+            said.push(format!("{} of about {expected} lines", self.lines));
+            if let Some((_, _, per_second)) = self.pace
+                && per_second > 0.0
+                && self.lines < expected
+            {
+                said.push(format!("about {} left", clock((expected - self.lines) as f64 / per_second)));
+            }
+        }
+        ui.add(egui::ProgressBar::new(fraction as f32).desired_height(16.0).show_percentage());
+        ui.label(RichText::new(said.join(" · ")).monospace().size(12.0).color(dim));
+    }
+
+    /// How far down page `page` the call has got once `fraction` of its bits
+    /// have gone, in lines, and how many lines it has. None before the
+    /// coding is known.
+    fn line_reached(&mut self, page: usize, fraction: f64) -> Option<(f64, usize)> {
+        let coding = self.live().and_then(|c| c.carried).map_or(self.coding, |c| c.coding);
+        let which = match coding {
+            "MH" => Coding::ModifiedHuffman,
+            "MR" => Coding::ModifiedRead,
+            "MMR" => Coding::Mmr,
+            "JBIG" => Coding::Jbig,
+            _ => return None,
+        };
+        let lines = self.pages.get(page)?.height();
+        let slot = self.line_ends.get_mut(page)?;
+        let current = match slot.as_ref() {
+            Some(LineMap::Working(c, _) | LineMap::Ready(c, _, _)) => *c == coding,
+            None => false,
+        };
+        if !current {
+            let p = self.pages[page].clone();
+            let (tell, told) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let bits = which.encode(&p.lines, p.resolution, 0);
+                let _ = tell.send((fax::coding::line_ends(which, &bits), bits.len()));
+            });
+            *slot = Some(LineMap::Working(coding, told));
+        }
+        if let Some(LineMap::Working(c, told)) = slot.as_ref()
+            && let Ok((ends, total)) = told.try_recv()
+        {
+            *slot = Some(LineMap::Ready(c, ends, total));
+        }
+        let Some(LineMap::Ready(_, ends, total)) = slot.as_ref() else { return None };
+        let sent = (fraction.clamp(0.0, 1.0) * *total as f64).round() as usize;
+        Some((fax::coding::line_at(ends, sent), lines))
+    }
+
+    /// Which of the four codings the call is sending in.
+    fn coding_now(&self) -> Option<usize> {
+        coding_index(self.live().and_then(|c| c.carried).map_or(self.coding, |c| c.coding))
+    }
+
+    /// The document to send and how it is made into pages, folded away
+    /// during a call.
+    fn document(&mut self, ui: &mut egui::Ui, dim: Color32, bright: Color32) {
+        let heading = match self.pages.len() {
+            0 => "document: none".to_owned(),
+            1 => "document: 1 page".to_owned(),
+            n => format!("document: {n} pages"),
+        };
+        egui::CollapsingHeader::new(RichText::new(heading).color(bright))
+            .id_salt("fax-document")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui
+                        .button("Browse")
+                        .on_hover_text(
+                            "A picture, sent as one page, or a PDF, sent a page to a sheet at \
+                             the size it is printed -- up to 50 of its pages",
+                        )
+                        .clicked()
+                        && let Some(chosen) = rfd::FileDialog::new()
+                            .add_filter("pictures and PDFs", &["png", "jpg", "jpeg", "bmp", "gif", "pdf"])
+                            .add_filter("PDFs", &["pdf"])
+                            .add_filter("pictures", &["png", "jpg", "jpeg", "bmp", "gif"])
+                            .pick_file()
+                    {
+                        self.load(&chosen);
+                        self.view = View::Sending;
+                    }
+                    let shown = std::path::Path::new(&self.path)
+                        .file_name()
+                        .map_or_else(|| "no picture or PDF".to_owned(), |n| n.to_string_lossy().into_owned());
+                    ui.add(egui::Label::new(RichText::new(shown).monospace().color(dim)).truncate())
+                        .on_hover_text(&self.path);
+                });
+                let mut again = false;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("paper").monospace().color(dim));
+                    for r in [Resolution::Standard, Resolution::Fine] {
+                        if ui.selectable_label(self.resolution == r, r.name()).clicked() {
+                            self.resolution = r;
+                            again = true;
+                        }
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("ink  ").monospace().color(dim));
+                    for h in [Halftone::Threshold, Halftone::Diffuse] {
+                        if ui.selectable_label(self.halftone == h, h.name()).clicked() {
+                            self.halftone = h;
+                            again = true;
+                        }
+                    }
+                });
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("offer").monospace().color(dim));
+                    ui.checkbox(&mut self.v27ter, "V.27ter").on_hover_text(
+                        "2400 and 4800, and the one every fax has. Left unticked with nothing \
+                         else ticked, it is offered anyway",
+                    );
+                    ui.checkbox(&mut self.v29, "V.29").on_hover_text(
+                        "7200 and 9600. Untick it to hold a call to V.27ter, which is slower \
+                         and more forgiving of a bad line",
+                    );
+                    ui.checkbox(&mut self.v17, "V.17").on_hover_text(
+                        "7200 to 14 400, trellis coded. Untick it to hold a call to V.29 and V.27ter",
+                    );
+                    ui.checkbox(&mut self.v34, "V.34").on_hover_text(
+                        "Super G3: V.8 in front of the call, and the page over V.34's \
+                         half-duplex mode at up to 33 600. Used only when the far end has it; \
+                         answering, it means ANSam in place of the called tone",
+                    );
+                    ui.checkbox(&mut self.error_correction, "ECM").on_hover_text(
+                        "Error correction mode, T.30 Annex A: the page goes in numbered frames, \
+                         and any the far end cannot read are sent again instead of printed as \
+                         streaks. Used only when the far end offers it too",
+                    );
+                    ui.add_enabled(self.error_correction, egui::Checkbox::new(&mut self.jbig, "JBIG"))
+                        .on_hover_text(
+                            "T.85's JBIG: a good deal smaller than MMR on a picture. Only with \
+                             ECM, and only when the far end offers it too",
+                        );
+                });
+                if again {
+                    self.render();
+                }
+                if !self.pages.is_empty() {
+                    let [mh, mr, mmr, jbig] = self.coded_bits;
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new("coded").monospace().color(dim));
+                        for (name, bits) in [("MH", mh), ("MR", mr), ("MMR", mmr), ("JBIG", jbig)] {
+                            ui.label(
+                                RichText::new(format!("{name} {}k", bits / 1000))
+                                    .monospace()
+                                    .color(coding_colour(name)),
+                            );
+                        }
+                    });
+                }
+            });
+    }
+
+    /// How long the document takes at every rate this end offers, fastest
+    /// first, with the rate the call agreed on lit once there is one.
+    fn rate_table(&self, ui: &mut egui::Ui, dim: Color32, bright: Color32) {
+        if self.pages.is_empty() {
+            return;
+        }
+        let [mh, mr, mmr, jbig] = self.coded_bits;
+        let packed = if self.jbig { jbig.min(mmr) } else { mmr };
+        let best = if self.error_correction { packed } else { mr };
+        let carried = self.live().and_then(|c| c.carried).or(self.carried);
+        ui.label(RichText::new("how long the document takes").color(bright)).on_hover_text(
+            "From the smallest coding this end will send at each rate -- JBIG or MMR under \
+             error correction, MR without -- to MH, which every machine reads. Fastest first",
+        );
+        egui::Grid::new("fax-rates").num_columns(3).spacing([10.0, 2.0]).show(ui, |ui| {
+            for row in rate_rows(self.v34, &self.ours(), packed, best, mh) {
+                let lit = agreed(&row, carried);
+                let rate = if lit && row.modulation == "V.34" {
+                    carried.map_or(row.rate, |c| c.rate)
+                } else {
+                    row.rate
+                };
+                let text = |s: String, colour: Color32| {
+                    let t = RichText::new(s).monospace().size(12.0).color(colour);
+                    if lit { t.strong().background_color(Color32::from_rgb(30, 70, 45)) } else { t }
+                };
+                ui.label(text(format!("{rate}"), if lit { BEST } else { dim }));
+                ui.label(text(row.modulation.to_owned(), modulation_colour(row.modulation)));
+                ui.label(text(
+                    format!(
+                        "{} to {}{}",
+                        clock(row.least as f64 / f64::from(rate)),
+                        clock(row.most as f64 / f64::from(rate)),
+                        if lit { "  agreed" } else { "" }
+                    ),
+                    if lit { BEST } else { bright },
+                ));
+                ui.end_row();
+            }
+        });
+    }
+
+    /// The calls since the window opened, newest first.
+    fn session_list(&mut self, ui: &mut egui::Ui, now: f64, dim: Color32, bright: Color32) {
+        ui.label(RichText::new("calls this session").color(bright));
+        if self.calls.is_empty() {
+            ui.label(RichText::new("None yet.").small().color(dim));
+            return;
+        }
+        let (mut open, mut save) = (None, None);
+        egui::Grid::new("fax-calls").num_columns(5).spacing([8.0, 3.0]).striped(true).show(ui, |ui| {
+            for (i, call) in self.calls.iter().enumerate().rev().take(30) {
+                ui.label(RichText::new(ago(now - call.ended.unwrap_or(now))).size(12.0).color(dim));
+                let far = if call.far.is_empty() { "?" } else { call.far.as_str() };
+                ui.label(
+                    RichText::new(format!("{} {far}", if call.sending { "to" } else { "from" }))
+                        .monospace()
+                        .size(12.0)
+                        .color(bright),
+                )
+                .on_hover_text(call.details(now));
+                let (short, colour) = call.short();
+                ui.label(RichText::new(short).monospace().size(12.0).strong().color(colour))
+                    .on_hover_text(call.headline().0);
+                let pages = if call.sending { call.confirmed_pages() } else { call.received.len() };
+                ui.label(RichText::new(format!("{pages} p")).monospace().size(12.0).color(dim));
+                ui.horizontal(|ui| {
+                    if !call.received.is_empty() {
+                        if ui.small_button("open").clicked() {
+                            open = Some(i);
+                        }
+                        if ui.small_button("save").on_hover_text("As one PDF, or a PNG a page").clicked() {
+                            save = Some(i);
+                        }
+                    }
+                });
+                ui.end_row();
+            }
+        });
+        if let Some(i) = open {
+            self.open(i, 0);
+        }
+        if let Some(i) = save
+            && let Some(chosen) = rfd::FileDialog::new()
+                .add_filter("PDF, every page in one", &["pdf"])
+                .add_filter("PNG pictures, a page each", &["png"])
+                .set_file_name("fax.pdf")
+                .save_file()
+            && let Some(call) = self.calls.get(i)
+        {
+            let pages: Vec<(usize, &[Vec<bool>], Resolution)> = call
+                .received
+                .iter()
+                .map(|(sheet, page)| (*sheet, page.lines.as_slice(), page.resolution))
+                .collect();
+            self.saved = Some(save_pages(&pages, &chosen));
+        }
+        if let Some(saved) = &self.saved {
+            ui.label(RichText::new(saved).small().color(dim));
+        }
+    }
+
     /// What to type at the modem to start one.
     pub fn commands(start: &Start) -> String {
         // The class first: it decides what the dial does, and a modem told to
@@ -1483,6 +2235,59 @@ impl Fax {
             Start::HangUp => String::new(),
         }
     }
+}
+
+/// A page arriving, or arrived, drawn the whole width of the panel and
+/// scrolling once it is taller than the room, following the newest line
+/// while the view is at the bottom.
+fn draw_scan(ui: &mut egui::Ui, scan: &mut Scan, arriving: bool, zoom: &mut Zoom) {
+    // Whole screen pixels to a texel or whole texels to a pixel, never
+    // smoothed: fitted across the panel until the wheel says otherwise, and
+    // scrolling, following the newest line down.
+    let ppp = ui.ctx().pixels_per_point();
+    let room = ui.available_size();
+    let (n, m, level, anchor) = zoom.begin(ui, (room.x - 14.0) * ppp);
+    scan.set_scale(n);
+    let Some(texture) = scan.texture(ui.ctx()) else { return };
+    let shown = scan.shown();
+    let bottom = shown as f32 / scan.capacity as f32;
+    let sheet = scan.sheet_rows();
+    let width = scan.width();
+    let mut area = egui::ScrollArea::both()
+        .id_salt("fax-receive-scroll")
+        .max_height(room.y)
+        .auto_shrink([false, false])
+        .stick_to_bottom(true);
+    if let Some(offset) = anchor {
+        area = area.scroll_offset(offset);
+    }
+    let out = area.show(ui, |ui| {
+        // Painted into a rectangle of its own rather than through an image
+        // widget: the texture is a whole sheet tall, and an image widget
+        // keeps its proportions.
+        let full = picture_size(ppp, width, shown.max(sheet), m);
+        let (area, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width().max(full.x), full.y),
+            egui::Sense::hover(),
+        );
+        // On the pixel grid, so each texel lands on whole pixels.
+        let left = ((area.center().x - full.x / 2.0).max(area.left()) * ppp).round() / ppp;
+        let top = (area.top() * ppp).round() / ppp;
+        let paper = egui::Rect::from_min_size(egui::pos2(left, top), full);
+        // The rest of the sheet, still to come.
+        ui.painter().rect_filled(paper, 0.0, UNSCANNED);
+        let rect = egui::Rect::from_min_size(paper.min, picture_size(ppp, width, shown, m));
+        ui.painter().image(
+            texture.id(),
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, bottom)),
+            Color32::WHITE,
+        );
+        if arriving {
+            ui.painter().hline(rect.x_range(), rect.bottom() - 1.0, egui::Stroke::new(2.0, BEST));
+        }
+    });
+    zoom.end(ui, out.inner_rect, out.state.offset, level);
 }
 
 #[cfg(test)]
@@ -1519,15 +2324,18 @@ mod tests {
 
     #[test]
     fn a_page_arriving_is_drawn_the_shape_of_the_sheet() {
-        // A whole A4 sheet at either resolution is the same picture, 297 mm
-        // down and 215 across -- not a standard page half the height of the
-        // same page sent fine.
+        // A whole A4 sheet at either resolution is the same picture, near
+        // enough 297 mm down and 215 across -- not a standard page half the
+        // height of the same page sent fine. Near enough: drawn a whole
+        // pixel to a pel, 7.7 lines to the millimetre come out as tall as
+        // 8.04 pels across, 4% short.
         for resolution in [Resolution::Standard, Resolution::Fine] {
             let mut scan = Scan::new(0, 1, resolution);
             scan.extend(0, lines_of(resolution.lines(), false));
-            let tall = scan.rows as f64 / SCAN_WIDTH as f64;
+            let size = picture_size(1.0, scan.width(), scan.rows, 1);
+            let tall = (size.y / size.x) as f64;
             assert!(
-                (tall - 297.0 / 215.0).abs() < 0.01,
+                (tall - 297.0 / 215.0).abs() < 0.07,
                 "{resolution:?}: {} rows for {SCAN_WIDTH} across",
                 scan.rows
             );
@@ -1640,12 +2448,14 @@ mod tests {
     fn the_texture_has_room_for_a_sheet_and_grows_for_a_longer_page() {
         let ctx = egui::Context::default();
         let largest = ctx.input(|i| i.max_texture_side);
+        // Shrunk by three, so a sheet fits the test's small texture limit.
         let mut scan = Scan::new(0, 1, Resolution::Standard);
+        scan.set_scale(3);
         assert!(scan.texture(&ctx).is_none(), "a texture for nothing");
         scan.extend(0, lines_of(100, false));
         let texture = scan.texture(&ctx).expect("no texture");
-        assert_eq!(texture.size()[0], SCAN_WIDTH);
-        assert!(texture.size()[1] >= 795, "{} rows is not a sheet", texture.size()[1]);
+        assert_eq!(texture.size()[0], SCAN_WIDTH / 3);
+        assert!(texture.size()[1] >= 762, "{} rows is not a sheet", texture.size()[1]);
         assert_eq!(scan.uploaded, scan.rows);
 
         // Half as long again as a sheet.
@@ -1720,7 +2530,7 @@ mod tests {
                 ..Default::default()
             };
             let mut output = ctx.run_ui(input, |ui| {
-                fax.receive_row(ui, Color32::GRAY, Color32::WHITE);
+                fax.received_page(ui, Color32::GRAY, Color32::WHITE);
             });
             // What a renderer would have uploaded. There is none here.
             output.textures_delta.clear();
@@ -1737,15 +2547,16 @@ mod tests {
             widths.push(rect.width());
             heights.push(rect.height());
         }
-        assert!(widths[0] > 500.0, "the first rows are {} across", widths[0]);
+        // 1728 pels do not fit 640 points, so a third: 576 across.
+        assert!((widths[0] - 576.0).abs() < 0.5, "the first rows are {} across", widths[0]);
         assert!(
             widths.iter().all(|w| (w - widths[0]).abs() < 0.5),
             "the page changed width as it arrived: {widths:?}"
         );
         assert!(heights.windows(2).all(|h| h[0] < h[1]), "not growing downwards: {heights:?}");
-        // And the page's own shape at the end: 795 rows of 576 across.
-        let whole = heights[3] / widths[3];
-        assert!((whole - 795.0 / 576.0).abs() < 0.01, "a sheet {whole} times as tall as it is wide");
+        // And whole pixels at the end: 1143 standard lines, two pixels
+        // each, shrunk by three.
+        assert!((heights[3] - 762.0).abs() < 0.5, "a sheet {} tall", heights[3]);
     }
 
     #[test]
@@ -1755,7 +2566,7 @@ mod tests {
         // wrong picture. A page that arrives is whatever length the far end
         // sent, including lengths nothing here would ever produce.
         for lines in [0, 1, 5, 6, 7, 11, 191, 1143, 2287] {
-            let image = Fax::thumbnail(&page_of(lines));
+            let image = Fax::thumbnail(&page_of(lines), 16384, 3);
             assert_eq!(
                 image.pixels.len(),
                 image.size[0] * image.size[1],
@@ -1869,12 +2680,12 @@ mod tests {
         frame.fax_rate = 33_600;
         frame.fax_symbol_rate = 3429;
         frame.fax_error_correction = true;
-        fax.observe(&frame);
+        fax.observe(&frame, 0.0);
         assert_eq!(fax.carried, None, "taken before a page was moving");
 
         frame.fax_coding = "JBIG";
         frame.fax_progress = Some(0.25);
-        fax.observe(&frame);
+        fax.observe(&frame, 0.0);
         let page = Carried {
             coding: "JBIG",
             modulation: "V.34",
@@ -1885,7 +2696,7 @@ mod tests {
         assert_eq!(fax.carried, Some(page));
 
         frame.fax_progress = None;
-        fax.observe(&frame);
+        fax.observe(&frame, 0.0);
         assert_eq!(fax.carried, Some(page), "lost in the turnaround after the page");
     }
 
@@ -1993,5 +2804,397 @@ mod tests {
         assert!(fax.pages().is_empty());
         assert!(fax.source.is_none());
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// The frames of the first V.17 call to a real machine, read back out of
+    /// its recording (dist/captures/live-1795341989.wav) with the replay
+    /// test: the far end's CSI, DIS and CFR, this end's TSI, DCS and EOP,
+    /// the far end's MCF at 52.2 s, and this end's DCN.
+    fn telstra() -> Vec<Exchanged> {
+        let far = |frame| Exchanged { frame, ours: false };
+        let near = |frame| Exchanged { frame, ours: true };
+        vec![
+            far(Frame::Csi),
+            far(Frame::Dis),
+            near(Frame::Tsi),
+            near(Frame::Dcs),
+            far(Frame::Cfr),
+            near(Frame::Eop),
+            far(Frame::Mcf),
+            near(Frame::Dcn),
+        ]
+    }
+
+    fn v17() -> Carried {
+        Carried { coding: "MH", modulation: "V.17", rate: 14_400, symbol_rate: 0, correcting: false }
+    }
+
+    fn sent(frames: Vec<Exchanged>) -> CallRecord {
+        let mut call = CallRecord::new(true, 10.0, "1300 368 909");
+        call.frames = frames;
+        call.sheets = 1;
+        call.carried = Some(v17());
+        call.last_phase = Some(fax::call::Phase::AwaitingReceipt.name());
+        call.ended = Some(56.0);
+        call
+    }
+
+    #[test]
+    fn the_first_v17_call_to_a_real_machine_was_confirmed() {
+        let call = sent(telstra());
+        assert_eq!(call.verdict(), Verdict::Confirmed);
+        assert_eq!(call.confirmed_pages(), 1);
+        let (headline, colour) = call.headline();
+        assert_eq!(headline, "Confirmed: the far end took 1 page (MCF)");
+        assert_eq!(colour, BEST);
+        assert_eq!(call.details(0.0), "1 sent · 0 received · V.17 14400 · MH · no ECM · 0:46");
+        assert_eq!(call.short().0, "MCF");
+    }
+
+    #[test]
+    fn a_call_still_going_has_no_verdict() {
+        let mut call = sent(telstra());
+        call.ended = None;
+        assert_eq!(call.verdict(), Verdict::Going);
+    }
+
+    #[test]
+    fn a_page_answered_with_rtn_or_rtp_asks_for_a_retrain() {
+        for (answer, word) in [(Frame::Rtn, "RTN"), (Frame::Rtp, "RTP")] {
+            let mut frames = telstra();
+            frames[6].frame = answer;
+            let call = sent(frames);
+            assert_eq!(call.verdict(), Verdict::RetrainAsked(answer));
+            assert!(call.headline().0.contains(word), "{}", call.headline().0);
+            assert_eq!(call.confirmed_pages(), usize::from(answer == Frame::Rtp));
+        }
+    }
+
+    #[test]
+    fn a_call_that_ends_before_the_page_says_which_phase_and_why() {
+        let mut call = sent(telstra()[..4].to_vec());
+        call.last_phase = Some(fax::call::Phase::AwaitingConfirm.name());
+        call.trouble = Some("no answer to the DCS".to_owned());
+        assert_eq!(call.verdict(), Verdict::Failed { phase: 'B', why: "no answer to the DCS".to_owned() });
+        assert!(call.headline().0.starts_with("Disconnected in phase B"), "{}", call.headline().0);
+        assert_eq!(call.short().0, "failed B");
+
+        let mut stopped = sent(telstra()[..6].to_vec());
+        stopped.last_phase = Some(fax::call::Phase::AwaitingReceipt.name());
+        stopped.stopped_here = true;
+        assert_eq!(stopped.verdict(), Verdict::Failed { phase: 'D', why: "stopped at this end".to_owned() });
+
+        let mut nobody = sent(Vec::new());
+        nobody.last_phase = Some(fax::call::Phase::Calling.name());
+        assert_eq!(nobody.verdict(), Verdict::Failed { phase: 'A', why: "no fax machine answered".to_owned() });
+    }
+
+    #[test]
+    fn a_first_page_confirmed_and_then_a_hang_up_is_not_a_confirmed_call() {
+        let near = |frame| Exchanged { frame, ours: true };
+        let far = |frame| Exchanged { frame, ours: false };
+        let mut frames = telstra()[..5].to_vec();
+        frames.extend([near(Frame::Mps), far(Frame::Mcf), far(Frame::Dcn)]);
+        let mut call = sent(frames);
+        call.trouble = Some("the far end hung up while this end was sending the page".to_owned());
+        match call.verdict() {
+            Verdict::Failed { why, .. } => assert!(why.ends_with("after page 1 was confirmed"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_command_sent_three_times_and_answered_once_is_one_page() {
+        let near = |frame| Exchanged { frame, ours: true };
+        let far = |frame| Exchanged { frame, ours: false };
+        let mut frames = telstra()[..5].to_vec();
+        frames.extend([near(Frame::Eop), near(Frame::Eop), near(Frame::Eop), far(Frame::Mcf), near(Frame::Dcn)]);
+        assert_eq!(sent(frames).confirmed_pages(), 1);
+    }
+
+    #[test]
+    fn a_fax_received_and_confirmed_by_this_end_is_confirmed() {
+        let near = |frame| Exchanged { frame, ours: true };
+        let far = |frame| Exchanged { frame, ours: false };
+        let mut call = CallRecord::new(false, 0.0, "");
+        call.frames = vec![
+            near(Frame::Csi),
+            near(Frame::Dis),
+            far(Frame::Dcs),
+            near(Frame::Cfr),
+            far(Frame::Mps),
+            near(Frame::Mcf),
+            far(Frame::Eop),
+            near(Frame::Mcf),
+            far(Frame::Dcn),
+        ];
+        call.received = vec![(1, page_of(10)), (2, page_of(10))];
+        call.sheets = 2;
+        call.ended = Some(80.0);
+        assert_eq!(call.verdict(), Verdict::Confirmed);
+        assert_eq!(call.confirmed_pages(), 2);
+        assert_eq!(call.headline().0, "Received 2 pages, confirmed (MCF)");
+    }
+
+    #[test]
+    fn the_rate_table_goes_fastest_first() {
+        let ours = [t30::Modulation::V27ter, t30::Modulation::V29, t30::Modulation::V17];
+        let rows = rate_rows(true, &ours, 10, 20, 30);
+        let order: Vec<(u32, &str)> = rows.iter().map(|r| (r.rate, r.modulation)).collect();
+        assert_eq!(order, vec![
+            (33_600, "V.34"),
+            (14_400, "V.17"),
+            (12_000, "V.17"),
+            (9600, "V.17"),
+            (9600, "V.29"),
+            (7200, "V.17"),
+            (7200, "V.29"),
+            (4800, "V.27ter"),
+            (2400, "V.27ter"),
+        ]);
+        assert_eq!((rows[0].least, rows[1].least, rows[1].most), (10, 20, 30));
+    }
+
+    #[test]
+    fn the_rate_the_call_agreed_is_the_one_lit() {
+        let ours = [t30::Modulation::V27ter, t30::Modulation::V29, t30::Modulation::V17];
+        let rows = rate_rows(true, &ours, 10, 20, 30);
+        let lit: Vec<(u32, &str)> =
+            rows.iter().filter(|r| agreed(r, Some(v17()))).map(|r| (r.rate, r.modulation)).collect();
+        assert_eq!(lit, vec![(14_400, "V.17")]);
+        assert!(rows.iter().all(|r| !agreed(r, None)), "lit before anything was agreed");
+        // V.34 at whatever rate it settled on, which is seldom 33 600.
+        let v34 = Carried { coding: "JBIG", modulation: "V.34", rate: 26_400, symbol_rate: 3200, correcting: true };
+        let lit: Vec<&str> = rows.iter().filter(|r| agreed(r, Some(v34))).map(|r| r.modulation).collect();
+        assert_eq!(lit, vec!["V.34"]);
+        // V.27 ter written with its space still matches.
+        let v27 = Carried { coding: "MH", modulation: "V.27 ter", rate: 4800, symbol_rate: 0, correcting: false };
+        assert!(rows.iter().any(|r| agreed(r, Some(v27)) && r.rate == 4800));
+    }
+
+    #[test]
+    fn the_time_left_is_this_page_and_the_ones_after_it_at_the_rate() {
+        let bits = [144_000, 72_000, 28_800];
+        let p = send_progress(&bits, 2, 0.5, 14_400).unwrap();
+        assert_eq!((p.page_bits, p.done_bits), (72_000, 36_000));
+        assert!((p.page_left - 2.5).abs() < 1e-9, "{}", p.page_left);
+        assert!((p.rest_left - 2.0).abs() < 1e-9, "{}", p.rest_left);
+        assert_eq!(send_progress(&bits, 0, 0.5, 14_400), None, "no page yet");
+        assert_eq!(send_progress(&bits, 4, 0.5, 14_400), None, "past the last page");
+        assert_eq!(send_progress(&bits, 1, 0.5, 0), None, "no rate yet");
+    }
+
+    #[test]
+    fn a_call_is_a_record_from_its_first_phase_to_on_hook_and_keeps_its_frames() {
+        let mut fax = Fax::new();
+        fax.dialled = "1300368909".to_owned();
+        let mut frame = telemetry::Frame::new(16, 16, 16_000.0);
+        fax.observe(&frame, 0.0);
+        assert!(fax.calls.is_empty(), "a call out of nothing");
+
+        frame.state = telemetry::CallState::Negotiating;
+        frame.fax_phase = Some(fax::call::Phase::Calling.name());
+        frame.fax_sending = true;
+        fax.observe(&frame, 1.0);
+        assert_eq!(fax.calls.len(), 1);
+        assert_eq!(fax.calls[0].far, "1300368909", "the number dialled until the far end says");
+        frame.fax_identity = "     1300  368 909".to_owned();
+        frame.fax_phase = Some(fax::call::Phase::AwaitingReceipt.name());
+        frame.fax_sheet = 1;
+        fax.observe(&frame, 40.0);
+        fax.exchanged(telstra()[..6].to_vec());
+        assert_eq!(fax.calls[0].far, "1300  368 909");
+        assert_eq!(fax.calls[0].verdict(), Verdict::Going);
+
+        frame.fax_phase = Some(fax::call::Phase::Done.name());
+        fax.observe(&frame, 47.0);
+        // The last frames arrive just after the end was seen.
+        fax.exchanged(telstra()[6..].to_vec());
+        assert_eq!(fax.calls[0].ended, Some(47.0));
+        assert_eq!(fax.calls[0].verdict(), Verdict::Confirmed);
+
+        // Still "done" and on hook: no second call.
+        frame.state = telemetry::CallState::Idle;
+        fax.observe(&frame, 48.0);
+        assert_eq!(fax.calls.len(), 1);
+        // The next one is another record.
+        frame.state = telemetry::CallState::Negotiating;
+        frame.fax_phase = Some(fax::call::Phase::Answering.name());
+        frame.fax_sending = false;
+        fax.observe(&frame, 60.0);
+        assert_eq!(fax.calls.len(), 2);
+        assert!(!fax.calls[1].sending);
+    }
+
+    #[test]
+    fn a_page_that_arrives_is_kept_with_its_call() {
+        let mut fax = Fax::new();
+        let mut frame = telemetry::Frame::new(16, 16, 16_000.0);
+        frame.state = telemetry::CallState::Negotiating;
+        frame.fax_phase = Some(fax::call::Phase::Receiving.name());
+        fax.observe(&frame, 0.0);
+        fax.arrived(1, page_of(30));
+        fax.arrived(2, page_of(40));
+        fax.arrived(2, page_of(41));
+        let kept: Vec<(usize, usize)> = fax.calls[0].received.iter().map(|(s, p)| (*s, p.height())).collect();
+        assert_eq!(kept, vec![(1, 30), (2, 41)], "a page handed over again replaces itself");
+        fax.open(0, 1);
+        assert_eq!(fax.opened.as_ref().map(|(c, p, s)| (*c, *p, s.lines.len())), Some((0, 1, 41)));
+        assert_eq!(fax.shown_view(), View::Received);
+    }
+
+    #[test]
+    fn a_call_record_saves_every_page_as_one_pdf_or_a_png_each() {
+        let pages = [page_of(20), page_of(30)];
+        let refs: Vec<(usize, &[Vec<bool>], Resolution)> =
+            pages.iter().enumerate().map(|(i, p)| (i + 1, p.lines.as_slice(), p.resolution)).collect();
+        let pdf = scratch("record.pdf");
+        assert!(save_pages(&refs, &pdf).starts_with("2 pages saved"));
+        assert!(std::fs::metadata(&pdf).is_ok());
+        let png = scratch("record.png");
+        assert!(save_pages(&refs, &png).starts_with("2 pages saved as"));
+        for n in [1, 2] {
+            let each = png.with_file_name(format!("record-{n}.png"));
+            assert!(std::fs::metadata(&each).is_ok(), "{}", each.display());
+            let _ = std::fs::remove_file(each);
+        }
+        let _ = std::fs::remove_file(pdf);
+    }
+
+    #[test]
+    fn times_read_as_minutes_and_seconds_and_ages_as_words() {
+        assert_eq!(clock(46.0), "0:46");
+        assert_eq!(clock(130.4), "2:10");
+        assert_eq!(clock(-3.0), "0:00");
+        assert_eq!(ago(5.0), "just now");
+        assert_eq!(ago(250.0), "4 min ago");
+        assert_eq!(ago(7300.0), "2 h ago");
+    }
+
+    #[test]
+    fn the_page_modulation_is_kept_when_the_modem_goes_back_to_v21_for_the_frames() {
+        let mut fax = Fax::new();
+        let mut frame = telemetry::Frame::new(16, 16, 16_000.0);
+        frame.state = telemetry::CallState::Negotiating;
+        frame.fax_phase = Some(fax::call::Phase::Receiving.name());
+        frame.fax_coding = "JBIG";
+        frame.fax_rate = 14_400;
+        frame.fax_error_correction = true;
+        frame.fax_progress = Some(0.5);
+        frame.modulation = "V.21";
+        fax.observe(&frame, 0.0);
+        assert_eq!(fax.carried, None, "V.21 taken for the page's modulation");
+        frame.modulation = "V.17";
+        fax.observe(&frame, 1.0);
+        frame.modulation = "V.21";
+        frame.fax_progress = Some(1.0);
+        fax.observe(&frame, 2.0);
+        let carried = fax.carried.expect("nothing carried");
+        assert_eq!((carried.modulation, carried.rate), ("V.17", 14_400));
+        assert_eq!(fax.calls[0].carried.map(|c| c.modulation), Some("V.17"));
+    }
+
+    #[test]
+    fn receiving_the_far_end_is_what_its_dcs_chose_not_nothing_in_common() {
+        let mut fax = Fax::new();
+        let mut frame = telemetry::Frame::new(16, 16, 16_000.0);
+        frame.state = telemetry::CallState::Negotiating;
+        frame.fax_phase = Some(fax::call::Phase::CheckingTraining.name());
+        frame.fax_sending = false;
+        // A DCS for V.17 at 14 400: bits 11 to 14 are 0001 (Table 2).
+        let mut dcs = vec![0u8; 3];
+        dcs[1] = 0b0010_0000;
+        assert_eq!(t30::command_rate(&dcs), Some((t30::Modulation::V17, 14_400)), "the field in this test");
+        frame.fax_capabilities = Some(dcs);
+        fax.observe(&frame, 0.0);
+        let caps = fax.far.clone().expect("no far end");
+        assert_eq!(fax.shared(&caps).as_deref(), Some("V.17 at 14400 bit/s"));
+    }
+
+    #[test]
+    fn the_line_sent_follows_the_lines_and_not_the_share_of_the_bits() {
+        // A page white for its top half and noise below: half its bits gone
+        // is well into the bottom half, not the middle of the page.
+        let mut seed = 7u32;
+        let lines: Vec<Vec<bool>> = (0..300)
+            .map(|y| {
+                (0..fax::page::WIDTH)
+                    .map(|_| {
+                        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+                        y >= 150 && seed >> 31 == 1
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut fax = Fax::new();
+        fax.pages = vec![Page { lines, resolution: Resolution::Standard }];
+        fax.line_ends = vec![None];
+        for coding in ["MH", "MR", "MMR", "JBIG"] {
+            fax.coding = coding;
+            // Worked out on a thread: none until it is done.
+            let mut reached = None;
+            // Generous: a debug build coding JBIG under a full test run is slow.
+            for _ in 0..12_000 {
+                reached = fax.line_reached(0, 0.5);
+                if reached.is_some() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let (half, of) = reached.expect("no line");
+            assert_eq!(of, 300);
+            assert!(half > 200.0, "{coding}: half the bits is line {half}");
+            let (all, _) = fax.line_reached(0, 1.0).unwrap();
+            assert!((all - 300.0).abs() < 1.0, "{coding}: every bit is line {all}");
+        }
+        fax.coding = "-";
+        assert_eq!(fax.line_reached(0, 0.5), None, "a coding not known yet");
+    }
+
+    #[test]
+    fn a_page_to_send_is_drawn_the_shape_of_its_paper_at_either_resolution() {
+        // The same sheet at standard and at fine: half the lines, the same
+        // paper, the same picture -- a pixel a pel, standard lines doubled.
+        let size = |resolution: Resolution, n| {
+            let page = Page { lines: lines_of(resolution.lines(), false), resolution };
+            let image = Fax::thumbnail(&page, 16384, n);
+            picture_size(1.0, image.size[0], image.size[1], 1)
+        };
+        for n in [1, 2, 3] {
+            let (a, b) = (size(Resolution::Standard, n), size(Resolution::Fine, n));
+            assert!((a.x - b.x).abs() < 0.01 && (a.y / b.y - 1.0).abs() < 0.01, "{a:?} against {b:?}");
+            assert!((a.y / a.x - 297.0 / 215.0).abs() < 0.07, "not A4: {a:?}");
+        }
+        let page = Page { lines: lines_of(5, true), resolution: Resolution::Fine };
+        assert_eq!(Fax::thumbnail(&page, 16384, 1).size, [1728, 5]);
+        assert_eq!(Fax::thumbnail(&page, 16384, 2).size, [864, 3]);
+        // Shrunk, a block all ink is still black, and black and white at 1:1.
+        assert!(Fax::thumbnail(&page, 16384, 2).pixels.iter().all(|p| *p == Color32::BLACK));
+    }
+
+    #[test]
+    fn an_ecm_receive_whose_dcn_was_cut_off_is_still_confirmed() {
+        // Seen filming: the sender hangs up the SIP call as it sends DCN, so
+        // the receiver never hears it -- but it had already confirmed the
+        // last page and was waiting for the far end to hang up.
+        let near = |frame| Exchanged { frame, ours: true };
+        let far = |frame| Exchanged { frame, ours: false };
+        let mut call = CallRecord::new(false, 0.0, "");
+        call.frames = vec![
+            near(Frame::Csi),
+            near(Frame::Dis),
+            far(Frame::Dcs),
+            near(Frame::Cfr),
+            far(Frame::Pps),
+            near(Frame::Mcf),
+        ];
+        call.received = vec![(1, page_of(10))];
+        call.sheets = 1;
+        call.last_phase = Some(fax::call::Phase::AwaitingDisconnect.name());
+        call.ended = Some(40.0);
+        assert_eq!(call.verdict(), Verdict::Confirmed);
+        // Still receiving the page when the line went: not confirmed.
+        call.last_phase = Some(fax::call::Phase::Receiving.name());
+        assert!(matches!(call.verdict(), Verdict::Failed { phase: 'C', .. }), "{:?}", call.verdict());
     }
 }

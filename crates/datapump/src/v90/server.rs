@@ -101,6 +101,12 @@ impl Line {
         }
     }
 
+    /// From the end of V.8, as V.34's answer modem with U.S. Robotics x2 on
+    /// offer (see [`Digital::x2`]).
+    pub fn x2(fs: f64, lead_in: f64) -> Self {
+        Self { modem: Digital::x2(lead_in), ..Self::new(fs, ours(), lead_in) }
+    }
+
     /// What the network delivered, one level for every 8000 Hz sample, for
     /// the samples [`Line::step`] is about to be given.
     ///

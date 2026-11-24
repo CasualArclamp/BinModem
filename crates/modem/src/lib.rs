@@ -25,6 +25,8 @@ use at::result::ResultCode;
 use at::{Action, Interpreter};
 use datapump::AsyncBits;
 use datapump::bell103;
+use datapump::bell202;
+use datapump::bell212;
 use datapump::hst;
 use datapump::v21;
 use datapump::v22bis;
@@ -32,6 +34,8 @@ use datapump::v32;
 use datapump::v34;
 use datapump::v90;
 pub use datapump::v92::memo::Recognized;
+pub mod bbs;
+mod automode;
 mod faxcall;
 pub mod memos;
 mod varc;
@@ -54,6 +58,9 @@ use ec::{Params, Role as EcRole, Stack};
 /// clears bit 70, the caller sends V.90's Table 10 whatever the server said,
 /// and the call is V.90 in every particular. `BINMODEM_V92_PCM_UP=1` turns it
 /// on, at either end; both have to have it for PCM to go up.
+/// The S-parameter that offers U.S. Robotics x2 (`at::registers`).
+const X2_REGISTER: u8 = 70;
+
 fn v92_pcm_upstream_wanted() -> bool {
     match std::env::var("BINMODEM_V92_PCM_UP") {
         Ok(v) => matches!(v.trim(), "1" | "yes" | "on" | "true"),
@@ -106,6 +113,41 @@ pub struct HstStatus {
     /// Where the call has got, in words.
     pub phase: &'static str,
 }
+
+/// `BINMODEM_V92_TONEQ_MS` when a call is placed: end TONEq after that many
+/// milliseconds even while ANSpcm goes on, as a test (see
+/// [`v8line::Modem::with_toneq_cap`]). Unset, empty or not a number: TONEq
+/// lasts until ANSpcm stops, as 9.2.1.3/V.92 has it.
+fn v92_toneq_cap() -> Option<f64> {
+    let ms: f64 = std::env::var("BINMODEM_V92_TONEQ_MS").ok()?.trim().parse().ok()?;
+    (ms.is_finite() && ms > 0.0).then_some(ms / 1000.0)
+}
+
+/// How long after a quick connect's hand-over the analogue modem waits for
+/// the far end's INFO0d or tone B, beyond the round trip: 9.4.2.2.2/V.92's
+/// 2500 ms, which it gives the tone B reversal after INFO0a.
+///
+/// Sized against a 60 s budget: NetZero's POPs hang up on a call that has
+/// not connected within 60 s of answering. In live-1795315036 the hand-over
+/// came 8.8 s into the call, so with its 0.85 s round trip the CM goes out
+/// at about 12.2 s; a full start-up from V.8 reaches phase 3 about 10 s after
+/// its CM, which leaves the rest of the minute for phases 3 and 4. Waiting
+/// for phase 2's own 20 s limit instead put the CM at about 29 s, and a call
+/// that then needed a V.90 retrain as well would not have fitted.
+const QUICK_PHASE2_WAIT: f64 = 2.5;
+
+/// The round trip to allow for when the memo has none (an unmeasured one,
+/// from `BINMODEM_V92_QC=always`): about the longest the international SIP
+/// routes to US servers have shown.
+const QUICK_ROUND_TRIP: f64 = 1.5;
+
+/// How long CM goes on, beyond the round trip, after a quick connect the far
+/// end never followed into Phase 2: two CMs for it to answer (8.2.2) and two
+/// JMs for this end to believe (8.1.2), about 0.4 s each, with room to spare.
+/// Short for the same 60 s budget as [`QUICK_PHASE2_WAIT`]: a far end that
+/// answers no CM either is hung up on about 8.3 s after the hand-over
+/// (17.1 s into live-1795315036), so a redial still has time to work.
+const QUICK_RESCUE_PATIENCE: f64 = 4.0;
 
 /// Which end of the call this modem is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +207,11 @@ enum Pump {
     /// Bell 103 or V.21: 300 bit/s, two tones a direction, and nothing else
     /// at all. Which of the two is in the modem's `Plan`.
     Bell103(Box<bell103::Modem>),
+    /// Bell 212A: V.22's 1200 bit/s DPSK behind Bell's own handshake, and a
+    /// Bell 103 inside it for a far end that is one.
+    Bell212(Box<bell212::Modem>),
+    /// Bell 202: 1200 bit/s FSK on one band, the two ends taking turns.
+    Bell202(Box<bell202::Modem>),
     /// V.34: the line probed and ranged in phase 2, both receivers trained
     /// and data mode's parameters exchanged in phases 3 and 4, and data after.
     V34(Box<v34::startup::Modem>),
@@ -178,11 +225,36 @@ enum Pump {
 }
 
 impl Pump {
+    /// The same answering pump with its answer tone already behind it, for
+    /// automode's offers after ANSam.
+    fn past_answer_tone(self) -> Self {
+        match self {
+            Self::V32(m) => Self::V32(Box::new(m.past_answer_tone())),
+            Self::V22bis(m) => Self::V22bis(Box::new(m.past_answer_tone())),
+            Self::Bell212(m) => Self::Bell212(Box::new(m.past_billing())),
+            other => other,
+        }
+    }
+
+    /// Whether an answering pump offered by automode has heard the caller
+    /// answer its offer.
+    fn heard_caller(&self) -> bool {
+        match self {
+            Self::V32(m) => !matches!(m.phase(), "answer tone" | "AC" | "AC (retrain)"),
+            Self::V22bis(m) => !matches!(m.phase(), "answer tone" | "unscrambled ones"),
+            Self::Bell212(m) => !matches!(m.phase(), "billing delay" | "answer tone"),
+            Self::Bell103(m) => m.carrier(),
+            _ => true,
+        }
+    }
+
     fn step(&mut self, line: f64) -> f64 {
         match self {
             Self::V22bis(m) => m.step(line),
             Self::V32(m) => m.step(line),
             Self::Bell103(m) => m.step(line),
+            Self::Bell212(m) => m.step(line),
+            Self::Bell202(m) => m.step(line),
             Self::V34(m) => m.step(line),
             Self::V90(m) => m.step(line),
             Self::V90Server(m) => m.step(line),
@@ -209,6 +281,16 @@ impl Pump {
                 bell103::Status::Negotiating => Progress::Negotiating,
                 bell103::Status::Connected(rate) => Progress::both_ways(rate),
                 bell103::Status::Failed => Progress::Failed,
+            },
+            Self::Bell212(m) => match m.status() {
+                bell212::Status::Negotiating => Progress::Negotiating,
+                bell212::Status::Connected(rate) => Progress::both_ways(rate),
+                bell212::Status::Failed => Progress::Failed,
+            },
+            Self::Bell202(m) => match m.status() {
+                bell202::Status::Negotiating => Progress::Negotiating,
+                bell202::Status::Connected(rate) => Progress::both_ways(rate),
+                bell202::Status::Failed => Progress::Failed,
             },
             // Rates can differ each way, and V.34 is the one modulation here
             // where they do: each end asks for what it can receive (MP, 10.1.3),
@@ -251,7 +333,7 @@ impl Pump {
             Self::V34(m) => m.phase2().round_trip().map(|s| (s * 1000.0).round() as u32),
             Self::V90(m) => m.round_trip().map(|s| (s * 1000.0).round() as u32),
             Self::V90Server(m) => m.modem().round_trip().map(|s| (s * 1000.0).round() as u32),
-            Self::V22bis(_) | Self::Bell103(_) => None,
+            Self::V22bis(_) | Self::Bell103(_) | Self::Bell212(_) | Self::Bell202(_) => None,
         }
     }
 
@@ -266,6 +348,8 @@ impl Pump {
             // waiting for a carrier that had gone before it started waiting.
             Self::V32(m) => m.carrier(),
             Self::Bell103(m) => m.carrier(),
+            Self::Bell212(m) => m.carrier(),
+            Self::Bell202(m) => m.carrier(),
             Self::V34(m) => m.carrier(),
             Self::V90(m) => m.carrier(),
             Self::V90Server(m) => m.modem().carrier(),
@@ -277,6 +361,8 @@ impl Pump {
             Self::V22bis(m) => m.take_bits(),
             Self::V32(m) => m.take_bits(),
             Self::Bell103(m) => m.take_bits(),
+            Self::Bell212(m) => m.take_bits(),
+            Self::Bell202(m) => m.take_bits(),
             Self::V34(m) => m.take_bits(),
             Self::V90(m) => m.take_bits(),
             Self::V90Server(m) => m.modem_mut().take_bits(),
@@ -288,6 +374,8 @@ impl Pump {
             Self::V22bis(m) => m.send_bits(bits),
             Self::V32(m) => m.send_bits(bits),
             Self::Bell103(m) => m.send_bits(bits),
+            Self::Bell212(m) => m.send_bits(bits),
+            Self::Bell202(m) => m.send_bits(bits),
             Self::V34(m) => m.send_bits(bits),
             Self::V90(m) => m.send_bits(bits),
             Self::V90Server(m) => m.modem_mut().send_bits(bits),
@@ -305,7 +393,7 @@ impl Pump {
             Self::V34(m) => m.accepts_bits(),
             Self::V90(m) => m.accepts_bits(),
             Self::V90Server(m) => m.modem().accepts_bits(),
-            Self::V22bis(_) | Self::V32(_) | Self::Bell103(_) => true,
+            Self::V22bis(_) | Self::V32(_) | Self::Bell103(_) | Self::Bell212(_) | Self::Bell202(_) => true,
         }
     }
 
@@ -339,6 +427,8 @@ impl Pump {
             Self::V22bis(m) => m.pending_bits(),
             Self::V32(m) => m.pending_bits(),
             Self::Bell103(m) => m.pending_bits(),
+            Self::Bell212(m) => m.pending_bits(),
+            Self::Bell202(m) => m.pending_bits(),
             Self::V34(m) => m.pending_bits(),
             Self::V90(m) => m.pending_bits(),
             Self::V90Server(m) => m.modem().pending_bits(),
@@ -361,7 +451,8 @@ impl Pump {
             Self::V90(m) => m.v34().constellation_point(),
             // Upstream is V.34's, and that is what this end reads.
             Self::V90Server(m) => m.modem().constellation_point(),
-            Self::Bell103(_) => None,
+            Self::Bell212(m) => m.constellation_point(),
+            Self::Bell103(_) | Self::Bell202(_) => None,
         }
     }
 
@@ -370,6 +461,8 @@ impl Pump {
     fn discriminator(&self) -> Option<f64> {
         match self {
             Self::Bell103(m) => Some(m.level()),
+            Self::Bell212(m) => m.level(),
+            Self::Bell202(m) => Some(m.level()),
             _ => None,
         }
     }
@@ -378,6 +471,8 @@ impl Pump {
     fn line_framing_errors(&self) -> Option<u64> {
         match self {
             Self::Bell103(m) => Some(m.framing_errors()),
+            Self::Bell212(m) => m.framing_errors(),
+            Self::Bell202(m) => Some(m.framing_errors()),
             // The synchronous pumps hand up a bit stream and have no idea
             // where a character begins, so the framing is done above them and
             // the count belongs there.
@@ -389,6 +484,8 @@ impl Pump {
     fn take_symbol(&mut self) -> Option<f64> {
         match self {
             Self::Bell103(m) => m.take_symbol(),
+            Self::Bell212(m) => m.take_symbol(),
+            Self::Bell202(m) => m.take_symbol(),
             _ => None,
         }
     }
@@ -398,11 +495,12 @@ impl Pump {
     fn residual_error(&self) -> Option<f64> {
         match self {
             Self::V22bis(m) => Some(m.residual_error()),
+            Self::Bell212(m) => m.residual_error(),
             Self::V32(m) => Some(m.residual_error()),
             // V.34 keeps its error as a power in decibels; as a distance it
             // is the root of that.
             Self::V34(m) => m.snr_db().map(|db| 10f64.powf(-db / 20.0)),
-            Self::Bell103(_) | Self::V90(_) | Self::V90Server(_) => None,
+            Self::Bell103(_) | Self::Bell202(_) | Self::V90(_) | Self::V90Server(_) => None,
         }
     }
 
@@ -419,7 +517,13 @@ impl Pump {
     fn reception(&self) -> Option<f64> {
         match self {
             Self::V32(m) => Some(m.residual_error() / m.point_spacing()),
-            Self::V22bis(_) | Self::Bell103(_) | Self::V34(_) | Self::V90(_) | Self::V90Server(_) => None,
+            Self::V22bis(_)
+            | Self::Bell103(_)
+            | Self::Bell212(_)
+            | Self::Bell202(_)
+            | Self::V34(_)
+            | Self::V90(_)
+            | Self::V90Server(_) => None,
         }
     }
 
@@ -439,7 +543,9 @@ impl Pump {
                 }
                 _ => 4,
             },
-            Self::Bell103(_) => 2,
+            Self::Bell103(_) | Self::Bell202(_) => 2,
+            Self::Bell212(m) if m.is_bell103() => 2,
+            Self::Bell212(_) => 4,
             // Phase 3's TRN and J are four points, phase 4 is sixteen, and
             // data mode is however many hundred its rate and shaping make.
             Self::V34(m) => m.constellation_size().unwrap_or(2),
@@ -468,7 +574,9 @@ impl Pump {
                 },
                 _ => "4PSK",
             },
-            Self::Bell103(_) => "2FSK",
+            Self::Bell103(_) | Self::Bell202(_) => "2FSK",
+            Self::Bell212(m) if m.is_bell103() => "2FSK",
+            Self::Bell212(_) => "4PSK",
             Self::V34(m) => match m.constellation_size() {
                 Some(4) => "4PSK",
                 Some(16) => "16QAM",
@@ -505,12 +613,16 @@ impl Pump {
                 _ => "V.32",
             },
             Self::Bell103(m) => m.standard(),
+            Self::Bell212(m) => m.standard(),
+            Self::Bell202(_) => "Bell 202",
             Self::V34(_) => "V.34",
             // V.92 once PCM is going up as well as down (9.5, 9.6); V.90
             // until phase 2 says the far end is not a server.
             Self::V90(m) if m.is_v92() => "V.92",
             Self::V90(m) if m.is_v90() || m.v34().training().is_none() => "V.90",
             Self::V90(_) => "V.34",
+            Self::V90Server(m) if m.modem().is_x2() => "x2",
+            Self::V90Server(m) if m.modem().offers_x2() => "V.34",
             Self::V90Server(m) if m.modem().is_v92() => "V.92",
             Self::V90Server(m) if m.modem().is_v90() || m.modem().v34().training().is_none() => "V.90",
             Self::V90Server(_) => "V.34",
@@ -524,9 +636,23 @@ impl Pump {
             Self::V22bis(m) => m.phase(),
             Self::V32(m) => m.phase(),
             Self::Bell103(m) => m.line_phase(),
+            Self::Bell212(m) => m.phase(),
+            Self::Bell202(m) => m.phase(),
             Self::V34(m) => m.phase(),
             Self::V90(m) => m.phase(),
             Self::V90Server(m) => m.phase(),
+        }
+    }
+
+    /// Whether the line format is start-stop characters, found by the pump
+    /// itself: Bell 103, Bell 202, and a 212A that fell back to 103. Error
+    /// control needs a synchronous bit pipe and these are not one (see where
+    /// this is asked in `advance_handshake`).
+    fn framed(&self) -> bool {
+        match self {
+            Self::Bell103(_) | Self::Bell202(_) => true,
+            Self::Bell212(m) => m.is_bell103(),
+            _ => false,
         }
     }
 
@@ -539,6 +665,118 @@ impl Pump {
             _ => None,
         }
     }
+}
+
+/// What a pump's start-up has learned about the far end and settled with it,
+/// as rows for the distant panel: V.34's phase 2 report, and beside it what
+/// only a PCM call carries -- the INFO0d or INFO0a that says which half of
+/// V.90 or V.92 the far end is, the INFO1d and INFO1a that set phase 3 up,
+/// and V.90's or V.92's Jd and CP. Empty before phase 2 has heard anything.
+fn handshake_rows(pump: &Pump) -> Vec<(&'static str, String)> {
+    let Some(startup) = pump.v34() else { return Vec::new() };
+    let p2 = startup.phase2();
+    if p2.far_capabilities().is_none() && p2.far_info0d().is_none() {
+        return Vec::new();
+    }
+    let mut rows = V34Report::of(startup).rows();
+    let law = |a: bool| if a { "A-law" } else { "mu-law" };
+    if let Some(d) = p2.far_info0d() {
+        let flags = d.pcm_flags();
+        rows.push((
+            "INFO0d",
+            format!(
+                "{} digital modem, {}, phase 2 at -{} dBm0, at most -{:.1} dBm0{}{}{}",
+                if flags.v92 { "V.92" } else { "V.90" },
+                law(d.a_law),
+                6 + u32::from(d.nominal_power),
+                0.5 * (f64::from(d.max_power) + 1.0),
+                if d.power_at_codec { " at the codec" } else { "" },
+                if d.upstream_3429 { ", 3429 upstream" } else { "" },
+                if flags.short_phase2 { ", asks for short phase 2" } else { "" },
+            ),
+        ));
+    } else if p2.pcm().is_some() {
+        // This end is the digital modem: the far end's INFO0a says whether
+        // it is a V.92 analogue modem.
+        let flags = p2.far_pcm_flags();
+        rows.push((
+            "INFO0a",
+            format!(
+                "{} analogue modem{}",
+                if flags.v92 { "V.92" } else { "V.90" },
+                if flags.short_phase2 { ", asks for short phase 2" } else { "" }
+            ),
+        ));
+    }
+    if p2.pcm().is_some() {
+        if p2.was_short() {
+            rows.push(("phase 2", "short (V.92 9.4): no probing, no INFO1".to_owned()));
+        }
+        if let Some(c) = p2.info1c() {
+            rows.push((
+                "INFO1d",
+                format!(
+                    "power down {} dB, {} more tolerable, MD {} ms{}",
+                    c.min_power_reduction,
+                    c.additional_power_reduction,
+                    u32::from(c.md_length) * 35,
+                    c.frequency_offset.map_or(String::new(), |hz| format!(", {hz:+.2} Hz offset"))
+                ),
+            ));
+        }
+        if let Some(a) = p2.info1a_pcm() {
+            rows.push((
+                "INFO1a",
+                format!(
+                    "V.90: U_INFO {}, upstream {} symbols/s, MD {} ms",
+                    a.uinfo,
+                    a.upstream.nominal(),
+                    u32::from(a.md_length) * 35
+                ),
+            ));
+        }
+        if let Some(a) = p2.info1a_pcm_up() {
+            rows.push((
+                "INFO1a",
+                format!(
+                    "PCM upstream: U_INFO {}, {} filter sections, L_tot {}, L_max {}, MD {:.0} ms",
+                    a.uinfo,
+                    a.sections + 1,
+                    192 + 64 * u32::from(a.ltot_code),
+                    128 + 64 * u32::from(a.lmax_code),
+                    f64::from(a.md_length) * 34.5
+                ),
+            ));
+        }
+        if let Some(why) = p2.refused_info1a() {
+            rows.push(("INFO1a refused", why.to_owned()));
+        }
+    }
+    // Phase 3's Jd: the downstream rates the digital modem will send.
+    let jd = match pump {
+        Pump::V90(m) => m.v92().and_then(|v| v.far_jd().copied()).or_else(|| m.v90().and_then(|v| v.far_jd())),
+        _ => None,
+    };
+    if let Some(jd) = jd {
+        let top = (1..=v90::sequences::DOWNSTREAM_RATES as u8).rev().find(|&drn| jd.enables(drn));
+        rows.push((
+            "Jd",
+            format!(
+                "downstream up to {}, lookahead {}{}",
+                top.and_then(v90::sequences::data_rate).map_or("no rate".to_owned(), |r| format!("{r} bit/s")),
+                jd.lookahead,
+                if jd.sixteen_in_training { ", 16-point training" } else { "" }
+            ),
+        ));
+    }
+    if let Pump::V90(m) = pump {
+        rows.push((
+            "PCM",
+            if m.is_v92() { "V.92, PCM upstream" } else if m.is_v90() { "V.90, V.34 upstream" } else { "not settled yet" }
+                .to_owned(),
+        ));
+    }
+    rows
 }
 
 /// What a V.34 start-up found, kept after the call it ended.
@@ -938,6 +1176,14 @@ pub struct Modem {
     /// [`Self::choose_upstream`]); None for the server's own choice. Kept
     /// from call to call.
     pinned_upstream: Option<u8>,
+    /// The calling modem's ear for a far end with no V.8 (see `automode`):
+    /// armed at dialling, put away once a V.8 answer or V.32's own is heard.
+    pre_v8_ear: Option<automode::Ear>,
+    /// A carrier automode has settled on, in place of the one `+MS` named.
+    forced_carrier: Option<&'static str>,
+    /// The answering modem offering each pre-V.8 modulation in turn: which
+    /// of `automode::OFFERS`, and the call sample its offer began on.
+    offering: Option<(usize, u64)>,
     /// When V.92's short start-up is used: `BINMODEM_V92_QC` when the modem
     /// is made, and [`Self::set_quick_connect`] after.
     quick_connect: QuickConnect,
@@ -952,6 +1198,9 @@ pub struct Modem {
     memo_spent: bool,
     /// What this call's short Phase 1 settled, if it had one.
     quick: Option<v8line::Quick>,
+    /// Whether this call's V.8 is the CM sent after a quick connect the far
+    /// end never followed into Phase 2 (see [`Self::rescue_quick_connect`]).
+    quick_rescue: bool,
     /// What this call has taught, once it is a V.92 call in data mode (see
     /// [`Self::learned`]).
     learned: Option<Recognized>,
@@ -1027,6 +1276,13 @@ pub struct Modem {
     /// What V.34's phase 2 found on the last call that ran it, kept after the
     /// call it ended.
     v34_report: Option<V34Report>,
+    /// Everything the pump's start-up has learned about the far end and
+    /// settled with it -- phase 2's INFO sequences, V.90's and V.92's Jd and
+    /// CP -- read off the pump while it runs and kept after it is gone, so a
+    /// call that never connected still says what it found.
+    handshake_rows: Vec<(&'static str, String)>,
+    /// Milliseconds until `handshake_rows` is read again.
+    rows_due: u32,
     /// What the error control layer heard, kept after it is put away.
     ///
     /// A connection that ends up without error control drops the stack, and
@@ -1101,12 +1357,16 @@ impl Modem {
             pinned_rate: None,
             pcm_upstream: v92_pcm_upstream_wanted(),
             pinned_upstream: None,
+            pre_v8_ear: None,
+            forced_carrier: None,
+            offering: None,
             quick_connect: v92_quick_connect_wanted(),
             quick_memo: None,
             memos: None,
             dialled: None,
             memo_spent: false,
             quick: None,
+            quick_rescue: false,
             learned: None,
             negotiation: None,
             bis: None,
@@ -1122,6 +1382,8 @@ impl Modem {
             fax_identification: String::new(),
             far_menu: None,
             v34_report: None,
+            handshake_rows: Vec::new(),
+            rows_due: 0,
             far_ec: Vec::new(),
             recovered: Vec::new(),
             declared_lapm: false,
@@ -1207,6 +1469,11 @@ impl Modem {
     /// The modulation in use, by the name `+MS` knows it as.
     pub fn modulation(&self) -> &str {
         &self.at.modulation.carrier
+    }
+
+    /// All of what `+MS` last selected: what `AT+MS?` would answer.
+    pub fn selected(&self) -> &at::Modulation {
+        &self.at.modulation
     }
 
     /// Which step of the handshake the line is on.
@@ -1382,10 +1649,12 @@ impl Modem {
             // power reaches about one and a half: drawn at one, its outer
             // rings were all piled up along the edge of the box.
             Some(Pump::V34(m)) => m.constellation_peak().map_or(1.0, |peak| peak.max(1.0) as f32),
-            // PCM's pairs are drawn to one already; V.34, when that is what
-            // the call became, is V.34's.
-            Some(Pump::V90(m)) if !m.is_v90() => m.v34().constellation_peak().map_or(1.0, |peak| peak.max(1.0) as f32),
-            // The server plots what comes up, which is V.34's.
+            // PCM's pairs are drawn against their own held peak, whatever it
+            // is; V.34, when that is what the call became, is V.34's.
+            Some(Pump::V90(m)) if m.is_v90() => m.pair_peak() as f32,
+            Some(Pump::V90(m)) => m.v34().constellation_peak().map_or(1.0, |peak| peak.max(1.0) as f32),
+            Some(Pump::V90Server(m)) if m.modem().is_v92() => m.modem().constellation_peak().map_or(1.0, |peak| peak as f32),
+            // Otherwise the server plots what comes up, which is V.34's.
             Some(Pump::V90Server(m)) => m.modem().constellation_peak().map_or(1.0, |peak| peak.max(1.0) as f32),
             _ => 1.0,
         }
@@ -1441,6 +1710,8 @@ impl Modem {
                 "V32B" => "V.32bis",
                 "V32" => "V.32",
                 "B103" => "Bell 103",
+                "B212" => "Bell 212A",
+                "B202" => "Bell 202",
                 "V21" => "V.21",
                 _ => "V.22bis",
             },
@@ -1617,9 +1888,11 @@ impl Modem {
                 .to_owned(),
             ));
             // V.90 is not a modulation octet but a category of its own
-            // (Table 5), and says which half the far end can be.
+            // (Table 5), and says which half the far end can be -- of V.90
+            // or V.92, which its bits do not tell apart: that is for V.8
+            // bis's list or INFO0 to say.
             let pcm = menu.pcm.unwrap_or_default();
-            let mut modes: Vec<&str> = [(pcm.analogue, "V.90 analogue"), (pcm.digital, "V.90 digital"), (pcm.v91, "V.91")]
+            let mut modes: Vec<&str> = [(pcm.analogue, "V.90/V.92 analogue"), (pcm.digital, "V.90/V.92 digital"), (pcm.v91, "V.91")]
                 .into_iter()
                 .filter_map(|(has, name)| has.then_some(name))
                 .collect();
@@ -1661,7 +1934,9 @@ impl Modem {
             ));
         }
         rows.extend(self.error_control_rows());
-        if let Some(report) = self.v34_report.as_ref() {
+        if !self.handshake_rows.is_empty() {
+            rows.extend(self.handshake_rows.iter().cloned());
+        } else if let Some(report) = self.v34_report.as_ref() {
             rows.extend(report.rows());
         }
         // A Super G3 call's channels, from the half-duplex modem: what its
@@ -1737,6 +2012,29 @@ impl Modem {
         } else {
             // The stack has been put away; what it heard was kept.
             rows.extend(self.far_ec.iter().cloned());
+        }
+        // The Bell modems say nothing about themselves: what the far end is
+        // is what it sent back, and that is worth a row.
+        match self.pump.as_ref() {
+            Some(Pump::Bell212(m)) if m.status() != bell212::Status::Negotiating => rows.push((
+                "far end",
+                if m.is_bell103() {
+                    "Bell 103: a steady mark, no 1200 offer".to_owned()
+                } else {
+                    "Bell 212A: scrambled ones at 1200".to_owned()
+                },
+            )),
+            Some(Pump::Bell202(m)) => rows.push((
+                "line",
+                if m.transmitting() {
+                    "half duplex, this end sending".to_owned()
+                } else if m.far_carrier() {
+                    "half duplex, far end sending".to_owned()
+                } else {
+                    "half duplex, quiet".to_owned()
+                },
+            )),
+            _ => {}
         }
         rows
     }
@@ -1913,6 +2211,26 @@ impl Modem {
     /// of samples stepped; a sound card never calls it and loses nothing.
     /// What the digital modem says of itself in INFO0d, in the law the
     /// line is in.
+    /// Whether this end offers U.S. Robotics x2: S70 set, answering as a
+    /// V.90 or V.92 server, on a mu-law line (x2 has no A-law).
+    fn serves_x2(&self) -> bool {
+        self.at.regs.get(X2_REGISTER) == Ok(1)
+            && self.role == Role::Answering
+            && self.pcm_end == Role::Answering
+            && matches!(self.at.modulation.carrier.as_str(), "V90" | "V92")
+            && !self.network_a_law
+    }
+
+    /// Offer x2 from the next call on, or not: S70 (see [`Self::serves_x2`]).
+    pub fn set_x2(&mut self, on: bool) {
+        let _ = self.at.regs.set(X2_REGISTER, u32::from(on));
+    }
+
+    /// Whether S70 offers x2.
+    pub fn x2(&self) -> bool {
+        self.at.regs.get(X2_REGISTER) == Ok(1)
+    }
+
     fn server_info0d(&self) -> datapump::v34::info::Info0d {
         datapump::v34::info::Info0d { a_law: self.network_a_law, ..v90::server::ours() }
     }
@@ -1974,6 +2292,21 @@ impl Modem {
             return self.carry_hst(line);
         }
 
+        if self.pre_v8_ear.is_some()
+            && let Some(answer) = self.hear_pre_v8(line)
+        {
+            // V.32bis Annex A: an answerer from before V.8, known by what it
+            // said. Its own modulation, at once.
+            self.line_notes.push(format!("automode: heard {}, and no V.8", answer.name()));
+            self.pre_v8_ear = None;
+            self.bis = None;
+            self.negotiation = None;
+            self.pump = None;
+            self.forced_carrier = Some(answer.carrier());
+            self.start_pump(None);
+            return 0.0;
+        }
+
         if self.bis.is_some() {
             return self.select_mode(line);
         }
@@ -1990,6 +2323,10 @@ impl Modem {
             // Taken on the sample that made them, and kept here, so that a
             // pump put away on this same sample still has its last lines told.
             self.line_notes.extend(m.take_notes());
+            if m.far_end_silent() && self.quick.is_some() {
+                self.rescue_quick_connect();
+                return out;
+            }
         }
         if let Pump::V90Server(m) = pump {
             // The server's V.92 Phases 3 and 4 tell their steps the same way.
@@ -2008,6 +2345,10 @@ impl Modem {
                 self.negotiation = self.v8_end().map(v8line::Modem::resuming_at_ansam);
                 return out;
             }
+        }
+
+        if self.offering.is_some() && self.next_offer() {
+            return out;
         }
 
         match self.state {
@@ -2312,6 +2653,18 @@ impl Modem {
 
     /// Time passing, which drives the escape guard and V.42's timers.
     pub fn tick(&mut self, ms: u32) {
+        // Four times a second is often enough for a panel, and the pump's
+        // accessors are not free.
+        self.rows_due = self.rows_due.saturating_sub(ms);
+        if self.rows_due == 0 {
+            self.rows_due = 250;
+            if let Some(pump) = self.pump.as_ref() {
+                let rows = handshake_rows(pump);
+                if !rows.is_empty() {
+                    self.handshake_rows = rows;
+                }
+            }
+        }
         if self.state == State::Handshaking {
             self.since_dial_ms = self.since_dial_ms.saturating_add(ms);
         }
@@ -2363,7 +2716,7 @@ impl Modem {
         // caller its Answerer Detection Pattern, so "answering" counts as a
         // reason on its own.
         let wants_ec = (self.want_error_control || self.role == Role::Answering)
-            && !matches!(self.pump, Some(Pump::Bell103(_)));
+            && !self.pump.as_ref().is_some_and(Pump::framed);
         // Announced but no stack yet: the CONNECT went out before the pump
         // reported connected, and returning here would skip the arm below that
         // builds the error-control stack. A V.92 call does exactly that -- its
@@ -2456,7 +2809,7 @@ impl Modem {
                 // apart into characters that were never there. So error
                 // control is off at 300 bit/s -- which is also how anyone ever
                 // dialled a board at 300 bit/s.
-                let framed = matches!(self.pump, Some(Pump::Bell103(_)));
+                let framed = self.pump.as_ref().is_some_and(Pump::framed);
                 // An answering modem with error control turned off still owes
                 // the caller an answer. 7.2.1.3 requires the answerer, on
                 // seeing the ODP, to "immediately send one of the Answerer
@@ -3163,6 +3516,7 @@ impl Modem {
             self.announce = None;
             self.far_menu = None;
             self.v34_report = None;
+            self.handshake_rows.clear();
             self.far_ec.clear();
             self.recovered.clear();
             self.outbound.clear();
@@ -3219,6 +3573,7 @@ impl Modem {
         self.ec = None;
         self.far_menu = None;
         self.v34_report = None;
+        self.handshake_rows.clear();
         self.far_ec.clear();
         self.recovered.clear();
         self.declared_lapm = false;
@@ -3238,6 +3593,10 @@ impl Modem {
         self.bis_far = None;
         self.varc_wait = 0;
         self.pcm_end = role;
+        self.forced_carrier = None;
+        self.offering = None;
+        self.pre_v8_ear = (role == Role::Calling && self.at.modulation.automode && !self.offered().is_empty())
+            .then(|| automode::Ear::new(self.fs));
         self.pump = None;
         self.negotiation = None;
         if self.at.v8bis && self.at.modulation.automode && !self.offered().is_empty() {
@@ -3304,6 +3663,9 @@ impl Modem {
             if self.at.modulation.carrier == "V92" && self.pcm_end == Role::Answering {
                 negotiation = negotiation.handing_over_early();
             }
+            if self.serves_x2() {
+                negotiation = negotiation.offering_x2();
+            }
             if matches!(self.at.modulation.carrier.as_str(), "V90" | "V92") {
                 negotiation = match self.pcm_end {
                     Role::Calling => negotiation.offering_pcm(Pcm::ANALOGUE),
@@ -3322,8 +3684,10 @@ impl Modem {
                 negotiation = match self.pcm_end {
                     Role::Answering => negotiation.answering_quick(datapump::v92::memo::DEFAULT_LEVEL),
                     Role::Calling => match (self.quick_memo, self.quick_connect) {
-                        (Some(memo), _) => negotiation.offering_quick(memo.qts()),
-                        (None, QuickConnect::Always) => negotiation.offering_quick(Recognized::unmeasured().qts()),
+                        (Some(memo), _) => negotiation.offering_quick(memo.qts()).with_toneq_cap(v92_toneq_cap()),
+                        (None, QuickConnect::Always) => negotiation
+                            .offering_quick(Recognized::unmeasured().qts())
+                            .with_toneq_cap(v92_toneq_cap()),
                         (None, _) => negotiation,
                     },
                 };
@@ -3360,7 +3724,8 @@ impl Modem {
             // V.8 does have a bit for V.21 (Table 4). But this modem's V.21
             // answers with V.25's tone, as a V.21 modem does, rather than
             // ANSam, and nothing after V.8 has been taught to skip it.
-            "B103" | "V21" => None,
+            // Nor for the Bell modems: V.8 is for V-series ones.
+            "B103" | "V21" | "B212" | "B202" => None,
             _ => Some(Modulation::V22bis),
         }) else {
             return Modulations::NONE;
@@ -3445,6 +3810,16 @@ impl Modem {
             .or_else(|| self.fax_result.as_mut().and_then(FaxCall::take_received))
     }
 
+    /// The T.30 frames either end of a fax call has sent since this was last
+    /// asked, in order: the call in progress's, or the one that just ended.
+    pub fn take_fax_exchange(&mut self) -> Vec<fax::call::Exchanged> {
+        let mut out = self.fax_result.as_mut().map(FaxCall::take_exchange).unwrap_or_default();
+        if let Some(call) = self.fax.as_mut() {
+            out.extend(call.take_exchange());
+        }
+        out
+    }
+
     /// What this end tells a V.8 bis far end it can do: the data mode, the
     /// modulations `+MS` allows, and V.42 if error control is wanted.
     fn bis_capabilities(&self) -> v8::bis::Message {
@@ -3512,6 +3887,7 @@ impl Modem {
         self.announce = None;
         self.far_menu = None;
         self.v34_report = None;
+        self.handshake_rows.clear();
         self.far_ec.clear();
         self.recovered.clear();
         self.varc_owed_ms = 0.0;
@@ -3657,13 +4033,28 @@ impl Modem {
             // of this existed.
             v8line::Status::NoNegotiation => {
                 self.negotiation = None;
+                // ANSam ran out with no CM: a caller from before V.8, which
+                // says nothing until it hears its own answer. Annex A/V.32bis
+                // has the answerer offer each in turn.
+                if self.role == Role::Answering && self.at.modulation.automode {
+                    self.offering = Some((0, self.call_samples));
+                    self.forced_carrier = Some(automode::OFFERS[0]);
+                    self.line_notes.push("automode: no CM; offering V.32bis, V.22bis, Bell and V.21 in turn".to_owned());
+                }
                 self.start_pump(None);
             }
             // Nothing in common, or nothing heard. Both ends know, which is
             // the difference between this and a minute of silence.
             v8line::Status::Failed => {
                 self.negotiation = None;
-                self.end_call(Ended::NoAnswer);
+                // The far end answered, and then went quiet: see
+                // `rescue_quick_connect`.
+                if std::mem::take(&mut self.quick_rescue) {
+                    self.line_notes.push("V.92 quick connect: no JM to the CM either; hanging up".to_owned());
+                    self.end_call(Ended::CarrierLost);
+                } else {
+                    self.end_call(Ended::NoAnswer);
+                }
             }
         }
         out
@@ -3680,7 +4071,8 @@ impl Modem {
     /// Build the pump with V.8's handover silence still to run.
     fn start_pump_with(&mut self, chosen: Option<Modulation>, lead_in: f64) {
         let role = self.role;
-        let carrier = match chosen {
+        let forced = if chosen.is_none() { self.forced_carrier.take() } else { None };
+        let carrier = if let Some(forced) = forced { forced.to_owned() } else { match chosen {
             // V.8's joint menu named a V.90 server for this end to be the
             // analogue half of (9.1.1/V.90).
             // What V.8 agreed is V.34's bit either way; which V.90-family
@@ -3697,6 +4089,9 @@ impl Modem {
                     _ => "V90S".to_owned(),
                 }
             }
+            // A caller that offered V.34 and no PCM to a server offering x2:
+            // V.34's answer modem, which an x2 client's marker turns into x2.
+            Some(Modulation::V34Duplex) if self.serves_x2() => "X2S".to_owned(),
             Some(Modulation::V34Duplex) => "V34".to_owned(),
             // V.8 cannot tell the two apart, so what it agreed does not
             // change which of them was asked for. Anything else -- a far end
@@ -3715,7 +4110,8 @@ impl Modem {
                 "V34" | "V90" | "V92" => "V32B".to_owned(),
                 other => other.to_owned(),
             },
-        };
+        } };
+        let offered = self.offering.is_some() && role == Role::Answering;
         self.pump = Some(match carrier.as_str() {
             "V90" => {
                 let mut analogue = v90::startup::Analogue::new(self.fs, lead_in);
@@ -3723,6 +4119,7 @@ impl Modem {
                 Pump::V90(Box::new(analogue))
             }
             "V90S" => Pump::V90Server(Box::new(v90::server::Line::new(self.fs, self.server_info0d(), lead_in))),
+            "X2S" => Pump::V90Server(Box::new(v90::server::Line::x2(self.fs, lead_in))),
             "V92S" => {
                 let pcm_upstream = self.pcm_upstream;
                 // The short phase 2 is asked for along with the short phase
@@ -3760,6 +4157,16 @@ impl Modem {
                 };
                 let mut analogue = v90::startup::Analogue::new(self.fs, lead_in).with_v92(wish, lead_in);
                 analogue.set_remembered_round_trip(memo.map(|memo| f64::from(memo.round_trip_ms) / 1000.0));
+                // DIL off only on the fast path: after a quick connect Ja asks
+                // for none, and on every other start-up for V.90's.
+                analogue.set_after_quick(self.quick.is_some_and(|q| q.role == PcmRole::Analogue));
+                // After a quick connect the digital modem is in Phase 2
+                // before this end is (9.2.4.3/V.92): a far end still silent
+                // a round trip and 9.4.2.2.2's wait later is not, and the
+                // call is better off back at V.8 than at phase 2's limit.
+                if self.quick.is_some_and(|q| q.role == PcmRole::Analogue) {
+                    analogue.expect_far_end_within(QUICK_PHASE2_WAIT + self.quick_round_trip());
+                }
                 analogue.set_pinned(self.pinned_rate);
                 analogue.set_pinned_upstream(self.pinned_upstream);
                 Pump::V90(Box::new(analogue))
@@ -3813,7 +4220,30 @@ impl Modem {
                     Role::Calling => bell103::Role::Originate,
                     Role::Answering => bell103::Role::Answer,
                 };
-                Pump::Bell103(Box::new(bell103::Modem::with_plan(v21::DATA, hs_role, self.fs)))
+                if offered {
+                    Pump::Bell103(Box::new(bell103::Modem::marking_with_plan(v21::DATA, hs_role, self.fs)))
+                } else {
+                    Pump::Bell103(Box::new(bell103::Modem::with_plan(v21::DATA, hs_role, self.fs)))
+                }
+            }
+            "B212" => {
+                let hs_role = match role {
+                    Role::Calling => bell103::Role::Originate,
+                    Role::Answering => bell103::Role::Answer,
+                };
+                // A ceiling of 300 asks for the 103 inside it, and gets one.
+                if self.rate_range().1 < 1200 {
+                    Pump::Bell103(Box::new(bell103::Modem::new(hs_role, self.fs)))
+                } else {
+                    Pump::Bell212(Box::new(bell212::Modem::new(hs_role, self.fs)))
+                }
+            }
+            "B202" => {
+                let hs_role = match role {
+                    Role::Calling => bell103::Role::Originate,
+                    Role::Answering => bell103::Role::Answer,
+                };
+                Pump::Bell202(Box::new(bell202::Modem::new(hs_role, self.fs)))
             }
             _ => {
                 let hs_role = match role {
@@ -3835,7 +4265,110 @@ impl Modem {
                 )))
             }
         });
+        if offered {
+            // ANSam has been the answer tone; each offer starts on its own
+            // signal (automode).
+            self.pump = self.pump.take().map(Pump::past_answer_tone);
+        }
         self.state = State::Handshaking;
+    }
+
+    /// The calling modem's automode ear, one sample: while nothing the call
+    /// has heard yet says what the far end is. Put away once it has (V.8's
+    /// ANSam, V.32's AC, a pump past its opening).
+    fn hear_pre_v8(&mut self, line: f64) -> Option<automode::Answer> {
+        let listening = self.state == State::Handshaking
+            && (self.bis.is_some()
+                || self.negotiation.as_ref().is_some_and(|n| !n.heard_answer())
+                || match self.pump.as_ref() {
+                    // V.8 heard a plain ANS and gave the line to V.32bis,
+                    // which now sends AA and waits for AC.
+                    Some(Pump::V32(m)) => matches!(m.phase(), "listening" | "AA"),
+                    // An answer tone is being heard and V.8 has it: V.8's
+                    // own V.21 frames come next, and 1650 Hz is in them.
+                    None | Some(_) => false,
+                });
+        if !listening {
+            // A V.8 answer tone, or a pump that has gone past its opening:
+            // the ear has nothing left to decide.
+            if self.state != State::Handshaking
+                || self.pump.as_ref().is_some_and(|p| !matches!(p, Pump::V32(_)))
+                || matches!(self.pump.as_ref(), Some(Pump::V32(m)) if !matches!(m.phase(), "listening" | "AA"))
+            {
+                self.pre_v8_ear = None;
+            }
+            return None;
+        }
+        self.pre_v8_ear.as_mut()?.feed(line)
+    }
+
+    /// The answering modem's automode: keep the offer the caller answered,
+    /// or move on to the next once it has had [`automode::OFFER_FOR`].
+    /// True when the pump was replaced on this sample.
+    fn next_offer(&mut self) -> bool {
+        let Some((index, since)) = self.offering else { return false };
+        let Some(pump) = self.pump.as_ref() else { return false };
+        if pump.heard_caller() {
+            self.line_notes.push(format!("automode: the caller answered {}", automode::OFFERS[index]));
+            self.offering = None;
+            return false;
+        }
+        if (self.call_samples - since) as f64 >= automode::OFFER_FOR * self.fs {
+            let next = index + 1;
+            if next >= automode::OFFERS.len() {
+                // Nothing answered any of them: what the pump says now is
+                // what the call does.
+                self.offering = None;
+                return false;
+            }
+            self.offering = Some((next, self.call_samples));
+            self.forced_carrier = Some(automode::OFFERS[next]);
+            self.pump = None;
+            self.start_pump(None);
+            return true;
+        }
+        false
+    }
+
+    /// The round trip a quick connect to this number is expected to have:
+    /// the memo's, or [`QUICK_ROUND_TRIP`] when it has none.
+    fn quick_round_trip(&self) -> f64 {
+        self.quick_memo
+            .map(|memo| f64::from(memo.round_trip_ms) / 1000.0)
+            .filter(|&rtd| rtd > 0.0)
+            .unwrap_or(QUICK_ROUND_TRIP)
+    }
+
+    /// A quick connect whose far end never joined Phase 2: no INFO0d and no
+    /// tone B a round trip and 2.5 s after the hand-over (see
+    /// [`v90::startup::Analogue::expect_far_end_within`]). The memo that
+    /// asked for it is forgotten now rather than at hang-up, and the call
+    /// goes back to V.8 with a CM and no QC1a (see
+    /// [`v8line::Modem::resuming_at_cm`]): a full start-up if the far end
+    /// answers it, and the call ended a few seconds later if not.
+    ///
+    /// live-1795315036: a NetZero server heard TONEq, stopped ANSpcm, and 75
+    /// ms later sent 10 ms of the most negative codeword and then nothing,
+    /// and this end held the call in Phase 2 until the user hung up.
+    fn rescue_quick_connect(&mut self) {
+        let round_trip = self.quick_round_trip();
+        if let (Some(memos), Some(number)) = (self.memos.as_mut(), self.dialled.as_ref()) {
+            memos.forget(number);
+        }
+        self.memo_spent = false;
+        self.quick_memo = None;
+        self.line_notes.push(
+            "V.92 quick connect: no INFO0d or tone B after TONEq; memo dropped, CM for a full start-up".to_owned(),
+        );
+        self.pump = None;
+        self.quick = None;
+        self.declared_lapm = false;
+        self.pcm_role = None;
+        self.negotiation = self.v8_end().map(|n| n.resuming_at_cm(QUICK_RESCUE_PATIENCE + round_trip));
+        self.quick_rescue = self.negotiation.is_some();
+        if self.negotiation.is_none() {
+            self.end_call(Ended::CarrierLost);
+        }
     }
 
     /// End the call and tell the terminal why.
@@ -4008,6 +4541,7 @@ impl Modem {
         self.hst = None;
         self.hst_closing_ms = None;
         self.negotiation = None;
+        self.quick_rescue = false;
         self.bis = None;
         self.rate = 0;
         self.transmit_rate = 0;
