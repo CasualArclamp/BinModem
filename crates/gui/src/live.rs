@@ -632,6 +632,9 @@ pub struct Session {
     /// Whether V.92 calls may start up the short way, when the window has
     /// said: 0 for nothing said, 1 for never, 2 for recognised connections.
     quick_connect: std::sync::atomic::AtomicU8,
+    /// Whether to offer U.S. Robotics x2, as `quick_connect` is kept: 0 not
+    /// said, 1 off, 2 on.
+    x2: std::sync::atomic::AtomicU8,
     /// Set when the window asks for a retrain: V.34 goes back through phase 2
     /// on the same call. The line thread asks the modem and clears it.
     retrain: AtomicBool,
@@ -749,6 +752,7 @@ impl Default for Session {
             hang_up: AtomicBool::new(false),
             pcm_upstream: std::sync::atomic::AtomicU8::new(0),
             quick_connect: std::sync::atomic::AtomicU8::new(0),
+            x2: std::sync::atomic::AtomicU8::new(0),
             retrain: AtomicBool::new(false),
             rate_request: Mutex::default(),
             rate_pinned: Mutex::default(),
@@ -911,6 +915,19 @@ impl Session {
     /// Until this is called the modem keeps what `BINMODEM_V92_QC` gave it.
     pub fn set_quick_connect(&self, on: bool) {
         self.quick_connect.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+    }
+
+    /// Whether a V.90 or V.92 server offers U.S. Robotics x2 from the next
+    /// call on (see `Modem::set_x2`, S70).
+    pub fn set_x2(&self, on: bool) {
+        self.x2.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+    }
+
+    fn take_x2(&self) -> Option<bool> {
+        match self.x2.swap(0, Ordering::Relaxed) {
+            0 => None,
+            said => Some(said == 2),
+        }
     }
 
     fn take_quick_connect(&self) -> Option<bool> {
@@ -1724,6 +1741,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         }
         if let Some(on) = session.take_pcm_upstream() {
             modem.set_pcm_upstream(on);
+        }
+        if let Some(on) = session.take_x2() {
+            modem.set_x2(on);
         }
         if let Some(on) = session.take_quick_connect() {
             modem.set_quick_connect(if on {

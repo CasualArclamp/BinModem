@@ -898,6 +898,12 @@ impl Modem {
         self.settings.round_trip
     }
 
+    /// Whether phase 4 has begun: each end has trained on the other's phase 3
+    /// at the symbol rates phase 2 settled, as far as this end can tell.
+    pub fn in_phase4(&self) -> bool {
+        matches!(self.stage, Stage::CallTraining4 | Stage::CallMp | Stage::AnswerPhase4 | Stage::AnswerMp)
+    }
+
     pub fn settings(&self) -> Settings {
         self.settings
     }

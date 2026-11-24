@@ -422,7 +422,8 @@ impl V34Tap {
             | Info::Info1aPcm(_)
             | Info::Info1aPcmUp(_)
             | Info::Info1aV34Up(_)
-            | Info::Mh(_) => {
+            | Info::Mh(_)
+            | Info::X2Marker(_) => {
                 self.notes.push(format!("the {who} modem sent an INFO sequence of another start-up"));
             }
         }

@@ -56,6 +56,7 @@ use std::collections::VecDeque;
 use dsp::{Complex, least_squares};
 
 use super::constellation::Point;
+use super::data::Warp;
 use super::qam::{Band, ROLLOFF};
 use super::signals::{self, Size};
 use crate::v32::Mode;
@@ -154,14 +155,13 @@ pub enum Slicer {
     /// Every odd grid point out to `limit`, a unit-power symbol being `scale`
     /// grid units: data mode, whose trellis decoder makes the real decisions
     /// some symbols later than the loops can wait.
-    ///
-    /// `bend` is theta over the constellation's average energy where the far
-    /// end encodes non-linearly (9.7), and zero where it does not. A point
-    /// sent that way is not on the grid: it is moved out by more the further
-    /// out it is, a tenth and more at the edge, and a slicer that takes the
-    /// grid as it stands decides the outer points wrong and teaches every
-    /// loop to pull them in.
-    Grid { scale: f64, limit: i32, bend: f64 },
+    Grid { scale: f64, limit: i32 },
+    /// The same grid, for a far end whose points are bent by 9.7's non-linear
+    /// encoder: each received point is unbent before it is decided, and the
+    /// decision bent back to where the far end put it. Decided against the
+    /// straight grid, the outer points of a shaped signal land between grid
+    /// points and drag the loops with them.
+    BentGrid { scale: f64, limit: i32, warp: Warp },
 }
 
 impl Slicer {
@@ -169,22 +169,17 @@ impl Slicer {
     fn decide(self, z: Complex) -> (Point, Complex) {
         match self {
             Self::Points(size) => decide(z, size),
-            Self::Grid { scale, limit, bend } => {
-                // Phi of 9-34.
-                let phi = |zeta: f64| 1.0 + zeta / 6.0 + zeta * zeta / 120.0;
-                let arrived = z.scale(scale);
-                // The stretch taken back out: a point bent out by phi of its
-                // own energy is brought back by phi of the unbent one's.
-                let mut flat = arrived;
-                if bend > 0.0 {
-                    for _ in 0..crate::v34::data::UNBENT {
-                        flat = arrived.scale(1.0 / phi(bend * flat.norm_sqr()));
-                    }
-                }
+            Self::Grid { scale, limit } => {
+                let odd = |v: f64| (2 * ((v * scale - 1.0) / 2.0).round() as i32 + 1).clamp(-limit, limit);
+                let point = (odd(z.re), odd(z.im));
+                (point, Complex::new(f64::from(point.0), f64::from(point.1)).scale(1.0 / scale))
+            }
+            Self::BentGrid { scale, limit, warp } => {
+                let straight = warp.unbend(z.scale(scale));
                 let odd = |v: f64| (2 * ((v - 1.0) / 2.0).round() as i32 + 1).clamp(-limit, limit);
-                let point = (odd(flat.re), odd(flat.im));
-                let ideal = Complex::new(f64::from(point.0), f64::from(point.1));
-                (point, ideal.scale(phi(bend * ideal.norm_sqr()) / scale))
+                let point = (odd(straight.re), odd(straight.im));
+                let target = warp.bend(Complex::new(f64::from(point.0), f64::from(point.1)));
+                (point, target.scale(1.0 / scale))
             }
         }
     }
@@ -193,7 +188,7 @@ impl Slicer {
     fn min_distance_squared(self) -> f64 {
         match self {
             Self::Points(size) => min_distance_squared(size),
-            Self::Grid { scale, .. } => (2.0 / scale).powi(2),
+            Self::Grid { scale, .. } | Self::BentGrid { scale, .. } => (2.0 / scale).powi(2),
         }
     }
 
@@ -207,7 +202,7 @@ impl Slicer {
     fn lost_level(self) -> f64 {
         match self {
             Self::Points(_) => 0.25 * self.min_distance_squared(),
-            Self::Grid { .. } => self.min_distance_squared() / 12.0,
+            Self::Grid { .. } | Self::BentGrid { .. } => self.min_distance_squared() / 12.0,
         }
     }
 
@@ -218,7 +213,7 @@ impl Slicer {
     fn lost_threshold(self, settled: f64) -> f64 {
         match self {
             Self::Points(_) => (8.0 * settled).max(self.lost_level()),
-            Self::Grid { .. } => (2.0 * settled).max(self.lost_level()),
+            Self::Grid { .. } | Self::BentGrid { .. } => (2.0 * settled).max(self.lost_level()),
         }
     }
 
@@ -228,7 +223,7 @@ impl Slicer {
             Self::Points(_) => (4.0 * settled).max(0.0625 * self.min_distance_squared()),
             // Garbage is a sixth of a step squared here, and not far above a
             // locked signal at the rates this is used for, so the bar is close.
-            Self::Grid { .. } => (2.0 * settled).max(0.4 * self.min_distance_squared() / 6.0),
+            Self::Grid { .. } | Self::BentGrid { .. } => (2.0 * settled).max(0.4 * self.min_distance_squared() / 6.0),
         }
     }
 
@@ -237,7 +232,7 @@ impl Slicer {
     fn window(self) -> (usize, usize) {
         match self {
             Self::Points(_) => (RESYNC_WINDOW, 8),
-            Self::Grid { .. } => (4 * RESYNC_WINDOW, 32),
+            Self::Grid { .. } | Self::BentGrid { .. } => (4 * RESYNC_WINDOW, 32),
         }
     }
 }
@@ -671,14 +666,7 @@ impl Receiver {
     /// Decide against data mode's grid from here on: `scale` grid units to a
     /// unit-power symbol, out to `limit`.
     pub fn set_grid(&mut self, scale: f64, limit: i32) {
-        self.set_slicer(Slicer::Grid { scale, limit, bend: 0.0 });
-    }
-
-    /// The same for a far end that encodes non-linearly: `bend` is theta over
-    /// the average energy of its constellation in grid units, which is
-    /// [`crate::v34::data::Decoder::bend`].
-    pub fn set_bent_grid(&mut self, scale: f64, limit: i32, bend: f64) {
-        self.set_slicer(Slicer::Grid { scale, limit, bend });
+        self.set_slicer(Slicer::Grid { scale, limit });
     }
 
     /// The same again for a far end that precodes: `h` is h(1), h(2) and h(3)
@@ -694,8 +682,8 @@ impl Receiver {
     /// So the decision is made with the channel put in from the symbols
     /// already decided, and what the symbol should have been is the point
     /// found less the same.
-    pub fn set_precoded_grid(&mut self, scale: f64, limit: i32, bend: f64, h: [(i16, i16); 3]) {
-        self.set_slicer(Slicer::Grid { scale, limit, bend });
+    pub fn set_precoded_grid(&mut self, scale: f64, limit: i32, warp: Option<Warp>, h: [(i16, i16); 3]) {
+        self.set_bent_grid(scale, limit, warp);
         let h = h.map(|(re, im)| Complex::new(f64::from(re), f64::from(im)).scale(1.0 / 16384.0));
         if h.iter().any(|c| c.norm_sqr() > 0.0) {
             self.precoded = Some((h, [Complex::ZERO; 3]));
@@ -705,17 +693,16 @@ impl Receiver {
     /// The nearest point to `z` and where it would have arrived, by the
     /// slicer, or with the far end's precoding allowed for.
     fn decide_tracked(&mut self, z: Complex) -> (Point, Complex) {
-        let (Slicer::Grid { scale, limit, bend }, Some((h, past))) = (self.slicer, self.precoded.as_mut()) else {
+        let (scale, limit, warp) = match self.slicer {
+            Slicer::Grid { scale, limit } => (scale, limit, None),
+            Slicer::BentGrid { scale, limit, warp } => (scale, limit, Some(warp)),
+            Slicer::Points(_) => return self.slicer.decide(z),
+        };
+        let Some((h, past)) = self.precoded.as_mut() else {
             return self.slicer.decide(z);
         };
-        let phi = |zeta: f64| 1.0 + zeta / 6.0 + zeta * zeta / 120.0;
         let arrived = z.scale(scale);
-        let mut flat = arrived;
-        if bend > 0.0 {
-            for _ in 0..crate::v34::data::UNBENT {
-                flat = arrived.scale(1.0 / phi(bend * flat.norm_sqr()));
-            }
-        }
+        let flat = warp.map_or(arrived, |warp| warp.unbend(arrived));
         let mut added = Complex::ZERO;
         for (x, c) in past.iter().zip(h.iter()) {
             added += *x * *c;
@@ -730,7 +717,17 @@ impl Receiver {
         let point = (odd(y.re), odd(y.im));
         let sent = Complex::new(f64::from(point.0), f64::from(point.1)) - added;
         *past = [sent, past[0], past[1]];
-        (point, sent.scale(phi(bend * sent.norm_sqr()) / scale))
+        (point, warp.map_or(sent, |warp| warp.bend(sent)).scale(1.0 / scale))
+    }
+
+    /// The same, for a far end that uses non-linear encoding (9.7): decided
+    /// with the bend taken out (see [`Slicer::BentGrid`]). With no bend, the
+    /// plain grid.
+    pub fn set_bent_grid(&mut self, scale: f64, limit: i32, warp: Option<Warp>) {
+        match warp {
+            Some(warp) => self.set_slicer(Slicer::BentGrid { scale, limit, warp }),
+            None => self.set_grid(scale, limit),
+        }
     }
 
     /// Decide against `slicer` from here, forgetting what the last one made of
@@ -1327,7 +1324,7 @@ impl Receiver {
     /// carrier's turn is found again from the symbols' fourth power, to within
     /// a quarter -- which the same differential coding does not mind either.
     fn resync(&mut self) {
-        if matches!(self.slicer, Slicer::Grid { .. }) {
+        if matches!(self.slicer, Slicer::Grid { .. } | Slicer::BentGrid { .. }) {
             self.resync_dense();
             return;
         }
@@ -2305,8 +2302,8 @@ mod tests {
         let precoding = [(4096, -2048), (-1024, 512), (256, 0)];
         let params = Params { framing, code: Code::States16, nonlinear: true, precoding, mode: Mode::Answer };
         let decoder = Decoder::new(params);
-        let (scale, limit, bend) = (decoder.grid_scale(), decoder.extent(), decoder.bend());
-        assert!(bend > 0.0);
+        let (scale, limit, bend) = (decoder.grid_scale(), decoder.extent(), decoder.warp());
+        assert!(bend.is_some());
         let symbols: Vec<Complex> = {
             let mut encoder = Encoder::new(params);
             let mut seed = 77u32;

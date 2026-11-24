@@ -361,6 +361,14 @@ pub struct Modem {
     ci: u32,
     /// The JM this end answered with, to repeat as it was.
     sent_jm: Option<Menu>,
+    /// Whether this answering modem offers U.S. Robotics x2 to a caller that
+    /// offers V.34 and no PCM (see [`Self::offering_x2`]).
+    x2: bool,
+    /// The sign of the V.21 carrier: an x2 server turns it after each JM.
+    sign: f64,
+    /// A JM has been queued again, and the carrier turns as the first bit
+    /// of its run-in goes out.
+    turn_due: bool,
     /// How long the answering end's ANSam runs when nothing ends it sooner.
     ansam_seconds: f64,
     /// Whether a call menu for any call function but this end's own goes
@@ -433,6 +441,9 @@ impl Modem {
             cj: 0,
             ci: 0,
             sent_jm: None,
+            x2: false,
+            sign: 1.0,
+            turn_due: false,
             ansam_seconds: timing::ANSAM,
             own_function_only: false,
             quick_offer: None,
@@ -656,6 +667,17 @@ impl Modem {
     /// LAPM has said so whether or not its ADP survives the line.
     pub fn offering_lapm(mut self) -> Self {
         self.menu.protocol = Protocol::Lapm;
+        self
+    }
+
+    /// As an answering server, offer U.S. Robotics x2 to a caller whose CM
+    /// offers V.34 and no PCM, as an I-modem does it (libv90modem's
+    /// `docs/history/x2-facts.md`, "Phase 1"): the JM carries the caller's
+    /// PSTN access category back with the digital network bit set, and the
+    /// V.21 carrier's sign is turned after each complete JM. A caller that
+    /// offers PCM gets the JM it would have had anyway.
+    pub fn offering_x2(mut self) -> Self {
+        self.x2 = true;
         self
     }
 
@@ -1173,6 +1195,9 @@ impl Modem {
                     self.tx.set_transmitting(false);
                     self.enter(State::Handover);
                 } else if self.outgoing.is_empty() && self.tx.pending_bits() == 0 {
+                    // The last bit of a JM has only just begun here: the turn
+                    // waits for the next JM's first bit (see `transmit`).
+                    self.turn_due = self.x2 && self.sent_jm.is_some_and(|jm| jm.pcm.is_none());
                     let jm = self.last_jm();
                     self.send_sequence(jm);
                 }
@@ -1277,6 +1302,12 @@ impl Modem {
             }
             _ => cm.joint(self.menu.modulations, self.menu.protocol),
         };
+        // An x2 server's JM: the CM's PSTN access octet back, with "DCE on
+        // digital network" set (an I-modem's `... 8d` to a Courier's `... 0d`).
+        let jm = match cm.access {
+            Some(access) if self.x2 && cm.pcm.is_none() => Menu { access: Some(Access { digital: true, ..access }), ..jm },
+            _ => jm,
+        };
         self.sent_jm = Some(jm);
         self.chosen = jm.chosen();
         self.agreed = jm.protocol;
@@ -1323,7 +1354,16 @@ impl Modem {
             let bits = self.bits.encode(octet);
             self.tx.push_bits(&bits);
         }
-        MESSAGE_LEVEL * self.tx.next_sample()
+        // An x2 server's JM: the carrier turns half way round between one
+        // whole JM and the next, on the bit boundary -- as the next JM's first
+        // run-in bit begins, and not as the last stop bit does. A Courier's
+        // V.8 classifier did not take the signature one bit early (the
+        // emulated Courier's x2 flags stayed clear, 2026-11-24).
+        if self.turn_due && self.tx.pending_bits() < v8::PREAMBLE_ONES {
+            self.turn_due = false;
+            self.sign = -self.sign;
+        }
+        MESSAGE_LEVEL * self.sign * self.tx.next_sample()
     }
 
     /// One sample of ANSam (7.2).

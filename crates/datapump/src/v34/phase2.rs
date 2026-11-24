@@ -45,7 +45,7 @@
 use dsp::{ReversalDetector, ToneDetector};
 
 use super::dpsk::{self, Side};
-use super::info::{Info, Info0, Info0d, Info1a, Info1aPcm, Info1aPcmUp, Info1c, PcmFlags, Probed, SymbolRate};
+use super::info::{Info, Info0, Info0d, Info1a, Info1aPcm, Info1aPcmUp, Info1c, PcmFlags, Probed, SymbolRate, X2Marker};
 use crate::v90;
 use super::probe::{self, Analyzer, Reading};
 
@@ -189,6 +189,11 @@ pub enum Status {
     /// phase 2 exists here to make going round again worth it.
     Failed(&'static str),
 }
+
+/// How long after this end's L1 an x2 client's marker is taken: D-Modem's
+/// server's 800 ms (x2-facts, "Phase 2 marker"); the latest seen came 100 ms
+/// after.
+const X2_MARKER_WAIT: f64 = 0.800;
 
 /// "40 ± 1 ms" from a far reversal arriving to the answering one leaving
 /// (11.2.1.1.3, 11.2.1.1.6 and 11.2.1.2.5).
@@ -503,6 +508,10 @@ pub struct Modem {
     /// Whether an analogue modem that could ask for PCM upstream asks for
     /// V.90 data mode instead, having found the line will not carry it.
     pcm_up_declined: bool,
+    /// Symbol rates a start-up of this call trained at and never got to data
+    /// mode with, one bit each by [`SymbolRate::index`]: not chosen again
+    /// while another will do (see [`Self::avoid_symbol_rate`]).
+    avoided: u8,
     /// The far end's two V.92 bits, read as its own INFO0 table lays them out.
     ///
     /// Only ever written in a PCM role. V.34's Table 14 has the transmit clock
@@ -527,6 +536,12 @@ pub struct Modem {
     heard_far: bool,
     /// Whether phase 2 stopped at `far_deadline`.
     far_silent: bool,
+    /// Whether this answering modem offers U.S. Robotics x2.
+    x2: bool,
+    /// The x2 client's marker, if one came in place of its L2 and INFO1c.
+    x2_marker: Option<X2Marker>,
+    /// The last sample a marker is taken at: 800 ms after this end's L1.
+    x2_until: Option<u64>,
 }
 
 impl Modem {
@@ -575,6 +590,7 @@ impl Modem {
             tone_b_level: None,
             info1a_pcm_up: None,
             pcm_up_declined: false,
+            avoided: 0,
             far_flags: PcmFlags::default(),
             full_phase2_only: false,
             sent_pcm_upstream: false,
@@ -583,6 +599,9 @@ impl Modem {
             far_deadline: None,
             heard_far: false,
             far_silent: false,
+            x2: false,
+            x2_marker: None,
+            x2_until: None,
         }
     }
 
@@ -600,6 +619,37 @@ impl Modem {
         let bits = modem.info0_bits();
         modem.tx.send(&bits);
         modem
+    }
+
+    /// The answering modem's phase 2, offering U.S. Robotics x2 as well.
+    ///
+    /// libv90modem's `docs/history/x2-facts.md`, "Phase 2 marker": a Courier
+    /// knows an x2 server by bit 23 or bit 24 of its INFO0a (ITU numbering),
+    /// so INFO0a says `max_sr_diff` 4, bit 23 alone of 21:23, and CME, bit
+    /// 24. An x2 client then sends no L1, L2 or INFO1c: one marker frame 10 to
+    /// 100 ms after this end's L1, and is quiet until phase 3. A marker is
+    /// taken up to 800 ms after L1 ends, as D-Modem's server does; with none,
+    /// phase 2 goes on as V.34's, and a V.34 caller sees nothing but the two
+    /// INFO0a bits, both of which V.34 allows.
+    ///
+    /// `lead_in` is V.8's handover silence still to run, as [`Self::v90`]'s.
+    pub fn answering_x2(fs: f64, lead_in: f64) -> Self {
+        let mut modem = Self::blank(Role::Answer, fs);
+        modem.silent_until = (lead_in * fs).round() as u64;
+        modem.x2 = true;
+        modem.ours.asymmetry = 4;
+        modem.ours.cme = true;
+        modem.rx = dpsk::Receiver::new(Role::Answer.far(), fs).with_x2();
+        modem.stage = Stage::AnswerInfo0;
+        modem.speaking = Speaking::Carrier;
+        let bits = modem.info0_bits();
+        modem.tx.send(&bits);
+        modem
+    }
+
+    /// The x2 client's marker, when phase 2 ended on one: the call is x2's.
+    pub fn x2_marker(&self) -> Option<X2Marker> {
+        self.x2_marker
     }
 
     /// V.90's phase 2 from its start (9.2.1.1.1, 9.2.2.1.1).
@@ -652,6 +702,7 @@ impl Modem {
             modem.presence.floor = level * TONE_B_FLOOR;
         }
         modem.pcm_up_declined = self.pcm_up_declined;
+        modem.avoided = self.avoided;
         modem.far_flags = self.far_flags;
         modem.full_phase2_only = true;
         modem
@@ -677,6 +728,32 @@ impl Modem {
     /// [`Self::expect_far_end_within`]).
     pub fn far_end_silent(&self) -> bool {
         self.far_silent
+    }
+
+    /// Keep off `rate` in this phase 2 and every retrain's after it, while
+    /// another symbol rate will do: a start-up got as far as phase 4 at it and
+    /// the call came back to phase 2 without reaching data mode.
+    ///
+    /// The answer modem leaves it out of INFO1a's choice; the call modem says
+    /// in INFO1c that it cannot be used towards it (max rate 0, "the symbol
+    /// rate cannot be used"), which is the one say it has over the answer
+    /// modem's transmitter. The two directions are not told apart: which of
+    /// them failed is not known, and V.34 asks for one symbol rate both ways
+    /// unless both ends allow asymmetry.
+    ///
+    /// An emulated U.S. Robotics Courier (courier-emu, DSP 3.1.2) projected
+    /// 21600 bit/s at 3429 and 19200 at 3200 in its INFO1c, so 3429 was
+    /// chosen towards it; its MP then asked for 7200 at 3429 and it never
+    /// acknowledged this end's MP, and retrained. Every retrain chose 3429
+    /// again from the same INFO1c, and the call ended in phase 3. At 3200 it
+    /// connects at 31200 both ways.
+    pub fn avoid_symbol_rate(&mut self, rate: SymbolRate) {
+        self.avoided |= 1 << rate.index();
+    }
+
+    /// Whether `rate` is one [`Self::avoid_symbol_rate`] keeps off.
+    pub fn avoids(&self, rate: SymbolRate) -> bool {
+        self.avoided & (1 << rate.index()) != 0
     }
 
     /// Ask for V.34 in INFO1a from now on, even of a V.90 digital modem
@@ -1106,6 +1183,23 @@ impl Modem {
                     self.tx.send(&bits);
                 }
             }
+            // An x2 client's marker, in place of its L2: this end goes quiet
+            // and phase 2 is over. Its first index has to be the PCM
+            // direction's; anything else, or too late, is not x2's, and the
+            // wait for tone B goes on. The marker is on the call modem's
+            // carrier, where tone B is, so the stages that follow hearing
+            // tone B may already have begun when its CRC comes in.
+            (Role::Answer, Info::X2Marker(marker))
+                if matches!(self.stage, Stage::AnswerSendProbe | Stage::AnswerProbeReversal | Stage::AnswerReadProbe) =>
+            {
+                if marker.is_x2() && marker.symbol_rate().is_some() && self.x2_until.is_some_and(|t| self.now <= t) {
+                    self.x2_marker = Some(marker);
+                    self.tx.stop();
+                    self.speaking = Speaking::Silent;
+                    self.status = Status::Done;
+                    self.enter(Stage::Finished);
+                }
+            }
             (Role::Answer, Info::Info1c(info1c)) if self.stage == Stage::AnswerInfo1 => {
                 self.info1c = Some(info1c);
                 // An analogue modem that heard an INFO0d asks for V.90
@@ -1130,6 +1224,9 @@ impl Modem {
                         // Kept as it went, which is to the field's own
                         // resolution.
                         self.info1a = Info1a::from_bits(&bits);
+                        if std::env::var_os("PHASE2_TRACE").is_some() {
+                            eprintln!("P2TRACE sending info1a={:?}", self.info1a);
+                        }
                         bits
                     }
                 };
@@ -1398,6 +1495,14 @@ impl Modem {
                             *slot = reading.probed(rate, &far, wide);
                         }
                     }
+                    // A symbol rate a start-up of this call failed at is
+                    // "cannot be used", while another can.
+                    let usable = |r: &SymbolRate| probed[r.index() as usize].max_rate > 0;
+                    if SymbolRate::ALL.iter().any(|r| usable(r) && !self.avoids(*r)) {
+                        for rate in SymbolRate::ALL.iter().filter(|r| self.avoids(**r)) {
+                            probed[rate.index() as usize].max_rate = 0;
+                        }
+                    }
                     let frequency_offset = reading.as_ref().and_then(|r| r.frequency_offset);
                     if std::env::var_os("PHASE2_TRACE").is_some() {
                         eprintln!("P2TRACE info1d probed={probed:?} frequency={frequency_offset:?}");
@@ -1576,6 +1681,9 @@ impl Modem {
             }
             Stage::AnswerSendProbe => {
                 let Speaking::Probe { l1_until } = self.speaking else { return };
+                if self.x2 && self.x2_until.is_none() {
+                    self.x2_until = Some(l1_until + self.ms(X2_MARKER_WAIT));
+                }
                 if self.deadline.is_none() {
                     self.deadline = Some(l1_until + self.ms(0.600 + TONE_AFTER_PROBE_SLACK) + self.rtd());
                 }
@@ -1717,7 +1825,10 @@ impl Modem {
         };
         let towards_call: Vec<(SymbolRate, u8)> =
             SymbolRate::ALL.iter().map(|&r| (r, info1c.probed[r.index() as usize].max_rate)).collect();
-        let answer_to_call = best(&towards_call).map_or(SymbolRate::S2400, |b| b.0);
+        // A symbol rate a start-up of this call failed at is passed over
+        // while the call modem projects another (see `avoid_symbol_rate`).
+        let untried: Vec<(SymbolRate, u8)> = towards_call.iter().copied().filter(|&(r, _)| !self.avoids(r)).collect();
+        let answer_to_call = best(&untried).or_else(|| best(&towards_call)).map_or(SymbolRate::S2400, |b| b.0);
         // Towards this end: what this end read of the call modem's L2, within
         // the asymmetry both ends allow.
         let steps = u32::from(far.asymmetry.min(self.ours.asymmetry));
@@ -1729,7 +1840,10 @@ impl Modem {
                 (r, probed.max_rate, probed)
             })
             .collect();
-        let (call_to_answer, probed) = best(&towards_answer.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>())
+        let towards_answer_rates: Vec<(SymbolRate, u8)> = towards_answer.iter().map(|x| (x.0, x.1)).collect();
+        let untried: Vec<(SymbolRate, u8)> = towards_answer_rates.iter().copied().filter(|&(r, _)| !self.avoids(r)).collect();
+        let (call_to_answer, probed) = best(&untried)
+            .or_else(|| best(&towards_answer_rates))
             .and_then(|(r, _)| towards_answer.iter().find(|x| x.0 == r).map(|x| (x.0, x.2)))
             .unwrap_or((answer_to_call, Probed::default()));
         Info1a {
@@ -1804,6 +1918,85 @@ pub(crate) mod tests {
         (caller, answerer)
     }
 
+    /// An x2 client: a V.34 call modem up to the server's L1, quiet from
+    /// there, and `after` seconds past the end of L1 as the server timed it,
+    /// the marker with `body`, then quiet again.
+    fn x2_client(line: &mut Line, body: u8, after: f64, seconds: f64) -> Modem {
+        let mut caller = Modem::new(Role::Call, FS);
+        let mut answerer = Modem::answering_x2(FS, 0.0);
+        let mut marker = dpsk::Transmitter::new(Side::Call, FS);
+        let mut sent = false;
+        let mut quiet = false;
+        let (mut from_call, mut from_answer) = (0.0, 0.0);
+        for _ in 0..(seconds * FS) as usize {
+            let at_call = line.to_call.pop_front().unwrap() + line.echo * from_call + line.noise();
+            let at_answer = line.to_answer.pop_front().unwrap() + line.echo * from_answer + line.noise();
+            let from_v34 = caller.step(at_call);
+            from_answer = answerer.step(at_answer);
+            let ends = match answerer.speaking {
+                Speaking::Probe { l1_until } if answerer.stage == Stage::AnswerSendProbe => Some(l1_until),
+                _ => None,
+            };
+            if !sent && ends.is_some_and(|l1| answerer.now >= l1 + (after * FS) as u64) {
+                // Two points of lead-in, then the frame.
+                let mut bits = vec![true, true];
+                bits.extend(X2Marker::from_body(body).to_bits());
+                marker.send(&bits);
+                marker.silence();
+                sent = true;
+            }
+            quiet |= ends.is_some();
+            from_call = if sent {
+                marker.next_sample()
+            } else if quiet {
+                0.0
+            } else {
+                from_v34
+            };
+            line.to_answer.push_back(from_call * line.loss);
+            line.to_call.push_back(from_answer * line.loss);
+            if answerer.status() != Status::Running {
+                break;
+            }
+        }
+        answerer
+    }
+
+    #[test]
+    fn an_x2_clients_marker_ends_phase_2_as_x2() {
+        for after in [0.010, 0.100, 0.400] {
+            let mut line = Line::new(0.020, 10.0, 25.0, 60.0);
+            let answerer = x2_client(&mut line, 0x4d, after, 12.0);
+            assert_eq!(answerer.status(), Status::Done, "{after} s: stuck at {}", answerer.phase());
+            let m = answerer.x2_marker().expect("no marker");
+            assert_eq!((m.high_carrier, m.first, m.second), (true, 6, 4));
+            assert!(answerer.info1a().is_none());
+        }
+    }
+
+    #[test]
+    fn a_marker_that_is_not_x2s_or_comes_too_late_is_not_taken() {
+        // 49: plain V.34's body. And 4d a second after L1.
+        for (body, after) in [(0x49, 0.050), (0x4d, 1.0)] {
+            let mut line = Line::new(0.020, 10.0, 25.0, 60.0);
+            let answerer = x2_client(&mut line, body, after, 3.0);
+            assert!(answerer.x2_marker().is_none(), "{body:02x} at {after} s taken");
+        }
+    }
+
+    #[test]
+    fn a_v34_caller_meets_an_x2_server_as_it_meets_any() {
+        let mut line = Line::new(0.010, 10.0, f64::INFINITY, 70.0);
+        let (caller, answerer) = run(&mut line, 12.0, Modem::new(Role::Call, FS), Modem::answering_x2(FS, 0.0));
+        assert_eq!(caller.status(), Status::Done, "call modem stuck at {}", caller.phase());
+        assert_eq!(answerer.status(), Status::Done, "answer modem stuck at {}", answerer.phase());
+        assert!(answerer.x2_marker().is_none());
+        assert_eq!(caller.info1a(), answerer.info1a());
+        // What it was told of this end: bit 23 and CME.
+        let far = caller.far_capabilities().unwrap();
+        assert_eq!((far.asymmetry, far.cme), (4, true));
+    }
+
     #[test]
     fn two_ends_get_through_phase_2_on_a_short_line() {
         let mut line = Line::new(0.010, 10.0, f64::INFINITY, 70.0);
@@ -1845,6 +2038,33 @@ pub(crate) mod tests {
         assert_eq!(info1a.probed.max_rate, 14, "{info1a:?}");
         let info1c = caller.info1c().unwrap();
         assert_eq!(info1c.probed[5].max_rate, 14, "{info1c:?}");
+    }
+
+    /// A symbol rate a failed start-up trained at is passed over the next
+    /// time, by the answer modem in INFO1a and by the call modem in INFO1c,
+    /// on a line where it would otherwise be the first choice.
+    #[test]
+    fn a_symbol_rate_that_failed_is_not_chosen_again() {
+        let mut answerer = Modem::new(Role::Answer, FS);
+        answerer.avoid_symbol_rate(SymbolRate::S3429);
+        // A retrain's phase 2 keeps the list.
+        assert!(answerer.again().avoids(SymbolRate::S3429));
+        let mut line = Line::new(0.020, 6.0, f64::INFINITY, 55.0);
+        let (caller, answerer) = run(&mut line, 12.0, Modem::new(Role::Call, FS), answerer);
+        assert_eq!(answerer.status(), Status::Done);
+        let info1a = caller.info1a().expect("no INFO1a");
+        assert_eq!(info1a.answer_to_call, SymbolRate::S3200, "{info1a:?}");
+        assert_eq!(info1a.call_to_answer, SymbolRate::S3200, "{info1a:?}");
+
+        let mut caller = Modem::new(Role::Call, FS);
+        caller.avoid_symbol_rate(SymbolRate::S3429);
+        let mut line = Line::new(0.020, 6.0, f64::INFINITY, 55.0);
+        let (caller, answerer) = run(&mut line, 12.0, caller, Modem::new(Role::Answer, FS));
+        assert_eq!(answerer.status(), Status::Done);
+        let info1c = caller.info1c().unwrap();
+        assert_eq!(info1c.probed[5].max_rate, 0, "{info1c:?}");
+        assert!(info1c.probed[4].max_rate > 0, "{info1c:?}");
+        assert_eq!(caller.info1a().expect("no INFO1a").answer_to_call, SymbolRate::S3200);
     }
 
     #[test]

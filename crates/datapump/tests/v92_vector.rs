@@ -584,6 +584,7 @@ fn the_info_sequences_say_whether_v92_and_pcm_upstream_were_used() {
                 Info::Info1aPcmUp(_) => "INFO1a (V.92 PCM upstream)",
                 Info::Info1aV34Up(_) => "INFO1a (V.92 Table 19)",
                 Info::Mh(_) => "MH",
+                Info::X2Marker(_) => "x2 marker",
                 Info::InfoH(_) => "INFOh",
             };
             (*side, kind)

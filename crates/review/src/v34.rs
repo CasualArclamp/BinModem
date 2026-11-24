@@ -133,7 +133,7 @@ struct Direction {
     /// Symbols running that the trellis has paid as though for nothing.
     adrift: usize,
     /// What the receiver is told of data mode's grid: scale, extent, bend.
-    aim: (f64, i32, f64),
+    aim: (f64, i32, Option<datapump::v34::data::Warp>),
     precoding: [(i16, i16); 3],
     /// The channel a precoding far end expects, where it precodes.
     channel: Option<Channel>,
@@ -187,7 +187,7 @@ impl Direction {
             searches: 0,
             relocked: 0,
             adrift: 0,
-            aim: (1.0, 1, 0.0),
+            aim: (1.0, 1, None),
             precoding: [(0, 0); 3],
             channel: None,
             b1_left: 0,
@@ -581,7 +581,7 @@ impl Direction {
                 // The receiver keeps its loops on decisions of its own, and
                 // has to be told where the points are: on the grid moved
                 // out by 9.7's stretch, where the far end was asked for it.
-                self.aim = (decoder.grid_scale(), decoder.extent(), decoder.bend());
+                self.aim = (decoder.grid_scale(), decoder.extent(), decoder.warp());
                 self.precoding = params.precoding;
                 self.rx
                     .set_precoded_grid(self.aim.0, self.aim.1, self.aim.2, self.precoding);

@@ -34,6 +34,7 @@ use datapump::v34;
 use datapump::v90;
 pub use datapump::v92::memo::Recognized;
 pub mod bbs;
+mod automode;
 mod faxcall;
 pub mod memos;
 mod varc;
@@ -56,6 +57,9 @@ use ec::{Params, Role as EcRole, Stack};
 /// clears bit 70, the caller sends V.90's Table 10 whatever the server said,
 /// and the call is V.90 in every particular. `BINMODEM_V92_PCM_UP=1` turns it
 /// on, at either end; both have to have it for PCM to go up.
+/// The S-parameter that offers U.S. Robotics x2 (`at::registers`).
+const X2_REGISTER: u8 = 70;
+
 fn v92_pcm_upstream_wanted() -> bool {
     match std::env::var("BINMODEM_V92_PCM_UP") {
         Ok(v) => matches!(v.trim(), "1" | "yes" | "on" | "true"),
@@ -200,6 +204,29 @@ enum Pump {
 }
 
 impl Pump {
+    /// The same answering pump with its answer tone already behind it, for
+    /// automode's offers after ANSam.
+    fn past_answer_tone(self) -> Self {
+        match self {
+            Self::V32(m) => Self::V32(Box::new(m.past_answer_tone())),
+            Self::V22bis(m) => Self::V22bis(Box::new(m.past_answer_tone())),
+            Self::Bell212(m) => Self::Bell212(Box::new(m.past_billing())),
+            other => other,
+        }
+    }
+
+    /// Whether an answering pump offered by automode has heard the caller
+    /// answer its offer.
+    fn heard_caller(&self) -> bool {
+        match self {
+            Self::V32(m) => !matches!(m.phase(), "answer tone" | "AC" | "AC (retrain)"),
+            Self::V22bis(m) => !matches!(m.phase(), "answer tone" | "unscrambled ones"),
+            Self::Bell212(m) => !matches!(m.phase(), "billing delay" | "answer tone"),
+            Self::Bell103(m) => m.carrier(),
+            _ => true,
+        }
+    }
+
     fn step(&mut self, line: f64) -> f64 {
         match self {
             Self::V22bis(m) => m.step(line),
@@ -573,6 +600,8 @@ impl Pump {
             Self::V90(m) if m.is_v92() => "V.92",
             Self::V90(m) if m.is_v90() || m.v34().training().is_none() => "V.90",
             Self::V90(_) => "V.34",
+            Self::V90Server(m) if m.modem().is_x2() => "x2",
+            Self::V90Server(m) if m.modem().offers_x2() => "V.34",
             Self::V90Server(m) if m.modem().is_v92() => "V.92",
             Self::V90Server(m) if m.modem().is_v90() || m.modem().v34().training().is_none() => "V.90",
             Self::V90Server(_) => "V.34",
@@ -1126,6 +1155,14 @@ pub struct Modem {
     /// [`Self::choose_upstream`]); None for the server's own choice. Kept
     /// from call to call.
     pinned_upstream: Option<u8>,
+    /// The calling modem's ear for a far end with no V.8 (see `automode`):
+    /// armed at dialling, put away once a V.8 answer or V.32's own is heard.
+    pre_v8_ear: Option<automode::Ear>,
+    /// A carrier automode has settled on, in place of the one `+MS` named.
+    forced_carrier: Option<&'static str>,
+    /// The answering modem offering each pre-V.8 modulation in turn: which
+    /// of `automode::OFFERS`, and the call sample its offer began on.
+    offering: Option<(usize, u64)>,
     /// When V.92's short start-up is used: `BINMODEM_V92_QC` when the modem
     /// is made, and [`Self::set_quick_connect`] after.
     quick_connect: QuickConnect,
@@ -1294,6 +1331,9 @@ impl Modem {
             pinned_rate: None,
             pcm_upstream: v92_pcm_upstream_wanted(),
             pinned_upstream: None,
+            pre_v8_ear: None,
+            forced_carrier: None,
+            offering: None,
             quick_connect: v92_quick_connect_wanted(),
             quick_memo: None,
             memos: None,
@@ -1573,10 +1613,12 @@ impl Modem {
             // power reaches about one and a half: drawn at one, its outer
             // rings were all piled up along the edge of the box.
             Some(Pump::V34(m)) => m.constellation_peak().map_or(1.0, |peak| peak.max(1.0) as f32),
-            // PCM's pairs are drawn to one already; V.34, when that is what
-            // the call became, is V.34's.
-            Some(Pump::V90(m)) if !m.is_v90() => m.v34().constellation_peak().map_or(1.0, |peak| peak.max(1.0) as f32),
-            // The server plots what comes up, which is V.34's.
+            // PCM's pairs are drawn against their own held peak, whatever it
+            // is; V.34, when that is what the call became, is V.34's.
+            Some(Pump::V90(m)) if m.is_v90() => m.pair_peak() as f32,
+            Some(Pump::V90(m)) => m.v34().constellation_peak().map_or(1.0, |peak| peak.max(1.0) as f32),
+            Some(Pump::V90Server(m)) if m.modem().is_v92() => m.modem().constellation_peak().map_or(1.0, |peak| peak as f32),
+            // Otherwise the server plots what comes up, which is V.34's.
             Some(Pump::V90Server(m)) => m.modem().constellation_peak().map_or(1.0, |peak| peak.max(1.0) as f32),
             _ => 1.0,
         }
@@ -2071,6 +2113,26 @@ impl Modem {
     /// of samples stepped; a sound card never calls it and loses nothing.
     /// What the digital modem says of itself in INFO0d, in the law the
     /// line is in.
+    /// Whether this end offers U.S. Robotics x2: S70 set, answering as a
+    /// V.90 or V.92 server, on a mu-law line (x2 has no A-law).
+    fn serves_x2(&self) -> bool {
+        self.at.regs.get(X2_REGISTER) == Ok(1)
+            && self.role == Role::Answering
+            && self.pcm_end == Role::Answering
+            && matches!(self.at.modulation.carrier.as_str(), "V90" | "V92")
+            && !self.network_a_law
+    }
+
+    /// Offer x2 from the next call on, or not: S70 (see [`Self::serves_x2`]).
+    pub fn set_x2(&mut self, on: bool) {
+        let _ = self.at.regs.set(X2_REGISTER, u32::from(on));
+    }
+
+    /// Whether S70 offers x2.
+    pub fn x2(&self) -> bool {
+        self.at.regs.get(X2_REGISTER) == Ok(1)
+    }
+
     fn server_info0d(&self) -> datapump::v34::info::Info0d {
         datapump::v34::info::Info0d { a_law: self.network_a_law, ..v90::server::ours() }
     }
@@ -2128,6 +2190,21 @@ impl Modem {
             return self.carry_fax(line);
         }
 
+        if self.pre_v8_ear.is_some()
+            && let Some(answer) = self.hear_pre_v8(line)
+        {
+            // V.32bis Annex A: an answerer from before V.8, known by what it
+            // said. Its own modulation, at once.
+            self.line_notes.push(format!("automode: heard {}, and no V.8", answer.name()));
+            self.pre_v8_ear = None;
+            self.bis = None;
+            self.negotiation = None;
+            self.pump = None;
+            self.forced_carrier = Some(answer.carrier());
+            self.start_pump(None);
+            return 0.0;
+        }
+
         if self.bis.is_some() {
             return self.select_mode(line);
         }
@@ -2166,6 +2243,10 @@ impl Modem {
                 self.negotiation = self.v8_end().map(v8line::Modem::resuming_at_ansam);
                 return out;
             }
+        }
+
+        if self.offering.is_some() && self.next_offer() {
+            return out;
         }
 
         match self.state {
@@ -3403,6 +3484,10 @@ impl Modem {
         self.bis_far = None;
         self.varc_wait = 0;
         self.pcm_end = role;
+        self.forced_carrier = None;
+        self.offering = None;
+        self.pre_v8_ear = (role == Role::Calling && self.at.modulation.automode && !self.offered().is_empty())
+            .then(|| automode::Ear::new(self.fs));
         self.pump = None;
         self.negotiation = None;
         if self.at.v8bis && self.at.modulation.automode && !self.offered().is_empty() {
@@ -3468,6 +3553,9 @@ impl Modem {
             // silence; a V.90 one at the end of it, as it always has.
             if self.at.modulation.carrier == "V92" && self.pcm_end == Role::Answering {
                 negotiation = negotiation.handing_over_early();
+            }
+            if self.serves_x2() {
+                negotiation = negotiation.offering_x2();
             }
             if matches!(self.at.modulation.carrier.as_str(), "V90" | "V92") {
                 negotiation = match self.pcm_end {
@@ -3836,6 +3924,14 @@ impl Modem {
             // of this existed.
             v8line::Status::NoNegotiation => {
                 self.negotiation = None;
+                // ANSam ran out with no CM: a caller from before V.8, which
+                // says nothing until it hears its own answer. Annex A/V.32bis
+                // has the answerer offer each in turn.
+                if self.role == Role::Answering && self.at.modulation.automode {
+                    self.offering = Some((0, self.call_samples));
+                    self.forced_carrier = Some(automode::OFFERS[0]);
+                    self.line_notes.push("automode: no CM; offering V.32bis, V.22bis, Bell and V.21 in turn".to_owned());
+                }
                 self.start_pump(None);
             }
             // Nothing in common, or nothing heard. Both ends know, which is
@@ -3866,7 +3962,8 @@ impl Modem {
     /// Build the pump with V.8's handover silence still to run.
     fn start_pump_with(&mut self, chosen: Option<Modulation>, lead_in: f64) {
         let role = self.role;
-        let carrier = match chosen {
+        let forced = if chosen.is_none() { self.forced_carrier.take() } else { None };
+        let carrier = if let Some(forced) = forced { forced.to_owned() } else { match chosen {
             // V.8's joint menu named a V.90 server for this end to be the
             // analogue half of (9.1.1/V.90).
             // What V.8 agreed is V.34's bit either way; which V.90-family
@@ -3883,6 +3980,9 @@ impl Modem {
                     _ => "V90S".to_owned(),
                 }
             }
+            // A caller that offered V.34 and no PCM to a server offering x2:
+            // V.34's answer modem, which an x2 client's marker turns into x2.
+            Some(Modulation::V34Duplex) if self.serves_x2() => "X2S".to_owned(),
             Some(Modulation::V34Duplex) => "V34".to_owned(),
             // V.8 cannot tell the two apart, so what it agreed does not
             // change which of them was asked for. Anything else -- a far end
@@ -3901,7 +4001,8 @@ impl Modem {
                 "V34" | "V90" | "V92" => "V32B".to_owned(),
                 other => other.to_owned(),
             },
-        };
+        } };
+        let offered = self.offering.is_some() && role == Role::Answering;
         self.pump = Some(match carrier.as_str() {
             "V90" => {
                 let mut analogue = v90::startup::Analogue::new(self.fs, lead_in);
@@ -3909,6 +4010,7 @@ impl Modem {
                 Pump::V90(Box::new(analogue))
             }
             "V90S" => Pump::V90Server(Box::new(v90::server::Line::new(self.fs, self.server_info0d(), lead_in))),
+            "X2S" => Pump::V90Server(Box::new(v90::server::Line::x2(self.fs, lead_in))),
             "V92S" => {
                 let pcm_upstream = self.pcm_upstream;
                 // The short phase 2 is asked for along with the short phase
@@ -4009,7 +4111,11 @@ impl Modem {
                     Role::Calling => bell103::Role::Originate,
                     Role::Answering => bell103::Role::Answer,
                 };
-                Pump::Bell103(Box::new(bell103::Modem::with_plan(v21::DATA, hs_role, self.fs)))
+                if offered {
+                    Pump::Bell103(Box::new(bell103::Modem::marking_with_plan(v21::DATA, hs_role, self.fs)))
+                } else {
+                    Pump::Bell103(Box::new(bell103::Modem::with_plan(v21::DATA, hs_role, self.fs)))
+                }
             }
             "B212" => {
                 let hs_role = match role {
@@ -4050,7 +4156,69 @@ impl Modem {
                 )))
             }
         });
+        if offered {
+            // ANSam has been the answer tone; each offer starts on its own
+            // signal (automode).
+            self.pump = self.pump.take().map(Pump::past_answer_tone);
+        }
         self.state = State::Handshaking;
+    }
+
+    /// The calling modem's automode ear, one sample: while nothing the call
+    /// has heard yet says what the far end is. Put away once it has (V.8's
+    /// ANSam, V.32's AC, a pump past its opening).
+    fn hear_pre_v8(&mut self, line: f64) -> Option<automode::Answer> {
+        let listening = self.state == State::Handshaking
+            && (self.bis.is_some()
+                || self.negotiation.as_ref().is_some_and(|n| !n.heard_answer())
+                || match self.pump.as_ref() {
+                    // V.8 heard a plain ANS and gave the line to V.32bis,
+                    // which now sends AA and waits for AC.
+                    Some(Pump::V32(m)) => matches!(m.phase(), "listening" | "AA"),
+                    // An answer tone is being heard and V.8 has it: V.8's
+                    // own V.21 frames come next, and 1650 Hz is in them.
+                    None | Some(_) => false,
+                });
+        if !listening {
+            // A V.8 answer tone, or a pump that has gone past its opening:
+            // the ear has nothing left to decide.
+            if self.state != State::Handshaking
+                || self.pump.as_ref().is_some_and(|p| !matches!(p, Pump::V32(_)))
+                || matches!(self.pump.as_ref(), Some(Pump::V32(m)) if !matches!(m.phase(), "listening" | "AA"))
+            {
+                self.pre_v8_ear = None;
+            }
+            return None;
+        }
+        self.pre_v8_ear.as_mut()?.feed(line)
+    }
+
+    /// The answering modem's automode: keep the offer the caller answered,
+    /// or move on to the next once it has had [`automode::OFFER_FOR`].
+    /// True when the pump was replaced on this sample.
+    fn next_offer(&mut self) -> bool {
+        let Some((index, since)) = self.offering else { return false };
+        let Some(pump) = self.pump.as_ref() else { return false };
+        if pump.heard_caller() {
+            self.line_notes.push(format!("automode: the caller answered {}", automode::OFFERS[index]));
+            self.offering = None;
+            return false;
+        }
+        if (self.call_samples - since) as f64 >= automode::OFFER_FOR * self.fs {
+            let next = index + 1;
+            if next >= automode::OFFERS.len() {
+                // Nothing answered any of them: what the pump says now is
+                // what the call does.
+                self.offering = None;
+                return false;
+            }
+            self.offering = Some((next, self.call_samples));
+            self.forced_carrier = Some(automode::OFFERS[next]);
+            self.pump = None;
+            self.start_pump(None);
+            return true;
+        }
+        false
     }
 
     /// The round trip a quick connect to this number is expected to have:

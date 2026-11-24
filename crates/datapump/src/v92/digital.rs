@@ -1634,6 +1634,12 @@ impl Modem {
         self.scope.pair()
     }
 
+    /// The scale [`Self::pair`]'s points are drawn at.
+    #[must_use]
+    pub fn pair_peak(&self) -> f64 {
+        self.scope.peak()
+    }
+
     /// How many points the upstream is being read against, both signs
     /// counted (see `Receiver::points`).
     #[must_use]

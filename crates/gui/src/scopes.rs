@@ -819,7 +819,10 @@ pub fn symbol_scope(
     // V.32's thirty-two points do. Eight of them have a coordinate a quarter
     // beyond the box and were being drawn off the edge of it, so a
     // thirty-two-point constellation showed twenty-four dots.
-    let fit = 1.0 / peak.max(1.0);
+    // PCM's pairs come as the receiver read them and the peak is theirs, so
+    // the whole picture is drawn against it, up or down; a constellation is
+    // only ever shrunk to fit.
+    let fit = if pairs { 1.0 / peak.max(1e-9) } else { 1.0 / peak.max(1.0) };
     let m = constellation.len().max(1);
     let at = |re: f32, im: f32| {
         pos2(

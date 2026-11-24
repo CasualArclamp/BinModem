@@ -19,6 +19,7 @@ pub mod v8;
 pub mod v8bis;
 pub mod v90;
 pub mod v92;
+pub mod x2;
 
 pub use bell103::{Bell103Rx, Role};
 pub use framing::{AsyncBits, AsyncFramer};

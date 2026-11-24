@@ -321,6 +321,11 @@ fn info_event(
             .summary(format!("modem on hold: {:?}", m.indication))
             .field("indication", format!("{:?}", m.indication))
             .field("information", format!("{:?}", m.information)),
+        Info::X2Marker(m) => make("x2 marker", info::X2_MARKER_BITS)
+            .summary(if m.is_x2() { "x2 client asks for PCM downstream" } else { "phase 2 marker, not x2" }.to_string())
+            .field("carrier", if m.high_carrier { "high" } else { "low" }.to_string())
+            .field("first index", m.first.to_string())
+            .field("second index", m.second.to_string()),
     }
 }
 

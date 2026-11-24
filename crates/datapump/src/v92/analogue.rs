@@ -1417,6 +1417,12 @@ impl Modem {
         self.scope.pair()
     }
 
+    /// The scale [`Self::pair`]'s points are drawn at.
+    #[must_use]
+    pub fn pair_peak(&self) -> f64 {
+        self.scope.peak()
+    }
+
     /// The downstream's levels and their power, once there is a constellation
     /// on the line: the CPt's through Phase 4, the CPu's in data mode.
     #[must_use]
@@ -2490,6 +2496,9 @@ impl Modem {
     }
 
     fn heard_frame(&mut self, j: J) {
+        if std::env::var_os("V92_J_TRACE").is_some() {
+            eprintln!("V92JTRACE: {:?} at {} in {:?}", j, self.now, self.stage);
+        }
         match (self.stage, j) {
             (Stage::Jd, J::Jd(jd)) if self.far_jd.is_none() => {
                 self.far_jd = Some(jd);
