@@ -17,6 +17,7 @@
 //! subtracting what it sent, and a tap sent nothing.
 
 pub mod model;
+pub mod pcm;
 pub mod phase2;
 pub mod picture;
 pub mod setup;
@@ -71,7 +72,28 @@ pub fn analyse(wav: &Wav, name: &str) -> Report {
         (Tap::Summed, found.into_iter().flatten().map(|f| f.event).collect())
     };
     let settled = second_phase(&streams, fs, tap, &mut events);
-    let _ = settled;
+    let mut pcm = None;
+    if let Tap::Split { caller } = tap {
+        // The analogue modem is the one that sent INFO1a.
+        let analogue = events.iter().find(|e| e.tag == "INFO1a").map(|e| e.from);
+        if let Some(who) = analogue {
+            let channel = |end: End| if end == End::Caller { caller } else { 1 - caller };
+            if let Some((found, outcome)) = pcm::follow(
+                (&streams[channel(who)], who),
+                (&streams[channel(who.other())], who.other()),
+                fs,
+                &settled,
+            ) {
+                events.extend(found);
+                pcm = Some(outcome);
+            }
+        }
+    } else if settled.info1a_pcm.is_some() {
+        caveats.push(
+            "a V.90 call on one channel: past phase 2 the server's signal covers the modem's, and neither is followed"
+                .to_owned(),
+        );
+    }
     events.sort_by(|a, b| a.start.total_cmp(&b.start));
 
     let channels = streams
@@ -99,6 +121,21 @@ pub fn analyse(wav: &Wav, name: &str) -> Report {
         caveats,
     };
     verdict(&mut report);
+    if let Some(outcome) = pcm {
+        if let Some(rate) = outcome.downstream_bps {
+            report.verdict.push(("downstream".to_owned(), format!("{rate} bit/s, from CP")));
+        }
+        if let Some(mask) = outcome.upstream_rates {
+            let top = (0..13).rev().find(|bit| mask >> bit & 1 == 1).map(|bit| 4800 + 2400 * bit);
+            if let Some(top) = top {
+                report.verdict.push(("upstream".to_owned(), format!("up to {top} bit/s enabled in CP")));
+            }
+        }
+        report.verdict.push((
+            "data mode".to_owned(),
+            if outcome.reached_data { "reached".to_owned() } else { "not reached on the recording".to_owned() },
+        ));
+    }
     report
 }
 

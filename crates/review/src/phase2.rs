@@ -24,6 +24,9 @@ pub struct Settled {
     pub info1a: Option<Info1a>,
     pub info1a_pcm: Option<Info1aPcm>,
     pub info1a_pcm_up: Option<Info1aPcmUp>,
+    /// The carrier a short phase 2's INFO1a put the upstream on, which is
+    /// where a full one's INFO1d would have said.
+    pub upstream_high_carrier: Option<bool>,
     /// When the last INFO1 ended, in seconds: phase 3 starts after it.
     pub ended: Option<f64>,
 }
@@ -33,7 +36,7 @@ impl Settled {
         macro_rules! take {
             ($($field:ident),*) => { $( if self.$field.is_none() { self.$field = other.$field; } )* };
         }
-        take!(info0_call, info0_answer, info0d, info1c, info1a, info1a_pcm, info1a_pcm_up);
+        take!(info0_call, info0_answer, info0d, info1c, info1a, info1a_pcm, info1a_pcm_up, upstream_high_carrier);
         self.ended = match (self.ended, other.ended) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (a, b) => a.or(b),
@@ -200,6 +203,7 @@ fn info_event(info: &Info, side: Side, who: End, end: f64, pcm_call: bool, settl
         }
         Info::Info1aV34Up(a) => {
             settled.info1a_pcm = Some(a.v90);
+            settled.upstream_high_carrier = Some(a.high_carrier);
             settled.ended = Some(end);
             pcm_info1a(make("INFO1a", info::INFO1A_BITS), &a.v90)
                 .field("upstream carrier", if a.high_carrier { "high" } else { "low" })
