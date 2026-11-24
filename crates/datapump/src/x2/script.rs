@@ -154,7 +154,6 @@ impl Script {
     /// sync frames end once enough have gone.
     pub fn mp(&mut self, bank: &'static Bank) {
         self.data = Some(bank);
-        self.go = true;
     }
 
     /// The client's E: the records end at the next whole record.
@@ -275,7 +274,8 @@ impl Script {
             Segment::Sync => {
                 let f = self.ones();
                 self.n += 1;
-                if self.go && self.n >= SYNC_FRAMES {
+                // The MP may have come before the sync began.
+                if self.data.is_some() && self.n >= SYNC_FRAMES {
                     self.enter(Segment::Record);
                     self.record = record::server(true);
                     self.record_at = 0;

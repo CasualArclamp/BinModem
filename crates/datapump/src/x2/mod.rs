@@ -15,7 +15,9 @@
 //! data in `banks.rs`. No code of any of them is used.
 
 pub mod bank;
+pub mod client;
 mod banks;
 pub mod map;
 pub mod record;
 pub mod script;
+pub mod server;

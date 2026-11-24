@@ -110,6 +110,32 @@ fn projection(zeta: f64) -> f64 {
     1.0 + zeta / 6.0 + zeta * zeta / 120.0
 }
 
+/// 9.7's non-linear encoder as a receiver sees it: points in grid units bent
+/// out by phi of their own energy over the mapper's mean, and back.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Warp {
+    theta: f64,
+    energy: f64,
+}
+
+impl Warp {
+    /// A grid point where the far end put it.
+    pub fn bend(&self, point: Complex) -> Complex {
+        point.scale(projection(self.theta * point.norm_sqr() / self.energy))
+    }
+
+    /// A received point back on the straight grid: by fixed-point iteration,
+    /// since a point bent out by phi of its own energy is brought back by phi
+    /// of the unbent one's.
+    pub fn unbend(&self, point: Complex) -> Complex {
+        let mut x = point;
+        for _ in 0..3 {
+            x = point.scale(1.0 / projection(self.theta * x.norm_sqr() / self.energy));
+        }
+        x
+    }
+}
+
 /// The nearest multiple of `step` to `value`, halfway going to the smaller
 /// magnitude (9.6.2 items 2 and 3).
 fn round_to(value: i64, step: i64) -> i64 {
@@ -454,12 +480,7 @@ fn to_grid(params: &Params, energy: f64, scale: f64, symbol: Complex) -> Complex
     if !params.nonlinear {
         return point;
     }
-    let theta = params.theta();
-    let mut x = point;
-    for _ in 0..3 {
-        x = point.scale(1.0 / projection(theta * x.norm_sqr() / energy));
-    }
-    x
+    Warp { theta: params.theta(), energy }.unbend(point)
 }
 
 /// For two received 2D symbols, the nearest pair of points in each 4D subset
@@ -573,6 +594,12 @@ impl Decoder {
     /// What a unit-power symbol is multiplied by to be in grid units.
     pub fn grid_scale(&self) -> f64 {
         self.scale
+    }
+
+    /// The far end's non-linear encoding, for the receiver's slicer: None
+    /// when it uses none.
+    pub fn warp(&self) -> Option<Warp> {
+        self.params.nonlinear.then_some(Warp { theta: self.params.theta(), energy: self.energy })
     }
 
     /// The largest coordinate a point of the constellation reaches, at the
