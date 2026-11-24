@@ -45,7 +45,7 @@ jobs:
 
       - name: Build
         env:
-          RUSTFLAGS: "-C target-feature=+crt-static -C link-args=${{ env.YY_THUNKS_OBJ }} /SUBSYSTEM:WINDOWS,5.01"
+          RUSTFLAGS: '-C target-feature=+crt-static -C "link-arg=${{ env.YY_THUNKS_OBJ }}" -C link-arg=/SUBSYSTEM:WINDOWS,5.01'
         run: cargo build --release -p gui --target i686-pc-windows-msvc
 
       - name: Audit Windows XP Imports
