@@ -9,6 +9,14 @@ binmodem.exe --capture        replay the golden capture
 
 [docs/usage.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/usage.md) has the setup.
 
+## What's new in 5.4.3
+
+Two faults in V.92 calls to a server that is not BinModem's own, reported with recordings by the people who run one ([#54](https://github.com/CasualArclamp/BinModem/issues/54)). Calls to such a server fell back to V.90.
+
+- **Fixed: PCM upstream data was unreadable to other V.92 servers.** Half of the upstream symbols were sent two constellation points away from where V.92 6.4.2 puts them, a reading fitted to one capture of one modem. They are now sent as the text has them. `BINMODEM_V92_PAIR_OFFSET=2` in the environment brings the old reading back; two BinModems connect either way.
+- **Fixed: over SIP, the server often never heard the caller's Su turn over, and retrained.** The caller stopped for about 90 ms to fit its equaliser, and its answer to Jd went out late in the burst of sound that followed, where a short jitter buffer discards it. The fit now takes about a quarter of the time, and Su waits 200 ms after it.
+- **Fixed: the S-bar-u that answers Jp could start part of the way through a period of Su.** It now starts on a twelve-symbol boundary.
+
 ## What's new in 5.4.2
 
 - **Fixed: the mode box follows `AT+MS` typed at the terminal.** `AT+MS=V34` typed there changed the next call and left the box, the command on the faceplate and the remembered settings on the old modulation. The window now takes the modulation, automode and rate limits from the modem whenever they change.

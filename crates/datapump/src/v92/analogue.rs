@@ -260,6 +260,21 @@ const JD_WITHIN: f64 = 4.5;
 /// has to have been read by then.
 const SU_WITHIN: f64 = 5.0;
 
+/// How long after the fit on TRN1d the first Su is held back.
+///
+/// A6 lets this end choose its moment: Su goes out "no later than 5000 ms
+/// after the silence of A3 began", and the digital modem repeats Jd until it
+/// comes. The moment straight after Jd is the one bad one. The fit is the one
+/// place in Phase 3 where this end stops to think, and on a line that is a
+/// packet stream whatever is made while the sound catches up leaves late.
+/// Jd is read some twenty milliseconds after the fit, and the 144T of Su and
+/// the 24.5T of S-bar-u that follow are over in twenty-one more: a far end
+/// with an 80 ms jitter buffer threw the whole of them away as late and heard
+/// only the Su that runs on after them, with no reversal in it (issue 54).
+/// A fifth of a second is several times what the fit takes on a slow machine,
+/// and a twenty-fifth of what A6 allows.
+const SU_HOLD: f64 = 0.2;
+
 /// A11: CPt "shall start within 5000 ms of sending the S-bar-u of A8".
 const CPT_WITHIN: f64 = 5.0;
 
@@ -1176,6 +1191,8 @@ pub struct Modem {
     sd_deadline: Option<u64>,
     jd_deadline: Option<u64>,
     su_by: Option<u64>,
+    /// The symbol before which the first Su does not start ([`SU_HOLD`]).
+    su_from: Option<u64>,
     cpt_by: Option<u64>,
     /// When the first CPt began, so that an Ri heard before the digital
     /// modem could have read a whole one is not taken for its answer.
@@ -1298,6 +1315,7 @@ impl Modem {
             sd_deadline: None,
             jd_deadline: None,
             su_by: None,
+            su_from: None,
             cpt_by: None,
             cpt_began: None,
             start_up_by,
@@ -1638,6 +1656,15 @@ impl Modem {
                 if self.stage == Stage::Opening && self.source.count >= self.lead_in {
                     self.begin_ru();
                 }
+                // A6: Jd has been read, and Su answers it.
+                if self.stage == Stage::Jd
+                    && self.far_jd.is_some()
+                    && self.su_from.is_none_or(|from| self.now >= from)
+                {
+                    self.source.start(Up::Su);
+                    self.su_short = true;
+                    self.stage = Stage::Su;
+                }
             }
             Up::Ru => {
                 if self.source.count >= RU_SYMBOLS {
@@ -1719,6 +1746,22 @@ impl Modem {
                     self.source.start(Up::SuBar);
                     self.delays.push(HALF_SYMBOL);
                     self.su_short = false;
+                } else if self.stage == Stage::AfterJp
+                    && self.source.count.is_multiple_of(UP_INTERVALS as u64)
+                    && let Some(jp) = self.jp
+                {
+                    // A8: Jp has been read. 8.5.6 has Su in whole twelves, so
+                    // the Su running on is turned over at the end of one and
+                    // not at whichever symbol Jp's last bit arrived on: turned
+                    // over part of the way through a period it is a jump of
+                    // phase and not a reversal, and the digital modem cannot
+                    // time it. Jp comes in frames of seventy-two symbols, and
+                    // an Su started the moment Jd was read happened to keep
+                    // step with them; one started at any other time does not.
+                    self.source.start(Up::SuBar);
+                    // "S-bar-u for 24T plus epsilon" is a lasting delay of the
+                    // transmitter, not extra symbols (8.5.6).
+                    self.delays.push(f64::from(jp.epsilon) / EPSILON_STEPS);
                 }
             }
             Up::SuBar => {
@@ -2369,6 +2412,7 @@ impl Modem {
         let base = self.rx.symbols() - self.rx.history_len() as u64;
         let at = from.saturating_sub(base);
         if self.rx.train_near(at, TRAIN_SEARCH) {
+            self.su_from = Some(self.now + (SU_HOLD * FS) as u64);
             self.reader = TwoPointReader::differential_with(Mode::Call);
             self.window.clear();
             self.stage = Stage::Jd;
@@ -2451,23 +2495,18 @@ impl Modem {
                 self.far_jd = Some(jd);
                 self.su_by = None;
                 self.jd_deadline = None;
-                // A6: Su at once, for 144T. This end may wait up to 5 s for a
-                // better moment and has no reason to.
-                self.source.start(Up::Su);
-                self.su_short = true;
-                self.stage = Stage::Su;
                 self.notes.push(format!("Jd read, lookahead {}", jd.lookahead));
+                // A6: Su for 144T, once the fit is far enough behind
+                // ([`SU_HOLD`]); `advance` starts it.
             }
             (Stage::Su, J::Jp(jp)) if self.jp.is_none() => {
                 self.jp = Some(jp);
                 // A8: circuit 107 comes on when a CRC-valid Jp with bit 47 set
                 // arrives.
                 self.circuit107 = true;
+                // The S-bar-u that answers it starts where the Su in flight
+                // next completes a twelfth symbol; `advance` sends it.
                 self.stage = Stage::AfterJp;
-                self.source.start(Up::SuBar);
-                // "S-bar-u for 24T plus epsilon" is a lasting delay of the
-                // transmitter, not extra symbols (8.5.6).
-                self.delays.push(f64::from(jp.epsilon) / EPSILON_STEPS);
                 self.cpt_by = Some(self.now + ((CPT_WITHIN + self.settings.round_trip) * FS) as u64);
                 self.notes.push(format!("Jp read, epsilon {} and 107 on", jp.epsilon));
             }
@@ -3062,6 +3101,8 @@ mod phase4_tests {
         /// after the DIL's last it takes to choose them.
         choice: Option<(Cp, Cp, u32)>,
         notes: Vec<String>,
+        /// Every symbol the modem has sent, from its first step.
+        line: Vec<f64>,
     }
 
     impl Call {
@@ -3094,6 +3135,7 @@ mod phase4_tests {
                 cpts: Vec::new(),
                 choice: None,
                 notes: Vec::new(),
+                line: Vec::new(),
             }
         }
 
@@ -3174,6 +3216,7 @@ mod phase4_tests {
                 *n += 1;
             }
             let up = self.modem.step(down);
+            self.line.push(up);
             // `phase` names the signal the symbol just sent belongs to.
             let phase = self.modem.phase();
             let over_dil = phase == "V.92 phase 3: TRN1u over the DIL";
@@ -3283,6 +3326,51 @@ mod phase4_tests {
             assert!(zeros.iter().all(|&bit| !bit), "E2u is scrambled zeros (8.7.2): {zeros:?}");
             1 + e2u / width + e2u_symbols
         }
+    }
+
+    /// A6 to A8 as the line sees them (issue 54). The first Su waits out
+    /// [`SU_HOLD`] after the fit on TRN1d, so that it never leaves in the
+    /// burst of sound that follows the fit; and what goes out is 144T of Su,
+    /// 24T of S-bar-u, Su for a whole number of twelves and 24T of S-bar-u
+    /// again, each a clean reversal of the one before, whatever symbol Jp's
+    /// last bit arrived on.
+    #[test]
+    fn su_waits_out_the_fit_and_turns_over_on_whole_twelves() {
+        let mut call = Call::new(settings());
+        let (mut trained, mut jd, mut ticks) = (None, None, 0u64);
+        let mut sent = Vec::new();
+        while call.modem.phase() != "V.92 phase 3: TRN1u over the DIL" {
+            assert!(ticks < 60_000, "no second TRN1u: {:?}", call.notes);
+            call.tick();
+            ticks += 1;
+            if trained.is_none() && call.notes.iter().any(|note| note.starts_with("TRN1d trained")) {
+                trained = Some(ticks);
+            }
+            if jd.is_none() && call.notes.iter().any(|note| note.starts_with("Jd read")) {
+                jd = Some(ticks);
+            }
+            let up = call.line[call.line.len() - 1];
+            if jd.is_some() && (!sent.is_empty() || up != 0.0) {
+                sent.push((ticks, up));
+            }
+        }
+        // The symbol that changed the phase is TRN1u's first.
+        sent.pop();
+        let (trained, jd) = (trained.expect("trained"), jd.expect("Jd"));
+        let from = sent[0].0;
+        assert!(jd < from, "Jd was read at {jd} and Su began at {from}");
+        assert!(from - trained >= (SU_HOLD * FS) as u64, "Su began {} symbols after the fit", from - trained);
+        assert!(from - trained < (SU_HOLD * FS) as u64 + 16, "Su began {} symbols after the fit", from - trained);
+
+        let levels: Vec<f64> = sent.iter().map(|&(_, up)| up).collect();
+        let running = levels.len() - (SU_SYMBOLS + 2 * SU_BAR_SYMBOLS) as usize;
+        assert!(running > 0 && running.is_multiple_of(UP_INTERVALS), "the Su that runs on was {running} symbols");
+        let mut wanted = Vec::new();
+        for (length, bar) in [(SU_SYMBOLS as usize, false), (SU_BAR_SYMBOLS as usize, true), (running, false), (SU_BAR_SYMBOLS as usize, true)] {
+            wanted.extend((0..length as u64).map(|n| su(n, bar)));
+        }
+        assert_eq!(levels, wanted, "Su, S-bar-u, Su, S-bar-u");
+        assert_eq!(call.modem.delays().len(), 2, "the half symbol and epsilon: {:?}", call.modem.delays());
     }
 
     /// 9.6.2.1 from end to end: the whole of Phase 4 against a digital modem
