@@ -4563,6 +4563,11 @@ impl ScopeApp {
             Step::Type(keys) => self.typing.extend(keys),
             Step::Files(open) => self.transfer_open = open,
             Step::Receive => session.receive_into(self.receive_dir.trim().into()),
+            Step::LogIn => session.log_in(),
+            Step::Web => {
+                self.carry_web = true;
+                session.carry_web(true);
+            }
             Step::Tab(name) => {
                 self.tab = match name.as_str() {
                     "scopes" => Tab::Scopes,
@@ -6286,6 +6291,11 @@ enum Step {
     /// `@receive`: take a file the far end sends by ZMODEM, into the folder
     /// the file window names.
     Receive,
+    /// `@login`: what Log in, then PPP does -- answer the far end's login
+    /// prompts with the account in the network window and start PPP.
+    LogIn,
+    /// `@web`: carry web traffic, as the box in the network window does.
+    Web,
 }
 
 fn script_step(line: &str) -> Step {
@@ -6294,6 +6304,12 @@ fn script_step(line: &str) -> Step {
     }
     if line == "@receive" {
         return Step::Receive;
+    }
+    if line == "@login" {
+        return Step::LogIn;
+    }
+    if line == "@web" {
+        return Step::Web;
     }
     if line == "@files" || line == "@files off" {
         return Step::Files(line == "@files");
@@ -6973,6 +6989,8 @@ mod tests {
         assert_eq!(script_step("@until login: "), Step::Until("login: ".to_owned()));
         assert_eq!(script_step("@tab scopes"), Step::Tab("scopes".to_owned()));
         assert_eq!(script_step("@receive"), Step::Receive);
+        assert_eq!(script_step("@login"), Step::LogIn);
+        assert_eq!(script_step("@web"), Step::Web);
         assert_eq!(script_step("@files off"), Step::Files(false));
         assert!((40..=250).contains(&key_gap(b'a')) && key_gap(b' ') > key_gap(b'a').min(149));
     }

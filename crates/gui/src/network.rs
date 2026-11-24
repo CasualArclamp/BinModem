@@ -416,8 +416,9 @@ impl Networking {
         self.link.feed(bytes);
     }
 
-    /// Let `ms` pass, and give back what should go down the line.
-    pub fn step(&mut self, ms: u32, tx: &Publisher) -> Vec<u8> {
+    /// Let `ms` pass, and give back what should go down the line: about
+    /// `room` octets of it (see `ppp::link::Link::take_line_upto`).
+    pub fn step(&mut self, ms: u32, room: usize, tx: &Publisher) -> Vec<u8> {
         self.link.tick(ms);
         // Anything the far end sent that was not an answer to one of ours has
         // already been replied to inside the link; there is nothing above IP
@@ -425,7 +426,7 @@ impl Networking {
         let _ = self.pinger.poll(&mut self.link, ms);
         self.drive_proxy(ms, tx);
         self.report(tx);
-        let out = self.link.take_line();
+        let out = self.link.take_line_upto(room);
         self.tx_bytes += out.len() as u64;
         out
     }
@@ -613,11 +614,11 @@ mod tests {
 
         let mut came_up = None;
         for ms in 0..30_000u32 {
-            let from_answering = answering.step(1, &tx);
+            let from_answering = answering.step(1, usize::MAX, &tx);
             if !from_answering.is_empty() {
                 calling.feed(&from_answering);
             }
-            let from_calling = calling.step(1, &tx);
+            let from_calling = calling.step(1, usize::MAX, &tx);
             if !from_calling.is_empty() {
                 answering.feed(&from_calling);
             }
@@ -635,11 +636,11 @@ mod tests {
 
         calling.ping_once(&tx);
         for _ in 0..100 {
-            let out = calling.step(1, &tx);
+            let out = calling.step(1, usize::MAX, &tx);
             if !out.is_empty() {
                 answering.feed(&out);
             }
-            let back = answering.step(1, &tx);
+            let back = answering.step(1, usize::MAX, &tx);
             if !back.is_empty() {
                 calling.feed(&back);
             }

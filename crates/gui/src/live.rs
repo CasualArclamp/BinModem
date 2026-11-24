@@ -1589,7 +1589,14 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         // Drive the link. Its frames go down the line the same way a keystroke
         // does, because to the modem that is what they are.
         if let Some(link) = networking.as_mut() {
-            for b in link.step(ms, &tx) {
+            // A quarter of a second of line in the modem and no more. The
+            // rest waits in the link, where a page can overtake a download
+            // (see `ppp::fair`); in the modem's queue it could not, and
+            // handed everything at once that queue grew to seconds. 256
+            // octets at least, so a slow line still takes a whole packet.
+            let ahead = (modem.transmit_rate().unwrap_or(2400) as usize / 32).max(256);
+            let room = ahead.saturating_sub(modem.queued());
+            for b in link.step(ms, room, &tx) {
                 modem.feed_dte(b);
             }
             session.set_network(Some(link.view()));

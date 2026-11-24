@@ -288,10 +288,10 @@ impl Xid {
     /// Everything this implementation supports, as an opening proposal.
     pub fn proposal(compression: Compression) -> Self {
         Self {
-            n401_transmit: Some(crate::lapm::DEFAULT_N401 as u16),
-            n401_receive: Some(crate::lapm::DEFAULT_N401 as u16),
-            window_transmit: Some(crate::lapm::DEFAULT_K),
-            window_receive: Some(crate::lapm::DEFAULT_K),
+            n401_transmit: Some(crate::lapm::PROPOSED_N401 as u16),
+            n401_receive: Some(crate::lapm::PROPOSED_N401 as u16),
+            window_transmit: Some(crate::lapm::PROPOSED_K),
+            window_receive: Some(crate::lapm::PROPOSED_K),
             // Offered, because the alternative is worse than it looks. A
             // 16-bit check sequence lets about one damaged frame in 65536
             // through undetected, and on a line damaging hundreds a minute

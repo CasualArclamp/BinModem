@@ -101,6 +101,10 @@ pub struct Link {
     who: Option<String>,
     phase: Phase,
     line: Vec<u8>,
+    /// Datagrams not yet framed, a flow at a time (see `fair`). They are
+    /// compressed and framed as they leave, so the line gets them in the
+    /// order RFC 1144 compressed them.
+    waiting: crate::fair::FairQueue,
     arrived: Vec<ip::Arrived>,
     /// Datagrams carrying something other than an echo, for whatever is above
     /// this to make sense of.
@@ -158,6 +162,7 @@ impl Link {
             who: None,
             phase: Phase::Dead,
             line: Vec::new(),
+            waiting: crate::fair::FairQueue::default(),
             arrived: Vec::new(),
             carried: Vec::new(),
             compressor: None,
@@ -335,9 +340,32 @@ impl Link {
         self.pump();
     }
 
-    /// Octets for the modem.
+    /// Octets for the modem: everything there is.
     pub fn take_line(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.line)
+        self.take_line_upto(usize::MAX)
+    }
+
+    /// Octets for the modem, about `room` of them: the link's own control
+    /// frames whatever their size, then datagrams a flow at a time until
+    /// `room` is used. What does not fit waits here, where a small packet can
+    /// still overtake a download, rather than in the modem, where it cannot.
+    /// At least one datagram goes whenever there is any room at all, so a
+    /// datagram larger than `room` is not held for ever.
+    pub fn take_line_upto(&mut self, room: usize) -> Vec<u8> {
+        let mut out = std::mem::take(&mut self.line);
+        let mut first = true;
+        while room > 0 && (first || out.len() < room) {
+            let Some(datagram) = self.waiting.pop() else { break };
+            first = false;
+            self.frame_datagram(datagram);
+            out.append(&mut self.line);
+        }
+        out
+    }
+
+    /// Octets of datagrams waiting for room on the line.
+    pub fn waiting_octets(&self) -> usize {
+        self.waiting.octets()
     }
 
     /// Echoes that have arrived.
@@ -415,6 +443,11 @@ impl Link {
     fn send_datagram(&mut self, datagram: Vec<u8>) {
         self.counters.datagrams_out += 1;
         self.counters.octets_out += datagram.len() as u64;
+        self.waiting.push(datagram);
+    }
+
+    /// One datagram onto the line, compressed if the link compresses.
+    fn frame_datagram(&mut self, datagram: Vec<u8>) {
         match self.compressor.as_mut() {
             Some(c) => {
                 let (kind, packet) = c.compress(&datagram);
@@ -753,6 +786,9 @@ impl Link {
                 Report::Down | Report::Finished => {
                     self.compressor = None;
                     self.decompressor = None;
+                    // Datagrams for a network layer that has gone: nowhere
+                    // to send them, and the next one up is a new link.
+                    self.waiting.clear();
                     if self.phase == Phase::Network {
                         self.phase = Phase::Establish;
                     }

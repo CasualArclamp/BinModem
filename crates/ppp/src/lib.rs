@@ -12,6 +12,7 @@
 
 pub mod auth;
 pub mod control;
+pub mod fair;
 pub mod frame;
 pub mod ip;
 pub mod ipcp;

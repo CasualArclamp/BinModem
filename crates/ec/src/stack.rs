@@ -1384,6 +1384,22 @@ impl Stack {
         // 8.5.5 ends the connection -- so this is a capability to use when it
         // has been granted rather than one to try.
         self.lapm.set_selective_reject(agreed.srej_single);
+        // The frame size and window, which used to be agreed and then not
+        // used. The smaller of each pair: the two fields are named from
+        // opposite ends in a command and a response, and taking both
+        // leaves nothing to get the wrong way round.
+        let n401 = [agreed.n401_transmit, agreed.n401_receive]
+            .into_iter()
+            .map(|n| n.map_or(crate::lapm::DEFAULT_N401, usize::from))
+            .min()
+            .unwrap_or(crate::lapm::DEFAULT_N401);
+        let k = [agreed.window_transmit, agreed.window_receive]
+            .into_iter()
+            .map(|k| k.unwrap_or(crate::lapm::DEFAULT_K))
+            .min()
+            .unwrap_or(crate::lapm::DEFAULT_K);
+        self.lapm.set_size(n401, k);
+        self.trace(&format!("XID frames of {n401} octets, {k} outstanding"));
         // Answer every command and no responses. 8.10.2: "on receipt of an
         // L-SETPARM response primitive ... an error control function shall
         // return the indicated parameter values/procedure settings in the
