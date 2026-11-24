@@ -43,6 +43,7 @@ mod dialin;
 mod document;
 mod faxwin;
 mod console;
+mod contacts;
 mod engine;
 mod live;
 mod net;
