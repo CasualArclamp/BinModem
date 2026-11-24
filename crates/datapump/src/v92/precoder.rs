@@ -68,53 +68,45 @@ use crate::v34::trellis::{self, Code};
 /// magnitude can be matched with one edit.
 pub const TIE_TO_SMALLER_INDEX: bool = true;
 
-/// The index offset the class of a 4D pair's *first* symbol carries, in
-/// indices.
+/// An index offset on the class of a 4D pair's *first* symbol, in indices.
+/// None, which is the clause: 6.4.2 prints "eta_k = Ki + z_k Mi" for
+/// k = 0, 1, 2, and Ki and the index it came from are in the same residue
+/// class modulo Mi.
 ///
-/// 6.4.2 prints "eta_k = Ki + z_k Mi" for k = 0, 1, 2, which puts Ki and the
-/// index it came from in the same residue class modulo Mi. A capture of an
-/// Agere SV92PP's B1u does not agree: read back through the classes as printed,
-/// only the low bit of every Ki comes out right, bits 1 and 2 are wrong in
-/// about a quarter of the frames, and B1u reads 83% ones where 8.7.1 says every
-/// one of its 48 data frames must. Reading positions 0 and 2 of each trellis
-/// frame as "eta_k = Ki + 2 + z_k Mi" instead makes B1u exactly all ones -- and
-/// the far end's whole idle stretch after it, some forty thousand bits.
+/// It is a number at all because this was once 2. A capture of an Agere
+/// SV92PP's B1u, read through the classes as printed, came out 83% ones where
+/// 8.7.1 says all, and reading positions 0 and 2 of each trellis frame as
+/// "eta_k = Ki + 2 + z_k Mi" made it all ones. That was fitted and kept
+/// (`crates/datapump/examples/v92_b1u_search.rs`), and it was wrong for every
+/// other far end there is a measurement of:
 ///
-/// That is a measurement, not a derivation: it is what this far end's
-/// transmitter does, and it is recorded here as a named constant rather than
-/// buried in the two places that use it, because the clause as printed says
-/// otherwise and a second capture may disagree. What it stands in for is most
-/// likely how a pair's first index is numbered when the constellation's levels
-/// arrive from a CPd of eight odd magnitudes; the offline enumeration that
-/// established it is `crates/datapump/examples/v92_b1u_search.rs`.
+/// * D-Modem's digital modem reads the classes as printed. With the 2 its
+///   B1u came out half zeros on clean points and it retrained; without, 2880
+///   ones of 2880 and data at 40 000 up.
+/// * libv90modem, the digital modem of a public dial-in server, received this
+///   transmitter's B1u on two calls with every symbol at k = 1 and k = 3
+///   right and every symbol at k = 0 and k = 2 exactly two indices high --
+///   1544 and 1602 bit errors in 3072 -- and with 2 taken off those indices
+///   read both without an error and connected at 42 666 up (issue 54). The
+///   same receiver reads B1u as printed from a Conexant CX93001 and a U.S.
+///   Robotics 5686.
 ///
-/// It has a cost the printed classes do not have, and the capture could not
-/// show it. With eta_k = Ki + z_k Mi everywhere, inverting every symbol turns
-/// each Ki into Mi - 1 - Ki, which is 6.4.1's R0 complemented, and the
-/// differential sign of 6.4.1 takes that out: the upstream reads the same
-/// either way up. With an offset of o on some positions those become
-/// Mi - 1 - Ki - 2o, which is the same thing only when Mi divides 2o. At
-/// Mi = 8 it does not, and an upstream read upside down comes out with one bit
-/// in six wrong -- B1u as 83% ones, which is the figure quoted above. So the
-/// digital modem has to read the upstream the right way up
-/// (`receiver::Receiver::set_trn2u_seed`, from 8.7.6), and a capture that was
-/// read the other way up would have measured this constant with the other
-/// sign.
-pub const PAIR_FIRST_INDEX_OFFSET: i64 = 2;
+/// A shift of two leaves the V.34 2D subsets where they were, so the trellis,
+/// Y0 and the parity all still line up, and nothing short of the decoded bits
+/// shows it. Why the Agere capture read as it did is not known. One thing it
+/// may have been is a stream read upside down: with an offset of o on some
+/// positions, inverting every symbol turns Ki into Mi - 1 - Ki - 2o there
+/// instead of into 6.4.1's R0 complemented, and at Mi = 8 that is one bit in
+/// six wrong -- the 83% above.
+pub const PAIR_FIRST_INDEX_OFFSET: i64 = 0;
 
 /// The offset in force: [`PAIR_FIRST_INDEX_OFFSET`], unless
 /// `BINMODEM_V92_PAIR_OFFSET` in the environment says otherwise.
 ///
-/// A second far end does disagree. D-Modem's digital modem reads the classes
-/// as 6.4.2 prints them, eta_k = Ki + z_k Mi with nothing added, and a call to
-/// it settles the matter in one frame: with the offset at 2 its B1u comes out
-/// half zeros on clean points and it retrains; with
-/// `BINMODEM_V92_PAIR_OFFSET=0` it reads 2880 ones of 2880 and the call
-/// carries data at 40 000 up. So there are two measurements and they do not
-/// agree, and until a capture says which of them a real server shares, the
-/// one from the real modem stays the default and the other is a switch. Both
-/// ends of a call between two of these read the same switch, so either value
-/// connects them.
+/// `BINMODEM_V92_PAIR_OFFSET=2` is the reading fitted to the Agere capture,
+/// kept as a switch for a far end that turns out to share it. Both ends of a
+/// call between two of these read the same switch, so either value connects
+/// them.
 pub fn pair_first_index_offset() -> i64 {
     use std::sync::OnceLock;
     static OFFSET: OnceLock<i64> = OnceLock::new();
@@ -384,8 +376,9 @@ pub fn index_to_ki(eta: i32, modulus: u8, k: usize) -> u8 {
         let parity = eta.rem_euclid(2);
         (((eta - parity) / 2).rem_euclid(modulus)) as u8
     } else if opens_a_pair(k) {
-        // The pair's first index is measured from Ki + the offset the far end
-        // uses; see `PAIR_FIRST_INDEX_OFFSET`.
+        // The pair's first index is measured from Ki + the offset in force,
+        // which is none unless the switch says so; see
+        // `PAIR_FIRST_INDEX_OFFSET`.
         (i32::try_from(i64::from(eta) - pair_first_index_offset()).unwrap_or(eta)
             .rem_euclid(modulus)) as u8
     } else {
@@ -1076,26 +1069,26 @@ mod tests {
         let run = |chain: &mut Chain| (0..UP_INTERVALS).map(|_| chain.step(1).v).collect::<Vec<_>>();
 
         let first = run(&mut chain);
-        // Worked through by hand for the first two. At n = 0 (k = 0, the first
-        // symbol of a 4D pair) every memory is zero, so c(0) = 0 and the class
-        // is {1 + 2 + 4z} = {..., -5, -1, 3, 7, ...}: the member nearest zero
-        // is a(-1) = -1, so x(0) = -1 and v(0) = z2(0) x(0) = -1. At n = 1
-        // (k = 1, whose class is {1 + 4z} = {..., -7, -3, 1, 5, ...}) c(1) =
-        // 0.2 u(0) + 0.5 x(0) = -0.7, the member nearest 0.7 is a(1) = 3, so
-        // x(1) = 2.3 and v(1) = 2.3 + 0.3 x(0) + 0.1 v(0) = 1.9.
+        // Worked through by hand for the first two. Every class is
+        // {1 + 4z} = {..., -7, -3, 1, 5, ...}. At n = 0 every memory is zero,
+        // so c(0) = 0 and the members nearest zero are a(1) = 3 and
+        // a(-3) = -5: u(0) = 3, x(0) = 3 and v(0) = z2(0) x(0) = 3. At n = 1,
+        // c(1) = 0.2 u(0) + 0.5 x(0) = 2.1, the member nearest -2.1 is
+        // a(-3) = -5, so x(1) = -2.9 and v(1) = -2.9 + 0.3 x(0) + 0.1 v(0) =
+        // -1.7.
         let pinned = [
-            -1.0,
-            1.8999999999999997,
-            1.88,
-            7.212999999999999,
-            6.2513,
-            4.5538799999999995,
-            1.477263,
-            6.356476300000001,
-            5.92455388,
-            4.604721013,
-            1.5843783513,
-            6.39732455388,
+            3.0,
+            -1.7,
+            -1.2400000000000002,
+            -7.9590000000000005,
+            -5.7659,
+            -5.1428400000000005,
+            -0.8749089999999998,
+            -6.9262409,
+            -5.34184284,
+            -5.1891061590000005,
+            -1.0040668659000003,
+            -6.979254342840001,
         ];
         for (got, want) in first.iter().zip(pinned.iter()) {
             assert!((got - want).abs() < 1e-9, "the first twelve prefilter outputs after a reset: {first:?}");
