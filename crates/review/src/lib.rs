@@ -21,6 +21,7 @@ pub mod link;
 pub mod model;
 pub mod pcm;
 mod pcm4;
+pub mod pcm92;
 pub mod phase2;
 pub mod picture;
 pub mod setup;
@@ -96,6 +97,9 @@ pub fn analyse(wav: &Wav, name: &str) -> Report {
         // out of its channel, where there is one.
         let mut cleaned: Vec<Option<Vec<f32>>> = vec![None, None];
         for index in 0..2 {
+            if std::env::var_os("REVIEW_NO_ECHO").is_some() {
+                continue;
+            }
             if let Some(done) = echo::cancel(&streams[index], &streams[1 - index], fs) {
                 let end = if index == caller {
                     End::Caller
@@ -148,6 +152,17 @@ pub fn analyse(wav: &Wav, name: &str) -> Report {
                     .and_then(|next| next.began)
                     .map_or(length, |began| began - 0.3);
                 if let Some((found, outcome)) = pcm::follow(
+                    (streams[channel(who)], who),
+                    (streams[channel(who.other())], who.other()),
+                    fs,
+                    settled,
+                    until,
+                ) {
+                    events.extend(found);
+                    pcm = Some(outcome);
+                }
+                // V.92 with PCM going up as well as down.
+                if let Some((found, outcome)) = pcm92::follow(
                     (streams[channel(who)], who),
                     (streams[channel(who.other())], who.other()),
                     fs,

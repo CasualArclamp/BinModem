@@ -550,7 +550,7 @@ impl Upstream {
     }
 }
 
-fn descriptor_fields(d: &Descriptor) -> Vec<(String, String)> {
+pub(crate) fn descriptor_fields(d: &Descriptor) -> Vec<(String, String)> {
     let run = |list: &[u8]| list.iter().map(u8::to_string).collect::<Vec<_>>().join(" ");
     let bits = |list: &[bool]| {
         list.iter()
@@ -583,7 +583,7 @@ fn descriptor_fields(d: &Descriptor) -> Vec<(String, String)> {
     ]
 }
 
-fn cp_fields(cp: &Cp) -> Vec<(String, String)> {
+pub(crate) fn cp_fields(cp: &Cp) -> Vec<(String, String)> {
     let mut fields = Vec::new();
     let mut add = |name: &str, value: String| fields.push((name.to_owned(), value));
     add(
@@ -993,7 +993,7 @@ impl Downstream {
     }
 }
 
-fn jd_fields(jd: &Jd) -> Vec<(String, String)> {
+pub(crate) fn jd_fields(jd: &Jd) -> Vec<(String, String)> {
     let rates: Vec<u32> = (1..=22u8)
         .filter(|&drn| jd.enables(drn))
         .filter_map(sequences::data_rate)
