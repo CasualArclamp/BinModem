@@ -396,3 +396,52 @@ fn it_beats_v42bis_on_text() {
         old.len()
     );
 }
+
+/// 7.11.4: the history ends at N8, and a string may not carry it past.
+///
+/// Issue 64: Netstalgia's server answered P3R 4096 and released the link
+/// after about 4 kB of upstream, its decoder having found the history past
+/// 4096. The encoder checked for a full history only before each string, so
+/// a string that started at 4090 and matched 40 characters ended at 4130.
+/// Compressible text is the case that does it, long matches near the end.
+#[test]
+fn the_history_never_goes_past_n8() {
+    let text: Vec<u8> = (0..400u32)
+        .flat_map(|i| format!("GET /forum/thread/{} HTTP/1.1
+Host: bbs.example
+
+", i % 37).into_bytes())
+        .collect();
+    let mut binary = Vec::new();
+    let mut x = 0x1234_5678u32;
+    for _ in 0..40_000 {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        // Small alphabet, so it matches often and still looks like data.
+        binary.push((x % 6) as u8 * 40);
+    }
+    for input in [&text, &binary] {
+        for (n2, n7, n8) in [(2048, 255, 4096), (1024, 255, 3072), (512, 32, 512), (2048, 255, 6144)] {
+            let params = Params { n2, n7, n8 };
+            for chunk in [1usize, 7, 260, usize::MAX] {
+                let mut enc = Encoder::new(params);
+                let mut dec = Decoder::new(params);
+                let mut wire = Vec::new();
+                let mut out = Vec::new();
+                for piece in input.chunks(chunk.min(input.len())) {
+                    enc.encode(piece, &mut wire);
+                    enc.flush(&mut wire);
+                    dec.decode(&wire, &mut out).expect("the far end could not read it");
+                    wire.clear();
+                }
+                assert_eq!(&out, input, "N8 {n8}, chunks of {chunk}");
+                assert!(
+                    dec.longest_history() <= usize::from(n8),
+                    "history reached {} against N8 {n8}, chunks of {chunk}",
+                    dec.longest_history()
+                );
+            }
+        }
+    }
+}
