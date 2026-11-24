@@ -173,8 +173,8 @@ impl Script {
             .find(|(_, b)| b.b == current.b)
             .and_then(|(n, _)| Bank::get(n, pad))
             .unwrap_or(current);
-        for i in 0..FRAME {
-            self.marker[i] = behind.list(i).sent[0];
+        for (i, level) in self.marker.iter_mut().enumerate() {
+            *level = behind.list(i).sent[0];
         }
         self.pad_b = Bank::get(1, pad);
         self.data = Some(bank);
