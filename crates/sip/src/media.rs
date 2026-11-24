@@ -65,6 +65,20 @@ use std::time::{Duration, Instant};
 
 use dsp::Resampler;
 
+/// `BINMODEM_RTP_TRACE=1`: each packet sent late and each one the play-out
+/// had to do without, with seconds since the first packet of the call, to
+/// line up with a recording of it.
+pub(crate) fn rtp_trace(what: &str) {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    static START: OnceLock<Instant> = OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("BINMODEM_RTP_TRACE").is_some()) {
+        return;
+    }
+    let start = START.get_or_init(Instant::now);
+    eprintln!("RTPTRACE {:9.3} {what}", start.elapsed().as_secs_f64());
+}
+
 use crate::g711::{self, Law};
 use crate::jitter::{Counters, Jitter};
 use crate::rtp;
@@ -1091,6 +1105,7 @@ fn pace(shared: Arc<Shared>, socket: UdpSocket) {
                     payload.extend(queue.drain(..octets));
                     if queue.len() >= octets {
                         shared.sent_behind.fetch_add(1, Ordering::Relaxed);
+                        rtp_trace(&format!("sent behind, {} octets more waiting", queue.len()));
                     }
                 }
             } else if !speaking {

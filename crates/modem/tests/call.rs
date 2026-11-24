@@ -2165,3 +2165,59 @@ fn the_v8_bis_switch_reads_back_and_refuses_what_it_cannot_do() {
     p.run(0.01);
     assert!(p.caller_saw().contains("ERROR"), "{:?}", p.caller_saw());
 }
+
+/// V.32bis Annex A automode, calling: a caller left on V.92, dialling an
+/// answerer from before V.8, is to hear what it is and become one of those.
+/// Before this, V.22bis, V.21 and Bell answerers were never recognised: the
+/// caller sat in V.32's AA or in V.8 waiting for ANSam.
+#[test]
+fn an_automode_caller_finds_an_answerer_without_v8() {
+    for (ms, want, rate) in [
+        ("V32B", "V.32bis", 14_400),
+        ("V32", "V.32", 9600),
+        ("V22B", "V.22bis", 2400),
+        ("B212", "Bell 212A", 1200),
+        ("B103", "Bell 103", 300),
+        ("V21", "V.21", 300),
+    ] {
+        let mut p = Pair::new();
+        Pair::type_at(&mut p.host, &format!("AT+MS={ms},0"));
+        Pair::type_at(&mut p.caller, "AT+MS=V92");
+        p.run(0.01);
+        Pair::type_at(&mut p.host, "ATA");
+        Pair::type_at(&mut p.caller, "ATD5551234");
+        p.run(30.0);
+        assert_eq!(p.caller.state(), State::Data, "an answering {ms}: caller never connected");
+        assert_eq!(p.host.state(), State::Data, "an answering {ms}: never connected");
+        assert_eq!(p.caller.standard(), want, "an answering {ms}");
+        assert_eq!(p.caller.rate(), Some(rate), "an answering {ms}");
+    }
+}
+
+/// And answering: callers from before V.8 say nothing until they hear their
+/// own answer, so after ANSam an automode answerer offers V.32bis, V.22bis,
+/// Bell and V.21 in turn. A Bell 212A caller takes V.22bis's offer at 1200,
+/// which is the same DPSK, as it does with any V.22 answerer.
+#[test]
+fn an_automode_answerer_finds_a_caller_without_v8() {
+    for (ms, want, rate) in [
+        ("V32B", "V.32bis", 14_400),
+        ("V32", "V.32", 9600),
+        ("V22B", "V.22bis", 2400),
+        ("B212", "Bell 212A", 1200),
+        ("B103", "Bell 103", 300),
+        ("V21", "V.21", 300),
+    ] {
+        let mut p = Pair::new();
+        Pair::type_at(&mut p.caller, &format!("AT+MS={ms},0"));
+        Pair::type_at(&mut p.host, "AT+MS=V92");
+        p.run(0.01);
+        Pair::type_at(&mut p.host, "ATA");
+        Pair::type_at(&mut p.caller, "ATD5551234");
+        p.run(30.0);
+        assert_eq!(p.caller.state(), State::Data, "a calling {ms}: never connected");
+        assert_eq!(p.host.state(), State::Data, "a calling {ms}: the answerer never connected");
+        assert_eq!(p.caller.standard(), want, "a calling {ms}");
+        assert_eq!(p.host.rate(), Some(rate), "a calling {ms}");
+    }
+}

@@ -380,6 +380,15 @@ impl Modem {
         modem
     }
 
+    /// [`Self::marking`] on another set of tones: V.21's answering mark, sent
+    /// at once by an answerer whose answer tone has already been sent.
+    pub fn marking_with_plan(plan: Plan, role: Role, fs: f64) -> Self {
+        let mut modem = Self::with_plan(plan, role, fs);
+        modem.tx.set_transmitting(true);
+        modem.phase = Phase::Marking;
+        modem
+    }
+
     /// Take one sample from the line and give back the one to put on it.
     pub fn step(&mut self, line: f64) -> f64 {
         if let Some(byte) = self.rx.feed(line)

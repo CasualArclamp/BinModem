@@ -115,6 +115,12 @@ pub struct Modem {
     ear: Bell103Rx,
     /// The Bell 103 this became, if it fell back.
     fallback: Option<Box<bell103::Modem>>,
+    /// 2225 Hz and 2100 Hz, narrow: what tells a Bell answer from V.25's
+    /// or V.8's answer tone, which the FSK ear alone cannot. 2100 Hz sits
+    /// inside the 103 band, and a caller that took ANSam for 2225 Hz
+    /// "connected" to a V.92 answerer still offering V.32.
+    bell_tone: dsp::ToneDetector,
+    v25_tone: dsp::ToneDetector,
     /// Characters out of and into start-stop framing at 1200, for `send` and
     /// `take_bytes`; what sits above a pump uses the bits.
     framing: AsyncBits,
@@ -151,9 +157,21 @@ impl Modem {
             tone,
             ear: Bell103Rx::with_tones(space, mark, fs),
             fallback: None,
+            bell_tone: dsp::ToneDetector::new(ANSWER_TONE, 40.0, fs),
+            v25_tone: dsp::ToneDetector::new(2100.0, 40.0, fs),
             framing: AsyncBits::new(8),
             received: Vec::new(),
         }
+    }
+
+    /// An answering modem with the billing delay already behind it: on a
+    /// call that has been answered for seconds, it whistles 2225 Hz at once.
+    pub fn past_billing(mut self) -> Self {
+        if self.state == State::Billing {
+            self.tone.set_transmitting(true);
+            self.state = State::AnswerTone;
+        }
+        self
     }
 
     /// Take one sample from the line and give back the one to put on it.
@@ -163,6 +181,8 @@ impl Modem {
         }
         self.rx.feed(line);
         self.ear.feed(line);
+        self.bell_tone.feed(line);
+        self.v25_tone.feed(line);
         self.advance();
         if let Some(m) = self.fallback.as_mut() {
             // The 103 starts on the next sample; this one is its first.
@@ -204,7 +224,8 @@ impl Modem {
                 }
             }
             State::Listening => {
-                if self.hold(far_mark) >= timing::HEARD_TONE {
+                let bell = far_mark && self.bell_tone.amplitude() > 2.0 * self.v25_tone.amplitude();
+                if self.hold(bell) >= timing::HEARD_TONE {
                     self.enter(State::Pausing);
                 }
             }
