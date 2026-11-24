@@ -42,10 +42,15 @@ checkout):
     .venv\Scripts\python.exe -m courier_emu run dumps\courier-board-21210-capture-403\courier-board.rom `
       --instructions 400000000 --line-link tcp:127.0.0.1:47123 --line-listen --with-dsp `
       --nvram-fixture idsdl403 --board-id 7 --dip-preset default --tick-ms 5 `
-      --at "ATX1S32=66S54=0S58=48&A3&B1Q0DT5551234" --serial-input-after 5000000 `
+      --at "ATX1S32=66S39=8S54=0S58=48&A3&B1Q0DT5551234" --serial-input-after 5000000 `
+      --at "ATI11" --serial-input-after 150000000 `
       --summary > courier.json
 
-`S32=66` leaves the Courier x2 and no V.90. Then this end:
+`S32=66` leaves the Courier x2 and no V.90. `S39=8` matters: the profile's
+own S39=0 is an invalid transmit level, and with it the Courier's upstream
+arrives with a bad frame every few hundred octets (courier-emu's own
+finding). The second `--at` types ATI11 once the call is over, for the
+Courier's diagnostics. Then this end:
 
     cargo run --release -p modem --example courier_peer -- 127.0.0.1:47123 [--pad 0|3|6] [--no-x2]
 
@@ -53,12 +58,31 @@ It prints what this modem says and does; the Courier's terminal is the
 `serial_text` of `courier.json`. The emulator runs at about 1.2 times
 real time here: 400 M instructions is some 118 s of line.
 
-## What the emulator can and cannot show
+## What it showed (2026-11-24, courier-emu e84e324)
 
-libv90modem found (its `docs/history/x2-facts.md`, "Harness") that this
-emulated Courier decodes x2 at the start-up's 32000 from any server, its
-own I-modem's firmware included, but not above it after its rate change:
-the same octets from three servers, the original among them, fail alike.
-So a run here shows the negotiation, the training, records and data at
-32000, and that the rate change is followed; only a real Courier can show
-the rates above.
+- The Courier takes x2: ATI11 says `x2/V.34+`, `8000/3200`, 64 states,
+  non-linear encoding and shaping upstream. Its start-up MP is the
+  published `0344 03fe 0000 0500`.
+- `CONNECT 49333/ARQ/x2/LAPM/V42BIS` on its terminal; this end reports
+  32000 down and 24000 up (USR prints one 1333 step above the payload).
+- 12 s in, its rate change asks for index 14: followed to 54666 down and
+  28800 up in 0.7 s, and every one of the 82 numbered lines sent in the
+  call, some 70 of them after the change, arrived intact.
+
+libv90modem had found (its `docs/history/x2-facts.md`, "Harness") that
+this emulator would not carry data above 32000 from any server. courier-emu
+has since changed how the Courier DSP's frame interrupt is clocked (its
+`docs/courier-x2-frame-default-20261031.md`), and that limit is gone here.
+
+Two things this run found, both fixed:
+
+- The Courier's V.8 classifier looks for the server's carrier turned half
+  way round between one JM and the next, on the bit boundary where the
+  next JM starts. One bit early, at the start of the last stop bit, it
+  does not count, and the Courier calls the server "not x2". Watching its
+  DSP cells `039f` (the classifier's verdict, `4040` when taken) and
+  `fff7` (the x2 conditions, bit 4 "remote modem supports x2") with
+  `--dsp-write-watch` is how that was found.
+- V.42 here answered the Courier's XID with its own offer (N7 250 against
+  its 32, 32-bit FCS and multiple SREJ it had not offered); the Courier
+  repeated its XID and never sent SABME.
