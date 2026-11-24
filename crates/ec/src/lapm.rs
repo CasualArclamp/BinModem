@@ -22,6 +22,18 @@ pub const DEFAULT_N401: usize = 128;
 /// Outstanding I frames allowed. V.42 9.2.4 sets the default at 15.
 pub const DEFAULT_K: u8 = 15;
 
+/// What this end asks for in XID: 256-octet frames, 63 of them outstanding.
+///
+/// The defaults let 15 x 128 = 1920 octets be unacknowledged at once, and
+/// over a SIP call's 0.75 s round trip that is about 2.4 kilobytes a
+/// second whatever the modem's rate: measured, a 56000 bit/s V.90 call
+/// to a provider moved 1.9 kB/s, and the 8 kB TCP windows above it queued
+/// for five seconds. 16 kB covers a 56k line at any round trip up to two
+/// seconds. XID takes the lower of the two ends' numbers, so a far end
+/// that wants the defaults still gets them.
+pub const PROPOSED_N401: usize = 256;
+pub const PROPOSED_K: u8 = 63;
+
 /// Acknowledgement timer in milliseconds, when the rate is not known.
 ///
 /// V.42 9.2.1 defines what T401 is for but gives no default value at all, only
@@ -333,6 +345,18 @@ impl Lapm {
     /// Optional, and only after both ends have said so in XID: 8.4.5.1 has an
     /// end that did not agree treat an SREJ as an unrecognized control field,
     /// which under 8.5.5 ends the connection.
+    /// The information field and window XID settled on. k is at most 127,
+    /// the most modulo-128 numbering can tell apart.
+    pub fn set_size(&mut self, n401: usize, k: u8) {
+        self.params.n401 = n401.clamp(1, 2000);
+        self.params.k = k.clamp(1, MODULUS - 1);
+    }
+
+    /// The information field and window in use.
+    pub fn size(&self) -> (usize, u8) {
+        (self.params.n401, self.params.k)
+    }
+
     pub fn set_selective_reject(&mut self, on: bool) {
         self.srej = on;
     }

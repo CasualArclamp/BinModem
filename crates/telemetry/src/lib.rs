@@ -461,6 +461,11 @@ impl Publisher {
     }
 
     fn push_entry(&self, direction: Direction, text: String, complete: bool) {
+        // `BINMODEM_TRANSCRIPT=1`: every finished line on stderr as well, for
+        // runs nobody is watching.
+        if complete && transcript_to_stderr() {
+            eprintln!("{:9.3} {:?} {}", self.shared.started.elapsed().as_secs_f64(), direction, text);
+        }
         let entry = LogEntry {
             at: self.shared.started.elapsed(),
             direction,
@@ -802,4 +807,9 @@ mod constellation_tests {
         assert_eq!(frame.symbol_label, "16QAM");
         assert_eq!(frame.constellation, sent, "points did not cross the channel");
     }
+}
+
+fn transcript_to_stderr() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BINMODEM_TRANSCRIPT").is_some())
 }
