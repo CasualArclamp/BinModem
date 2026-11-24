@@ -36,6 +36,11 @@ fn path() -> Option<PathBuf> {
     Some(base.join("BinModem"))
 }
 
+/// The per-user directory the window keeps its files in.
+pub fn directory() -> Option<PathBuf> {
+    path()
+}
+
 /// Where the V.92 connections that have connected before are kept, for the
 /// short start-up (see `modem::memos`): a file of its own beside the
 /// settings, so that it can be deleted without losing them.
