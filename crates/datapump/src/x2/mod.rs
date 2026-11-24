@@ -17,3 +17,5 @@
 pub mod bank;
 mod banks;
 pub mod map;
+pub mod record;
+pub mod script;

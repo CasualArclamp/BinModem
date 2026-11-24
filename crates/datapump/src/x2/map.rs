@@ -124,17 +124,14 @@ impl Mapper {
     pub fn unframe(&mut self, octets: &[u8; FRAME]) -> Option<Vec<bool>> {
         let mut level = [0u8; FRAME];
         let mut digit = [0usize; FRAME];
-        for i in 0..FRAME {
-            level[i] = octets[i] | 0x80;
+        for (i, &octet) in octets.iter().enumerate() {
+            level[i] = octet | 0x80;
             digit[i] = self.bank.list(i).recv.iter().position(|&l| l == level[i])?;
         }
         let free = free_position(&level);
         let mut bits = Vec::with_capacity(self.bits());
-        for i in 0..FRAME {
-            if i == free {
-                continue;
-            }
-            let positive = octets[i] & 0x80 != 0;
+        for (_, &octet) in octets.iter().enumerate().filter(|&(i, _)| i != free) {
+            let positive = octet & 0x80 != 0;
             bits.push(positive != self.last);
             self.last = positive;
         }
@@ -172,7 +169,10 @@ mod tests {
     /// xorshift32's low bits from 0x2545F491, scrambled by GPC from state 0,
     /// the sign positive and the running sum zero at the first frame. Frames
     /// 0, 1 and 3999, and the FNV-1a of all 24 000 octets, as it printed them.
-    const ORACLE: [(u8, u8, [u8; 6], [u8; 6], [u8; 6], u32); 12] = [
+    /// Index, pad, frames 0, 1 and 3999, FNV-1a.
+    type Run = (u8, u8, [u8; 6], [u8; 6], [u8; 6], u32);
+
+    const ORACLE: [Run; 12] = [
         (1, 0, [0xb3, 0x2e, 0x33, 0x5f, 0xa8, 0x28], [0xae, 0xdf, 0xa8, 0xdf, 0xcb, 0x33], [0x2b, 0xbf, 0xbf, 0x33, 0xa8, 0x4b], 0xcab5c166),
         (8, 0, [0xc0, 0x26, 0x29, 0xa5, 0x49, 0xc6], [0x2f, 0x27, 0xbc, 0xd9, 0xa7, 0x49], [0xba, 0xa3, 0x30, 0xa5, 0x23, 0xac], 0x351348e8),
         (12, 0, [0xb9, 0xa1, 0x2a, 0x3e, 0x2a, 0xb1], [0x38, 0x3a, 0x39, 0xd4, 0x5a, 0xa7], [0xbb, 0x41, 0xd1, 0xbd, 0x23, 0xaf], 0x029f3fd8),
