@@ -129,7 +129,7 @@ impl Warp {
     /// of the unbent one's.
     pub fn unbend(&self, point: Complex) -> Complex {
         let mut x = point;
-        for _ in 0..3 {
+        for _ in 0..UNBENT {
             x = point.scale(1.0 / projection(self.theta * x.norm_sqr() / self.energy));
         }
         x
@@ -472,6 +472,13 @@ fn subsets(code: Code) -> Vec<Vec<(u8, u8)>> {
     subsets
 }
 
+/// Passes made at taking 9.7's stretch back out. Each leaves about a third
+/// of what the one before did, and at the edge of a large constellation the
+/// stretch is four grid units: three passes left a tenth of a unit there,
+/// which is a twentieth of the distance between points and was noise of our
+/// own making.
+pub(crate) const UNBENT: usize = 10;
+
 /// A received 2D symbol at unit power, in grid units, with 9.7's stretch taken
 /// back out: by fixed-point iteration, since a point bent out by phi of its
 /// own energy is brought back by phi of the unbent one's.
@@ -481,6 +488,67 @@ fn to_grid(params: &Params, energy: f64, scale: f64, symbol: Complex) -> Complex
         return point;
     }
     Warp { theta: params.theta(), energy }.unbend(point)
+}
+
+/// What stands between a flat equaliser and the trellis when the far end
+/// precodes (9.6.2): the channel its precoder was told to expect.
+///
+/// A precoder takes off each symbol, before it is sent, what a channel of
+/// 1 + h(1) z^-1 + h(2) z^-2 + h(3) z^-3 would add to it from the three
+/// before: so that a receiver whose equaliser leaves exactly that channel --
+/// which is the one that leaves its noise white -- finds points of the
+/// constellation with no feedback of its own. The coefficients are the ones
+/// the receiving modem sent in its MP. A receiver whose equaliser makes the
+/// channel flat instead has the symbols as they were sent, which are not
+/// points of anything: each is a point less what was taken off. This puts
+/// the channel in, after taking 9.7's stretch out, which was put on last
+/// and so comes off first.
+///
+/// What comes out is for a [`Decoder`] made for the same parameters with
+/// `nonlinear` false, the stretch being already out.
+#[derive(Debug, Clone)]
+pub struct Channel {
+    params: Params,
+    energy: f64,
+    scale: f64,
+    /// What the decoder it feeds multiplies a unit-power symbol by.
+    plain: f64,
+    h: [Complex; 3],
+    /// x(n - 1), x(n - 2), x(n - 3) in grid units.
+    past: [Complex; 3],
+}
+
+impl Channel {
+    /// From the start of B1, where the precoder's memory is empty.
+    pub fn new(params: Params) -> Self {
+        let bent = Decoder::new(params);
+        let plain = Decoder::new(Params { nonlinear: false, ..params });
+        Self {
+            params,
+            energy: bent.energy,
+            scale: bent.scale,
+            plain: plain.scale,
+            h: params.precoding.map(|(re, im)| Complex::new(f64::from(re), f64::from(im)).scale(1.0 / 16384.0)),
+            past: [Complex::ZERO; 3],
+        }
+    }
+
+    /// The parameters to make the decoder after it with.
+    pub fn decoder_params(&self) -> Params {
+        Params { nonlinear: false, ..self.params }
+    }
+
+    /// One equalised 2D symbol at unit mean power, as the decoder is to have
+    /// it.
+    pub fn feed(&mut self, symbol: Complex) -> Complex {
+        let x = to_grid(&self.params, self.energy, self.scale, symbol);
+        let mut y = x;
+        for (before, h) in self.past.iter().zip(&self.h) {
+            y += *before * *h;
+        }
+        self.past = [x, self.past[0], self.past[1]];
+        y.scale(1.0 / self.plain)
+    }
 }
 
 /// For two received 2D symbols, the nearest pair of points in each 4D subset
@@ -1434,6 +1502,38 @@ mod tests {
                     "{primary}, non-linear {nonlinear}: symbols reach {reach:.3} against a peak of {unit:.3}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_flat_receivers_symbols_decode_with_the_channel_put_in() {
+        // What a receiver whose equaliser makes the channel flat has is the
+        // symbols as they were sent, stretched and precoded. Through the
+        // channel the precoder was told of they are for a decoder that has
+        // been told of neither.
+        for nonlinear in [false, true] {
+            let mut p = params(SymbolRate::S3429, 31_200, Code::States16, true, nonlinear);
+            p.precoding = [(4096, -2048), (-1024, 512), (256, 0)];
+            let mut encoder = Encoder::new(p);
+            let mut channel = Channel::new(p);
+            let mut decoder = Decoder::new(channel.decoder_params());
+            assert!(!channel.decoder_params().nonlinear);
+            let mut seed = 5u32;
+            let mut sent = Vec::new();
+            for _ in 0..80 * 8 {
+                let x = encoder.next_symbol(&mut || {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    sent.push(seed & 1 == 1);
+                    seed & 1 == 1
+                });
+                decoder.feed(channel.feed(x));
+            }
+            let got = decoder.take_bits();
+            let wrong = sent.iter().zip(&got).skip(23).filter(|(a, b)| a != b).count();
+            assert!(got.len() > 1000);
+            assert_eq!(wrong, 0, "non-linear {nonlinear}");
         }
     }
 }

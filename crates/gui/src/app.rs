@@ -294,6 +294,8 @@ enum Tab {
     /// T.30: the page going or arriving, the far end, and how each call
     /// went. Only on a live line, which is the only thing that places one.
     Fax,
+    /// A recording of somebody else's call, read and laid out.
+    Review,
 }
 
 /// The colours of the faceplate, said once.
@@ -557,6 +559,8 @@ pub struct ScopeApp {
     /// What was written out last, so that a frame which changed nothing does
     /// not rewrite the file sixty times a second.
     remembered: String,
+    /// The Review tab: a recording of a call, read.
+    review: crate::review::ReviewPane,
 }
 
 /// The line's figures as a person can read them.
@@ -772,6 +776,7 @@ impl ScopeApp {
             fit: true,
             step_at: [None; 6],
             remembered: String::new(),
+            review: crate::review::ReviewPane::default(),
         };
         // Before anything is drawn, so the first frame shows what the modem
         // will actually be set to rather than the defaults it never used.
@@ -4475,6 +4480,15 @@ impl ScopeApp {
         Ok(())
     }
 
+    /// What `--review` asked for: the Review tab, and a recording read
+    /// into it if one was named.
+    pub fn open_review(&mut self, recording: Option<&std::path::Path>) {
+        self.tab = Tab::Review;
+        if let Some(path) = recording {
+            self.review.open(path);
+        }
+    }
+
     /// What `--fax` asked for: the Fax tab as the one to open on.
     pub fn open_fax_tab(&mut self, fax: bool) {
         if fax && self.source.is_live() {
@@ -4528,6 +4542,7 @@ impl ScopeApp {
                 self.tab = match name.as_str() {
                     "scopes" => Tab::Scopes,
                     "fax" => Tab::Fax,
+                    "review" => Tab::Review,
                     "transcript" => Tab::Transcript,
                     _ => Tab::Terminal,
                 };
@@ -5894,6 +5909,7 @@ impl ScopeApp {
             if self.source.is_live() {
                 ui.selectable_value(&mut self.tab, Tab::Fax, "fax");
             }
+            ui.selectable_value(&mut self.tab, Tab::Review, "review");
             ui.separator();
             // A socket has no command state to be in, so saying which one it
             // was in would be answering a question nobody asked.
@@ -5977,6 +5993,7 @@ impl ScopeApp {
             Tab::Transcript => self.transcript(ui),
             Tab::Scopes => self.scopes_pane(ui),
             Tab::Fax => self.fax_pane(ui),
+            Tab::Review => self.review.ui(ui),
         }
     }
 
@@ -6284,11 +6301,15 @@ impl eframe::App for ScopeApp {
         self.remember();
         scopes::request_animation(ui.ctx());
 
-        egui::Panel::top("controls").show(ui, |ui| {
-            ui.add_space(4.0);
-            self.controls(ui);
-            ui.add_space(4.0);
-        });
+        // A recording being read wants the room, and nothing on the
+        // faceplate is about it.
+        if self.tab != Tab::Review {
+            egui::Panel::top("controls").show(ui, |ui| {
+                ui.add_space(4.0);
+                self.controls(ui);
+                ui.add_space(4.0);
+            });
+        }
 
         // A socket has no signal path, so there is nothing for the scopes to
         // show and no honest way to fill them. The terminal takes the whole

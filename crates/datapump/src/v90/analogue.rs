@@ -1317,6 +1317,27 @@ fn trusted_symbols(descriptor: &Descriptor, law: Law) -> Vec<Trust> {
     out
 }
 
+/// One pass of a DIL as a receiver is to expect it: each symbol's signed
+/// level, or NaN where it is not one to learn from -- a codeword loud enough
+/// for the codec to bend, or the first of a segment that follows a much
+/// louder one. What this modem steers its own receiver by through a DIL, for
+/// anything else that has to follow one.
+pub fn dil_expectations(descriptor: &Descriptor, law: Law) -> Vec<f64> {
+    trusted_symbols(descriptor, law)
+        .into_iter()
+        .zip(descriptor.symbols())
+        .map(|(trust, (u, positive))| {
+            if trust != Trust::Yes {
+                f64::NAN
+            } else if positive {
+                ucode::level(law, u)
+            } else {
+                -ucode::level(law, u)
+            }
+        })
+        .collect()
+}
+
 /// What a DIL symbol can be used for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Trust {

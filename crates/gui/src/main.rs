@@ -50,6 +50,7 @@ mod net;
 mod network;
 mod parent_console;
 mod remembered;
+mod review;
 mod scopes;
 mod speed;
 mod tap;
@@ -143,6 +144,9 @@ struct Args {
     /// Record the line from the start, as the window's Record key would: kept
     /// in `captures` when the window closes or the key is pressed.
     record: bool,
+    /// Open on the Review tab; with a recording to read there, if one was
+    /// named.
+    review: Option<Option<PathBuf>>,
 }
 
 fn parse() -> Result<Option<Args>, String> {
@@ -160,6 +164,7 @@ fn parse() -> Result<Option<Args>, String> {
         answer_as: None,
         setup: false,
         record: false,
+        review: None,
     };
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut rest = raw.iter();
@@ -196,6 +201,16 @@ fn parse() -> Result<Option<Args>, String> {
             "--answer-as" => args.answer_as = Some(value("--answer-as")?),
             "--setup" => args.setup = true,
             "--record" => args.record = true,
+            // The recording is optional: without one the tab opens empty,
+            // and one is opened or dropped there.
+            "--review" => {
+                let path = rest.clone().next().filter(|p| !p.starts_with('-'));
+                if path.is_some() {
+                    rest.next();
+                }
+                args.review = Some(path.map(PathBuf::from));
+                args.live = true;
+            }
             "--in" => args.input = Some(value("--in")?),
             "--out" => args.output = Some(value("--out")?),
             "--devices" | "--list-devices" => {
@@ -211,6 +226,7 @@ fn parse() -> Result<Option<Args>, String> {
                      binmodem ... --answer-as fax|modem         press that answer when a SIP call rings\n\
                      binmodem ... --record                      record the line from the start, into captures\n\
                      binmodem ... --setup                       leave the Setup row showing with a line open\n\
+                     binmodem --review [path.wav]               read a recording of a call: what was said, and when\n\
                      binmodem [path.wav]                        replay a capture\n\
                      binmodem --capture                         replay the Bell 103 golden vector\n\
                      binmodem --devices                         list audio devices\n\
@@ -272,6 +288,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Taken now, because `args` is picked apart below.
     let (typed, scopes, fax, setup) = (std::mem::take(&mut args.typed), args.scopes, args.fax, args.setup);
     let answer_as = args.answer_as.take();
+    let review = args.review.take();
 
     let control = Arc::new(Control::default());
     let (sample_rate, title) = if args.live {
@@ -344,6 +361,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 app.answer_as(how)?;
             }
             app.keep_setup_showing(setup);
+            if let Some(recording) = &review {
+                app.open_review(recording.as_deref());
+            }
             Ok(Box::new(app))
         }),
     )?;

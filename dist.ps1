@@ -5,7 +5,9 @@
 .DESCRIPTION
     Leaves dist\binmodem.exe: a modem, the scope around it, the telnet
     terminal, the answering board and a capture to replay, in a single
-    executable that needs nothing installed beside it.
+    executable that needs nothing installed beside it. And beside it
+    dist\dialsnoop.exe, which reads a recording of somebody else's call and
+    is nothing else.
 
     It opens on a real line, because that is what the program is for. Every
     other mode is a flag.
@@ -69,8 +71,22 @@ if ($runtime) {
 } else {
     Write-Host "  no C runtime dependency; Windows is all it needs" -ForegroundColor DarkGray
 }
+# The recording reader is a second program out of the same build: no line,
+# no modem, and a third of the size.
+$snoopBuilt = Join-Path $root "target\release\dialsnoop.exe"
+$snoop = Join-Path $dist "dialsnoop.exe"
+if (Test-Path $snoopBuilt) {
+    try {
+        Copy-Item $snoopBuilt $snoop -Force -ErrorAction Stop
+        Write-Host ("  {0}  ({1:N1} MB)" -f $snoop, ((Get-Item $snoop).Length / 1MB))
+    } catch [System.IO.IOException] {
+        Write-Host "  $snoop is running; the new one is at $snoopBuilt" -ForegroundColor Yellow
+    }
+}
 Write-Host ""
 Write-Host "  binmodem.exe                  a modem on a real line" -ForegroundColor DarkGray
+Write-Host "  binmodem.exe --review x.wav   read a recording of a call, in the modem's window" -ForegroundColor DarkGray
+Write-Host "  dialsnoop.exe x.wav           the same reader as a program of its own" -ForegroundColor DarkGray
 Write-Host "  binmodem.exe --devices        what audio this machine has" -ForegroundColor DarkGray
 Write-Host "  binmodem.exe --telnet         a board over a socket" -ForegroundColor DarkGray
 Write-Host "  binmodem.exe --capture        replay the golden capture" -ForegroundColor DarkGray
