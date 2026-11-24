@@ -712,10 +712,33 @@ impl ReviewPane {
                 .clicked();
             }
         };
-        let peak = event.symbols.iter().map(|(a, b)| a.abs().max(b.abs())).fold(0.0f32, f32::max).max(1e-6);
-        // A constellation of unit mean power reaches a little past one; PCM
-        // is drawn to its own largest level.
-        let peak = if pcm.is_some() { peak } else { peak.clamp(1.0, 2.0) };
+        if pcm.is_some() {
+            // PCM is drawn to its own levels, whatever they are: a call's
+            // are a fraction of full scale, and at full scale's size they
+            // are a stripe across the middle. To all but the few largest,
+            // so that one click on the line does not shrink the rest.
+            let mut sizes: Vec<f32> = event.symbols.iter().map(|(_, level)| level.abs()).collect();
+            sizes.sort_by(f32::total_cmp);
+            let most = sizes.get(sizes.len().saturating_sub(1) * 998 / 1000).copied().unwrap_or(0.0);
+            let scale = 1.0 / (1.04 * most).max(1e-6);
+            let fitted: Vec<(f32, f32)> = event
+                .symbols
+                .iter()
+                .map(|(before, level)| ((before * scale).clamp(-1.0, 1.0), (level * scale).clamp(-1.0, 1.0)))
+                .collect();
+            let label = format!("{label}  full height {:.0} of 32768", 32768.0 / scale);
+            return scopes::symbol_scope(
+                ui,
+                &[],
+                scopes::Constellation { points: &fitted, tones, peak: 1.0, pcm },
+                &label,
+                None,
+                height,
+            )
+            .clicked();
+        }
+        // A constellation of unit mean power reaches a little past one.
+        let peak = event.symbols.iter().map(|(a, b)| a.abs().max(b.abs())).fold(0.0f32, f32::max).clamp(1.0, 2.0);
         scopes::symbol_scope(
             ui,
             &[],
