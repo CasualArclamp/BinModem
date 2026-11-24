@@ -56,6 +56,7 @@ use std::collections::VecDeque;
 use dsp::{Complex, least_squares};
 
 use super::constellation::Point;
+use super::data::Warp;
 use super::qam::{Band, ROLLOFF};
 use super::signals::{self, Size};
 use crate::v32::Mode;
@@ -155,6 +156,12 @@ pub enum Slicer {
     /// grid units: data mode, whose trellis decoder makes the real decisions
     /// some symbols later than the loops can wait.
     Grid { scale: f64, limit: i32 },
+    /// The same grid, for a far end whose points are bent by 9.7's non-linear
+    /// encoder: each received point is unbent before it is decided, and the
+    /// decision bent back to where the far end put it. Decided against the
+    /// straight grid, the outer points of a shaped signal land between grid
+    /// points and drag the loops with them.
+    BentGrid { scale: f64, limit: i32, warp: Warp },
 }
 
 impl Slicer {
@@ -167,6 +174,13 @@ impl Slicer {
                 let point = (odd(z.re), odd(z.im));
                 (point, Complex::new(f64::from(point.0), f64::from(point.1)).scale(1.0 / scale))
             }
+            Self::BentGrid { scale, limit, warp } => {
+                let straight = warp.unbend(z.scale(scale));
+                let odd = |v: f64| (2 * ((v - 1.0) / 2.0).round() as i32 + 1).clamp(-limit, limit);
+                let point = (odd(straight.re), odd(straight.im));
+                let target = warp.bend(Complex::new(f64::from(point.0), f64::from(point.1)));
+                (point, target.scale(1.0 / scale))
+            }
         }
     }
 
@@ -174,7 +188,7 @@ impl Slicer {
     fn min_distance_squared(self) -> f64 {
         match self {
             Self::Points(size) => min_distance_squared(size),
-            Self::Grid { scale, .. } => (2.0 / scale).powi(2),
+            Self::Grid { scale, .. } | Self::BentGrid { scale, .. } => (2.0 / scale).powi(2),
         }
     }
 
@@ -188,7 +202,7 @@ impl Slicer {
     fn lost_level(self) -> f64 {
         match self {
             Self::Points(_) => 0.25 * self.min_distance_squared(),
-            Self::Grid { .. } => self.min_distance_squared() / 12.0,
+            Self::Grid { .. } | Self::BentGrid { .. } => self.min_distance_squared() / 12.0,
         }
     }
 
@@ -199,7 +213,7 @@ impl Slicer {
     fn lost_threshold(self, settled: f64) -> f64 {
         match self {
             Self::Points(_) => (8.0 * settled).max(self.lost_level()),
-            Self::Grid { .. } => (2.0 * settled).max(self.lost_level()),
+            Self::Grid { .. } | Self::BentGrid { .. } => (2.0 * settled).max(self.lost_level()),
         }
     }
 
@@ -209,7 +223,7 @@ impl Slicer {
             Self::Points(_) => (4.0 * settled).max(0.0625 * self.min_distance_squared()),
             // Garbage is a sixth of a step squared here, and not far above a
             // locked signal at the rates this is used for, so the bar is close.
-            Self::Grid { .. } => (2.0 * settled).max(0.4 * self.min_distance_squared() / 6.0),
+            Self::Grid { .. } | Self::BentGrid { .. } => (2.0 * settled).max(0.4 * self.min_distance_squared() / 6.0),
         }
     }
 
@@ -218,7 +232,7 @@ impl Slicer {
     fn window(self) -> (usize, usize) {
         match self {
             Self::Points(_) => (RESYNC_WINDOW, 8),
-            Self::Grid { .. } => (4 * RESYNC_WINDOW, 32),
+            Self::Grid { .. } | Self::BentGrid { .. } => (4 * RESYNC_WINDOW, 32),
         }
     }
 }
@@ -648,6 +662,16 @@ impl Receiver {
     /// unit-power symbol, out to `limit`.
     pub fn set_grid(&mut self, scale: f64, limit: i32) {
         self.set_slicer(Slicer::Grid { scale, limit });
+    }
+
+    /// The same, for a far end that uses non-linear encoding (9.7): decided
+    /// with the bend taken out (see [`Slicer::BentGrid`]). With no bend, the
+    /// plain grid.
+    pub fn set_bent_grid(&mut self, scale: f64, limit: i32, warp: Option<Warp>) {
+        match warp {
+            Some(warp) => self.set_slicer(Slicer::BentGrid { scale, limit, warp }),
+            None => self.set_grid(scale, limit),
+        }
     }
 
     /// Decide against `slicer` from here, forgetting what the last one made of
@@ -1243,7 +1267,7 @@ impl Receiver {
     /// carrier's turn is found again from the symbols' fourth power, to within
     /// a quarter -- which the same differential coding does not mind either.
     fn resync(&mut self) {
-        if matches!(self.slicer, Slicer::Grid { .. }) {
+        if matches!(self.slicer, Slicer::Grid { .. } | Slicer::BentGrid { .. }) {
             self.resync_dense();
             return;
         }

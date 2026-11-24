@@ -63,6 +63,7 @@ fn the_info_sequences_of_a_real_call_check() {
                 Info::Info1aPcmUp(_) => "INFO1a (V.92 PCM upstream)",
                 Info::Info1aV34Up(_) => "INFO1a (V.92 Table 19)",
                 Info::Mh(_) => "MH",
+                Info::X2Marker(_) => "x2 marker",
             };
             (*side, kind)
         })

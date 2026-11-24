@@ -16,6 +16,7 @@ use crate::v34::phase2::{self, Pcm, V92Wish};
 use crate::v34::startup as v34;
 
 use crate::v92::digital as pcm;
+use crate::x2;
 use crate::v92::{FilterLimits, analogue as pcm_up, line as pcm_line, quick};
 
 use super::sequences::Descriptor;
@@ -589,6 +590,11 @@ pub struct Digital {
     /// with a Table 18 INFO1a (9.5, 9.6). At most one of this and `v90` is
     /// ever built.
     v92: Option<pcm::Modem>,
+    /// U.S. Robotics x2, when the caller's marker asked for it (see
+    /// [`Self::x2`]). At most one of this, `v90` and `v92` is ever built.
+    x2: Option<x2::server::Modem>,
+    /// Whether this server answers as x2's, not as V.90's.
+    offers_x2: bool,
     /// What this end said in ITS INFO0d, and what it wants of V.92: phase 2
     /// is rebuilt from these when V.92 is asked for (see [`Self::with_v92`]).
     info0d: Info0d,
@@ -629,6 +635,8 @@ impl Digital {
             v34: v34::Modem::with_phase2(phase2::Modem::v90(Pcm::Digital(info0d), digital::FS, lead_in), digital::FS),
             v90: None,
             v92: None,
+            x2: None,
+            offers_x2: false,
             info0d,
             lead_in,
             wish: V92Wish::default(),
@@ -725,6 +733,33 @@ impl Digital {
         self.v34.phase2().both_v92()
     }
 
+    /// The server for a caller whose V.8 offered V.34 and no PCM, answering
+    /// as V.34's answer modem with U.S. Robotics x2 on offer as well: an x2
+    /// client's marker after this end's L1 makes the call x2's, and anything
+    /// else leaves it V.34's (see [`phase2::Modem::answering_x2`]). x2 is
+    /// mu-law only.
+    pub fn x2(lead_in: f64) -> Self {
+        let mut server = Self::new(super::server::ours(), lead_in);
+        server.v34 = v34::Modem::with_phase2(phase2::Modem::answering_x2(digital::FS, lead_in), digital::FS);
+        server.offers_x2 = true;
+        server
+    }
+
+    /// Whether x2 is on offer.
+    pub fn offers_x2(&self) -> bool {
+        self.offers_x2
+    }
+
+    /// x2's server, once the call is x2's.
+    pub fn x2_server(&self) -> Option<&x2::server::Modem> {
+        self.x2.as_ref()
+    }
+
+    /// Whether x2 is what the call came to.
+    pub fn is_x2(&self) -> bool {
+        self.x2.is_some()
+    }
+
     pub fn v34(&self) -> &v34::Modem {
         &self.v34
     }
@@ -762,6 +797,9 @@ impl Digital {
 
     /// Whether there is anything to send bits into.
     pub fn accepts_bits(&self) -> bool {
+        if let Some(m) = self.x2.as_ref() {
+            return matches!(m.status(), x2::server::Status::Connected { .. });
+        }
         if self.v92.is_some() {
             // PCM inbound data mode is not built yet: Phase 4 stops at TRN2d
             // (see [`pcm::Modem`]), and nothing hands bits over before it.
@@ -775,6 +813,9 @@ impl Digital {
 
     /// Whether the far end's data signal is there.
     pub fn carrier(&self) -> bool {
+        if let Some(m) = self.x2.as_ref() {
+            return !matches!(m.status(), x2::server::Status::Failed(_));
+        }
         if let Some(m) = self.v92.as_ref() {
             return !matches!(m.status(), pcm::Status::Failed(_) | pcm::Status::ClearedDown);
         }
@@ -792,11 +833,15 @@ impl Digital {
     /// Rate renegotiations and cleardowns since the call began, V.90's and
     /// V.34's.
     pub fn renegotiations(&self) -> u32 {
-        self.renegotiations + self.v90.as_ref().map_or(0, digital::Modem::renegotiations) + self.v34.renegotiations()
+        self.x2.as_ref().map_or(0, x2::server::Modem::rate_changes)
+            + self.renegotiations + self.v90.as_ref().map_or(0, digital::Modem::renegotiations) + self.v34.renegotiations()
     }
 
     /// The analogue modem's last upstream symbol, for a scope.
     pub fn constellation_point(&self) -> Option<(f64, f64)> {
+        if let Some(m) = self.x2.as_ref() {
+            return m.last_point();
+        }
         if let Some(m) = self.v92.as_ref() {
             // PCM, which has no plane: each symbol against the next.
             return m.pair();
@@ -810,6 +855,9 @@ impl Digital {
     /// The largest coordinate the upstream's points reach, in the units of
     /// [`Self::constellation_point`].
     pub fn constellation_peak(&self) -> Option<f64> {
+        if let Some(m) = self.x2.as_ref() {
+            return Some(m.upstream_peak());
+        }
         if self.v92.is_some() {
             // The pairs are scaled to one already.
             return Some(1.0);
@@ -822,6 +870,9 @@ impl Digital {
 
     /// Points the upstream is read against.
     pub fn constellation_size(&self) -> Option<usize> {
+        if let Some(m) = self.x2.as_ref() {
+            return Some(m.upstream_points());
+        }
         if let Some(m) = self.v92.as_ref() {
             return Some(m.points());
         }
@@ -832,6 +883,17 @@ impl Digital {
     }
 
     pub fn status(&self) -> Status {
+        if let Some(m) = self.x2.as_ref() {
+            return match m.status() {
+                x2::server::Status::Connected { downstream, upstream } => {
+                    Status::Connected { transmit: downstream, receive: upstream }
+                }
+                x2::server::Status::Failed(why) => Status::Failed(why),
+                // The client's rate change, with the call up.
+                x2::server::Status::Running if self.connected_once => Status::Retraining,
+                x2::server::Status::Running => Status::Running,
+            };
+        }
         if let Some(m) = self.v92.as_ref() {
             return match m.status() {
                 pcm::Status::Running | pcm::Status::Phase4 if self.connected_once => Status::Retraining,
@@ -868,17 +930,24 @@ impl Digital {
         if let Some(q) = self.quick.as_ref() {
             return q.phase();
         }
+        if let Some(m) = self.x2.as_ref() {
+            return m.phase();
+        }
         if let Some(m) = self.v92.as_ref() {
             return m.phase();
         }
         match self.v90.as_ref() {
             Some(m) => m.phase(),
+            None if self.v34.training().is_none() && self.offers_x2 => "V.34 phase 2 (x2 on offer)",
             None if self.v34.training().is_none() => "V.90 phase 2",
             None => self.v34.phase(),
         }
     }
 
     pub fn take_bits(&mut self) -> Vec<bool> {
+        if let Some(m) = self.x2.as_mut() {
+            return m.take_bits();
+        }
         if let Some(m) = self.v92.as_mut() {
             return m.take_bits();
         }
@@ -889,6 +958,10 @@ impl Digital {
     }
 
     pub fn send_bits(&mut self, bits: &[bool]) {
+        if let Some(m) = self.x2.as_mut() {
+            m.send_bits(bits);
+            return;
+        }
         if let Some(m) = self.v92.as_mut() {
             m.send_bits(bits);
             return;
@@ -900,6 +973,9 @@ impl Digital {
     }
 
     pub fn pending_bits(&self) -> usize {
+        if let Some(m) = self.x2.as_ref() {
+            return m.pending_bits();
+        }
         if let Some(m) = self.v92.as_ref() {
             return m.pending_bits();
         }
@@ -918,6 +994,11 @@ impl Digital {
 
     /// Start a full retrain (9.5.1.1).
     pub fn retrain(&mut self) -> bool {
+        // x2's server starts neither a retrain nor a rate change: only the
+        // client does.
+        if self.x2.is_some() {
+            return false;
+        }
         if self.v92.is_some() {
             // 9.7.1.1: back through V.92's Phase 2, which for this end is
             // V.34's phase 2 with V.90's INFO sequences in it.
@@ -937,7 +1018,7 @@ impl Digital {
     /// Renegotiate from data mode (9.6.1.1), asking the analogue modem to
     /// send no faster than `upstream`, a multiple of 2400.
     pub fn renegotiate(&mut self, upstream: u8) -> bool {
-        if self.v92.is_some() {
+        if self.v92.is_some() || self.x2.is_some() {
             return false;
         }
         match self.v90.as_mut() {
@@ -948,6 +1029,9 @@ impl Digital {
 
     /// End the call from data mode (9.7).
     pub fn clear_down(&mut self) -> bool {
+        if self.x2.is_some() {
+            return false;
+        }
         match self.v90.as_mut() {
             Some(m) => m.clear_down(),
             None => self.v34.clear_down(),
@@ -963,6 +1047,14 @@ impl Digital {
                 quick::Status::Running => {}
                 quick::Status::Answered => self.quick = None,
                 quick::Status::GaveUp => self.quick_gave_up = true,
+            }
+            return out;
+        }
+        if let Some(m) = self.x2.as_mut() {
+            // Octets, at their own level.
+            let out = m.step(input);
+            if matches!(m.status(), x2::server::Status::Connected { .. }) {
+                self.connected_once = true;
             }
             return out;
         }
@@ -1011,6 +1103,14 @@ impl Digital {
             self.connected_once = true;
         }
         let p2 = self.v34.phase2();
+        // An x2 client's marker in place of its L2: phase 3 on is x2's.
+        if p2.status() == phase2::Status::Done
+            && let Some(marker) = p2.x2_marker()
+        {
+            let settings = x2::server::Settings { marker, round_trip: p2.round_trip().unwrap_or(0.0) };
+            self.x2 = Some(x2::server::Modem::new(settings));
+            return 0.0;
+        }
         if std::env::var_os("PHASE2_TRACE").is_some() && p2.status() == phase2::Status::Done {
             eprintln!(
                 "P2TRACE data mode: both_v92 {} far_flags {:?} table18 {:?} table10 {:?}",

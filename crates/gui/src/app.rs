@@ -529,6 +529,8 @@ pub struct ScopeApp {
     /// Whether a second V.92 call to the same place may start up the short
     /// way (the other tick under the mode list).
     quick_connect: bool,
+    /// Offer U.S. Robotics x2 as a V.90 or V.92 server (S70).
+    x2: bool,
     blank_seq: Option<u64>,
     last_row: Option<std::time::Instant>,
     /// When the call reached data, for how long it has been there.
@@ -752,6 +754,7 @@ impl ScopeApp {
             },
             sip_call_was_up: false,
             pcm_up: true,
+            x2: false,
             quick_connect: !matches!(
                 std::env::var("BINMODEM_V92_QC").as_deref().map(str::trim),
                 Ok("0" | "off" | "no" | "false")
@@ -3577,6 +3580,8 @@ impl ScopeApp {
         let (mode, two_wire) = if self.v8bis { self.varc_bis } else { (0, false) };
         out.push(format!("AT+VARCBIS={mode},{}", u8::from(two_wire)));
         out.extend(self.protection.commands());
+        // After AT&F, which puts S70 back to 0.
+        out.push(format!("ATS70={}", u8::from(self.x2)));
         out
     }
 
@@ -5018,6 +5023,22 @@ impl ScopeApp {
             {
                 self.quick_connect = quick;
                 session.set_quick_connect(quick);
+            }
+            // U.S. Robotics' own 56k of 1997, for its modems that never had
+            // V.90. Only a server can offer it, and only to a caller that
+            // offers V.34 and no PCM: a V.90 caller still gets V.90.
+            let server = matches!(Self::CARRIERS[self.carrier].0, "V90" | "V92");
+            let mut x2 = self.x2;
+            if ui
+                .add_enabled(server, egui::Checkbox::new(&mut x2, "x2"))
+                .on_hover_text(
+                    "Answering as a V.90 or V.92 server: offer U.S. Robotics x2 to a caller that offers V.34 and no V.90, as a USR modem from before its V.90 upgrade does. Up to 56000 down, V.34 up. Mu-law lines only. Same as ATS70=1. Takes effect from the next call.",
+                )
+                .on_disabled_hover_text("Choose V.90 or V.92 above to offer x2 as a server")
+                .clicked()
+            {
+                self.x2 = x2;
+                session.set_x2(x2);
             }
 
             ui.separator();

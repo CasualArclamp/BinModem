@@ -675,7 +675,31 @@ impl Xid {
     /// rather than this end's whole offer. A far end whose P1 was refused by
     /// [`Self::resolve`] would otherwise take the lower of its own P1 and ours,
     /// turn compression on, and send codewords at a decoder that is not there.
+    ///
+    /// And the numbers in it are the settled ones, not this end's offer.
+    /// 8.10.2 has the response "return the indicated parameter values", the
+    /// ones negotiation came to, and V.42bis's N2 and N7 and V.42's N401 and
+    /// k may only come down in an answer. Answering with this end's own offer
+    /// told a far end that proposed less that we had asked for more: a U.S.
+    /// Robotics Courier, whose XID offers V.42bis with N7 32, read the 250 in
+    /// ours as no answer and sent its XID again until it gave up on the call.
     pub fn answering(mut self, settled: &Self) -> Self {
+        self.n401_transmit = settled.n401_transmit;
+        self.n401_receive = settled.n401_receive;
+        self.window_transmit = settled.window_transmit;
+        self.window_receive = settled.window_receive;
+        self.codewords = settled.codewords;
+        self.max_string = settled.max_string;
+        // The optional functions too: 32-bit FCS, SREJ and TEST only where
+        // both have them. The same Courier offered neither 32-bit FCS nor
+        // multiple SREJ and took an answer that named them for no answer.
+        self.fcs32 = settled.fcs32;
+        self.srej_single = settled.srej_single;
+        self.srej_multiple = settled.srej_multiple;
+        self.test_frame = settled.test_frame;
+        if settled.v44.is_some() {
+            self.v44 = settled.v44;
+        }
         if settled.v44.is_some() {
             self.compression = None;
         } else {
@@ -774,6 +798,38 @@ fn take_param(field: &[u8]) -> Result<Option<Parameter<'_>>, XidError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A U.S. Robotics Courier's XID command (its V.42bis N7 is 32), taken off
+    /// the line of an emulated Courier, answered with what was settled.
+    #[test]
+    fn an_answer_never_asks_for_more_than_the_command_offered() {
+        let courier: Vec<u8> = (0..)
+            .step_by(2)
+            .take_while(|&i| i < COURIER.len())
+            .map(|i| u8::from_str_radix(&COURIER[i..i + 2], 16).unwrap())
+            .collect();
+        let theirs = Xid::decode(&courier).unwrap();
+        assert_eq!(theirs.max_string, Some(32));
+        let mut ours = Xid::proposal(Compression::Both);
+        ours.codewords = Some(2048);
+        ours.max_string = Some(250);
+        let settled = ours.resolve(&theirs);
+        let answer = Xid::decode(&ours.answering(&settled).encode(Kind::Response)).unwrap();
+        assert_eq!(answer.max_string, Some(32));
+        // Nothing it did not offer: no 32-bit FCS, no multiple SREJ.
+        assert!(!theirs.fcs32 && !answer.fcs32);
+        assert!(!theirs.srej_multiple && !answer.srej_multiple);
+        assert!(answer.codewords <= theirs.codewords);
+        for (ours, theirs) in [
+            (answer.n401_transmit, theirs.n401_receive),
+            (answer.n401_receive, theirs.n401_transmit),
+            (answer.window_transmit.map(u16::from), theirs.window_receive.map(u16::from)),
+        ] {
+            assert!(ours <= theirs, "{ours:?} against {theirs:?}");
+        }
+    }
+
+    const COURIER: &str = "8280001303038e8900050207a0060207a007010f08010ff0000f000356343201010302020800030120ffff03485354400403000000f10106";
 
     #[test]
     fn a_proposal_round_trips() {

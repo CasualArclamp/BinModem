@@ -103,9 +103,14 @@ impl Side {
     /// where a modem-on-hold transaction is expected, so it is asked for
     /// rather than always looked for. Half-duplex's page never holds one: it
     /// is the one phase 2 that has no duplex carrier to put it on.
-    fn lengths(self, half_duplex: bool, mh: bool) -> &'static [usize] {
+    fn lengths(self, half_duplex: bool, mh: bool, x2: bool) -> &'static [usize] {
         match (self, half_duplex, mh) {
             (_, true, _) => &[info::INFO0_BITS, info::INFOH_BITS],
+            // An x2 client's marker comes from the call modem, and only an
+            // answering server offering x2 listens for it.
+            (Self::Call, false, false) if x2 => {
+                &[info::X2_MARKER_BITS, info::INFO0_BITS, info::INFO0D_BITS, info::INFO1C_BITS]
+            }
             (Self::Call, false, false) => &[info::INFO0_BITS, info::INFO0D_BITS, info::INFO1C_BITS],
             (Self::Call, false, true) => {
                 &[info::MH_BITS, info::INFO0_BITS, info::INFO0D_BITS, info::INFO1C_BITS]
@@ -360,6 +365,8 @@ struct Expecting {
     /// Short phase 2, where the seventy bits of a V.90-shaped INFO1a are
     /// Table 19/V.92 rather than Table 10/V.90.
     short_phase2: bool,
+    /// U.S. Robotics x2's thirty-nine-bit marker.
+    x2: bool,
 }
 
 impl Receiver {
@@ -435,6 +442,14 @@ impl Receiver {
     /// is a layout no other INFO1a can be, in either phase.
     pub fn in_short_phase2(mut self) -> Self {
         self.expecting.short_phase2 = true;
+        self
+    }
+
+    /// The same receiver, also listening for an x2 client's marker
+    /// ([`info::X2Marker`]). Only an answering modem offering x2 asks: the
+    /// marker is a thirty-nine-bit frame no V.34 or V.90 modem sends.
+    pub fn with_x2(mut self) -> Self {
+        self.expecting.x2 = true;
         self
     }
 
@@ -526,7 +541,7 @@ fn decide(
     branch.bits.push_back(turned < 0.0);
 
     let bits = branch.bits.make_contiguous();
-    for &length in side.lengths(half_duplex, expecting.mh) {
+    for &length in side.lengths(half_duplex, expecting.mh, expecting.x2) {
         // Checked the moment the CRC is in -- or, for an INFO0 that could be
         // the start of an INFOh, once the first of the fill is in too. The
         // rest of the fill says nothing more, and whatever follows a sequence
@@ -542,6 +557,7 @@ fn decide(
         }
         let found = match (side, length) {
             (_, info::MH_BITS) => Mh::from_bits(candidate).map(Info::Mh),
+            (Side::Call, info::X2_MARKER_BITS) => info::X2Marker::from_bits(candidate).map(Info::X2Marker),
             (_, info::INFO0_BITS) => Info0::from_bits(candidate).map(Info::Info0),
             // Whichever modem is the recipient sends it.
             (_, info::INFOH_BITS) => InfoH::from_bits(candidate).map(Info::InfoH),
