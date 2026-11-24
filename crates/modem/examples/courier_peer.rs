@@ -7,7 +7,7 @@
 //! (see `tools/x2/courier-peer.md`), then:
 //!
 //! ```text
-//! cargo run --release -p modem --example courier_peer -- 127.0.0.1:47123 [--pad 0|3|6] [--no-x2] [--seconds N]
+//! cargo run --release -p modem --example courier_peer -- 127.0.0.1:47123 [--pad 0|3|6] [--no-x2] [--ms V90|V34] [--drive D] [--seconds N]
 //! ```
 //!
 //! The line carries the Courier's codec samples, 8000 a second, in frames
@@ -41,16 +41,26 @@ const TO_COURIER: i32 = 17316;
 /// back down, and a digital modem's codewords go round that as they are.
 const FS: f64 = 16_000.0;
 
+/// How hard a waveform drives the line: modem-sip's and the window's default,
+/// twenty decibels below the 0.707 rms every transmitter here leaves at.
+/// Without it V.34's phase 2 and 3 reached the Courier at about +3 dBm0, a
+/// fifth to a third of their samples flat against the top of mu-law.
+const DRIVE: f64 = 0.1;
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut addr = "127.0.0.1:47123".to_owned();
     let mut pad = 0u32;
     let mut x2 = true;
+    let mut ms = "V90".to_owned();
+    let mut drive = DRIVE;
     let mut seconds = 200.0;
     while let Some(a) = args.next() {
         match a.as_str() {
             "--pad" => pad = args.next().and_then(|v| v.parse().ok()).unwrap_or(0),
             "--no-x2" => x2 = false,
+            "--ms" => ms = args.next().unwrap_or(ms),
+            "--drive" => drive = args.next().and_then(|v| v.parse().ok()).unwrap_or(drive),
             "--seconds" => seconds = args.next().and_then(|v| v.parse().ok()).unwrap_or(seconds),
             other => addr = other.to_owned(),
         }
@@ -67,7 +77,8 @@ fn main() {
     let mut up = Resampler::new(8000.0, FS);
     let mut down = Resampler::new(FS, 8000.0);
     let (mut wide, mut narrow) = (Vec::new(), Vec::new());
-    for line in ["AT+MS=V90", if x2 { "ATS70=1" } else { "ATS70=0" }] {
+    let ms_line = format!("AT+MS={ms}");
+    for line in [ms_line.as_str(), if x2 { "ATS70=1" } else { "ATS70=0" }] {
         for b in line.bytes().chain(*b"\r") {
             modem.feed_dte(b);
         }
@@ -83,12 +94,17 @@ fn main() {
     let mut last = String::new();
     let mut sent_text = 0;
     let mut connect_at: Option<f64> = None;
+    let mut far_line = (u8::MAX, u8::MAX);
     loop {
         let Some((courier_off_hook, ringing, call, samples)) = receive(&mut stream) else {
             println!("[{:7.2}] line closed", frames as f64 * 0.02);
             break;
         };
         let now = frames as f64 * samples.len().max(1) as f64 / 8000.0;
+        if (courier_off_hook, call) != far_line {
+            println!("[{now:7.2}] the Courier: off hook {courier_off_hook}, call state {call}");
+            far_line = (courier_off_hook, call);
+        }
         state = state.max(call);
         if !answered && (ringing != 0 || call == CALL_RINGING) {
             println!("[{now:7.2}] the Courier rings us: ATA");
@@ -111,8 +127,11 @@ fn main() {
             wide.clear();
             up.process(l, &mut wide);
             for &w in &wide {
+                // As modem-sip drives the line: waveforms at the window's
+                // drive, a digital modem's exact levels as they are.
                 let said = modem.step(w);
-                down.process(said, &mut narrow);
+                let drive = if modem.exact_levels() { 1.0 } else { drive };
+                down.process(said * drive, &mut narrow);
             }
         }
         // Exactly one out for each in, whatever the conversions did.
@@ -176,7 +195,7 @@ fn main() {
             && modem.state() == State::Data
             && now - at > 2.0 + sent_text as f64
         {
-            let text = format!("line {sent_text:03} from BinModem's x2 server, the quick brown fox\r\n");
+            let text = format!("line {sent_text:03} from BinModem, the quick brown fox\r\n");
             for b in text.bytes() {
                 modem.feed_dte(b);
             }
