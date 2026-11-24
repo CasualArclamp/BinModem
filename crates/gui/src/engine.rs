@@ -23,6 +23,8 @@ use line::AudioSink;
 use dsp::Spectrum;
 use telemetry::{CallState, Direction, Leds, Publisher};
 
+use crate::tap::{V32Tap, V34Tap};
+
 pub const SCOPE_LEN: usize = 1024;
 pub const FFT_SIZE: usize = 1024;
 pub const SPECTRUM_BINS: usize = FFT_SIZE / 2;
@@ -91,30 +93,22 @@ impl Standard {
     }
 
     /// True only where a receiver actually exists.
+    ///
+    /// For V.32bis and V.34 that is a receiver for as much of the call as one
+    /// tap has in it: each end's training, and not the data (`tap`).
     pub fn has_receiver(self) -> bool {
-        matches!(self, Self::Bell103 | Self::V22bis)
+        matches!(self, Self::Bell103 | Self::V22bis | Self::V32bis | Self::V34)
     }
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Bell103 => "Bell 103",
             Self::V22bis => "V.22bis",
-            Self::V32bis => "V.32bis (no receiver)",
-            Self::V34 => "V.34 (no receiver)",
+            Self::V32bis => "V.32bis",
+            Self::V34 => "V.34",
             Self::V90 => "V.90 (no receiver)",
             Self::V92 => "V.92 (no receiver)",
             Self::Unknown => "unknown",
-        }
-    }
-
-    pub fn bit_rate(self) -> Option<u32> {
-        match self {
-            Self::Bell103 => Some(300),
-            Self::V22bis => Some(2400),
-            Self::V32bis => Some(14400),
-            Self::V34 => Some(33600),
-            Self::V90 | Self::V92 => Some(56000),
-            Self::Unknown => None,
         }
     }
 }
@@ -225,6 +219,9 @@ enum Demod {
         host_sift: Box<Sift>,
         caller_sift: Box<Sift>,
     },
+    /// The two that share a band, as far as one tap lets them be followed.
+    V32(Box<V32Tap>),
+    V34(Box<V34Tap>),
 }
 
 impl Demod {
@@ -242,6 +239,8 @@ impl Demod {
                 host_sift: Box::new(Sift::new()),
                 caller_sift: Box::new(Sift::new()),
             }),
+            Standard::V32bis => Some(Self::V32(Box::new(V32Tap::new(fs)))),
+            Standard::V34 => Some(Self::V34(Box::new(V34Tap::new(fs)))),
             _ => None,
         }
     }
@@ -262,6 +261,35 @@ impl Demod {
                 host_sift.feed(host.take_bits(), from_host);
                 caller_sift.feed(caller.take_bits(), from_caller);
             }
+            Self::V32(tap) => tap.feed(x),
+            Self::V34(tap) => tap.feed(x),
+        }
+    }
+
+    /// Where a call followed from one tap has got to, and whether a receiver
+    /// is trained on it; None for the modulations that are simply decoded.
+    fn progress(&self) -> Option<(bool, &'static str)> {
+        match self {
+            Self::V32(tap) => Some((tap.training(), tap.phase())),
+            Self::V34(tap) => Some((tap.training(), tap.phase())),
+            _ => None,
+        }
+    }
+
+    /// What the two ends have said of themselves so far.
+    fn said(&self) -> &[(&'static str, String)] {
+        match self {
+            Self::V32(tap) => tap.said(),
+            Self::V34(tap) => tap.said(),
+            _ => &[],
+        }
+    }
+
+    fn take_notes(&mut self) -> Vec<String> {
+        match self {
+            Self::V32(tap) => tap.take_notes(),
+            Self::V34(tap) => tap.take_notes(),
+            _ => Vec::new(),
         }
     }
 
@@ -269,7 +297,7 @@ impl Demod {
     fn take_symbol(&mut self) -> Option<f32> {
         match self {
             Self::Bell103 { host, .. } => host.take_symbol().map(|v| v as f32),
-            Self::V22bis { .. } => None,
+            _ => None,
         }
     }
 
@@ -281,6 +309,8 @@ impl Demod {
                 let (i, q) = host.constellation_point();
                 Some((i as f32, q as f32))
             }
+            Self::V32(tap) => tap.point(),
+            Self::V34(tap) => tap.point(),
         }
     }
 
@@ -289,21 +319,32 @@ impl Demod {
         match self {
             Self::Bell103 { host, caller } => (host.carrier(), caller.carrier()),
             Self::V22bis { host, caller, .. } => (host.carrier(), caller.carrier()),
+            // One receiver at a time, on whichever end is alone on the line.
+            Self::V32(tap) => (tap.training(), false),
+            Self::V34(tap) => (tap.training(), false),
         }
     }
 
-    fn level(&self) -> f64 {
+    /// The level in the receiver's band, or None where the raw line's is as
+    /// good.
+    fn level(&self) -> Option<f64> {
         match self {
-            Self::Bell103 { host, caller } => host.amplitude().max(caller.amplitude()),
-            Self::V22bis { host, caller, .. } => host.level().max(caller.level()),
+            Self::Bell103 { host, caller } => Some(host.amplitude().max(caller.amplitude())),
+            Self::V22bis { host, caller, .. } => Some(host.level().max(caller.level())),
+            Self::V32(_) | Self::V34(_) => None,
         }
     }
 
-    /// Mean distance from decisions, where the receiver can measure it.
-    fn residual(&self) -> Option<f32> {
+    /// How far clear of the error the decisions are, in decibels, where the
+    /// receiver can measure it: a tighter constellation is a larger number.
+    fn snr_db(&self) -> Option<f32> {
         match self {
             Self::Bell103 { .. } => None,
-            Self::V22bis { host, .. } => Some(host.residual_error() as f32),
+            Self::V22bis { host, .. } => {
+                Some(-20.0 * (host.residual_error() as f32).max(1e-3).log10())
+            }
+            Self::V32(tap) => tap.snr_db(),
+            Self::V34(tap) => tap.snr_db(),
         }
     }
 
@@ -311,6 +352,8 @@ impl Demod {
         match self {
             Self::Bell103 { .. } => "2FSK",
             Self::V22bis { .. } => "16QAM",
+            // The training signal, which is all of either that is drawn.
+            Self::V32(_) | Self::V34(_) => "TRN",
         }
     }
 
@@ -318,15 +361,18 @@ impl Demod {
         match self {
             Self::Bell103 { .. } => 2,
             Self::V22bis { .. } => 16,
+            Self::V32(_) | Self::V34(_) => 4,
         }
     }
 
     /// The rate actually in use, which for V.22bis the receiver works out from
     /// the constellation rather than being told.
-    fn bit_rate(&self) -> u32 {
+    fn bit_rate(&self) -> Option<u32> {
         match self {
-            Self::Bell103 { .. } => 300,
-            Self::V22bis { host, .. } => host.rate().bits_per_second(),
+            Self::Bell103 { .. } => Some(300),
+            Self::V22bis { host, .. } => Some(host.rate().bits_per_second()),
+            // Training carries no data, and the data is not to be had.
+            Self::V32(_) | Self::V34(_) => None,
         }
     }
 }
@@ -444,7 +490,17 @@ fn run(
     sink: Arc<AudioSink>,
 ) {
     tx.log(Direction::Note, format!("loaded {name} ({:.1}s at {fs:.0} Hz)", samples.len() as f64 / fs));
-    if standard.has_receiver() {
+    if matches!(standard, Standard::V32bis | Standard::V34) {
+        tx.log(
+            Direction::Note,
+            format!(
+                "{}: both ends share the band, so one tap gives each end's training and not the data",
+                standard.label()
+            ),
+        );
+    } else if standard == Standard::V22bis {
+        tx.log(Direction::Note, "V.22bis: calling on 1200 Hz, answering on 2400 Hz");
+    } else if standard.has_receiver() {
         tx.log(Direction::Note, "Bell 103: originate 1070/1270, answer 2025/2225");
     } else {
         tx.log(
@@ -551,13 +607,19 @@ fn run(
                 // One point per symbol, for the quadrature scope. Only taken
                 // when it changes, so a motionless constellation is not filled
                 // with copies of a single point.
-                if let Some(p) = d.constellation()
-                    && points.back() != Some(&p) {
+                match d.constellation() {
+                    Some(p) if points.back() != Some(&p) => {
                         if points.len() == SYMBOL_HISTORY {
                             points.pop_front();
                         }
                         points.push_back(p);
                     }
+                    Some(_) => {}
+                    // A call followed from a tap draws only while a receiver
+                    // is trained; what it drew before is not left standing.
+                    None if d.progress().is_some() => points.clear(),
+                    None => {}
+                }
             }
 
             spectrum.push(x);
@@ -568,6 +630,11 @@ fn run(
         // is the signal being decoded rather than a separate playback path.
         sink.push(&monitor_block);
         tx.line_data(&rx_block);
+        if let Some(d) = demod.as_mut() {
+            for note in d.take_notes() {
+                tx.log(Direction::Note, note);
+            }
+        }
 
         if pos >= samples.len() {
             host_line.end(&tx);
@@ -591,14 +658,13 @@ fn run(
             }
             // Without a receiver there is no band filter to take a level from,
             // so measure the raw line instead.
-            let level = if let Some(d) = demod.as_ref() {
-                d.level()
-            } else {
+            let level = demod.as_ref().and_then(Demod::level).unwrap_or_else(|| {
                 let n = waveform.data.len();
                 (waveform.data.iter().map(|v| (*v as f64) * (*v as f64)).sum::<f64>()
                     / n as f64)
                     .sqrt()
-            };
+            });
+            let progress = demod.as_ref().and_then(Demod::progress);
             let level_db = 20.0 * (level + 1e-9).log10();
 
             tx.publish(|f| {
@@ -615,16 +681,28 @@ fn run(
                     // saying "negotiating" would imply progress that is not
                     // happening.
                     CallState::Idle
+                } else if let Some((training, _)) = progress {
+                    // Followed from a tap, a call never reaches data: it is
+                    // training while a receiver is, and negotiating around it.
+                    if training { CallState::Training } else { CallState::Negotiating }
                 } else if carrier {
                     CallState::Connected
                 } else {
                     CallState::Negotiating
                 };
                 f.modulation = standard.label();
+                f.line_phase = progress.map_or("-", |(_, phase)| phase);
+                f.distant.clear();
+                if let Some(d) = demod.as_ref() {
+                    // Rust note: `take` because publishing never grows what
+                    // the frame was given, and it was given ten rows.
+                    let room = f.distant.capacity();
+                    f.distant.extend(d.said().iter().take(room).cloned());
+                }
                 f.bit_rate = if carrier {
                     // Report what the receiver found, not what the
                     // capture's name promised.
-                    demod.as_ref().map(Demod::bit_rate).or_else(|| standard.bit_rate())
+                    demod.as_ref().and_then(Demod::bit_rate)
                 } else {
                     None
                 };
@@ -632,11 +710,7 @@ fn run(
                 f.tx_bytes = tx_bytes;
                 f.tones = demod.as_ref().map(Demod::tones).unwrap_or(2);
                 f.symbol_label = demod.as_ref().map(Demod::label).unwrap_or("-");
-                f.snr_db = demod.as_ref().and_then(Demod::residual).map(|e| {
-                    // Report the decision margin as a decibel figure, so a
-                    // tighter constellation reads as a larger number.
-                    -20.0 * (e.max(1e-3)).log10()
-                });
+                f.snr_db = demod.as_ref().and_then(Demod::snr_db);
                 f.symbols.clear();
                 f.symbols.extend(symbols.iter().copied());
                 f.constellation.clear();
@@ -776,7 +850,7 @@ mod tests {
             text.contains("Welcome to phl6-dial1.popsite.net"),
             "the host greeting never reached the transcript; got {text:?}"
         );
-        assert_eq!(demod.bit_rate(), 1200, "both modems settle on 1200 bit/s");
+        assert_eq!(demod.bit_rate(), Some(1200), "both modems settle on 1200 bit/s");
     }
 
     #[test]
@@ -806,9 +880,10 @@ mod tests {
     fn only_implemented_modulations_claim_a_receiver() {
         assert!(Standard::Bell103.has_receiver());
         assert!(Standard::V22bis.has_receiver());
+        // As far as one tap goes, which is their training.
+        assert!(Standard::V32bis.has_receiver());
+        assert!(Standard::V34.has_receiver());
         for s in [
-            Standard::V32bis,
-            Standard::V34,
             Standard::V90,
             Standard::V92,
             Standard::Unknown,
@@ -823,7 +898,9 @@ mod tests {
         // nor disclaim one it can.
         assert_eq!(Standard::Bell103.label(), "Bell 103");
         assert_eq!(Standard::V22bis.label(), "V.22bis");
-        for s in [Standard::V32bis, Standard::V34, Standard::V90, Standard::V92] {
+        assert_eq!(Standard::V32bis.label(), "V.32bis");
+        assert_eq!(Standard::V34.label(), "V.34");
+        for s in [Standard::V90, Standard::V92] {
             assert!(
                 s.label().contains("no receiver"),
                 "{s:?} label {:?} does not say so",

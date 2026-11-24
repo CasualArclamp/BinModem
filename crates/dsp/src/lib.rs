@@ -16,6 +16,7 @@ pub mod fft;
 pub mod filter;
 pub mod fsk;
 pub mod nco;
+pub mod qam;
 pub mod resample;
 pub mod shaping;
 pub mod tone;

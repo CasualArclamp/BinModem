@@ -287,3 +287,121 @@ fn a_rewind_costs_what_is_in_flight_and_not_the_rest_of_the_file() {
 fn subpacket_len() -> usize {
     transfer::zmodem::subpacket::recommended_length(2400)
 }
+
+/// What `sz -e ONE.TXT TWO.BIN` puts on the line, in the order it does.
+///
+/// This end's own Sender sends one file and never a ZSINIT, so it cannot
+/// show either of the two things a real sender did to the receiver: a ZSINIT
+/// at the start, which went unanswered until `sz` gave up, and a batch, of
+/// which only the last file came out.
+fn a_batch_as_sz_sends_it(files: &[(&str, &[u8])]) -> Vec<Vec<u8>> {
+    use transfer::zmodem::Kind;
+    use transfer::zmodem::{Ending, Header, Style, capability, subpacket};
+
+    let mut steps = Vec::new();
+    steps.push(Header::position(Kind::Rqinit, 0).encode(Style::Hex));
+    // 8.1: a ZSINIT asking for control characters escaped goes as a hex
+    // header, and its subpacket carries the attention string.
+    let mut sinit = Header::flags(Kind::Sinit, 0, 0, 0, capability::ESCCTL).encode(Style::Hex);
+    sinit.extend(subpacket::encode(b"\x03\x8e\0", Ending::Wait, false, 0));
+    steps.push(sinit);
+    for (name, data) in files {
+        let mut offer = Header::position(Kind::File, 0).encode(Style::Binary32);
+        offer.extend(subpacket::encode(&plain(name, data).encode(), Ending::Wait, true, 0));
+        steps.push(offer);
+        // 7.4's longest subpacket, as `sz` sends them, and the last one
+        // ending the frame.
+        let mut body = Header::position(Kind::Data, 0).encode(Style::Binary32);
+        let pieces: Vec<&[u8]> = data.chunks(1024).collect();
+        for (i, piece) in pieces.iter().enumerate() {
+            let ending = if i + 1 == pieces.len() { Ending::End } else { Ending::Go };
+            body.extend(subpacket::encode(piece, ending, true, 0));
+        }
+        body.extend(Header::position(Kind::Eof, data.len() as u32).encode(Style::Hex));
+        steps.push(body);
+    }
+    steps.push(Header::position(Kind::Fin, 0).encode(Style::Hex));
+    steps.push(b"OO".to_vec());
+    steps
+}
+
+/// The headers the receiver said, by kind.
+fn said(bytes: &[u8]) -> Vec<transfer::zmodem::Kind> {
+    let mut kinds = Vec::new();
+    let mut rest = bytes;
+    while let Some(start) = transfer::zmodem::header::find(rest) {
+        rest = &rest[start..];
+        match transfer::zmodem::header::decode(rest) {
+            Ok((h, _, used)) => {
+                kinds.push(h.kind);
+                rest = &rest[used..];
+            }
+            Err(_) => rest = &rest[1..],
+        }
+    }
+    kinds
+}
+
+#[test]
+fn a_zsinit_is_answered_with_a_zack() {
+    use transfer::zmodem::Kind;
+
+    let steps = a_batch_as_sz_sends_it(&[("ONE.TXT", b"one")]);
+    let mut rx = Receiver::default();
+    rx.take_out();
+    rx.feed(&steps[0]);
+    rx.take_out();
+    rx.feed(&steps[1]);
+    assert_eq!(said(&rx.take_out()), vec![Kind::Ack], "the ZSINIT went unanswered");
+    for step in &steps[2..] {
+        rx.feed(step);
+    }
+    assert_eq!(rx.state(), State::Done);
+    assert_eq!(rx.finished().expect("no file").data, b"one");
+}
+
+#[test]
+fn every_file_of_a_batch_is_kept() {
+    let one = b"MAIN MENU\r\n".repeat(300);
+    let two: Vec<u8> = (0..50_000u32).map(|i| (i % 253) as u8).collect();
+    let three = b"bye".to_vec();
+    let files: [(&str, &[u8]); 3] = [("ONE.TXT", &one), ("TWO.BIN", &two), ("THREE", &three)];
+    let mut rx = Receiver::default();
+    let mut arrived = Vec::new();
+    for step in a_batch_as_sz_sends_it(&files) {
+        rx.feed(&step);
+        rx.take_out();
+        arrived.extend(rx.take_arrived());
+    }
+    assert_eq!(rx.state(), State::Done);
+    let names: Vec<&str> = arrived.iter().map(|r| r.file.name.as_str()).collect();
+    assert_eq!(names, ["ONE.TXT", "TWO.BIN", "THREE"]);
+    assert_eq!(arrived[0].data, one);
+    assert_eq!(arrived[1].data, two);
+    assert_eq!(arrived[2].data, three);
+    assert_eq!(rx.finished().expect("no file").data, three, "finished() is the last file");
+    assert!(rx.take_arrived().is_empty(), "a file was handed up twice");
+}
+
+#[test]
+fn a_batch_that_fails_partway_keeps_what_had_arrived() {
+    let one = b"first".to_vec();
+    let two = b"second, never finished".to_vec();
+    let files: [(&str, &[u8]); 2] = [("ONE.TXT", &one), ("TWO.TXT", &two)];
+    let steps = a_batch_as_sz_sends_it(&files);
+    let mut rx = Receiver::default();
+    let mut arrived = Vec::new();
+    // Up to the second file's offer, and then the line goes quiet.
+    for step in &steps[..steps.len() - 3] {
+        rx.feed(step);
+        arrived.extend(rx.take_arrived());
+    }
+    for _ in 0..1_000 {
+        rx.tick(1_000);
+    }
+    arrived.extend(rx.take_arrived());
+    assert!(matches!(rx.state(), State::Failed(_)), "the receiver is {:?}", rx.state());
+    assert_eq!(arrived.len(), 1);
+    assert_eq!(arrived[0].file.name, "ONE.TXT");
+    assert_eq!(arrived[0].data, one);
+}

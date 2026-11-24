@@ -94,6 +94,41 @@ impl Asked {
     }
 }
 
+/// The choice at the end of the DIL: [`choose`]'s, one rung slower at a time
+/// until its levels stand [`dil::SLACK`] times [`dil::SPACING`] of the error
+/// the route leads data mode to expect -- its spread at data mode's power,
+/// and of that what the shaping asked for is to leave.
+///
+/// [`choose`] stands them [`dil::SPACING`] apart and then as far apart as
+/// Table 15's power lets it, which on every simulated line here is further;
+/// but a route whose ladder runs out before its power does -- every rung in
+/// use, at exactly that spacing -- comes out with none of that to spare, and
+/// everything then rests on a single 0.44 s pass of the DIL having read the
+/// spread data mode will meet. Only here: a renegotiation is chosen on what
+/// data mode itself has found of the line.
+///
+/// None if nothing slow enough has the room, or nothing carries V.90's
+/// slowest rate at all.
+pub fn choose_with_slack(
+    route: &Route,
+    law: Law,
+    limit: u32,
+    enabled: impl Fn(u8) -> bool,
+    most_lookahead: u8,
+    leftover: Option<&Leftover>,
+) -> Option<Asked> {
+    let noise = route.noise_at(law, f64::from(limit) / 32768.0);
+    let mut below = u8::MAX;
+    loop {
+        let asked = choose(route, law, limit, |drn| drn < below && enabled(drn), most_lookahead, leftover)?;
+        let expected = noise * asked.left.sqrt();
+        if dil::least_gap(&asked.choice.data, route) >= dil::SLACK * dil::SPACING * expected {
+            return Some(asked);
+        }
+        below = asked.choice.data.drn;
+    }
+}
+
 /// A route whose errors are `share` of the power they were.
 pub fn scaled(route: &Route, share: f64) -> Route {
     let mut scaled = route.clone();
@@ -276,5 +311,36 @@ mod tests {
             assert_eq!(mapping.redundancy, asked.shaping.redundancy);
         }
         assert!(Mapping::from_cp(&asked.choice.data).unwrap().valid());
+    }
+
+    /// The choice at the end of the DIL leaves room: where [`choose`]'s pick
+    /// has its levels [`dil::SLACK`] times [`dil::SPACING`] of the expected
+    /// error apart it stands, and where it has less -- a ladder that ran out
+    /// at the spacing, with no power to spare it more -- the rate comes down
+    /// until the room is there, and no further than the first rate that has
+    /// it. Across a sweep of clean routes, which land on either side.
+    #[test]
+    fn the_choice_at_the_end_of_the_dil_leaves_room_or_comes_down_until_it_does() {
+        let (mut kept, mut lowered) = (0, 0);
+        for step in 0..60 {
+            let noise = 1e-4 * 1.03f64.powi(step);
+            let route = Route::clean(Law::Mu, noise);
+            let room = |a: &Asked| dil::least_gap(&a.choice.data, &route) / (dil::SPACING * route.noise_at(Law::Mu, 4024.0 / 32768.0) * a.left.sqrt());
+            let Some(best) = choose(&route, Law::Mu, 4024, |_| true, 1, None) else { continue };
+            let slack = choose_with_slack(&route, Law::Mu, 4024, |_| true, 1, None).expect("nothing with room");
+            assert!(room(&slack) >= dil::SLACK, "noise {noise:.2e}: {} with room {:.3}", slack.rate(), room(&slack));
+            if room(&best) >= dil::SLACK {
+                assert_eq!(slack, best, "noise {noise:.2e}: {} had room {:.3}", best.rate(), room(&best));
+                kept += 1;
+            } else {
+                assert!(slack.rate() < best.rate(), "noise {noise:.2e}");
+                // The first rate down that has the room, not one further.
+                let between = choose(&route, Law::Mu, 4024, |drn| drn > slack.choice.data.drn && drn < best.choice.data.drn, 1, None);
+                assert!(between.as_ref().is_none_or(|b| room(b) < dil::SLACK), "noise {noise:.2e}: {:?} had room too", between.map(|b| b.rate()));
+                lowered += 1;
+            }
+        }
+        println!("{kept} routes kept their rate and {lowered} came down");
+        assert!(kept > 0 && lowered > 0, "{kept} kept, {lowered} came down");
     }
 }

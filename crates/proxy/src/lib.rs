@@ -30,6 +30,7 @@
 
 pub mod client;
 pub mod gateway;
+pub mod policy;
 pub mod resolve;
 pub mod server;
 

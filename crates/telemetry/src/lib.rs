@@ -71,6 +71,42 @@ impl CallState {
     }
 }
 
+/// A V.92 call's PCM downstream, as a panel wants it: how many levels, which,
+/// and how loud -- which for PCM is the constellation's doing and nobody's
+/// setting -- with the rates this end can be sent at.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PcmLevels {
+    /// Levels either side of nought in the downstream's constellation, and
+    /// the Ucodes of the quietest and the loudest.
+    pub count: usize,
+    pub lowest: u8,
+    pub highest: u8,
+    /// The downstream's mean power in data, and the training's, in dBm0.
+    pub dbm0: f64,
+    pub training_dbm0: f64,
+    /// Whether this end is the one sending the downstream.
+    pub sending: bool,
+    /// The slowest and the fastest rate this end can be sent at, in bit/s.
+    pub slowest: u32,
+    pub fastest: u32,
+}
+
+/// What the far end of a call says it hears of this end.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FarEnd {
+    /// The level arriving there, RMS, and the largest sample in the last
+    /// second, in decibels against its full scale.
+    pub level_db: f32,
+    pub peak_db: f32,
+    /// Samples in that second at full scale.
+    pub clipped: u32,
+    /// Signal to noise at its slicer, in decibels; nought until measured.
+    pub snr_db: f32,
+    /// Decibels this end is sending below its made-for level because of
+    /// what the far end said.
+    pub trim_db: f32,
+}
+
 /// One snapshot of the signal path, sized once and then written in place.
 #[derive(Debug, Clone)]
 pub struct Frame {
@@ -108,6 +144,29 @@ pub struct Frame {
     /// Magnitude spectrum in dBFS, DC to Nyquist.
     pub spectrum_db: Vec<f32>,
     pub hz_per_bin: f64,
+    /// How far up the spectrum is worth drawing, in hertz. 4000 for a
+    /// telephone channel, whatever rate it was sampled at; the whole of what
+    /// the sound card passes for a mode that uses the whole of it.
+    pub display_hz: f64,
+    /// The error-correcting code on what is arriving, (n, k): octets a
+    /// codeword and how many of them are data. Only V.ARC has one.
+    pub code: Option<(u16, u16)>,
+    /// What a V.ARC call's stream is compressed with, sending and then
+    /// receiving, and the octets each way before and after: written and
+    /// sent, delivered and received.
+    pub squeeze: Option<(&'static str, &'static str, [u64; 4])>,
+    /// The band a carrier at a time, for a mode that loads each carrier for
+    /// itself: frequency in hertz, signal to noise in decibels, and bits.
+    /// Thinned to a couple of hundred entries; empty for every other mode.
+    pub carriers: Vec<(f32, f32, f32)>,
+    /// The echo a canceller has learned: what comes back for one sample
+    /// sent. Empty when there is no canceller or it has found nothing.
+    pub echo: Vec<f32>,
+    /// How far round the line the echo is, in milliseconds; below nought
+    /// when there is a canceller and it has not found the echo.
+    pub echo_delay_ms: f32,
+    /// What the far end says it hears of this end. Only V.ARC is told.
+    pub far_end: Option<FarEnd>,
     /// Received level in dBFS.
     pub rx_level_db: f32,
     /// Estimated signal-to-noise ratio in dB, if the datapump can measure one.
@@ -148,6 +207,8 @@ pub struct Frame {
     /// between neighbouring constellation points. Half is where a decision is
     /// as likely to be wrong as right.
     pub reception: Option<f64>,
+    /// A V.92 call's PCM levels, once there is a constellation on the line.
+    pub pcm: Option<PcmLevels>,
     /// Where a fax call has got to, what the far end calls itself, and the
     /// capability field it sent, raw. Raw because reading it belongs to the
     /// fax crate and the panel is downstream of that.
@@ -160,6 +221,9 @@ pub struct Frame {
     /// have arrived. None for the fraction until there is a page moving.
     pub fax_progress: Option<f64>,
     pub fax_rate: u32,
+    /// The symbol rate under that rate, in baud, on a V.34 call; nought on
+    /// any other, whose modulations have one symbol rate each.
+    pub fax_symbol_rate: u32,
     pub fax_lines: usize,
     /// Which page of the call that is, counting from one, and how many the
     /// call has as far as this end knows.
@@ -198,6 +262,13 @@ impl Frame {
             symbol_label: "-",
             spectrum_db: vec![-120.0; spectrum_bins],
             hz_per_bin: sample_rate / (spectrum_bins as f64 * 2.0),
+            display_hz: 4000.0,
+            code: None,
+            squeeze: None,
+            carriers: Vec::new(),
+            echo: Vec::new(),
+            echo_delay_ms: 0.0,
+            far_end: None,
             rx_level_db: -120.0,
             snr_db: None,
             carrier: false,
@@ -210,12 +281,14 @@ impl Frame {
             rx_bytes: 0,
             echo_loss_db: None,
             reception: None,
+            pcm: None,
             fax_phase: None,
             fax_identity: String::new(),
             fax_capabilities: None,
             fax_non_standard: None,
             fax_progress: None,
             fax_rate: 0,
+            fax_symbol_rate: 0,
             fax_lines: 0,
             fax_sheet: 0,
             fax_sheets: 0,

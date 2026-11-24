@@ -21,11 +21,31 @@
 //! from the answer modem are on 2400 Hz, tone B and INFO from the call modem
 //! on 1200 -- and the probing signal leaves out 1200 and 2400 Hz, so that
 //! each end can hear the other's tone over the echo of its own L2.
+//!
+//! V.92's full phase 2 is this phase 2. "The operating procedures for full
+//! Phase 2 and the associated recovery procedures are identical to those for
+//! Phase 2 of ITU-T V.90" (9.3), so nothing here moves in time; what V.92
+//! changes is what the sequences say.
+//!
+//! 1. Each INFO0 carries two bits that V.90 reserved: "V.92 capability" and
+//!    "requests short Phase 2 to be used". INFO0d and INFO0a put them the
+//!    other way round from each other -- 27 and 26 against 26 and 27 -- which
+//!    is the one trap in the clause (Tables 15 and 16/V.92).
+//! 2. When both modems have shown V.92, the digital modem's INFO1d is Table
+//!    17, where bit 70 stops being the 3429 high-carrier flag and becomes
+//!    "the channel supports PCM upstream".
+//! 3. The analogue modem may then answer with Table 18, which asks for eight
+//!    thousand symbols a second in *both* directions: PCM upstream. It "shall
+//!    not use this sequence if bit 70 of INFO1d is clear" (8.4.1).
+//!
+//! Everything else -- the INFO0 recovery, the reversals, the probe, the
+//! timeouts -- is untouched, and a pair of modems that offer no V.92 puts
+//! exactly the bits on the line that it put there before.
 
 use dsp::{ReversalDetector, ToneDetector};
 
 use super::dpsk::{self, Side};
-use super::info::{Info, Info0, Info0d, Info1a, Info1aPcm, Info1c, Probed, SymbolRate};
+use super::info::{Info, Info0, Info0d, Info1a, Info1aPcm, Info1aPcmUp, Info1c, PcmFlags, Probed, SymbolRate, X2Marker};
 use crate::v90;
 use super::probe::{self, Analyzer, Reading};
 
@@ -37,19 +57,77 @@ pub enum Role {
 }
 
 impl Role {
-    fn side(self) -> Side {
+    pub(crate) fn side(self) -> Side {
         match self {
             Self::Call => Side::Call,
             Self::Answer => Side::Answer,
         }
     }
 
-    fn far(self) -> Side {
+    pub(crate) fn far(self) -> Side {
         match self {
             Self::Call => Side::Answer,
             Self::Answer => Side::Call,
         }
     }
+}
+
+/// What this end has of V.92 to offer, and what it wants out of it.
+///
+/// The two INFO0 flags are capabilities, sent before either end knows anything
+/// about the other, so a V.92 modem always sets its own and reads the far
+/// end's afterwards. The other two are choices this end makes about the call:
+/// whether PCM upstream is wanted at all, and -- if it is -- what shape of
+/// precoder and prefilter the digital modem may design against (Table 18 bits
+/// 12:17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct V92Wish {
+    /// "V.92 capability: 1": INFO0d bit 27, INFO0a bit 26 (Tables 15 and 16).
+    pub capable: bool,
+    /// "Set to 1 requests short Phase 2 to be used": INFO0d bit 26, INFO0a
+    /// bit 27.
+    ///
+    /// An analogue modem "shall only indicate the desire to use a short Phase
+    /// 2 if it intends to connect in either PCM upstream or V.90 data mode"
+    /// (9.4), so this is not a capability but a promise about INFO1a -- and
+    /// here a narrower one: the short phase 2 this module runs ends in a
+    /// Table 18 INFO1a, PCM upstream, and Table 19's V.34 upstream is not
+    /// built. So an analogue modem sets this only when it will ask for PCM
+    /// upstream, and a digital one only when it would grant it.
+    /// [`Modem::short_phase2_agreed`] is where the four bits of 9.4 are read.
+    pub short_phase2: bool,
+    /// Whether PCM upstream is wanted: `+PIG=0` at the analogue modem, and the
+    /// digital modem's own verdict on the channel, which is what its INFO1d
+    /// bit 70 carries.
+    pub pcm_upstream: bool,
+    /// What the analogue modem can run, for Table 18 bits 12:17. The digital
+    /// modem has no use for it.
+    pub up_caps: UpCaps,
+}
+
+impl V92Wish {
+    /// The two INFO0 bits, whichever table is about to lay them out.
+    fn flags(self) -> PcmFlags {
+        PcmFlags { v92: self.capable, short_phase2: self.short_phase2 }
+    }
+}
+
+/// Table 18/V.92 bits 12:17: the precoder and prefilter the analogue modem is
+/// able to run, which is what bounds the digital modem's design of them.
+///
+/// The default is the least any V.92 analogue modem may promise -- p1 and z2
+/// only, 192 coefficients in all and 128 in one section -- because 0 is the
+/// first row of each of the three fields and every one of them is a floor
+/// rather than a reserved value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UpCaps {
+    /// Bits 12:13: "0 = p1(i) and z2(i) are supported; 1 = z1(i), p1(i),
+    /// z2(i); 2 = p1(i), p2(i), z2(i); 3 = z1(i), p1(i), p2(i), z2(i)".
+    pub sections: u8,
+    /// Bits 14:15: L_tot "in multiples of 64 starting at 192".
+    pub ltot_code: u8,
+    /// Bits 16:17: L_max "in multiples of 64 starting at 128".
+    pub lmax_code: u8,
 }
 
 /// V.90's part in phase 2 (9.2/V.90), where there is one.
@@ -60,6 +138,13 @@ impl Role {
 /// ... by the digital modem with a carrier frequency of 1200 Hz" (8.2.3.1).
 /// So the analogue modem is V.34's answer modem here even though it placed
 /// the call, and the digital modem V.34's call modem.
+///
+/// Each role comes twice: once as V.90 built it, and once carrying a
+/// [`V92Wish`]. The V.90 pair are not a special case of the V.92 pair with an
+/// empty wish -- they are the same thing, and the INFO0 they send is identical
+/// bit for bit -- but they are kept as their own constructors so that a V.90
+/// call cannot acquire a V.92 flag by accident, and so that the two places
+/// that build them need no change at all.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Pcm {
     /// The analogue modem: it asks for V.90 in INFO1a when the far end's
@@ -68,14 +153,27 @@ pub enum Pcm {
     /// The digital modem, whose INFO0 is this INFO0d. Its bits 12 to 28 are
     /// filled in from this end's own capabilities.
     Digital(Info0d),
+    /// The analogue modem with V.92 to offer.
+    AnalogueV92(V92Wish),
+    /// The digital modem with V.92 to offer.
+    DigitalV92(Info0d, V92Wish),
 }
 
 impl Pcm {
     /// The V.34 side this takes in phase 2.
     pub fn role(self) -> Role {
         match self {
-            Self::Analogue => Role::Answer,
-            Self::Digital(_) => Role::Call,
+            Self::Analogue | Self::AnalogueV92(_) => Role::Answer,
+            Self::Digital(_) | Self::DigitalV92(..) => Role::Call,
+        }
+    }
+
+    /// What this end offers of V.92. The V.90 constructors offer nothing, so
+    /// every flag reads false and every test below them takes the V.90 path.
+    pub fn wish(self) -> V92Wish {
+        match self {
+            Self::AnalogueV92(wish) | Self::DigitalV92(_, wish) => wish,
+            Self::Analogue | Self::Digital(_) => V92Wish::default(),
         }
     }
 }
@@ -92,12 +190,17 @@ pub enum Status {
     Failed(&'static str),
 }
 
+/// How long after this end's L1 an x2 client's marker is taken: D-Modem's
+/// server's 800 ms (x2-facts, "Phase 2 marker"); the latest seen came 100 ms
+/// after.
+const X2_MARKER_WAIT: f64 = 0.800;
+
 /// "40 ± 1 ms" from a far reversal arriving to the answering one leaving
 /// (11.2.1.1.3, 11.2.1.1.6 and 11.2.1.2.5).
-const TURN: f64 = 0.040;
+pub(crate) const TURN: f64 = 0.040;
 
 /// A tone goes on "for another 10 ms after the phase reversal".
-const AFTER_REVERSAL: f64 = 0.010;
+pub(crate) const AFTER_REVERSAL: f64 = 0.010;
 
 /// The answer modem's tone A before its reversals: "at least 50 ms" in
 /// 11.2.1.2.3 and exactly 50 in 11.2.1.2.6.
@@ -123,7 +226,7 @@ const L2_READ: f64 = 0.300;
 
 /// Silence before the tone that starts or answers a retrain: "70 ± 5 ms"
 /// (11.5.1.1, 11.5.1.2, 11.5.2.1, 11.5.2.2).
-const RETRAIN_SILENCE: f64 = 0.070;
+pub(crate) const RETRAIN_SILENCE: f64 = 0.070;
 
 /// Allowed on top of the recommendation's waits for the far end's tone after
 /// this end's L2 (11.2.2.1.5, 11.2.2.2.3). The far end may read the whole
@@ -134,18 +237,26 @@ const TONE_AFTER_PROBE_SLACK: f64 = 0.300;
 
 /// What is let go past before reading L2, so the windows see the line settled
 /// on it rather than the step from L1.
-const L2_SETTLE: f64 = 0.020;
+pub(crate) const L2_SETTLE: f64 = 0.020;
 
 /// 11.2.2.1.3 and 11.2.2.2.2: a reversal expected back within 2000 ms.
+///
+/// The recommendation's 2000 ms is a floor. Some analogue modems answer a
+/// repeated INFO0 of their own accord -- a recovery the digital modem has no
+/// part in -- and the tone that carries the reversal is off the line for a
+/// second or so while they do it. Waiting twice as long costs nothing when
+/// nothing is wrong, since a reversal that does come ends the wait, and it
+/// keeps the digital modem from tearing phase 2 down over a recovery that
+/// was about to finish.
 const REVERSAL_WAIT: f64 = 2.0;
 
 /// Amplitude a tone has to reach before it counts as there, as V.32's start-up
 /// uses.
-const AUDIBLE: f64 = 0.008;
+pub(crate) const AUDIBLE: f64 = 0.008;
 
 /// Bandwidth of the reversal detector, which V.32's start-up has measured the
 /// latency of against real calls.
-const REVERSAL_BANDWIDTH: f64 = 60.0;
+pub(crate) const REVERSAL_BANDWIDTH: f64 = 60.0;
 
 /// How much of what is 150 Hz either side a tone has to reach to count as the
 /// far end's tone rather than this end's own L2 leaking into its detector.
@@ -162,10 +273,46 @@ const OVER_LEAKAGE: f64 = 0.05;
 const PRESENCE_BANDWIDTH: f64 = 10.0;
 
 /// How long a tone has to be there before it is believed.
-const TONE_HELD: f64 = 0.020;
+pub(crate) const TONE_HELD: f64 = 0.020;
+
+/// How far below the level V.90's analogue modem heard the digital modem's
+/// tone B at in phase 2 a tone B can arrive later in the same call and still
+/// be the digital modem's: half, 6 dB down.
+///
+/// The digital modem sends everything in phase 2 but L1 "at the nominal
+/// transmit power level", and a retrain brings it back to that power
+/// (8.2/V.90): a power INFO0d names once for the whole call (Table 7/V.90,
+/// bits 29:32). So a retrain's tone B comes over the same line as loud as the
+/// tone B phase 2 heard, give or take what a softphone's gain control has
+/// done since. A softphone's own beep at the end of a call need not: one at
+/// exactly 1200 Hz, clean and 200 ms long, came as the server hung up on four
+/// live calls (live-1790032877, live-1790031913, live-1789986037,
+/// live-1789986211), 10 dB below the server's tone B, and was taken for tone
+/// B -- in data mode on the first, which then retrained into a dead call,
+/// and by the phase 2 of a retrain already under way on the second. The
+/// server's own retrain in live-1789986211 arrived at the level its phase 2
+/// tone B had.
+pub(crate) const TONE_B_FLOOR: f64 = 0.5;
+
+/// Every wait of V.92's short phase 2 (9.4.1.2.2, 9.4.1.2.3, 9.4.2.2.2), in
+/// seconds.
+const SHORT_WAIT: f64 = 2.5;
+
+/// How long the far end's tone has to have stood, with no INFO0 from it, for
+/// the answer modem to take it that the INFO0 was lost (11.2.2.2.1).
+///
+/// Well past [`TONE_HELD`]: the tone follows straight on from the INFO0, which
+/// is reported some thirty milliseconds after its last bit, and an INFO0 that
+/// did arrive must not be answered with a repeat of this end's. An INFO0 run
+/// of zeros is steady carrier too, and twenty milliseconds of it is twelve
+/// symbols.
+const TONE_B_BEFORE_INFO0: f64 = 0.100;
 
 /// No part of phase 2 takes this long, round trips and all.
-const GIVE_UP: f64 = 20.0;
+pub(crate) const GIVE_UP: f64 = 20.0;
+
+/// Why phase 2 stopped when [`Modem::expect_far_end_within`]'s time ran out.
+pub const FAR_END_SILENT: &str = "no INFO0 and no tone from the far end";
 
 /// Where phase 2 has got to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +333,15 @@ enum Stage {
     AnswerProbeReversal,
     AnswerReadProbe,
     AnswerInfo1,
+    // V.92's short phase 2 (9.4): the digital modem, which is the call modem
+    // here, with tone B up and waiting for tone A; then its own reversal
+    // gone and waiting for tone A's.
+    CallShortTone,
+    CallShortRanging,
+    // And the analogue modem: tone A up and waiting for tone B's reversal;
+    // then its own reversal due, and INFO1a behind it.
+    AnswerShortTone,
+    AnswerShortReversal,
     // Both.
     Finished,
 }
@@ -200,6 +356,8 @@ impl Stage {
             Self::CallAwaitTone | Self::AnswerProbeReversal => "V.34 tones again",
             Self::CallSendProbe | Self::AnswerSendProbe => "V.34 sending the probe",
             Self::CallInfo1 | Self::AnswerInfo1 => "V.34 INFO1",
+            Self::CallShortTone | Self::AnswerShortTone => "V.92 short phase 2 tones",
+            Self::CallShortRanging | Self::AnswerShortReversal => "V.92 short phase 2 ranging",
             Self::Finished => "V.34 phase 2 done",
         }
     }
@@ -207,7 +365,7 @@ impl Stage {
 
 /// What is on the line from this end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Speaking {
+pub(crate) enum Speaking {
     Silent,
     /// An INFO sequence or a tone, through the DPSK modulator.
     Carrier,
@@ -217,37 +375,59 @@ enum Speaking {
 
 /// A tone that is there and standing clear of what is either side of it.
 #[derive(Debug, Clone)]
-struct Presence {
+pub(crate) struct Presence {
     tone: ToneDetector,
     below: ToneDetector,
     above: ToneDetector,
-    held: u64,
+    pub(crate) held: u64,
+    /// The most the tone has read since this was last cleared.
+    peak: f64,
+    /// How loud a tone that has been there long enough has to be to be the
+    /// far end's: [`AUDIBLE`], unless the far end's tone has been heard
+    /// before (see [`TONE_B_FLOOR`]).
+    floor: f64,
 }
 
 impl Presence {
-    fn new(freq: f64, fs: f64) -> Self {
+    pub(crate) fn new(freq: f64, fs: f64) -> Self {
         Self {
             tone: ToneDetector::new(freq, PRESENCE_BANDWIDTH, fs),
             below: ToneDetector::new(freq - 150.0, PRESENCE_BANDWIDTH, fs),
             above: ToneDetector::new(freq + 150.0, PRESENCE_BANDWIDTH, fs),
             held: 0,
+            peak: 0.0,
+            floor: AUDIBLE,
         }
+    }
+
+    /// Whether the tone has been there for `n` samples and is loud enough
+    /// now to be the far end's.
+    ///
+    /// The time runs from when the tone is first audible, and the level is
+    /// judged when it is up, by which time the detector has come most of the
+    /// way to the tone's: timed from when it passed the floor, the wait would
+    /// grow by however long the detector took to rise that far. With no level
+    /// heard before, the floor is [`AUDIBLE`], which a tone that has been
+    /// there at all is already above, and this is `held >= n` as it was.
+    pub(crate) fn stood(&self, n: u64) -> bool {
+        self.held >= n && self.tone.amplitude() > self.floor
     }
 
     /// Whether what is either side of the tone is louder than the tone, which
     /// is what a probing signal looks like from here: L2 has tones 150 Hz
     /// either side of 1200 and 2400 Hz and nothing at either.
-    fn probing(&self) -> bool {
+    pub(crate) fn probing(&self) -> bool {
         self.below.amplitude().max(self.above.amplitude()) > self.tone.amplitude()
     }
 
-    fn feed(&mut self, x: f64) {
+    pub(crate) fn feed(&mut self, x: f64) {
         self.tone.feed(x);
         self.below.feed(x);
         self.above.feed(x);
         let there = self.tone.amplitude() > AUDIBLE
             && self.tone.amplitude() > OVER_LEAKAGE * self.below.amplitude().max(self.above.amplitude());
         self.held = if there { self.held + 1 } else { 0 };
+        self.peak = self.peak.max(self.tone.amplitude());
     }
 }
 
@@ -284,6 +464,13 @@ pub struct Modem {
     /// Reversals detected before this sample are not tone reversals but the
     /// tail of an INFO sequence, which is DPSK and full of them.
     ignore_reversals_until: u64,
+    /// Samples of silence to put out before the start-up's own sequences.
+    ///
+    /// V.8's handover silence belongs to the transmitter. V.90 9.2.1.1.1 has
+    /// the digital modem condition its receiver to receive INFO0a during the
+    /// same period, so the pump that takes the line over from V.8 has to be
+    /// listening from the start of the silence and silent until its end.
+    silent_until: u64,
     analyzer: Analyzer,
     /// The stretch of L2 being read.
     read_from: u64,
@@ -311,6 +498,50 @@ pub struct Modem {
     far_info0d: Option<Info0d>,
     /// An INFO1a asking for V.90, sent or received.
     info1a_pcm: Option<Info1aPcm>,
+    /// V.90's analogue modem: the level a digital modem's tone B stood at
+    /// just before the reversal that answered this end's (9.2.2.1.4), in the
+    /// call's first phase 2 to get that far. A retrain's phase 2 is given it,
+    /// and takes nothing much quieter for tone B (see [`TONE_B_FLOOR`]).
+    tone_b_level: Option<f64>,
+    /// An INFO1a asking for PCM upstream (Table 18/V.92), sent or received.
+    info1a_pcm_up: Option<Info1aPcmUp>,
+    /// Whether an analogue modem that could ask for PCM upstream asks for
+    /// V.90 data mode instead, having found the line will not carry it.
+    pcm_up_declined: bool,
+    /// Symbol rates a start-up of this call trained at and never got to data
+    /// mode with, one bit each by [`SymbolRate::index`]: not chosen again
+    /// while another will do (see [`Self::avoid_symbol_rate`]).
+    avoided: u8,
+    /// The far end's two V.92 bits, read as its own INFO0 table lays them out.
+    ///
+    /// Only ever written in a PCM role. V.34's Table 14 has the transmit clock
+    /// source in those two bits, and a V.34 modem that names one means a
+    /// clock by it (P2P P1, P2S N-3).
+    far_flags: PcmFlags,
+    /// Set on a retrain, where 9.7 always re-enters full phase 2 whatever the
+    /// INFO0 exchange once agreed.
+    full_phase2_only: bool,
+    /// Bit 70 as this end's INFO1d sent it, meaning "the channel supports PCM
+    /// upstream" rather than a carrier flag. False until an INFO1d has gone.
+    sent_pcm_upstream: bool,
+    /// Why the last INFO1a was counted as not received, if one was.
+    refused_info1a: Option<&'static str>,
+    /// Whether this phase 2 took V.92's short procedure (9.4), and has not
+    /// since been sent back to the full one.
+    short: bool,
+    /// When phase 2 gives up on a far end it has heard nothing from, if it
+    /// is to (see [`Self::expect_far_end_within`]).
+    far_deadline: Option<u64>,
+    /// Whether the far end's INFO0 or its tone has been heard at all.
+    heard_far: bool,
+    /// Whether phase 2 stopped at `far_deadline`.
+    far_silent: bool,
+    /// Whether this answering modem offers U.S. Robotics x2.
+    x2: bool,
+    /// The x2 client's marker, if one came in place of its L2 and INFO1c.
+    x2_marker: Option<X2Marker>,
+    /// The last sample a marker is taken at: 800 ms after this end's L1.
+    x2_until: Option<u64>,
 }
 
 impl Modem {
@@ -338,6 +569,7 @@ impl Modem {
             reversals: ReversalDetector::new(far_tone, REVERSAL_BANDWIDTH, AUDIBLE, fs),
             presence: Presence::new(far_tone, fs),
             ignore_reversals_until: 0,
+            silent_until: 0,
             analyzer: Analyzer::new(fs),
             read_from: u64::MAX,
             read_until: u64::MAX,
@@ -355,6 +587,21 @@ impl Modem {
             pcm_declined: false,
             far_info0d: None,
             info1a_pcm: None,
+            tone_b_level: None,
+            info1a_pcm_up: None,
+            pcm_up_declined: false,
+            avoided: 0,
+            far_flags: PcmFlags::default(),
+            full_phase2_only: false,
+            sent_pcm_upstream: false,
+            refused_info1a: None,
+            short: false,
+            far_deadline: None,
+            heard_far: false,
+            far_silent: false,
+            x2: false,
+            x2_marker: None,
+            x2_until: None,
         }
     }
 
@@ -374,8 +621,39 @@ impl Modem {
         modem
     }
 
+    /// The answering modem's phase 2, offering U.S. Robotics x2 as well.
+    ///
+    /// libv90modem's `docs/history/x2-facts.md`, "Phase 2 marker": a Courier
+    /// knows an x2 server by bit 23 or bit 24 of its INFO0a (ITU numbering),
+    /// so INFO0a says `max_sr_diff` 4, bit 23 alone of 21:23, and CME, bit
+    /// 24. An x2 client then sends no L1, L2 or INFO1c: one marker frame 10 to
+    /// 100 ms after this end's L1, and is quiet until phase 3. A marker is
+    /// taken up to 800 ms after L1 ends, as D-Modem's server does; with none,
+    /// phase 2 goes on as V.34's, and a V.34 caller sees nothing but the two
+    /// INFO0a bits, both of which V.34 allows.
+    ///
+    /// `lead_in` is V.8's handover silence still to run, as [`Self::v90`]'s.
+    pub fn answering_x2(fs: f64, lead_in: f64) -> Self {
+        let mut modem = Self::blank(Role::Answer, fs);
+        modem.silent_until = (lead_in * fs).round() as u64;
+        modem.x2 = true;
+        modem.ours.asymmetry = 4;
+        modem.ours.cme = true;
+        modem.rx = dpsk::Receiver::new(Role::Answer.far(), fs).with_x2();
+        modem.stage = Stage::AnswerInfo0;
+        modem.speaking = Speaking::Carrier;
+        let bits = modem.info0_bits();
+        modem.tx.send(&bits);
+        modem
+    }
+
+    /// The x2 client's marker, when phase 2 ended on one: the call is x2's.
+    pub fn x2_marker(&self) -> Option<X2Marker> {
+        self.x2_marker
+    }
+
     /// V.90's phase 2 from its start (9.2.1.1.1, 9.2.2.1.1).
-    pub fn v90(pcm: Pcm, fs: f64) -> Self {
+    pub fn v90(pcm: Pcm, fs: f64, lead_in: f64) -> Self {
         let mut modem = Self::blank(pcm.role(), fs);
         modem.pcm = Some(pcm);
         modem.stage = match pcm.role() {
@@ -383,6 +661,7 @@ impl Modem {
             Role::Answer => Stage::AnswerInfo0,
         };
         modem.speaking = Speaking::Carrier;
+        modem.silent_until = (lead_in * fs).round() as u64;
         let bits = modem.info0_bits();
         modem.tx.send(&bits);
         modem
@@ -400,6 +679,14 @@ impl Modem {
 
     /// A retrain of this phase 2 (11.5): the same end, the same far end, and
     /// V.90's part kept if there is one.
+    ///
+    /// The V.92 flags are kept too. A retrain never repeats INFO0, so the one
+    /// exchange there was is the only place either end's flags could have come
+    /// from -- and 9.3 wants them still in force: "If both the digital and
+    /// analogue modems indicate V.92 capability, any subsequent retrains shall
+    /// use Phase 2 of ITU-T V.92." What a retrain does *not* keep is the short
+    /// phase 2 agreement: every re-entry 9.7 defines lands in the full
+    /// procedure, at the reversal the two ends were already expecting.
     pub fn again(&self) -> Self {
         let far = self.far.unwrap_or_default();
         let mut modem = match self.pcm {
@@ -407,7 +694,66 @@ impl Modem {
             None => Self::retrain(self.role, self.fs, far),
         };
         modem.pcm_declined = self.pcm_declined;
+        // The digital modem's tone B comes back at the power it had the
+        // first time (8.2/V.90), so what the first time heard stands, and
+        // anything much quieter is something else.
+        modem.tone_b_level = self.tone_b_level;
+        if let Some(level) = self.tone_b_level {
+            modem.presence.floor = level * TONE_B_FLOOR;
+        }
+        modem.pcm_up_declined = self.pcm_up_declined;
+        modem.avoided = self.avoided;
+        modem.far_flags = self.far_flags;
+        modem.full_phase2_only = true;
         modem
+    }
+
+    /// Give up, with [`FAR_END_SILENT`], if neither the far end's INFO0 nor
+    /// its tone has been heard `seconds` after the lead-in.
+    ///
+    /// For a phase 2 that follows V.92's short Phase 1. There the digital
+    /// modem goes on to Phase 2 75 ms after it hears TONEq (9.2.4.3), so its
+    /// INFO0d is on its way before this end's silence has even begun, and a
+    /// far end that has sent nothing a round trip and 9.4.2.2.2's 2500 ms
+    /// later is not in Phase 2 at all. A retrain needs its INFO0d (9.7.2.1
+    /// keeps the capabilities), so there is nothing for this phase 2 to fall
+    /// back to: it stops, and its owner decides. Without this a live server
+    /// that went silent after TONEq (live-1795315036) held the call for
+    /// [`GIVE_UP`].
+    pub fn expect_far_end_within(&mut self, seconds: f64) {
+        self.far_deadline = Some(self.silent_until + self.ms(seconds));
+    }
+
+    /// Whether phase 2 stopped because the far end said nothing (see
+    /// [`Self::expect_far_end_within`]).
+    pub fn far_end_silent(&self) -> bool {
+        self.far_silent
+    }
+
+    /// Keep off `rate` in this phase 2 and every retrain's after it, while
+    /// another symbol rate will do: a start-up got as far as phase 4 at it and
+    /// the call came back to phase 2 without reaching data mode.
+    ///
+    /// The answer modem leaves it out of INFO1a's choice; the call modem says
+    /// in INFO1c that it cannot be used towards it (max rate 0, "the symbol
+    /// rate cannot be used"), which is the one say it has over the answer
+    /// modem's transmitter. The two directions are not told apart: which of
+    /// them failed is not known, and V.34 asks for one symbol rate both ways
+    /// unless both ends allow asymmetry.
+    ///
+    /// An emulated U.S. Robotics Courier (courier-emu, DSP 3.1.2) projected
+    /// 21600 bit/s at 3429 and 19200 at 3200 in its INFO1c, so 3429 was
+    /// chosen towards it; its MP then asked for 7200 at 3429 and it never
+    /// acknowledged this end's MP, and retrained. Every retrain chose 3429
+    /// again from the same INFO1c, and the call ended in phase 3. At 3200 it
+    /// connects at 31200 both ways.
+    pub fn avoid_symbol_rate(&mut self, rate: SymbolRate) {
+        self.avoided |= 1 << rate.index();
+    }
+
+    /// Whether `rate` is one [`Self::avoid_symbol_rate`] keeps off.
+    pub fn avoids(&self, rate: SymbolRate) -> bool {
+        self.avoided & (1 << rate.index()) != 0
     }
 
     /// Ask for V.34 in INFO1a from now on, even of a V.90 digital modem
@@ -416,12 +762,94 @@ impl Modem {
         self.pcm_declined = true;
     }
 
-    /// This end's INFO0 as it goes out: INFO0d from a digital modem.
+    /// Ask for V.90 data mode rather than PCM upstream in INFO1a from now on,
+    /// even of a V.92 digital modem that has offered it.
+    ///
+    /// The rung above [`Self::decline_pcm`] on the fallback ladder: 9.3 makes
+    /// Table 18 a "may" for the analogue modem, so a line that will not carry
+    /// PCM upstream is left by asking for Table 10 instead, without giving up
+    /// PCM downstream as well.
+    pub fn decline_pcm_upstream(&mut self) {
+        self.pcm_up_declined = true;
+    }
+
+    /// This end's INFO0 as it goes out: INFO0d from a digital modem, and the
+    /// two V.92 flags at whichever bits this layout puts them.
+    ///
+    /// The V.90 roles take the first two arms, which are the code that was
+    /// here before V.92 existed, so a V.90 pair sends the sequence it always
+    /// sent -- including whatever bits 26:27 a caller's own INFO0d carried.
     fn info0_bits(&self) -> Vec<bool> {
         match self.pcm {
             Some(Pcm::Digital(d)) => Info0d { v34: self.ours, ..d }.to_bits(),
-            _ => self.ours.to_bits(),
+            Some(Pcm::Analogue) | None => self.ours.to_bits(),
+            // Table 15/V.92: bit 26 is the short phase 2 request and bit 27
+            // the V.92 capability. `Info0d::to_bits` drops V.34's clock from
+            // the seventeen bits it shares with INFO0a and writes these two
+            // over the zeros V.90 reserved there.
+            Some(Pcm::DigitalV92(d, wish)) => {
+                let mut info0d = Info0d { v34: self.ours, ..d };
+                info0d.set_pcm_flags(wish.flags());
+                info0d.to_bits()
+            }
+            // Table 16/V.92, which has them the other way round: bit 26 the
+            // capability, bit 27 the request.
+            Some(Pcm::AnalogueV92(wish)) => {
+                let mut ours = self.ours;
+                ours.set_pcm_flags(wish.flags());
+                ours.to_bits()
+            }
         }
+    }
+
+    /// What this end offers of V.92, which is nothing outside a PCM role.
+    fn wish(&self) -> V92Wish {
+        self.pcm.map(Pcm::wish).unwrap_or_default()
+    }
+
+    /// Whether both modems have shown V.92 capability: "bit 27 of INFO0d and
+    /// bit 26 of INFO0a" (9.3).
+    ///
+    /// Everything V.92 adds to phase 2 hangs off this -- Table 17's meaning
+    /// for INFO1d bit 70, Table 18's availability, the retrain rule and the
+    /// ODP/ADP bypass -- and it is false for every V.90 and V.34 call, because
+    /// no wish has been offered and the far bits were never read as flags.
+    pub fn both_v92(&self) -> bool {
+        self.wish().capable && self.far_flags.v92
+    }
+
+    /// The far end's two V.92 bits as its own INFO0 laid them out. All false
+    /// outside a PCM role, where those bits are a transmit clock.
+    pub fn far_pcm_flags(&self) -> PcmFlags {
+        self.far_flags
+    }
+
+    /// Whether all four bits of 9.4 agree, so that short phase 2 is the one to
+    /// run: both modems V.92 (INFO0d bit 27, INFO0a bit 26) and both asking
+    /// for it (INFO0d bit 26, INFO0a bit 27).
+    ///
+    /// False after a retrain, whatever the flags say, because every retrain
+    /// re-enters full phase 2 (9.7).
+    pub fn short_phase2_agreed(&self) -> bool {
+        !self.full_phase2_only && self.both_v92() && self.wish().short_phase2 && self.far_flags.short_phase2
+    }
+
+    /// Whether this phase 2 ran V.92's short procedure to its end: no line
+    /// probe, no INFO1d, and for the analogue modem no round trip measured.
+    pub fn was_short(&self) -> bool {
+        self.short && self.status == Status::Done
+    }
+
+    /// Whether V.42's ODP/ADP exchange is to be skipped (9.3.1): "If both
+    /// modems indicate V.92 capability as well as indicating LAPM protocol in
+    /// ITU-T V.8 or ITU-T V.8 *bis*".
+    ///
+    /// Phase 2 knows one half of that and V.8 knows the other, so the caller
+    /// passes in what the menus said. V.8 7.3 warns that some equipment shows
+    /// LAPM in prot0 and still wants the exchange, so whatever bypasses should
+    /// still answer an ODP that arrives anyway.
+    pub fn lapm_bypass_allowed(&self, both_lapm: bool) -> bool {
+        self.both_v92() && both_lapm
     }
 
     /// V.90's part, if this is V.90's phase 2.
@@ -437,6 +865,37 @@ impl Modem {
     /// The INFO1a asking for V.90, if one went or came.
     pub fn info1a_pcm(&self) -> Option<Info1aPcm> {
         self.info1a_pcm
+    }
+
+    /// V.90's analogue modem: the amplitude the digital modem's tone B
+    /// arrived at in the call's first phase 2, on the line's own scale, once
+    /// its reversal has been heard. A retrain's tone B comes at the same, and
+    /// the analogue modem takes nothing much quieter for one in a retrain's
+    /// phase 2, in phases 3 and 4, or in data mode (see [`TONE_B_FLOOR`]).
+    pub fn tone_b_level(&self) -> Option<f64> {
+        self.tone_b_level
+    }
+
+    /// The far end's last DPSK symbol against the one before it, for a scope
+    /// (see `dpsk::Receiver::scope_point`), while phase 2 is running.
+    pub fn scope_point(&self) -> Option<(f64, f64)> {
+        (self.status() == Status::Running).then(|| self.rx.scope_point()).flatten()
+    }
+
+    /// The INFO1a asking for PCM upstream (Table 18/V.92), if one went or
+    /// came. At most one of this and [`Self::info1a_pcm`] is ever set.
+    pub fn info1a_pcm_up(&self) -> Option<Info1aPcmUp> {
+        self.info1a_pcm_up
+    }
+
+    /// Why the last INFO1a was counted as not received, if one was.
+    ///
+    /// A sequence whose CRC checked but whose layout this phase 2 may not act
+    /// on is treated as though it had not arrived (P2P P15), which leaves the
+    /// recovery of 9.2.1.2.6 to run: the reason is here for a log, not for a
+    /// decision.
+    pub fn refused_info1a(&self) -> Option<&'static str> {
+        self.refused_info1a
     }
 
     /// The fastest V.34 the far end's line probe says this end could
@@ -485,7 +944,7 @@ impl Modem {
     /// Everything V.34 has, since everything V.34 has is what is being
     /// built: phase 2 asks for the far end's honest projections, and a modem
     /// that said less would only be told less.
-    fn capabilities() -> Info0 {
+    pub(crate) fn capabilities() -> Info0 {
         Info0 {
             rate_2743: true,
             rate_2800: true,
@@ -585,6 +1044,13 @@ impl Modem {
         self.now += 1;
         let info = self.rx.feed(line);
         self.presence.feed(line);
+        // The tone has to stand as long as it does before a lost INFO0 is
+        // assumed. The server in live-1795315036 put ten milliseconds of
+        // its most negative codeword on the line as it went silent, and the
+        // narrow detector rang with that step for twenty.
+        if !self.heard_far && (info.is_some() || self.presence.stood(self.ms(TONE_B_BEFORE_INFO0))) {
+            self.heard_far = true;
+        }
         // A probing signal -- the far end's, or the echo of this end's own --
         // leaves the reversal detector sure the tone after it is far off
         // frequency, and it refuses that tone's reversal. Tone A reverses 50 ms
@@ -593,16 +1059,32 @@ impl Modem {
         if self.presence.probing() {
             self.reversals.restart();
         }
-        let reversed = self.reversals.feed(line) && self.now >= self.ignore_reversals_until;
+        let raw_reversed = self.reversals.feed(line);
+        if raw_reversed && std::env::var_os("PHASE2_TRACE").is_some() {
+            eprintln!("P2TRACE {:?} raw reversal at now={} ignore_until={} stage={:?}", self.role, self.now, self.ignore_reversals_until, self.stage);
+        }
+        let reversed = raw_reversed && self.now >= self.ignore_reversals_until;
         // Where the reversal was on the line, as against where it was noticed.
         let reversal = reversed.then(|| self.now.saturating_sub(u64::from(self.reversals.latency())));
         if (self.read_from..self.read_until).contains(&self.now) {
             self.analyzer.feed(line);
         }
 
+        if self.now <= self.silent_until {
+            // The lead-in: the receiver is on the line and hears what the far
+            // end sends, but the transmitter says nothing and no stage's
+            // clock has started.
+            if let Some(info) = info {
+                self.heard(info);
+            }
+            return 0.0;
+        }
         if self.status == Status::Running {
             if self.now > self.ms(GIVE_UP) {
                 self.fail("phase 2 went on for twenty seconds");
+            } else if !self.heard_far && self.far_deadline.is_some_and(|d| self.now > d) {
+                self.far_silent = true;
+                self.fail(FAR_END_SILENT);
             } else {
                 self.timers();
                 if let Some(info) = info {
@@ -658,15 +1140,31 @@ impl Modem {
     }
 
     fn heard(&mut self, info: Info) {
+        if std::env::var_os("PHASE2_TRACE").is_some() {
+            eprintln!("P2TRACE heard at now={} stage={:?} info={:?}", self.now, self.stage, info);
+        }
         match (self.role, info) {
             // A V.90 digital modem's INFO0 carries INFO0a's bits, and is heard
             // as one -- by a V.34 modem too, which has no use for the rest.
             (_, Info::Info0d(far)) => {
                 self.far_info0d = Some(far);
+                // Table 15/V.92's order, and only in a PCM role: V.90 reserves
+                // these two bits and sets both to 0, so a V.90 digital modem
+                // reads as "not V.92" without knowing V.92 exists.
+                if self.pcm.is_some() {
+                    self.far_flags = far.pcm_flags();
+                }
                 self.heard(Info::Info0(far.v34));
             }
             (_, Info::Info0(far)) => {
                 self.far = Some(far);
+                // Table 16/V.92's order, for the INFO0a a digital modem hears.
+                // Not when this arm was reached from the one above, which has
+                // already read the same two bits the other way round; and not
+                // in a V.34 phase 2, where they are a transmit clock source.
+                if self.pcm.is_some() && self.far_info0d.is_none() {
+                    self.far_flags = far.pcm_flags();
+                }
                 self.far_info0_count += 1;
                 // Its tail is fill bits, which are reversals.
                 self.ignore_reversals_until = self.now + self.ms(0.040);
@@ -674,20 +1172,49 @@ impl Modem {
                 // after correctly receiving INFO0a", and the answer modem the
                 // same of INFO0a.
                 self.ours.acknowledge = true;
-                if self.far_info0_count > 1 && matches!(self.stage, Stage::CallInfo0 | Stage::AnswerInfo0) {
+                if self.far_info0_count > 1 && self.due_to_repeat_info0() {
                     // 11.2.2.1.1 and 11.2.2.2.1: the far end is repeating its
                     // INFO0, so it did not get ours. Once more, now saying
                     // that its own arrived.
+                    if std::env::var_os("PHASE2_TRACE").is_some() {
+                        eprintln!("P2TRACE resending INFO0d/INFO0a at now={} count={}", self.now, self.far_info0_count);
+                    }
                     let bits = self.info0_bits();
                     self.tx.send(&bits);
+                }
+            }
+            // An x2 client's marker, in place of its L2: this end goes quiet
+            // and phase 2 is over. Its first index has to be the PCM
+            // direction's; anything else, or too late, is not x2's, and the
+            // wait for tone B goes on. The marker is on the call modem's
+            // carrier, where tone B is, so the stages that follow hearing
+            // tone B may already have begun when its CRC comes in.
+            (Role::Answer, Info::X2Marker(marker))
+                if matches!(self.stage, Stage::AnswerSendProbe | Stage::AnswerProbeReversal | Stage::AnswerReadProbe) =>
+            {
+                if marker.is_x2() && marker.symbol_rate().is_some() && self.x2_until.is_some_and(|t| self.now <= t) {
+                    self.x2_marker = Some(marker);
+                    self.tx.stop();
+                    self.speaking = Speaking::Silent;
+                    self.status = Status::Done;
+                    self.enter(Stage::Finished);
                 }
             }
             (Role::Answer, Info::Info1c(info1c)) if self.stage == Stage::AnswerInfo1 => {
                 self.info1c = Some(info1c);
                 // An analogue modem that heard an INFO0d asks for V.90
-                // (9.2.2.1.9); anything else is V.34's INFO1a.
-                let bits = match (self.pcm, self.far_info0d) {
-                    (Some(Pcm::Analogue), Some(far)) if !self.pcm_declined => {
+                // (9.2.2.1.9); anything else is V.34's INFO1a. A V.92 pair
+                // whose INFO1d allowed PCM upstream asks for that instead
+                // (9.3, 8.4.1).
+                let analogue = self.pcm.is_some_and(|p| p.role() == Role::Answer);
+                let bits = match (analogue, self.far_info0d) {
+                    (true, Some(far)) if self.table_18_allowed(&info1c) => {
+                        let asked = self.settle_pcm_up(&far);
+                        let bits = asked.to_bits();
+                        self.info1a_pcm_up = Some(asked);
+                        bits
+                    }
+                    (true, Some(far)) if !self.pcm_declined => {
                         let bits = self.settle_pcm(&info1c, &far).to_bits();
                         self.info1a_pcm = Info1aPcm::from_bits(&bits);
                         bits
@@ -697,6 +1224,9 @@ impl Modem {
                         // Kept as it went, which is to the field's own
                         // resolution.
                         self.info1a = Info1a::from_bits(&bits);
+                        if std::env::var_os("PHASE2_TRACE").is_some() {
+                            eprintln!("P2TRACE sending info1a={:?}", self.info1a);
+                        }
                         bits
                     }
                 };
@@ -706,6 +1236,9 @@ impl Modem {
                 self.speaking = Speaking::Carrier;
             }
             (Role::Call, Info::Info1a(info1a)) if self.stage == Stage::CallInfo1 => {
+                if std::env::var_os("PHASE2_TRACE").is_some() {
+                    eprintln!("P2TRACE info1a={info1a:?}");
+                }
                 self.info1a = Some(info1a);
                 self.status = Status::Done;
                 self.enter(Stage::Finished);
@@ -714,12 +1247,58 @@ impl Modem {
             // start-up procedure if bits 37:39 of INFO1a indicate the integer
             // 6". A V.34 modem never gets one, since it never sent INFO0d.
             (Role::Call, Info::Info1aPcm(asked)) if self.stage == Stage::CallInfo1 && self.pcm.is_some() => {
+                if std::env::var_os("PHASE2_TRACE").is_some() {
+                    eprintln!("P2TRACE info1a_pcm={asked:?}");
+                }
                 self.info1a_pcm = Some(asked);
                 self.status = Status::Done;
                 self.enter(Stage::Finished);
             }
+            // Table 18/V.92: eight thousand symbols a second in both
+            // directions. 9.3 allows it only when both modems have shown V.92,
+            // and 8.4.1 only when the INFO1d this end sent had bit 70 set --
+            // so a frame that arrives without both is one this end may not act
+            // on, and P2P P15 counts it as not received rather than as a
+            // reason to fail. The 9.2.1.2.6 recovery then runs on its own.
+            (Role::Call, Info::Info1aPcmUp(asked)) if self.stage == Stage::CallInfo1 && self.pcm.is_some() => {
+                // After a short phase 2 there was no INFO1d to carry bit 70,
+                // and asking for the short one was this end's offer of it.
+                if self.both_v92() && (self.sent_pcm_upstream || (self.short && self.wish().pcm_upstream)) {
+                    self.info1a_pcm_up = Some(asked);
+                    self.status = Status::Done;
+                    self.enter(Stage::Finished);
+                } else if self.both_v92() {
+                    self.refused_info1a = Some("a table 18 info1a after an info1d that cleared bit 70");
+                } else {
+                    self.refused_info1a = Some("a table 18 info1a from a far end that did not indicate v.92");
+                }
+            }
             _ => {}
         }
+    }
+
+    /// Whether a repeated INFO0 from the far end calls for another of ours.
+    ///
+    /// V.90 9.2.1.2.1: a digital modem that receives "repeated INFO0a
+    /// sequences" shall "repeatedly send INFO0d sequences", with bit 28 set
+    /// to acknowledge the INFO0a it has correctly received. That is not the
+    /// V.34 rule of 11.2.2, which only repeats an INFO0 before the exchange
+    /// has moved on: a V.90 analogue modem driven into its own recovery can
+    /// be repeating INFO0a long after the digital modem has left INFO0 for
+    /// the tones, and it stays there -- repeating INFO0a and nothing else --
+    /// until it hears an INFO0d with bit 28 set. A digital modem that has
+    /// gone on to the tones and stopped answering those repetitions leaves
+    /// the two ends waiting for each other until one of them times out.
+    ///
+    /// So a repeated INFO0a is answered wherever this end is in phase 2, as
+    /// long as there is a free carrier to put it on. Not on top of another
+    /// sequence -- INFO1c is sent on the same carrier and a second sequence
+    /// queued behind it would corrupt both.
+    fn due_to_repeat_info0(&self) -> bool {
+        self.role == Role::Call
+            && self.status == Status::Running
+            && self.tx.pending() == 0
+            && !matches!(self.stage, Stage::CallInfo1 | Stage::Finished)
     }
 
     fn reversal(&mut self, at: u64) {
@@ -755,10 +1334,36 @@ impl Modem {
             Stage::AnswerRanging if self.reversed_at.is_some_and(|ours| at > ours) => {
                 let ours = self.reversed_at.expect("checked");
                 self.round_trip = Some((at - ours).saturating_sub(self.ms(TURN)));
+                // 9.2.2.1.4: and how loud a V.90 digital modem's tone B was
+                // before it reversed, steady since this end's own reversal:
+                // the level a retrain's tone B will come at.
+                if self.pcm == Some(Pcm::Analogue) && self.far_info0d.is_some() && self.tone_b_level.is_none() {
+                    self.tone_b_level = Some(self.presence.peak);
+                }
                 // 11.2.1.2.5: tone A's reversal 40 ms on, then L1 and L2.
                 self.reverse_at = Some((at + self.ms(TURN)).max(self.now + 1));
                 self.probe_at = self.reverse_at.map(|r| r + self.ms(AFTER_REVERSAL));
                 self.enter(Stage::AnswerSendProbe);
+            }
+            // 9.4.1.1.4/V.92: tone A's reversal, which is the round trip --
+            // "the time interval between the appearance of the Tone B phase
+            // reversal at the digital modem line terminals and receiving the
+            // Tone A phase reversal at the line terminals minus 40 ms". Then
+            // silence, which this end is in already, and INFO1a.
+            Stage::CallShortRanging if self.reversed_at.is_some_and(|ours| at > ours) => {
+                let ours = self.reversed_at.expect("checked");
+                self.round_trip = Some((at - ours).saturating_sub(self.ms(TURN)));
+                self.enter(Stage::CallInfo1);
+                // 9.4.1.2.3: INFO1a "within 2500 ms from the transmission of
+                // Tone B phase reversal".
+                self.deadline = Some(ours + self.ms(SHORT_WAIT));
+            }
+            // 9.4.2.1.3/V.92: tone B's reversal, answered so that tone A's
+            // appears 40 ms after it was received; ten more milliseconds of
+            // tone A, and INFO1a.
+            Stage::AnswerShortTone => {
+                self.reverse_at = Some((at + self.ms(TURN)).max(self.now + 1));
+                self.enter(Stage::AnswerShortReversal);
             }
             // 11.2.1.2.7: the call modem's reversal before its L1 and L2.
             Stage::AnswerProbeReversal => {
@@ -781,9 +1386,39 @@ impl Modem {
         match self.stage {
             Stage::CallInfo0 => {
                 // 11.2.1.1.2: INFO0a received, and INFO0c gone, so on to the
-                // reversals.
+                // reversals -- V.92's short ones if all four bits ask (9.4).
                 if self.far.is_some() && self.tx.pending() == 0 {
-                    self.enter(Stage::CallFirstReversal);
+                    if self.short_phase2_agreed() {
+                        self.short = true;
+                        self.enter(Stage::CallShortTone);
+                    } else {
+                        self.enter(Stage::CallFirstReversal);
+                    }
+                }
+            }
+            Stage::CallShortTone => {
+                // 9.4.1.1.3/V.92: "After Tone A has been detected and Tone B
+                // has been transmitted for at least 50 ms, the digital modem
+                // shall transmit a Tone B phase reversal. Tone B shall be
+                // transmitted for another 10 ms after the phase reversal",
+                // which is what a reversal here always does, and then
+                // silence.
+                if self.presence.stood(self.ms(TONE_HELD)) && now - self.since >= self.ms(TONE_A_FIRST) {
+                    self.reverse_at = Some(now + 1);
+                    self.enter(Stage::CallShortRanging);
+                    self.deadline = Some(now + self.ms(SHORT_WAIT));
+                    self.ignore_reversals_until = now + self.ms(TURN);
+                }
+            }
+            Stage::CallShortRanging => {
+                if self.deadline.is_some_and(|d| now > d) {
+                    // 9.4.1.2.2/V.92: no tone A reversal in 2500 ms. "Upon
+                    // detection of Tone A, the digital modem shall transmit
+                    // Tone B and condition its receiver to detect Tone A
+                    // phase reversal ... then proceed with the full Phase 2
+                    // procedure" -- which is where 11.2.2.1.3 leaves a call
+                    // modem, silent in the stage that waits for tone A.
+                    self.back_to_full_phase2();
                 }
             }
             Stage::CallFirstReversal => {
@@ -840,8 +1475,14 @@ impl Modem {
             Stage::CallSendProbe => {
                 let Speaking::Probe { l1_until } = self.speaking else { return };
                 if self.deadline.is_none() {
-                    // Measured from the beginning of L2.
-                    self.deadline = Some(l1_until + self.ms(0.650 + TONE_AFTER_PROBE_SLACK) + self.rtd());
+                    // Measured from the beginning of L2. The far end's tone A
+                    // comes after it has read the probe and, on some analogue
+                    // modems, after it has finished a recovery of its own over
+                    // a repeated INFO0 -- a second or so of DPSK in place of
+                    // the tone. The extra slack is what lets this end sit
+                    // through that rather than give up on the reversal and
+                    // restart phase 2 with the timing already wrong.
+                    self.deadline = Some(l1_until + self.ms(0.650 + TONE_AFTER_PROBE_SLACK + 1.5) + self.rtd());
                 }
                 // 11.2.1.1.7: tone A, heard over the echo of L2, and INFO1c.
                 if now > l1_until && self.presence.held >= self.ms(TONE_HELD) {
@@ -854,15 +1495,49 @@ impl Modem {
                             *slot = reading.probed(rate, &far, wide);
                         }
                     }
-                    let info1c = Info1c {
+                    // A symbol rate a start-up of this call failed at is
+                    // "cannot be used", while another can.
+                    let usable = |r: &SymbolRate| probed[r.index() as usize].max_rate > 0;
+                    if SymbolRate::ALL.iter().any(|r| usable(r) && !self.avoids(*r)) {
+                        for rate in SymbolRate::ALL.iter().filter(|r| self.avoids(**r)) {
+                            probed[rate.index() as usize].max_rate = 0;
+                        }
+                    }
+                    let frequency_offset = reading.as_ref().and_then(|r| r.frequency_offset);
+                    if std::env::var_os("PHASE2_TRACE").is_some() {
+                        eprintln!("P2TRACE info1d probed={probed:?} frequency={frequency_offset:?}");
+                    }
+                    let mut info1c = Info1c {
                         min_power_reduction: 0,
                         additional_power_reduction: 0,
                         md_length: 0,
                         probed,
-                        frequency_offset: reading.and_then(|r| r.frequency_offset),
+                        frequency_offset,
                     };
+                    // Table 17/V.92: when both modems have shown V.92, bit 70
+                    // stops being the 3429 high-carrier flag and becomes "Set
+                    // to 0 indicates that the channel does not support PCM
+                    // upstream". It is a permission, not an instruction: the
+                    // analogue modem may still ask for V.90 or V.34 (N-6).
+                    if self.both_v92() {
+                        info1c.set_pcm_upstream(self.wish().pcm_upstream);
+                        self.sent_pcm_upstream = info1c.pcm_upstream();
+                        if std::env::var_os("PHASE2_TRACE").is_some() {
+                            eprintln!(
+                                "P2TRACE INFO1d bit70 (PCM upstream offered) = {}",
+                                self.sent_pcm_upstream
+                            );
+                        }
+                    }
                     let bits = info1c.to_bits();
                     self.info1c = Info1c::from_bits(&bits);
+                    if std::env::var_os("PHASE2_TRACE").is_some() {
+                        eprintln!(
+                            "P2TRACE INFO1d on the wire: bit70 {} ({} bits)",
+                            self.info1c.is_some_and(|i| i.pcm_upstream()),
+                            bits.len()
+                        );
+                    }
                     self.speaking = Speaking::Carrier;
                     self.tx.stop();
                     self.tx.send(&bits);
@@ -875,9 +1550,24 @@ impl Modem {
                     self.fail_for_a_retrain("no tone A after this end's probing");
                 }
             }
+            Stage::CallInfo1 if self.short => {
+                if self.deadline.is_some_and(|d| now > d) {
+                    // 9.4.1.2.3/V.92: no INFO1a in 2500 ms. "The digital
+                    // modem shall send Tone B and condition its receiver to
+                    // detect Tone A. Upon detection of Tone A, the digital
+                    // modem shall condition its receiver to detect the Tone
+                    // A phase reversal and proceed with the full Phase 2
+                    // procedure."
+                    self.back_to_full_phase2();
+                    self.start_tone();
+                }
+            }
             Stage::CallInfo1 => {
                 if self.deadline.is_none() && self.tx.pending() == 0 {
-                    // 11.2.2.1.6: INFO1a within 700 ms and a round trip.
+                    // 11.2.2.1.6: INFO1a within 700 ms and a round trip. Not
+                    // longer: an analogue modem that has not answered by then
+                    // has gone on to its own recovery, and waiting keeps this
+                    // end out of phase 3 while the far end retrains.
                     self.deadline = Some(now + self.ms(0.700) + self.rtd() + self.ms(0.3));
                 }
                 if self.deadline.is_some_and(|d| now > d) {
@@ -893,13 +1583,77 @@ impl Modem {
 
             Stage::AnswerInfo0 => {
                 if self.far.is_some() && self.tx.pending() == 0 {
-                    self.enter(Stage::AnswerAwaitTone);
+                    if self.short_phase2_agreed() && self.far_info0d.is_some() {
+                        self.short = true;
+                        self.enter(Stage::AnswerShortTone);
+                        // 9.4.2.2.2/V.92: the tone B reversal "within 2500 ms
+                        // from the end of INFO0a transmission".
+                        self.deadline = Some(now + self.ms(SHORT_WAIT));
+                        // The digital modem may reverse tone B fifty
+                        // milliseconds after INFO0d ends (9.4.1.1.3), and
+                        // INFO0d is reported some thirty after it ended: the
+                        // forty a full phase 2 then waits out, for the fill
+                        // bits at its tail, would cover the one reversal
+                        // there is. Those fill bits were on the line before
+                        // the sequence could be reported at all.
+                        self.ignore_reversals_until = self.ignore_reversals_until.min(now + self.ms(AFTER_REVERSAL));
+                    } else {
+                        self.enter(Stage::AnswerAwaitTone);
+                    }
+                } else if self.far.is_none() && self.tx.pending() == 0 && self.presence.stood(self.ms(TONE_B_BEFORE_INFO0)) {
+                    // 11.2.2.2.1, and V.90 9.2.2.2.1 in the same words: "If
+                    // ... the analogue modem detects Tone B before correctly
+                    // receiving INFO0d ... [it] shall repeatedly send INFO0a."
+                    // The far end got ours and has gone on to its tone, and
+                    // its INFO0 never arrived -- a hole in the line will do
+                    // it. Holding tone A tells it nothing; a repeated INFO0a
+                    // is what has it send its INFO0 again (11.2.2.1.1,
+                    // 9.2.1.2.1). Back to back while its tone lasts, and the
+                    // one going out is finished before tone A follows, as the
+                    // clause asks, by the arm above.
+                    if std::env::var_os("PHASE2_TRACE").is_some() {
+                        eprintln!("P2TRACE tone B before any INFO0: INFO0a again at now={now}");
+                    }
+                    self.recoveries += 1;
+                    let bits = self.info0_bits();
+                    self.tx.send(&bits);
+                }
+            }
+            Stage::AnswerShortTone => {
+                if self.deadline.is_some_and(|d| now > d) {
+                    // 9.4.2.2.2/V.92: "the analogue modem shall initiate a
+                    // retrain according to 9.7.2.1", and a retrain's phase 2
+                    // is the full one.
+                    self.fail_for_a_retrain("no tone B reversal in short phase 2");
+                }
+            }
+            Stage::AnswerShortReversal => {
+                // The reversal has gone and its ten milliseconds of tone A
+                // are up: 9.4.2.1.4/V.92, "Then, the analogue modem shall
+                // send INFO1a", straight on from the tone as one group with
+                // it. Table 18's, which is what asking for the short phase 2
+                // promised (see [`V92Wish::short_phase2`]).
+                if self.reversed_at.is_some_and(|at| now + 1 >= at + self.ms(AFTER_REVERSAL))
+                    && let Some(far) = self.far_info0d
+                {
+                    self.silence_at = None;
+                    let asked = self.settle_pcm_up(&far);
+                    self.tx.send(&asked.to_bits());
+                    self.tx.silence();
+                    self.speaking = Speaking::Carrier;
+                    self.info1a_pcm_up = Some(asked);
+                    self.enter(Stage::AnswerInfo1);
                 }
             }
             Stage::AnswerAwaitTone => {
-                // 11.2.1.2.3: tone B heard, and tone A on for 50 ms.
+                // 11.2.1.2.3: tone B heard, and tone A on for 50 ms. In a V.90
+                // retrain the analogue modem began, what it hears first is
+                // the digital modem's data, until tone A has been heard for
+                // 50 ms and 70 ms of silence gone (9.5.1.2/V.90); only a tone
+                // as loud as the first phase 2's tone B, or nearly, is taken
+                // for tone B then.
                 if self.tone_at.is_none()
-                    && self.presence.held >= self.ms(TONE_HELD)
+                    && self.presence.stood(self.ms(TONE_HELD))
                     && now - self.since >= self.ms(TONE_A_FIRST)
                 {
                     self.reverse_at = Some(now + 1);
@@ -908,6 +1662,9 @@ impl Modem {
                     // The reversal is this end's, and the call modem's answer
                     // cannot be back before a round trip and 40 ms.
                     self.ignore_reversals_until = now + self.ms(TURN);
+                    // Its tone from here to that answer is steady, and what
+                    // it rises to is its level.
+                    self.presence.peak = 0.0;
                 }
             }
             Stage::AnswerRanging => {
@@ -924,12 +1681,15 @@ impl Modem {
             }
             Stage::AnswerSendProbe => {
                 let Speaking::Probe { l1_until } = self.speaking else { return };
+                if self.x2 && self.x2_until.is_none() {
+                    self.x2_until = Some(l1_until + self.ms(X2_MARKER_WAIT));
+                }
                 if self.deadline.is_none() {
                     self.deadline = Some(l1_until + self.ms(0.600 + TONE_AFTER_PROBE_SLACK) + self.rtd());
                 }
                 // 11.2.1.2.6: tone B over the echo of L2, then tone A for 50 ms,
                 // its reversal, 10 ms more and silence.
-                if now > l1_until && self.presence.held >= self.ms(TONE_HELD) {
+                if now > l1_until && self.presence.stood(self.ms(TONE_HELD)) {
                     self.tx.stop();
                     self.start_tone();
                     self.reverse_at = Some(now + self.ms(TONE_A_FIRST));
@@ -955,7 +1715,7 @@ impl Modem {
                 }
             }
             Stage::AnswerInfo1 => {
-                if self.info1a.is_some() || self.info1a_pcm.is_some() {
+                if self.info1a.is_some() || self.info1a_pcm.is_some() || self.info1a_pcm_up.is_some() {
                     if !self.tx.is_sending() {
                         self.status = Status::Done;
                         self.enter(Stage::Finished);
@@ -967,6 +1727,56 @@ impl Modem {
                 }
             }
             Stage::Finished => {}
+        }
+    }
+
+    /// Leave V.92's short phase 2 for the full one, as the call modem
+    /// (9.4.1.2.2, 9.4.1.2.3): silent, and waiting for tone A and then its
+    /// reversal, which is the first thing the full procedure has it do.
+    fn back_to_full_phase2(&mut self) {
+        self.recoveries += 1;
+        self.short = false;
+        self.full_phase2_only = true;
+        self.first_reversal_at = None;
+        self.reversed_at = None;
+        self.round_trip = None;
+        self.enter(Stage::CallFirstReversal);
+    }
+
+    /// Whether this INFO1d and this call between them let the analogue modem
+    /// ask for PCM upstream with a Table 18 INFO1a.
+    ///
+    /// Four things, and all of them (9.3, 8.4.1):
+    ///
+    /// - both modems have shown V.92, or the digital modem's INFO1d is Table 9
+    ///   and its bit 70 means a carrier rather than a channel;
+    /// - that bit 70 is set -- "The analogue modem shall not use this sequence
+    ///   if bit 70 of INFO1d is clear";
+    /// - PCM upstream is wanted here at all, which `+PIG=1` turns off;
+    /// - and neither rung of the fallback ladder has been taken.
+    fn table_18_allowed(&self, info1d: &Info1c) -> bool {
+        self.both_v92()
+            && info1d.pcm_upstream()
+            && self.wish().pcm_upstream
+            && !self.pcm_up_declined
+            && !self.pcm_declined
+    }
+
+    /// V.92's INFO1a (Table 18/V.92): PCM upstream, the precoder and prefilter
+    /// the digital modem may design, and the codeword it is to train with.
+    ///
+    /// The symbol rates are not chosen here, because there is nothing to
+    /// choose: Table 18 names the integer 6 in both fields, which is eight
+    /// thousand a second each way. MD is length 0, so the digital modem starts
+    /// on TRN1u as soon as it hears the Ru reversal.
+    fn settle_pcm_up(&self, far: &Info0d) -> Info1aPcmUp {
+        let caps = self.wish().up_caps;
+        Info1aPcmUp {
+            sections: caps.sections,
+            ltot_code: caps.ltot_code,
+            lmax_code: caps.lmax_code,
+            md_length: 0,
+            uinfo: v90::training_codeword_v92(far),
         }
     }
 
@@ -1015,7 +1825,10 @@ impl Modem {
         };
         let towards_call: Vec<(SymbolRate, u8)> =
             SymbolRate::ALL.iter().map(|&r| (r, info1c.probed[r.index() as usize].max_rate)).collect();
-        let answer_to_call = best(&towards_call).map_or(SymbolRate::S2400, |b| b.0);
+        // A symbol rate a start-up of this call failed at is passed over
+        // while the call modem projects another (see `avoid_symbol_rate`).
+        let untried: Vec<(SymbolRate, u8)> = towards_call.iter().copied().filter(|&(r, _)| !self.avoids(r)).collect();
+        let answer_to_call = best(&untried).or_else(|| best(&towards_call)).map_or(SymbolRate::S2400, |b| b.0);
         // Towards this end: what this end read of the call modem's L2, within
         // the asymmetry both ends allow.
         let steps = u32::from(far.asymmetry.min(self.ours.asymmetry));
@@ -1027,7 +1840,10 @@ impl Modem {
                 (r, probed.max_rate, probed)
             })
             .collect();
-        let (call_to_answer, probed) = best(&towards_answer.iter().map(|x| (x.0, x.1)).collect::<Vec<_>>())
+        let towards_answer_rates: Vec<(SymbolRate, u8)> = towards_answer.iter().map(|x| (x.0, x.1)).collect();
+        let untried: Vec<(SymbolRate, u8)> = towards_answer_rates.iter().copied().filter(|&(r, _)| !self.avoids(r)).collect();
+        let (call_to_answer, probed) = best(&untried)
+            .or_else(|| best(&towards_answer_rates))
             .and_then(|(r, _)| towards_answer.iter().find(|x| x.0 == r).map(|x| (x.0, x.2)))
             .unwrap_or((answer_to_call, Probed::default()));
         Info1a {
@@ -1043,24 +1859,24 @@ impl Modem {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     const FS: f64 = 16_000.0;
 
     /// A line between two modems: a delay each way, a loss, noise, and a
     /// little of each end's own signal coming back to it.
-    struct Line {
-        to_answer: std::collections::VecDeque<f64>,
-        to_call: std::collections::VecDeque<f64>,
-        loss: f64,
-        echo: f64,
+    pub(crate) struct Line {
+        pub(crate) to_answer: std::collections::VecDeque<f64>,
+        pub(crate) to_call: std::collections::VecDeque<f64>,
+        pub(crate) loss: f64,
+        pub(crate) echo: f64,
         seed: u32,
-        noise: f64,
+        pub(crate) noise: f64,
     }
 
     impl Line {
-        fn new(one_way: f64, loss_db: f64, echo_db: f64, noise_db: f64) -> Self {
+        pub(crate) fn new(one_way: f64, loss_db: f64, echo_db: f64, noise_db: f64) -> Self {
             let delay = (one_way * FS) as usize;
             Self {
                 to_answer: std::iter::repeat_n(0.0, delay.max(1)).collect(),
@@ -1072,7 +1888,7 @@ mod tests {
             }
         }
 
-        fn noise(&mut self) -> f64 {
+        pub(crate) fn noise(&mut self) -> f64 {
             self.seed ^= self.seed << 13;
             self.seed ^= self.seed >> 17;
             self.seed ^= self.seed << 5;
@@ -1100,6 +1916,85 @@ mod tests {
             }
         }
         (caller, answerer)
+    }
+
+    /// An x2 client: a V.34 call modem up to the server's L1, quiet from
+    /// there, and `after` seconds past the end of L1 as the server timed it,
+    /// the marker with `body`, then quiet again.
+    fn x2_client(line: &mut Line, body: u8, after: f64, seconds: f64) -> Modem {
+        let mut caller = Modem::new(Role::Call, FS);
+        let mut answerer = Modem::answering_x2(FS, 0.0);
+        let mut marker = dpsk::Transmitter::new(Side::Call, FS);
+        let mut sent = false;
+        let mut quiet = false;
+        let (mut from_call, mut from_answer) = (0.0, 0.0);
+        for _ in 0..(seconds * FS) as usize {
+            let at_call = line.to_call.pop_front().unwrap() + line.echo * from_call + line.noise();
+            let at_answer = line.to_answer.pop_front().unwrap() + line.echo * from_answer + line.noise();
+            let from_v34 = caller.step(at_call);
+            from_answer = answerer.step(at_answer);
+            let ends = match answerer.speaking {
+                Speaking::Probe { l1_until } if answerer.stage == Stage::AnswerSendProbe => Some(l1_until),
+                _ => None,
+            };
+            if !sent && ends.is_some_and(|l1| answerer.now >= l1 + (after * FS) as u64) {
+                // Two points of lead-in, then the frame.
+                let mut bits = vec![true, true];
+                bits.extend(X2Marker::from_body(body).to_bits());
+                marker.send(&bits);
+                marker.silence();
+                sent = true;
+            }
+            quiet |= ends.is_some();
+            from_call = if sent {
+                marker.next_sample()
+            } else if quiet {
+                0.0
+            } else {
+                from_v34
+            };
+            line.to_answer.push_back(from_call * line.loss);
+            line.to_call.push_back(from_answer * line.loss);
+            if answerer.status() != Status::Running {
+                break;
+            }
+        }
+        answerer
+    }
+
+    #[test]
+    fn an_x2_clients_marker_ends_phase_2_as_x2() {
+        for after in [0.010, 0.100, 0.400] {
+            let mut line = Line::new(0.020, 10.0, 25.0, 60.0);
+            let answerer = x2_client(&mut line, 0x4d, after, 12.0);
+            assert_eq!(answerer.status(), Status::Done, "{after} s: stuck at {}", answerer.phase());
+            let m = answerer.x2_marker().expect("no marker");
+            assert_eq!((m.high_carrier, m.first, m.second), (true, 6, 4));
+            assert!(answerer.info1a().is_none());
+        }
+    }
+
+    #[test]
+    fn a_marker_that_is_not_x2s_or_comes_too_late_is_not_taken() {
+        // 49: plain V.34's body. And 4d a second after L1.
+        for (body, after) in [(0x49, 0.050), (0x4d, 1.0)] {
+            let mut line = Line::new(0.020, 10.0, 25.0, 60.0);
+            let answerer = x2_client(&mut line, body, after, 3.0);
+            assert!(answerer.x2_marker().is_none(), "{body:02x} at {after} s taken");
+        }
+    }
+
+    #[test]
+    fn a_v34_caller_meets_an_x2_server_as_it_meets_any() {
+        let mut line = Line::new(0.010, 10.0, f64::INFINITY, 70.0);
+        let (caller, answerer) = run(&mut line, 12.0, Modem::new(Role::Call, FS), Modem::answering_x2(FS, 0.0));
+        assert_eq!(caller.status(), Status::Done, "call modem stuck at {}", caller.phase());
+        assert_eq!(answerer.status(), Status::Done, "answer modem stuck at {}", answerer.phase());
+        assert!(answerer.x2_marker().is_none());
+        assert_eq!(caller.info1a(), answerer.info1a());
+        // What it was told of this end: bit 23 and CME.
+        let far = caller.far_capabilities().unwrap();
+        assert_eq!((far.asymmetry, far.cme), (4, true));
     }
 
     #[test]
@@ -1145,6 +2040,33 @@ mod tests {
         assert_eq!(info1c.probed[5].max_rate, 14, "{info1c:?}");
     }
 
+    /// A symbol rate a failed start-up trained at is passed over the next
+    /// time, by the answer modem in INFO1a and by the call modem in INFO1c,
+    /// on a line where it would otherwise be the first choice.
+    #[test]
+    fn a_symbol_rate_that_failed_is_not_chosen_again() {
+        let mut answerer = Modem::new(Role::Answer, FS);
+        answerer.avoid_symbol_rate(SymbolRate::S3429);
+        // A retrain's phase 2 keeps the list.
+        assert!(answerer.again().avoids(SymbolRate::S3429));
+        let mut line = Line::new(0.020, 6.0, f64::INFINITY, 55.0);
+        let (caller, answerer) = run(&mut line, 12.0, Modem::new(Role::Call, FS), answerer);
+        assert_eq!(answerer.status(), Status::Done);
+        let info1a = caller.info1a().expect("no INFO1a");
+        assert_eq!(info1a.answer_to_call, SymbolRate::S3200, "{info1a:?}");
+        assert_eq!(info1a.call_to_answer, SymbolRate::S3200, "{info1a:?}");
+
+        let mut caller = Modem::new(Role::Call, FS);
+        caller.avoid_symbol_rate(SymbolRate::S3429);
+        let mut line = Line::new(0.020, 6.0, f64::INFINITY, 55.0);
+        let (caller, answerer) = run(&mut line, 12.0, caller, Modem::new(Role::Answer, FS));
+        assert_eq!(answerer.status(), Status::Done);
+        let info1c = caller.info1c().unwrap();
+        assert_eq!(info1c.probed[5].max_rate, 0, "{info1c:?}");
+        assert!(info1c.probed[4].max_rate > 0, "{info1c:?}");
+        assert_eq!(caller.info1a().expect("no INFO1a").answer_to_call, SymbolRate::S3200);
+    }
+
     #[test]
     fn a_noisy_line_is_projected_slower() {
         let mut line = Line::new(0.020, 10.0, f64::INFINITY, 32.0);
@@ -1174,7 +2096,7 @@ mod tests {
     #[test]
     fn a_v90_pair_settles_on_v90() {
         let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
-        let (digital, analogue) = run(&mut line, 12.0, Modem::v90(Pcm::Digital(server()), FS), Modem::v90(Pcm::Analogue, FS));
+        let (digital, analogue) = run(&mut line, 12.0, Modem::v90(Pcm::Digital(server()), FS, 0.0), Modem::v90(Pcm::Analogue, FS, 0.0));
         assert_eq!(digital.status(), Status::Done, "digital: {}", digital.phase());
         assert_eq!(analogue.status(), Status::Done, "analogue: {}", analogue.phase());
         // Each end heard what the other is.
@@ -1194,7 +2116,7 @@ mod tests {
     #[test]
     fn a_v34_modem_calling_a_v90_server_gets_v34() {
         let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
-        let (digital, v34) = run(&mut line, 12.0, Modem::v90(Pcm::Digital(server()), FS), Modem::new(Role::Answer, FS));
+        let (digital, v34) = run(&mut line, 12.0, Modem::v90(Pcm::Digital(server()), FS, 0.0), Modem::new(Role::Answer, FS));
         assert_eq!(digital.status(), Status::Done, "digital: {}", digital.phase());
         assert_eq!(v34.status(), Status::Done, "V.34: {}", v34.phase());
         assert!(v34.info1a().is_some());
@@ -1313,10 +2235,587 @@ mod tests {
     #[test]
     fn a_v90_analogue_modem_meeting_v34_asks_for_v34() {
         let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
-        let (v34, analogue) = run(&mut line, 12.0, Modem::new(Role::Call, FS), Modem::v90(Pcm::Analogue, FS));
+        let (v34, analogue) = run(&mut line, 12.0, Modem::new(Role::Call, FS), Modem::v90(Pcm::Analogue, FS, 0.0));
         assert_eq!(v34.status(), Status::Done);
         assert_eq!(analogue.status(), Status::Done);
         assert!(analogue.info1a().is_some() && analogue.info1a_pcm().is_none());
         assert!(v34.info1a().is_some());
+        // No INFO0d named a power for phase 2, and no level is kept.
+        assert_eq!(analogue.tone_b_level(), None);
+    }
+
+    /// 9.2.2.1.4: the analogue modem keeps how loud the digital modem's tone
+    /// B arrived, and hands it on to a retrain's phase 2.
+    #[test]
+    fn a_v90_analogue_modem_keeps_how_loud_tone_b_came() {
+        let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
+        let (digital, analogue) = run(&mut line, 12.0, Modem::v90(Pcm::Digital(server()), FS, 0.0), Modem::v90(Pcm::Analogue, FS, 0.0));
+        assert_eq!(analogue.status(), Status::Done, "analogue: {}", analogue.phase());
+        // Tone B as the digital modem sends it, held with nothing to reverse
+        // it, and as it arrives after the line's loss.
+        let mut tone_b = Modem::retrain(Role::Call, FS, Info0::default());
+        let mut sent = ToneDetector::new(Side::Call.carrier(), PRESENCE_BANDWIDTH, FS);
+        for _ in 0..(0.5 * FS) as usize {
+            sent.feed(tone_b.step(0.0));
+        }
+        let level = analogue.tone_b_level().expect("no level kept");
+        let off = 20.0 * (level / (sent.amplitude() * line.loss)).log10();
+        assert!(off.abs() < 0.5, "kept {level:.4}, {off:.2} dB from what arrived");
+        assert_eq!(digital.tone_b_level(), None);
+        // A retrain's phase 2 has it, and so does one after that, and
+        // neither measures its own over it.
+        let mut again = analogue.again().again();
+        assert_eq!(again.tone_b_level(), Some(level));
+        assert_eq!(again.presence.floor, level * TONE_B_FLOOR);
+        again.presence.peak = 0.0;
+        again.stage = Stage::AnswerRanging;
+        again.reversed_at = Some(again.now);
+        again.reversal(again.now + 1);
+        assert_eq!(again.tone_b_level(), Some(level));
+        // A V.34 modem's retrain, which kept no level, listens as it did.
+        let (_, v34) = call(&mut Line::new(0.030, 10.0, 20.0, 50.0), 12.0);
+        assert_eq!(v34.again().presence.floor, AUDIBLE);
+    }
+
+    /// Where the phase 2 of a V.90 analogue modem's retrain (9.5.2.1) takes
+    /// what it hears for tone B, in seconds from the start of `line`, if it
+    /// does: the call's first phase 2 heard tone B at `level`, if at all.
+    fn retrain_takes_tone_b(level: Option<f64>, line: impl Iterator<Item = f64>) -> Option<f64> {
+        let mut first = Modem::v90(Pcm::Analogue, FS, 0.0);
+        first.far_info0d = Some(server());
+        first.tone_b_level = level;
+        let mut retrain = first.again();
+        line.enumerate().find_map(|(i, x)| {
+            retrain.step(x);
+            (retrain.stage != Stage::AnswerAwaitTone).then(|| i as f64 / FS)
+        })
+    }
+
+    /// 150 ms of silence, by when a retrain's tone A has sounded its 50 ms,
+    /// then 1200 Hz at `amplitude` for 200 ms, then silence: tone B, or a
+    /// softphone's beep.
+    fn tone_at_1200(amplitude: f64) -> impl Iterator<Item = f64> {
+        let mut nco = dsp::Nco::new(Side::Call.carrier(), FS);
+        (0..(0.550 * FS) as usize).map(move |i| {
+            let sounding = (0.150..0.350).contains(&(i as f64 / FS));
+            if sounding { amplitude * nco.step().1 } else { 0.0 }
+        })
+    }
+
+    /// A softphone's beep 10 dB under the server's tone B came while the
+    /// analogue modem's retrain was listening for tone B, and was taken for
+    /// it and answered with tone A's reversal on a dead call
+    /// (live-1790031913, 40.06 s). With the level the call's first phase 2
+    /// heard, it is not; tone B at that level is taken at the very sample it
+    /// was before, and 3 dB under it a few milliseconds later, while the
+    /// detector rises the rest of the way. With no level, as before, the beep
+    /// is tone B.
+    #[test]
+    fn a_retrain_s_phase_2_takes_no_tone_well_under_the_first_s_for_tone_b() {
+        let level = 5339.0 / 32768.0;
+        let down = |db: f64| level * 10f64.powf(-db / 20.0);
+        assert_eq!(retrain_takes_tone_b(Some(level), tone_at_1200(down(10.0))), None, "10 dB down");
+        let before = retrain_takes_tone_b(None, tone_at_1200(level)).expect("tone B with no level was never heard");
+        assert_eq!(retrain_takes_tone_b(Some(level), tone_at_1200(level)), Some(before), "at the level");
+        let under = retrain_takes_tone_b(Some(level), tone_at_1200(down(3.0))).expect("3 dB down was never heard");
+        assert!(under - 0.150 < 0.030, "3 dB down: heard {:.1} ms in", (under - 0.150) * 1e3);
+        assert!(retrain_takes_tone_b(None, tone_at_1200(down(10.0))).is_some(), "10 dB down, with no level");
+    }
+
+    /// 9.5.1.2/V.90: a digital modem answering the analogue modem's retrain
+    /// goes on with its data until it has heard tone A for 50 ms, and only
+    /// then sends 70 ms of silence and tone B. The data fills the band, and
+    /// the 1200 Hz detector reads it at a few hundredths: above
+    /// [`AUDIBLE`], and above [`OVER_LEAKAGE`] of its neighbours, so a
+    /// retrain with no level took it for tone B and reversed tone A before
+    /// the digital modem was listening for the reversal, and waited out the
+    /// two seconds of 9.2.2.2.2/V.90 for its trouble. With the first phase 2's
+    /// level it waits for tone B itself.
+    #[test]
+    fn a_retrain_s_phase_2_does_not_take_the_digital_modem_s_data_for_tone_b() {
+        let level = 5339.0 / 32768.0;
+        let mut seed = 0x2545_f491u32;
+        let mut noise = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            (f64::from(seed) / f64::from(u32::MAX) - 0.5) * 2.0 * 1.7321
+        };
+        let mut nco = dsp::Nco::new(Side::Call.carrier(), FS);
+        // Data at a fifth of full scale, RMS, for 600 ms; silence; tone B.
+        let (data, tone) = ((0.600 * FS) as usize, (0.670 * FS) as usize);
+        let line = (0..(1.0 * FS) as usize).map(|i| match i {
+            i if i < data => 0.2 * noise(),
+            i if i < tone => 0.0,
+            _ => level * nco.step().1,
+        });
+        let at = retrain_takes_tone_b(Some(level), line).expect("tone B was never heard");
+        let after = at - tone as f64 / FS;
+        assert!(after > 0.0 && after < 0.030, "taken {:.1} ms after tone B began", after * 1e3);
+    }
+
+    /// All four sections, 384 coefficients in all and 320 in one: the top row
+    /// of each of Table 18's three capability fields.
+    fn caps() -> UpCaps {
+        UpCaps { sections: 3, ltot_code: 3, lmax_code: 3 }
+    }
+
+    /// A V.92 analogue modem that does not ask for a short phase 2, as one
+    /// with no memo of the connection does not.
+    fn analogue_v92(pcm_upstream: bool) -> Pcm {
+        Pcm::AnalogueV92(V92Wish { capable: true, short_phase2: false, pcm_upstream, up_caps: caps() })
+    }
+
+    /// A V.92 digital modem, whose `pcm_upstream` is its verdict on the
+    /// channel and so what its INFO1d bit 70 will carry.
+    fn digital_v92(pcm_upstream: bool) -> Pcm {
+        Pcm::DigitalV92(server(), V92Wish { capable: true, pcm_upstream, ..V92Wish::default() })
+    }
+
+    /// Two PCM modems against each other, the digital one on V.34's call side.
+    fn pcm_call(line: &mut Line, digital: Pcm, analogue: Pcm) -> (Modem, Modem) {
+        run(line, 12.0, Modem::v90(digital, FS, 0.0), Modem::v90(analogue, FS, 0.0))
+    }
+
+    /// 9.3: both modems indicate V.92, so INFO1d is Table 17 with bit 70 set
+    /// and the analogue modem answers with Table 18 -- "the integer 6" in both
+    /// symbol rate fields, which is eight thousand a second each way.
+    #[test]
+    fn a_v92_pair_settles_on_pcm_upstream() {
+        let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
+        let (digital, analogue) = pcm_call(&mut line, digital_v92(true), analogue_v92(true));
+        assert_eq!(digital.status(), Status::Done, "digital: {}", digital.phase());
+        assert_eq!(analogue.status(), Status::Done, "analogue: {}", analogue.phase());
+        // Each end read the other's capability bit, at its own table's place.
+        assert!(digital.both_v92() && analogue.both_v92());
+        assert!(!digital.short_phase2_agreed() && !analogue.short_phase2_agreed());
+        // Bit 70 said the channel carries PCM upstream, and it was the
+        // digital modem's verdict rather than the probe's carrier flag.
+        assert!(analogue.info1c().is_some_and(|d| d.pcm_upstream()), "INFO1d bit 70 was clear");
+        let asked = analogue.info1a_pcm_up().expect("the analogue modem sent no Table 18 INFO1a");
+        assert_eq!(digital.info1a_pcm_up(), Some(asked));
+        assert_eq!(digital.refused_info1a(), None);
+        // And no other INFO1a layout went either way.
+        assert!(analogue.info1a().is_none() && analogue.info1a_pcm().is_none());
+        assert!(digital.info1a().is_none() && digital.info1a_pcm().is_none());
+        // What Table 18 carries: this end's filter capabilities, an MD of
+        // nothing, and a codeword the digital modem can build Sd from.
+        assert_eq!((asked.sections, asked.ltot_code, asked.lmax_code), (3, 3, 3));
+        assert_eq!(asked.md_length, 0);
+        assert_eq!(asked.uinfo, 79, "the same ceiling V.90 works to, for the same INFO0d");
+        assert!(asked.uinfo_is_sendable());
+    }
+
+    /// V.90 9.2.2.2.1: the digital modem's INFO0d is lost to a hole in the
+    /// line (a live call had two, 8.7 and 2.6 ms, right across it), but our
+    /// INFO0a got through and the digital modem goes on to tone B. The
+    /// analogue modem has to answer that tone with INFO0a again, which has the
+    /// digital modem repeat INFO0d; holding tone A and waiting left the call
+    /// in INFO0 until phase 2's twenty seconds were up.
+    #[test]
+    fn a_lost_info0d_is_recovered_by_repeating_info0a() {
+        let mut line = Line::new(0.030, 10.0, f64::INFINITY, 60.0);
+        let mut digital = Modem::v90(digital_v92(true), FS, 0.0);
+        let mut analogue = Modem::v90(analogue_v92(true), FS, 0.0);
+        // INFO0d is on the line at the analogue end from 30 ms to about 150.
+        let hole = (0.060 * FS) as usize..(0.080 * FS) as usize;
+        for n in 0..(12.0 * FS) as usize {
+            let at_digital = line.to_call.pop_front().unwrap() + line.noise();
+            let mut at_analogue = line.to_answer.pop_front().unwrap() + line.noise();
+            if hole.contains(&n) {
+                at_analogue = 0.0;
+            }
+            let from_digital = digital.step(at_digital);
+            let from_analogue = analogue.step(at_analogue);
+            line.to_answer.push_back(from_digital * line.loss);
+            line.to_call.push_back(from_analogue * line.loss);
+            if digital.status() != Status::Running && analogue.status() != Status::Running {
+                break;
+            }
+        }
+        assert_eq!(analogue.status(), Status::Done, "analogue: {}", analogue.phase());
+        assert_eq!(digital.status(), Status::Done, "digital: {}", digital.phase());
+        assert!(analogue.far_info0d().is_some(), "INFO0d was never read");
+        assert!(analogue.recoveries() > 0, "the hole missed INFO0d, so this tested nothing");
+        assert!(analogue.info1a_pcm_up().is_some());
+    }
+
+    /// 9.3: "If either modem does not indicate V.92 capability, then the
+    /// digital modem and analogue modem shall use the information bits
+    /// defined in 8.2.3.2 of ITU-T V.90" -- so a V.92 analogue modem that
+    /// meets a V.90 server gets V.90's Table 10, and bit 70 of the INFO1d it
+    /// reads is a carrier flag it must not take for a permission.
+    #[test]
+    fn a_v92_analogue_modem_meets_a_v90_digital_modem_with_table_10() {
+        let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
+        let (digital, analogue) = pcm_call(&mut line, Pcm::Digital(server()), analogue_v92(true));
+        assert_eq!(digital.status(), Status::Done, "digital: {}", digital.phase());
+        assert_eq!(analogue.status(), Status::Done, "analogue: {}", analogue.phase());
+        assert!(!analogue.both_v92() && !digital.both_v92());
+        assert_eq!(analogue.far_pcm_flags(), PcmFlags::default());
+        assert!(analogue.info1a_pcm_up().is_none(), "Table 18 went to a modem that never offered V.92");
+        let asked = analogue.info1a_pcm().expect("no Table 10 INFO1a");
+        assert_eq!(digital.info1a_pcm(), Some(asked));
+    }
+
+    /// The mirror image: a V.92 server and a V.90 analogue modem, which sends
+    /// zeros in INFO0a bits 26:27 because V.90 reserves them.
+    #[test]
+    fn a_v90_analogue_modem_meets_a_v92_digital_modem_with_table_10() {
+        let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
+        let (digital, analogue) = pcm_call(&mut line, digital_v92(true), Pcm::Analogue);
+        assert_eq!(digital.status(), Status::Done, "digital: {}", digital.phase());
+        assert_eq!(analogue.status(), Status::Done, "analogue: {}", analogue.phase());
+        assert!(!digital.both_v92());
+        assert_eq!(digital.far_pcm_flags(), PcmFlags::default());
+        assert!(digital.info1a_pcm().is_some() && digital.info1a_pcm_up().is_none());
+        // The INFO1d it sent kept bit 70 as V.90's 3429 high-carrier flag: the
+        // verdict is written over it only when both ends are V.92.
+        assert!(!digital.sent_pcm_upstream);
+    }
+
+    /// 8.4.1: "The analogue modem shall not use this sequence if bit 70 of
+    /// INFO1d is clear." Both modems are V.92 here, but the digital one says
+    /// the channel will not carry PCM upstream, so Table 10 is what goes.
+    #[test]
+    fn bit_70_clear_means_no_table_18() {
+        let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
+        let (digital, analogue) = pcm_call(&mut line, digital_v92(false), analogue_v92(true));
+        assert_eq!(digital.status(), Status::Done, "digital: {}", digital.phase());
+        assert_eq!(analogue.status(), Status::Done, "analogue: {}", analogue.phase());
+        assert!(digital.both_v92() && analogue.both_v92(), "the flags crossed all the same");
+        assert!(!analogue.info1c().expect("no INFO1d").pcm_upstream(), "bit 70 was set");
+        assert!(analogue.info1a_pcm_up().is_none(), "Table 18 went with bit 70 clear");
+        assert!(analogue.info1a_pcm().is_some() && digital.info1a_pcm().is_some());
+    }
+
+    /// `+PIG=1`, "PCM upstream ignore": the channel would carry it and the far
+    /// end offers it, but this end does not want it. 9.3 makes Table 18 a
+    /// "may", so V.90 data mode is the answer.
+    #[test]
+    fn pig_off_means_no_table_18() {
+        let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
+        let (digital, analogue) = pcm_call(&mut line, digital_v92(true), analogue_v92(false));
+        assert_eq!(analogue.status(), Status::Done, "analogue: {}", analogue.phase());
+        assert!(analogue.info1c().is_some_and(|d| d.pcm_upstream()), "bit 70 should still be set");
+        assert!(analogue.info1a_pcm_up().is_none());
+        assert!(digital.info1a_pcm().is_some(), "the server took Table 10");
+    }
+
+    /// The fallback ladder's upper rung: PCM upstream would not hold, so the
+    /// next INFO1a asks for V.90 data mode instead -- and PCM downstream is
+    /// kept, which is what makes this a rung of its own rather than
+    /// `decline_pcm`.
+    #[test]
+    fn declining_pcm_upstream_gives_table_10_next_time() {
+        let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
+        let (digital, mut analogue) = pcm_call(&mut line, digital_v92(true), analogue_v92(true));
+        assert!(analogue.info1a_pcm_up().is_some(), "no Table 18 the first time round");
+
+        analogue.decline_pcm_upstream();
+        let mut again = Line::new(0.030, 10.0, 20.0, 50.0);
+        let (digital, analogue) = run(&mut again, 12.0, digital.again(), analogue.again());
+        assert_eq!(digital.status(), Status::Done, "digital: {}", digital.phase());
+        assert_eq!(analogue.status(), Status::Done, "analogue: {}", analogue.phase());
+        assert!(analogue.info1a_pcm_up().is_none(), "Table 18 again after declining it");
+        assert!(analogue.info1a_pcm().is_some() && digital.info1a_pcm().is_some());
+        // The offer is still on the table; only this end's answer changed.
+        assert!(analogue.both_v92());
+        assert!(analogue.info1c().is_some_and(|d| d.pcm_upstream()));
+    }
+
+    /// 9.3: "any subsequent retrains shall use Phase 2 of ITU-T V.92", and
+    /// 11.5 does not repeat INFO0 -- so the flags of the one exchange there
+    /// was have to survive, or the retrain would drop to V.90's layouts and
+    /// the two ends would disagree about what bit 70 means. 9.7's four
+    /// re-entry points are all in the full procedure, so a pair that had
+    /// agreed a short phase 2 stops agreeing one.
+    #[test]
+    fn a_retrain_between_v92_modems_keeps_the_flags_and_runs_full_phase_2() {
+        let short = |pcm: Pcm| match pcm {
+            Pcm::AnalogueV92(w) => Pcm::AnalogueV92(V92Wish { short_phase2: true, ..w }),
+            Pcm::DigitalV92(d, w) => Pcm::DigitalV92(d, V92Wish { short_phase2: true, ..w }),
+            other => other,
+        };
+        let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
+        let (digital, analogue) =
+            pcm_call(&mut line, short(digital_v92(true)), short(analogue_v92(true)));
+        assert!(digital.short_phase2_agreed() && analogue.short_phase2_agreed(), "all four bits are set");
+
+        let (before_d, before_a) = (digital.far_pcm_flags(), analogue.far_pcm_flags());
+        let mut again = Line::new(0.030, 10.0, 20.0, 50.0);
+        let (digital, analogue) = run(&mut again, 12.0, digital.again(), analogue.again());
+        assert_eq!(digital.status(), Status::Done, "digital: {}", digital.phase());
+        assert_eq!(analogue.status(), Status::Done, "analogue: {}", analogue.phase());
+        // No INFO0 crossed this time, and the flags are the ones that did.
+        assert_eq!(digital.far_info0_count, 1);
+        assert_eq!((digital.far_pcm_flags(), analogue.far_pcm_flags()), (before_d, before_a));
+        assert!(digital.both_v92() && analogue.both_v92());
+        assert!(!digital.short_phase2_agreed() && !analogue.short_phase2_agreed(), "9.7 re-enters full phase 2");
+        // Which is to say the V.92 layouts are still in use: a full phase 2
+        // with its probing, an INFO1d with bit 70, and Table 18 again.
+        assert!(analogue.reading().is_some(), "a full phase 2 probes");
+        assert!(analogue.info1a_pcm_up().is_some() && digital.info1a_pcm_up().is_some());
+    }
+
+    fn asking_short(pcm: Pcm) -> Pcm {
+        match pcm {
+            Pcm::AnalogueV92(w) => Pcm::AnalogueV92(V92Wish { short_phase2: true, ..w }),
+            Pcm::DigitalV92(d, w) => Pcm::DigitalV92(d, V92Wish { short_phase2: true, ..w }),
+            other => other,
+        }
+    }
+
+    /// 9.4: all four bits set, so INFO0, one reversal each way and INFO1a --
+    /// no probe and no INFO1d -- and the digital modem has the round trip.
+    #[test]
+    fn a_v92_pair_that_both_ask_runs_the_short_phase_2() {
+        for one_way in [0.005, 0.030, 0.750] {
+            let mut line = Line::new(one_way, 10.0, 20.0, 50.0);
+            // INFO0 is about 0.1 s, the tones another 0.1 s and INFO1a 0.12 s:
+            // a second and four trips of the line is ample, and a fifth of
+            // what the full procedure takes.
+            let seconds = 1.0 + 4.0 * one_way;
+            let (digital, analogue) = run(
+                &mut line,
+                seconds,
+                Modem::v90(asking_short(digital_v92(true)), FS, 0.0),
+                Modem::v90(asking_short(analogue_v92(true)), FS, 0.0),
+            );
+            assert_eq!(digital.status(), Status::Done, "{one_way}: digital: {}", digital.phase());
+            assert_eq!(analogue.status(), Status::Done, "{one_way}: analogue: {}", analogue.phase());
+            assert!(digital.was_short() && analogue.was_short());
+            assert!(digital.reading().is_none() && analogue.reading().is_none(), "a short phase 2 does not probe");
+            assert!(analogue.info1c().is_none(), "nor is there an INFO1d");
+            let asked = analogue.info1a_pcm_up().expect("no Table 18 INFO1a");
+            assert_eq!(digital.info1a_pcm_up(), Some(asked));
+            // 9.4.1.1.4: RTDEd, to a millisecond or two. The analogue modem
+            // measures none, and brings its own from the call before.
+            let measured = digital.round_trip().expect("the digital modem has the round trip");
+            assert!((measured - 2.0 * one_way).abs() < 0.003, "{one_way}: measured {measured}");
+            assert_eq!(analogue.round_trip(), None);
+            assert_eq!(digital.recoveries() + analogue.recoveries(), 0);
+        }
+    }
+
+    /// "If both ... indicate ... the desire to shorten Phase 2": one end
+    /// asking is not both, and the procedure is the full one.
+    #[test]
+    fn a_short_phase_2_only_one_end_asks_for_is_the_full_one() {
+        for (digital, analogue) in [
+            (asking_short(digital_v92(true)), analogue_v92(true)),
+            (digital_v92(true), asking_short(analogue_v92(true))),
+        ] {
+            let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
+            let (digital, analogue) = pcm_call(&mut line, digital, analogue);
+            assert_eq!((digital.status(), analogue.status()), (Status::Done, Status::Done));
+            assert!(!digital.was_short() && !analogue.was_short());
+            assert!(analogue.reading().is_some(), "a full phase 2 probes");
+            assert!(analogue.info1a_pcm_up().is_some() && digital.info1a_pcm_up().is_some());
+        }
+    }
+
+    /// 9.4.1.2.2: the digital modem's reversal goes unanswered -- the line
+    /// to the analogue modem is dead for it -- so after 2500 ms it goes to
+    /// the full procedure; the analogue modem, with no reversal in its own
+    /// 2500 ms, asks for a retrain (9.4.2.2.2).
+    #[test]
+    fn a_short_phase_2_whose_reversal_is_lost_is_left_for_the_full_one() {
+        let mut digital = Modem::v90(asking_short(digital_v92(true)), FS, 0.0);
+        let mut analogue = Modem::v90(asking_short(analogue_v92(true)), FS, 0.0);
+        let (mut to_digital, mut to_analogue) = (0.0, 0.0);
+        for _ in 0..(4.0 * FS) as usize {
+            let from_digital = digital.step(to_digital);
+            let from_analogue = analogue.step(to_analogue);
+            // Tone B reaches the analogue modem until the digital modem is
+            // about to reverse it, and nothing does after.
+            let cut = matches!(digital.stage, Stage::CallShortRanging | Stage::CallFirstReversal);
+            to_analogue = if cut { 0.0 } else { from_digital };
+            to_digital = from_analogue;
+        }
+        assert_eq!(digital.stage, Stage::CallFirstReversal, "the full procedure's wait for tone A's reversal");
+        assert!(!digital.short_phase2_agreed() && digital.recoveries() == 1);
+        assert_eq!(analogue.status(), Status::Failed("no tone B reversal in short phase 2"));
+        assert!(analogue.asks_for_retrain());
+    }
+
+    /// After a quick connect: a far end that sends nothing -- bar the step of
+    /// a full-scale codeword the live server in live-1795315036 left as it
+    /// went quiet -- is given up on when the time runs out, and not at
+    /// [`GIVE_UP`]; it is not a retrain, which would need its INFO0d.
+    #[test]
+    fn a_far_end_that_says_nothing_after_a_quick_connect_is_given_up_on() {
+        let lead_in = 0.075;
+        let mut analogue = Modem::v90(asking_short(analogue_v92(true)), FS, lead_in);
+        analogue.expect_far_end_within(3.4);
+        let mut stopped = None;
+        for n in 0..(GIVE_UP * FS) as usize {
+            // Ten milliseconds of the most negative codeword, early on.
+            let heard = if (1000..1160).contains(&n) { -0.98 } else { 0.0 };
+            analogue.step(heard);
+            if analogue.status() != Status::Running {
+                stopped = Some(n as f64 / FS);
+                break;
+            }
+        }
+        let at = stopped.expect("phase 2 never gave up");
+        assert!((lead_in + 3.4..lead_in + 3.5).contains(&at), "gave up at {at:.3} s");
+        assert_eq!(analogue.status(), Status::Failed(FAR_END_SILENT));
+        assert!(analogue.far_end_silent() && !analogue.asks_for_retrain());
+    }
+
+    /// The same deadline does nothing to a far end that is there: a short
+    /// phase 2 over a long round trip finishes as ever.
+    #[test]
+    fn the_quick_connect_deadline_leaves_a_far_end_that_answers_alone() {
+        let mut line = Line::new(0.750, 10.0, 20.0, 50.0);
+        let digital = Modem::v90(asking_short(digital_v92(true)), FS, 0.0);
+        let mut analogue = Modem::v90(asking_short(analogue_v92(true)), FS, 0.0);
+        analogue.expect_far_end_within(2.5 + 1.5);
+        let (digital, analogue) = run(&mut line, 12.0, digital, analogue);
+        assert_eq!(digital.status(), Status::Done, "digital: {}", digital.phase());
+        assert_eq!(analogue.status(), Status::Done, "analogue: {}", analogue.phase());
+        assert!(analogue.was_short() && !analogue.far_end_silent());
+    }
+
+    /// P2P P1 and P2S N-3: V.34's Table 14 has the transmit clock source in
+    /// bits 26:27, so those bits are read as V.92's flags only in a PCM phase
+    /// 2, never in V.34's own.
+    ///
+    /// The other direction cannot be defended from inside phase 2. A V.92
+    /// digital modem reading a V.34 modem's INFO0a has nothing in the frame to
+    /// tell "V.92 capability" from "synchronized to the receive timing", and
+    /// 9.3 offers no second signal. What that costs is bounded and is pinned
+    /// below: the digital modem believes the bit, writes its PCM-upstream
+    /// verdict into INFO1d bit 70 where V.90 would have put the 3429 carrier
+    /// flag, and the call still lands on V.34, because a V.34 modem answers
+    /// with Table 11 whatever bit 70 said.
+    #[test]
+    fn a_v34_info0_with_a_clock_of_1_is_not_taken_for_v92() {
+        let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
+        let mut v34 = Modem::new(Role::Answer, FS);
+        // "Transmit clock source: synchronized to the receive timing", which
+        // sits in the two bits V.92's INFO0a uses.
+        v34.ours.clock = 1;
+        // The constructor queued an INFO0 with the clock that was there; this
+        // test means the other one.
+        v34.tx.stop();
+        let bits = v34.info0_bits();
+        assert!(bits[26] && !bits[27], "the clock should still go out as a clock");
+        v34.tx.send(&bits);
+        let (digital, v34) = run(&mut line, 12.0, Modem::v90(digital_v92(true), FS, 0.0), v34);
+        assert_eq!(digital.status(), Status::Done, "digital: {}", digital.phase());
+        assert_eq!(v34.status(), Status::Done, "V.34: {}", v34.phase());
+        // The V.34 end reads no flags at all: it has no PCM role.
+        assert!(!v34.both_v92());
+        assert_eq!(v34.far_pcm_flags(), PcmFlags::default());
+        // And it could not: an INFO0d's bits 26:27 are parked above V.34's own
+        // two on the way in, so they are not a clock source there either.
+        assert_eq!(v34.far_capabilities().map(|f| f.clock & 3), Some(0), "an INFO0d read as a clock");
+        // The digital end cannot tell, and does believe it -- and nothing
+        // comes of it, because the far end asked for V.34.
+        assert!(digital.both_v92(), "no frame bit could say otherwise");
+        assert!(digital.info1a().is_some(), "the server did not take V.34's INFO1a");
+        assert!(digital.info1a_pcm_up().is_none() && digital.info1a_pcm().is_none());
+    }
+
+    /// 9.3.1: "If both modems indicate V.92 capability as well as indicating
+    /// LAPM protocol in ITU-T V.8 or ITU-T V.8 bis, then the V.42 ODP/ADP
+    /// exchange shall be bypassed." Phase 2 knows the first half; the second
+    /// is the V.8 menus, and both are needed.
+    #[test]
+    fn the_lapm_bypass_needs_both_v92_and_both_prot0() {
+        let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
+        let (digital, analogue) = pcm_call(&mut line, digital_v92(true), analogue_v92(true));
+        for (who, m) in [("digital", &digital), ("analogue", &analogue)] {
+            assert!(m.lapm_bypass_allowed(true), "{who} would not bypass with both halves");
+            assert!(!m.lapm_bypass_allowed(false), "{who} bypassed without LAPM in prot0");
+        }
+        // A V.90 pair never bypasses, however the menus read.
+        let mut line = Line::new(0.030, 10.0, 20.0, 50.0);
+        let (digital, analogue) = pcm_call(&mut line, Pcm::Digital(server()), Pcm::Analogue);
+        assert!(!digital.lapm_bypass_allowed(true) && !analogue.lapm_bypass_allowed(true));
+    }
+
+    /// P2P P15: a Table 18 INFO1a is one the digital modem may act on only if
+    /// both modems indicated V.92 (9.3) and the INFO1d it sent had bit 70 set
+    /// (8.4.1). A frame whose CRC checked but whose layout fails either test
+    /// is counted as not received, which leaves the recovery of 9.2.1.2.6 to
+    /// run rather than ending the call on a frame the far end may yet repeat.
+    #[test]
+    fn a_table_18_info1a_this_end_did_not_invite_is_counted_as_not_received() {
+        let asked = Info1aPcmUp { sections: 3, ltot_code: 0, lmax_code: 0, md_length: 0, uinfo: 90 };
+
+        // A V.92 pair whose INFO1d said the channel will not carry PCM
+        // upstream, and an analogue modem that asks for it regardless.
+        let mut m = Modem::v90(digital_v92(false), FS, 0.0);
+        m.far_flags = PcmFlags { v92: true, short_phase2: false };
+        m.stage = Stage::CallInfo1;
+        m.heard(Info::Info1aPcmUp(asked));
+        assert_eq!(m.status(), Status::Running, "the frame was acted on");
+        assert!(m.info1a_pcm_up().is_none());
+        assert_eq!(m.refused_info1a(), Some("a table 18 info1a after an info1d that cleared bit 70"));
+
+        // And the same frame from a far end that never indicated V.92, with
+        // bit 70 set, so that only the capability test can refuse it.
+        let mut m = Modem::v90(digital_v92(true), FS, 0.0);
+        m.stage = Stage::CallInfo1;
+        m.sent_pcm_upstream = true;
+        m.heard(Info::Info1aPcmUp(asked));
+        assert_eq!(m.status(), Status::Running);
+        assert!(m.info1a_pcm_up().is_none());
+        assert_eq!(m.refused_info1a(), Some("a table 18 info1a from a far end that did not indicate v.92"));
+
+        // With both, it is the INFO1a this phase 2 was waiting for.
+        let mut m = Modem::v90(digital_v92(true), FS, 0.0);
+        m.far_flags = PcmFlags { v92: true, short_phase2: false };
+        m.stage = Stage::CallInfo1;
+        m.sent_pcm_upstream = true;
+        m.heard(Info::Info1aPcmUp(asked));
+        assert_eq!(m.status(), Status::Done);
+        assert_eq!(m.info1a_pcm_up(), Some(asked));
+        assert_eq!(m.refused_info1a(), None);
+    }
+
+    /// Tables 15 and 16/V.92 put the same two flags the other way round, which
+    /// is the one trap in the clause: INFO0d bit 26 asks for a short phase 2
+    /// and bit 27 says V.92, and INFO0a has them swapped.
+    #[test]
+    fn the_info0_flags_go_out_where_each_table_puts_them() {
+        use crate::v34::info::{INFO0_BITS, INFO0D_BITS};
+        let asking = V92Wish { capable: true, short_phase2: true, pcm_upstream: true, up_caps: caps() };
+        let capable = V92Wish { short_phase2: false, ..asking };
+
+        let bits = Modem::v90(Pcm::DigitalV92(server(), capable), FS, 0.0).info0_bits();
+        assert_eq!(bits.len(), INFO0D_BITS);
+        assert!(!bits[26] && bits[27], "INFO0d: 26 is the request, 27 the capability");
+        let bits = Modem::v90(Pcm::DigitalV92(server(), asking), FS, 0.0).info0_bits();
+        assert!(bits[26] && bits[27]);
+        assert_eq!(Info0d::from_bits(&bits).map(|d| d.pcm_flags()), Some(asking.flags()));
+
+        let bits = Modem::v90(Pcm::AnalogueV92(capable), FS, 0.0).info0_bits();
+        assert_eq!(bits.len(), INFO0_BITS);
+        assert!(bits[26] && !bits[27], "INFO0a: 26 is the capability, 27 the request");
+        let bits = Modem::v90(Pcm::AnalogueV92(asking), FS, 0.0).info0_bits();
+        assert!(bits[26] && bits[27]);
+        assert_eq!(Info0::from_bits(&bits).map(|a| a.pcm_flags()), Some(asking.flags()));
+    }
+
+    /// The V.90 constructors mean "not V.92", and mean it on the wire: a pair
+    /// that offers nothing puts the same bits out as it did before V.92 was
+    /// written, which is what keeps every V.90 call unchanged.
+    #[test]
+    fn the_v90_constructors_still_send_what_they_always_sent() {
+        let nothing = V92Wish::default();
+        for (v90, v92) in [
+            (Pcm::Analogue, Pcm::AnalogueV92(nothing)),
+            (Pcm::Digital(server()), Pcm::DigitalV92(server(), nothing)),
+        ] {
+            let was = Modem::v90(v90, FS, 0.0).info0_bits();
+            assert_eq!(was, Modem::v90(v92, FS, 0.0).info0_bits(), "{v90:?}");
+            assert!(!was[26] && !was[27], "{v90:?}: V.90 sets both of these to 0");
+            assert_eq!(v90.wish(), nothing);
+            assert_eq!(v90.role(), v92.role());
+        }
     }
 }

@@ -1,5 +1,8 @@
 # V.92 implementation plan
 
+> **Handing over?** Read [`handoff.md`](handoff.md) first: where the work stands, what to do next, the
+> nine things that cost the most to find, and what each of the three simulated peers actually does.
+
 ITU-T V.92 (11/2000), "Enhancements to Recommendation V.90", built in BinModem from the Recommendation and
 real captures only. 62 work packages in 18 waves. Both ends of every feature are ours, so every feature is
 proved call-to-call over `v90::network::Network` before it is ever offered to a live line.
@@ -278,7 +281,7 @@ not listed must not be touched.
 
 ### Wave 1: independent foundations
 
-#### V92-01: Scaffold the `v92` module, its shared numbers, `Parameters` and `Deadlines` (S)
+#### V92-01: Scaffold the `v92` module, its shared numbers, `Parameters` and `Deadlines` (L)
 
 - **Depends on:** none.
 - **Clauses:** 1 (items c, e); 3.5; 3.6; 3.8; 5; 6.1; 6.2; 6.4 (Figure 1); clause 8 preamble (bit order);
@@ -304,8 +307,13 @@ not listed must not be touched.
   - the start-up watchdog, 20 s + 6 RTD;
   - signed and unsigned `Qa.b` helpers with the section 4 reading;
   - `Parameters` (AD-3), with `Debug`, `Clone` and a `fits()` self-check;
-  - `Deadlines`: named `Option<(u64, &'static str)>` slots with `arm`, `clear` and `expired(now)`, which
-    reports the earliest slot that has passed;
+  - `Deadlines`: slots of `pub type Deadline = (u64, &'static str)` held by name, with `arm`, `clear`,
+    `clear_all`, `armed` and `expired(now)`, which reports the earliest slot that has passed. The name is
+    a `&'static str`, not an enum variant, because a later package must be able to arm a timer this module
+    has never heard of without editing `mod.rs`, which its own file list forbids - the same reason
+    `PeerSuv`, `PeerCp` and `SequenceKind` are declared here. The cost is that a name is checked at run
+    time, so a package that arms `"TR3"` and clears `"Tr3"` leaves the timer running; whoever writes the
+    second of a pair asserts with `armed()`;
   - the plain flag structs and the sequence-kind enum that the side-agnostic `Exchange` of V92-14 is driven
     by, declared **here** because `exchange.rs` may not edit `mod.rs` and the plan's own rule forbids
     touching a file outside a package's list: `PeerSuv { ack, silence, wait_for_cp }`, `PeerCp { ack }` and
@@ -317,7 +325,10 @@ not listed must not be touched.
   - `the_upstream_ladder_runs_from_24000_to_48000_in_steps_of_8000_over_6` - 19 rungs, drn 1 is 24 000,
     drn 19 is 48 000.
   - `a_data_frame_holds_2_drn_plus_34_bits` - K runs 36..=72, always even, and
-    `up_bits(drn) * 8000 == up_rate(drn) * 12` for every drn.
+    `up_bits(drn) * 8000 / 12 == up_rate(drn)` for every drn, plus the exact
+    `up_bits(drn) * 8000 == up_rate(drn) * 12` at the seven rungs where 3 divides drn + 17. The exact form
+    does not hold at the other twelve, because `up_rate` floors as `v90::rate_for` does: at drn 2,
+    38 x 8000 is 304 000 and 25 333 x 12 is 303 996.
   - `a_twelve_symbol_frame_holds_two_constellation_frames_and_three_trellis_frames` - j = i mod 6,
     k = i mod 4.
   - `the_q_formats_read_as_the_printed_digit_patterns` - 4G = 0x4000 gives G = 1/16; signed Q1.6 0x80 is
@@ -326,27 +337,34 @@ not listed must not be touched.
   - `the_filter_limits_decode_from_info1a` - codes 0..3 give the tabled Ltot and Lmax.
   - `deadlines_report_the_earliest_that_has_passed`.
 
-#### V92-02: The V.92 INFO sequences and the MH frame (M)
+#### V92-02: The V.92 INFO sequences and the MH frame (L)
 
 - **Depends on:** none.
 - **Clauses:** 8.4, 8.4.1 (Tables 15-19); 8.9.2 (Tables 32, 33); 9.3; 9.4; V.34 10.1.2.3.1-10.1.2.3.2;
   V.90 8.2.3.2 (Tables 7-11).
 - **Files:** `crates/datapump/src/v34/info.rs`; `crates/datapump/src/v34/dpsk.rs`;
-  `crates/datapump/src/v34/phase2.rs` (new match arms only); `crates/datapump/tests/v90_vector.rs` and
-  `crates/datapump/tests/v34_vector.rs` (new match arms only).
+  `crates/datapump/src/v34/phase2.rs` (new match arms only - reserved, but as built none were needed);
+  `crates/datapump/tests/v90_vector.rs` and `crates/datapump/tests/v34_vector.rs` (new match arms only).
 - **Digests:** P2S (5-10, 15, 16.2); P2P (2, 3); MOH (1.2); CD (6); CT (6, 9.1).
 - **Description:**
-  - **INFO0d** gains `v92` (bit 27) and `short_phase2` (bit 26). With both false the encoding is
-    bit-identical to today's, which is the regression test.
+  - **INFO0d** gains `v92` (bit 27) and `short_phase2` (bit 26), reached through `Info0d::pcm_flags()` and
+    `set_pcm_flags` rather than as new fields on `Info0d` (section 14, "V92-02 as built"). With both false
+    the encoding is bit-identical to today's, which is the regression test.
   - **INFO0a** gains a V.92 view with the two bits **the other way round** (bit 26 = V.92, bit 27 = short
-    request), exposed as `Info0::pcm_flags()` and kept off `Info0.clock`, which is V.34's transmit-clock
-    field. Only PCM roles read it (P2S N-3).
+    request), exposed as `Info0::pcm_flags()`. Those two bits *are* V.34's transmit-clock field, which
+    Table 16/V.92 has no room for beside them, so they travel in `Info0.clock` and only PCM roles read them
+    (P2S N-3). INFO0d's pair travels above them in the same field, because V.90's Table 7 gives that
+    sequence no clock at all and a clock value must never go out as a V.92 capability.
   - **INFO1d**: `Info1c::pcm_upstream()` for bit 70, a way to write it on purpose, and the 3429 result read
     as 8 bits (71:74 pre-emphasis, 75:78 rate) (N-4).
   - **Table 18**: new `Info1aPcmUp { sections, ltot_code, lmax_code, md_length, uinfo }` with bits
     34:36 = 6 and 37:39 = 6, sending bits 32:33 = 0 and 40:49 all ones; UINFO must be 67..111 (N-24); the
-    receiver ignores 32:33 and 40:49. Today `Info1aPcm::from_bits` rejects exactly this frame.
-  - **Table 19**: `Info1aPcm.high_carrier` (bit 33), written only for Table 19; Table 10 writes 0.
+    receiver ignores 32:33 and 40:49. Today `Info1aPcm::from_bits` rejects exactly this frame. The end that
+    *chooses* U_INFO is held to 67..111; a received value is taken whatever it names.
+  - **Table 19**: its own `Info1aV34Up { v90: Info1aPcm, high_carrier }` for bit 33, read only by
+    `Receiver::in_short_phase2()`. Table 10/V.90 reserves bit 33 - "not interpreted by the digital modem" -
+    and Table 19 is used "during short Phase 2" alone (8.4.1), so the phase decides which reading applies
+    and the frame never does (section 14, "V92-02 as built").
   - **Classification**: the 70-bit INFO1a is classified by (37:39, 34:36) as in P2S 10.4; invalid
     combinations are dropped rather than guessed.
   - **MH**: new `Mh { indication, information }` on Table 32 (indication and information nibbles as
@@ -356,7 +374,8 @@ not listed must not be touched.
     `T1::Reserved(code)`, never as a duration**, so nothing downstream can mistake it for a grant. The
     Recommendation says nothing about reserved T1 codes (MOH Q11); section 4 fixes the reading and V92-25
     acts on it by treating such an MHack as a refusal.
-  - **dpsk**: `Receiver::with_mh()` opts either side in to 40-bit frames; the default is unchanged.
+  - **dpsk**: `Receiver::with_mh()` opts either side in to 40-bit frames and `Receiver::in_short_phase2()`
+    into Table 19's reading of bit 33; the default is unchanged.
 - **Tests:**
   - `a_v92_info0d_says_so_in_bit_27_and_asks_for_short_phase_2_in_bit_26` - the P2S vector (CRC 0xDB49) and
     the P2P vector (0xA8A9) round-trip bit-exact.
@@ -376,6 +395,11 @@ not listed must not be touched.
     `T1::Reserved`, the thirteen defined codes decode as their printed durations (10 s through "no limit"),
     and no reserved code yields a duration or an unbounded hold.
   - `mh_frames_are_heard_back_to_back_only_when_asked_for`.
+  - `bit_33_is_read_only_where_short_phase_2_gives_it_a_meaning` - a Table 10 INFO1a that arrives with the
+    reserved bit 33 set is still a Table 10 INFO1a to every receiver but a short phase 2's.
+  - `the_u_info_we_choose_is_one_table_18_allows` - 67..111 on the sending side, anything on the receiving.
+  - `an_info0d_never_claims_v92_because_of_a_v34_transmit_clock`.
+  - `a_timeout_table_33_cannot_name_is_granted_short_rather_than_reserved`.
   - Existing `info.rs` and `dpsk.rs` tests, `v90_vector` and `v34_vector` pass.
 
 #### V92-03: V.92 CP and descriptor layouts, and the V.92 finders, in `v90/sequences.rs` (M)
@@ -394,13 +418,20 @@ not listed must not be touched.
     reserved; no silence bit and no upstream rate mask, so 36:48 are reserved too. **The V.92 layout
     writes zeros into bits 26:30 and 36:48 on transmission and ignores them on reception**, which is what
     Table 23 asks for ("set to 0", not interpreted) - so `silence` reads back as false and
-    `upstream_rates` as `None` whatever arrives, and a far end using a future ITU extension, or leaving
+    `Cp::upstream_rates` as 0 whatever arrives. That field stays V.90's `u16` rather than becoming an
+    `Option`, because `v90/analogue.rs` and `v90/digital.rs` assign and read it and are not in this
+    package's Files line. A far end using a future ITU extension, or leaving
     stale bits set, still connects. Only bit 18 and the type field at 19:20 are dispatch fields and may be
     refused. Bits 31 onward as V.90; one fill bit, then zeros to the pad unit.
     `cp_length` and the mask code are shared.
-  - **Descriptor.** `Descriptor.upstream_rates: Option<u32>` (19 bits); `Some` selects the V.92 layout:
-    two mask words, then a start bit, the CRC and one fill bit at 221+P..238+P, then zeros to a multiple of
-    12 bits, giving `descriptor_length` + 2 blocks.
+  - **Descriptor.** The 19-bit upstream rate mask as an `Option<u32>` carried *beside* the descriptor,
+    not as a field in it: `Descriptor::to_bits_in(upstream_rates)`,
+    `Descriptor::from_bits_in(layout, bits) -> Option<(Descriptor, Option<u32>)>`, and
+    `DescriptorFinder::upstream_rates()` as an accessor beside `feed` (AD-5's shape). `Some` selects the
+    V.92 layout: two mask words, then a start bit, the CRC and one fill bit at 221+P..238+P, then zeros to
+    a multiple of 12 bits, giving `descriptor_length` + 2 blocks. A field would read better, but
+    `Descriptor` derives no `Default` and is built by struct literal in `v90/dil.rs` and
+    `tests/dil_sounds.rs`, neither of which is in this package's Files line (section 14, last note).
   - **Guard.** A V.92 reader must dispatch on bit 47 before anything else, or a Jp reads as a Jd full of
     nonsense rates with `sixteen_in_training` set. Add an acceptance predicate parameter so `v92` can
     require bit 47 = 0 for Jd and 1 for Jp. V.90's own `Jd::from_bits` keeps today's behaviour.
@@ -435,7 +466,11 @@ not listed must not be touched.
 - **Digests:** CD (9, 9.2 N1-N11); CT (2.4, 5.2, 7).
 - **Description:** every default stays exactly as it is, so the V.90 tests are bit-identical.
   - Tabulate the upstream windowed-sinc kernel per fractional phase instead of recomputing sin/cos per tap
-    per tick. This is the CI-runtime lever.
+    per tick. This is the CI-runtime lever **while the two clocks agree**, which is every test but the
+    skewed ones: the table is keyed on the exact fraction, so it is built once for a call at zero skew
+    (39 ms of a ten-second call against 268 ms per tap) and rebuilt every sample under a skew, where it
+    costs what it replaced. Rounding the fraction to a grid to get the lever back there is **refused**;
+    see section 14, note 7.
   - `with_upstream_phase(fraction_of_t)`: a fractional A/D sampling instant, with a fractional lag. Today,
     at fs = 16 000 with no skew, every A/D instant lands on an analogue sample, so epsilon would always be
     zero and Su and Jp would never be exercised.
@@ -475,8 +510,14 @@ not listed must not be touched.
   applied *before* `Jd::from_bits` is called at all - V.90 passes `|_| true`, and V.92 will pass
   `|bits| !bits[47]`, so a Jp is never decoded as a Jd full of nonsense rates. The closure needs nothing
   from V92-03, which is what keeps this package a pure move with no dependency inside its own wave; the
-  bit-47 knowledge stays wholly in V92-03 and V92-11. `RWatch` and `RSeen`, with the levels supplied by the caller **and the pattern period made a
-  parameter** (6 for R, Ri, Rd and Rt; 4 for Rf), so V.92 needs no second copy; `Levels`, `levels_for`,
+  bit-47 knowledge stays wholly in V92-03 and V92-11. `RWatch` and `RSeen`, with the levels supplied by the
+  caller **and the pattern's period and origin both made parameters** - 6 for R, Ri, Rd and Rt, all of
+  which begin where a data frame does, and 4 for Rf, which "shall begin on the boundary of a data frame"
+  (9.9.1.1.1/V.92) but whose pattern is not a frame long, so that boundary is as often two symbols into the
+  pattern as none and the symbol count alone is not its phase. The levels stay the data frame's six,
+  because R's codewords are per data frame interval (8.6.4, and 8.8.4/V.92 for Rf) however long the sign
+  pattern is; and `RSeen::Moved` is reported only by a watch whose pattern is a data frame long, since no
+  rotation of four determines a move of six. So V.92 needs no second copy; `Levels`, `levels_for`,
   `least_gap`, `nearest`, `slicer_for`; `Trust` and `trusted_symbols`; `find_place`; `Frames`, with a
   pluggable sequence finder; and a `DilReader` owning the `dil*` state, `before_dil` and `analysis`, with
   `begin_dil`, `find_dil_start`, `fit_dil`, `dil_levels`, `dil_symbol`, `count_dil` and `find_dil`, each
@@ -489,30 +530,50 @@ not listed must not be touched.
     `v90_vector.rs` pass unchanged; the two J-prime-d tests move into `downstream.rs`.
   - `an_r_watch_finds_a_four_symbol_pattern_too` - a synthetic plus-plus-minus-minus sequence in both
     polarities.
+  - `an_r_watch_hears_a_four_symbol_pattern_that_began_on_an_odd_frame` - the same sequence from a data
+    frame boundary two symbols into the pattern, heard when the origin is given and not heard when it is
+    not.
+  - `a_four_symbol_pattern_is_judged_against_the_data_frames_levels` - six unequal levels, refused when
+    they sit in the wrong intervals.
   - `a_jd_reader_with_a_callers_acceptance_closure_ignores_frames_it_rejects` - a frame with bit 47 set is
     refused by a `|bits| !bits[47]` closure and accepted by `|_| true`, and the refused one never reaches
     `Jd::from_bits`.
-  - `the_carrier_watch_can_be_named_from_outside_v90` - a compile-level check that
-    `crate::v90::carrier::Watch` resolves from a sibling module.
+  - `the_carrier_watch_can_be_named_from_outside_v90` - a `#[cfg(test)] pub(crate) use super::carrier;`,
+    which is E0365 unless `mod carrier` is `pub(crate)`. Not a path from a sibling module: everything in
+    `v90/downstream.rs` is a descendant of `v90` and would resolve `crate::v90::carrier::Watch` either way.
   - `an_r_watch_takes_its_levels_from_the_caller`.
-  - Run the ignored DIL slip sweep before and after and record the same failure count (17 of 260) in the
-    commit message.
+  - Rebuild the DIL slip sweep from project memory `v34-phase2-tone-deadline` (it was never committed, and
+    `crates/datapump/tests/` is not on the Files line), run it before and after, record the same failure
+    count (17 of 260) in the commit message, and delete it again.
 
 #### V92-06: `pcm::Receiver::symbol_clock()`, for slaving the upstream (S)
 
 - **Depends on:** none.
-- **Clauses:** 6.2.
+- **Clauses:** 6.2; 8.6.3 with Table 22, 9.5.1.1.6-7 and 9.5.2.1.8 for the hand-over note on the phase.
 - **Files:** `crates/datapump/src/v90/pcm.rs`.
 - **Digests:** CA (11.3 "Clock slaving", 13.2).
 - **Description:** `pub fn symbol_clock(&self) -> SymbolClock`, giving the line samples one far-end symbol
   takes, smoothed from `drift` rather than from `due`. `due` steps by up to a quarter half-symbol in
   `hold_centre` and on every timing-loop update; an upstream transmitter that followed it would jitter at
-  the far A/D. Nothing else in `pcm.rs` changes.
+  the far A/D. The reported period is held at the nominal `fs / 8000` while the receiver is untrained: a
+  `Receiver` carries its `drift` through a retrain, and a failed training leaves behind the rate it had
+  fitted, so neither is offered to an upstream that 6.2 asks to free-run until it can see the network's
+  clock. Nothing else in `pcm.rs` changes.
 - **Tests:**
   - `the_symbol_clock_follows_a_network_120_ppm_fast` - over 10 s of `Network::with_clock(120)` the
-    reported period is within 1 ppm of the truth.
+    reported rate is within 1 ppm of the truth in every one of the ten seconds, read as that second's
+    median (measured at most 0.19 ppm out). A single reading also carries the timing loop's dither, which
+    is bounded separately by named constants: 1.25 ppm once the loop has settled and 4 ppm in the first
+    second after training (measured 1.04 and 3.19). See review note V92-06 in section 14.
   - `the_symbol_clock_does_not_jump_when_the_timing_loop_steps` - the sample-to-sample change stays under a
     stated bound while `due` steps.
+  - `the_symbol_clock_is_the_nominal_one_until_the_receiver_trains` and
+    `the_symbol_clock_goes_back_to_nominal_when_a_trained_receiver_hunts_again` - the period is nominal
+    while `trained` is false, both on a fresh `Receiver` and on one that has trained at 120 ppm and been
+    hunted again for a retrain, so a stale rate never reaches an upstream.
+  - `an_upstream_timed_by_the_symbol_clock_keeps_its_phase_for_ten_seconds` - a transmitter that takes the
+    phase once in the silence after Ja and then follows the rate is still inside 0.05 T of the far end's
+    symbols ten seconds later, which is what V92-15 will do.
   - The existing `pcm.rs` tests pass.
 
 #### V92-07: The V.8 quick-connect sequence codec (S)
@@ -544,7 +605,7 @@ not listed must not be touched.
   - `a_cm_carrying_0x55_as_an_extension_octet_is_not_a_qc`.
   - `a_qc_whose_two_copies_differ_is_not_accepted`.
 
-#### V92-08: V.42: skipping the detection phase at both ends, and suspend and resume (S)
+#### V92-08: V.42: skipping the detection phase at both ends, and suspend and resume (M)
 
 - **Depends on:** none.
 - **Clauses:** V.92 9.2.5, 9.3.1; V.42 7.2.1.2, 7.2.1.3, 7.10, 7.11, Appendix VI.2; V.8 7.3/7.4 NOTE.
@@ -555,19 +616,33 @@ not listed must not be touched.
     the start of the protocol phase; an ODP that does arrive anyway is still answered with an ADP, because
     V.8 itself warns that some equipment declares LAPM and still needs the detection phase. Document
     `without_detection()` as the originator form.
+  - The ADP is answered by a whole `detect::Answerer` kept running beside the protocol phase, whose
+    pattern `next_bit` splices in **between** frames -- never into one, and never cut between two
+    repetitions, which 7.2.1.2's "two adjacent ADPs" forbids. `Answerer::sending()` is what tells a caller
+    with frames of its own which of the two the next bit is. The detector is dropped on continuous flags or
+    on any decoded LAPM frame, so nothing scans an established link.
+  - 7.2.1.3's own T400 keeps running behind the bypass, and on expiry the stack falls to
+    `Phase::Transparent` with the heard bits kept for the terminal. A bypassed answerer otherwise has no
+    ending at all: it sends no SABME, so nothing in it ever gives up and `settled()` never comes true.
   - `suspend()` and `resume()`: freeze T400 during detection and T401 once connected (T402 and T403 are not
     implemented), without releasing the link, so sequence numbers, windows and the V.42 bis and V.44
-    dictionaries survive a hold or a long retrain.
-- **Tests** (inline in `stack.rs`):
-  - `two_ends_that_both_skip_detection_reach_lapm_with_no_odp_or_adp_on_the_wire`.
+    dictionaries survive a hold or a long retrain. Each layer freezes its own clocks, as 7.10.1 and 7.10.2
+    split them: T400 and the XID exchange's in `stack.rs`, T401 in `Lapm::suspend`.
+- **Tests** (inline in `stack.rs`, except the last two):
+  - `two_ends_that_both_skip_detection_reach_lapm_with_no_odp_or_adp_on_the_wire` - proved by the wire, as
+    the longest run of ONEs in each direction: every ODP and ADP character sits behind "8 to 16 ones", and
+    HDLC cannot produce eight.
   - `an_answerer_that_skips_detection_still_answers_an_odp`.
+  - `a_bypassed_answerer_still_falls_back_when_the_far_end_does_no_v42`.
   - `a_suspended_link_keeps_its_timers_still_through_sixty_seconds_of_nothing`.
-  - `after_resume_the_link_carries_on_with_the_same_sequence_numbers_and_dictionary`.
+  - `after_resume_the_link_carries_on_with_the_same_sequence_numbers_and_dictionary` - across a ten-minute
+    hold with frames outstanding, which is longer than N400 attempts at a growing T401 add up to.
+  - `an_answerer_says_whether_its_pattern_still_has_bits_to_go`, in `detect.rs`.
   - `ec/tests/loopback.rs` and the modem-crate call tests pass unchanged.
 
 ### Wave 2: codecs, signal blocks and the Phase 2 flags
 
-#### V92-09: The 12-interval modulus encoder and decoder (S)
+#### V92-09: The 12-interval modulus encoder and decoder (M)
 
 - **Depends on:** V92-01.
 - **Clauses:** 6.4.1.
@@ -578,17 +653,27 @@ not listed must not be touched.
   the differential `d(f) = s(f) ^ d(f-1)`, and step 4's `d(f-1)` reading from section 4. `Decoder { d_prev }`
   rebuilds R0, R, s and d, keeping d from **R**, not from R0's half, because those differ when M is odd and
   R = (M-1)/2. Both have `reset()`, which zeroes d, because 8.7.1 zeroes the memories before B1u.
+  R is carried as a value, `FrameBits`, rather than as a `Vec<bool>`: step 1 makes the frame an integer,
+  the whole module works in u128, and the data path runs 667 frames a second. The two readings of
+  section 4 are `STEP4_USES_PREVIOUS_D` and `D_BEFORE_THE_FIRST_FRAME`, and `LONGEST_FRAME` is the K = 72
+  bound the arithmetic is built to.
 - **Tests:**
   - `random_frames_round_trip_for_even_and_odd_products` - 2000 frames each, K = 36..=72, including
-    R = 0, R = M-1 and R = (M-1)/2.
+    R = 0, R = M-1 and R = (M-1)/2. R = M-1 is only a legal frame when M = 2^K exactly, because 2^K <= M
+    and M-1 < 2^K force it, so one of the three sets is twelve 64s; the middle value is legal at
+    K = capacity for every set, and odd there only for the odd one.
   - `the_middle_value_of_an_odd_product_keeps_the_sign_chain`.
   - `an_inverted_channel_decodes_with_the_decoder_started_inverted` - mapping every Ki to Mi-1-Ki and
     inverting the decoder's d recovers the same bits, which is why the differential step exists.
   - `a_frame_that_does_not_fit_is_refused`.
   - `the_memory_starts_at_zero` - the first frame after a reset matches a hand-worked value.
   - `seventy_two_bits_need_u128` - M = 255^12.
+  - `the_alternative_reading_of_step_4_is_not_one_to_one` - reflecting on d(f) instead of d(f-1) folds
+    [0, M) into half of itself, so two frames share an R0 and no decoder could mirror it.
+  - `the_sign_splits_the_frame_at_the_middle`, `the_first_bit_in_time_is_the_lowest_in_value` and
+    `the_moduli_come_out_of_the_parameters` - steps 1 and 2 on their own, and AD-3's boundary.
 
-#### V92-10: Precoder, prefilter, constellations, the inverse map and the 4T trellis (M)
+#### V92-10: Precoder, prefilter, constellations, the inverse map and the 4T trellis (L)
 
 - **Depends on:** V92-01.
 - **Clauses:** 6.4.2; 6.4.3; 6.4.4; 8.8.3 NOTE; V.34 9.6.3.1 (Figure 9, Table 13).
@@ -609,6 +694,15 @@ not listed must not be touched.
     `v34::trellis::Code` clocked once per 4-symbol trellis frame with its inputs masked to the code, 16, 32
     or 64 state chosen by `Parameters::trellis`.
   - `reset()` zeroes every memory.
+  - Two named readings, because section 4 gives this module one and P-12 forces the other:
+    `TIE_TO_SMALLER_INDEX` (the tie 6.4.2 leaves open, which nothing on the wire depends on) and
+    `OUTPUT_LIMIT` (the bound on G·v(n) alone, in the units 8.8.3 fixes; the filter state is never
+    saturated).
+  - The four map helpers are public and have their one home here, because V92-20's decoder needs the same
+    arithmetic backwards: `code_for`, `label_of`, `inverse_map` and `index_to_ki`.
+  - `Chain::new` checks less than `Parameters::fits` on purpose, and says so: V92-62 runs the chain with a
+    *trial* gain to find G, and a trial gain is not one Table 30's Q0.16 field could carry. The class
+    feasibility, the constellation index and the empty-z2 case are checked here with `fits`'s own wording.
 - **Tests:**
   - `with_no_filters_the_output_is_the_chosen_level` - z1 = p1 = [], z2 = [1], p2 = [], G = 1.
   - `the_prefilter_feed_forward_starts_at_kappa_0_and_the_precoder_s_at_1` - the one-tap indexing
@@ -618,11 +712,15 @@ not listed must not be touched.
   - `the_precoder_output_stays_bounded_over_a_long_run` - with a real feedback section, max |x| over
     100 000 symbols is under a stated multiple of the top level.
   - `a_class_with_no_member_is_reported` - N < Mi, and N < 2·Mi at k = 3.
-  - `an_inverse_channel_gives_back_every_k_as_eta_mod_m`.
-  - `the_memories_are_zero_before_b1u` - the first 12 outputs after a reset are a fixed vector.
+  - `an_inverse_channel_gives_back_every_k_as_eta_mod_m` - both filters run backwards from v(n), so an
+    off-by-one in either feed-forward section cannot find the levels again.
+  - `the_memories_are_zero_before_b1u` - the first 12 prefilter outputs after a reset are a fixed vector.
   - `the_state_is_never_saturated_only_the_output`.
+  - Four more the package needed: `the_fourth_symbol_s_class_steps_by_twice_the_modulus`,
+    `a_tie_goes_to_the_smaller_index`, `the_levels_rise_with_the_index_across_the_mirror` and
+    `the_code_is_the_one_cpd_bits_27_and_28_named`.
 
-#### V92-11: The V.92 framed sequences (M)
+#### V92-11: The V.92 framed sequences (L)
 
 - **Depends on:** V92-01, V92-03.
 - **Clauses:** 8.5.4 (Table 20); 8.6.2-8.6.4 (Tables 21, 22, and Jp-prime); 8.7.3 (Tables 23, 24);
@@ -649,9 +747,14 @@ not listed must not be touched.
     2^K <= product M), and `merged_over(previous)` for absent parts.
   - **`From<&Parameters> for Cpd`** and **`TryFrom<&Cpd> for Parameters`** (AD-3).
   - **`CpFamily`** dispatch on bit 18 (SUV = 1, CP = 0) and the type at 19:20; CPt and CPu go through the
-    V92-03 V.92 layout.
-  - **A stream finder** for SUV and CP, tolerant of long runs of ones, with a length callback: CPd header
-    words then counts, `cp_length` for CPu.
+    V92-03 V.92 layout. Downstream needs a second enumeration, `DownFamily` (CPd or SUVd), because CPd has
+    no type field at 19:20 at all - those bits are its part flags - so only the direction chooses the
+    reading, and one enumeration would have to guess (section 14, "V92-11 as built").
+  - **A stream finder for each direction**, tolerant of long runs of ones, with a length callback that
+    reports "not yet" while a CPd's header words are still arriving: CPd header words then counts, and
+    `v90::sequences::CpFinder::v92` for the long CPs, whose `cp_length` is private to that module.
+  - **The CPd point reading** (section 4) as `set_levels`, a function rather than a `pub const`, because
+    the reading is a rule - unsigned magnitudes, mirrored by a(-eta-1) = -a(eta) - and not a value.
   - **Pad helpers** for 24, 36 and K bits upstream and D bits downstream.
   - **`rm_k(i, m, prime)`**: Tables 25 and 26 with the interval-11 errata reading (row 11 is K11).
   - **Q formats**: V92-01's signed and unsigned `Qa.b` helpers are used as they stand, at Q0.15, Q1.14,
@@ -698,7 +801,11 @@ not listed must not be touched.
   - `Trn2uSender { size, first_bit_is_lsb }`: scrambler reset at the start, only the **sign** bit
     differential from a caller seed, magnitudes (2m+1)/sqrt(5) for 4 points or (2m+1)/sqrt(21) for 8, and
     the bit order behind the named constant of section 4. `Trn2uReader` matches it.
-  - Segment-length constants 384, 24, 144, 2040, and `UP_SEQUENCE_UNIT = 12`.
+  - `UP_SEQUENCE_UNIT = 12`, plus the readings of section 4 whose Owner column names this module:
+    `TRN2U_SIGN_LAST`, "only the sign bit of TRN2u is differential", "CPt's 24 ones" and "TRN1u scrambler
+    reset". The segment lengths 384, 24, 144 and 2040 are **not** here: V92-01 already owns them in
+    `v92/mod.rs` as `RU_SYMBOLS`, `RU_BAR_SYMBOLS`, `SU_SYMBOLS` and `TRN1U_MINIMUM`, and section 4's "one
+    reading, one home" rule forbids a second copy (section 14).
 - **Tests:**
   - `trn1u_starts_with_the_gpa_signs_the_digest_lists` - the first 48 signs equal the P3S vector.
   - `ru_and_its_bar_are_the_printed_patterns`, and `su_has_the_same_power_as_trn1u` with lines at
@@ -712,7 +819,7 @@ not listed must not be touched.
     and the two settings differ, so flipping it after a capture is a one-line change.
   - `e1u_is_twelve_zeros_and_is_told_from_another_cpt`.
 
-#### V92-13: ANSpcm, QTS and TONEq (M)
+#### V92-13: ANSpcm, QTS and TONEq (L)
 
 - **Depends on:** V92-01.
 - **Clauses:** 8.3.1 (Tables 6-10); 8.3.6; 8.2.5; 9.2.1.3, 9.2.2.3, 9.2.3.3, 9.2.4.3; 9.8.1.1.3;
@@ -731,7 +838,14 @@ not listed must not be touched.
   - `ToneqGenerator`, exactly 980 Hz, and `ToneqDetector`: a steady 980 Hz for at least 60 ms with no
     1180 Hz energy, so V.21(L) marking cannot trigger it.
   - `AnspcmWatch` for the analogue side: 2100 Hz **without** the 15 Hz AM (using `v8::ansam`), told from
-    V.25 ANS by the QTS burst that precedes it, and reporting the QTS reversal time.
+    V.25 ANS by the QTS burst that precedes it, and reporting the QTS reversal time. It is `Debug` but
+    **not `Clone`**, because `v8::ansam::AnswerTone` is not, and none of `AnswerTone`'s state can be
+    rebuilt from outside it. A later package that wants one inside a `Clone` type - `v90::startup::Analogue`
+    is `Clone` today - needs that one derive added in `crates/v8/src/ansam.rs`, which is on no package's
+    Files line; it should be added to whichever package first needs it rather than guessed at here.
+  - `zero_dbm0(law)` and the two G.711 overload points it is built from, because a dBm0 figure needs a
+    reference and `ucode::linear(127)` is not it: that is the middle of the loudest interval, 0.14 dB
+    below the overload point, and using it reports every ANSpcm level loud by that much.
 - **Tests:**
   - `the_generator_reproduces_all_2408_tabled_octets`, and `table_7_k82_a_law_is_08` (the page prints "8").
   - `a_reversal_flips_only_the_polarity_bit_every_3612_symbols_and_lands_on_a_frame_boundary`.
@@ -772,13 +886,22 @@ not listed must not be touched.
     the ack state cleared when the silence ends.
   - A peer SUV with `wait_for_cp` set (Table 27 bit 26) holds our own CP back until the peer's CP has
     arrived **or** the CP repeat window expires, whichever comes first, and never holds back an SUV, an E
-    or a B1. The bound is what makes complying free, which is the condition 9.6.1.1.2 attaches to its
-    [MAY].
+    or a B1. The [MAY] is **Table 27 bit 26's own sentence**, "the digital modem is not required to comply
+    with this request", and not 9.6.1.1.2, which says nothing about bit 26 at all (section 14). The bound
+    is what makes complying free: the wait can never outlast the time the peer would have had to wait for
+    a repeat anyway.
+  - The CP also waits until one SUV of **our own** has been sent, which is 9.8.2.1.3's "after having
+    transmitted an SUVu and received an SUVd". In the `Training` context the owner is already sending SUVs
+    when it enters, so this changes nothing there.
 - **Tests:**
   - `figure_12_crossing_cps_end_in_ed_and_e2u` - a scripted trace reproduces SUVd SUVd CPd SUVd' SUVd' Ed
     against SUVu SUVu CPu SUVu SUVu' SUVu' E2u.
-  - `figure_13_a_cpu_heard_first_makes_the_single_cpd_a_cpd_prime`.
-  - `figure_14_a_lost_cpu_is_repeated_after_100_ms_and_a_round_trip`.
+  - `figure_13_a_cpu_heard_first_makes_the_single_cpd_a_cpd_prime` - which is the bit-26 case: the
+    analogue modem asks, and the CPd that follows the CPu is already CPd'.
+  - `figure_14_a_lost_cpu_is_repeated_after_100_ms_and_a_round_trip` - the figure's **shape**, not its box
+    count. Figure 14 draws "RTD + 100 ms" across four SUVu, which at 12 symbols each is 6 ms and not 106,
+    so the runs of unacknowledged sequences come out far longer than the one box the figure prints; the
+    test asserts the run lengths the printed window gives, and the instant the repeat starts (section 14).
   - `the_sequence_that_completes_after_the_deadline_still_counts`.
   - `no_second_cp_is_sent_while_acks_arrive`, and `an_e_counts_as_an_acknowledgement`.
   - `a_cpus_counts_as_a_cpu`.
@@ -791,7 +914,7 @@ not listed must not be touched.
     `wait_for_cp` set no CP goes before the peer's CP arrives; with it clear the CP goes after the first
     peer SUV; and a peer that asks and then never sends a CP does not stall us past the repeat window.
 
-#### V92-15: The PCM upstream transmitter (M)
+#### V92-15: The PCM upstream transmitter (L)
 
 - **Depends on:** V92-01, V92-04, V92-06.
 - **Clauses:** 6.2; 8.5.6 with 9.5.2.1.7-9.5.2.1.8; 8.6.3; 3.8.
@@ -800,10 +923,17 @@ not listed must not be touched.
   P3P (7.1 A7-A8, 13.2 item 5).
 - **Description:** `PcmTransmitter::new(fs, Mode)` in the pull shape of `v34::qam::Transmitter`, with
   `next_sample(clock, next_level)`, turning 8000 symbols/s levels into line samples (AD-8).
-  - `Mode::Interpolated`: windowed-sinc reconstruction just under 4 kHz, as `pcm::Receiver` builds its own,
-    with an arbitrary fractional delay.
+  - `Mode::Interpolated`: a windowed-sinc reconstruction with an arbitrary fractional delay, as
+    `pcm::Receiver` builds its own, but **with its cutoff at exactly 4 kHz** and not just under it, because
+    only a sinc whose cutoff is the symbol rate's own Nyquist has its zeros on the other symbols' instants,
+    and without that an unshifted line sample is the symbol plus a few per cent of its neighbours. The
+    window then puts the response "just under 4 kHz" in practice. Interpolate *between* two of the table's
+    phases rather than rounding to the nearer, which `pcm::Receiver` may do and this may not: epsilon
+    resolves 1/65536 of a symbol and a grid of 1/512 would quantise it to about a thousandth.
   - `Mode::Straight`: at fs = 16 000, the level on the codec's phase and a band-limited midpoint between;
-    exact only for multiples of 0.5 T, which the module doc states.
+    exact only for multiples of 0.5 T, which the module doc states. It is the same kernel as
+    `Mode::Interpolated` read at the only two phases where that kernel is a delta and a midpoint, so one
+    reconstruction serves both and a bug in it is a bug in both; off those two phases it takes the nearer.
   - `lookahead()` in symbols, so mid-segment cuts are computed on the symbol stream, never on line time.
   - `delay(fraction_of_t)`: a one-off shift, used twice only - +0.5 T at the first S-bar-u (24.5T) and
     +epsilon·T at the second ((24+epsilon)T) - and never re-stepped afterwards.
@@ -812,16 +942,36 @@ not listed must not be touched.
   - Clock slaving: free-run at a nominal 8000 symbols/s until the downstream receiver has trained, then
     follow `symbol_clock()`; the switch happens in the silence after Ja, where a phase step costs nothing.
   - LU scaling with peaks bounded to 0.3 of full scale, the `dil::LOUDEST` ceiling, because the softphone
-    capture path has its own limiter.
+    capture path has its own limiter. LU is held under that ceiling where it is *chosen* rather than by
+    squashing samples, so `PEAK`, a named `CREST` of 3 (the reading, with 2 as the alternative) and
+    `LU_LOUDEST = PEAK / CREST` are the three constants, and `peak()` reports what was actually made.
 - **Tests:**
-  - `at_twice_the_rate_every_other_sample_is_the_level` - fs = 16 000, phase 0, both modes.
-  - `through_the_network_the_codec_reads_back_the_levels_sent` - unquantised, gain 1, error below -40 dB.
-  - `a_half_symbol_delay_moves_the_codec_samples_by_half_a_symbol`.
+  - `at_twice_the_rate_every_other_sample_is_the_level` - fs = 16 000, phase 0, both modes. The odd
+    samples are asserted on a *steady* level only: between two unequal levels a band-limited midpoint is
+    not their average, because the reconstruction rings.
+  - `through_the_network_the_codec_reads_back_the_levels_sent` - unquantised, gain 1, error below -40 dB,
+    **with the network's own upstream anti-alias filter opened to the line's Nyquist**. See the note in
+    section 14: at 4 kHz it cannot be done at all, and the reason is worth knowing.
+  - `a_half_symbol_delay_moves_the_codec_samples_by_half_a_symbol` - `with_upstream_phase(0.5)` and the
+    same shift in the transmitter, which cancel; and the control run, where they do not.
   - `epsilon_resolves_to_a_sixty_five_thousandth_of_a_symbol` - eight epsilon values measured back through
-    `Network::with_upstream_phase`; epsilon = 0x4000 moves the waveform by T/4 within 1 %.
+    `Network::with_upstream_phase`; epsilon = 0x4000 moves the waveform by T/4 within 1 %. Measure the
+    shift as the phase of a tone at the far A/D, and hold every one of the eight to **half a code of Jp**,
+    so a transmitter that rounded epsilon to a coarser grid than the field's own fails here.
   - `the_transmitter_follows_a_network_120_ppm_fast` - over 10 s the symbol instants at the far A/D stay
-    within a stated fraction of T.
+    within a stated fraction of T, against a control that free-runs and walks 7.7 T. The clock is a
+    synthetic `SymbolClock` carrying the true rate, not a trained `pcm::Receiver`: what a real receiver's
+    clock leaves is V92-06's question, and its
+    `an_upstream_timed_by_the_symbol_clock_keeps_its_phase_for_ten_seconds` already answers it.
   - `the_transmitter_is_never_re_stepped_after_epsilon`.
+  - And, beyond the six: `a_shift_delays_the_symbols_rather_than_adding_one`,
+    `symbol_at_says_when_a_symbol_reached_the_line`,
+    `a_symbol_is_asked_for_a_lookahead_before_it_reaches_the_line`,
+    `a_transmitter_free_runs_until_the_receiver_has_trained`,
+    `taking_the_clock_up_does_not_step_the_phase`,
+    `straight_is_the_interpolated_reconstruction_at_its_two_exact_phases`,
+    `the_reconstruction_carries_a_steady_level_at_every_phase` and
+    `lu_is_held_under_the_ceiling_the_capture_path_imposes`.
 
 #### V92-16: Phase 2: the V.92 flags and the Table 18 choice in full Phase 2 (M)
 
@@ -832,38 +982,58 @@ not listed must not be touched.
 - **Digests:** P2P (2, 4, 5, 7, 11); P2S (10, 11, 16); P3S (5.7 Sd-5); CA (2, 11.2); CD (2, 5.1, 8.4).
 - **Description:** full Phase 2 learns V.92; the procedure itself is unchanged, because 9.3 says it is
   V.90's.
-  - `V92Wish { capable, short_phase2, pcm_upstream, up_caps }`, carried by the `Pcm` roles. The existing
-    constructors mean "not V.92", so a V.90 pair is byte-identical to today.
+  - `V92Wish { capable, short_phase2, pcm_upstream, up_caps }`, carried by the `Pcm` roles as **two more
+    variants**, `AnalogueV92(V92Wish)` and `DigitalV92(Info0d, V92Wish)`, rather than folded into the two
+    that are there. `v90/startup.rs` builds `Pcm::Analogue` and `Pcm::Digital(info0d)` and is outside this
+    package's file list, so neither may change shape. The existing constructors mean "not V.92", and mean
+    it on the wire: a V.90 pair is byte-identical to today, which a test asserts against the V.92 variants
+    carrying an empty wish.
   - INFO0 is written with the bits at the swapped positions per role; the far flags are recorded **only**
     in PCM roles and survive a retrain, because a retrain never repeats INFO0. Add `both_v92()`.
   - Digital INFO1d: bit 70 is "PCM upstream allowed", set from the digital modem's own verdict, when both
     modems are V.92; otherwise it is the V.90 carrier flag, unchanged.
   - Analogue INFO1a: Table 18 when all of - both V.92, bit 70 set, `pcm_upstream` wanted, PCM upstream not
     declined; otherwise today's Table 10 or Table 11.
-  - **UINFO is capped for V.92.** `v90::training_codeword` (`v90/mod.rs:63`) searches Ucodes 67..127
-    downwards against the INFO0d power limit and can return a Ucode above 111. Table 18 cannot carry one
-    (bits 25:31), and Sd could not use one anyway, because Sd's codeword is Ucode 16 + U_INFO and must stay
-    <= 127 (8.6.7 with V.90 8.4.4; P3S 5.7 Sd-5). Against a digital modem with a high maximum transmit
-    power a conforming Table 18 INFO1a could therefore not be built at all. Add `V92_MAX_UINFO: u8 = 111`
-    in `v90/mod.rs`, whose doc quotes Sd-5, and a `training_codeword_v92(far)` that starts the same search
-    at 111. V.90's own `training_codeword` is left exactly as it is, so no V.90 behaviour changes.
+  - **UINFO is capped for V.92, as a guard rather than as a fix.** `v90::training_codeword` searches
+    Ucodes 67..127 downwards against the INFO0d power limit. Sd's codeword is Ucode 16 + U_INFO and must
+    stay <= 127 (8.6.7 with V.90 8.4.4; P3S 5.7 Sd-5), so a U_INFO above 111 names a codeword the digital
+    modem could not send. Add `V92_MAX_UINFO` in `v90/mod.rs`, whose doc quotes Sd-5, and a
+    `training_codeword_v92(far)` that stops the same search there. **This entry's original premise was
+    wrong** and is corrected here: Table 15/V.90's loudest limit is (15124)^2, which admits no Ucode above
+    **109** under either companding law, so the V.90 search cannot reach 111 for any of the thirty-two
+    maximum transmit powers an INFO0d can name, and the cap costs nothing today. It is there so that a
+    later reading of those limits cannot ask for a codeword the far end could not build Sd from. The
+    constant is `v34::info::UINFO_HIGHEST` rather than a second 111, because V92-02 created that constant
+    after this entry was written and one reading has one home. The two searches share one private helper
+    whose only argument is the ceiling, and V.90's own `training_codeword` returns exactly what it always
+    did, which the test below proves for every INFO0d.
   - `decline_pcm_upstream()`, with a pass-through in `v34::startup`, and an `info1a_pcm_up()` accessor.
   - Digital acceptance: a Table 18 INFO1a is accepted only if this modem set bit 70 and both are V.92;
     otherwise the frame counts as not received (P2P P15).
-  - `again()` keeps the flags and always runs full Phase 2.
-  - `lapm_bypass_allowed()` means both modems are V.92 (9.3.1); the error-control layer consumes it later.
-- **Tests** (the `phase2.rs` `Line` harness):
+  - `again()` keeps the flags and always runs full Phase 2, through a `full_phase2_only` latch that
+    `short_phase2_agreed()` reads: 9.7's four re-entry points are all in the full procedure.
+  - `lapm_bypass_allowed(both_lapm)` is both modems V.92 (9.3.1) **and** the caller's half of the rule.
+    9.3.1 wants LAPM in V.8 or V.8 *bis* as well, which phase 2 cannot see, so the V.8 answer is an
+    argument rather than a second accessor - and the named test below needs both halves visible here.
+- **Tests** (the `phase2.rs` `Line` harness, except where the code is elsewhere):
   - `a_v92_pair_settles_on_pcm_upstream` - a Table 18 INFO1a, both ends reporting PCM upstream.
-  - `uinfo_never_exceeds_111_so_sd_s_codeword_exists` - against a digital modem whose INFO0d maximum
-    transmit power would otherwise admit Ucode 120: the Table 18 INFO1a is still built, its UINFO is
-    67..=111, and Ucode 16 + UINFO is <= 127. The V.90 `training_codeword` for the same INFO0d still
-    returns its old value, and the existing `v90/mod.rs` tests pass.
+  - `uinfo_never_exceeds_111_so_sd_s_codeword_exists`, **in `v90/mod.rs`**, where the code is. For both
+    laws and all thirty-two maximum transmit powers: `training_codeword_v92` is 67..=111, Ucode 16 + it
+    exists, and it equals `training_codeword` for the same INFO0d, so V.90's own choice provably did not
+    move. The search's ceiling is then tested with the power limit taken away, which is the only way to
+    reach it: 127 against V.90's ceiling and 111 against V.92's.
   - `a_v92_analogue_modem_meets_a_v90_digital_modem_with_table_10`, and the mirror image.
   - `bit_70_clear_means_no_table_18`, and `pig_off_means_no_table_18`.
   - `declining_pcm_upstream_gives_table_10_next_time`.
   - `a_retrain_between_v92_modems_keeps_the_flags_and_runs_full_phase_2`.
-  - `a_v34_info0_with_a_clock_of_1_is_not_taken_for_v92`.
+  - `a_v34_info0_with_a_clock_of_1_is_not_taken_for_v92` - and it also pins what cannot be defended: a
+    V.92 digital modem *does* read a V.34 modem's clock bits as V.92 flags, because no frame bit can say
+    otherwise, and the call still lands on V.34.
+  - `a_table_18_info1a_this_end_did_not_invite_is_counted_as_not_received` - both halves of the digital
+    acceptance rule, each refused on its own, and the frame taken when both hold.
   - `the_lapm_bypass_needs_both_v92_and_both_prot0`.
+  - `the_info0_flags_go_out_where_each_table_puts_them` - Tables 15 and 16, the swap and all.
+  - `the_v90_constructors_still_send_what_they_always_sent` - byte for byte against an empty wish.
   - `a_v90_pair_settles_on_v90` passes unchanged, as does every existing Phase 2 test.
 
 #### V92-17: Network, part B: echo, transcoder, gain control and softphone paths (M)
@@ -893,9 +1063,10 @@ not listed must not be touched.
 #### V92-18: Probe the V.92 capture (S)
 
 - **Depends on:** V92-02, V92-07.
-- **Clauses:** 8.2.1; 8.4.1 (Tables 15-19); 9.1; 9.3.
+- **Clauses:** 8.2.1, 8.2.2 (Table 3), 8.2.5; 8.3.1 (Table 6), 8.3.5 (Table 14), 8.3.6; 8.4.1
+  (Tables 15-19); 9.1; 9.2, 9.2.1.3, 9.2.4.2; 9.3.
 - **Files:** `crates/datapump/tests/v92_vector.rs` (new).
-- **Digests:** CT (2.2, 8.4, 9.5); CV (Q8); P2S (10.4, 15).
+- **Digests:** CT (2.2, 8.4, 9.5); CV (Q8); P2S (10.4, 15); P1P (3.1-3.8, Figure 5, 5.1, 5.4).
 - **Description:** read `tests/vectors/v92-56k.wav` the way `v90_vector.rs` reads its file, and pin what
   the 2005 Conexant softmodem and its server actually negotiated. The vectors README calls this file
   "V.34-style startup", so the honest expectation is that it may contain no PCM upstream and no QC1a at
@@ -905,13 +1076,33 @@ not listed must not be touched.
   - Copy the helpers of `v90_vector.rs`.
   - Read the V.8 menus; run `v8::quick::BitWatcher` on V.21(L) before the CM looking for a QC1a; read the
     INFO sequences with their V.92 bits; classify the INFO1a.
+
+  **What it turned out to hold** (section 14, "V92-18 as built"): a **short Phase 1 over the V.8 bis
+  opening**, Figure 5 -- QC2a on V.21(H), QCA2d on V.21(L), then QTS, QTS\, ANSpcm and TONEq -- with no CM,
+  no JM and no CJ anywhere, and then a full Phase 2 in which the analogue modem declines the PCM upstream
+  its server offers. So the package also reads the two V.8 bis identification fields (Tables 3 and 14) with
+  `ec::hdlc`, feeding the fields themselves to V92-07's `Uqts` and `AnspcmLevel`, and measures the short
+  Phase 1 timings off the tap. It does **not** add a V.8 bis codec: `v8::quick` stays V.8-framed, and the
+  two octets are unpicked in the test.
 - **Tests:**
-  - `the_v92_menus_offer_pcm` - the CM and JM octets.
+  - `the_v8_menus_never_come_because_this_call_used_short_phase_1` - replaces `the_v92_menus_offer_pcm`,
+    which has no answer in this capture. No CM and no JM in either V.21 channel, with the five CMs and
+    three JMs of `v90-56k.wav` as the positive control.
   - `a_qc1a_before_the_cm_is_looked_for` - asserts presence or absence, as found, and records which.
+    Absent, in both channels; and the V.92 synchronisation pattern *does* appear once, inside QC2a's own
+    HDLC body, with no ten ONEs in front of it, which is why `BitWatcher` anchors its whole window.
+  - `the_quick_connect_is_the_v8_bis_pair_qc2a_and_qca2d` - identification octets `2D 25` and `2D E2`,
+    each with a good FCS: U_QTS = Ucode 79 and P = 1 from the analogue modem, LM = 01 (-12 dBm0) and P = 1
+    from the digital one. The QCA2d field is byte for byte the vector P1P 3.3 derived beforehand.
+  - `qts_follows_qca2d_by_seventy_five_milliseconds_and_runs_for_768_symbols` - the 9.2.4.2 silence, the
+    8000/6 Hz tone with its 4 kHz partner, and the QTS/QTS\ reversal at 768 symbols.
+  - `anspcm_reverses_every_3612_symbols_until_toneq_answers_it` - both reversals, the one second of 9.2.1.3
+    before TONEq, and the 93 ms this modem leaves before INFO0a where the clause asks for 75 +/- 5.
   - `the_info_sequences_say_whether_v92_and_pcm_upstream_were_used` - INFO0d bit 27, INFO0a bit 26 where
     readable, INFO1d bit 70, and the INFO1a layout from bits 34:39.
   - `if_pcm_upstream_was_used_ru_and_trn1u_are_on_the_tap` - a period-6 hunt after INFO1a; `#[ignore]`d
-    with its finding recorded if the capture turns out not to contain it.
+    with its finding recorded if the capture turns out not to contain it. It does not: the hunt runs
+    against QTS as a control and finds nothing after INFO1a.
 
 ### Wave 3: the chain, the decoder, the design, the choice, the receiver
 
@@ -1039,6 +1230,12 @@ not listed must not be touched.
 
   Slip re-framing and echo cancellation are deliberately **not** here; they are V92-43 and V92-46, once the
   network can produce slips and echo.
+  **Measured on the spike (V92-26, 2026-10):** the channel estimate is the whole margin. Fitting 32 taps on
+  2400 symbols left the estimate 7.2e-4 out, and the decoder then made 26 bits' worth of bursty errors a
+  call -- enough to look like a decoder fault. The same link with 48 taps on 4800 symbols left it 7.7e-7
+  out and decoded 13 392 bits with none wrong at drn 19, at 16, 32 and 64 states. TRN1u is 2040 symbols at
+  least (8.5.6), so `train_on_trn1u` must use every one of them, and the retries of `TRAIN_TRIES` matter
+  more here than they do downstream.
 - **Tests:**
   - `ru_and_its_reversal_are_found_whatever_the_polarity` - through `Network::up` at four A/D phases.
   - `su_is_found_through_its_zeros_and_its_reversal_timed_to_the_symbol`.
@@ -1564,6 +1761,22 @@ not listed must not be touched.
   - `on_ri_the_current_cpt_is_finished_and_then_e1u_goes` - never mid-sequence.
   - `the_cpt_we_send_is_one_the_digital_modem_can_send` - drn, Sr and ld against the Jd we read.
   - `with_no_dil_asked_ri_comes_before_cpt_and_e1u_follows_ri_bar`.
+- **Landed** (see `handoff.md` §2-§4), with three readings fixed in the code:
+  - The row that says "read through `v90::downstream::DilReader`, with `RWatch` at UINFO for Ri and
+    R-bar-i" is built without that refactor: Ri and R-bar-i are Ru and R-bar-u's shape at UINFO
+    (8.6.5 with 8.5.5), so `v92::receiver`'s own hunt reports them as `Heard::Ru`/`RuReversal`, and
+    the DIL's symbols are kept raw in `Modem::dil` for V92-39 to read with whatever reader it gets.
+  - The half symbol and epsilon are **recorded**, not applied: `Modem::delays` is the queue
+    `v92::transmit::PcmTransmitter::delay` pulls from, and this module never leaves the symbol
+    domain. The tests the package asked for at `Network::with_upstream_phase` therefore belong
+    with V92-38's call harness, not here.
+  - With N = 0 the Recommendation's own order (9.5.2.1.10: TRN1u until Ri, CPt, E1u on R-bar-i) is
+    behind `ZERO_DIL_A10_ORDER`, and it is **on**: the digital modem now sends SCR and then Ri where
+    9.5.1.1.13 puts them, because an Agere SV92PP waiting for a Ri that never came showed that the
+    old "stay silent until a CPt arrives" reading deadlocks against a real far end.
+  - The digital modem's E1u detector had to be fixed to make the exchange work: twelve zeroes in a
+    row appear inside every CPt (Table 23's reserved and shaping fields are whole sixteen-bit words
+    of them), so it now counts only the twelve bits where the next CPt's synchronisation belongs.
 
 #### V92-37: The digital modem, Su to R-bar-i (M)
 
@@ -2706,6 +2919,20 @@ V92-58 from 16 to 17 and V92-59 from 17 to 18, and adds a nineteenth wave. Hold 
 V92-53's cleardown half - the seam the package already names - into its own package, which would free
 V92-56 and let hold run a wave ahead of FPE; that is a change to make deliberately, not a reordering.
 
+**7. V92-05's `RWatch` takes a phase origin, and its carrier check is not a sibling.** Two amendments to
+that entry, both made while resolving the package review. First, "the pattern period made a parameter" is
+not enough for Rf: 8.8.4/V.92 prints Rf as a 12-symbol sequence whose signs repeat every 4, and 9.9.1.1.1
+makes it begin on a data-frame boundary, which is six symbols - so Rf's first symbol lands on 0 or 2 of its
+own 4, and a watch reading its phase off the symbol count would read the 2 case as R-bar-f's rotation in
+every group, never hear Rf, and never report the turn. The entry now asks for the pattern's origin beside
+its period, and says the levels stay the frame's six. Second, the entry asked for
+`the_carrier_watch_can_be_named_from_outside_v90` to be "a compile-level check that
+`crate::v90::carrier::Watch` resolves from a sibling module". That check cannot exist as written: privacy
+in Rust reaches every descendant, so any module the package could add resolves a private `carrier` too,
+and no module outside `v90` is on its Files line. What does force the visibility is a `pub(crate)`
+re-export, which is E0365 on a private module; the entry now says so, and says the guard is `#[cfg(test)]`
+because an unconditional one is an unused import under `-D warnings`.
+
 Two further judgements worth recording, both accepted from the review but resolved with a choice:
 
 - **Reserved codes are treated as "unknown", never as a licence.** A reserved T1 in an MHack is no grant
@@ -2717,3 +2944,310 @@ Two further judgements worth recording, both accepted from the review but resolv
   The analogue mirror was already in V92-39, the existing V.90 modems already carry the data-holdback
   semantics, and a Phase 4 in which only one side's circuits exist would make the FPE circuit tests of
   V92-53 untestable on the digital side.
+
+**V92-01, after implementation review.** Three lines of its entry were corrected against what the package
+had to be. The sizing was wrong: `v92/mod.rs` came to 979 lines, and 1165 once the review's findings were
+answered, a third of it the clause quotations the house rule asks for. So the package is **L** and not
+**S**; the description lists thirteen groups of content and seven tests and was never an S. The `Deadlines` slots are keyed by `&'static str` rather than
+by an enum variant, because a package that has to arm a new timer cannot add a variant without editing
+`mod.rs`, which its own file list forbids - the entry now says so, and says what it costs. And
+the named test's `up_bits(drn) * 8000 == up_rate(drn) * 12` is false at twelve of the nineteen rungs,
+because `up_rate` floors 8000/6 exactly as `v90::rate_for` does; the entry now asks for the floor-
+consistent identity everywhere and the exact one at the seven rungs where it holds, so that a later reader
+does not restore a broken assertion.
+
+**V92-02 as built: two departures from its entry, both forced by section 9.1.** The entry asked for new
+fields - `v92` and `short_phase2` on `Info0d`, `high_carrier` on `Info1aPcm`. Neither can be added: the
+exhaustive struct literals in `v90/server.rs`, `datapump/tests/v90_call.rs` and `modem/tests/v90_call.rs`
+would stop compiling, and all three are outside the package's file list and promised unedited. So the two
+INFO0 bits travel inside `Info0::clock` - INFO0a's pair in V.34's own two bits, which Table 16/V.92
+overloads, and INFO0d's above them, because V.90's Table 7 gives an INFO0d no clock at all and an
+external-clock value must never go out as "V.92 capability: 1" - and Table 19 is a separate `Info1aV34Up`
+wrapping `Info1aPcm`. The wire bits are the tables' either way. Bit 33 then raised a second point, which
+the review of the package was right about: it must not be a *dispatch* field, because Table 10/V.90
+reserves it and "not interpreted by the digital modem" means a Table 10 frame that carries it set is still
+a Table 10 frame. Dispatching on it dropped such a frame in `v34/phase2.rs` and stalled a V.90 start-up
+that used to finish. The reading is chosen by the phase instead, through `Receiver::in_short_phase2()`,
+never by the frame - which is also why AD-5's "V92-02 makes the new match arms, once" ended up needing no
+arm in `v34/phase2.rs`: no new `Info` variant reaches a receiver that has not asked for it. The package is
+L, not M.
+
+Amendments made while a package was being built are recorded here too, one paragraph each.
+
+- **V92-03's upstream rate mask is an argument and an accessor, not a `Descriptor` field.** The entry asked
+  for `Descriptor.upstream_rates: Option<u32>`. A new public field cannot be added inside V92-03's Files
+  line: `Descriptor` derives no `Default` and is built by struct literal in `crates/datapump/src/v90/dil.rs`
+  and `crates/datapump/tests/dil_sounds.rs`, and neither file belongs to any package in section 5. The mask
+  is therefore a parameter to `to_bits_in`, the second half of what `from_bits_in` returns, and
+  `DescriptorFinder::upstream_rates()` beside `feed` -- which is AD-5's shape anyway. V92-11 and V92-22
+  read the mask from the accessor, not from the descriptor. For the same reason `Cp::upstream_rates` stays
+  V.90's `u16` and reads back as 0 under `Layout::V92`, rather than becoming the `Option` the entry names:
+  `v90/analogue.rs` and `v90/digital.rs` both use that field and are outside the Files line as well.
+
+- **V92-13 is L, and the reason is 170 lines of printed table.** The entry's first bullet asks for Tables 7
+  to 10 as constants, which is 2408 octets - about 170 lines before a line of code is written - and
+  `v92/anspcm.rs` came to 1558 with them, its five other bullets and nine tests. Nothing about the package
+  grew; the sizing simply did not count the data. The entry now says L and has gained two things the build
+  found. `AnspcmWatch` cannot be `Clone` while `v8::ansam::AnswerTone` is not, which matters because
+  `v90::startup::Analogue` is `Clone` and V92-49 is the package that will want one there; the fix is one
+  derive in a file no package owns, and the entry says to add it to whichever package first needs it rather
+  than to guess a home for it now. And a dBm0 figure needs a reference: it is G.711's overload point, 8159
+  on mu-law, **not** `ucode::linear(127)`, which is the middle of the loudest interval and 0.14 dB quieter.
+  Taking the second reports every ANSpcm level loud by that much - more than the whole tolerance of
+  `anspcm_power_is_the_level_lm_names` - so the two overload constants are named in `v92::anspcm` and a test
+  pins the difference between them.
+
+### From the work-package reviews
+
+**7. V92-04's kernel table stays keyed on the exact fractional phase, so the lever is a zero-skew one.**
+The review of the built package was right that the table is rebuilt on every network sample as soon as the
+two clocks differ, and that CD 9.2 N11 asks for a V.92 upstream test at plus or minus 120 ppm. Its remedy,
+rounding the phase to a grid, is declined, and V92-04's entry now says so rather than promising a lever
+that cannot be had. Measured in the worktree: at 120 ppm the sampling instant moves 2.4e-4 of a line
+sample per network sample, so a grid of 1/1024 would be reused about four times over - and it moves 248 of
+19 600 upstream codewords, one symbol in eighty, where 1/256 moves 902 of them. A route that invents its
+own symbol errors cannot measure a modem's, and the point of the package is that the A/D hands back the
+codeword the analogue modem meant. What it costs to leave alone is bounded and small: 305 ms per ten
+seconds of skewed line against 39 ms unskewed, and one integration test in twenty sets `with_clock`. What
+was added instead is proof - the bit-exact test now runs off phase zero and at plus and minus 120 ppm as
+well, so anyone who does round the phase breaks it at once.
+
+Notes from the package reviews follow, one per package that changed its own entry.
+
+**V92-11 as built: one enumeration became two, one constant became a function, and the package is L.**
+The entry named `CpFamily` alone. Upstream it works as written - bit 18, then the type at 19:20 - but the
+digital modem's own sequences cannot be read that way: CPd's bits 19:21 are the flags saying which of its
+three parts are present, so a CPd and a CPu differ only in which way the receiver is listening. A single
+enumeration would have had to guess, and guessing wrong turns a part flag into a type. So there are two,
+`CpFamily` and `DownFamily`, and each finder is told which direction it is in by which one it returns. The
+entry also asked the finder to use `cp_length` for CPu: that function and the `Shape` it takes are private
+to `v90::sequences`, which V92-03 did not export and this package may not edit, so the long CPs are found
+by `CpFinder::v92` itself - the same arithmetic, already proved, and no second copy of it. Third, section
+4's "CPd point linear value" is a reading rather than a number, so its home here is `set_levels`, whose doc
+carries the clause, the scale and the alternative; a `pub const` would have had to be a tautology to be
+used at all. Last, the sizing: the file is 1789 lines, 693 of them the sixteen named tests and the five the
+package added, and 370 of the remaining 1096 the clause quotations the house rule asks for. Seven wire
+formats, two finders and a part walker were never an M. The entry is marked **L**, but honestly it is past
+the top of that band by about a third, and section 2's bands have nothing above L. It could not be split:
+the Files line is one file, and a second one would have been a file outside it.
+
+**V92-15: two half-band filters in cascade are not one, and the package is L.** The entry asked for
+`through_the_network_the_codec_reads_back_the_levels_sent` at 40 dB and did not say what the network had to
+be. It cannot be done with the model's upstream anti-alias filter anywhere near 4 kHz, and the reason is
+not a modelling artefact. The transmitter's own reconstruction is already the band-limiting filter and it
+is a *half-band* one - `H(f) + H(8000 - f) = 1`, which is exactly what puts its zeros on the other symbols'
+instants - so an A/D that samples on those instants and folds our image back reads the level exactly, with
+no filter of its own needed at all. Put a second half-band filter in front of that A/D and the product is
+not half-band: at 4 kHz each passes half, the pair passes a quarter twice over, and a random level
+sequence, which fills its band right up to the edge, comes back about 22 dB down (measured 21.9). Widening
+the filter instead of removing it is worse, because then our own out-of-band image aliases. So the test
+opens it to the line's Nyquist, where the A/D is transparent, and the read-back is exact to floating point
+(measured 305 dB down). The 4 kHz filter is a real thing on a real gateway; it is a *channel*, and
+equalizing the channel is what the prefilter the digital modem designs and downloads is for (6.4.2). The
+entry's `a_half_symbol_delay_...` test keeps a control run at the same settings, so the exactness is not
+mistaken for the route doing nothing. Two smaller corrections in the same entry: `Mode::Interpolated`'s
+cutoff is exactly 4 kHz and not "just under", because only the symbol rate's own Nyquist has zeros on the
+symbol instants, and the table is interpolated between phases rather than rounded to one of them, because
+1/512 of a symbol is thirty times coarser than a code of Jp. And the sizing was wrong: `transmit.rs` came
+to 1026 lines, 560 of them tests, so the package is **L** and not M.
+
+**V92-06: "within 1 ppm" is the rate, read as the median of each second, not every single reading.** The
+package reads the clock after every line sample, which is what the upstream transmitter will do, and a
+single reading carries the timing loop's own dither on top of the rate. Measured over ten seconds of a
+120 ppm network: the per-second medians come out at most 0.19 ppm from the truth, but individual readings
+reach 1.04 ppm once the loop has settled and 3.19 ppm in the first second after training. So the figure
+was not assertable as written on a per-reading basis, and the entry now puts the plan's 1 ppm on the rate
+in every one of the ten seconds - where the original test looked only at the last - with the dither
+bounded separately by named constants carrying their measured values. The median is also the project's
+convention for a statistic a jitter buffer disturbs (memory `voip-jitter-slips`). The entry also gained
+the untrained-clock behaviour, which the review found the doc promising and the code not delivering, and
+the three tests the package had added beyond the two the plan named.
+
+**V92-08: a bypassed answerer needs an ending, and the entry did not give it one.** The description named
+the three ways into the protocol phase and none of the ways out. That is fine for the originator, which
+sends the SABME and therefore gives up on its own N400; an answerer sends nothing, so with the detection
+phase skipped there is no clock in it at all, `settled()` never comes true and `Modem::announce_connect`
+waits for ever on a far end that indicated LAPM and does not do it - which V.8 7.3 says exists. The
+answer was already in the clause the package was implementing: 7.2.1.3's T400 ends the answerer's wait
+whether or not an ODP came, and the bypass changes when that wait starts, not that it ends. So the
+detector the entry asks for anyway - the one that answers a stray ODP - carries the timer too, and its
+expiry drops the stack to `Phase::Transparent` with the heard bits kept for the terminal, exactly as a
+detection phase that timed out does. The entry now says so and names the test. The package is **M** and
+not **S**: 604 lines across the three files, over half of them the clause quotations the house rule asks
+for and the tests.
+
+**V92-09: the alternative reading of step 4 is not a reading, and the package is M.** Section 4 fixes step
+4 on d(f-1) "as printed" and asks for a named constant so that one edit flips it. The constant is there
+(`STEP4_USES_PREVIOUS_D`), but the entry should not leave the impression that d(f) is a second working
+convention waiting for a capture to choose it. Reflecting on d(f) rather than d(f-1) sends every R into
+the same half of [0, M): with M = 105, R = 51 and R = 53 both give R0 = 51, and only 53 of the 105 values
+of R0 are reachable at all. There is therefore nothing for a decoder to mirror, and a capture that
+disagreed with the printed reading would mean the differential step means something else again, not that
+this switch is the wrong way up. The module says so, `Decoder::decode` refuses rather than guessing, and
+`the_alternative_reading_of_step_4_is_not_one_to_one` is the proof. Q-1's "both readings decode" is the
+one line of INTRO 9.4 this contradicts. The sizing was also wrong: the file came to 750 lines, a third of
+it the clause quotations the house rule asks for, so the package is **M** and not **S**.
+
+**V92-10 is L, and its `Chain::new` is narrower than `Parameters::fits` on purpose.** Two corrections to
+its entry, both made while the package was built. The sizing was wrong for the same reason V92-01's was:
+`v92/precoder.rs` came to 1128 lines, half of it the clause quotations the house rule asks for and the
+inverse-channel test that proves the two feed-forward indexings of P-5 apart, so the package is **L** and
+not M. And the entry's "an infeasible parameter set is reported" could not be met by calling
+`Parameters::fits`, which V92-01 already owns: `fits` refuses a gain above `GAIN_LARGEST`, and the plan's
+own `with_no_filters_the_output_is_the_chosen_level` names G = 1, while V92-62 has to run this very chain
+with a trial gain to *find* the G that makes the mean square of G·v(n) equal to 1. A chain that demanded a
+Table 30 gain could not be used to choose one. So `Chain::new` checks the three things the chain itself
+needs - a constellation per interval, a prefilter feed-forward section, and a class with a member - in
+`fits`'s own wording, and the doc says why it stops there.
+
+The entry also gained what the package had to add beyond its description. `TIE_TO_SMALLER_INDEX` is
+section 4's point-selection reading given the named-constant home that section demands, and `OUTPUT_LIMIT`
+is the bound P-12 asks for, set at eight in the units 8.8.3 fixes: it is a bound in *those* units and in
+no others, so anything measuring power before G is settled reads `Symbol::v`, which the constant's doc
+says. `code_for`, `label_of`, `inverse_map` and `index_to_ki` are public here rather than repeated in
+V92-20, since the decoder needs exactly this arithmetic read backwards. Measured while building it: with
+p1 = [0.6, -0.2, 0.1] over 100 000 symbols the precoder output peaks at 15.9998 against a top level of 31,
+which is half the widest class spacing to six figures - the bound the minimum-|x(n)| rule predicts, and
+the reason the long-run test can assert a multiple as tight as 0.6 of the top level.
+
+**V92-12: the four segment lengths were already V92-01's, so the entry asked for a duplicate.** The
+description's last bullet asked this package for "segment-length constants 384, 24, 144, 2040, and
+`UP_SEQUENCE_UNIT = 12`", but V92-01's own entry had already put all four in `v92/mod.rs` -
+`RU_SYMBOLS`, `RU_BAR_SYMBOLS`, `SU_SYMBOLS` and `TRN1U_MINIMUM` - and they are there in the merged code.
+Writing them again in `up_signals.rs` would have broken section 4's "one reading, one home" rule and left
+two numbers to change whenever one moved, which is risk R12. The bullet now says so, and names instead
+what this package really does own: `UP_SEQUENCE_UNIT`, which is the *padding and segment* unit rather than
+a length and which is `UP_INTERVALS` under another name, and the four section 4 readings whose Owner
+column says `v92::up_signals`. The module uses V92-01's lengths and its tests assert against them, so the
+package still proves that 384T and 24T are whole Ru periods and that 144T and 2040T are whole frames.
+
+**V92-14: the "wait for my CPu" [MAY] is Table 27's sentence, not 9.6.1.1.2's, and Figure 14 is not to
+scale.** Two corrections made while the package was being built, both read off the rendered pages.
+9.6.1.1.2 (PDF page 58) is two sentences long and mentions neither bit 26 nor an option of any kind; the
+[MAY] is Table 27 bit 26 itself (PDF page 37), "The digital modem is not required to comply with this
+request", which is also where P4A 3.6 and P4D 12.2 put it. V92-14's entry now cites the table. **V92-39
+and V92-40 carry the same slip** - "9.6.1.1.2 makes complying a [MAY] in any case" and "which 9.6.1.1.2
+allows [MAY]" - and their entries are not this package's to edit, so whoever builds them should quote
+Table 27 bit 26 in the code and correct the entry then. Second: Figure 14 (PDF page 58) draws its
+"RTD + 100 ms" bracket across four SUVu, and an SUVu is 12 or 24 symbols, so the bracket as drawn is 6 to
+12 ms where the clause asks for 106 ms and up. The figure's box counts therefore cannot be reproduced by a
+machine that obeys 9.6.2.1.3; its *shape* can, and is - SUVu SUVu CPu, SUVu x4, SUVu', CPu' x3, E2u
+against SUVd x5, CPd, SUVd, SUVd', Ed - with the runs of unacknowledged sequences coming out 68 and 76
+instead of 1 and 4, and the instant the repeat starts asserted against the window. Figures 12 and 13 do
+come out box for box, Figure 13 with the digital modem's CPd held back one boundary past the CPu's arrival
+because it is still being designed, which is the same drawing slack P4P reads into Figure 14's late switch
+to SUVu'.
+
+One thing that entry did not name and the package needed: the single CP waits for one SUV of **our own**
+as well as one of the peer's, because 9.8.2.1.3 releases it only "after having transmitted an SUVu and
+received an SUVd". Without it, an SUVd that arrived while TRN2u was still running would put a CPu before
+the first SUVu in a renegotiation. The entry now says so.
+
+**V92-16: the UINFO cap is a guard, not a fix, and Table 15/V.90 says so.** The entry claimed
+`training_codeword` "can return a Ucode above 111", and built a named test around a digital modem whose
+maximum transmit power "would otherwise admit Ucode 120". Neither is true. Table 15/V.90, read from the
+rendered page, has its loudest limit at (15124)^2 for -0.5 dBm0, and no Ucode above 109 stays inside that
+under either companding law - Ucode 120 is 24956 in Table 1's units, half as loud again as the loudest
+limit there is. So the V.90 search can never reach 111 for any INFO0d, the conforming-Table-18 problem the
+entry describes does not exist, and the test as written could not be built. `V92_MAX_UINFO` is kept all
+the same, because Sd-5 is a real bound on a real signal and a cap that costs nothing is the cheapest place
+to hold it; the entry now says what it is for, and the test proves both that the ceiling is where it
+should be and that V.90's own choice did not move for any of the sixty-four cases. Two smaller departures
+are recorded in the entry too: `V92Wish` rides on two *additional* `Pcm` variants, because the two that
+exist are built in `v90/startup.rs` and cannot change shape, and `lapm_bypass_allowed` takes V.8's half of
+9.3.1 as an argument.
+
+One reading the package could not settle is worth naming here, because a later package inherits it.
+**A V.92 digital modem cannot tell INFO0a bit 26 from V.34's transmit clock source.** V.90 reserves bits
+26:27 of INFO0a and a V.90 analogue modem sends zeros, so V.90 peers are safe; but a plain V.34 modem
+answering a V.92 digital modem's phase 2 puts its clock source in those bits, and "synchronized to the
+receive timing" reads as "V.92 capability: 1". 9.3 gives no second signal, and phase 2 cannot see the V.8
+menus that would. What it costs in this package is one bit: INFO1d bit 70 carries the PCM-upstream verdict
+where V.90 would have put the 3429 high-carrier flag, and the call still lands on V.34, because a V.34
+modem answers with Table 11 whatever bit 70 said. V92-24 inherits a sharper version of the same thing: a
+V.34 modem naming an external clock (the value 3) sets *both* flags, so if our own end also requests a
+short phase 2 the four bits of 9.4 agree with a modem that has never heard of it, and the two ends reverse
+in opposite orders. The remedy is not in phase 2 - it is to make the short-phase-2 request conditional on
+V.8 having offered PCM, which AD-12's memo already gates it on (P2S N-21).
+
+**V92-18 as built: the capture is a short Phase 1 over V.8 bis, and it declines PCM upstream.** The entry
+asked for the V.8 menus and for a QC1a on V.21(L) before the CM. `tests/vectors/v92-56k.wav` has neither,
+and not because anything failed to read it: there is no CM, no JM and no CJ on either V.21 channel, while
+the same two passes over `v90-56k.wav` find that recording's five CMs and three JMs. What the clip holds
+instead, from 1.1 s to 3.4 s, is the second half of Figure 5/V.92 - **QC2a** on V.21(H) from the analogue
+calling modem, **QCA2d** on V.21(L) from the digital answering one, then 75 ms of silence, QTS, QTS\ and
+ANSpcm, and TONEq one second after ANSpcm began. The CRe that opened it is before the clip starts.
+
+Three consequences, all recorded rather than acted on.
+
+- **`v8::quick` could not have found it, and is right as it stands.** V92-07 codes the four V.8-framed
+  sequences and says in its module comment that the V.8 bis pair is out of scope because this modem has no
+  V.8 bis to send them on. That remains true, and V92-18 does not add one: it reads the two identification
+  octets of Tables 3 and 14 with `ec::hdlc` - V.8 bis 7.2 frames a message exactly as LAPM frames one -
+  and hands the fields to V92-07's `Uqts` and `AnspcmLevel`, which are the same codes in both framings. If
+  short Phase 1 is ever offered on a live line, though, this is the evidence that the V.8 bis opening is
+  the one a real V.92 pair took, and a package that adds QC2x/QCA2x has a capture to check itself against.
+- **The digests' derived vectors hold up against the wire.** QCA2d reads `2D E2`, which is byte for byte
+  the vector P1P 3.3 worked out from the Recommendation before this file was read, and QC2a reads `2D 25`:
+  U_QTS = Ucode 79, P = 1 both ways, LM = 01 (-12 dBm0). QTS runs 96 ms and turns over into QTS\ at
+  exactly 768 symbols; ANSpcm reverses at 450 and 455 ms where 8.3.1 says 3612 symbols. Every printed
+  number that reaches the wire in short Phase 1 is now confirmed by a real modem.
+- **There is no PCM upstream on this recording.** Both INFO0s say V.92 and the server sets INFO1d bit 70,
+  so 9.3 leaves the analogue modem free to send a Table 18 INFO1a - and it sends Table 10/V.90 instead,
+  8000 down and V.34 at 3200 up, with the same UINFO 78, MD 20 and S3200 as the V.90 recording. So no Ru,
+  no TRN1u, no Jp and no CPd exist in any capture this project owns, and V92-26's spike, V92-30's choice
+  and the Phase 3 packages have only the Recommendation and our own two ends to check themselves against.
+  Section 13's live requests are the only route to a real one, and INFO1d bit 70 arriving set from a real
+  server is the first thing worth capturing there.
+
+One measured departure is recorded and not asserted as conformance: between TONEq stopping and INFO0a
+starting this modem leaves 93 ms, where 9.2.1.3 asks for 75 +/- 5. The last 35 ms of the tone come back
+about 15 dB down, which is the line's own echo of it, so the true figure depends on where one calls the
+tone over; it is one 2005 modem either way, and nothing in our transmitter was changed to match it.
+
+## 15. Priorities for the branch, and the echo canceller (2026-10)
+
+Written after the experimental branch was merged onto main as `v92-dev`. Section 5's package list and
+section 6's wave order still hold; what follows is the order they are taken in, and one item that is not a
+V.92 package at all.
+
+### 15.1 What is wanted first
+
+1. **PCM upstream, waves 3 to 9.** It is the whole of what V.92 adds to a connection, and it is what
+   `M0` and `M1` gate on: V92-19's chain, V92-20's decoder, V92-21's design, V92-62's numeric choice,
+   V92-22's receiver and V92-26's spike, then the Phase 3 and Phase 4 state machines. Nothing else is worth
+   doing before the spike has said the designed precoder carries the upper half of the ladder.
+2. **The start-up that reaches it** (waves 10 to 11: V92-42, V92-44, V92-46, V92-47). A V.92 that no AT
+   command can ask for is not a product.
+3. **Rate renegotiation and fast parameter exchange** (V92-48, V92-51, V92-53). A PCM-upstream call that
+   cannot renegotiate is at the rate it started with, and on a line that changes that is most of the value.
+4. **Modem-on-hold and Quick Connect: deferred, not dropped.** V92-24 (short Phase 2), V92-25 and
+   V92-55 to V92-59 (hold), and V92-29/V92-31/V92-45/V92-49/V92-52 (short Phase 1, the memo, quick
+   connect in the pumps) are the lowest priority of the set. The reason is not that they are hard, it is
+   that neither changes the rate a call connects at, and V92-18's capture says the one real V.92 pair this
+   project has recorded did not use them either: that modem sent Table 10/V.90 in Phase 2 and took the
+   full V.8 start-up. Packages that only these deferrals leave stranded -- V92-50 and V92-61, the GUI's
+   carrier and the scope -- wait with them.
+5. Everything else keeps its wave.
+
+### 15.2 The echo canceller, in all three modes
+
+A telephone line's hybrid echo arrives at -24 to -30 dB below the transmitter, which is the range the
+interop rigs are already run at (`BRIDGE_HYBRID_DB` defaults to -25, `BRIDGE_CO_HYBRID_DB` to -99 for a
+line the central office has cancelled). The canceller has to work at the near end of that range, and the
+objective is the rate, not the residual: at -24 dB an uncancelled echo costs more than the noise on a
+quiet loop. To be done **while testing V.34, V.90 and V.92**, not before, and as its own commits:
+
+- **V.34:** the analogue modem's canceller under a -24 to -30 dB hybrid with the line's own 1 ms delay,
+  measured as the rate the DIL then chooses. `interop/v90/run_v90.py --line-model phone` at
+  `BRIDGE_HYBRID_DB` of -24, -27 and -30 is the rig; a V.34 call is `--rate` low enough to fall back.
+- **V.90:** the same, on the digital side's echo path (V.92-43 is the package that adds one where V.90 has
+  none), plus the analogue side's, reported as the CONNECT rate curve. The regression the current work
+  already has is -25 dB = 34667 and -20 dB = 14400; the -24 to -30 band is where the curve has to be flat.
+- **V.92:** the upstream is where echo hurts most, because the analogue modem's own transmitter is 24 to
+  48 kbit/s of PCM right beside the levels the digital modem is trying to read. PCM upstream at -24 dB
+  echo is the numbers that decide whether the canceller, the precoder or the fallback ladder takes it.
+- **Where the model lives:** the hybrid is a delay and a gain in the 9600 Hz LPCM domain of the rig
+  (section 15 of the project's own rule 1), never a codeword-domain subtraction.
+- **What is recorded:** a rate-against-echo table per mode in `docs/10-binmodem-v90-interop.md`, so that a
+  change to any canceller shows up as a number rather than as an impression.

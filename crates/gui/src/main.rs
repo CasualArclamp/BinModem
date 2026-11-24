@@ -31,19 +31,28 @@
 //! the speakers are plugged into, and a handshake played through speakers is
 //! no use to anyone.
 
+// No console window behind the program's own when it is opened from Explorer;
+// `parent_console` gives back the output a shell expects.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod answer;
 mod app;
+mod callprompt;
 mod crashlog;
 mod dialin;
+mod document;
 mod faxwin;
 mod console;
+mod contacts;
 mod engine;
 mod live;
 mod net;
 mod network;
+mod parent_console;
 mod remembered;
 mod scopes;
 mod speed;
+mod tap;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -76,6 +85,37 @@ fn list_devices() {
     }
 }
 
+/// The SIP accounts the file holds, and where the file is.
+///
+/// Printed with the path, because the answer to "there are no accounts" is
+/// always a path and never a list.
+fn list_accounts() {
+    match sip::Account::default_path() {
+        Some(path) => {
+            let _ = sip::Account::write_example(&path);
+            println!("accounts (--sip), from {}:", path.display());
+        }
+        None => println!("accounts (--sip):"),
+    }
+    match sip::Account::load_default() {
+        Ok(accounts) if accounts.is_empty() => {
+            println!("  none yet; the file above has a commented example in it");
+        }
+        Ok(accounts) => {
+            for account in accounts {
+                println!(
+                    "  {}  {} through {}{}",
+                    account.name,
+                    account.uri(),
+                    account.next_hop(),
+                    if account.register { "" } else { " (no registration)" }
+                );
+            }
+        }
+        Err(e) => println!("  the account file will not read: {e}"),
+    }
+}
+
 struct Args {
     path: Option<PathBuf>,
     /// Replay the capture carried inside the program.
@@ -83,10 +123,26 @@ struct Args {
     live: bool,
     input: Option<String>,
     output: Option<String>,
+    /// A SIP account to open the line on instead of a pair of audio devices.
+    sip: Option<String>,
     /// Whether to open a terminal onto a socket instead of a modem, and where
     /// to point it. `Some(None)` is the mode with the host chosen in the
     /// window, which is the usual way in.
     telnet: Option<Option<String>>,
+    /// Lines to type at the modem once its line is open, in order, and
+    /// whether to open on the scopes: for a call with nobody at the keyboard.
+    typed: Vec<String>,
+    scopes: bool,
+    /// Or on the Fax tab, which only a live line has.
+    fax: bool,
+    /// Answer a ringing SIP call as this, after it has rung a moment.
+    answer_as: Option<String>,
+    /// Whether the Setup row stays showing once a line is open: for a
+    /// picture of a window that shows what line it is on.
+    setup: bool,
+    /// Record the line from the start, as the window's Record key would: kept
+    /// in `captures` when the window closes or the key is pressed.
+    record: bool,
 }
 
 fn parse() -> Result<Option<Args>, String> {
@@ -96,7 +152,14 @@ fn parse() -> Result<Option<Args>, String> {
         live: false,
         input: None,
         output: None,
+        sip: None,
         telnet: None,
+        typed: Vec::new(),
+        scopes: false,
+        fax: false,
+        answer_as: None,
+        setup: false,
+        record: false,
     };
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let mut rest = raw.iter();
@@ -117,6 +180,22 @@ fn parse() -> Result<Option<Args>, String> {
                 }
                 args.telnet = Some(host.cloned());
             }
+            // A line with no sound card in it at all. Implies --live,
+            // because there is nothing else it could mean.
+            "--sip" => {
+                args.sip = Some(value("--sip")?);
+                args.live = true;
+            }
+            "--accounts" => {
+                list_accounts();
+                return Ok(None);
+            }
+            "--type" => args.typed.push(value("--type")?),
+            "--scopes" => args.scopes = true,
+            "--fax" => args.fax = true,
+            "--answer-as" => args.answer_as = Some(value("--answer-as")?),
+            "--setup" => args.setup = true,
+            "--record" => args.record = true,
             "--in" => args.input = Some(value("--in")?),
             "--out" => args.output = Some(value("--out")?),
             "--devices" | "--list-devices" => {
@@ -127,9 +206,16 @@ fn parse() -> Result<Option<Args>, String> {
                 println!(
                     "binmodem                                   a modem, line chosen in the window\n\
                      binmodem --in <dev> --out <dev>            and opened straight away\n\
+                     binmodem ... --type <line> [--scopes]      typed at the modem once the line is open\n\
+                     binmodem ... --fax                         open on the Fax tab, on a live line\n\
+                     binmodem ... --answer-as fax|modem         press that answer when a SIP call rings\n\
+                     binmodem ... --record                      record the line from the start, into captures\n\
+                     binmodem ... --setup                       leave the Setup row showing with a line open\n\
                      binmodem [path.wav]                        replay a capture\n\
                      binmodem --capture                         replay the Bell 103 golden vector\n\
                      binmodem --devices                         list audio devices\n\
+                     binmodem --sip <account>                   a call over SIP, with no sound card\n\
+                     binmodem --accounts                        list the SIP accounts there are\n\
                      binmodem --telnet [host]                   a board over a socket, no modem\n\
                      binmodem --answer --in <dev> --out <dev>   a board to dial, on the same cable"
                 );
@@ -168,6 +254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Before anything at all, so that whatever goes wrong next leaves a line
     // behind saying where. Nothing else in here writes anything down.
     crashlog::install();
+    parent_console::attach();
 
     // The answering modem is a different program in the same file. It owns the
     // process rather than sharing it -- there is no window, and what it prints
@@ -181,7 +268,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(i32::from(code != std::process::ExitCode::SUCCESS));
     }
 
-    let Some(args) = parse()? else { return Ok(()) };
+    let Some(mut args) = parse()? else { return Ok(()) };
+    // Taken now, because `args` is picked apart below.
+    let (typed, scopes, fax, setup) = (std::mem::take(&mut args.typed), args.scopes, args.fax, args.setup);
+    let answer_as = args.answer_as.take();
 
     let control = Arc::new(Control::default());
     let (sample_rate, title) = if args.live {
@@ -210,6 +300,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (handle, Source::Telnet(session))
     } else if args.live {
         let session = Arc::new(live::Session::default());
+        session.set_recording(args.record);
         // Named devices open straight away; without them the window opens with
         // the modem on the desk and no line in it, and the line panel is where
         // one gets chosen.
@@ -217,7 +308,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // cables by itself when they are not, because finding them means
         // enumerating audio devices and the thread that opens one is the right
         // place to go looking.
-        if let (Some(input), Some(output)) = (&args.input, &args.output) {
+        if let Some(account) = &args.sip {
+            session.open_sip(account);
+        } else if let (Some(input), Some(output)) = (&args.input, &args.output) {
             session.open(input, output);
         }
         let handle = live::spawn(tx, control.clone(), session.clone(), sink.clone());
@@ -244,13 +337,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         options,
         Box::new(move |cc| {
             cc.egui_ctx.set_visuals(eframe::egui::Visuals::dark());
-            Ok(Box::new(app::ScopeApp::new(
-                rx,
-                ui_control,
-                sink,
-                sample_rate,
-                source,
-            )))
+            let mut app = app::ScopeApp::new(rx, ui_control, sink, sample_rate, source);
+            app.script(typed, scopes);
+            app.open_fax_tab(fax);
+            if let Some(how) = answer_as.as_deref() {
+                app.answer_as(how)?;
+            }
+            app.keep_setup_showing(setup);
+            Ok(Box::new(app))
         }),
     )?;
 

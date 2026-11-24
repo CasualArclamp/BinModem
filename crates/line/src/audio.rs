@@ -141,7 +141,7 @@ impl AudioSink {
 
 /// Names of the available output devices, default first.
 pub fn output_devices() -> Vec<String> {
-    let host = cpal::default_host();
+    let host = crate::host();
     let default = host.default_output_device().map(|d| d.to_string());
     let mut names: Vec<String> = host
         .output_devices()
@@ -190,7 +190,7 @@ pub fn listen(
     device_name: Option<&str>,
     source_rate: f64,
 ) -> Result<Monitor, String> {
-    let host = cpal::default_host();
+    let host = crate::host();
     let device = match device_name {
         Some(want) => host
             .output_devices()

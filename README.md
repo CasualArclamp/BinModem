@@ -1,6 +1,10 @@
 # BinModem
 
-<img width="1314" height="892" alt="image" src="https://github.com/user-attachments/assets/f07ab50e-662e-4474-bae8-eda9861fb87a" />
+[![release](https://img.shields.io/github/v/release/CasualArclamp/BinModem?logo=github&label=release)](https://github.com/CasualArclamp/BinModem/releases/latest) [![downloads](https://img.shields.io/github/downloads/CasualArclamp/BinModem/total?logo=github&label=downloads)](https://github.com/CasualArclamp/BinModem/releases)
+
+If you've found this worth your time, please consider [donating via PayPal](https://www.paypal.me/Arclamp).
+
+![BinModem on a V.34 call at 33 600: the faceplate, the call card and the scopes](docs/images/releases/v3.0.0/scopes-v34.png)
 
 A dial-up softmodem in Rust. Everything a modem does — the tones, the
 handshakes, the error control, the compression — is code, and the line is a
@@ -9,14 +13,15 @@ one vendor's Windows.
 
 Written against the ITU-T Recommendations, with clause numbers cited in the
 source for every normative constant, and against the RFCs for everything
-carried over the top of them. 1580 tests.
+carried over the top of them. 2175 tests.
 
 ## What works
 
-It places and answers real calls. Full interactive sessions — public dial-up
-gateways, reached over a VoIP trunk — have crossed it at V.22bis 2400 and at
-V.32 4800, with V.42 error control and V.42bis compression, byte for byte
-correct including the ANSI. Where a far end answers no XID at all and simply
+It places and answers real calls. Every modulation in the table below has
+connected to real modems and providers' servers over a VoIP trunk, from Bell 103
+to V.90, and full interactive sessions on public dial-up gateways have crossed
+it with V.42 error control and V.42bis compression, byte for byte correct
+including the ANSI. Where a far end answers no XID at all and simply
 announces compression in band, that is followed too, and 1957 octets of one
 board's screen are kept as a test vector. No far end ever has answered one, in
 any of twelve recorded calls, and reading those calls back through the whole
@@ -32,6 +37,51 @@ through untouched changes, from one to four. The redundant bit buys nine
 decibels at every one of them, which is why 14 400 fits in the channel 4800
 does.
 
+V.34 works on real calls. Through a VoIP trunk to real modems it has come up
+at 28 800 to 33 600 and carried login banners and PPP without an error. The
+recordings of those calls replay through the modem to the same banners, and in
+them it answers the far end's rate renegotiation and follows the jitter
+buffer's slips, both in the start-up and once connected. Phase 2 reads the far end's probe for 300 ms rather than the
+full 500 V.34 allows, because a real modem that needed the difference to hear
+our reply stalled three times running without it.
+
+V.90 works both ways round. The analogue modem, the half that dials a
+provider, reads a real server's start-up the way the Recommendation writes
+it -- CM and JM, INFO0d and INFO1d, Ja, TRN1d, Jd and the DIL -- and connects
+in PCM to real providers' servers over the VoIP trunk. The
+digital modem, the half a provider runs, answers too, so two of these connect
+at full PCM rates over a virtual cable. Against a simulated G.711 network --
+A-law and μ-law, a robbed bit, a pad, noise, a second's round trip, a sound
+card 120 ppm out, a jitter buffer slipping every few seconds and a softphone's
+gain control -- it connects at 52 000 to 56 000, renegotiates and retrains from
+either end, notices a far end that has hung up, and falls back to V.34 on a
+route that would carry less as PCM. Where the top of the band is cut, as a
+codec or a VoIP path cuts it, the analogue modem asks for spectral shaping the
+way a real one does, so the server sends next to nothing where the cut is.
+
+### U.S. Robotics x2
+
+x2 is the 56k scheme U.S. Robotics shipped in 1997, before V.90. A server
+here offers it as well when `ATS70=1` (or the window's **x2** tick) is set
+with `AT+MS=V90` or `V92`: a caller whose V.8 offers V.34 and no PCM, as a
+USR modem that never had its V.90 upgrade does, then gets x2 -- PCM down at
+32000 to 56000, V.34 up -- and anything else gets what it got before. Nothing
+of x2 is standardised; the facts come from libv90modem's notes (gathered from
+D-Modem and courier-emu, and its own reading of the server firmware), and the
+level banks for each rate are carried as data from D-Modem's published
+numbers. See [crates/datapump/src/x2](crates/datapump/src/x2).
+
+U.S. Robotics' own Courier firmware, running in courier-emu, connects to it:
+`CONNECT 49333/ARQ/x2/LAPM/V42BIS` on the Courier's terminal, numbered lines
+arriving intact, its rate change to 54666 followed and the data still
+arriving after it. Getting there found two things worth knowing: a Courier
+reads the server's V.8 JM for a carrier inversion between one JM and the
+next, on the bit boundary where the next begins and not one bit earlier;
+and V.42 here answered an XID with its own offer rather than the settled
+values, which a Courier takes for no answer at all (fixed for every call,
+not only x2). [tools/x2/courier-peer.md](tools/x2/courier-peer.md) says how
+to run the emulated Courier. It has not met a real x2 modem yet.
+
 Every constellation was read off the figures by position rather than out of
 extracted text, which loses the sign of each coordinate and shuffles the axis
 labels through the rows. [tools/read_constellation.py](tools/read_constellation.py)
@@ -42,28 +92,35 @@ been checked three other ways: two documents, two methods, one table.
 
 | | |
 |---|---|
-| **Modulations** | Bell 103 (300), V.22 (1200), V.22bis (1200/2400), V.32 (4800/9600, both codings), V.32bis (7200/12000/14400), V.34 (4800 to 33600: shell mapping, 16/32/64-state 4D trellis codes, precoding, non-linear encoding), V.90 analogue and digital modems (28000 to 56000 PCM down, V.34 up: DIL analysis, modulus encoding, spectral shaping, rate renegotiation; the digital one answers through a softphone) |
+| **Modulations** | Bell 103 (300), Bell 212A (1200, falling back to 103), Bell 202 (1200 half duplex), V.21 (300), V.22 (1200), V.22bis (1200/2400), V.32 (4800/9600, both codings), V.32bis (7200/12000/14400), V.34 (4800 to 33600: shell mapping, 16/32/64-state 4D trellis codes, precoding, non-linear encoding), V.90 analogue and digital modems (28000 to 56000 PCM down, V.34 up: DIL analysis, modulus encoding, spectral shaping, rate renegotiation; the digital one answers through a softphone), U.S. Robotics x2 as a server (32000 to 56000 PCM down, V.34 up, the client's rate changes followed) |
 | **Negotiation** | V.8 CM/JM/CI/CJ and ANSam; V.25 answer tone told apart from it |
 | **Error control** | V.42 LAPM — detection, HDLC, XID, REJ/SREJ, mod-128 |
 | **Compression** | V.44 (LZJH) and V.42bis (BTLZ), both offered in one XID and the far end picks; V.42bis also followed in band |
-| **Commands** | V.250 AT: `+MS`, `+ES`, `+DS`, `+DS44`, `+ER`, `+DR`, S-registers, `+++` |
+| **Commands** | V.250 AT: `+MS`, `+ES`, `+DS`, `+DS44`, `+ER`, `+DR`, S-registers (S70: x2 on offer, our own), `+++` |
 | **Terminal** | ANSI/CP437 with mouse reporting; telnet (RFC 854) to use it alone |
 | **Settings** | remembered between runs, so the modem comes back where it was left |
 | **Files** | ZMODEM send and receive |
-| **Fax** | T.30 group 3, sending and receiving; V.29 (7200/9600) and V.27 ter (2400/4800); T.4 Modified Huffman and Modified READ, T.6 MMR; T.30 Annex A error correction mode; any number of pages in a call, each drawn as it arrives |
+| **Fax** | T.30 group 3, sending and receiving; V.17 (7200 to 14 400), V.29 (4800/7200/9600) and V.27 ter (2400/4800); Super G3 -- V.8, then T.30 Annex F on V.34's half-duplex mode at up to 33 600; T.4 Modified Huffman and Modified READ, T.6 MMR, T.85 JBIG; T.30 Annex A error correction mode; any number of pages in a call, each drawn as it arrives; a PDF sent a page to a sheet at its printed size, and the pages received saved as a PDF |
 | **Network** | PPP (RFC 1661/1662) with LCP, PAP and CHAP, and IPCP, Van Jacobson header compression (RFC 1144), and a ping over it; a dial-in login prompt, and a login script for dialling out |
 | **Internet** | our own TCP (RFC 9293) and an HTTP/HTTPS proxy (RFC 9112): pages straight to the internet through a provider, or through a far BinModem that has it |
 | **Line** | full-duplex sound card, or a WAV to replay |
 
 It is a fax machine as well. A picture loaded in the Fax window becomes a
-group 3 page and goes out under T.30; a public fax service over the same VoIP
+group 3 page, and a PDF becomes one for each of its pages, drawn at their
+printed size; they go out under T.30. A public fax service over the same VoIP
 trunk accepts the training check and confirms the page, and a page it sends
-back arrives and saves as a PNG. V.29 carries it at 9600 and 7200, falling back
+back arrives and saves as a PDF or a PNG. V.29 carries it at 9600 and 7200, falling back
 to V.27 ter at 4800 and 2400, and every point and training sequence of both was
 read off the figures -- the extracted text turns the square root of two into
 "2". What finally let a real machine's page in was twenty milliseconds of
 silence that its transmitter puts in front of every training sequence on
 purpose, and that this end had been taking for the end of the burst.
+V.17 carries it at 14 400 down to 7200 between two of these; no real machine
+has been tried at V.17 yet. Super G3 -- V.8 in front of the call and the page
+over V.34's half-duplex mode at up to 33 600, with T.30's frames on its 1200
+bit/s control channel -- goes between two of these too, over the VoIP line's
+delay and slips, and a real Super G3 fax has sent one a page at 33 600 on 3429
+baud, in JBIG. Sending to one has yet to get through.
 
 Between two of these the page goes under T.30's error correction mode:
 numbered frames, and a partial page request for any the far end could not read.
@@ -104,119 +161,102 @@ loopback.
 Connected six seconds into the call, network phase at seven, a page back at
 2400 bit/s — and it runs without a sound card.
 
-The window around it is a scope: waterfall, spectrum, constellation, LED
-faceplate, decoded transcript, and a log of every frame both ends sent. What
+The window is a modem's faceplate: the lamps, the level, the rate it connected
+at, and the keys that dial and answer. Under it are the terminal, with a strip
+that says how far the call has got and how long each step took, a transcript
+of every frame both ends sent, and the scopes: a card that names what the
+receiver is slicing and its margin and then goes down the receive chain a
+stage at a time, beside the constellation, an oscilloscope, a waterfall and a
+spectrum that label their own peak, noise floor and occupied band. A recording
+of somebody else's call replays through the same scopes, as far as one tap on
+the line lets it be followed. What
 the echo canceller is taking out, and where on the line it found the
 reflection, are on the panel too — on a two-wire pair that decides everything
 and is otherwise invisible, since a constellation full of noise looks the same
 whether the noise is the line or this modem listening to itself.
+
+There is a SIP caller in it now, written the same way as everything else here
+-- against RFC 3261, 3550 and 4566, with no third-party stack -- so a call can
+be placed without a virtual cable and a softphone in the path. That middle
+stretch was doing three things a modem never wants: resampling 48 kHz to 8 and
+back, running an adaptive jitter buffer that inserts about 20 ms of audio every
+few seconds, and applying gain control. The first ruins a V.90 server's
+codewords, which are the far end's actual symbols; the second was measured
+putting a V.34 receiver out of lock for 1.3 seconds. With the softphone out of
+the way the codewords arrive as they were sent, and the losses that remain are
+counted rather than concealed -- so a failed call now says whether it failed in
+the modem or in the network.
+
+It has a dialler of its own: a keypad, a number box, a Call button, and a form
+for the account -- SIP server, username, password, and UDP or TCP -- so a trunk
+can be set up without editing a file. Call types `ATD` at the terminal rather
+than reaching past it, so there is one path that places a call and it can be
+watched. T.38 is not there yet: a far end that asks for it is declined and the
+call stays on G.711, where the fax modulations already work. Compiled and
+tested against a fake trunk that challenges, refuses, retransmits and
+renegotiates -- and, since 2026-09-23, over a real trunk: it registers, places
+a call, carries it in mu-law, and the modem works over it. TCP has been
+exercised only against the fake trunk so far.
 
 Portable in principle — `cpal` for the audio, `eframe` for the window, no
 OS-specific code — but only built and run on Windows so far.
 
 ## Work in progress
 
-- **V.32 at 9600** connects to a real modem, agrees on the trellis code and
-  passes data, but not reliably. The receiver reaches 30 dB about half a
-  second after connecting and then loses the carrier: the error while it goes
-  is all across the radius and none along it, and the equaliser — frozen at
-  the peak to check — leaves the radial part untouched. So it is the carrier
-  loop, not the line and not the equaliser. Two calls now say the same thing.
-  The rates above it are more crowded still and will want the same fix.
-- **14 400 to a real modem, and it cannot be read.** Reached over the VoIP
-  trunk once the two start-up faults below were fixed: both ends offered every
-  rate, agreed on 14 400 and came up. The receiver locked for a second at a
-  fifth of the distance between neighbouring points, then let go and settled at
-  two fifths, which is where a symbol lands when the decisions are random. It
-  stayed there for thirty-seven seconds. On one virtual cable, where it works,
-  both ends carry V.42 and V.42bis at 14 400 with 0.76 of everything each modem
-  says coming back a sixth of a second later, so what the trunk adds is the
-  difference.
-- **A rate that cannot be read is given up now.** 7 begins a retrain on
-  "detection of unsatisfactory signal reception" and leaves the definition
-  open. Ours was a distance, which cannot work: normalised the same way,
-  neighbouring points are 1.41 apart at 4800 and 0.22 at 14 400, so one number
-  was a quarter of the gap at one end of the range and one and a half gaps at
-  the other — further than a symbol can land from the nearest point. The test
-  was unreachable exactly where it was needed, which is why that call sat there
-  for thirty-seven seconds. It is a fraction of the gap now, a quarter, which
-  is what the old number was at the rate it was tuned on. The retrain that
-  follows offers less than it did, since the rate exchange has no memory and
-  would otherwise arrive back where it started; 5.4.1 and 5.4.2 both ask the
-  rate signals to "take account of the likely receiver performance with the
-  particular GSTN connection", and a rate this receiver has just spent a second
-  failing to read is the strongest evidence about the connection there is.
-  Tried on the line: 14 400 came up, was unreadable, and the modem retrained
-  and agreed 12 000 with the far end — the first rate renegotiated with a real
-  modem. 12 000 was unreadable too, so the step is chosen from the measurement
-  now rather than taken one rate at a time; on a line with a second's delay a
-  retrain costs fifteen seconds and the far end hung up during the third.
-- **The rate signal gets misread, and it costs the rate.** One recorded call
-  to a real V.32bis modem: the far end offered 4800 through 14 400 and sent
-  that same sixteen bits 201 times; this end read one corrupted copy of it,
-  answered with an E calling for 4800, and connected there. 5.3.1 asks for two
-  consecutive identical sequences and two is what a systematic misread
-  produces — counted at the locked phase, the true sequence ran 53 consecutive
-  and every wrong one ran once, except the one that was acted on, which ran
-  twice. Waiting for a third was tried and is worse: on a line returning the
-  transmitter at unity a correct reading never happens three times running, so
-  a modem that holds out never connects. The reading wants a better receiver
-  under it, not a stricter test above it.
-  [tools/read_rate_signals.py](tools/read_rate_signals.py) reads them off a
-  recording.
-- **The round trip is a second and a quarter, and V.32's start-up has no room
-  for it.** MicroSIP to a real modem measures 2947 symbols there and back. Two
-  faults that only show up at that length have been found and fixed. 5.4.1's NT
-  and 5.4.2's MT are counter readings the two ends compare, and this end was
-  handing the pre-roll a trimmed version of one: the far end heard the S, ceased
-  transmitting as 5.4.2 tells it to, looked again MT later and found the S had
-  ended 30 ms earlier. It waited five seconds for another and then started the
-  call from the answer tone, twice. And 5.4.1's "transmission of R2 shall
-  continue until an incoming rate signal R3 is detected" was read as written,
-  so this end talked at a modem that had gone back to the beginning for
-  twenty-three seconds and let it hang up. Both are guarded by tests now;
-  neither has been tried on the line again yet.
-- **Two of these on one virtual cable** fail in one direction only. The
-  answering end reads a clean thirty-two point constellation and brings up
-  V.42 and V.42bis; the originating end sees noise. Measured off a recording,
-  the originating end's own signal comes back at 121 ms and is 0.57 correlated
-  with everything it hears, which is the asymmetry: only the calling modem has
-  to receive the far end's second training segment while transmitting.
+- **V.90 between two of these through softphones** falls back to V.34. The
+  server's codewords are resampled on their way into its softphone and
+  requantised, which leaves noise at about 1.7% of every codeword; a real
+  provider's server puts exact codewords on the network, which is why a real
+  modem gets 56k on the same line.
+
+- **V.ARC**, a wideband mode of our own for a sound card and not a
+  telephone line; both ends have to be BinModem. A multicarrier modulation
+  loaded a carrier at a time, and QAM and baseband levels that fill the
+  card's band (`AT+VARC` sets their baud, code and grid by hand). `AT+VARCBIS`
+  lists it in V.8 bis, so an ordinary call between two BinModems finds it.
+  Over SIP, linear PCM at 8 to 48 kHz carries it exactly, and EasySip is
+  that with no account: type the other end's address.
+  `AT+MS=VARC` or the window's mode box selects it and `ATD` and `ATA` place
+  and answer the call.
+  - Through a real lead between a Realtek line output and its line input at
+    192 kHz: 1.4 Mbit/s with no octet wrong. A call is one signal, the same
+    on both channels.
+  - A call starts with a handshake at 200 bit/s in the voice band, where
+    each end says what its sound cards are, so ends that differ agree on
+    what to run and do not just fail.
+  - It starts on a line it knows nothing about, with a signal that needs any
+    2.3 kHz of the band, and loads only where the line is.
+  - Each end tells the other what it hears, and a sender that is too loud
+    turns itself down.
+  - An end that cannot hear the other says so, and the far end slows the
+    modulation by halves until it can; codes from 0.93 down to 0.25 for
+    lines with little to spare. One direction has been out of a loudspeaker
+    and into a microphone: 20 kbit/s.
+  - `AT+MS=VARC2W` is the same mode on one pair of wires, with an echo
+    canceller. Each end learns its echo with the line to itself first; two
+    ends sharing a virtual cable connect at 327 kbit/s and pass 75 dB.
+  - Between two SIP accounts that say `linear = yes` the call carries
+    sixteen-bit samples exactly and the samples are the data, at 200 kbit/s.
+
+  It has never been run between two machines, and the two-wire mode has
+  never met a real two-wire line. See
+  [docs/design/v-arc.md](docs/design/v-arc.md).
 
 ## Next
 
-V.34 on a real call. A live call has reached data mode with a real modem at
-31 200 towards this end: its login banner came through without an error, and the
-far end heard this end's 33 600 well enough to ask, six seconds in, for a rate
-renegotiation down to 28 800. That renegotiation is now answered -- two of
-these renegotiate from either end and carry V.42 on through it, and the capture
-replays through the modem to the banner on the terminal and the far end's new
-MP read. A second call lost the far end's E to a VoIP slip; that capture now
-connects in replay, the receiver re-timing itself to the slip and finding the
-frames again from the superframe's bit inversions, and doing the same for
-another slip once connected. And a full retrain: a far end that gives up on a
-renegotiation, or meets a line that changed too much for one, falls back to
-sending its tone and starting phase 2 again, and two of these now go back
-through it together and come up at whatever the line will carry, without
-exchanging their capabilities a second time.
+V.33 -- the same trellis code as V.32bis again, on a leased line.
 
-V.90 on a real call. The analogue half is written from the Recommendation and
-checked against a recording of a real server: its CM and JM, INFO0d, INFO1d,
-Ja, TRN1d, Jd and the DIL all read back as they should, and the DIL fits what
-the analogue modem asked for. Against a simulated server over a simulated
-G.711 network -- A-law and μ-law, a robbed bit, a pad, noise, a VoIP round
-trip, a sound card 120 ppm out, and a jitter buffer slipping every few seconds
--- it connects at 52 000 to 56 000, renegotiates and retrains from either end,
-and carries V.42 at `AT+MS=V90`. The first live call reached the DIL against a
-real server and showed two things the simulation did not have: a jitter buffer
-cutting ten milliseconds out of the DIL on every pass, and a gain control
-holding loud codewords down. Both are now simulated, and followed.
-
-Next, V.17 for fax at 14 400, and V.33 beside it -- the same trellis code as
-V.32bis again, on a fax call and a leased line respectively -- and more than
-one page to send from the fax window.
-
-V.92, on a branch. Eighteen agents read the Recommendation clause by clause off
+V.92 carries data between two of these modems: `AT+MS=V92` at both ends with
+`BINMODEM_V92_PCM_UP=1`, PCM both ways, 48 000 up and up to 56 000 down over a
+pair of virtual cables. It has not carried a call with a real V.92 modem yet,
+and the calling side still wants a line with no echo and one clock. A second
+V.92 call to the same number starts up the short way (9.2 and 9.4, "quick
+connect"): QC1a and QCA1d in place of V.8's menus, a Phase 2 with no line
+probe, and no ODP/ADP, which takes about three seconds off the sixteen;
+`BINMODEM_V92_QC=0` turns it off and `always` asks every server. A quick connect whose server sends
+no INFO0d or tone B within a round trip and 2.5 s of the hand-over forgets the memo, sends CM for a
+full start-up, and hangs up if that gets no JM either; `BINMODEM_V92_TONEQ_MS=<ms>` ends TONEq early
+as a test. Eighteen agents read the Recommendation clause by clause off
 the rendered pages, with V.8, V.8 bis and V.250's `+P` commands beside it, and
 four more read what the V.90 code here already does; the notes they wrote and
 the plan built from them are in [docs/design/v92](docs/design/v92) -- 62 work
@@ -234,9 +274,6 @@ into what the reading of the Recommendation had predicted. That modem declined
 PCM upstream, so no recording here contains the upstream signals, and the tests
 that would want one say so rather than pretending.
 
-Alongside them: MNP as an alternative to LAPM, since it is what a modem without
-V.42 will offer.
-
 ## Running it
 
 ```bash
@@ -245,8 +282,69 @@ cargo run -p gui --release -- --live
 
 Or `dist.bat`, which leaves a single `dist\binmodem.exe` holding the scope, the
 terminal, an answering board and a capture to replay, with nothing to install.
+[docs/quickstart.md](docs/quickstart.md) gets from a download to a first call.
 [docs/usage.md](docs/usage.md) has the rest — the AT interface, the live-line
 setup, ZMODEM and the telnet terminal.
+
+## Building on Linux
+
+The releases are Windows executables; CI builds the Linux one on every change
+but does not run it, so reports from people who do are what this section is
+kept right by. For Debian or Ubuntu; other distributions want the same things
+under their own names.
+
+Sound goes through the sound server when there is one (PipeWire or
+PulseAudio), so a device BinModem is using stays usable by everything else.
+`BINMODEM_AUDIO_HOST=alsa` opens the hardware through ALSA instead, which takes
+the device for BinModem alone.
+
+What it needs: a Rust toolchain recent enough for the 2024 edition (1.85 or
+later), a C linker, and ALSA's headers for the sound card. The window comes up
+on X11 or Wayland through OpenGL, which a desktop install already has.
+
+```bash
+sudo apt install build-essential pkg-config libasound2-dev libpipewire-0.3-dev libclang-dev libxkbcommon0 libgl1
+```
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+Open a new terminal so that `cargo` is on the path, then:
+
+```bash
+git clone https://github.com/CasualArclamp/BinModem.git
+```
+
+```bash
+cd BinModem
+```
+
+```bash
+cargo build --release -p gui
+```
+
+That leaves one file, `target/release/binmodem`. To see it work with no line
+and no sound card, replay the capture that comes with it:
+
+```bash
+./target/release/binmodem --capture
+```
+
+And then the real thing:
+
+```bash
+./target/release/binmodem --devices
+```
+
+```bash
+./target/release/binmodem
+```
+
+The first lists the audio devices the machine has; the second opens the modem
+on a line. `--telnet` is a board over a socket and `--sip <account>` a call
+over a SIP trunk, neither of which needs a sound card.
+[docs/usage.md](docs/usage.md) has every flag.
 
 ## Licence
 

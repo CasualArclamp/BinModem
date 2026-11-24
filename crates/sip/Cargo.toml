@@ -1,0 +1,13 @@
+[package]
+name    = "sip"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+
+[dependencies]
+# For the rate conversion between the network's 8 kHz and whatever rate the
+# modem runs at. The only thing in here that is not protocol.
+dsp = { path = "../dsp" }
+
+[lints]
+workspace = true

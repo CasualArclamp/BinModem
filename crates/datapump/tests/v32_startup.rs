@@ -5,7 +5,7 @@
 //! from the echo. The later ones put the hybrid back.
 
 use datapump::v32::startup::{Rates, Heard, Role, Startup, Status, endpoints, rate_signal};
-use datapump::v32::{BAUD, Receiver, Transmitter};
+use datapump::v32::{BAUD, Mode, Receiver, Signal, Transmitter};
 
 const FS: f64 = 16_000.0;
 
@@ -281,4 +281,109 @@ fn trace() {
         }
     }
     println!("round trip: call {} answer {}", calling.up.round_trip(), answering.up.round_trip());
+}
+
+/// A far end that trains for as long as 5.2.3 allows is still there when it
+/// has finished.
+///
+/// 5.4.1 has R2 sent "until an incoming rate signal R3 is detected" and puts
+/// no limit on the waiting, so this end has to. What the limit has to cover is
+/// everything between this end starting R2 and R3 arriving: the trip out, the
+/// far end reading R2, the conditioning signal it sends before R3, and the
+/// trip home. The conditioning signal alone can be 8464 symbols -- 5.2.1's
+/// 256, 5.2.2's 16, and a training segment 5.2.3 allows "at least 1280 and not
+/// exceed 8192" -- so a deadline of 8464 plus one round trip leaves the far
+/// end no time whatever to read R2 in, and one at the top of that range misses
+/// it by however long reading it took.
+///
+/// Not a hypothetical. On live-1790207279 the far end trained for 7536
+/// symbols, its R3 arrived 283 ms after this end had given up on it, and what
+/// it offered was 14 400.
+///
+/// The far end here is the real answering modem until this end starts R2, and
+/// a script after it, because the answering modem trains for 4096 and there is
+/// no asking it for more. The script is built from the transmitter it would
+/// have used, so what arrives is a signal one of these would have sent.
+#[test]
+fn a_far_end_that_trains_for_as_long_as_it_may_is_waited_for() {
+    use std::collections::VecDeque;
+
+    let offer = rate_signal(Rates { at_4800: true, ..Rates::default() });
+    let mut calling = Modem::new(Role::Calling, offer);
+    let mut answering = Modem::new(Role::Answering, offer);
+
+    // 150 ms each way, and 300 ms for the far end to read a rate signal in.
+    // 5.3.1 identifies one by two identical sixteens, which is 13 ms; this is
+    // twenty times that and still under a tenth of what a training segment at
+    // 5.2.3's limit costs, which is the proportion the deadline has to get
+    // right.
+    let one_way = (0.150 * FS) as usize;
+    // Counted from where the script starts, which is where this end begins
+    // R2 -- so the trip out is part of the wait before the far end can have
+    // read anything.
+    let recognising = one_way + (0.300 * FS) as usize;
+    let mut to_calling: VecDeque<f64> = VecDeque::from(vec![0.0; one_way]);
+    let mut to_answering: VecDeque<f64> = VecDeque::from(vec![0.0; one_way]);
+
+    let symbols = |n: f64| (n * FS / BAUD) as usize;
+    let (ends_s, ends_s_bar, ends_trn) = (
+        recognising + symbols(256.0),
+        recognising + symbols(256.0 + 16.0),
+        recognising + symbols(256.0 + 16.0 + 8192.0),
+    );
+    let mut script = Transmitter::new(Mode::Answer, FS);
+    let mut scripted: Option<usize> = None;
+
+    for _ in 0..(30.0 * FS) as usize {
+        to_answering.push_back(calling.out);
+        to_calling.push_back(answering.out);
+        let heard_calling = to_calling.pop_front().unwrap_or(0.0);
+        let heard_answering = to_answering.pop_front().unwrap_or(0.0);
+
+        calling.up.step(heard_calling, &mut calling.tx, &mut calling.rx);
+        calling.out = calling.tx.next_sample();
+        answering.up.step(heard_answering, &mut answering.tx, &mut answering.rx);
+
+        // The script takes over the moment this end starts R2, which is the
+        // moment the deadline under test starts running.
+        if scripted.is_none() && calling.up.phase() == "rate signal" {
+            scripted = Some(0);
+        }
+        answering.out = match scripted.as_mut() {
+            None => answering.tx.next_sample(),
+            Some(n) => {
+                script.set_signal(if *n < recognising {
+                    Signal::Silent
+                } else if *n < ends_s {
+                    Signal::ConditioningS
+                } else if *n < ends_s_bar {
+                    Signal::ConditioningSbar
+                } else if *n < ends_trn {
+                    Signal::Trn
+                } else {
+                    // 5.4.2: R3 until the calling modem closes the exchange.
+                    Signal::Rate(offer)
+                });
+                *n += 1;
+                script.next_sample()
+            }
+        };
+
+        if matches!(calling.up.status(), Status::Connected(_)) {
+            break;
+        }
+    }
+
+    let reached = scripted.expect("this end never got as far as sending R2");
+    assert!(
+        reached > ends_trn,
+        "the script never reached R3: {reached} samples of it ran, R3 begins at {ends_trn}"
+    );
+    assert_eq!(
+        calling.up.status(),
+        Status::Connected(4800),
+        "gave up on a far end that was still training: it ended in {:?}, phase {}",
+        calling.up.status(),
+        calling.up.phase()
+    );
 }

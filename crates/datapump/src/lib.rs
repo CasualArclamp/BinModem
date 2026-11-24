@@ -5,6 +5,8 @@
 //! accepts a block and re-acquires from scratch.
 
 pub mod bell103;
+pub mod bell202;
+pub mod bell212;
 pub mod framing;
 pub mod v17;
 pub mod v21;
@@ -14,7 +16,10 @@ pub mod v29;
 pub mod v32;
 pub mod v34;
 pub mod v8;
+pub mod v8bis;
 pub mod v90;
+pub mod v92;
+pub mod x2;
 
 pub use bell103::{Bell103Rx, Role};
 pub use framing::{AsyncBits, AsyncFramer};

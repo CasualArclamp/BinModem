@@ -19,6 +19,26 @@ use crate::lapm::{Cause, Event, Lapm, Params, State};
 use crate::{v42bis, v44};
 use crate::xid::{Compression, Xid};
 
+/// Append one line to the file named by `V92_XID_TRACE`, if it is set.
+///
+/// Diagnostic only: the XID exchange against a real far end is the one thing
+/// no unit test can stand in for, and every line this writes is a question
+/// about what actually crossed the line.
+fn xid_trace(text: &str) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("V92_XID_TRACE") else {
+        return;
+    };
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{text}");
+    }
+}
+
+/// An information field as hex, for those traces.
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// The data link both ends use for user data (V.42 8.1.2).
 const DLCI_DATA: u8 = 0;
 
@@ -123,6 +143,22 @@ const XID_N400: u32 = 1;
 /// margin in it to take out.
 const XID_LAST_WAIT_MS: u32 = crate::lapm::PROPAGATION_MS;
 
+/// How many compressed streams that will not decode are answered with a
+/// re-established link before the next one releases it.
+///
+/// V.42bis 5.8 and V.44 7.15 both ask for "appropriate recovery action,
+/// including re-establishment of the error corrected connection", and 5.6 a)
+/// makes that a C-INIT at both ends: both dictionaries start again from
+/// nothing, which is the only way two that disagree ever agree again.
+///
+/// A far end whose encoder does not start again when the link does will fail
+/// the same way every time. That is what a real one did (live-1790041800):
+/// its first compressed codeword was a STEPUP and then 793, from a dictionary
+/// of more than five hundred entries, after 34 characters on the link. So
+/// the reset is only worth making a few times. After that there is no
+/// recovery left, and a link carrying nothing readable is better put down.
+pub const UNDECODABLE_RESETS: u64 = 3;
+
 /// Where a V.42 connection has got to.
 ///
 /// The three stages are separate because they answer separate questions, in
@@ -215,8 +251,18 @@ pub struct Stack {
     declining: bool,
     /// What the far end answered in the detection phase, if it answered.
     heard_adp: Option<Answer>,
-    /// What the far end proposed in XID, if it sent one.
+    /// What the far end proposed in XID, if it sent one: its command.
     heard_xid: Option<Xid>,
+    /// And what it answered to this end's, if it did: its response.
+    ///
+    /// Kept apart because they are different statements. The command says
+    /// what the far end can do; the response names at most one compression
+    /// algorithm, the one the call is going to use (V.44 7.3), and says
+    /// nothing of the other. Both went into one slot, the later on top, so
+    /// after an ordinary exchange the "offer" on show was a V.44-only
+    /// answer -- and the panel, reading only the V.42bis half of it, said
+    /// "none offered" on every call where V.44 was running.
+    heard_answer: Option<Xid>,
     /// The check sequence width the two ends agreed on, once they have.
     ///
     /// Not in use yet when it is set: V.42 8.10.2 keeps XID at 16 bits and
@@ -225,8 +271,8 @@ pub struct Stack {
     /// Whether the link has ever been up, which is what tells a failure to
     /// establish apart from a connection that later ended.
     established: bool,
-    /// Compressed streams that would not decode, each of which took the link
-    /// down with it.
+    /// Compressed streams that would not decode. Each re-established the
+    /// link, up to [`UNDECODABLE_RESETS`], and the one after that released it.
     ///
     /// Counted rather than inferred. It is the one failure here that looks
     /// like something else from outside: the link goes, error control starts
@@ -254,6 +300,18 @@ pub struct Stack {
     /// bits once it has failed, and every bit after, for the terminal
     /// (Appendix I.3's second option).
     unclaimed: Vec<bool>,
+    /// A detector kept running beside the protocol phase, for the answerer
+    /// that skipped the detection phase and met an ODP anyway.
+    ///
+    /// [`Stack::bypassing_detection`] builds it; nothing else does, and it is
+    /// dropped the moment the far end proves it is past the detection phase
+    /// too.
+    watch: Option<Box<Answerer>>,
+    /// Whether the error correction procedure is suspended (V.42 7.10).
+    suspended: bool,
+    /// Whether the far end's data mode may begin after this end's, so that
+    /// an answerer waits ten T400s for its pattern and not one.
+    late_far_end: bool,
 }
 
 /// One end of the detection phase (7.2.1). Which one depends on the role.
@@ -266,15 +324,28 @@ enum Detect {
 
 impl Detect {
     /// The detection phase from the beginning, for this end of the call.
-    fn start(role: Role, t400_ms: u32, declining: bool) -> Self {
+    fn start(role: Role, t400_ms: u32, declining: bool, late: bool) -> Self {
         match role {
             Role::Originator => Self::Origin(Box::new(Originator::new(t400_ms))),
-            Role::Answerer => Self::Answer(Box::new(Answerer::new(
-                t400_ms,
-                if declining { Answer::None } else { Answer::ErrorControl },
-            ))),
+            Role::Answerer => {
+                let answer = if declining { Answer::None } else { Answer::ErrorControl };
+                let answerer = Answerer::new(t400_ms, answer);
+                // Ten T400s only where the far end may not be listening yet.
+                Self::Answer(Box::new(if late { answerer } else { answerer.prompt() }))
+            }
         }
     }
+}
+
+/// The compression a link is running, and on what terms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Agreed {
+    /// V.42bis, with the dictionary the two ends settled on. `in_band` where
+    /// it was never negotiated and is being followed because the far end
+    /// started sending it (see `may_follow_ecm`).
+    V42bis { params: v42bis::Params, in_band: bool },
+    /// V.44, each direction sized on its own (7.4).
+    V44 { transmit: v44::Params, receive: v44::Params },
 }
 
 /// Whichever compression the two ends settled on.
@@ -321,6 +392,10 @@ struct Compressor {
     /// uncompressed, because nothing has agreed that the far end would read
     /// anything else.
     speculative: bool,
+    /// Turned on by an XID exchange rather than handed over configured, so
+    /// that a later XID naming no compression can take it away again. What is
+    /// set from above was never negotiated and is not an XID's to withdraw.
+    negotiated: bool,
 }
 
 impl Compressor {
@@ -400,7 +475,7 @@ impl Stack {
             damaged: 0,
             log: Vec::new(),
             phase: Phase::Detecting,
-            detect: Detect::start(role, crate::detect::DEFAULT_T400_MS, false),
+            detect: Detect::start(role, crate::detect::DEFAULT_T400_MS, false, false),
             offer: Compression::Neither,
             limits: (v42bis::OFFERED_N2, v42bis::OFFERED_N7),
             guessed_wrong: false,
@@ -411,6 +486,7 @@ impl Stack {
             declining: false,
             heard_adp: None,
             heard_xid: None,
+            heard_answer: None,
             agreed_fcs: Fcs::Bits16,
             established: false,
             undecodable: 0,
@@ -422,6 +498,9 @@ impl Stack {
             round_trip_ms: 0,
             heard_text: false,
             unclaimed: Vec::new(),
+            watch: None,
+            suspended: false,
+            late_far_end: false,
         }
     }
 
@@ -454,11 +533,82 @@ impl Stack {
     /// question already answered is not worth three quarters of a second to
     /// ask again.
     ///
+    /// This is the **originator's** half of the bypass, and it is only half of
+    /// it. V.42 Appendix VI.2's NOTE reads the requirement as being on both
+    /// ends at once -- "Clause 9.3.1/V.9.2 requires that both the originating
+    /// and answering modems skip the V.42 detection phase if they both
+    /// indicate that V.42 is supported in the V.8 protocol octet or in the
+    /// V.92 short phase 1 signals" -- and an answerer that did not skip it
+    /// would sit in its detection phase swallowing this end's opening frames
+    /// until T400 ran out. [`Self::bypassing_detection`] is the other half.
+    ///
     /// It is a real cost if the far end turns out not to do V.42, though, so
     /// the patience is the same as for a detection phase that heard nothing.
     pub fn without_detection(mut self) -> Self {
         self.enter_negotiating();
         self.lapm.set_retransmissions(crate::lapm::UNCONFIRMED_N400);
+        self
+    }
+
+    /// The same for the answerer: no wait for an ODP, and no ADP
+    /// (V.92 9.2.5, 9.3.1).
+    ///
+    /// 9.2.5 is one sentence -- "If both modems have indicated LAPM
+    /// capability, the V.42 ODP/ADP exchange shall be bypassed" -- and 9.3.1
+    /// is the same sentence with V.92 capability added to it. What is bypassed
+    /// on this side, by 7.2.1.3, is the wait: the answerer would otherwise
+    /// send marks "until termination of the detection phase, receipt of the
+    /// ODP, or detection of the start of the protocol phase". Only the last of
+    /// those three is left, and it is already true, so the protocol phase
+    /// starts here and now.
+    ///
+    /// **An ODP that arrives anyway is still answered.** V.8 7.3 and 7.4 both
+    /// print the warning: "some existing implementations of V.8 may indicate
+    /// LAPM in prot0, but still require the ODP/ADP exchange to successfully
+    /// negotiate LAPM", and Appendix VI.2 says plainly that many answering
+    /// modems run the detection phase whatever V.8 said. A far end like that
+    /// hears this end's flags as nothing at all -- its detector is reading
+    /// characters, not frames -- and decides at T400 that there is no V.42
+    /// here. So a detector goes on running beside the protocol phase, and if
+    /// an ODP does turn up it gets Table 3's answer spliced between two
+    /// frames. It costs about 440 bits on the one call in a hundred that needs
+    /// it, and the call that needs it is the one that would otherwise have no
+    /// error control at all.
+    ///
+    /// The detector is dropped as soon as the far end proves it is past the
+    /// detection phase -- continuous flags or any LAPM frame, which is
+    /// 7.2.1.3's own list -- so nothing is scanning the line once a link is
+    /// up, and a stray DC1 in compressed data cannot start a pattern.
+    ///
+    /// This presumes LAPM was agreed, since that is the only thing that
+    /// licenses the bypass; it is not for an end that means to decline
+    /// ([`Self::declining`]).
+    ///
+    /// Patience is left alone, unlike [`Self::without_detection`]. The
+    /// originator cuts its N400 because it is about to send SABMEs into a
+    /// silence that may go on for ever; an answerer sends no SABME at all, so
+    /// the only thing a smaller N400 would shorten here is an established
+    /// link's own recovery (8.5.3), and this end has more reason to believe in
+    /// the far one than a detection phase would have given it.
+    pub fn bypassing_detection(mut self) -> Self {
+        self.enter_negotiating();
+        self.watch = Some(Box::new(Answerer::new(self.t400_ms(), Answer::ErrorControl)));
+        self
+    }
+
+    /// Wait for a far end whose data mode begins after this end's.
+    ///
+    /// V.92's two directions do not reach data mode together, and an answerer
+    /// that gave the originator one T400 from its own start had gone
+    /// transparent two seconds before the far end could send anything. On
+    /// such a call the answerer waits ten. Everywhere else it waits one, as
+    /// V.42 7.2.1.3 has it, so that a caller with no error control is not
+    /// kept seven seconds from its CONNECT.
+    pub fn waiting_for_a_late_far_end(mut self) -> Self {
+        self.late_far_end = true;
+        if !matches!(self.detect, Detect::Done) {
+            self.detect = Detect::start(self.role, self.t400_ms(), self.declining, true);
+        }
         self
     }
 
@@ -468,7 +618,7 @@ impl Stack {
     /// connection without it.
     pub fn declining(mut self) -> Self {
         self.declining = true;
-        self.detect = Detect::start(self.role, self.t400_ms(), true);
+        self.detect = Detect::start(self.role, self.t400_ms(), true, self.late_far_end);
         self
     }
 
@@ -493,7 +643,14 @@ impl Stack {
     pub fn over_a_round_trip(mut self, round_trip_ms: u32) -> Self {
         self.round_trip_ms = round_trip_ms;
         if !matches!(self.detect, Detect::Done) {
-            self.detect = Detect::start(self.role, self.t400_ms(), self.declining);
+            self.detect = Detect::start(self.role, self.t400_ms(), self.declining, self.late_far_end);
+        }
+        // And the detector a bypass leaves running, which has the same T400
+        // and is on the same line. Rebuilt rather than adjusted because
+        // nothing can have reached it yet: these are builders, and the call
+        // has not started.
+        if self.watch.is_some() {
+            self.watch = Some(Box::new(Answerer::new(self.t400_ms(), Answer::ErrorControl)));
         }
         self
     }
@@ -573,6 +730,16 @@ impl Stack {
             offer.transmit = offer.transmit.resolve(transmit);
             offer.receive = offer.receive.resolve(receive);
         }
+        if let Some(path) = std::env::var_os("V92_XID_TRACE") {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                let _ = writeln!(
+                    f,
+                    "XID offer: compression={:?} v42bis={:?}/{:?} v44={:?}",
+                    xid.compression, xid.codewords, xid.max_string, xid.v44
+                );
+            }
+        }
         xid
     }
 
@@ -583,6 +750,9 @@ impl Stack {
     /// decompress data that was never compressed and deliver nonsense.
     pub fn with_compression(mut self, params: v42bis::Params) -> Self {
         self.enable_compression(params);
+        if let Some(c) = self.compression.as_mut() {
+            c.negotiated = false;
+        }
         self
     }
 
@@ -594,6 +764,7 @@ impl Stack {
                 params,
             })),
             speculative: false,
+            negotiated: true,
         });
     }
 
@@ -607,12 +778,21 @@ impl Stack {
                 receive,
             })),
             speculative: false,
+            negotiated: true,
         });
     }
 
     /// Which compression is running, if any.
     pub fn compression_name(&self) -> Option<&'static str> {
         self.compression.as_ref().map(Compressor::name)
+    }
+
+    /// V.44's settled sizes, transmit then receive, while V.44 is running.
+    pub fn v44_params(&self) -> Option<(v44::Params, v44::Params)> {
+        match &self.compression.as_ref()?.codec {
+            Codec::V44(c) => Some((c.transmit, c.receive)),
+            Codec::V42bis(_) => None,
+        }
     }
 
     /// Whether an unnegotiated switch to compressed data should be followed.
@@ -630,6 +810,7 @@ impl Stack {
     fn may_follow_ecm(&self) -> bool {
         !self.guessed_wrong
             && self.heard_xid.is_none()
+            && self.heard_answer.is_none()
             && matches!(
                 self.offer,
                 Compression::Both | Compression::ResponderToInitiator
@@ -645,9 +826,23 @@ impl Stack {
         self.heard_adp
     }
 
-    /// What the far end proposed in XID, if it sent one.
+    /// What the far end proposed in XID, if it sent one: its command.
     pub fn far_xid(&self) -> Option<Xid> {
         self.heard_xid
+    }
+
+    /// What the far end answered to this end's XID, if it did.
+    pub fn far_xid_answer(&self) -> Option<Xid> {
+        self.heard_answer
+    }
+
+    /// The compression running and what the two ends agreed for it, if any.
+    pub fn agreed_compression(&self) -> Option<Agreed> {
+        let compressor = self.compression.as_ref()?;
+        Some(match &compressor.codec {
+            Codec::V42bis(b) => Agreed::V42bis { params: b.params, in_band: compressor.speculative },
+            Codec::V44(l) => Agreed::V44 { transmit: l.transmit, receive: l.receive },
+        })
     }
 
     /// Whether the detection phase ended on the far end's terminal's text.
@@ -736,6 +931,15 @@ impl Stack {
         self.log.push(Crossed { outbound, intact, body: body.to_vec() });
     }
 
+    /// One line about the XID exchange into the `V92_XID_TRACE` file.
+    ///
+    /// Instrumentation only, for the question the unit tests cannot answer:
+    /// what a real far end actually put in its XID, and what this end made of
+    /// it. Nothing here changes behaviour.
+    fn trace(&self, text: &str) {
+        xid_trace(&format!("[{:?} {:?}] {text}", self.role, self.phase));
+    }
+
     /// Ask for the link to be established.
     ///
     /// Only meaningful once the detection phase has decided there is something
@@ -751,8 +955,73 @@ impl Stack {
         self.lapm.disconnect();
     }
 
+    /// Suspend error correction: freeze the timers and change nothing else
+    /// (V.42 7.10).
+    ///
+    /// "The control function may instruct its error control function to
+    /// suspend the error correction procedure by issuing an L-SUSPEND request
+    /// primitive", and the NOTE says what for: "typically used to suspend the
+    /// error correction procedure during a retrain or the modem on hold
+    /// procedures defined in ITU-T Rec. V.92". Which is the whole point of it
+    /// here. A V.92 hold takes the line away for as long as the far end's
+    /// other call lasts, and a retrain takes it away for a second or two; in
+    /// both, every timer in this stack is counting a silence that means
+    /// nothing.
+    ///
+    /// What freezes is what 7.10.1 and 7.10.2 name: T400 while the detection
+    /// phase is running, and T401 once it is not. T402 and T403 are not
+    /// implemented (see [`crate::lapm`]), so they are not frozen either. The
+    /// XID exchange's own clock goes with T401, because 8.10.2 and 8.10.3 say
+    /// its timer *is* T401.
+    ///
+    /// Nothing is released, so there is nothing to establish again: the
+    /// sequence variables, the window, the unacknowledged frames and the
+    /// V.42bis or V.44 dictionaries are all exactly where they were. That is
+    /// the difference between a hold and a dropped call, and it is why this
+    /// exists rather than the caller simply dropping the stack. The
+    /// dictionaries especially: 5.6 re-initialises them on an establishment,
+    /// and an establishment is what a caller who rebuilt the stack would get.
+    ///
+    /// The line is the caller's business, not this one's. During a hold or a
+    /// retrain nothing is pulling bits out of [`Self::next_bit`], so nothing
+    /// goes out; a caller that keeps pulling while the carrier is gone is
+    /// throwing frames away, and freezing T401 means nothing will ask for them
+    /// again.
+    pub fn suspend(&mut self) {
+        self.suspended = true;
+        self.lapm.suspend();
+    }
+
+    /// Resume it (V.42 7.11): "unfreeze previously frozen timers".
+    ///
+    /// Each timer picks up with whatever it had left, so the far end has as
+    /// long to answer as it had before the line went away. T401 recovery
+    /// (8.5.3) then does the rest: if the far end moved on while this end was
+    /// away, the poll finds out what it is missing.
+    pub fn resume(&mut self) {
+        self.suspended = false;
+        self.lapm.resume();
+    }
+
+    /// Whether error correction is suspended.
+    pub fn suspended(&self) -> bool {
+        self.suspended
+    }
+
     /// Time passing, which is what drives every timer here.
+    ///
+    /// Suspension (7.10) is the absence of it.
     pub fn tick(&mut self, dt_ms: u32) {
+        if self.suspended {
+            // Each layer stops its own clocks: T400 and the XID exchange's are
+            // this one's, T401 is `lapm`'s, so `lapm.tick` is still called and
+            // still does nothing with the time it is given. What is not a
+            // timer carries on -- `drain` hands over what has already arrived
+            // -- because timers are all 7.10 freezes.
+            self.lapm.tick(dt_ms);
+            self.drain();
+            return;
+        }
         match self.phase {
             Phase::Detecting => {
                 let outcome = match &mut self.detect {
@@ -805,6 +1074,15 @@ impl Stack {
             }
             Phase::Protocol | Phase::Transparent => {}
         }
+        // 7.2.1.3's own T400, still running behind a bypass. What it bounds is
+        // no longer the wait for an ODP -- this end stopped waiting before the
+        // call began -- but the far end's chance to show it is doing V.42 at
+        // all.
+        if let Some(watch) = self.watch.as_mut()
+            && watch.tick(dt_ms) == Outcome::TimedOut
+        {
+            self.bypass_failed();
+        }
         self.lapm.tick(dt_ms);
         self.drain();
     }
@@ -852,6 +1130,17 @@ impl Stack {
             return true;
         }
         if self.encoder.is_empty() {
+            // Table 3's answer to an ODP that should never have arrived, put
+            // on the line between frames rather than through them. Between,
+            // because it is async characters and not HDLC: cutting into a
+            // frame would give the far end a check sequence failure instead of
+            // an answer, and cutting between two repetitions would break the
+            // adjacency 7.2.1.2 needs.
+            if let Some(watch) = self.watch.as_mut()
+                && watch.sending()
+            {
+                return watch.transmit();
+            }
             let mut queued = false;
             if !self.opened {
                 self.opened = true;
@@ -880,11 +1169,9 @@ impl Stack {
                 // P/F bit of an XID frame is set to 0" and names no exception.
                 self.xid_due = false;
                 self.xid_ms = 0;
-                let body = Frame::Xid {
-                    pf: false,
-                    info: self.proposal().encode(Kind::Command),
-                }
-                .encode(DLCI_DATA, self.role, Kind::Command);
+                let info = self.proposal().encode(Kind::Command);
+                self.trace(&format!("XID sending Command info={}", hex(&info)));
+                let body = Frame::Xid { pf: false, info }.encode(DLCI_DATA, self.role, Kind::Command);
                 self.encoder.frame_with(&body, Fcs::Bits16);
                 self.note(true, true, &body);
                 queued = true;
@@ -917,11 +1204,21 @@ impl Stack {
             self.unclaimed.push(bit);
             return;
         }
+        // The detector a bypass leaves running (7.2.1.3), which may put this
+        // stack into the transparent phase on this very bit -- and has then
+        // kept the bit itself, along with everything before it.
+        self.watch_bit(bit);
+        if self.phase == Phase::Transparent {
+            return;
+        }
         let Some(result) = self.decoder.feed(bit) else {
             return;
         };
         let Ok(body) = result else {
             let discarded = self.decoder.discarded().to_vec();
+            if self.damaged < 40 {
+                self.trace(&format!("bad HDLC frame discarded body={}", hex(&discarded)));
+            }
             self.note(false, false, &discarded);
             // A frame that did not survive the line is dropped and left to the
             // retransmission machinery, which is what it is for. Counting them
@@ -932,10 +1229,67 @@ impl Stack {
         };
         self.note(false, true, &body);
         let Ok((address, frame)) = Frame::decode(&body, self.role) else {
+            if self.damaged < 40 {
+                self.trace(&format!("undecodable frame body={}", hex(&body)));
+            }
             self.damaged += 1;
             return;
         };
+        // 7.2.1.3 ends the detection phase on "receipt of continuous flags, or
+        // of an LAPM or alternative procedure protocol frame". This is the
+        // second of those, and it is the stronger one: a far end that is
+        // sending frames is not about to send an ODP.
+        self.watch = None;
         self.dispatch(address, frame);
+    }
+
+    /// Feed the detector a bypass left running, and act on what it makes of
+    /// the line.
+    fn watch_bit(&mut self, bit: bool) {
+        let Some(watch) = self.watch.as_mut() else {
+            return;
+        };
+        let outcome = watch.receive(bit);
+        let sending = watch.sending();
+        match outcome {
+            // The far end skipped the detection phase as well, which is what
+            // 9.2.5 asked of it. There is nothing left to detect.
+            Outcome::ProtocolStarted => self.watch = None,
+            // It did not, and has now been answered. Once the last repetition
+            // is out the detector has done its one job.
+            Outcome::OriginatorDetected if !sending => self.watch = None,
+            // The far end's terminal is typing, so whatever V.8 said, there is
+            // no V.42 at the other end of this line.
+            Outcome::Text => {
+                self.heard_text = true;
+                self.bypass_failed();
+            }
+            _ => {}
+        }
+    }
+
+    /// The far end never showed any sign of V.42, so the bypass was taken on
+    /// the strength of something that was not true.
+    ///
+    /// 7.2.1.3's ending, which the bypass changes the start of and not the
+    /// finish: "If, after establishment of the physical connection, the ODP is
+    /// not observed within the period of T400 and the start of the protocol
+    /// establishment phase is not observed within the same period, then the
+    /// answerer shall decide that the originator is not capable of V.42
+    /// error-correcting operation and shall fall back to non-error-correcting
+    /// operation."
+    ///
+    /// Without this an answerer that bypassed would have no ending at all. It
+    /// never sends a SABME -- the originator does that -- so nothing here ever
+    /// gives up, [`Self::settled`] never comes true, and the terminal waits
+    /// for a CONNECT that is not coming.
+    fn bypass_failed(&mut self) {
+        if let Some(watch) = self.watch.as_mut() {
+            let heard = watch.take_heard();
+            self.unclaimed.extend(heard);
+        }
+        self.watch = None;
+        self.phase = Phase::Transparent;
     }
 
     fn dispatch(&mut self, address: Address, frame: Frame) {
@@ -964,20 +1318,52 @@ impl Stack {
     }
 
     fn receive_xid(&mut self, info: Vec<u8>, kind: Kind) {
+        self.trace(&format!("XID recv {kind:?} info={}", hex(&info)));
         let Ok(theirs) = Xid::decode(&info) else {
+            self.trace("XID recv DID NOT DECODE -- no answer will be sent");
             self.damaged += 1;
             return;
         };
-        self.heard_xid = Some(theirs);
+        self.trace(&format!("XID recv {kind:?} decoded={theirs:?}"));
+        match kind {
+            Kind::Command => self.heard_xid = Some(theirs),
+            Kind::Response => self.heard_answer = Some(theirs),
+        }
         let agreed = self.proposal().resolve(&theirs);
+        self.trace(&format!("XID agreed={agreed:?}"));
         // V.44 first where both were offered and both ends know it, and
         // V.42bis otherwise. 7.3 has the responder answer about at most one of
         // the two, so a far end that named neither leaves this alone and the
         // call carries on uncompressed.
         if let Some(offer) = agreed.v44 {
+            self.trace(&format!(
+                "XID enabling V.44 transmit {:?} receive {:?}",
+                offer.transmit, offer.receive
+            ));
             self.enable_v44(offer.transmit, offer.receive);
         } else if let Some(params) = agreed.v42bis_params() {
+            self.trace(&format!("XID enabling V.42bis {params:?}"));
             self.enable_compression(params);
+        } else if !self.lapm.is_connected() {
+            // An XID can take compression away again, and this one did: an
+            // Agere SV92PP answered with V.44 in its first XID and then sent
+            // a second, immediately before its SABME, naming no compression
+            // at all. Holding on to the first answer left this end encoding
+            // every frame of the new connection with a dictionary the far
+            // end had just withdrawn, and it answered the first I frame with
+            // "LAPM disconnected (protocol error)" and a DISC -- four hundred
+            // milliseconds into data mode, with the greeting still in the
+            // buffer.
+            //
+            // Only before the connection is up: the agreement is settled then
+            // and nothing has been sent under it. Once frames are crossing,
+            // withdrawing compression is V.42bis 5.6's re-initialisation at
+            // both ends rather than a silent switch here, which is what the
+            // undecodable-stream path further down is for.
+            if self.compression.as_ref().is_some_and(|c| c.negotiated) {
+                self.trace("XID agreed none -- compression withdrawn before the link came up");
+                self.compression = None;
+            }
         }
         if agreed.fcs32 {
             self.agreed_fcs = Fcs::Bits32;
@@ -1015,11 +1401,9 @@ impl Stack {
             // What goes back is this end's proposal with one compression
             // algorithm in it, the one `agreed` came to -- V.44 7.3's NOTE,
             // and the same choice made a few lines above.
-            let body = Frame::Xid {
-                pf: false,
-                info: self.proposal().answering(&agreed).encode(Kind::Response),
-            }
-            .encode(DLCI_DATA, self.role, Kind::Response);
+            let info = self.proposal().answering(&agreed).encode(Kind::Response);
+            self.trace(&format!("XID sending Response info={}", hex(&info)));
+            let body = Frame::Xid { pf: false, info }.encode(DLCI_DATA, self.role, Kind::Response);
             // 8.10.2 keeps this one at 16 bits whatever the connection has
             // moved to, because the command it answers was sent at 16.
             self.encoder.frame_with(&body, Fcs::Bits16);
@@ -1125,6 +1509,11 @@ impl Stack {
         if self.phase == Phase::Protocol {
             return;
         }
+        self.trace(&format!(
+            "begin_protocol: agreed_fcs={:?} compression={:?}",
+            self.agreed_fcs,
+            self.compression_name()
+        ));
         self.phase = Phase::Protocol;
         if self.agreed_fcs == Fcs::Bits32 {
             // 8.10.2: the width changes over on the SABME and not before, so
@@ -1232,10 +1621,23 @@ impl Stack {
                     // A compressed stream that will not decode cannot be
                     // recovered from by asking again: the dictionary at each
                     // end is built from everything that came before, so once
-                    // they disagree they stay disagreed. V.42bis 6.4 has the
-                    // receiver ask for the link to be reset.
+                    // they disagree they stay disagreed. V.42bis 5.8 has the
+                    // control function recover by "re-establishment of the
+                    // error corrected connection", and the L-ESTABLISH that
+                    // follows is 5.6 a)'s C-INIT at both ends.
+                    //
+                    // Not a release. This used to send DISC, which ended a
+                    // call over a single codeword that one SABME could have
+                    // fixed. What the far end sent before it hears the SABME
+                    // cannot reach the new decoder: those frames carry N(S)
+                    // past the V(R) of 0 the reset leaves, so they arrive out
+                    // of sequence and are never delivered.
                     self.undecodable += 1;
-                    self.lapm.disconnect();
+                    if self.undecodable > UNDECODABLE_RESETS {
+                        self.lapm.disconnect();
+                    } else {
+                        self.lapm.connect();
+                    }
                 }
             }
             None => self.delivered.extend_from_slice(&arrived),
@@ -1701,6 +2103,26 @@ mod tests {
         assert_eq!(b.take_received(), b"plain");
     }
 
+    /// Issue 64: Netstalgia's server answers P3T and P3R 4096 to our 6144.
+    /// 7.4 takes the lesser, both ways and at both ends, whichever end
+    /// called; then a long upload through it arrives whole.
+    #[test]
+    fn a_far_end_that_keeps_less_history_gets_its_own_size() {
+        let small = v44::Params { n2: 2048, n7: 255, n8: 4096 };
+        for small_end_calls in [false, true] {
+            let (mut a, mut b) = negotiated_pair();
+            b.offer_v44_limits(small, small);
+            if small_end_calls {
+                b.connect();
+            } else {
+                a.connect();
+            }
+            settle(&mut a, &mut b, 40_000, |_, bit| bit);
+            assert_eq!(a.v44_params(), Some((small, small)), "calling end small: {small_end_calls}");
+            assert_eq!(b.v44_params(), Some((small, small)), "calling end small: {small_end_calls}");
+        }
+    }
+
     #[test]
     fn the_terminal_s_v44_ceilings_go_into_the_offer() {
         let (mut a, _) = negotiated_pair();
@@ -1961,6 +2383,55 @@ mod tests {
         assert_eq!(answerer.fcs(), Fcs::Bits32, "and it did not follow the SABME to 32");
     }
 
+    /// A far end's XID offering V.42bis with a P1 below the minimum.
+    ///
+    /// V.42bis 5.1 calls it a procedural error. It was taken as the lower of
+    /// the two proposals and handed to the dictionary as its size, and a P1
+    /// of 258 or less panicked building the dictionary, 259 on the first octet
+    /// sent -- on the line thread, which nothing restarts. A modem without V.44
+    /// sends exactly this XID, with the number wrong.
+    #[test]
+    fn an_xid_with_a_p1_below_the_minimum_is_refused_rather_than_built() {
+        use crate::frame::Kind;
+
+        for codewords in [0, 258, 259, 511] {
+            let mut answerer = Stack::new(Role::Answerer, Params::default()).without_detection();
+            answerer.offer_compression(Compression::Both);
+            let mut offer = Xid::proposal(Compression::Both);
+            offer.v44 = None;
+            offer.codewords = Some(codewords);
+            let xid = Frame::Xid { pf: false, info: offer.encode(Kind::Command) }
+                .encode(DLCI_DATA, Role::Originator, Kind::Command);
+            let mut e = Encoder::new(Fcs::Bits16);
+            e.idle(LEADING_FLAGS);
+            e.frame(&xid);
+            e.idle(2);
+            while let Some(bit) = e.next_bit() {
+                answerer.next_bit();
+                answerer.feed_bit(bit);
+            }
+            answerer.tick(0);
+
+            assert_eq!(answerer.compression_name(), None, "P1 {codewords} turned compression on");
+            let answers: Vec<Xid> = answerer
+                .take_log()
+                .into_iter()
+                .filter(|f| f.outbound)
+                .filter_map(|f| Frame::decode(&f.body, Role::Originator).ok())
+                .filter_map(|(address, frame)| match frame {
+                    Frame::Xid { info, .. } if address.kind == Kind::Response => Xid::decode(&info).ok(),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(answers.len(), 1, "P1 {codewords} was not answered");
+            assert_eq!(
+                answers[0].compression,
+                Some(Compression::Neither),
+                "the answer to P1 {codewords} did not refuse compression",
+            );
+        }
+    }
+
     /// A far end that compresses without ever negotiating it.
     ///
     /// From `live-1788830261.wav`, a call to a real board. It answered the
@@ -2052,6 +2523,131 @@ mod tests {
     }
 
 
+    /// A frame body written the way a frame log prints it.
+    fn hex(text: &str) -> Vec<u8> {
+        text.split_whitespace()
+            .map(|h| u8::from_str_radix(h, 16).expect("not hex"))
+            .collect()
+    }
+
+    /// Everything the far end says, framed as it would arrive.
+    fn wire(stack: &mut Stack, body: &[u8]) {
+        let mut e = Encoder::new(Fcs::Bits16);
+        e.frame(body);
+        while let Some(bit) = e.next_bit() {
+            stack.next_bit();
+            stack.feed_bit(bit);
+        }
+        stack.tick(0);
+    }
+
+    /// Idle flags from the far end, long enough for this end to send whatever
+    /// it has queued, and with time passing short of any T401.
+    fn idle(stack: &mut Stack) {
+        for _ in 0..4 {
+            for _ in 0..2_000 {
+                stack.next_bit();
+                stack.feed_bit(true);
+            }
+            stack.tick(10);
+        }
+    }
+
+    /// The frames this end has sent since the log was last taken.
+    fn sent(stack: &mut Stack) -> Vec<Vec<u8>> {
+        stack.take_log().into_iter().filter(|c| c.outbound).map(|c| c.body).collect()
+    }
+
+    /// live-1790041800's far end, up to the point where it answered our
+    /// XID with V.42bis at 1024 codewords and strings of 32, and our SABME.
+    fn linked_to_the_1790041800_far_end() -> Stack {
+        let mut stack = Stack::new(Role::Originator, Params::default()).without_detection();
+        stack.offer_compression(Compression::Both);
+        stack.connect();
+        idle(&mut stack);
+        wire(
+            &mut stack,
+            &hex("03 af 82 80 00 13 03 03 8e 89 00 05 02 04 00 06 02 04 00 07 01 0f 08 01 0f \
+                  f0 00 0f 00 03 56 34 32 01 01 03 02 02 04 00 03 01 20"),
+        );
+        idle(&mut stack);
+        wire(&mut stack, &hex("03 73"));
+        assert!(stack.is_connected(), "the link never came up");
+        assert_eq!(stack.compression_name(), Some("V.42bis"));
+        stack.take_log();
+        stack
+    }
+
+    /// A negotiated stream that will not decode resets the link; it does not
+    /// release it.
+    ///
+    /// The five I-frames are exactly what that call's far end sent. Its
+    /// third starts compressed mode with a STEPUP and then codeword 793, from
+    /// a dictionary that had been built from data that never reached us. We
+    /// sent DISC and the call ended. V.42bis 5.8 asks for the connection to be
+    /// re-established instead, which starts both dictionaries again (5.6 a).
+    #[test]
+    fn a_stream_that_will_not_decode_starts_the_link_again() {
+        let mut stack = linked_to_the_1790041800_far_end();
+        for body in [
+            "01 00 00 03 ad 7c 5f 23 9e 7c 5a 8a cf d3 8f 58 1f d7 7d dd f8 78 47 08 a0 b0 af \
+             11 74 a2 41 3f c1 08 33",
+            "01 02 00 0c c0 00 00",
+            "01 04 00 02 32 d6 98 81",
+            "01 06 00 92 25 78 19 83 75 70 b6 d0 83 11 96 d6 00 92 6b 58 d8 9a 53 19 ce 36 43 \
+             6d 45 dc 96 db 6e 47 fa 06 9c 70 27 1a 57 55 1c 2c 4e e4 e2 73 30 52 57 d5 75 d9 79",
+            "01 08 00 b1 5d 00",
+        ] {
+            wire(&mut stack, &hex(body));
+        }
+        idle(&mut stack);
+        assert_eq!(stack.undecodable_streams(), 1);
+        let sent = sent(&mut stack);
+        assert!(sent.contains(&vec![0x03, 0x7f]), "no SABME went out: {sent:02x?}");
+        assert!(!sent.contains(&vec![0x03, 0x53]), "the link was released: {sent:02x?}");
+
+        // The far end's UA, and then what it sends from its own fresh start.
+        // Frames it sent before our SABME reached it cannot get in: they
+        // carry sequence numbers the reset has left behind.
+        wire(&mut stack, &hex("03 73"));
+        assert!(stack.is_connected(), "the link did not come back");
+        stack.take_received();
+        wire(
+            &mut stack,
+            &Frame::I { ns: 0, nr: 0, poll: false, info: b"Login: ".to_vec() }
+                .encode(DLCI_DATA, Role::Answerer, Kind::Command),
+        );
+        assert_eq!(stack.take_received(), b"Login: ");
+    }
+
+    /// And a far end that never starts its dictionary again is put down, once
+    /// resetting has been tried as often as it is worth.
+    #[test]
+    fn a_far_end_that_never_starts_again_is_released_in_the_end() {
+        let mut stack = linked_to_the_1790041800_far_end();
+        for round in 0..=UNDECODABLE_RESETS {
+            // The same failure every time: ECM, then STEPUP and a codeword
+            // from a dictionary this end has never seen.
+            for (ns, info) in [(0, "0c c0 00 00"), (1, "02 32 d6 98 81")] {
+                wire(
+                    &mut stack,
+                    &Frame::I { ns, nr: 0, poll: false, info: hex(info) }
+                        .encode(DLCI_DATA, Role::Answerer, Kind::Command),
+                );
+            }
+            idle(&mut stack);
+            assert_eq!(stack.undecodable_streams(), round + 1);
+            let sent = sent(&mut stack);
+            if round < UNDECODABLE_RESETS {
+                assert!(sent.contains(&vec![0x03, 0x7f]), "round {round}: no SABME: {sent:02x?}");
+                wire(&mut stack, &hex("03 73"));
+                assert!(stack.is_connected(), "round {round}: the link did not come back");
+            } else {
+                assert!(sent.contains(&vec![0x03, 0x53]), "never released: {sent:02x?}");
+            }
+        }
+    }
+
     /// And a far end that was never compressing at all keeps its link.
     ///
     /// The price of watching for a switch nobody negotiated: a decoder in
@@ -2114,5 +2710,295 @@ mod tests {
         stack.take_received();
         send(&mut stack, b"password: ");
         assert_eq!(stack.take_received(), b"password: ");
+    }
+
+    /// Run two ends against each other, keeping every bit that crossed.
+    ///
+    /// The same channel as [`settle`], with the wire itself written down, for
+    /// the tests whose subject is what was *not* on it.
+    fn settle_recording(a: &mut Stack, b: &mut Stack, bits: usize) -> (Vec<bool>, Vec<bool>) {
+        let (mut from_a, mut from_b) = (Vec::new(), Vec::new());
+        for i in 0..bits {
+            let to_b = a.next_bit();
+            let to_a = b.next_bit();
+            from_a.push(to_b);
+            from_b.push(to_a);
+            b.feed_bit(to_b);
+            a.feed_bit(to_a);
+            if i % 160 == 0 {
+                a.tick(16);
+                b.tick(16);
+            }
+        }
+        (from_a, from_b)
+    }
+
+    /// The longest run of ONEs anywhere in a stream.
+    fn longest_run_of_ones(bits: &[bool]) -> usize {
+        let (mut best, mut run) = (0, 0);
+        for &bit in bits {
+            run = if bit { run + 1 } else { 0 };
+            best = best.max(run);
+        }
+        best
+    }
+
+    /// V.92 9.2.5: "If both modems have indicated LAPM capability, the V.42
+    /// ODP/ADP exchange shall be bypassed", and 9.3.1 says the same of a full
+    /// Phase 1 that settled both V.92 capability and LAPM. V.42 Appendix VI.2
+    /// reads that as binding on both ends at once, which is what this is: the
+    /// originator disables its detection phase (7.2.1.2) and the answerer
+    /// skips the wait (7.2.1.3), and the line carries HDLC from its first bit.
+    #[test]
+    fn two_ends_that_both_skip_detection_reach_lapm_with_no_odp_or_adp_on_the_wire() {
+        let mut a = Stack::new(Role::Originator, Params::default()).without_detection();
+        let mut b = Stack::new(Role::Answerer, Params::default()).bypassing_detection();
+        assert_eq!(a.phase(), Phase::Negotiating, "the originator waited");
+        assert_eq!(b.phase(), Phase::Negotiating, "the answerer waited");
+
+        let (from_a, from_b) = settle_recording(&mut a, &mut b, 20_000);
+        assert!(a.is_connected(), "the originator is {:?}", a.state());
+        assert!(b.is_connected(), "the answerer is {:?}", b.state());
+
+        // Every character of an ODP and of an ADP sits behind ONEs: 7.2.1.2
+        // separates the two DC1s by "8 to 16 ones" and Table 3 does the same
+        // for `E` and its type character. HDLC cannot produce eight in a row
+        // -- a flag holds six and zero insertion stops a frame at five -- so
+        // a run of eight is the mark of a detection pattern, and there is not
+        // one in either direction.
+        assert!(
+            longest_run_of_ones(&from_a) < 8,
+            "{} ONEs in a row from the originator: an ODP crossed",
+            longest_run_of_ones(&from_a)
+        );
+        assert!(
+            longest_run_of_ones(&from_b) < 8,
+            "{} ONEs in a row from the answerer: an ADP crossed",
+            longest_run_of_ones(&from_b)
+        );
+        assert_eq!(a.far_answer(), None, "the originator was answered by something");
+
+        a.send(b"login: cactus\r\n");
+        settle(&mut a, &mut b, 20_000, |_, bit| bit);
+        assert_eq!(b.take_received(), b"login: cactus\r\n");
+    }
+
+    /// V.8 7.3 and 7.4, both in the same words: "some existing implementations
+    /// of V.8 may indicate LAPM in prot0, but still require the ODP/ADP
+    /// exchange to successfully negotiate LAPM". V.42 Appendix VI.2 adds that
+    /// many answering modems run the detection phase whatever V.8 said.
+    ///
+    /// Such a far end hears this end's opening flags as nothing at all, since
+    /// its detector is reading characters and not frames, and at T400 decides
+    /// there is no V.42 here. Answering its ODP is the only thing that stops
+    /// that, and it costs one burst of pattern.
+    #[test]
+    fn an_answerer_that_skips_detection_still_answers_an_odp() {
+        let mut a = Stack::new(Role::Originator, Params::default());
+        let mut b = Stack::new(Role::Answerer, Params::default()).bypassing_detection();
+        assert_eq!(a.phase(), Phase::Detecting, "the far end is the one that asks");
+
+        let (_, from_b) = settle_recording(&mut a, &mut b, 40_000);
+        assert_eq!(
+            a.far_answer(),
+            Some(Answer::ErrorControl),
+            "the ODP went unanswered, so the far end fell back to no error control"
+        );
+        assert!(a.is_connected(), "the originator is {:?}", a.state());
+        assert!(b.is_connected(), "the answerer is {:?}", b.state());
+
+        // The answer really was async characters on the line, and not HDLC
+        // that happened to satisfy the detector.
+        assert!(longest_run_of_ones(&from_b) >= 8, "Table 3's fill never went out");
+
+        a.send(b"login: cactus\r\n");
+        settle(&mut a, &mut b, 20_000, |_, bit| bit);
+        assert_eq!(b.take_received(), b"login: cactus\r\n");
+    }
+
+    /// V.42 7.2.1.3's own ending, which the bypass changes the start of and
+    /// not the finish: an answerer that sees neither an ODP nor the start of
+    /// the protocol phase within T400 "shall decide that the originator is not
+    /// capable of V.42 error-correcting operation and shall fall back to
+    /// non-error-correcting operation".
+    ///
+    /// Without that a bypassed answerer would have no ending at all. It never
+    /// sends a SABME, so nothing in it ever gives up, and the terminal would
+    /// wait for a CONNECT that is not coming.
+    #[test]
+    fn a_bypassed_answerer_still_falls_back_when_the_far_end_does_no_v42() {
+        let mut b = Stack::new(Role::Answerer, Params::default()).bypassing_detection();
+        // A far end that took the line and said nothing on it. The wait for
+        // the ODP is not on T400 (7.2.1.3 has the answerer send mark until it
+        // sees one), so this is the bound that ends it.
+        for _ in 0..200 {
+            for _ in 0..4_000 {
+                b.next_bit();
+                b.feed_bit(true);
+            }
+            b.tick(100);
+        }
+        assert_eq!(b.phase(), Phase::Transparent);
+        assert!(b.settled(), "the terminal would still be waiting for a CONNECT");
+    }
+
+    /// V.42 7.10: "the error control function shall freeze the appropriate
+    /// timers", which is T401 here (7.10.2; T402 and T403 are not
+    /// implemented). The NOTE says what for: "typically used to suspend the
+    /// error correction procedure during a retrain or the modem on hold
+    /// procedures defined in ITU-T Rec. V.92".
+    ///
+    /// A V.92 hold can take the line away for minutes. With T401 running, the
+    /// first frame outstanding when it went would be polled for, N400 times,
+    /// and then the link would be released -- so the call would come back from
+    /// its hold to no error control and no dictionaries.
+    #[test]
+    fn a_suspended_link_keeps_its_timers_still_through_sixty_seconds_of_nothing() {
+        let (mut a, mut b) = pair();
+        settle(&mut a, &mut b, 20_000, |_, bit| bit);
+        assert!(a.is_connected() && b.is_connected(), "the link never came up");
+
+        // One frame on the line with nothing at the far end to acknowledge it,
+        // which is exactly the state a hold interrupts.
+        a.send(b"are you still there\r\n");
+        for _ in 0..4_000 {
+            a.next_bit();
+        }
+        assert!(!a.take_log().is_empty(), "nothing went out, so nothing is outstanding");
+
+        a.suspend();
+        assert!(a.suspended());
+        for _ in 0..600 {
+            a.tick(100);
+        }
+        assert!(a.is_connected(), "the link was released while suspended: {:?}", a.state());
+        for _ in 0..4_000 {
+            a.next_bit();
+        }
+        assert!(
+            a.take_log().is_empty(),
+            "T401 fired while suspended, so something was sent to a line that was not there"
+        );
+
+        // Frozen and not cancelled: what was left of T401 is still there, and
+        // it fires once time starts again (8.5.3's poll).
+        a.resume();
+        assert!(!a.suspended());
+        for _ in 0..80 {
+            a.tick(100);
+        }
+        for _ in 0..4_000 {
+            a.next_bit();
+        }
+        assert!(!a.take_log().is_empty(), "T401 never came back");
+    }
+
+    /// V.42 7.11 unfreezes the timers and nothing else: the link was never
+    /// released, so 8.2.4.3 discarded nothing, V(S) and V(R) are where they
+    /// were, and 5.6's C-INIT -- which fires on an establishment -- never
+    /// happened. That last is the one that cannot be recovered from: a
+    /// dictionary built from the data that went past only agrees with the far
+    /// end's because both saw the same data, and an end that started again on
+    /// its own would read every codeword after it as something else.
+    #[test]
+    fn after_resume_the_link_carries_on_with_the_same_sequence_numbers_and_dictionary() {
+        use crate::frame::Address;
+
+        let (mut a, mut b) = negotiated_pair();
+        settle(&mut a, &mut b, 40_000, |_, bit| bit);
+        assert!(a.is_connected() && b.is_connected(), "the link never came up");
+        assert!(a.compressing() && b.compressing(), "compression was not negotiated");
+
+        // Enough of the same phrases for both dictionaries to be full of them.
+        let block = |from: usize| {
+            let mut out = Vec::new();
+            for i in from..from + 200 {
+                out.extend_from_slice(format!("the same words over and over, line {i}\r\n").as_bytes());
+            }
+            out
+        };
+        let before = block(0);
+        a.send(&before);
+        settle(&mut a, &mut b, 200_000, |_, bit| bit);
+        assert_eq!(b.take_received(), before, "what arrived before the hold was wrong");
+        assert_eq!(b.undecodable_streams(), 0, "a compressed stream would not decode");
+
+        /// The N(S) of every I frame this end has put on the line since the
+        /// log was last taken, in order.
+        fn outbound_ns(stack: &mut Stack, from: Role) -> Vec<u8> {
+            let receiver = match from {
+                Role::Originator => Role::Answerer,
+                Role::Answerer => Role::Originator,
+            };
+            stack
+                .take_log()
+                .iter()
+                .filter(|c| c.outbound)
+                .filter_map(|c| Frame::decode(&c.body, receiver).ok())
+                .filter_map(|(_, frame): (Address, Frame)| match frame {
+                    Frame::I { ns, .. } => Some(ns),
+                    _ => None,
+                })
+                .collect()
+        }
+        let last = *outbound_ns(&mut a, Role::Originator).last().expect("no I frame went out");
+        assert!(last + 1 < crate::frame::MODULUS, "V(S) wrapped, and the check below cannot tell");
+
+        // A second lot, cut off partway: a hold falls where it falls, and
+        // where it usually falls is with frames on the line that nothing has
+        // acknowledged. That is the case the freeze is for -- with T401
+        // running, this end polls into a line that is not there, N400 times,
+        // and releases the link that the hold was supposed to preserve.
+        let during = block(1_000);
+        a.send(&during);
+        settle(&mut a, &mut b, 4_000, |_, bit| bit);
+        let partial = b.take_received().len();
+        assert!(partial < during.len(), "all {partial} of it crossed, so nothing was outstanding");
+
+        // The line goes away for ten minutes, which is a modem-on-hold: V.92
+        // Table 34's T1 runs to a quarter of an hour, and the whole point of
+        // the feature is that the DTE's other call is a real telephone call.
+        // Longer than N400 attempts at a growing T401 add up to, so without
+        // 7.10 the link is released somewhere in the middle of it.
+        a.suspend();
+        b.suspend();
+        for _ in 0..6_000 {
+            a.tick(100);
+            b.tick(100);
+        }
+        a.resume();
+        b.resume();
+        assert!(
+            a.is_connected() && b.is_connected(),
+            "the link did not survive the hold: {:?} and {:?}",
+            a.state(),
+            b.state()
+        );
+
+        let after = block(2_000);
+        a.send(&after);
+        settle(&mut a, &mut b, 400_000, |_, bit| bit);
+        let mut expected = during[partial..].to_vec();
+        expected.extend_from_slice(&after);
+        assert_eq!(
+            b.take_received(),
+            expected,
+            "what arrived after the hold was not what was sent, so the dictionaries came apart"
+        );
+        assert_eq!(b.undecodable_streams(), 0, "a compressed stream would not decode");
+
+        // Counting on from where it left off. An establishment would have put
+        // V(S) back to 0 (8.3.1) and discarded what was unacknowledged
+        // (8.2.4.3), and 5.6 would have emptied both dictionaries with it.
+        let sent = outbound_ns(&mut a, Role::Originator);
+        assert_ne!(
+            sent.first().copied(),
+            Some(0),
+            "V(S) went back to the beginning, so the link re-established"
+        );
+        assert!(
+            sent.contains(&(last + 1)),
+            "the sequence never carried on past {last}: {sent:?}"
+        );
     }
 }

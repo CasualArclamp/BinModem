@@ -44,12 +44,26 @@ impl Link {
         let client = Client::new("127.0.0.1:0", CLIENT, SERVER, 11).expect("could not listen");
         Self {
             client,
-            server: Server::new(SERVER, 22),
+            server: {
+                let mut server = Server::new(SERVER, 22);
+                // The web server here is on the loopback, which a caller is
+                // otherwise kept away from.
+                server.reach_anywhere();
+                server
+            },
             clock: 0,
             flying: Vec::new(),
             lose_one_in,
             crossed: 0,
         }
+    }
+
+    /// The same, with the answering end kept off its own machine and network,
+    /// as it is on a real call.
+    fn guarded() -> Self {
+        let mut link = Self::new(0);
+        link.server = Server::new(SERVER, 22);
+        link
     }
 
     fn step(&mut self) {
@@ -586,4 +600,41 @@ fn an_http_page_comes_back_over_a_line_that_loses_things() {
     drop(link);
     let seen = web_thread.join().expect("the web thread panicked");
     assert_eq!(seen.len(), 1, "{seen:?}");
+}
+
+/// Whoever dials in reaches what the answering machine can reach, and that
+/// was everything -- its own loopback, its own network -- over a tunnel to
+/// any port at all. A web server on the answering machine's loopback is
+/// somewhere a caller does not go, by tunnel or by plain request, and the
+/// server never hears from the proxy.
+#[test]
+fn the_answering_machine_itself_is_off_limits() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let local = listener.local_addr().expect("addr").to_string();
+
+    let mut link = Link::guarded();
+    let proxy = link.client.bound().to_string();
+    let target = local.clone();
+    let browser = thread::spawn(move || -> Result<String, String> {
+        let mut socket = TcpStream::connect(&proxy).map_err(|e| e.to_string())?;
+        socket
+            .set_read_timeout(Some(Duration::from_secs(60)))
+            .map_err(|e| e.to_string())?;
+        tunnel(&mut socket, &target)
+    });
+    let reply = alongside(&mut link, 60, browser).expect("no answer to the tunnel");
+    // RFC 9110 15.5.4: understood, and refused.
+    assert!(reply.starts_with("HTTP/1.1 403"), "a tunnel to this machine was not refused: {reply:?}");
+
+    let proxy = link.client.bound().to_string();
+    let by_name = local.replace("127.0.0.1", "localhost");
+    let browser = an_http_browser(proxy, vec![format!("http://{by_name}/secret")]);
+    let got = alongside(&mut link, 60, browser).expect("no answer to the request");
+    assert!(got[0].starts_with("HTTP/1.1 403"), "a request to this machine was not refused: {}", got[0]);
+
+    listener.set_nonblocking(true).expect("nonblocking");
+    assert!(
+        matches!(listener.accept(), Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "the proxy reached the answering machine's own server"
+    );
 }

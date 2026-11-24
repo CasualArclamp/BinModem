@@ -42,11 +42,29 @@ window, and Open joins them into one two-wire line. Changing either box moves
 the call onto the new device.
 
 The terminal in the window is the modem's DTE. Type `AT` and it answers `OK`;
-`AT+MS=B103` or `V22B` or `V32` chooses the modulation; `ATD` originates, `ATA`
-answers and `+++` escapes back to command state. The buttons above do exactly
-those and nothing else — the modem has one interface, and a button that reached
-past it would be able to ask for things a terminal could not. The scopes show
-the call as it happens rather than a recording of somebody else's.
+`AT+MS=B103`, `V21`, `V22B` or `V32` chooses the modulation; `ATD` originates,
+`ATA` answers and `+++` escapes back to command state. The buttons above do
+exactly those and nothing else — the modem has one interface, and a button
+that reached past it would be able to ask for things a terminal could not. The
+scopes show the call as it happens rather than a recording of somebody else's.
+
+`AT+MS=B212` is Bell 212A: 1200 bit/s, V.22's four-phase DPSK behind Bell's
+own handshake. The answering end waits two seconds and sends 2225 Hz, which is
+also Bell 103's answering mark; a calling 212A answers that with scrambled
+ones at 1200, a calling 103 with its 1270 Hz mark, and the answering end goes
+whichever way it heard. A calling 212A that offers 1200 and hears only a steady
+mark back falls back to 103 too, so a B212 reaches a 103 at either end at
+300. `AT+MS=B212,1,300,300` asks for the 103 outright. Error control runs at
+1200, as over V.22, and not at 300.
+
+`AT+MS=B202` is Bell 202: 1200 bit/s FSK, mark 1200 Hz and space 2200 Hz,
+both ends in the one band and so taking turns. An end with something to send
+waits for a quiet line, raises its carrier for 33 ms, sends, and ends with
+10 ms of the 900 Hz soft carrier turn-off; the answering end waits longer for
+quiet than the calling end, so two ends with something to say at once do not
+both key. There is no error control over it, no reverse channel, and no
+carrier to lose: an idle half-duplex line has none, so the call is up until a
+hang-up says otherwise. Neither Bell modem uses V.8.
 
 An ordinary `ATD` now negotiates before it starts. V.250 6.4.1 names the
 mechanism — `<automode>` "enables or disables automatic modulation negotiation
@@ -224,6 +242,178 @@ found from its own levels. In data mode, the frames themselves show where a
 slip took them. Press **Record** before dialling: a capture of a V.90 call that
 went wrong is what gets it fixed.
 
+## Calling over SIP, with no softphone
+
+Everything above puts a sound card between the modem and the network. The
+**line** box has another choice in it: a SIP account, which places the call
+itself. Nothing is resampled, nothing is concealed, no gain control touches it,
+and the G.711 codewords the far end sends are the ones the modem reads -- which
+is the whole of the argument for it, and matters most to V.90, where those
+codewords *are* the far end's symbols.
+
+Start with the credentials. Press **Dial** on the toolbar for the dialler,
+then **Credentials** at the bottom of it. Four things matter and they are the
+first four in the form:
+
+- **SIP server** -- the registrar your provider gave you, `host` or
+  `host:port`.
+- **username** -- on an Australian trunk this is usually the full number.
+- **password** -- the SIP password from the provider's portal, not the one you
+  log in to the portal with.
+- **transport** -- UDP unless the provider insists otherwise. See below.
+
+Everything else has a default that suits an ordinary trunk and is folded away
+under *rarely needed*. Press **Save**. If something is still missing the form
+says so in red rather than letting you dial and fail.
+
+The form writes `%APPDATA%\BinModem\sip.txt`, which can equally be edited by
+hand -- `binmodem --accounts` prints the path and lists what is in it. The
+file holds the password in clear text, because SIP digest authentication
+computes its answer from the password itself; it is as private as your profile
+directory and no more than that. A hand-edited file is read at startup, so
+restart after editing it outside the window.
+
+Then pick the account in the **line** box instead of a sound card, press
+**Open**, and watch for the green **Online** at the foot of the dialler. Type
+a number on the keypad and press **Call**.
+
+The keypad is a telephone's: digits, `*` and `#`, `+` for an international
+number, `C` to clear and `R` to redial the last number. **Call** becomes
+**Hang up** once there is a call.
+
+Nothing is hidden behind it. **Call** types `ATD<number>` at the terminal, so
+the call is placed the same way it would be if you typed it, and you can watch
+it happen in the transcript. Everything the terminal could do it still can:
+`ATD` dials, `ATH` hangs up the call as well as the modem, `ATA` answers one
+arriving, and a whole SIP URI works for a PBX on the desk --
+`ATD sip:1000@pbx.local`, typed or pasted into the number box.
+
+The modem hears nothing at all until the far end answers, so the handshake
+starts on a connected call rather than into ringback.
+
+### EasySip: no account at all
+
+For two BinModems that can reach each other by address, on one network or
+across a forwarded port. In the line box choose **EasySip**, type the other
+end's address beside it (`192.168.1.20`, or `192.168.1.20:5062` if it does
+not listen on 5060), and Open. Do the same at the other end with this
+end's address. One dials; the other presses Answer when it rings.
+
+- There is no account, registrar or password. Anything that can reach the
+  port can ring it, so it is for a network you trust.
+- "my port" is where this end listens: 5060 unless changed. Two on one
+  machine need two different ports, each naming the other's.
+- Linear samples are offered first, the fastest rate first, and G.711
+  behind them. With `AT+MS=VARC` the call is V.ARC/L16: 601 kbit/s at
+  48 kHz between two windows on one machine.
+- **coding** is what the call is carried in. "best both have" is the fastest
+  linear coding the two ends share. Any one of the eight linear codings can
+  be chosen instead, or G.711 mu-law or A-law, which is what a telephone
+  network carries and what the ordinary modes (V.34, V.90 and the rest) are
+  for. The caller's choice is tried first; an answerer that chose a
+  different linear rate gets G.711. Once a call is up, the top line of the
+  window says what it is in, as `L16/48000` or `PCMA`.
+- **UPnP** asks the router to let the call in, for a far end across the
+  internet. With it ticked, opening the line finds the router, asks what
+  its outside address is, and has it forward this end's SIP port and its
+  RTP port (both UDP) to this machine; the transcript then says where the
+  far end reaches this one, as `203.0.113.7:5060`. Each end gives the other
+  that address. The ports are closed again when the line is; a program
+  that is killed leaves them for a day at most. It is not used when the far
+  end is on this network or this machine. A router with UPnP off, or one
+  behind another router (the provider's, on many mobile and some fibre
+  lines), cannot do it, and the transcript says which. It has carried a call
+  across the internet.
+- From the command line: `binmodem.exe --live --sip "easysip:192.168.1.20|5060"`,
+  the far end's address, a bar, and this end's port. A third field chooses
+  the coding: `"easysip:192.168.1.20|5060|PCMU"`, or `L16/16000`, or
+  `L16/44100/2`, and `|upnp` after it turns UPnP on. `--setup` leaves the Setup row showing with the line open.
+
+An account in the SIP file gets the same codings with `linear = yes`.
+
+### Compression on a V.ARC call
+
+A V.ARC call compresses what the terminal sends, with whichever method both
+ends have: LZ (BinModem's own, the strongest), V.44 or V.42bis. The
+"Compression" line in the scopes says which is in use each way and what it
+has saved.
+
+- `AT+VARCZ=2` is how it comes: all three, LZ preferred.
+- `AT+VARCZ=1` leaves LZ out: V.44 if `+DS44` is on, V.42bis if `+DS` is.
+- `AT+VARCZ=0` turns it off.
+
+It makes no difference to data that is already compressed, and both ends
+have to be 5.2 or later; with an older build the call is simply not
+compressed.
+
+### A robbed bit, for testing
+
+No SIP call has robbed-bit signalling on it, so there is a switch that puts
+it there. `BINMODEM_ROB_BIT=3` in the environment of a window (or of
+`modem-sip`) overwrites the least significant bit of one G.711 octet in
+six, of what that end receives, as a T1 trunk without a signalling channel
+does. `0,3` robs two positions, as a call over two trunks has it, and
+`3:0` writes a nought where the default is a one. Set it on the calling
+end to rob the downstream.
+
+![V.90 with one robbed position, V.92 with one, and V.90 with two](images/robbed-bit.png)
+
+Between two windows on EasySip in mu-law, on one machine: V.90 finds it and
+connects at 53 333 on 112 levels where a clean line gives 56 000 on 132;
+with two positions robbed, 45 333 on 54 levels. V.92 with PCM upstream did
+not come up at all in the one run tried, which fits its calling side
+asking for no DIL.
+
+### UDP or TCP
+
+UDP unless you have a reason. It is what a trunk expects, and the protocol
+does its own retransmission because nothing underneath it will.
+
+TCP is there for the two cases that need it: a provider that insists on it,
+and a message too big for the path. An INVITE carrying a long description can
+pass the point where UDP fragments it, and a surprising number of routers drop
+a fragmented datagram -- which looks like a trunk ignoring your calls. Over
+TCP a message is found in the stream by its length, and the retransmissions
+are turned off, because repeating a request on a transport that already
+guarantees delivery only gives the far end a duplicate to sort out. If the
+trunk drops an idle connection, the next thing to say something opens another
+and repeats whatever was in flight.
+
+The media never changes: RTP is UDP whatever SIP travels over.
+
+Or from a shell, skipping the window's line box:
+
+```
+binmodem --sip trunk
+```
+
+What to watch, in the line row:
+
+- **registered** in green. A modem that will not train on a line that never
+  registered is not a modem fault.
+- The call state and the law -- `up with sip:0398765432@... in PCMU`. If the
+  law is PCMA on a V.90 call, the trunk is transcoding, and that costs about
+  twenty decibels of training.
+- **lost** and **ms of silence** in red. This is the number worth having.
+  Every octet of silence is a hole handed to the modem in place of audio that
+  did not arrive, counted honestly rather than papered over with a repeat of
+  the last packet the way a softphone does. **A call that failed with none of
+  this failed in the modem; one with any of it failed in the network.** That
+  distinction used to take an afternoon with a capture.
+
+When the call ends -- from either side -- the modem is told, so the terminal
+gets `NO CARRIER` rather than sitting in silence waiting for a carrier that
+has gone. The transcript then says what the call cost in packets: how many
+crossed each way, how many were lost, how much silence was handed to the modem
+in their place, and anything thrown away for a reason that was not the
+network's. If the far end puts the call on hold, it stays up and says so; the
+modem stops transmitting until it comes back, rather than talking to nobody.
+
+Fax still goes over G.711 here. A far end that asks to switch the call to T.38
+is declined, and the call stays on audio where the V.17, V.29 and V.27 ter
+modulations work as they always have. T.38 itself is the next thing to build;
+`docs/design/sip.md` sketches what it needs.
+
 ## Moving a file
 
 The **Files** button opens ZMODEM: a path to send, a directory to receive
@@ -238,7 +428,14 @@ own. Two values in it are given only by reference to a C header -- the frame
 type numbers and the subpacket terminators -- and where the code relies on one
 it says what it was derived from.
 
-Tell the board to send first. This end answers; it does not ask.
+Tell the board to send first. This end answers; it does not ask. A board may
+send several files at once, and each is kept in the directory as it arrives,
+so a batch that is cut off partway still leaves the files that were already
+here. A name the board chose is only ever a name in that directory: any
+directories in it are dropped, characters Windows will not have in a name
+become `_`, and a device's name like `NUL` or `COM1` gets a `_` in front.
+`crates/transfer/tests/lrzsz.rs` runs the receiver against `sz` wherever
+lrzsz is installed.
 
 ## Sending a fax
 
@@ -246,6 +443,17 @@ The **Fax** button opens T.30. **Browse** loads a picture and makes a page of
 it: 1728 pels across, at 3.85 or 7.7 lines per millimetre, thresholded or
 dithered. The panel says what that page comes to and how long it takes at each
 rate before anything is dialled.
+
+**Browse** takes a PDF as well, and every page of it goes in the one call, a
+page to a sheet. Each is drawn at the size it is printed, straight onto the
+fax's pels: A4 comes out A4, with the 215 mm line a little wider than the
+paper, and a page too big for the line is shrunk until it fits across and down
+an A4 sheet. A page wider than it is tall and too wide for the line -- A4 or
+Letter on its side -- is turned a quarter turn anticlockwise, as a printer set
+to landscape turns it, so that it fills the sheet. **<** and **>** under the
+preview step through the pages, and the **coded** row and the times are for
+all of them together. A fax takes the first 50 pages of a document; a PDF
+locked with a password does not load.
 
 **Send fax** types `AT+FCLASS=1` and then `ATD` with the number in the box. On
 a softphone, place the call there first and press it once the far end has
@@ -259,15 +467,28 @@ slow-scan television is, under **page arriving**. The view follows the newest
 line, with a green line marking it; scrolling up to look at the top stops it
 following until it is scrolled back down. With error correction the page draws
 a block's frames at a time, and waits at a damaged frame until it has been sent
-again. **Save as PNG** writes out the page, or as much of it as has arrived,
-with each scan line drawn tall enough to make the pels square, which they are
-not. **page to send** and **page arriving** both fold away, for a window that
+again. **Save** writes out the page, or as much of it as has arrived, as a PDF
+or a PNG, whichever the name ends in. A PDF's sheet is the size the page was
+scanned at, with the page on it in T.6, the coding it came in under error
+correction; a PNG draws each scan line tall enough to make the pels square,
+which they are not. **page to send** and **page arriving** both fold away, for a window that
 is taller than the screen.
 
 The **offer** boxes are what this end will use. V.29 carries a page at 9600 and
 7200; V.27 ter at 4800 and 2400, and every fax machine has it. A call starts at
 the fastest rate both ends have and drops a rung each time the far end refuses
 the training check. Untick V.29 to hold a call to V.27 ter on a bad line.
+**V.34** is Super G3: V.8 in front of the call -- answering, ANSam in place of
+the called tone -- and, where the far end has it too, the page over V.34's
+half-duplex mode at up to 33 600 with the T.30 frames on its 1200 bit/s control
+channel; the progress line then gives the symbol rate beside the bit rate, and
+the far-end panel the two ends' menus and what the modem settled. A plain fax
+hears the ordinary tone in ANSam and the call is as before.
+
+A page the far end could not read -- T.30's RTN, which a line that slipped
+after the training check passed will cause -- is trained for again a rung down
+and sent again, twice at most. After that the next page goes instead, and the
+call says which page did not get through.
 
 **ECM** is T.30's error correction mode. The page goes in numbered frames, and
 any the far end cannot read are asked for and sent again rather than printed as
@@ -277,20 +498,28 @@ correction* while a call is using it. Untick it to see what the same line does
 to a page without it.
 
 A page goes in the smallest coding both ends have, and the progress line names
-it: MMR, T.6's coding, when there is error correction; Modified READ when the far
-end reads it; and Modified Huffman, which every machine reads, when nothing else
-is shared. The **coded** row under the page to send gives its size in all three,
-and the times beside each rate run from MMR's to Modified Huffman's.
+it: JBIG, T.85's coding, and then MMR, T.6's, when there is error correction;
+Modified READ when the far end reads it; and Modified Huffman, which every
+machine reads, when nothing else is shared. The **coded** row under the page to
+send gives its size in the three T.4 and T.6 codings, and the times beside each
+rate run from MMR's to Modified Huffman's; JBIG usually comes in under MMR, and
+on a dithered picture far under it.
+
+**JBIG** is T.85's coding: every pel predicted from the ones around it and
+arithmetic coded, which learns the page as it goes. It is only used with error
+correction, and only when the far end offers it too; untick it and a page that
+would have gone in JBIG goes in MMR.
 
 The far end's number and what its DIS says appear as soon as they arrive,
 whether or not a page follows.
 
 A call can bring any number of pages. Each is drawn as it arrives, the heading
 and the progress line say which page it is, and **<** and **>** go back through
-the pages of the call that came before it. **Save as PNG** writes the page in
-view; **Save all** writes every page of the call to its own file, the name
-chosen with the page's number after it: `fax-1.png`, `fax-2.png` and so on.
-The window sends one page to a call.
+the pages of the call that came before it. **Save** writes the page in view;
+**Save all** writes every page of the call into one PDF, a page to a sheet, or,
+given a name ending in `.png`, each to its own picture with the page's number
+after the name: `fax-1.png`, `fax-2.png` and so on. A fax saved as a PDF loads
+back into **Browse** as the same pages, to send on.
 
 The modem stays in fax class after a call, as V.250 asks, so `AT+FCLASS=0`
 makes it a modem again before dialling a board.
@@ -444,6 +673,13 @@ On the machine that answered, **carry web traffic** offers its internet to a
 BinModem that calls, and says *offering the internet at 10.0.0.1:1080*. The
 setting is kept for the next link, so a machine answering with a login prompt
 can offer it before anyone has called.
+
+It offers the internet and nothing nearer. A caller asking for the answering
+machine itself, or anywhere on its own network -- 127.0.0.1, 192.168.x.x,
+10.x.x.x, a router's page, a cloud host's 169.254.169.254 -- is answered 403
+and nothing is opened, since those are the places a firewall assumes nobody
+outside can reach. A tunnel goes only to port 443, which is what a browser
+wants one for, and a plain request to 80, 443 or a port above 1023.
 
 The transcript says whether the headers are being compressed — *ppp: headers
 compressed both ways, 16 slots*. That is RFC 1144, and it matters more here

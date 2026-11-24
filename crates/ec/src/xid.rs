@@ -95,6 +95,31 @@ const N401_DEFAULT: u16 = crate::lapm::DEFAULT_N401 as u16;
 /// The window size when nobody proposes one (V.42 9.2.4).
 const K_DEFAULT: u8 = crate::lapm::DEFAULT_K;
 
+/// The HDLC optional functions mask as it goes on the wire.
+///
+/// V.42 Table 11a Note 1 fixes this parameter at "4 octets (i.e. PL = 4)", and
+/// names bit positions 3, 14, 17 and 24 and no further. Sending all four is
+/// what this end did, and one far end reads it as a whole information field it
+/// cannot walk: the Agere SV92PP's XID parser takes PL = 3 for this parameter
+/// and, on anything else, abandons the rest of the field rather than skipping
+/// the item (its `LapmProcessXID` calls a routine that returns as soon as
+/// `PL != 3` at PI 3, at 0x661bb in `agrmodemlib.o`). Everything after it --
+/// the V.42bis private subfield and the V.44 user data subfield among them --
+/// was then never read, so the far end answered "no compression" and its own
+/// log said "LAPM compression disabled" on every call, whatever either end had
+/// offered.
+///
+/// Three octets carry every bit the note gives a meaning to, and that is what
+/// every real modem sends: the Agere's own XID, the Conexant pair captured in
+/// `tests/vectors/v22bis-2400.wav`, and the mask this end's decoder already
+/// accepts in one, two or three octets. The fourth is sent only if a bit above
+/// position 24 is ever set, which nothing here sets today.
+fn mask_octets(mask: u32) -> ([u8; 4], usize) {
+    let octets = mask.to_le_bytes();
+    let len = if octets[3] != 0 { 4 } else { 3 };
+    (octets, len)
+}
+
 /// Bits of the HDLC optional functions mask that V.42 12.2.2 Note 1 names.
 ///
 /// Bit 1 is the low-order bit of the first octet and is transmitted first.
@@ -301,7 +326,8 @@ impl Xid {
 
         // Parameter negotiation subfield.
         let mut params = Vec::new();
-        push_param(&mut params, pi::HDLC_OPTIONAL, &self.hdlc_mask(kind).to_le_bytes());
+        let (mask, mask_len) = mask_octets(self.hdlc_mask(kind));
+        push_param(&mut params, pi::HDLC_OPTIONAL, &mask[..mask_len]);
         // V.42 12.2.2 Note 3: N401 is in octets, but negotiated in bits.
         if let Some(n) = self.n401_transmit {
             push_param(&mut params, pi::N401_TRANSMIT, &(n * 8).to_be_bytes());
@@ -585,6 +611,30 @@ impl Xid {
     /// V.42 9.2.3, 9.2.4 and V.42bis 5.1 all say the same thing for their own
     /// parameters: where the two ends differ, the lower value is used.
     pub fn resolve(&self, other: &Self) -> Self {
+        let codewords = lower(self.codewords, other.codewords, v42bis::DEFAULT_N2);
+        let max_string = lower(self.max_string, other.max_string, v42bis::DEFAULT_N7);
+        let mut compression = match (self.compression, other.compression) {
+            (Some(a), Some(b)) => Some(a.intersect(b)),
+            _ => None,
+        };
+        // V.42bis 5.1: a P1 below 512 or a P2 outside 6 to 250 "shall be
+        // considered a procedural error". The lower of the two is whatever the
+        // far end sent, so a far end that sent one would otherwise have its
+        // number used as the size of this end's dictionary -- and one below
+        // the 259 codewords the roots and control codes take up (6.1) took
+        // the line thread down the moment the dictionary was built. Refusing
+        // compression is kinder than the disconnection 5.1 goes on to ask
+        // for, the same choice V.44's own minimum gets below, and
+        // [`Self::answering`] tells the far end so.
+        if compression.is_some_and(|c| c != Compression::Neither) {
+            let params = v42bis::Params {
+                n2: codewords.unwrap_or(v42bis::DEFAULT_N2),
+                n7: max_string.unwrap_or(v42bis::DEFAULT_N7),
+            };
+            if params.validate().is_err() {
+                compression = Some(Compression::Neither);
+            }
+        }
         Self {
             n401_transmit: lower(self.n401_transmit, other.n401_transmit, N401_DEFAULT),
             n401_receive: lower(self.n401_receive, other.n401_receive, N401_DEFAULT),
@@ -595,12 +645,9 @@ impl Xid {
             srej_single: self.srej_single && other.srej_single,
             test_frame: self.test_frame && other.test_frame,
             srej_multiple: self.srej_multiple && other.srej_multiple,
-            compression: match (self.compression, other.compression) {
-                (Some(a), Some(b)) => Some(a.intersect(b)),
-                _ => None,
-            },
-            codewords: lower(self.codewords, other.codewords, v42bis::DEFAULT_N2),
-            max_string: lower(self.max_string, other.max_string, v42bis::DEFAULT_N7),
+            compression,
+            codewords,
+            max_string,
             // V.44's two directions are settled crosswise rather than by
             // taking the lower of matching fields, so it has its own.
             v44: self.v44_params(other),
@@ -623,11 +670,43 @@ impl Xid {
     /// that is the one [`crate::Stack`] turns on; otherwise the answer is
     /// about V.42bis, including when nothing was agreed, since a far end told
     /// no direction has been answered and a far end told nothing has not.
+    ///
+    /// Where the two came to no V.42bis at all, the answer says a P0 of zero
+    /// rather than this end's whole offer. A far end whose P1 was refused by
+    /// [`Self::resolve`] would otherwise take the lower of its own P1 and ours,
+    /// turn compression on, and send codewords at a decoder that is not there.
+    ///
+    /// And the numbers in it are the settled ones, not this end's offer.
+    /// 8.10.2 has the response "return the indicated parameter values", the
+    /// ones negotiation came to, and V.42bis's N2 and N7 and V.42's N401 and
+    /// k may only come down in an answer. Answering with this end's own offer
+    /// told a far end that proposed less that we had asked for more: a U.S.
+    /// Robotics Courier, whose XID offers V.42bis with N7 32, read the 250 in
+    /// ours as no answer and sent its XID again until it gave up on the call.
     pub fn answering(mut self, settled: &Self) -> Self {
+        self.n401_transmit = settled.n401_transmit;
+        self.n401_receive = settled.n401_receive;
+        self.window_transmit = settled.window_transmit;
+        self.window_receive = settled.window_receive;
+        self.codewords = settled.codewords;
+        self.max_string = settled.max_string;
+        // The optional functions too: 32-bit FCS, SREJ and TEST only where
+        // both have them. The same Courier offered neither 32-bit FCS nor
+        // multiple SREJ and took an answer that named them for no answer.
+        self.fcs32 = settled.fcs32;
+        self.srej_single = settled.srej_single;
+        self.srej_multiple = settled.srej_multiple;
+        self.test_frame = settled.test_frame;
+        if settled.v44.is_some() {
+            self.v44 = settled.v44;
+        }
         if settled.v44.is_some() {
             self.compression = None;
         } else {
             self.v44 = None;
+            if settled.compression == Some(Compression::Neither) {
+                self.compression = Some(Compression::Neither);
+            }
         }
         self
     }
@@ -719,6 +798,38 @@ fn take_param(field: &[u8]) -> Result<Option<Parameter<'_>>, XidError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A U.S. Robotics Courier's XID command (its V.42bis N7 is 32), taken off
+    /// the line of an emulated Courier, answered with what was settled.
+    #[test]
+    fn an_answer_never_asks_for_more_than_the_command_offered() {
+        let courier: Vec<u8> = (0..)
+            .step_by(2)
+            .take_while(|&i| i < COURIER.len())
+            .map(|i| u8::from_str_radix(&COURIER[i..i + 2], 16).unwrap())
+            .collect();
+        let theirs = Xid::decode(&courier).unwrap();
+        assert_eq!(theirs.max_string, Some(32));
+        let mut ours = Xid::proposal(Compression::Both);
+        ours.codewords = Some(2048);
+        ours.max_string = Some(250);
+        let settled = ours.resolve(&theirs);
+        let answer = Xid::decode(&ours.answering(&settled).encode(Kind::Response)).unwrap();
+        assert_eq!(answer.max_string, Some(32));
+        // Nothing it did not offer: no 32-bit FCS, no multiple SREJ.
+        assert!(!theirs.fcs32 && !answer.fcs32);
+        assert!(!theirs.srej_multiple && !answer.srej_multiple);
+        assert!(answer.codewords <= theirs.codewords);
+        for (ours, theirs) in [
+            (answer.n401_transmit, theirs.n401_receive),
+            (answer.n401_receive, theirs.n401_transmit),
+            (answer.window_transmit.map(u16::from), theirs.window_receive.map(u16::from)),
+        ] {
+            assert!(ours <= theirs, "{ours:?} against {theirs:?}");
+        }
+    }
+
+    const COURIER: &str = "8280001303038e8900050207a0060207a007010f08010ff0000f000356343201010302020800030120ffff03485354400403000000f10106";
 
     #[test]
     fn a_proposal_round_trips() {
@@ -1347,6 +1458,36 @@ mod v44_negotiation {
             receive: v44::Params { n2: 64, n7: 8, n8: 16 },
         };
         assert_eq!(mine.resolve(theirs), None);
+    }
+
+    /// V.42bis 5.1 makes a P1 below 512 or a P2 outside 6 to 250 "a procedural
+    /// error". Taking the lower of the two handed a far end's P1 of 258 to the
+    /// dictionary as its size, and a dictionary smaller than its own roots
+    /// panicked as it was built. The same far end is now refused compression,
+    /// and the answer it gets says so.
+    #[test]
+    fn a_v42bis_proposal_out_of_range_is_declined_and_the_answer_says_so() {
+        let mine = Xid::proposal(Compression::Both);
+        for (codewords, max_string) in [(0, 250), (258, 250), (259, 250), (511, 250), (2048, 5), (2048, 0)] {
+            let mut theirs = Xid::proposal(Compression::Both);
+            theirs.v44 = None;
+            theirs.codewords = Some(codewords);
+            theirs.max_string = Some(max_string);
+            let settled = mine.resolve(&theirs);
+            assert_eq!(settled.v42bis_params(), None, "P1 {codewords}, P2 {max_string} was taken");
+            let answer = mine.answering(&settled);
+            assert_eq!(answer.compression, Some(Compression::Neither), "P1 {codewords}, P2 {max_string}");
+            assert_eq!(answer.v44, None);
+        }
+
+        // And the smallest the Recommendation allows is still taken.
+        let mut theirs = Xid::proposal(Compression::Both);
+        theirs.v44 = None;
+        theirs.codewords = Some(512);
+        theirs.max_string = Some(6);
+        let settled = mine.resolve(&theirs);
+        assert_eq!(settled.v42bis_params(), Some(v42bis::Params { n2: 512, n7: 6 }));
+        assert_eq!(mine.answering(&settled).compression, Some(Compression::Both));
     }
 
     /// The capability byte a modem sends: Table A.1's "neither packet method

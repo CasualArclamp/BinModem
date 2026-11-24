@@ -37,7 +37,82 @@ const FS: f64 = 16_000.0;
 #[derive(Debug, Clone)]
 enum Request {
     Open { input: String, output: String },
+    /// Open a line made of packets instead: this account from the SIP file.
+    OpenSip { account: String },
     Close,
+}
+
+/// Whichever kind of line is open.
+///
+/// A sound card and a SIP call are the same thing to everything above: a
+/// clock that delivers samples, and somewhere to put the answer. Keeping them
+/// behind one small enum rather than a trait object is not about speed --
+/// these are called once a block, not once a sample -- but about the counters,
+/// which are the same three questions asked of two quite different things.
+#[derive(Debug)]
+enum Wire {
+    /// Two audio devices, which between them are a two-wire line.
+    Audio(Box<line::Duplex>),
+    /// A call over the network, with no sound card anywhere in it.
+    Sip(Box<sip::Line>),
+    /// The same two audio devices as they are, both channels at their own
+    /// rate, for as long as a V.ARC call wants them that way. The names are
+    /// kept to put the two-wire line back afterwards.
+    Wide { line: Box<line::Wide>, input: String, output: String },
+}
+
+impl Wire {
+    fn receive(&self, into: &mut Vec<f32>) {
+        match self {
+            Self::Audio(line) => line.receive(into),
+            Self::Sip(line) => line.receive(into),
+            // Stepped a frame at a time at its own rate, by its own path.
+            Self::Wide { .. } => {}
+        }
+    }
+
+    fn transmit(&self, samples: &[f32]) {
+        match self {
+            Self::Audio(line) => line.transmit(samples),
+            Self::Sip(line) => line.transmit(samples),
+            Self::Wide { .. } => {}
+        }
+    }
+
+    /// Samples that arrived and were lost before anything read them. On a
+    /// sound card that is the modem failing to keep up; over SIP the same
+    /// fault shows as the jitter buffer overflowing, which is counted there.
+    fn dropped_in(&self) -> u64 {
+        match self {
+            Self::Audio(line) => line.dropped_in(),
+            Self::Sip(line) => line.stats().jitter.overflowed,
+            Self::Wide { line, .. } => line.dropped_in(),
+        }
+    }
+
+    /// Times the line had nothing to send and sent silence. The same fault
+    /// and the same consequence either way: the far end hears a hole.
+    fn underruns(&self) -> u64 {
+        match self {
+            Self::Audio(line) => line.underruns(),
+            Self::Sip(line) => line.stats().underruns,
+            Self::Wide { line, .. } => line.underruns(),
+        }
+    }
+
+    fn sip(&self) -> Option<&sip::Line> {
+        match self {
+            Self::Sip(line) => Some(line),
+            Self::Audio(_) | Self::Wide { .. } => None,
+        }
+    }
+
+    fn wide(&self) -> Option<&line::Wide> {
+        match self {
+            Self::Wide { line, .. } => Some(line),
+            Self::Audio(_) | Self::Sip(_) => None,
+        }
+    }
 }
 
 /// Input devices that are one half of a two-wire line, best first.
@@ -61,6 +136,14 @@ pub fn line_rates(modem: &Modem) -> String {
         format!("{receive} bit/s")
     } else {
         format!("{receive} bit/s receiving / {send} sending")
+    }
+}
+
+/// What the rate menu has V.90 start-ups asking for, for the transcript.
+fn pinned_said(drn: Option<u8>) -> String {
+    match drn.and_then(datapump::v90::sequences::data_rate) {
+        Some(rate) => format!("V.90 start-ups will ask for {rate} bit/s, whatever the DIL chooses"),
+        None => "V.90 start-ups will choose their own rate".to_owned(),
     }
 }
 
@@ -107,10 +190,312 @@ fn preferred_line() -> Option<(String, String)> {
     Some((input, output))
 }
 
+/// The SIP accounts there are to choose from, best first.
+///
+/// A machine with no file yet gets one written for it, commented, rather than
+/// an empty list and no hint about where to put an account. That is the same
+/// bargain the settings file makes: a first run should leave something behind
+/// that can be edited.
+pub fn sip_accounts() -> Vec<String> {
+    if let Some(path) = sip::Account::default_path() {
+        let _ = sip::Account::write_example(&path);
+    }
+    sip::Account::load_default()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|a| a.name)
+        .collect()
+}
+
+/// What an EasySip line is called, wherever an account's name goes: the far
+/// end's address and this end's port, which are all there is to one.
+pub const EASY_SIP: &str = "easysip:";
+
+/// The name of the EasySip line to `peer`, heard on `port`.
+pub fn easy_sip_name(peer: &str, port: u16, coding: &str, upnp: bool) -> String {
+    let mut name = format!("{EASY_SIP}{}|{port}", peer.trim());
+    if !(coding.is_empty() || coding == EASY_CODINGS[0].0) {
+        name.push('|');
+        name.push_str(coding);
+    }
+    if upnp {
+        name.push_str("|upnp");
+    }
+    name
+}
+
+/// Whether an EasySip line's name asks for the router to be opened.
+pub fn easy_sip_upnp(name: &str) -> bool {
+    name.strip_prefix(EASY_SIP).is_some_and(|rest| rest.split('|').skip(2).any(|f| f.trim().eq_ignore_ascii_case("upnp")))
+}
+
+/// What an EasySip call can be carried in, as it is written in a line's
+/// name and as it is said in the window. The first is no choice at all:
+/// the fastest linear coding both ends have, and G.711 behind them.
+pub const EASY_CODINGS: [(&str, &str); 11] = [
+    ("auto", "best both have"),
+    ("L16/48000", "LPCM 48 kHz"),
+    ("L16/48000/2", "LPCM 48 kHz stereo"),
+    ("L16/44100", "LPCM 44 kHz"),
+    ("L16/44100/2", "LPCM 44 kHz stereo"),
+    ("L16/16000", "LPCM 16 kHz"),
+    ("L16/16000/2", "LPCM 16 kHz stereo"),
+    ("L16/8000", "LPCM 8 kHz"),
+    ("L16/8000/2", "LPCM 8 kHz stereo"),
+    ("PCMU", "G.711 mu-law"),
+    ("PCMA", "G.711 A-law"),
+];
+
+/// The coding an EasySip line's name asks for: one of [`EASY_CODINGS`]'s,
+/// and the first of them when the name says nothing or nothing known.
+pub fn easy_sip_coding(name: &str) -> &'static str {
+    let fields = name.strip_prefix(EASY_SIP).unwrap_or("").split('|').skip(2);
+    fields
+        .filter_map(|asked| EASY_CODINGS.iter().find(|(token, _)| token.eq_ignore_ascii_case(asked.trim())))
+        .map(|c| c.0)
+        .next()
+        .unwrap_or(EASY_CODINGS[0].0)
+}
+
+/// The far end's address and this end's port out of such a name.
+pub fn easy_sip_parts(name: &str) -> Option<(String, u16)> {
+    let (peer, rest) = name.strip_prefix(EASY_SIP)?.split_once('|')?;
+    let port = rest.split('|').next()?;
+    Some((peer.to_owned(), port.trim().parse().ok()?))
+}
+
+/// EasySip: a call straight to another of these, with nothing between.
+///
+/// No account, no registrar and no password. The far end is an address, and
+/// a call is an INVITE sent to it; this end listens on a port of its own for
+/// the same from there. Linear samples are offered first, since the far end
+/// is expected to be BinModem and V.ARC wants them, with G.711 behind for
+/// anything else that answers.
+fn easy_sip_account(name: &str) -> Result<sip::Account, String> {
+    let (peer, port) = easy_sip_parts(name).ok_or_else(|| format!("{name:?} is not an EasySip line"))?;
+    let coding = easy_sip_coding(name);
+    if peer.is_empty() {
+        return Err("EasySip: type the far end's address first, as 192.168.1.20 or 192.168.1.20:5060".to_owned());
+    }
+    let host = peer.rsplit_once(':').filter(|(_, p)| p.parse::<u16>().is_ok()).map_or(peer.as_str(), |(h, _)| h);
+    Ok(sip::Account {
+        name: name.to_owned(),
+        registrar: peer.clone(),
+        domain: host.to_owned(),
+        username: "binmodem".to_owned(),
+        register: false,
+        linear: coding.starts_with("L16") || coding == EASY_CODINGS[0].0,
+        linear_only: linear_only(coding),
+        // The router is only in the way of a far end that is beyond it. One
+        // on this network, or this machine, is reached as it is, and told
+        // the router's outside address would send its sound to the router.
+        upnp: easy_sip_upnp(name) && host.parse::<std::net::IpAddr>().map_or(true, sip::upnp::is_public),
+        // G.711 chosen is that law first and the other behind it, so that
+        // two ends that chose differently still have a call.
+        laws: if coding == "PCMA" { vec![sip::Law::A, sip::Law::Mu] } else { vec![sip::Law::Mu, sip::Law::A] },
+        local_port: port,
+        ..sip::Account::default()
+    })
+}
+
+/// The rate and channels of `L16/48000` or `L16/48000/2`.
+fn linear_only(coding: &str) -> Option<(u32, u8)> {
+    let mut fields = coding.strip_prefix("L16/")?.split('/');
+    let rate = fields.next()?.parse().ok()?;
+    Some((rate, fields.next().map_or(Some(1), |c| c.parse().ok())?))
+}
+
+/// Open a line on one of them.
+fn open_sip(name: &str, tx: &Publisher) -> Result<sip::Line, String> {
+    if name.starts_with(EASY_SIP) {
+        let account = easy_sip_account(name)?;
+        tx.log(
+            Direction::Note,
+            format!(
+                "EasySip: calls go to {}, and are heard on port {}; no account and no registrar; coding: {}",
+                account.next_hop(),
+                account.local_port,
+                EASY_CODINGS.iter().find(|c| c.0 == easy_sip_coding(name)).map_or("", |c| c.1)
+            ),
+        );
+        let asked = easy_sip_upnp(name);
+        let beyond = account.upnp;
+        let line = sip::Line::open(account, FS)?;
+        match line.upnp_said() {
+            Some(said) => tx.log(Direction::Note, said.to_owned()),
+            None if asked && !beyond => tx.log(
+                Direction::Note,
+                "UPnP: not used, because the far end is on this network or this machine and no router is in the way",
+            ),
+            None => {}
+        }
+        return Ok(line);
+    }
+    let accounts = sip::Account::load_default()?;
+    if accounts.is_empty() {
+        let where_it_goes = sip::Account::default_path()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "the SIP account file".to_owned());
+        return Err(format!("there are no SIP accounts; fill in {where_it_goes}"));
+    }
+    let account = accounts
+        .into_iter()
+        .find(|a| a.name == name)
+        .ok_or_else(|| format!("there is no SIP account called {name:?}"))?;
+    tx.log(
+        Direction::Note,
+        format!(
+            "sip: {} as {} through {}",
+            account.name,
+            account.uri(),
+            account.next_hop()
+        ),
+    );
+    sip::Line::open(account, FS)
+}
+
+/// How long a dial is given to become a call before the modem is told it did
+/// not.
+///
+/// A modem on a line made of packets is stepped only by arriving audio, so a
+/// call that is never placed leaves it waiting for a carrier with none of its
+/// own timers running -- not slowly, but for ever. The agent refuses a dial
+/// outright in two cases (a call already in progress, a next hop that will
+/// not resolve) and says so, but nothing it says reaches the modem.
+///
+/// Ten seconds rather than one: the agent's own `place_call` resolves the
+/// next hop before it does anything else, and a slow name server can take
+/// several. Ten is long enough that a call which was going to happen has, and
+/// short enough that a person has not yet decided the program is broken.
+const DIAL_GIVES_UP: Duration = Duration::from_secs(10);
+
+/// What the modem and the call between them need doing about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reconcile {
+    Nothing,
+    /// The call has gone and the modem does not know. It is waiting for a
+    /// carrier that cannot arrive.
+    CarrierLost,
+    /// The modem has finished and the call has not. It is still connected,
+    /// and still costing money.
+    HangUp,
+}
+
+/// Everything the decision depends on, gathered up so that it can be made --
+/// and tested -- without a call, a modem or a socket.
+///
+/// Pulled out into a function because the version of this that lived inline
+/// was wrong in a way nobody could see: it fired on the single turn of the
+/// loop where the modem went on hook, and any turn on which the call happened
+/// to read as inactive lost that edge for ever. What it left was a call that
+/// could not be ended by any control in the window. That is a state machine,
+/// and a state machine that cannot be run through its cases on demand is one
+/// whose cases do not get run through.
+#[derive(Debug, Clone, Copy)]
+struct Between {
+    /// Whether the call was doing anything last time round.
+    was_active: bool,
+    /// And whether it is now.
+    active: bool,
+    /// Whether the modem is off hook: handshaking, on a call, or escaped.
+    modem_busy: bool,
+    /// Whether the modem has taken this call up at any point. Kept for the
+    /// life of the call, which is what stops an incoming call that nobody has
+    /// answered from being hung up on the modem's behalf.
+    had_the_call: bool,
+    /// Whether the call has already been asked to end, so that asking is not
+    /// repeated once every couple of milliseconds until it does.
+    told_to_hang_up: bool,
+    /// How long ago a number was handed to the agent, while no call has come
+    /// of it yet.
+    dialled_ago: Option<Duration>,
+}
+
+fn reconcile(state: Between) -> Reconcile {
+    if state.modem_busy && !state.active {
+        // Either the call ended under the modem, or it was never placed at
+        // all. The second is not a hypothetical: the agent refuses a dial
+        // while another call is live, and a refusal is silent as far as the
+        // modem is concerned.
+        let ended = state.was_active;
+        let never_started = state.dialled_ago.is_some_and(|ago| ago >= DIAL_GIVES_UP);
+        if ended || never_started {
+            return Reconcile::CarrierLost;
+        }
+    }
+    if !state.modem_busy && state.active && state.had_the_call && !state.told_to_hang_up {
+        return Reconcile::HangUp;
+    }
+    Reconcile::Nothing
+}
+
+/// The modem's state as the window's lamps and call card name it.
+fn call_state(state: State, off_hook: bool) -> CallState {
+    match state {
+        State::Command if off_hook => CallState::OffHook,
+        State::Command => CallState::Idle,
+        State::Handshaking => CallState::Negotiating,
+        State::Data => CallState::Connected,
+        // The call is still up; the terminal has stepped back to talking to
+        // the modem rather than through it. Off hook is exactly what that
+        // is, and keeping it separate from connected is what lets anything
+        // watching tell whether an escape has already happened.
+        State::OnlineCommand => CallState::OffHook,
+    }
+}
+
+/// How often the window is told about a SIP line that has no audio on it.
+const QUIET_LINE_PUBLISH: Duration = Duration::from_millis(100);
+
+/// How long a SIP line has to have delivered nothing before it is called
+/// quiet. Packets are 20 ms apart and the loop goes round every two, so most
+/// turns of it during a call find nothing waiting: taking each of those for
+/// silence put an empty frame between every two real ones, which striped the
+/// waterfall and read the level as nothing in the middle of a call.
+const QUIET_LINE_AFTER: Duration = Duration::from_millis(500);
+
+/// White noise added to what the line delivers: Gaussian, at a set RMS.
+#[derive(Debug, Clone)]
+struct LineNoise {
+    rms: f32,
+    state: u64,
+}
+
+impl LineNoise {
+    /// From `BINMODEM_LINE_NOISE`, in dBFS RMS, if it is set and reads.
+    fn from_env() -> Option<Self> {
+        let dbfs: f32 = std::env::var("BINMODEM_LINE_NOISE").ok()?.trim().parse().ok()?;
+        Some(Self::at(dbfs))
+    }
+
+    fn at(dbfs: f32) -> Self {
+        Self { rms: 10f32.powf(dbfs / 20.0), state: 0x9E37_79B9_7F4A_7C15 }
+    }
+
+    /// A uniform number in (0, 1].
+    fn uniform(&mut self) -> f32 {
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 7;
+        self.state ^= self.state << 17;
+        ((self.state >> 40) as f32 + 1.0) / (1u64 << 24) as f32
+    }
+
+    fn add(&mut self, samples: &mut [f32]) {
+        for s in samples {
+            // Box and Muller: one normal deviate from two uniform ones.
+            let (u, v) = (self.uniform(), self.uniform());
+            *s += self.rms * (-2.0 * u.ln()).sqrt() * (std::f32::consts::TAU * v).cos();
+        }
+    }
+}
+
 /// What the line is doing, for the window to show.
 #[derive(Debug, Clone, Default)]
 pub struct LineState {
     pub open: bool,
+    /// What the modem's `+MS` holds, whoever set it: the window, or a
+    /// command typed at the terminal. None until the modem has said.
+    pub selected: Option<at::Modulation>,
     pub input: String,
     pub output: String,
     /// Rates the two devices are actually running at, which are rarely the
@@ -143,6 +528,10 @@ pub struct LineState {
     /// nearly three times higher than its own average. A drive setting that
     /// suits one clips the other.
     pub tx_peak: f32,
+    /// What the call is doing, when the line is a SIP one rather than a pair
+    /// of audio devices. None means there is a sound card on the line, or
+    /// nothing at all.
+    pub sip: Option<sip::Progress>,
     /// Mean power going out and mean power coming back, both as a fraction of
     /// full scale, over the last little while.
     ///
@@ -166,7 +555,8 @@ pub struct LineState {
 #[derive(Debug)]
 enum Job {
     Sending(Box<transfer::zmodem::Sender>),
-    Receiving(Box<transfer::zmodem::Receiver>, std::path::PathBuf),
+    /// The receiver, the folder files go into, and where the last one went.
+    Receiving(Box<transfer::zmodem::Receiver>, std::path::PathBuf, Option<String>),
 }
 
 /// What a file transfer is doing, for the window to show.
@@ -224,6 +614,9 @@ enum TransferRequest {
 pub struct Session {
     typed: Mutex<Vec<u8>>,
     request: Mutex<Option<Request>>,
+    /// Whether a line was named before the thread started. See
+    /// [`Session::was_asked_for_a_line`].
+    asked_for_a_line: AtomicBool,
     state: Mutex<LineState>,
     /// How hard to drive the line, as an f32 in its bit pattern.
     drive: AtomicU32,
@@ -233,9 +626,31 @@ pub struct Session {
     /// the line -- a data call, a fax, a handshake. The line thread hangs up
     /// and clears it.
     hang_up: AtomicBool,
+    /// Whether V.92 calls are to have PCM upstream, when the window has said:
+    /// 0 for nothing said, 1 for off, 2 for on.
+    pcm_upstream: std::sync::atomic::AtomicU8,
+    /// Whether V.92 calls may start up the short way, when the window has
+    /// said: 0 for nothing said, 1 for never, 2 for recognised connections.
+    quick_connect: std::sync::atomic::AtomicU8,
+    /// Whether to offer U.S. Robotics x2, as `quick_connect` is kept: 0 not
+    /// said, 1 off, 2 on.
+    x2: std::sync::atomic::AtomicU8,
     /// Set when the window asks for a retrain: V.34 goes back through phase 2
     /// on the same call. The line thread asks the modem and clears it.
     retrain: AtomicBool,
+    /// A choice from the V.90 rate menu not yet handed to the modem: a drn,
+    /// or None for the DIL's own choice.
+    rate_request: Mutex<Option<Option<u8>>>,
+    /// The rate V.90 start-ups ask for, as the modem last said: the window
+    /// shows it, and a new modem starts from it.
+    rate_pinned: Mutex<Option<u8>>,
+    /// What the modem predicts of each V.90 rate, once a DIL has been read.
+    rate_menu: Mutex<Option<datapump::v90::analogue::RateMenu>>,
+    /// A choice from the V.92 upstream menu not yet handed to the modem, and
+    /// the rate V.92 start-ups ask for going up, as the modem last said: a
+    /// drn of 6.1's ladder, or None for the server's own choice.
+    up_request: Mutex<Option<Option<u8>>>,
+    up_pinned: Mutex<Option<u8>>,
     /// A transfer the window has asked for, until the line thread takes it.
     transfer_request: Mutex<Option<TransferRequest>>,
     /// What the transfer is doing, for the window to read.
@@ -265,14 +680,26 @@ pub struct Session {
     fax_offer: Mutex<Vec<fax::t30::Modulation>>,
     /// Whether the window allows error correction mode.
     fax_error_correction: AtomicBool,
-    /// A page the window has loaded, waiting for the line thread to take it.
+    /// Whether the window allows JBIG.
+    fax_jbig: AtomicBool,
+    /// Whether the window allows V.34 half-duplex: V.8 in front of the call,
+    /// and the page on V.34 where the far end has it.
+    fax_v34: AtomicBool,
+    /// The pages the window has loaded, waiting for the line thread to take
+    /// them.
     ///
-    /// Taken rather than read, and a page is megabytes of booleans, so it
-    /// crosses the two threads exactly once.
-    fax_page: Mutex<Option<fax::page::Page>>,
+    /// Taken rather than read, and a page is megabytes of booleans, so they
+    /// cross the two threads exactly once.
+    fax_pages: Mutex<Option<Vec<fax::page::Page>>>,
     /// Pages that arrived, with their numbers in the call, waiting for the
     /// window to take them.
     fax_received: Mutex<std::collections::VecDeque<(usize, fax::page::Page)>>,
+    /// The T.30 frames either end has sent, for the window's account of how
+    /// the call went.
+    fax_exchange: Mutex<Vec<fax::call::Exchanged>>,
+    /// Pick up the SIP call ringing here without a command: for a modem
+    /// already off hook and answering when the call arrives.
+    answer_call: AtomicBool,
     /// Lines of a page that is still arriving, waiting for the window.
     fax_arriving: Mutex<Option<Arriving>>,
 }
@@ -313,12 +740,25 @@ impl Default for Session {
             fax_identification: Mutex::default(),
             fax_offer: Mutex::new(fax::call::OUR_MODULATIONS.to_vec()),
             fax_error_correction: AtomicBool::new(true),
-            fax_page: Mutex::default(),
+            fax_jbig: AtomicBool::new(true),
+            fax_v34: AtomicBool::new(true),
+            fax_pages: Mutex::default(),
             fax_received: Mutex::default(),
+            fax_exchange: Mutex::default(),
+            answer_call: AtomicBool::new(false),
             fax_arriving: Mutex::default(),
             recording: AtomicBool::new(false),
+            asked_for_a_line: AtomicBool::new(false),
             hang_up: AtomicBool::new(false),
+            pcm_upstream: std::sync::atomic::AtomicU8::new(0),
+            quick_connect: std::sync::atomic::AtomicU8::new(0),
+            x2: std::sync::atomic::AtomicU8::new(0),
             retrain: AtomicBool::new(false),
+            rate_request: Mutex::default(),
+            rate_pinned: Mutex::default(),
+            rate_menu: Mutex::default(),
+            up_request: Mutex::default(),
+            up_pinned: Mutex::default(),
         }
     }
 }
@@ -371,15 +811,33 @@ impl Session {
         self.fax_error_correction.store(on, Ordering::Relaxed);
     }
 
-    /// Leave a page for the next fax call that dials.
-    pub fn set_fax_page(&self, page: Option<fax::page::Page>) {
-        if let Ok(mut v) = self.fax_page.lock() {
-            *v = page;
+    /// Whether a fax call may use JBIG.
+    pub fn fax_jbig(&self) -> bool {
+        self.fax_jbig.load(Ordering::Relaxed)
+    }
+
+    pub fn set_fax_jbig(&self, on: bool) {
+        self.fax_jbig.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether a fax call may offer V.34 half-duplex.
+    pub fn fax_v34(&self) -> bool {
+        self.fax_v34.load(Ordering::Relaxed)
+    }
+
+    pub fn set_fax_v34(&self, on: bool) {
+        self.fax_v34.store(on, Ordering::Relaxed);
+    }
+
+    /// Leave pages for the next fax call that dials, in the order they go.
+    pub fn set_fax_pages(&self, pages: Vec<fax::page::Page>) {
+        if let Ok(mut v) = self.fax_pages.lock() {
+            *v = Some(pages);
         }
     }
 
-    fn take_fax_page(&self) -> Option<fax::page::Page> {
-        self.fax_page.lock().ok().and_then(|mut v| v.take())
+    fn take_fax_pages(&self) -> Option<Vec<fax::page::Page>> {
+        self.fax_pages.lock().ok().and_then(|mut v| v.take())
     }
 
     fn set_fax_received(&self, sheet: usize, page: fax::page::Page) {
@@ -391,6 +849,20 @@ impl Session {
     /// A page that arrived, with its number in the call, once and only once.
     pub fn take_fax_received(&self) -> Option<(usize, fax::page::Page)> {
         self.fax_received.lock().ok().and_then(|mut v| v.pop_front())
+    }
+
+    /// The T.30 frames since the window last asked, in order.
+    pub fn take_fax_exchange(&self) -> Vec<fax::call::Exchanged> {
+        self.fax_exchange.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default()
+    }
+
+    /// Answer the SIP call ringing here, leaving the modem as it is.
+    pub fn answer_call(&self) {
+        self.answer_call.store(true, Ordering::Relaxed);
+    }
+
+    fn take_answer_call(&self) -> bool {
+        self.answer_call.swap(false, Ordering::Relaxed)
     }
 
     /// More lines of the page arriving.
@@ -431,6 +903,47 @@ impl Session {
         self.hang_up.store(true, Ordering::Relaxed);
     }
 
+    /// Whether V.92 calls from here on are to have PCM upstream (see
+    /// `Modem::set_pcm_upstream`). Until this is called the modem keeps
+    /// whatever `BINMODEM_V92_PCM_UP` gave it.
+    pub fn set_pcm_upstream(&self, on: bool) {
+        self.pcm_upstream.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+    }
+
+    /// Whether V.92 calls from here on may use the short start-up on a
+    /// connection that has been made before (see `Modem::set_quick_connect`).
+    /// Until this is called the modem keeps what `BINMODEM_V92_QC` gave it.
+    pub fn set_quick_connect(&self, on: bool) {
+        self.quick_connect.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+    }
+
+    /// Whether a V.90 or V.92 server offers U.S. Robotics x2 from the next
+    /// call on (see `Modem::set_x2`, S70).
+    pub fn set_x2(&self, on: bool) {
+        self.x2.store(if on { 2 } else { 1 }, Ordering::Relaxed);
+    }
+
+    fn take_x2(&self) -> Option<bool> {
+        match self.x2.swap(0, Ordering::Relaxed) {
+            0 => None,
+            said => Some(said == 2),
+        }
+    }
+
+    fn take_quick_connect(&self) -> Option<bool> {
+        match self.quick_connect.swap(0, Ordering::Relaxed) {
+            0 => None,
+            said => Some(said == 2),
+        }
+    }
+
+    fn take_pcm_upstream(&self) -> Option<bool> {
+        match self.pcm_upstream.swap(0, Ordering::Relaxed) {
+            0 => None,
+            said => Some(said == 2),
+        }
+    }
+
     fn take_hang_up(&self) -> bool {
         self.hang_up.swap(false, Ordering::Relaxed)
     }
@@ -443,6 +956,48 @@ impl Session {
 
     fn take_retrain(&self) -> bool {
         self.retrain.swap(false, Ordering::Relaxed)
+    }
+
+    /// A choice from the V.90 rate menu, a drn or None for the DIL's own: in
+    /// data mode a rate renegotiation to it, and otherwise the rate V.90
+    /// start-ups ask for.
+    pub fn choose_rate(&self, drn: Option<u8>) {
+        if let Ok(mut request) = self.rate_request.lock() {
+            *request = Some(drn);
+        }
+    }
+
+    fn take_rate_request(&self) -> Option<Option<u8>> {
+        self.rate_request.lock().ok().and_then(|mut r| r.take())
+    }
+
+    /// A choice from the V.92 upstream menu: a drn of 6.1's ladder (1 is
+    /// 24 000 bit/s, 19 is 48 000), or None for the server's own choice. A
+    /// V.92 call that is up retrains to take it.
+    pub fn choose_upstream(&self, drn: Option<u8>) {
+        if let Ok(mut request) = self.up_request.lock() {
+            *request = Some(drn);
+        }
+    }
+
+    fn take_up_request(&self) -> Option<Option<u8>> {
+        self.up_request.lock().ok().and_then(|mut r| r.take())
+    }
+
+    /// The upstream rate V.92 start-ups ask for, as its drn; None for the
+    /// server's own choice.
+    pub fn up_pinned(&self) -> Option<u8> {
+        self.up_pinned.lock().ok().and_then(|p| *p)
+    }
+
+    /// The rate V.90 start-ups ask for, as its drn; None for the DIL's own.
+    pub fn rate_pinned(&self) -> Option<u8> {
+        self.rate_pinned.lock().ok().and_then(|p| *p)
+    }
+
+    /// What the modem predicts of each V.90 rate, once a DIL has been read.
+    pub fn rate_menu(&self) -> Option<datapump::v90::analogue::RateMenu> {
+        self.rate_menu.lock().ok().and_then(|m| m.clone())
     }
 
     /// Start or stop keeping it. Stopping writes the file.
@@ -472,6 +1027,18 @@ impl Session {
         self.ask(Request::Open {
             input: input.to_owned(),
             output: output.to_owned(),
+        });
+    }
+
+    /// Open a line made of packets: this account, out of the SIP file.
+    ///
+    /// The modem does not know the difference and is not told. What changes
+    /// is that a dialled number now has somewhere to go -- `ATD` places a
+    /// call rather than being a noise a switch would have heard -- and that
+    /// nothing arrives until the far end answers.
+    pub fn open_sip(&self, account: &str) {
+        self.ask(Request::OpenSip {
+            account: account.to_owned(),
         });
     }
 
@@ -607,6 +1174,19 @@ impl Session {
         self.request.lock().map(|s| s.is_some()).unwrap_or(false)
     }
 
+    /// Whether a line was named before this thread started -- on the command
+    /// line, or by anything else that got in first.
+    ///
+    /// Recorded rather than asked, because by the time the window is drawing
+    /// frames the request has been taken and acted on and the slot is empty
+    /// again: "was one waiting?" and "is one waiting?" are different
+    /// questions and only the first has an answer worth having. What it is
+    /// for: the window restores whichever line was open when it last closed,
+    /// and must not do that over a line somebody asked for by name.
+    pub fn was_asked_for_a_line(&self) -> bool {
+        self.asked_for_a_line.load(Ordering::Relaxed)
+    }
+
     fn ask(&self, request: Request) {
         if let Ok(mut slot) = self.request.lock() {
             *slot = Some(request);
@@ -646,7 +1226,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // The line to open when nobody named one. Decided here rather than in
     // `main` because this is the thread that opens the device, so it is the
     // one that should go looking for it.
-    if !session.has_request() {
+    let asked = session.has_request();
+    session.asked_for_a_line.store(asked, Ordering::Relaxed);
+    if !asked {
         if let Some((input, output)) = preferred_line() {
             session.open(&input, &output);
         } else {
@@ -661,8 +1243,16 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
 
     // Opened and closed on request, and never handed across a thread: on
     // Windows a cpal stream is not Send and has to stay where it was made.
-    let mut audio: Option<line::Duplex> = None;
+    let mut audio: Option<Wire> = None;
     let mut modem = Modem::new(FS);
+    // V.92 connections that have connected before, by the string dialled:
+    // the next call to one opens with the short start-up (V.92 9.2, 9.4).
+    modem.remember_connections(crate::remembered::recognised_connections().map(modem::memos::Memos::open));
+    modem.set_pinned_rate(session.rate_pinned());
+    modem.choose_upstream(session.up_pinned());
+    // The rate menu, looked at a few times a second: working it out after a
+    // DIL or a fall-back is a choice at every rate.
+    let mut menu_looked = Instant::now();
     let mut spectrum = Spectrum::new(FFT_SIZE, FS);
     let mut waveform = Ring::new(SCOPE_LEN);
     let mut bins = vec![0.0f64; SPECTRUM_BINS];
@@ -682,8 +1272,43 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // were handed over, and gets a new number.
     let (mut fax_page_number, mut fax_lines_handed, mut fax_sheet) = (0u64, 0usize, 0usize);
 
+    // Whether the SIP call was doing anything last time round, and whether
+    // the modem ever took this call up, so that either one ending can be
+    // noticed and told to the other. Unused on a sound-card line, which has
+    // no call to speak of.
+    //
+    // The second is per call and not per turn of the loop. It is what keeps
+    // an incoming call ringing -- the modem has not answered it, so nothing
+    // here will put it down on the modem's behalf -- while still ending a
+    // call the modem has finished with, however many turns later that is
+    // noticed.
+    let mut sip_call_active = false;
+    let mut modem_had_the_call = false;
+    // Whether the call has already been told to end, and when a number was
+    // last handed to the agent without a call yet coming of it.
+    let mut asked_to_hang_up = false;
+    let mut dialled_at: Option<Instant> = None;
+
     let mut from_line: Vec<f32> = Vec::with_capacity(4096);
+    // Noise added to everything heard, for a line that is too clean to be
+    // believed: BINMODEM_LINE_NOISE=-50 is white noise at -50 dBFS RMS.
+    let mut line_noise = LineNoise::from_env();
+    let mut from_network: Vec<f32> = Vec::with_capacity(2048);
     let mut to_line: Vec<f32> = Vec::with_capacity(4096);
+    // A V.ARC call's frames, at the sound card's own rate, and what of them
+    // the scopes are shown at the modem's.
+    let mut wide_heard: Vec<f32> = Vec::with_capacity(16_384);
+    let mut wide_send: Vec<f32> = Vec::with_capacity(16_384);
+    let mut wide_sent: Vec<f32> = Vec::with_capacity(4096);
+    let mut wide_owed = 0.0f64;
+    // The last sample sent, for the scope, when sending is paced apart from
+    // hearing and there is not one sent for each heard.
+    let mut wide_last = 0.0f32;
+    // Why a call could not be run on this line at all, until it is shown.
+    let mut refused: Option<String> = None;
+    // The spectrum of a V.ARC call, taken at the card's rate so that the
+    // waterfall can show the whole of the band the call is using.
+    let mut wide_spectrum: Option<(u32, Spectrum)> = None;
     let mut rx_bytes = 0u64;
     let mut tx_bytes = 0u64;
     // What arrived and what was sent, interleaved, so the two stay lined up
@@ -698,7 +1323,13 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     // of it, and neither says what the far end sent -- which on a link that
     // establishes and then carries nothing is the only question there is.
     let mut frames: Vec<String> = Vec::new();
+    // What the line's start-up did in this block, with where in the block it
+    // did it and how far into the call that was: the phase 4 exchange of a
+    // V.90 call, told a line at a time as it happens.
+    let mut noted: Vec<(usize, f64, String)> = Vec::new();
     let mut was_recording = false;
+    let mut trace = std::env::var_os("BINMODEM_VARC_TRACE").and_then(|path| std::fs::File::create(path).ok());
+    let (trace_from, mut trace_at) = (Instant::now(), Instant::now());
     let mut tx_peak = 0.0f32;
     let (mut tx_rms, mut rx_rms) = (0.0f32, 0.0f32);
     let (mut errors_before, mut errors_at) = (0u64, Instant::now());
@@ -752,14 +1383,53 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
 
     let publish_every = Duration::from_millis(16);
     let mut next_publish = Instant::now();
+    let mut last_audio = Instant::now();
+    // The same cadence for what the call is doing, which is published from
+    // above the early exits rather than with the audio. Its own instant so
+    // that neither can starve the other.
+    let mut next_call_publish = Instant::now();
 
     while !control.quit.load(Ordering::Relaxed) {
         if let Some(request) = session.take_request() {
+            // A line that was carrying a call takes the call with it. Over SIP
+            // the BYE does go out -- `sip::Line` drops its agent before its
+            // media, on purpose -- but the modem was never told, so it stayed
+            // in State::Data with nothing left to clock it: `audio` is None
+            // from here on, the loop takes the "no line" path every time
+            // round, and the terminal sits in data state with a call that no
+            // longer exists until somebody types +++. It cannot be noticed
+            // afterwards either, because the reconciliation further down is
+            // reset in the same breath. So the modem is told now, while there
+            // is still something to tell it about -- and told it the way the
+            // terminal needs to hear it, which is NO CARRIER: nobody at the
+            // terminal asked for this, so OK would be an answer to a question
+            // it never put.
+            let carried_a_call = audio.is_some() && modem.state() != State::Command;
             // Dropping the old one stops its streams, which has to happen
             // before the new ones open on the same device.
             audio = None;
+            if carried_a_call {
+                tx.log(Direction::Note, "the line went out from under the call");
+                modem.carrier_lost();
+            }
             let mut state = LineState::default();
             match request {
+                Request::OpenSip { account } => match open_sip(&account, &tx) {
+                    Ok(line) => {
+                        state = LineState {
+                            open: true,
+                            input: format!("sip: {account}"),
+                            output: format!("sip: {account}"),
+                            sip: Some(line.progress()),
+                            ..LineState::default()
+                        };
+                        audio = Some(Wire::Sip(Box::new(line)));
+                    }
+                    Err(e) => {
+                        tx.log(Direction::Note, format!("could not open the SIP line: {e}"));
+                        state.error = Some(e);
+                    }
+                },
                 Request::Open { input, output } => {
                     match line::Duplex::open(Some(&input), Some(&output), FS) {
                         Ok(open) => {
@@ -781,7 +1451,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                                 output_rate: open.output_rate,
                                 ..LineState::default()
                             };
-                            audio = Some(open);
+                            audio = Some(Wire::Audio(Box::new(open)));
                         }
                         Err(e) => {
                             tx.log(Direction::Note, format!("could not open the line: {e}"));
@@ -791,6 +1461,17 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 }
                 Request::Close => tx.log(Direction::Note, "line closed"),
             }
+            // A dial string the old line never used does not carry over to
+            // the new one. It matters in one direction only: a number typed
+            // at a sound-card line is a noise a switch would have heard and
+            // nothing took it, and handing it to a SIP line minutes later
+            // would place a real call nobody asked for.
+            modem.take_dial_request();
+            modem.take_answer_request();
+            sip_call_active = false;
+            modem_had_the_call = false;
+            asked_to_hang_up = false;
+            dialled_at = None;
             session.set_state(state);
         }
 
@@ -944,14 +1625,14 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 },
                 TransferRequest::Receive(into) => {
                     tx.log(Direction::Note, "waiting for the far end to send");
-                    job = Some(Job::Receiving(Box::default(), into));
+                    job = Some(Job::Receiving(Box::default(), into, None));
                     job_started = Instant::now();
                     meter = crate::speed::Speedometer::new();
                 }
                 TransferRequest::Cancel => {
                     match job.as_mut() {
                         Some(Job::Sending(s)) => s.cancel(),
-                        Some(Job::Receiving(r, _)) => r.cancel(),
+                        Some(Job::Receiving(r, ..)) => r.cancel(),
                         None => {}
                     }
                     tx.log(Direction::Note, "transfer cancelled");
@@ -1008,8 +1689,10 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         modem.fax_identification = session.fax_identification();
         modem.fax_offer = session.fax_offer();
         modem.fax_error_correction = session.fax_error_correction();
-        if let Some(page) = session.take_fax_page() {
-            modem.fax_page = Some(page);
+        modem.fax_jbig = session.fax_jbig();
+        modem.fax_v34 = session.fax_v34();
+        if let Some(pages) = session.take_fax_pages() {
+            modem.fax_pages = pages;
         }
         if let Some(call) = modem
             .fax_call()
@@ -1035,14 +1718,88 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         while let Some((sheet, page)) = modem.take_received_page() {
             session.set_fax_received(sheet, page);
         }
+        let exchanged = modem.take_fax_exchange();
+        if !exchanged.is_empty()
+            && let Ok(mut v) = session.fax_exchange.lock()
+        {
+            v.extend(exchanged);
+        }
 
         if session.take_hang_up() {
             tx.log(Direction::Note, "putting the call down");
             modem.hang_up();
+            // And the call underneath it, where the line is one made of
+            // packets. The two are separate things and this is the one
+            // button that has to end both: a modem on hook with a call still
+            // up is a trunk still billing, and -- worse -- a state nothing
+            // else can get out of, because ATH does nothing once the modem
+            // is already on hook and the agent refuses a second call while
+            // the first is live.
+            if let Some(sip) = audio.as_ref().and_then(Wire::sip) {
+                sip.hang_up();
+            }
+        }
+        if let Some(on) = session.take_pcm_upstream() {
+            modem.set_pcm_upstream(on);
+        }
+        if let Some(on) = session.take_x2() {
+            modem.set_x2(on);
+        }
+        if let Some(on) = session.take_quick_connect() {
+            modem.set_quick_connect(if on {
+                modem::QuickConnect::Recognized
+            } else {
+                modem::QuickConnect::Off
+            });
         }
         if session.take_retrain() {
             tx.log(Direction::Note, "retraining the line");
             modem.retrain();
+        }
+        if let Some(drn) = session.take_rate_request() {
+            match modem.choose_rate(drn) {
+                modem::RateChosen::Pinned(pinned) => {
+                    if let Ok(mut p) = session.rate_pinned.lock() {
+                        *p = pinned;
+                    }
+                    tx.log(Direction::Note, pinned_said(pinned));
+                }
+                modem::RateChosen::NotNow => tx.log(
+                    Direction::Note,
+                    "V.90 rate menu: not now -- a renegotiation is under way, or that rate is in use or not offered",
+                ),
+                modem::RateChosen::Renegotiating => {}
+                modem::RateChosen::Retraining(pinned) => {
+                    if let Ok(mut p) = session.rate_pinned.lock() {
+                        *p = pinned;
+                    }
+                    tx.log(Direction::Note, format!("{}; retraining to take it", pinned_said(pinned)));
+                }
+            }
+        }
+        if let Some(drn) = session.take_up_request() {
+            let (pinned, retraining) = match modem.choose_upstream(drn) {
+                modem::RateChosen::Retraining(pinned) => (pinned, true),
+                modem::RateChosen::Pinned(pinned) => (pinned, false),
+                _ => (drn, false),
+            };
+            if let Ok(mut p) = session.up_pinned.lock() {
+                *p = pinned;
+            }
+            let said = match pinned {
+                Some(drn) => format!("V.92 start-ups will ask for {} bit/s going up", datapump::v92::up_rate(drn)),
+                None => "V.92 start-ups will leave the upstream rate to the server".to_owned(),
+            };
+            tx.log(Direction::Note, if retraining { format!("{said}; retraining to take it") } else { said });
+        }
+        if menu_looked.elapsed() >= Duration::from_millis(250) {
+            menu_looked = Instant::now();
+            let menu = modem.rate_menu();
+            if let Ok(mut shown) = session.rate_menu.lock()
+                && *shown != menu
+            {
+                *shown = menu;
+            }
         }
 
         let typed = session.take_typed();
@@ -1069,6 +1826,73 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             }
         }
 
+        // V.ARC wants the sound card as it is: both channels, at its own
+        // rate, with no conversion in the way. So for as long as the modem
+        // has a V.ARC call the two-wire line is put away and the same two
+        // devices are opened wide, and when the call is over they go back.
+        // The call is the modem's to end; the line only follows.
+        //
+        // A SIP line is left as it is. What a V.ARC call wants of one is
+        // settled when the call is answered, and is dealt with where the
+        // samples are; see below.
+        match (audio.as_ref(), modem.varc_wanted()) {
+            (Some(Wire::Audio(two_wire)), Some(mode)) => {
+                let (input, output) = (two_wire.input_device.clone(), two_wire.output_device.clone());
+                // The old streams have to stop before new ones open on the
+                // same devices.
+                drop(audio.take());
+                match line::Wide::open(Some(&input), Some(&output)) {
+                    Ok(wide) => {
+                        tx.log(
+                            Direction::Note,
+                            format!(
+                                "{}: the sound card as it is, {} channels in at {} Hz and {} out at {} Hz",
+                                mode.name(),
+                                wide.input_channels,
+                                wide.rate,
+                                wide.output_channels,
+                                wide.output_rate
+                            ),
+                        );
+                        audio = Some(Wire::Wide { line: Box::new(wide), input, output });
+                        // A new call: whatever the last one was refused for
+                        // has been read by now.
+                        let mut state = session.state();
+                        if state.error.take().is_some() {
+                            session.set_state(state);
+                        }
+                    }
+                    Err(e) => {
+                        let why = format!("{}: could not open the sound card for it: {e}", mode.name());
+                        tx.log(Direction::Note, why.clone());
+                        // Where it is seen: the transcript is a tab nobody
+                        // has open when a call will not start.
+                        refused = Some(why);
+                        modem.carrier_lost();
+                        audio = line::Duplex::open(Some(&input), Some(&output), FS).ok().map(|l| Wire::Audio(Box::new(l)));
+                    }
+                }
+            }
+            (Some(Wire::Wide { input, output, .. }), None) => {
+                let (input, output) = (input.clone(), output.clone());
+                drop(audio.take());
+                match line::Duplex::open(Some(&input), Some(&output), FS) {
+                    Ok(two_wire) => audio = Some(Wire::Audio(Box::new(two_wire))),
+                    Err(e) => tx.log(Direction::Note, format!("could not reopen the line: {e}")),
+                }
+            }
+            _ => {}
+        }
+        // A call the modem would not run on this line. The terminal has
+        // been told NO CARRIER and the transcript why; neither is where a
+        // person looks when a call will not start, so it goes on the line's
+        // own row as well, where a line that would not open is reported.
+        if let Some(why) = modem.take_call_refused().or_else(|| refused.take()) {
+            let mut state = session.state();
+            state.error = Some(why);
+            session.set_state(state);
+        }
+
         let Some(audio) = audio.as_ref() else {
             drain_dte(
             &mut modem,
@@ -1083,12 +1907,182 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             continue;
         };
 
+        // A line made of packets has a call to place before it is a line at
+        // all, and the dial string is the only thing the modem knows that it
+        // needs. This has to happen before the check for samples below and
+        // not after it: until the far end answers there are no samples, which
+        // is exactly the stretch where the call is being set up.
+        if let Some(sip) = audio.sip() {
+            let was_active = sip_call_active;
+            for said in sip.poll() {
+                tx.log(Direction::Note, said);
+            }
+            if let Some(number) = modem.take_dial_request() {
+                sip.dial(&number);
+                dialled_at = Some(Instant::now());
+            }
+            if modem.take_answer_request() || session.take_answer_call() {
+                sip.answer();
+            }
+            // A call on its way out is not a call the modem should still be
+            // waiting on, which is what `is_a_call` decides: cancelling and
+            // hanging up are both states a call leaves by and never comes
+            // back from, and a cancel can sit unanswered for as long as the
+            // far end likes. Counting those as over costs nothing if the
+            // state does move on promptly, and saves the wait if it does
+            // not. Asking the agent rather than comparing text here is
+            // deliberate: the two crates would otherwise agree about these
+            // words only by coincidence, and stop agreeing in silence.
+            sip_call_active = sip.up() || sip::ua::state::is_a_call(&sip.status().call);
+            let modem_busy = modem.state() != State::Command;
+            if modem_busy {
+                // This call is one the modem took up. Remembered for as long
+                // as the call lasts rather than for one turn of the loop.
+                modem_had_the_call = true;
+            }
+            match reconcile(Between {
+                was_active,
+                active: sip_call_active,
+                modem_busy,
+                had_the_call: modem_had_the_call,
+                told_to_hang_up: asked_to_hang_up,
+                dialled_ago: dialled_at.map(|at| at.elapsed()),
+            }) {
+                // The call is over -- refused, cancelled, hung up at the far
+                // end, or never placed -- and the modem is still waiting for
+                // a carrier that cannot arrive. Telling it now is what gets
+                // NO CARRIER back to the terminal instead of a silence that
+                // lasts until somebody types +++.
+                Reconcile::CarrierLost => {
+                    modem.carrier_lost();
+                    dialled_at = None;
+                }
+                // The other way round: ATH, or a handshake that gave up,
+                // with the call still connected and costing money. Said once
+                // and not once every couple of milliseconds -- the agent
+                // takes a moment to act on it, and a hang-up asked for ten
+                // times is ten BYEs and nine rejections in the trunk's log.
+                Reconcile::HangUp => {
+                    sip.hang_up();
+                    asked_to_hang_up = true;
+                }
+                Reconcile::Nothing => {}
+            }
+            if sip_call_active {
+                // A number that became a call needs no rescuing.
+                dialled_at = None;
+            } else {
+                modem_had_the_call = false;
+                asked_to_hang_up = false;
+            }
+
+            // What the window shows about the call, published here and
+            // nowhere else.
+            //
+            // Here because this is above both of the early exits below, and
+            // so is reached on every turn of the loop. It used to be
+            // published with the audio measurements further down, which is
+            // past the point where a block with no samples in it gives up and
+            // goes round again -- so it was refreshed only while audio was
+            // arriving, and no audio arrives before a call is answered or
+            // after one ends. The window's picture of a call that had just
+            // ended froze at "up" and stayed there, which is a display that
+            // stops being refreshed at exactly the moment the thing it shows
+            // stops moving, and is indistinguishable from a display that is
+            // right.
+            if Instant::now() >= next_call_publish {
+                next_call_publish = Instant::now() + publish_every;
+                let progress = sip.progress();
+                if let Ok(mut state) = session.state.lock() {
+                    state.sip = Some(progress);
+                }
+            }
+        }
+
         from_line.clear();
-        audio.receive(&mut from_line);
+        from_network.clear();
+        // A SIP line also says what arrived at the network's own rate, which
+        // is what a digital modem's receiver reads (it ignores it otherwise).
+        let on_wide = audio.wide().is_some();
+        if let Some(wide) = audio.wide() {
+            // A V.ARC call: every frame the card heard goes to the modem as
+            // it is and what comes back goes out as it is. The spectrum and
+            // the waterfall are taken from the left channel at the card's
+            // own rate and drawn out to half of it. The oscilloscope and the
+            // level meter were built for the modem's rate and are shown the
+            // left channel cut down to it -- every third sample of a 48 kHz
+            // card -- which says something is there and measures nothing.
+            if wide_spectrum.as_ref().map(|(rate, _)| *rate) != Some(wide.rate) {
+                wide_spectrum = Some((wide.rate, Spectrum::new(FFT_SIZE, f64::from(wide.rate))));
+            }
+            wide_heard.clear();
+            wide_send.clear();
+            wide_sent.clear();
+            wide.receive(&mut wide_heard);
+            let rate = f64::from(wide.rate);
+            // Two devices at two rates are two lines, one each way: what is
+            // heard is stepped as it arrives, and what is sent is made
+            // afterwards, as much as the sending device has room for.
+            let apart = wide.output_rate != wide.rate;
+            for frame in wide_heard.as_chunks::<2>().0 {
+                let mut out = [0.0f64; 2];
+                if apart {
+                    modem.varc_hear(rate, f64::from(wide.output_rate), &[f64::from(frame[0]), f64::from(frame[1])]);
+                    out[0] = f64::from(wide_last);
+                } else {
+                    modem.varc_step(rate, &[f64::from(frame[0]), f64::from(frame[1])], &mut out);
+                    wide_send.push(out[0] as f32);
+                    wide_send.push(out[1] as f32);
+                }
+                if let Some((_, spectrum)) = wide_spectrum.as_mut() {
+                    spectrum.push(f64::from(frame[0]));
+                }
+                wide_owed += FS;
+                if wide_owed >= rate {
+                    wide_owed -= rate;
+                    from_line.push(frame[0]);
+                    wide_sent.push(out[0] as f32);
+                }
+            }
+            if apart {
+                for _ in 0..wide.wanted() {
+                    let mut out = [0.0f64; 2];
+                    modem.varc_say(&mut out);
+                    wide_send.push(out[0] as f32);
+                    wide_send.push(out[1] as f32);
+                }
+                wide_last = wide_send.as_chunks::<2>().0.last().map_or(wide_last, |f| f[0]);
+            }
+            wide.transmit(&wide_send);
+            for text in modem.take_line_notes() {
+                noted.push((0, modem.call_seconds(), text));
+            }
+        } else {
+            match audio.sip() {
+                Some(sip) => sip.receive_both(&mut from_line, &mut from_network),
+                None => audio.receive(&mut from_line),
+            }
+        }
+        if let Some(noise) = line_noise.as_mut() {
+            noise.add(&mut from_line);
+        }
         if from_line.is_empty() {
             // Nothing has arrived, so nothing can be stepped: the line is the
             // clock. Still hand the terminal whatever the modem said in the
             // meantime, which is how `OK` gets back before a call exists.
+            //
+            // And still tell the window what the line is doing, which is the
+            // part that was missing. Everything the window shows about a SIP
+            // line was published below, past this point -- so it was only
+            // ever refreshed while audio was arriving. That is not a quiet
+            // corner: no audio arrives before a call is answered, and none
+            // arrives after one ends. The moment a call went down the
+            // window's picture of it froze at whatever it last was, so the
+            // dialler went on saying the call was up and went on offering
+            // Hang up, for ever, while every press of it worked perfectly.
+            // A display that stops being refreshed exactly when the thing it
+            // displays stops moving is indistinguishable from a display that
+            // is right.
             drain_dte(
             &mut modem,
             &tx,
@@ -1098,22 +2092,140 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             networking.as_mut(),
             login.as_mut(),
         );
+            // And the modem's own state, on a line made of packets. The
+            // frame the window draws its lamps, its call card and its
+            // timeline from is published past this point, where the samples
+            // are -- so a call the trunk refused left the window on
+            // "negotiating" with the hook lamp lit and the clock running,
+            // minutes after the modem had said NO CARRIER and gone back to
+            // its command state. With no audio there is nothing on the line
+            // either, and the scopes are told that as well.
+            if audio.sip().is_some() && last_audio.elapsed() >= QUIET_LINE_AFTER && Instant::now() >= next_publish {
+                next_publish = Instant::now() + QUIET_LINE_PUBLISH;
+                tx.publish(|f| {
+                    f.state = call_state(modem.state(), modem.off_hook());
+                    f.carrier = modem.carrier();
+                    f.modulation = modem.standard();
+                    f.line_phase = modem.line_phase();
+                    f.bit_rate = modem.rate();
+                    f.tx_bit_rate = modem.transmit_rate();
+                    f.leds = Leds {
+                        mr: true,
+                        tr: true,
+                        sd: false,
+                        rd: false,
+                        cd: modem.carrier(),
+                        oh: modem.off_hook(),
+                        aa: modem.role() == Role::Answering,
+                        hs: modem.rate().is_some_and(|r| r >= 9600),
+                        ec: modem.error_controlled(),
+                    };
+                    f.rx_level_db = -120.0;
+                    f.spectrum_db.fill(-120.0);
+                    f.waveform.fill(0.0);
+                    f.constellation.clear();
+                    f.symbols.clear();
+                });
+            }
+            // And a recording stopped while nothing arrives is stopped now.
+            // It was only ever kept past this point, with the samples, so a
+            // far end that hung up -- a BYE, and no audio after it -- left
+            // Stop pressed and nothing happening, and the recording running
+            // on until the next call brought samples to step it with.
+            let recording_now = session.recording();
+            if was_recording && !recording_now {
+                keep(&recording, &frames, &tx, &session);
+                recording = Vec::new();
+                frames = Vec::new();
+                was_recording = false;
+            }
+            if let Ok(mut state) = session.state.lock() {
+                state.recording = recording_now.then(|| recording.len() as f64 / 2.0 / FS);
+                // A SIP line with no call on it brings no samples, and that
+                // is when most commands are typed.
+                if state.selected.as_ref() != Some(modem.selected()) {
+                    state.selected = Some(modem.selected().clone());
+                }
+            }
             thread::sleep(Duration::from_millis(2));
             continue;
         }
 
+        last_audio = Instant::now();
         to_line.clear();
+        if on_wide {
+            to_line.extend_from_slice(&wide_sent);
+        }
+        // Only on a call at the network's own rate: see
+        // `sip::Line::carries_network_levels`.
+        let network_levels = audio.sip().is_some_and(sip::Line::carries_network_levels);
+        modem.set_network_a_law(audio.sip().is_some_and(sip::Line::a_law));
+        if !from_network.is_empty() && network_levels {
+            let levels: Vec<f64> = from_network.iter().map(|l| f64::from(*l)).collect();
+            modem.give_network_levels(&levels);
+        }
+        // A V.ARC call on a SIP line. If the call agreed on linear samples
+        // the network's own samples are the modem's line, one for one, and
+        // what it says goes back as it is. If it is in G.711 the same is
+        // true of its codewords, between two of these with nothing recoding
+        // them on the way; the modem finds out whether that is so, and
+        // carries on as an ordinary call if it is not.
+        let mut exact_sent: Option<Vec<f32>> = None;
+        // Nothing of a V.ARC call can arrive before the call is up, and what
+        // does is the last call's tail, still in the media path. Handed to
+        // the modem it chose V.ARC's form from a call with no description
+        // yet -- not linear, so G.711 -- and a linear call placed straight
+        // after another one came up as "does not carry G.711 codewords" and
+        // fell back to V.8 bis.
+        if let Some(sip) = audio.sip()
+            && modem.varc_wanted().is_some()
+            && !sip.up()
+        {
+            from_line.clear();
+            from_network.clear();
+        }
+        if let Some(sip) = audio.sip()
+            && modem.varc_wanted().is_some()
+            && sip.up()
+        {
+            let rate = if sip.linear() {
+                modem.varc_exact_line(true);
+                sip.linear_rate()
+            } else {
+                modem.varc_codeword_line(Some(sip.a_law()));
+                8000.0
+            };
+            let mut exact = Vec::with_capacity(from_network.len());
+            for &level in &from_network {
+                let mut out = [0.0f64];
+                modem.varc_step(rate, &[f64::from(level)], &mut out);
+                exact.push(out[0] as f32);
+            }
+            for text in modem.take_line_notes() {
+                noted.push((0, modem.call_seconds(), text));
+            }
+            // A call that gave V.ARC up in there is an ordinary one from
+            // the next block on, and has said nothing in this one.
+            if modem.varc_wanted().is_some() {
+                exact_sent = Some(exact);
+            }
+        }
         let drive = session.drive();
         // The PCM scope is every sample against the next, and a dense grid
         // of levels wants the full depth whatever the count of them.
         let depth = if modem.shape() == "PCM" { PCM_DEPTH } else { scope_depth(modem.states()) };
-        for &s in &from_line {
+        for (n, &s) in from_line.iter().enumerate() {
             let heard = f64::from(s);
             // A V.90 server's samples are codewords, and the far encoder
             // only turns them back into the same ones at the level they left:
             // no drive of any other size will do.
             let drive = if modem.exact_levels() { 1.0 } else { drive };
-            to_line.push(modem.step(heard) as f32 * drive);
+            if !on_wide {
+                to_line.push(modem.step(heard) as f32 * drive);
+            }
+            for text in modem.take_line_notes() {
+                noted.push((n, modem.call_seconds(), text));
+            }
 
             if modem.shape() != drawing {
                 drawing = modem.shape();
@@ -1141,10 +2253,79 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             spectrum.push(heard);
             waveform.push(s);
         }
-        audio.transmit(&to_line);
+        // A V.ARC call's symbols do not come a sample at a time: they are
+        // taken as they have gathered, a grid at a time.
+        // And its handshake is tones, which the scope draws as it does any
+        // FSK: which tone, along a line.
+        let tones = modem.varc_symbols();
+        if !tones.is_empty() {
+            if modem.shape() != drawing {
+                drawing = modem.shape();
+                symbols.clear();
+                points.clear();
+            }
+            for tone in tones {
+                if symbols.len() == SYMBOL_HISTORY {
+                    symbols.pop_front();
+                }
+                symbols.push_back(tone as f32);
+            }
+        }
+        let gathered = modem.varc_points();
+        if !gathered.is_empty() {
+            if modem.shape() != drawing {
+                drawing = modem.shape();
+                symbols.clear();
+                points.clear();
+            }
+            let depth = if modem.shape() == "PCM" { PCM_DEPTH } else { scope_depth(modem.states()) };
+            for (i, q) in gathered {
+                while points.len() >= depth {
+                    points.pop_front();
+                }
+                points.push_back((i as f32, q as f32));
+            }
+        }
+        // On a SIP line a digital modem's codewords go as they are, with no
+        // rate conversion to blur them; see `Modem::take_network_levels`.
+        if let (Some(sip), Some(exact)) = (audio.sip(), exact_sent.as_ref()) {
+            // V.ARC's samples are the data: nothing may touch them.
+            to_line.clear();
+            to_line.extend_from_slice(exact);
+            sip.transmit_exact(exact);
+        } else {
+            match (audio.sip(), modem.take_network_levels()) {
+                (Some(sip), Some(levels)) if network_levels => {
+                    let levels: Vec<f32> = levels.iter().map(|l| *l as f32).collect();
+                    sip.transmit_exact(&levels);
+                }
+                _ => audio.transmit(&to_line),
+            }
+        }
         owed_ms += from_line.len() as f64 / FS * 1000.0;
 
+        // A trace of what the V.ARC receiver measures, sixty times a
+        // second, for looking at how steady it is: BINMODEM_VARC_TRACE names
+        // the file.
+        if let Some(trace) = trace.as_mut()
+            && trace_at.elapsed() >= Duration::from_micros(16_667)
+        {
+            use std::io::Write as _;
+            trace_at = Instant::now();
+            let _ = writeln!(
+                trace,
+                "{:.4},{:.3},{},{},{:?}",
+                trace_from.elapsed().as_secs_f64(),
+                modem.varc_snr_db().unwrap_or(f64::NAN),
+                modem.states(),
+                modem.shape(),
+                modem.varc_bauds(),
+            );
+        }
+
         let recording_now = session.recording();
+        // Where this block starts in the recording, if it is going into one.
+        let block_at = if was_recording { recording.len() / 2 } else { 0 };
         if recording_now {
             if !was_recording {
                 recording.clear();
@@ -1171,6 +2352,19 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             frames = Vec::new();
         }
         was_recording = recording_now;
+        // Timed by the recording where there is one, so that each line can be
+        // found in the capture, and written beside its frames; by the call
+        // otherwise.
+        for (n, into_call, text) in noted.drain(..) {
+            let line = format!("{}: {text}", modem.standard());
+            if recording_now {
+                let at = (block_at + n) as f64 / FS;
+                frames.push(format!("{at:9.3}  --  {line}"));
+                tx.log(Direction::Note, format!("{line} ({at:.3} s into the recording)"));
+            } else {
+                tx.log(Direction::Note, format!("{line} ({into_call:.3} s into the call)"));
+            }
+        }
 
         // Decays rather than resets, so a peak stays up long enough to read
         // instead of flickering past between repaints.
@@ -1259,11 +2453,17 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
         let undecodable = modem.undecodable_streams();
         if undecodable > last_undecodable {
             last_undecodable = undecodable;
-            tx.log(
-                Direction::Note,
-                "V.42bis: what arrived would not decode, so the link is being put down"
-                    .to_owned(),
-            );
+            let name = modem.compression_name().unwrap_or("compression");
+            let action = if undecodable > ec::stack::UNDECODABLE_RESETS {
+                "so the link is being put down".to_owned()
+            } else {
+                format!(
+                    "so the link is being re-established to start both dictionaries again \
+                     ({undecodable} of {})",
+                    ec::stack::UNDECODABLE_RESETS
+                )
+            };
+            tx.log(Direction::Note, format!("{name}: what arrived would not decode, {action}"));
         }
 
         let state = modem.state();
@@ -1306,8 +2506,20 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
 
         if Instant::now() >= next_publish {
             next_publish = Instant::now() + publish_every;
-            if spectrum.ready() {
-                spectrum.magnitudes_db(&mut bins);
+            // On a V.ARC call the spectrum is the card's, out to half its
+            // rate; otherwise a telephone channel's, out to 4 kHz.
+            let wide_rate = audio.wide().map(|w| f64::from(w.rate));
+            match (wide_rate, wide_spectrum.as_mut()) {
+                (Some(_), Some((_, wide))) => {
+                    if wide.ready() {
+                        wide.magnitudes_db(&mut bins);
+                    }
+                }
+                _ => {
+                    if spectrum.ready() {
+                        spectrum.magnitudes_db(&mut bins);
+                    }
+                }
             }
             let level = {
                 let n = waveform.data.len().max(1);
@@ -1325,21 +2537,13 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 for (slot, &v) in f.spectrum_db.iter_mut().zip(bins.iter()) {
                     *slot = v as f32;
                 }
-                f.hz_per_bin = FS / FFT_SIZE as f64;
+                f.hz_per_bin = wide_rate.unwrap_or(FS) / FFT_SIZE as f64;
+                // A V.ARC call on a SIP line fills the call's whole 8 kHz.
+                let narrow = if modem.varc_wanted().is_some() { FS / 2.0 } else { crate::scopes::DISPLAY_HZ };
+                f.display_hz = wide_rate.map_or(narrow, |rate| rate / 2.0);
                 f.rx_level_db = (20.0 * (level + 1e-9).log10()) as f32;
                 f.carrier = modem.carrier();
-                f.state = match state {
-                    State::Command if modem.off_hook() => CallState::OffHook,
-                    State::Command => CallState::Idle,
-                    State::Handshaking => CallState::Negotiating,
-                    State::Data => CallState::Connected,
-                    // The call is still up; the terminal has stepped back to
-                    // talking to the modem rather than through it. Off hook is
-                    // exactly what that is, and keeping it separate from
-                    // connected is what lets anything watching tell whether an
-                    // escape has already happened.
-                    State::OnlineCommand => CallState::OffHook,
-                };
+                f.state = call_state(state, modem.off_hook());
                 f.modulation = modem.standard();
                 f.line_phase = modem.line_phase();
                 f.distant.clear();
@@ -1350,14 +2554,25 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 f.tx_bytes = tx_bytes;
                 f.echo_loss_db = modem.echo_return_loss_now();
                 f.reception = modem.reception();
+                f.pcm = modem.pcm_levels().map(|(levels, sending, (slowest, fastest))| telemetry::PcmLevels {
+                    count: levels.count,
+                    lowest: levels.lowest,
+                    highest: levels.highest,
+                    dbm0: levels.dbm0,
+                    training_dbm0: levels.training_dbm0,
+                    sending,
+                    slowest,
+                    fastest,
+                });
                 f.fax_class = modem.is_fax_class();
                 if let Some(call) = modem.fax_call() {
-                    f.fax_phase = Some(call.phase().name());
+                    f.fax_phase = Some(call.phase_name());
                     f.fax_identity = call.identity().to_owned();
                     f.fax_non_standard = call.non_standard().map(<[u8]>::to_vec);
                     f.fax_capabilities = call.capability_field().map(<[u8]>::to_vec);
                     f.fax_progress = call.progress();
                     f.fax_rate = call.rate();
+                    f.fax_symbol_rate = call.symbol_rate().unwrap_or(0);
                     f.fax_lines = call.lines_received();
                     f.fax_sheet = call.sheet();
                     f.fax_sheets = call.sheets();
@@ -1367,14 +2582,48 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                     f.fax_trouble = call.trouble().map(str::to_owned);
                 }
                 f.echo_at = modem.reflection().map(|r| (r.delay, r.strength));
+                f.code = modem.varc_code().map(|(n, k)| (n as u16, k as u16));
+                f.squeeze = modem.varc_compression();
+                // The band a carrier at a time, thinned to what a small
+                // scope can draw: each entry the mean of its neighbours.
+                let carriers = modem.varc_carriers();
+                let every = carriers.len().div_ceil(220).max(1);
+                f.carriers.clear();
+                f.carriers.extend(carriers.chunks(every).map(|group| {
+                    let n = group.len() as f64;
+                    (
+                        (group.iter().map(|c| c.0).sum::<f64>() / n) as f32,
+                        (group.iter().map(|c| c.1).sum::<f64>() / n) as f32,
+                        (group.iter().map(|c| f64::from(c.2)).sum::<f64>() / n) as f32,
+                    )
+                }));
+                f.echo.clear();
+                f.echo.extend(modem.varc_echo_response().iter().map(|t| *t as f32));
+                // Below nought for a canceller that has found nothing yet.
+                f.echo_delay_ms = match modem.varc_echo().first() {
+                    None => 0.0,
+                    Some((_, None)) => -1.0,
+                    Some((_, Some(delay))) => wide_rate.map_or(0.0, |rate| 1000.0 * *delay as f64 / rate) as f32,
+                };
+                f.far_end = modem.varc_far_end().map(|(report, trim)| telemetry::FarEnd {
+                    level_db: report.level_db as f32,
+                    peak_db: report.peak_db as f32,
+                    clipped: report.clipped,
+                    snr_db: report.snr_db as f32,
+                    trim_db: trim as f32,
+                });
                 f.tones = modem.states();
                 f.constellation_peak = modem.constellation_peak();
                 f.symbol_label = modem.shape();
-                f.snr_db = modem.residual_error().map(|e| {
-                    // The decision margin as decibels, so a tighter
-                    // constellation reads as a larger number.
-                    (-20.0 * e.max(1e-3).log10()) as f32
-                });
+                f.snr_db = modem
+                    .residual_error()
+                    .map(|e| {
+                        // The decision margin as decibels, so a tighter
+                        // constellation reads as a larger number.
+                        (-20.0 * e.max(1e-3).log10()) as f32
+                    })
+                    // A V.ARC receiver measures the ratio itself.
+                    .or_else(|| modem.varc_snr_db().map(|db| db as f32));
                 f.symbols.clear();
                 f.symbols.extend(symbols.iter().copied());
                 f.constellation.clear();
@@ -1402,6 +2651,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             if let Ok(mut state) = session.state.lock() {
                 state.dropped = dropped;
                 state.underruns = underruns;
+                if state.selected.as_ref() != Some(modem.selected()) {
+                    state.selected = Some(modem.selected().clone());
+                }
                 state.tx_peak = tx_peak;
                 state.tx_rms = tx_rms;
                 state.rx_rms = rx_rms;
@@ -1584,17 +2836,30 @@ fn step_job(job: &mut Job, tx: &Publisher, room: usize) -> (Vec<u8>, (TransferVi
                 matches!(state, State::Done | State::Failed(_)),
             )
         }
-        Job::Receiving(r, into) => {
+        Job::Receiving(r, into, written) => {
             r.tick(TICK_MS);
             let p = r.progress();
             let state = r.state();
-            let mut written = None;
-            if let Some(got) = r.finished() {
+            // Each file as it lands rather than the last one once the session
+            // is over: of a batch, that kept only the last, and a session that
+            // failed partway kept none of the files already here.
+            for got in r.take_arrived() {
                 // 8.2 leaves the name to the receiver's judgement, and a board
                 // is not a trusted party: `safe_name` is what keeps a
-                // directory traversal out of the file system.
-                let path = into.join(got.file.safe_name());
-                let _ = std::fs::create_dir_all(into);
+                // directory traversal out of the file system. Checked again
+                // here as the path it becomes, since what counts as leaving a
+                // folder is this machine's business.
+                let name = got.file.safe_name();
+                let one_part = {
+                    let mut parts = std::path::Path::new(&name).components();
+                    matches!(
+                        (parts.next(), parts.next()),
+                        (Some(std::path::Component::Normal(_)), None)
+                    )
+                };
+                let name = if one_part { name } else { "received".to_owned() };
+                let path = into.join(name);
+                let _ = std::fs::create_dir_all(&*into);
                 match std::fs::write(&path, &got.data) {
                     Ok(()) => {
                         let shown = std::fs::canonicalize(&path)
@@ -1607,7 +2872,7 @@ fn step_job(job: &mut Job, tx: &Publisher, room: usize) -> (Vec<u8>, (TransferVi
                             Direction::Note,
                             format!("kept {} bytes as {shown}", got.data.len()),
                         );
-                        written = Some(shown);
+                        *written = Some(shown);
                     }
                     Err(e) => tx.log(Direction::Note, format!("could not write it: {e}")),
                 }
@@ -1624,7 +2889,7 @@ fn step_job(job: &mut Job, tx: &Publisher, room: usize) -> (Vec<u8>, (TransferVi
                     damaged: r.damaged(),
                     outcome: describe(state),
                     finished: matches!(state, State::Done | State::Failed(_)),
-                    written_to: written,
+                    written_to: written.clone(),
                     ..TransferView::default()
                 },
                 matches!(state, State::Done | State::Failed(_)),
@@ -1685,7 +2950,7 @@ fn drain_dte(
     *heard = Instant::now();
     match (job, network, login) {
         (Some(Job::Sending(s)), _, _) => s.feed(&out),
-        (Some(Job::Receiving(r, _)), _, _) => r.feed(&out),
+        (Some(Job::Receiving(r, ..)), _, _) => r.feed(&out),
         (None, Some(link), _) => link.feed(&out),
         (None, None, Some(running)) => running.feed(&out, tx),
         (None, None, None) => tx.line_data(&out),
@@ -1737,6 +3002,140 @@ fn start_link(
 
 
 #[cfg(test)]
+mod reconciliation_tests {
+    use super::{Between, DIAL_GIVES_UP, Reconcile, reconcile};
+    use std::time::Duration;
+
+    /// A call, from the number being handed over to the modem hanging up on
+    /// it, one turn of the line thread's loop at a time.
+    ///
+    /// Written as the sequence rather than as separate cases because the
+    /// fault this replaces was not in any one case: every branch was right,
+    /// and the order they came in was what went wrong. The version before
+    /// this fired on the single turn where the modem went on hook, so a turn
+    /// on which the call read as inactive -- the twenty milliseconds before
+    /// the agent thread sets "dialling", or the window while a CANCEL is
+    /// outstanding -- lost that edge for good, and left a call no control in
+    /// the window could end.
+    #[test]
+    fn a_call_from_dialling_to_hanging_up() {
+        let mut had = false;
+        let mut told = false;
+        let mut was = false;
+        // (active, busy, dialled ago) -> what should happen
+        let turns: &[(bool, bool, Option<Duration>, Reconcile)] = &[
+            // ATD: the modem goes off hook at once, and for a turn or two the
+            // agent has not caught up. Nothing is wrong yet.
+            (false, true, Some(Duration::ZERO), Reconcile::Nothing),
+            (false, true, Some(Duration::from_millis(20)), Reconcile::Nothing),
+            // The agent reports the call, and the far end answers it.
+            (true, true, None, Reconcile::Nothing),
+            (true, true, None, Reconcile::Nothing),
+            // ATH. The modem is on hook and the call is not, so it is ended --
+            // once.
+            (true, false, None, Reconcile::HangUp),
+            (true, false, None, Reconcile::Nothing),
+            (true, false, None, Reconcile::Nothing),
+            // And it goes.
+            (false, false, None, Reconcile::Nothing),
+        ];
+        for (n, (active, busy, ago, want)) in turns.iter().enumerate() {
+            if *busy {
+                had = true;
+            }
+            let got = reconcile(Between {
+                was_active: was,
+                active: *active,
+                modem_busy: *busy,
+                had_the_call: had,
+                told_to_hang_up: told,
+                dialled_ago: *ago,
+            });
+            assert_eq!(got, *want, "turn {n}");
+            if got == Reconcile::HangUp {
+                told = true;
+            }
+            if !*active {
+                had = false;
+                told = false;
+            }
+            was = *active;
+        }
+    }
+
+    /// The far end hangs up while the modem is still handshaking. The modem
+    /// has no way to know -- over packets there is no carrier to lose -- so it
+    /// has to be told, or it waits for one for ever.
+    #[test]
+    fn a_call_that_goes_away_under_the_modem_is_told_to_the_modem() {
+        let ended = reconcile(Between {
+            was_active: true,
+            active: false,
+            modem_busy: true,
+            had_the_call: true,
+            told_to_hang_up: false,
+            dialled_ago: None,
+        });
+        assert_eq!(ended, Reconcile::CarrierLost);
+    }
+
+    /// A dial the agent refused -- because a call was already up, or because
+    /// the next hop would not resolve -- never becomes a call at all, so
+    /// there is no "it ended" edge to notice. Without the clock the modem
+    /// waits for a carrier on a call that was never placed, silently, with
+    /// none of its own timers running because nothing is stepping it.
+    #[test]
+    fn a_dial_that_never_became_a_call_still_reaches_the_modem() {
+        let just_now = Between {
+            was_active: false,
+            active: false,
+            modem_busy: true,
+            had_the_call: false,
+            told_to_hang_up: false,
+            dialled_ago: Some(Duration::from_secs(1)),
+        };
+        assert_eq!(reconcile(just_now), Reconcile::Nothing, "too soon to give up");
+
+        let waited = Between {
+            dialled_ago: Some(DIAL_GIVES_UP),
+            ..just_now
+        };
+        assert_eq!(reconcile(waited), Reconcile::CarrierLost);
+    }
+
+    /// An incoming call is left alone. The modem has not answered it, so
+    /// nothing here may put it down on the modem's behalf -- that is the
+    /// whole reason the "did the modem ever take this call up" question is
+    /// asked rather than "is the modem busy".
+    #[test]
+    fn a_call_ringing_here_is_not_hung_up_for_the_modem() {
+        let ringing = Between {
+            was_active: true,
+            active: true,
+            modem_busy: false,
+            had_the_call: false,
+            told_to_hang_up: false,
+            dialled_ago: None,
+        };
+        assert_eq!(reconcile(ringing), Reconcile::Nothing);
+    }
+
+    /// Nothing at all is happening, which is most of the time.
+    #[test]
+    fn an_idle_line_is_left_alone() {
+        let idle = Between {
+            was_active: false,
+            active: false,
+            modem_busy: false,
+            had_the_call: false,
+            told_to_hang_up: false,
+            dialled_ago: None,
+        };
+        assert_eq!(reconcile(idle), Reconcile::Nothing);
+    }
+}
+
+#[cfg(test)]
 mod level_tests {
     use super::both_carrying;
 
@@ -1786,5 +3185,22 @@ mod arriving_tests {
         session.push_fax_lines(batch(0, 40, 3));
         session.push_fax_lines(batch(1, 0, 2));
         assert_eq!(session.take_fax_lines(), Some(batch(1, 0, 2)));
+    }
+}
+
+#[cfg(test)]
+mod noise_tests {
+    use super::LineNoise;
+
+    #[test]
+    fn line_noise_is_at_the_level_asked_for_and_centred() {
+        let mut noise = LineNoise::at(-40.0);
+        let mut samples = vec![0.0f32; 200_000];
+        noise.add(&mut samples);
+        let mean = samples.iter().sum::<f32>() / samples.len() as f32;
+        let rms = (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt();
+        let db = 20.0 * rms.log10();
+        assert!((db + 40.0).abs() < 0.2, "{db} dBFS");
+        assert!(mean.abs() < 0.001, "mean {mean}");
     }
 }

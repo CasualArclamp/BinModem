@@ -305,6 +305,15 @@ pub struct Decoder {
     history: u8,
     bits: Vec<bool>,
     ones: u32,
+    /// The run of ones the line is at while hunting: seven or more is an
+    /// abort or the line at mark, and what follows it may be a frame whose
+    /// opening flag was lost.
+    mark: u32,
+    /// The frame being collected had no opening flag: it began at the first
+    /// zero after a run of seven or more ones. See [`Decoder::feed`].
+    flagless: bool,
+    /// Frames taken with no opening flag.
+    resynced: u64,
     max_octets: usize,
     overlong: bool,
     /// The octets of the frame just discarded, whatever was wrong with it.
@@ -326,6 +335,9 @@ impl Decoder {
             history: 0,
             bits: Vec::new(),
             ones: 0,
+            mark: 0,
+            flagless: false,
+            resynced: 0,
             // N401 defaults to 128 information octets; allow generous headroom
             // for the header, FCS and a negotiated larger frame size.
             max_octets: 2048,
@@ -367,7 +379,23 @@ impl Decoder {
         &self.discarded
     }
 
+    /// How many frames were taken with no opening flag.
+    pub fn resynced(&self) -> u64 {
+        self.resynced
+    }
+
     /// Feed one received bit. Yields a frame when one completes.
+    ///
+    /// A frame need not have its opening flag when a run of seven or more
+    /// ones came before it (an abort, or the line at mark). A modem whose
+    /// line stops and starts again over a rate change can come back with fill
+    /// ones and then the frame that was under way, its flag gone: a U.S.
+    /// Robotics x2 client does (libv90modem's 0.5.0 notes, from a live call:
+    /// each such frame dropped cost five frames resent after the client's
+    /// poll, some 2.6 s later). So what follows such a run is collected from
+    /// its first zero, and at the closing flag it is a frame if its check
+    /// sequence holds. Anything else it turns out to be is dropped without a
+    /// word, as it would have been while hunting for a flag.
     pub fn feed(&mut self, bit: bool) -> Option<Result<Vec<u8>, FrameError>> {
         match self.state {
             State::Hunt => {
@@ -375,6 +403,18 @@ impl Decoder {
                 self.history = (self.history >> 1) | if bit { 0x80 } else { 0 };
                 if self.history == FLAG {
                     self.enter_frame();
+                } else if bit {
+                    self.mark = self.mark.saturating_add(1);
+                } else {
+                    if self.mark >= 7 {
+                        // Either a flag's first bit, in which case the flag
+                        // closes an empty frame and opens the next one as
+                        // ever, or the first zero of a frame with no flag.
+                        self.enter_frame();
+                        self.flagless = true;
+                        self.bits.push(false);
+                    }
+                    self.mark = 0;
                 }
                 None
             }
@@ -403,6 +443,11 @@ impl Decoder {
                 None
             }
             State::Terminator => {
+                if bit && self.flagless {
+                    // Not a frame after all, and the line is at mark again.
+                    self.reset_to_mark();
+                    return None;
+                }
                 if bit {
                     // Seven ones: an abort (V.42 8.1.4). Five of them are
                     // already in the buffer, and the line does not say whose:
@@ -441,7 +486,7 @@ impl Decoder {
                     // that followed a damaged frame was logged and counted
                     // as a second copy of it.
                     self.discarded = octets(&self.bits[..content]);
-                    self.reset_to_hunt();
+                    self.reset_to_mark();
                     // 8.1.4 has the abort "ignore the frame currently being
                     // received", and one is being received as soon as a bit
                     // that is not the abort's own has arrived -- whether or
@@ -457,8 +502,12 @@ impl Decoder {
                 let keep = self.bits.len().saturating_sub(6);
                 let bits = self.bits[..keep].to_vec();
                 let overlong = self.overlong;
+                let flagless = self.flagless;
                 // A closing flag may open the next frame (V.42 8.1.1.2).
                 self.enter_frame();
+                if flagless {
+                    return self.finish_flagless(bits, overlong);
+                }
                 let done = Self::finish(bits.clone(), self.fcs, overlong);
                 self.matched = self.fcs;
                 // Kept before the other width is tried, since that may succeed
@@ -503,15 +552,67 @@ impl Decoder {
         self.state = State::Frame;
         self.bits.clear();
         self.ones = 0;
+        self.mark = 0;
+        self.flagless = false;
         self.overlong = false;
     }
 
-    fn reset_to_hunt(&mut self) {
+    /// Back to hunting after seven ones in a row, which the hunt has to know
+    /// of: they are the run a frame with no opening flag may follow, and they
+    /// are not the six ones of a flag, which a history left at zero would
+    /// make of them as soon as a zero came.
+    fn reset_to_mark(&mut self) {
         self.state = State::Hunt;
-        self.history = 0;
+        self.history = 0xff;
         self.bits.clear();
         self.ones = 0;
+        self.mark = 7;
+        self.flagless = false;
         self.overlong = false;
+    }
+
+    /// What was collected from the first zero after a run of ones, now that a
+    /// flag has closed it: a frame, if a check sequence holds, and otherwise
+    /// nothing at all.
+    ///
+    /// The frame's own leading ones ran into the fill before it and were not
+    /// collected. 8.1.1.2 stuffs a zero after five, so there were at most
+    /// five of them, and 8.1.3 c) has a frame come to whole octets, which
+    /// leaves one count to try -- or two: with five leading ones the zero the
+    /// collection began at was the stuffed one and is not content, and that
+    /// reading is as long as the one with four.
+    fn finish_flagless(&mut self, bits: Vec<bool>, overlong: bool) -> Option<Result<Vec<u8>, FrameError>> {
+        self.discarded.clear();
+        if overlong || bits.is_empty() {
+            return None;
+        }
+        let lead = (8 - bits.len() % 8) % 8;
+        let mut readings: Vec<Vec<bool>> = Vec::new();
+        if lead <= 4 {
+            let mut r = vec![true; lead];
+            r.extend_from_slice(&bits);
+            readings.push(r);
+        }
+        if lead == 4 {
+            let mut r = vec![true; 5];
+            r.extend_from_slice(&bits[1..]);
+            readings.push(r);
+        }
+        let other = match self.fcs {
+            Fcs::Bits16 => Fcs::Bits32,
+            Fcs::Bits32 => Fcs::Bits16,
+        };
+        let widths = if self.either { vec![self.fcs, other] } else { vec![self.fcs] };
+        for reading in readings {
+            for &fcs in &widths {
+                if let Some(Ok(frame)) = Self::finish(reading.clone(), fcs, false) {
+                    self.matched = fcs;
+                    self.resynced += 1;
+                    return Some(Ok(frame));
+                }
+            }
+        }
+        None
     }
 
     fn finish(bits: Vec<bool>, fcs: Fcs, overlong: bool) -> Option<Result<Vec<u8>, FrameError>> {
@@ -602,6 +703,102 @@ mod tests {
     fn crc32_residue_holds_too() {
         let framed = append_fcs(b"\x03\x73hello", Fcs::Bits32);
         assert!(fcs_ok(&framed, Fcs::Bits32));
+    }
+
+    /// The line bits of one frame with its opening flag taken off, behind
+    /// `fill` ones, as a line that stopped and started again leaves it.
+    fn without_opening_flag(payload: &[u8], fcs: Fcs, fill: usize) -> Vec<bool> {
+        let mut enc = Encoder::new(fcs);
+        enc.frame(payload);
+        let bits: Vec<bool> = std::iter::from_fn(|| enc.next_bit()).collect();
+        let mut line = vec![true; fill];
+        line.extend_from_slice(&bits[8..]);
+        line
+    }
+
+    fn feed_all(dec: &mut Decoder, line: &[bool]) -> Vec<Result<Vec<u8>, FrameError>> {
+        line.iter().filter_map(|&b| dec.feed(b)).collect()
+    }
+
+    /// What a U.S. Robotics x2 client sends after its rate change: fill ones,
+    /// then the frame with no flag before it. Every count of leading ones a
+    /// frame can have, and every length of fill from the seven that make it
+    /// a run, the thirteen that used to read as a flag among them.
+    #[test]
+    fn a_frame_whose_opening_flag_was_lost_after_ones_is_taken() {
+        // First octets with none to five leading ones (low-order bit first).
+        for first in [0x00u8, 0x01, 0x03, 0x07, 0x0f, 0x1f, 0xff] {
+            for fill in [7usize, 8, 12, 13, 14, 40] {
+                for fcs in [Fcs::Bits16, Fcs::Bits32] {
+                    let mut payload = vec![first, 0x73];
+                    payload.extend_from_slice(b"resumed after a rate change");
+                    let line = without_opening_flag(&payload, fcs, fill);
+                    let mut dec = Decoder::new(fcs);
+                    let got = feed_all(&mut dec, &line);
+                    assert_eq!(got, vec![Ok(payload)], "first {first:02x}, fill {fill}, {fcs:?}");
+                    assert_eq!(dec.resynced(), 1);
+                }
+            }
+        }
+    }
+
+    /// It follows an abort and a frame's closing flag just the same, and the
+    /// frames after it are read as ever.
+    #[test]
+    fn a_flagless_frame_is_taken_between_ordinary_ones() {
+        let mut enc = Encoder::new(Fcs::Bits16);
+        enc.frame(b"\x03\x00before");
+        let mut line: Vec<bool> = std::iter::from_fn(|| enc.next_bit()).collect();
+        line.extend(without_opening_flag(b"\x03\x02during", Fcs::Bits16, 20));
+        enc.frame(b"\x03\x04after");
+        line.extend(std::iter::from_fn(|| enc.next_bit()));
+        let mut dec = Decoder::new(Fcs::Bits16);
+        let got = feed_all(&mut dec, &line);
+        assert_eq!(
+            got,
+            vec![
+                Ok(b"\x03\x00before".to_vec()),
+                Ok(b"\x03\x02during".to_vec()),
+                Ok(b"\x03\x04after".to_vec()),
+            ]
+        );
+        assert_eq!(dec.resynced(), 1);
+    }
+
+    /// What follows the ones and is not a frame is dropped and not counted:
+    /// no error, nothing among the damaged, and the next frame is read.
+    #[test]
+    fn what_follows_ones_and_is_no_frame_is_dropped_in_silence() {
+        let mut line = without_opening_flag(b"\x03\x02spoiled on the way", Fcs::Bits16, 20);
+        line[40] = !line[40];
+        // And ones, a zero, and ones again: nothing between two runs.
+        line.extend([true; 9]);
+        line.push(false);
+        line.extend([true; 9]);
+        let mut enc = Encoder::new(Fcs::Bits16);
+        enc.frame(b"\x03\x04whole");
+        line.extend(std::iter::from_fn(|| enc.next_bit()));
+        let mut dec = Decoder::new(Fcs::Bits16);
+        let got = feed_all(&mut dec, &line);
+        assert_eq!(got, vec![Ok(b"\x03\x04whole".to_vec())]);
+        assert_eq!(dec.resynced(), 0);
+        assert!(dec.discarded().is_empty());
+    }
+
+    /// A line at mark between flagged frames is still just an idle line.
+    #[test]
+    fn mark_idle_between_flagged_frames_yields_nothing_of_its_own() {
+        let mut enc = Encoder::new(Fcs::Bits16);
+        let mut line = vec![true; 50];
+        enc.frame(b"\x03\x00one");
+        line.extend(std::iter::from_fn(|| enc.next_bit()));
+        line.extend([true; 50]);
+        enc.frame(b"\x03\x02two");
+        line.extend(std::iter::from_fn(|| enc.next_bit()));
+        let mut dec = Decoder::new(Fcs::Bits16);
+        let got = feed_all(&mut dec, &line);
+        assert_eq!(got, vec![Ok(b"\x03\x00one".to_vec()), Ok(b"\x03\x02two".to_vec())]);
+        assert_eq!(dec.resynced(), 0);
     }
 
     #[test]

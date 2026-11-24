@@ -115,6 +115,9 @@ fn a_page_over(carrier: &str) {
     let mut server_link = Link::new(SERVER, CLIENT);
     let mut client_link = Link::new([0, 0, 0, 0], [0, 0, 0, 0]);
     let mut server = proxy::Server::new(SERVER, 0x9e37_79b9);
+    // The web server is on the loopback, which a caller is otherwise kept away
+    // from.
+    server.reach_anywhere();
     let mut client =
         proxy::Client::new("127.0.0.1:0", CLIENT, SERVER, 0x85eb_ca6b).expect("could not listen");
 

@@ -42,6 +42,10 @@ pub struct Modem {
     retrains: u32,
     /// Retrains phase 2 has asked for since phases 3 and 4 last connected.
     phase2_retrains: u32,
+    /// Whether the phases 3 and 4 now running have reached phase 4, and data
+    /// mode.
+    reached_phase4: bool,
+    reached_data: bool,
 }
 
 impl Modem {
@@ -60,6 +64,8 @@ impl Modem {
             retraining: false,
             retrains: 0,
             phase2_retrains: 0,
+            reached_phase4: false,
+            reached_data: false,
         }
     }
 
@@ -74,6 +80,11 @@ impl Modem {
 
     pub fn phase2(&self) -> &phase2::Modem {
         &self.phase2
+    }
+
+    /// Phase 2, to be told something before it runs.
+    pub fn phase2_mut(&mut self) -> &mut phase2::Modem {
+        &mut self.phase2
     }
 
     /// Phases 3 and 4, once phase 2 is over.
@@ -150,15 +161,25 @@ impl Modem {
         self.training.as_ref().is_some_and(training::Modem::carrier)
     }
 
-    /// The far end's last symbol, once phase 3 has trained the receiver.
+    /// The far end's last symbol: phase 2's DPSK, each symbol against the
+    /// one before, and from phase 3 on what the trained receiver decided on.
     pub fn constellation_point(&self) -> Option<(f64, f64)> {
-        self.training.as_ref().and_then(training::Modem::constellation_point)
+        match self.training.as_ref() {
+            Some(training) => training.constellation_point(),
+            None => self.phase2.scope_point(),
+        }
     }
 
     /// Points in the constellation the far end is read against, once phase 3
     /// has trained the receiver.
     pub fn constellation_size(&self) -> Option<usize> {
         self.training.as_ref().map(training::Modem::constellation_size)
+    }
+
+    /// Signal to noise of the decisions being made, in decibels, once phase 3
+    /// has trained the receiver.
+    pub fn snr_db(&self) -> Option<f64> {
+        self.training.as_ref().map(training::Modem::snr)
     }
 
     /// The largest coordinate those points reach, in the units of
@@ -179,6 +200,15 @@ impl Modem {
         self.phase2.decline_pcm();
     }
 
+    /// Ask for V.90 data mode rather than PCM upstream in phase 2's INFO1a
+    /// from now on, even of a V.92 server that has offered it.
+    ///
+    /// The rung above [`Self::decline_pcm`]: PCM downstream is kept and only
+    /// the upstream falls back to V.34 modulation.
+    pub fn decline_pcm_upstream(&mut self) {
+        self.phase2.decline_pcm_upstream();
+    }
+
     /// Start phase 2 again as a retrain, from wherever this start-up is.
     pub fn restart_phase2(&mut self) {
         self.phase2 = self.phase2.again();
@@ -196,16 +226,30 @@ impl Modem {
                 // start-up settled -- a retrain does not exchange INFO0 again.
                 // The very sample is the retrain's first, so its tone follows
                 // the data with no gap the far end has to wait through.
+                let failed_at = (self.reached_phase4 && !self.reached_data).then(|| training.settings());
                 self.phase2 = self.phase2.again();
+                // A start-up that trained at its symbol rates both ways and
+                // still never reached data mode is not run at them again
+                // while others will do: the far end would very likely say the
+                // same in INFO1c and fail the same way (see
+                // `phase2::Modem::avoid_symbol_rate`). One that came back
+                // before phase 4 -- a far end that lost INFO1a, say -- says
+                // nothing about them.
+                if let Some(settings) = failed_at {
+                    self.phase2.avoid_symbol_rate(settings.transmit.rate);
+                    self.phase2.avoid_symbol_rate(settings.receive.rate);
+                }
                 self.training = None;
                 self.retraining = true;
                 self.retrains += 1;
                 return self.phase2.step(line);
             }
+            self.reached_phase4 |= training.in_phase4();
             // The recovery is over the moment the new training connects.
             if matches!(training.status(), training::Status::Connected { .. }) {
                 self.retraining = false;
                 self.phase2_retrains = 0;
+                self.reached_data = true;
             }
             return out;
         }
@@ -226,6 +270,8 @@ impl Modem {
         }
         if self.phase2.status() == phase2::Status::Done {
             self.training = self.settings().map(|settings| training::Modem::new(settings, self.fs));
+            self.reached_phase4 = false;
+            self.reached_data = false;
         }
         out
     }

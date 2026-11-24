@@ -4,20 +4,29 @@
 //! capabilities over 300 bit/s and then drops that carrier and raises this one
 //! to send the page, so this is the half of a fax that carries the picture.
 //!
-//! Nothing here is adaptive in the way V.32 is. There is no rate negotiation,
-//! no trellis, no echo canceller and no second station talking at the same
-//! time: the line is half duplex and turns around between messages, so a burst
-//! is a training sequence, then data, then silence. What makes that work is
-//! the training, which is long enough to teach an equaliser the line from
-//! nothing every single time.
+//! There is no rate negotiation, no trellis, no echo canceller and no second
+//! station talking at the same time: the line is half duplex and turns around
+//! between messages, so a burst is a training sequence, then data, then
+//! silence. What makes that work is the training, every symbol of which is
+//! known before it arrives, and which is long enough to solve an equaliser
+//! for from nothing -- or, the short one, to find a burst again with the one
+//! a long one left.
 //!
 //! Two rates, differing only in how many bits ride on each symbol and how fast
 //! the symbols go: three bits on eight phases at 1600 baud, or two bits on
 //! four phases at 1200 baud. The carrier, the shaping, the scrambler and every
 //! training segment are shared.
+//!
+//! The transmitter is here. The receiver ([`Receiver`]) is a driver on the
+//! shared QAM core, `dsp::qam`, in `v27ter/receiver.rs`, and finds each burst
+//! by its turn-on sequence in `v27ter/hunt.rs`.
 
-use dsp::filter::OnePole;
-use dsp::{ComplexFir, Equalizer, Gardner, Nco, fir_lowpass, rrc_at, rrc_taps};
+mod hunt;
+mod receiver;
+
+pub use receiver::Receiver;
+
+use dsp::{Nco, rrc_at};
 
 /// 2.1: "The carrier frequency is to be 1800 +/- 1 Hz."
 pub const CARRIER: f64 = 1800.0;
@@ -200,6 +209,26 @@ impl Scrambler {
     pub fn reset(&mut self) {
         self.history = 0;
     }
+}
+
+/// The first `count` phase changes of segment 4, as a receiver sees them: one
+/// for a symbol that did not change and minus one for a reversal, which is
+/// the real part of each symbol times the conjugate of the one before.
+///
+/// 2.5.1.2: "every third bit of the pseudo-random sequence", a ZERO for
+/// 0 degrees and a ONE for 180, from the scrambler loaded as Appendix I asks
+/// and fed ONEs -- the same register the transmitter runs, so the two cannot
+/// disagree.
+fn conditioning_changes(count: usize) -> Vec<f64> {
+    let mut scrambler = Scrambler::seeded();
+    (0..count)
+        .map(|_| {
+            let bit = scrambler.scramble(true);
+            scrambler.scramble(true);
+            scrambler.scramble(true);
+            if bit { -1.0 } else { 1.0 }
+        })
+        .collect()
 }
 
 /// Where a burst has got to.
@@ -543,445 +572,6 @@ impl Transmitter {
         let (cos, sin) = self.nco.step();
         LEVEL * (baseband.0 * cos - baseband.1 * sin)
     }
-}
-
-/// The quietest thing that may be called a carrier at all, and the level it
-/// has to fall below before it is called gone.
-///
-/// Sixty decibels below full scale with five decibels of hysteresis, which is
-/// what every other carrier detector in this modem uses. Only a floor: what
-/// actually decides is the ratio below, because a fixed level cannot be both
-/// low enough for a quiet line and high enough to ignore the noise on a noisy
-/// one. Sixty decibels down was above the carrier on a real line at an
-/// ordinary drive setting, and below the noise on a line with any hiss in it.
-const CARRIER_ON: f64 = 1.0e-3;
-const CARRIER_OFF: f64 = 5.62e-4;
-
-/// How far above the quiet line a carrier has to be. Twelve decibels.
-const ON_ABOVE_FLOOR: f64 = 4.0;
-
-/// How far a carrier has to fall below its own loudest to be called gone.
-///
-/// Its own, because that is the only reference that is always available and
-/// always right. Measuring the end of a burst against a fixed level, or
-/// against an estimate of the noise, needs the noise to be known -- and the
-/// only time it can be measured is while there is no carrier, which is
-/// exactly what cannot be established when the detector is stuck on. A burst
-/// that has stopped is twelve decibels down on the burst that was there, on
-/// any line at any level, and nothing has to be known in advance.
-const OFF_BELOW_LOUDEST: f64 = 0.25;
-
-/// How fast the loudest-so-far is forgotten, per sample at 16 kHz.
-///
-/// About two seconds, so a burst that fades over a long page is followed
-/// rather than cut off at the first quiet stretch.
-const LOUDEST_DECAY: f64 = 3.1e-5;
-
-/// How fast the estimate of the quiet line follows what it hears, going down
-/// and going up, per sample at 16 kHz.
-///
-/// Down in a tenth of a second, so a burst ending is noticed; up over five
-/// seconds, because what it is measuring is the noise on a line and that does
-/// not change quickly. It only moves at all while there is no carrier, so
-/// what it follows is only ever the quiet line.
-const FLOOR_FALL: f64 = 6.25e-4;
-const FLOOR_RISE: f64 = 1.25e-5;
-
-/// Where the floor goes when a burst ends, as a fraction of the level then.
-const FLOOR_AFTER_BURST: f64 = 0.5;
-
-/// Symbols of a burst ignored while the filters fill.
-const SETTLING: u64 = 8;
-
-/// Symbols the carrier is then measured over.
-///
-/// Everything at the front of a turn-on sequence is two-phase: the plain
-/// carrier of segment 1, the reversals of segment 3, the conditioning pattern
-/// of segment 4. The short sequence has seventy-two symbols of that, so eight
-/// and forty-eight is inside even the short one.
-const ACQUIRING: u64 = 48;
-
-/// What one symbol should come off the equaliser at.
-const UNIT: f64 = 1.0;
-
-/// Ceiling on the gain control, so silence does not become noise at full
-/// scale while the far end is between bursts.
-///
-/// High enough not to be reached by a quiet line, which is a receiver
-/// refusing to work rather than a receiver protecting itself. What stops
-/// silence being amplified is the carrier detector, not this.
-const MAX_GAIN: f64 = 400.0;
-
-/// V.27 ter receiver.
-///
-/// It never decides where the training ended. It cannot usefully: nothing in
-/// the turn-on sequence marks its own last symbol, and T.30 does not need it
-/// to. The training check is a run of zeros and is recognised as one; a page
-/// begins with an end-of-line code and is found by looking for it. So this
-/// hands up descrambled bits from the moment a carrier is there, and whoever
-/// is above finds its own place in them.
-#[derive(Debug)]
-pub struct Receiver {
-    fs: f64,
-    rate: Rate,
-    nco: Nco,
-    select: ComplexFir,
-    matched: ComplexFir,
-    gardner: Gardner,
-    countdown: f64,
-    previous_filtered: (f64, f64),
-    /// Carrier phase and frequency offset, in turns and turns per symbol.
-    phase: f64,
-    frequency: f64,
-    agc: OnePole,
-    equalizer: Equalizer,
-    level: OnePole,
-    /// What the line sounds like with nothing on it.
-    floor: f64,
-    /// The loudest the burst in hand has been.
-    loudest: f64,
-    carrier: bool,
-    symbols: u64,
-    /// The phase the previous symbol landed on, in eighths of a turn.
-    eighths: Option<u8>,
-    descrambler: Scrambler,
-    bits: Vec<bool>,
-    last_symbol: (f64, f64),
-    /// The averaged phase error the carrier loop works on.
-    track: f64,
-    /// The front of the burst as it arrived, before the carrier loop has
-    /// touched it.
-    front: Vec<(f64, f64)>,
-    /// What the timing loop's input is multiplied by.
-    timing_scale: f64,
-}
-
-impl Receiver {
-    pub fn new(fs: f64) -> Self {
-        let rate = Rate::default();
-        let sps = fs / rate.baud();
-        Self {
-            fs,
-            rate,
-            nco: Nco::new(CARRIER, fs),
-            // The signal reaches half the baud rate plus the roll-off either
-            // side of the carrier: 1200 Hz at baseband for the faster rate.
-            select: ComplexFir::new(fir_lowpass(1400.0, 121, fs)),
-            matched: ComplexFir::new(rrc_taps(sps, ROLLOFF, SPAN)),
-            gardner: Gardner::new(sps, 0.1),
-            countdown: sps / 2.0,
-            previous_filtered: (0.0, 0.0),
-            phase: 0.0,
-            frequency: 0.0,
-            agc: OnePole::starting_at(1.0, 0.030, rate.baud()),
-            // Long enough to reach across the delay spread of a telephone
-            // circuit at 1600 baud, which is what segment 4 is for.
-            equalizer: Equalizer::new(31, UNIT),
-            level: OnePole::new(0.010, fs),
-            floor: 0.0,
-            loudest: 0.0,
-            carrier: false,
-            symbols: 0,
-            eighths: None,
-            descrambler: Scrambler::new(),
-            bits: Vec::new(),
-            last_symbol: (0.0, 0.0),
-            track: 0.0,
-            front: Vec::new(),
-            timing_scale: 1.0,
-        }
-    }
-
-    /// Set the rate the burst about to arrive is at.
-    ///
-    /// A fax receiver always knows this in advance: the DCS frame that came
-    /// over V.21 named it, and the high-speed carrier that follows is at that
-    /// rate and no other. Nothing here has to guess.
-    pub fn set_rate(&mut self, rate: Rate) {
-        if rate == self.rate {
-            return;
-        }
-        self.rate = rate;
-        let sps = self.fs / rate.baud();
-        self.matched = ComplexFir::new(rrc_taps(sps, ROLLOFF, SPAN));
-        self.gardner = Gardner::new(sps, 0.1);
-        self.countdown = sps / 2.0;
-        self.agc = OnePole::starting_at(1.0, 0.030, rate.baud());
-    }
-
-    pub fn rate(&self) -> Rate {
-        self.rate
-    }
-
-    /// Whether the far end's carrier is on the line.
-    pub fn carrier(&self) -> bool {
-        self.carrier
-    }
-
-    pub fn level(&self) -> f64 {
-        self.level.value()
-    }
-
-    /// Where the last symbol landed, for a constellation display.
-    pub fn constellation_point(&self) -> (f64, f64) {
-        self.last_symbol
-    }
-
-    /// Mean distance from the decisions being made, in the same units the
-    /// constellation is drawn in.
-    pub fn residual_error(&self) -> f64 {
-        self.equalizer.error()
-    }
-
-    /// How far apart two neighbouring points are.
-    ///
-    /// Every point sits on the unit circle, so the gap between neighbours is
-    /// the chord: twice the sine of half the angle between them. Three
-    /// quarters of a unit at 4800 and nearly one and a half at 2400, which is
-    /// most of why the slower rate carries a page down a worse line.
-    pub fn point_spacing(&self) -> f64 {
-        let phases = f64::from(self.rate.phases());
-        2.0 * (std::f64::consts::PI / phases).sin()
-    }
-
-    /// Forget the burst just gone and be ready for the next one.
-    ///
-    /// Everything that belongs to one burst goes -- the differential
-    /// reference, the descrambler, the equaliser, any bits not yet taken, and
-    /// the carrier detector along with them. The detector especially: what is
-    /// on the line at the moment somebody starts listening for a burst is the
-    /// tail of the last one, and a detector that carries its own state across a
-    /// turnaround reports that tail as a burst that arrived and ended.
-    pub fn restart(&mut self) {
-        self.new_burst();
-        self.carrier = false;
-        self.loudest = 0.0;
-        self.level.reset();
-    }
-
-    /// The same, less the detector.
-    ///
-    /// What the detector does when it finds a carrier: throw away the
-    /// decoding state left over from the last burst, and keep its own, since
-    /// it is the thing that just decided there is a burst at all.
-    fn new_burst(&mut self) {
-        // The equaliser starts again as well. Every burst carries a training
-        // sequence built to teach one from nothing, so nothing is lost by it,
-        // and keeping the old one turns a moment's trouble into a lasting one:
-        // a burst of noise walks its taps off, and a receiver that carries
-        // those taps into the next burst cannot read that one either, or the
-        // retransmission that was meant to put things right.
-        self.equalizer.reset();
-        self.eighths = None;
-        self.descrambler.reset();
-        self.bits.clear();
-        self.symbols = 0;
-        self.front.clear();
-    }
-
-    pub fn take_bits(&mut self) -> Vec<bool> {
-        std::mem::take(&mut self.bits)
-    }
-
-    pub fn feed(&mut self, sample: f64) {
-        let (cos, sin) = self.nco.step();
-        let selected = self.select.process((sample * cos, sample * -sin));
-        let level = self
-            .level
-            .process((selected.0 * selected.0 + selected.1 * selected.1).sqrt());
-        if self.carrier {
-            self.loudest = self.loudest.max(level) * (1.0 - LOUDEST_DECAY);
-        } else {
-            self.loudest = 0.0;
-            let k = if level < self.floor { FLOOR_FALL } else { FLOOR_RISE };
-            self.floor += k * (level - self.floor);
-        }
-        let was = self.carrier;
-        self.carrier = if self.carrier {
-            level > (self.loudest * OFF_BELOW_LOUDEST).max(CARRIER_OFF)
-        } else {
-            level > (self.floor * ON_ABOVE_FLOOR).max(CARRIER_ON)
-        };
-        if self.carrier && !was {
-            self.new_burst();
-        }
-        if !self.carrier && was {
-            // The burst just went. Whatever is on the line now is the line
-            // with nothing on it, or on its way there, so the floor starts
-            // from half of where the level is rather than from wherever it was
-            // left. Left at nothing -- which it is, for the first burst of a
-            // call, since this receiver hears nothing between bursts -- the
-            // noise on the line clears the threshold the moment the carrier
-            // drops, the carrier comes straight back, and the burst never
-            // ends. Half puts the way back on at half the burst's own level:
-            // out of reach of the noise, and well within reach of a burst that
-            // stopped for twenty milliseconds on purpose and carried on. It
-            // falls from there to the real noise within a fraction of a second.
-            self.floor = self.floor.max(level * FLOOR_AFTER_BURST);
-        }
-        let filtered = self.matched.process(selected);
-
-        let previous = std::mem::replace(&mut self.previous_filtered, filtered);
-        let before = self.countdown;
-        self.countdown -= 1.0;
-        if self.countdown > 0.0 {
-            return;
-        }
-        let mu = before.clamp(0.0, 1.0);
-        let at = (
-            previous.0 + mu * (filtered.0 - previous.0),
-            previous.1 + mu * (filtered.1 - previous.1),
-        );
-        self.countdown += self.gardner.interval();
-        // The timing loop is handed the signal at about unit level, whatever
-        // the line delivered: it divides its error by a power estimate that
-        // starts at one and moves slowly, and a short training thirty
-        // decibels down is over before that estimate has come down far enough
-        // to let it move. Held while there is no carrier, so silence is not
-        // scaled up into something to lock onto.
-        if self.carrier {
-            self.timing_scale = 1.0 / self.level.value().max(CARRIER_OFF);
-        }
-        let scale = self.timing_scale;
-        let Some(scaled) = self.gardner.feed((at.0 * scale, at.1 * scale)) else {
-            return;
-        };
-        self.on_symbol((scaled.0 / scale, scaled.1 / scale));
-    }
-
-    /// Measure the carrier from the two-phase front of the burst.
-    ///
-    /// Squaring a symbol that is either a point or its opposite leaves the
-    /// same thing either way: twice the carrier's phase and none of the data.
-    /// So the squares, each times the conjugate of the one before, turn by
-    /// twice the carrier's frequency, and their sum points at twice its phase.
-    /// Halving both gives the phase to within half a turn, which a
-    /// differential code cannot tell from the truth.
-    ///
-    /// The loop that steers by its own decisions could not do this. At 2400,
-    /// seven hertz is two degrees of turn a symbol and the loop corrects less
-    /// than that for any error it can see, so it slipped from one phase to the
-    /// next for the whole of the training and never caught up: every one of
-    /// forty tries at plus or minus seven hertz failed.
-    fn acquire(&mut self) {
-        let squares: Vec<(f64, f64)> = self
-            .front
-            .iter()
-            .map(|&(x, y)| (x * x - y * y, 2.0 * x * y))
-            .collect();
-        if squares.len() < 2 {
-            return;
-        }
-        let conj_times = |r: (f64, f64), p: (f64, f64)| {
-            (r.0 * p.0 + r.1 * p.1, r.1 * p.0 - r.0 * p.1)
-        };
-        let twice = squares
-            .windows(2)
-            .map(|w| conj_times(w[1], w[0]))
-            .fold((0.0, 0.0), |a, z| (a.0 + z.0, a.1 + z.1));
-        let per_symbol = twice.1.atan2(twice.0) / 2.0;
-        let last = (squares.len() - 1) as f64;
-        let middle = last / 2.0;
-        let (re, im) = squares.iter().enumerate().fold((0.0, 0.0), |a, (n, z)| {
-            let back = -2.0 * per_symbol * (n as f64 - middle);
-            let (c, s) = (back.cos(), back.sin());
-            (a.0 + z.0 * c - z.1 * s, a.1 + z.0 * s + z.1 * c)
-        });
-        let now = im.atan2(re) / 2.0 + per_symbol * (last - middle);
-        let tau = std::f64::consts::TAU;
-        self.frequency = -per_symbol / tau;
-        self.phase = (-now / tau).rem_euclid(1.0);
-        self.track = 0.0;
-    }
-
-    fn on_symbol(&mut self, symbol: (f64, f64)) {
-        if self.carrier && self.symbols >= SETTLING && self.symbols < SETTLING + ACQUIRING {
-            self.front.push(symbol);
-            if self.symbols + 1 == SETTLING + ACQUIRING {
-                self.acquire();
-            }
-        }
-        let acquired = self.symbols >= SETTLING + ACQUIRING;
-        let power = symbol.0 * symbol.0 + symbol.1 * symbol.1;
-        let mean = if self.carrier {
-            self.agc.process(power)
-        } else {
-            self.agc.value()
-        };
-        let gain = (UNIT * UNIT / mean.max(1e-12)).sqrt().clamp(0.0, MAX_GAIN);
-
-        let turn = self.phase * std::f64::consts::TAU;
-        let (c, s) = (turn.cos(), turn.sin());
-        let point = (
-            (symbol.0 * c - symbol.1 * s) * gain,
-            (symbol.0 * s + symbol.1 * c) * gain,
-        );
-
-        // The carrier loop reads the unequalised symbol, so the equaliser's
-        // own delay stays outside it.
-        //
-        // Eight phases, whatever the rate. At 2400 only four of them are ever
-        // sent, but the training in front of the data is two-phase at both
-        // rates, and a decision over four points would read a reversal as a
-        // quarter turn of error. Eight is right for everything either rate
-        // sends.
-        let coarse = nearest_eighth(point);
-        let want = point_at(coarse);
-        let raw = point.1 * want.0 - point.0 * want.1;
-        self.track += 0.20 * (raw - self.track);
-        if self.carrier && acquired {
-            // Second order, so what is left of the seven hertz clause 3
-            // allows for is removed rather than merely followed.
-            self.frequency = (self.frequency - 2.0e-5 * self.track).clamp(-0.02, 0.02);
-            self.phase -= 0.010 * self.track;
-        }
-        self.phase += self.frequency;
-        self.phase -= self.phase.floor();
-
-        let equalized = self.equalizer.equalize(point);
-        let decided = nearest_eighth(equalized);
-        let decision = point_at(decided);
-
-        self.symbols += 1;
-        if self.carrier && acquired {
-            self.equalizer.adapt(equalized, decision);
-        }
-        self.last_symbol = equalized;
-
-        if !self.carrier {
-            return;
-        }
-
-        let Some(previous) = self.eighths.replace(decided) else {
-            // The first symbol of a burst is only a reference; a difference
-            // needs two.
-            return;
-        };
-        let change = (decided + 8 - previous) & 7;
-        let (group, count) = match self.rate {
-            Rate::R4800 => (TURN_TRIBIT[change as usize], 3),
-            // A quarter turn is two eighths. Anything odd is an error, and
-            // rounding it down is the nearest legal answer.
-            Rate::R2400 => (TURN_DIBIT[(change >> 1) as usize], 2),
-        };
-        for i in (0..count).rev() {
-            let bit = group >> i & 1 != 0;
-            let out = self.descrambler.descramble(bit);
-            self.bits.push(out);
-        }
-    }
-}
-
-/// The point one of the eight phases sits on.
-fn point_at(eighths: u8) -> (f64, f64) {
-    let angle = std::f64::consts::TAU * f64::from(eighths) / 8.0;
-    (angle.cos(), angle.sin())
-}
-
-/// Which of the eight phases a point is nearest.
-fn nearest_eighth(point: (f64, f64)) -> u8 {
-    let angle = point.1.atan2(point.0) / std::f64::consts::TAU * 8.0;
-    (angle.round() as i64).rem_euclid(8) as u8
 }
 
 #[cfg(test)]

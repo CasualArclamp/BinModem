@@ -12,10 +12,15 @@
 //! a fax call and they are how the two ends know what kind of call it is. A
 //! calling fax sends 1100 Hz in bursts; an answering one sends 2100 Hz
 //! steadily. Neither carries any information beyond its own presence.
+//!
+//! V.21 is also a data modem in its own right, the 300 bit/s duplex modem
+//! everywhere Bell 103 was not: channel 1 from the caller, channel 2 back,
+//! start-stop characters on both. That is `DATA`, and the modem that runs
+//! it is Bell 103's own with these tones in it.
 
 use dsp::FskDetector;
 
-use crate::bell103::Bell103Tx;
+use crate::bell103::{Bell103Tx, Plan};
 
 /// V.21 channel 2, as `(space, mark)`.
 ///
@@ -24,6 +29,34 @@ use crate::bell103::Bell103Tx;
 /// duplex and only one end speaks at a time, so both ends use the high
 /// channel and there is nothing to collide with.
 pub const CHANNEL_2: (f64, f64) = (1850.0, 1650.0);
+
+/// V.21 channel 1, as `(space, mark)`.
+///
+/// Note 2 to clause 3: F_A = 1180 Hz and F_Z = 980 Hz, and "in each
+/// channel, the higher characteristic frequency (F_A) corresponds to a
+/// binary 0". So the space is the higher tone, the other way up from Bell
+/// 103, where the mark is.
+pub const CHANNEL_1: (f64, f64) = (1180.0, 980.0);
+
+/// V.25's answering tone: "an uninterrupted 2100 +/- 15 Hz tone" (2.2).
+///
+/// The same frequency as `CED`. What it is for is the network's echo
+/// suppressors, which it turns off on the way.
+pub const ANSWER_TONE: f64 = 2100.0;
+
+/// V.21 as a data modem, the 300 bit/s duplex modem outside North America.
+///
+/// Clause 7 a): "channel No. 1 is used for transmission of the caller's
+/// data ... while channel No. 2 is used for transmission in the other
+/// direction". And clause 5: where echo control has to be disabled, "it is
+/// recommended that the procedures specified in Recommendation V.25 be
+/// followed", which a call on the switched network cannot know it need not.
+pub const DATA: Plan = Plan {
+    name: "V.21",
+    originate: CHANNEL_1,
+    answer: CHANNEL_2,
+    answer_tone: true,
+};
 
 pub const BAUD: f64 = 300.0;
 
@@ -92,7 +125,14 @@ pub struct Sender {
 
 impl Sender {
     pub fn new(fs: f64) -> Self {
-        let (space, mark) = CHANNEL_2;
+        Self::on(CHANNEL_2, fs)
+    }
+
+    /// A sender on either channel, as `(space, mark)`. Fax only ever uses
+    /// channel 2; V.8 bis puts its initiating station's messages on channel
+    /// 1 and its responding station's on channel 2 (V.8 bis 7.2.1).
+    pub fn on(channel: (f64, f64), fs: f64) -> Self {
+        let (space, mark) = channel;
         let mut tx = Bell103Tx::with_tones(space, mark, fs);
         tx.set_transmitting(false);
         Self { tx }
@@ -157,7 +197,12 @@ const PULL: f64 = 0.125;
 
 impl Receiver {
     pub fn new(fs: f64) -> Self {
-        let (space, mark) = CHANNEL_2;
+        Self::on(CHANNEL_2, fs)
+    }
+
+    /// A receiver on either channel, as `(space, mark)`.
+    pub fn on(channel: (f64, f64), fs: f64) -> Self {
+        let (space, mark) = channel;
         Self {
             detector: FskDetector::new(space, mark, BAUD, fs),
             sps: fs / BAUD,
@@ -210,6 +255,14 @@ impl Receiver {
 
     pub fn carrier(&self) -> bool {
         self.detector.carrier()
+    }
+
+    /// How much signal there is in this channel's band: the magnitude of
+    /// the band-filtered line, which for a tone of amplitude A is A over two.
+    /// For telling a carrier from line noise against the whole line's level,
+    /// which the fixed threshold of [`Self::carrier`] cannot do.
+    pub fn band_level(&self) -> f64 {
+        self.detector.level()
     }
 
     /// Decision margin at the last bit, which is what a scope plots.

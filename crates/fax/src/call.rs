@@ -22,8 +22,13 @@ use std::collections::VecDeque;
 use crate::coding::{self, Coding};
 use crate::ecm;
 use crate::frames::{Message, Reader, Sender};
+use crate::jbig;
 use crate::page::{Page, Resolution};
 use crate::t30::{self, Capabilities, Command, Frame, Modulation};
+
+mod annex_f;
+
+pub use annex_f::{FLAGS_GONE, FRAME_SECONDS, ONES, PRIMARY_FASTEST, PRIMARY_SLOWEST};
 
 /// Which end of the call this is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +53,18 @@ pub struct Speed {
 ///
 /// A modulation and a rate rather than a data pump, because which pump
 /// carries them is not this crate's business.
+///
+/// The last five are a call in T.30 Annex F, V.34's half-duplex mode, and
+/// only ever come once [`Call::start_annex_f`] has put it there. They name a
+/// channel rather than a modulation: the modem settled the modulation, and
+/// the primary channel's rate, with its own MPh exchange. Its turnarounds are
+/// its own too -- going from [`V34Ones`](Line::V34Ones) to
+/// [`V34Primary`](Line::V34Primary) is circuit 105 dropping, and the modem's
+/// control-channel turn-off and primary resynchronisation (12.6.3, 12.5.1/
+/// V.34) come of it; back from [`V34Primary`](Line::V34Primary) to the
+/// control channel is its primary turn-off and then the control channel's
+/// resynchronisation (12.5.3, 12.6), or its start-up (12.4) while
+/// [`Call::renegotiate`] asks for a new rate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Line {
     /// Nothing at all. Every turnaround has one of these in it.
@@ -64,6 +81,36 @@ pub enum Line {
     Fast(Speed),
     /// Listening for a high-speed burst.
     FastListen(Speed),
+    /// Annex F: on V.34's control channel with frames going out. The modem
+    /// sends what [`Call::next_control_bit`] gives, which between frames is
+    /// flags -- the channel is never quiet (F.3.1.2, F.3.1.4) -- and hands up
+    /// the far end's bits at the same time, since the channel is full duplex.
+    V34Control,
+    /// Annex F: the same channel with only flags going out, while this end
+    /// waits to hear something. To the modem it is exactly
+    /// [`V34Control`](Line::V34Control).
+    V34Listen,
+    /// Annex F, the source: binary ones on the control channel, until the
+    /// recipient has fallen silent for the page (F.3.2.3, F.3.4.5). They come
+    /// from [`Call::next_control_bit`] like anything else, which counts them,
+    /// and the far end falling silent is [`Call::set_far_silent`].
+    V34Ones,
+    /// Annex F, the source: off the control channel and onto the primary one,
+    /// with the page bits [`Call::next_fast_bit`] gives, after the modem's own
+    /// 70 ms, S, S-bar, PP and B1.
+    V34Primary,
+    /// Annex F, the recipient: silent, ready for the primary channel's
+    /// resynchronisation and the page, whose bits go to [`Call::fast_bits`]
+    /// (F.3.2.2, F.3.4.4).
+    V34PrimaryListen,
+}
+
+/// One frame of a call, and which end sent it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Exchanged {
+    pub frame: Frame,
+    /// Sent by this end rather than heard from the far one.
+    pub ours: bool,
 }
 
 /// How far the call has got.
@@ -90,6 +137,11 @@ pub enum Phase {
     AwaitingPostMessage,
     Acknowledging,
     AwaitingDisconnect,
+    // Annex F, either end, between the response that lets a page go and the
+    // page: the source sending ones until the recipient falls silent, and
+    // the recipient sending flags until it has heard forty of them (F.3.2.2,
+    // F.3.2.3, F.3.4.4, F.3.4.5).
+    TurningAround,
     // Phase E, and the two ends it can come to.
     Ending,
     Done,
@@ -116,9 +168,61 @@ impl Phase {
             Self::AwaitingPostMessage => "waiting for the end of the page",
             Self::Acknowledging => "acknowledging",
             Self::AwaitingDisconnect => "waiting for the far end to hang up",
+            Self::TurningAround => "turning the line round",
             Self::Ending => "hanging up",
             Self::Done => "done",
             Self::Failed => "failed",
+        }
+    }
+
+    /// Every phase, in the order the enum has them.
+    pub const ALL: [Phase; 21] = [
+        Self::Calling,
+        Self::Listening,
+        Self::Commanding,
+        Self::Training,
+        Self::AwaitingConfirm,
+        Self::Sending,
+        Self::EndingPage,
+        Self::AwaitingReceipt,
+        Self::Answering,
+        Self::Identifying,
+        Self::AwaitingCommand,
+        Self::CheckingTraining,
+        Self::Confirming,
+        Self::Receiving,
+        Self::AwaitingPostMessage,
+        Self::Acknowledging,
+        Self::AwaitingDisconnect,
+        Self::TurningAround,
+        Self::Ending,
+        Self::Done,
+        Self::Failed,
+    ];
+
+    /// The phase a name from [`Phase::name`] belongs to.
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|p| p.name() == name)
+    }
+
+    /// T.30's letter for it (figure 1): A the call set up, B the
+    /// pre-message procedure, C the page, D the post-message procedure and
+    /// E the release.
+    pub fn letter(self) -> char {
+        match self {
+            Self::Calling | Self::Answering => 'A',
+            Self::Listening
+            | Self::Commanding
+            | Self::Training
+            | Self::AwaitingConfirm
+            | Self::Identifying
+            | Self::AwaitingCommand
+            | Self::CheckingTraining
+            | Self::Confirming
+            | Self::TurningAround => 'B',
+            Self::Sending | Self::Receiving => 'C',
+            Self::EndingPage | Self::AwaitingReceipt | Self::AwaitingPostMessage | Self::Acknowledging => 'D',
+            Self::AwaitingDisconnect | Self::Ending | Self::Done | Self::Failed => 'E',
         }
     }
 
@@ -126,6 +230,20 @@ impl Phase {
     pub fn is_over(self) -> bool {
         matches!(self, Self::Done | Self::Failed)
     }
+}
+
+/// How far through an ECM page the sending end is: the frames of the blocks
+/// before this one, and `burst` of this one's, out of all the page's frames.
+///
+/// By frames and not by blocks, because the last block is seldom full: a
+/// page of two and a bit blocks counted as three equal thirds said 50 % half
+/// way through the second block, with nearly three quarters of the page
+/// gone -- the far end's picture well ahead of this end's.
+pub fn ecm_progress(frames: usize, block: usize, burst: f64) -> f64 {
+    let start = (block * ecm::BLOCK_FRAMES).min(frames);
+    let end = (start + ecm::BLOCK_FRAMES).min(frames);
+    let done = start as f64 + burst.clamp(0.0, 1.0) * (end - start) as f64;
+    (done / frames.max(1) as f64).min(1.0)
 }
 
 /// T1: how long to keep trying in phase B before giving up (5.3.3.1).
@@ -210,6 +328,11 @@ const HOLD_FOR_THE_FAR_END: f64 = 6.0;
 /// up on that too.
 const T5_SECONDS: f64 = 60.0;
 
+/// Times a page the far end answered with RTN is sent again before it is
+/// given up on. T.30 leaves the number to the sender; two more tries is what
+/// 5.4.2 allows a command, and no more.
+const PAGE_RESENDS: u8 = 2;
+
 /// How many of a training check's bits have to be zeros for the rate to be
 /// accepted, and how many in a row mark where it starts.
 ///
@@ -226,10 +349,12 @@ const T5_SECONDS: f64 = 60.0;
 const TCF_ZEROS_WANTED: f64 = 0.95;
 const TCF_STARTS_AFTER: usize = 32;
 
-/// The modulations this modem can carry a page with.
+/// The modulations a call offers and will carry a page with, unless whoever
+/// drives it says it has pumps for more ([`Call::set_available`]).
 ///
-/// V.17 is not among them yet. What goes in a DIS is this same fact in the
-/// form Table 2 wants it.
+/// What goes in a DIS is this same fact in the form Table 2 wants it. V.17
+/// is left out here, and put in by the modem crate's fax call, which has a
+/// V.17 pump to put behind it.
 pub const OUR_MODULATIONS: [Modulation; 2] = [Modulation::V27ter, Modulation::V29];
 
 /// Which post-message command goes out next under error correction mode.
@@ -271,8 +396,12 @@ pub struct Call {
     /// The far end's NSF, if it sent one: a T.35 country code and whatever
     /// its maker put after it.
     pub non_standard: Option<Vec<u8>>,
-    /// Every frame either end sent, for the log.
+    /// Every frame the far end sent, for the log.
     heard: Vec<Message>,
+    /// Every frame either end sent, in order, with which end sent it: what a
+    /// window needs to say how a call ended -- whether the last page was
+    /// confirmed, which is a frame the far end sends, or refused.
+    exchange: Vec<Exchanged>,
     /// This end's own identification, sent as a TSI or a CSI.
     identification: String,
 
@@ -285,6 +414,8 @@ pub struct Call {
     /// The modulations this end is willing to use, which is what goes in its
     /// DIS and what it will choose from when it sends.
     offer: Vec<Modulation>,
+    /// The modulations there are pumps for, which an offer is kept to.
+    available: Vec<Modulation>,
     /// The minimum scan line time the receiving end asked for, as the three
     /// bits of its DIS.
     scan_line_field: u8,
@@ -296,6 +427,9 @@ pub struct Call {
     /// using it.
     error_correction_offered: bool,
     ecm: bool,
+    /// Whether this end offers JBIG, and will send it to a far end that
+    /// offers it too.
+    jbig_offered: bool,
     /// Error correction mode, sending: the page cut into frames, the block of
     /// them in hand, the frames of it asked for again and how many times, and
     /// the page's number in the call.
@@ -368,6 +502,33 @@ pub struct Call {
     /// before the call is a lost cause, and a first attempt that goes
     /// unanswered is the ordinary way a fax call starts on a bad line.
     attempts: u8,
+    /// Times the far end has answered the page in hand with RTN.
+    refused: u8,
+
+    /// Whether this end offers V.8, which its clause 5 DIS says with bit 6
+    /// (6.1.3).
+    v8_capable: bool,
+    /// Whether this is a call in T.30 Annex F: V.8 agreed V.34 half-duplex,
+    /// and everything from phase B on goes over its two channels.
+    v34: bool,
+    /// Annex F: what the far end's control channel is doing, bit by bit.
+    far: annex_f::FarEnd,
+    /// Annex F: whether the modem says the far end has fallen silent on the
+    /// control channel.
+    far_silent: bool,
+    /// Annex F: ones handed to the control channel since the source began
+    /// turning the line round.
+    ones_sent: usize,
+    /// Annex F: the burst of frames last queued, and whether any of it has
+    /// gone, so that one a resynchronisation cut into can be sent whole.
+    burst: Vec<Message>,
+    burst_started: bool,
+    /// Annex F: whether the next start of the control channel should be a
+    /// start-up with a new rate rather than a resynchronisation, and whether
+    /// the block in hand has had one already.
+    new_rate: bool,
+    renegotiated: bool,
+
     /// Why the call ended, when it ended badly.
     pub trouble: Option<String>,
 }
@@ -413,16 +574,19 @@ impl Call {
             capability_field: None,
             non_standard: None,
             heard: Vec::new(),
+            exchange: Vec::new(),
             identification: identification.to_owned(),
             modulation: Modulation::V27ter,
             rate: 4800,
             fallback: Vec::new(),
             offer: OUR_MODULATIONS.to_vec(),
+            available: OUR_MODULATIONS.to_vec(),
             scan_line_field: 0b111,
             resolution: if fine { Resolution::Fine } else { Resolution::Standard },
             coding: Coding::ModifiedHuffman,
             error_correction_offered: true,
             ecm: false,
+            jbig_offered: true,
             ecm_frames: Vec::new(),
             ecm_block: 0,
             ecm_resend: Vec::new(),
@@ -456,6 +620,16 @@ impl Call {
             kept: false,
             accepted: false,
             attempts: 0,
+            refused: 0,
+            v8_capable: false,
+            v34: false,
+            far: annex_f::FarEnd::default(),
+            far_silent: false,
+            ones_sent: 0,
+            burst: Vec::new(),
+            burst_started: false,
+            new_rate: false,
+            renegotiated: false,
             trouble: None,
         }
     }
@@ -503,6 +677,16 @@ impl Call {
         self.ecm
     }
 
+    /// Offer JBIG, T.85's coding, or not: in the DIS when answering, and as
+    /// the coding a page goes in when sending to a far end that offers it.
+    ///
+    /// Offered by default. It only ever goes under error correction mode, so
+    /// turning that off turns this off with it; turning this off leaves MMR,
+    /// which is what a page went in before.
+    pub fn set_jbig(&mut self, on: bool) {
+        self.jbig_offered = on;
+    }
+
     /// The coding the page goes in, once a DCS has settled it.
     pub fn coding(&self) -> Coding {
         self.coding
@@ -517,12 +701,27 @@ impl Call {
         let mut kept: Vec<Modulation> = offer
             .iter()
             .copied()
-            .filter(|m| OUR_MODULATIONS.contains(m))
+            .filter(|m| self.available.contains(m))
             .collect();
         if kept.is_empty() {
             kept.push(Modulation::V27ter);
         }
         self.offer = kept;
+    }
+
+    /// Say which modulations there are pumps for: what
+    /// [`set_offer`](Self::set_offer) keeps from here on. [`OUR_MODULATIONS`]
+    /// until this is called, and the offer itself is left as it is.
+    pub fn set_available(&mut self, available: &[Modulation]) {
+        self.available = available.to_vec();
+    }
+
+    /// Say whether this end offers V.8, which is the join's to know: the
+    /// answering end's clause 5 DIS then carries bit 6 (6.1.3), the
+    /// invitation a caller that can may take up with CI (6.1.4). Off, as it
+    /// is unless told, the DIS is the one every call before V.8 sent.
+    pub fn set_v8_capable(&mut self, on: bool) {
+        self.v8_capable = on;
     }
 
     pub fn resolution(&self) -> Resolution {
@@ -532,6 +731,11 @@ impl Call {
     /// Frames seen since this was last asked, for a log.
     pub fn take_heard(&mut self) -> Vec<Message> {
         std::mem::take(&mut self.heard)
+    }
+
+    /// Frames either end has sent since this was last asked, in order.
+    pub fn take_exchange(&mut self) -> Vec<Exchanged> {
+        std::mem::take(&mut self.exchange)
     }
 
     /// How far through the page the call is, as a fraction.
@@ -547,8 +751,7 @@ impl Call {
                 }
                 let burst = self.fast_at as f64 / self.fast_out.len() as f64;
                 if self.ecm && !self.ecm_frames.is_empty() {
-                    // Blocks done, and how far through the one on the line.
-                    return Some((self.ecm_block as f64 + burst) / self.ecm_blocks() as f64);
+                    return Some(ecm_progress(self.ecm_frames.len(), self.ecm_block, burst));
                 }
                 Some(burst)
             }
@@ -606,6 +809,9 @@ impl Call {
 
     /// What the line should be doing at this instant.
     pub fn line(&self) -> Line {
+        if self.v34 {
+            return self.annex_f_line();
+        }
         if self.pause > 0.0 {
             return Line::Quiet;
         }
@@ -617,7 +823,8 @@ impl Call {
             | Phase::AwaitingReceipt
             | Phase::AwaitingCommand
             | Phase::AwaitingPostMessage
-            | Phase::AwaitingDisconnect => Line::Listen,
+            | Phase::AwaitingDisconnect
+            | Phase::TurningAround => Line::Listen,
             Phase::Commanding
             | Phase::Identifying
             | Phase::Confirming
@@ -645,7 +852,15 @@ impl Call {
     }
 
     /// The next bit for the control channel, if any.
+    ///
+    /// In an Annex F call there always is one until the call is over: flags
+    /// when the procedure has nothing else to say, and ones while the source
+    /// is turning the line round. `None` there means the disconnect has gone
+    /// and there is nothing more.
     pub fn next_control_bit(&mut self) -> Option<bool> {
+        if self.v34 {
+            return self.next_annex_f_bit();
+        }
         self.sender.next_bit()
     }
 
@@ -658,6 +873,9 @@ impl Call {
 
     /// A bit recovered from the control channel.
     pub fn control_bit(&mut self, bit: bool) {
+        if self.v34 {
+            self.hear_annex_f(bit);
+        }
         if let Some(message) = self.reader.feed(bit) {
             self.frame_arrived(message);
         }
@@ -725,6 +943,10 @@ impl Call {
     pub fn tick(&mut self, idle: bool) {
         self.elapsed += self.step;
         if self.phase.is_over() {
+            return;
+        }
+        if self.v34 {
+            self.tick_annex_f(idle);
             return;
         }
         if self.pause > 0.0 {
@@ -824,14 +1046,45 @@ impl Call {
                     self.held = 0.0;
                 }
             }
-            Phase::Done | Phase::Failed => {}
+            // Annex F's alone, and never here.
+            Phase::TurningAround | Phase::Done | Phase::Failed => {}
         }
+    }
+
+    /// Begin phase B again from this end's DIS, after a V.8 exchange cut into
+    /// it.
+    ///
+    /// For the answering end only. 6.1.6: "If the CM/JM exchange indicates
+    /// that the modulation system defined in ITU-T Rec. V.34 is not available
+    /// in both the calling and called terminals, then the procedures defined
+    /// in clause 5 shall be followed" -- and for the end that answered, clause
+    /// 5 opens with its DIS. Whatever was going out when the far end's call
+    /// menu arrived was cut short by the joint menu, so it is dropped rather
+    /// than finished, and whatever came in meanwhile was V.8 rather than
+    /// frames. The clocks of phase B start from here.
+    pub fn restart_identifying(&mut self) {
+        debug_assert_eq!(self.role, Role::Answerer, "only the answering end sends a DIS");
+        self.sender = Sender::new();
+        self.reader = Reader::new();
+        self.attempts = 0;
+        self.held = 0.0;
+        self.phase_b_since = self.elapsed;
+        self.pause_then(Phase::Identifying);
     }
 
     // ---- entering a phase -------------------------------------------------
 
     /// Sit out the settling time, then take up `next`.
+    ///
+    /// Not in an Annex F call, which has none to sit out. Its control channel
+    /// is up at both ends at once, and the silences either side of the
+    /// primary channel -- 70 ms each way (12.5.1, 12.6.1/V.34) -- are the
+    /// modem's, in its own turnarounds.
     fn pause_then(&mut self, next: Phase) {
+        if self.v34 {
+            self.enter(next);
+            return;
+        }
         self.pause = TURNAROUND_SECONDS;
         self.after_pause = Some(next);
         self.phase = next;
@@ -844,6 +1097,7 @@ impl Call {
             Phase::AwaitingCommand | Phase::AwaitingPostMessage => T2_SECONDS,
             Phase::AwaitingDisconnect => T4_SECONDS,
             Phase::CheckingTraining | Phase::Receiving => T2_SECONDS,
+            Phase::TurningAround => T2_SECONDS,
             _ => T1_SECONDS,
         };
         match phase {
@@ -879,6 +1133,7 @@ impl Call {
                 self.fast_up = 0.0;
                 self.fast_down = 0.0;
             }
+            Phase::TurningAround => self.begin_turning_around(),
             _ => {}
         }
     }
@@ -943,6 +1198,10 @@ impl Call {
                                 self.pause_then(Phase::Commanding);
                             }
                         }
+                        // Annex F has no training check to have failed and no
+                        // rate to drop: a DIS again is a far end that has not
+                        // heard the command, so it hears it again.
+                        Phase::AwaitingConfirm if self.v34 => self.pause_then(Phase::Commanding),
                         // A DIS again, once the command and training check
                         // have already gone, is a far end that could not
                         // train: 6.2.6 would have it answer with FTT, but
@@ -960,7 +1219,11 @@ impl Call {
             Frame::Dcs => {
                 if self.role == Role::Answerer {
                     self.capability_field = Some(message.fif.clone());
-                    if let Some((modulation, rate)) = t30::command_rate(&message.fif) {
+                    // Under Annex F bits 11 to 14 are zero (Note 33), and the
+                    // rate is the modem's, from its MPh exchange.
+                    if !self.v34
+                        && let Some((modulation, rate)) = t30::command_rate(&message.fif)
+                    {
                         self.modulation = modulation;
                         self.rate = rate;
                     }
@@ -969,11 +1232,17 @@ impl Call {
                     } else {
                         Resolution::Standard
                     };
-                    self.ecm = t30::bit(&message.fif, 27);
-                    // Bit 31 first: a sender that sets bit 16 beside it is
-                    // still sending MMR. And only with bit 27, as Note 17 has
-                    // it -- without error correction there is no MMR page.
-                    self.coding = if self.ecm && t30::bit(&message.fif, 31) {
+                    // Error correction is the only way a page goes over V.34
+                    // (F.3), whatever a far end forgot to say.
+                    self.ecm = self.v34 || t30::bit(&message.fif, 27);
+                    // The newest coding bit first: a sender that sets bit 16
+                    // beside 31 is still sending MMR, and one that sets 31
+                    // beside 78 is sending JBIG. And only with bit 27, as Note
+                    // 17 has it -- without error correction there is no MMR or
+                    // JBIG page.
+                    self.coding = if self.ecm && t30::commands_jbig(&message.fif) {
+                        Coding::Jbig
+                    } else if self.ecm && t30::bit(&message.fif, 31) {
                         Coding::Mmr
                     } else if t30::bit(&message.fif, 16) {
                         Coding::ModifiedRead
@@ -984,7 +1253,15 @@ impl Call {
                     self.ecm_octets.clear();
                     self.ecm_confirmed = None;
                     self.answered = None;
-                    self.pause_then(Phase::CheckingTraining);
+                    if self.v34 {
+                        // F.3.2.1: "The TCF signal is not used ... The
+                        // recipient terminal shall respond to a DCS with a
+                        // CFR", and the FTT that would refuse one is gone.
+                        self.accepted = true;
+                        self.pause_then(Phase::Confirming);
+                    } else {
+                        self.pause_then(Phase::CheckingTraining);
+                    }
                 }
             }
             Frame::Cfr => {
@@ -994,12 +1271,15 @@ impl Call {
                         // rather than holding the line.
                         self.pause_then(Phase::Ending);
                     } else {
-                        self.pause_then(Phase::Sending);
+                        self.on_to_the_page();
                     }
                 }
             }
             Frame::Ftt => {
-                if self.phase == Phase::AwaitingConfirm {
+                // F.3.2.1: "The FTT response shall not be used", and under
+                // Annex F there is no rate here to drop. One that comes
+                // anyway leaves the command to be said again at T4.
+                if self.phase == Phase::AwaitingConfirm && !self.v34 {
                     self.step_down();
                 }
             }
@@ -1011,6 +1291,7 @@ impl Call {
                         self.page = Some(next);
                         self.sheet += 1;
                         self.attempts = 0;
+                        self.refused = 0;
                         // 5.3.6.1.6: after MCF to a multi-page signal the
                         // next page follows at once. After RTP it follows
                         // "after retransmission of training and CFR"
@@ -1036,8 +1317,10 @@ impl Call {
                     self.frames_wanted_again(&message.fif);
                 }
             }
+            // "CTR/CTC frames shall not be used in V.34 ECM protocol" (F.3.4.5
+            // Note 1), and this end never sends the CTC one would answer.
             Frame::Ctr => {
-                if self.phase == Phase::AwaitingReceipt && self.ecm {
+                if self.phase == Phase::AwaitingReceipt && self.ecm && !self.v34 {
                     self.ecm_command = EcmCommand::Pps;
                     self.attempts = 0;
                     self.pause_then(Phase::Sending);
@@ -1055,10 +1338,16 @@ impl Call {
             // The far end listens for these on the control channel even while
             // it is waiting for the page carrier: a sender whose partial page
             // signal went unanswered sends it again, and it has to be heard.
+            // Under Annex F the recipient is still on the control channel
+            // while it turns the line round, and hears a command again there:
+            // its answer was lost, and the source's T4 ran out (Figure F.5-7).
             Frame::Pps => {
                 if self.ecm {
                     match self.phase {
                         Phase::Receiving | Phase::AwaitingPostMessage => {
+                            self.partial_page_signal(&message.fif);
+                        }
+                        Phase::TurningAround if self.role == Role::Answerer => {
                             self.partial_page_signal(&message.fif);
                         }
                         // The confirmation of a page's last block was lost,
@@ -1072,12 +1361,18 @@ impl Call {
                 }
             }
             Frame::Eor => {
-                if self.ecm && matches!(self.phase, Phase::Receiving | Phase::AwaitingPostMessage) {
+                let turning = self.phase == Phase::TurningAround && self.role == Role::Answerer;
+                if self.ecm
+                    && (turning || matches!(self.phase, Phase::Receiving | Phase::AwaitingPostMessage))
+                {
                     self.end_of_retransmission(&message.fif);
                 }
             }
             Frame::Ctc => {
-                if self.ecm && matches!(self.phase, Phase::Receiving | Phase::AwaitingPostMessage) {
+                if self.ecm
+                    && !self.v34
+                    && matches!(self.phase, Phase::Receiving | Phase::AwaitingPostMessage)
+                {
                     // A.4.1: the FIF is bits 1 to 16 of a DCS, and "the
                     // receiving terminal uses only bits 11-14".
                     if let Some((modulation, rate)) = t30::command_rate(&message.fif) {
@@ -1089,8 +1384,7 @@ impl Call {
             }
             Frame::Rtn => {
                 if self.phase == Phase::AwaitingReceipt {
-                    self.trouble = Some("the far end could not read the page".to_owned());
-                    self.pause_then(Phase::Ending);
+                    self.page_refused();
                 }
             }
             Frame::Eop | Frame::Mps | Frame::Eom => {
@@ -1125,6 +1419,7 @@ impl Call {
                 }
             }
         }
+        self.exchange.push(Exchanged { frame: message.frame, ours: false });
         self.heard.push(message);
     }
 
@@ -1138,6 +1433,9 @@ impl Call {
                 // not heard is not a line that cannot carry the rate.
                 if self.attempts < Self::ATTEMPTS {
                     self.pause_then(Phase::Commanding);
+                } else if self.v34 {
+                    // With no ladder under it: the rate is the modem's.
+                    self.bow_out("the far end never confirmed the command");
                 } else {
                     self.attempts = 0;
                     self.step_down();
@@ -1217,7 +1515,16 @@ impl Call {
     }
 
     /// Pick the fastest speed both ends have (5.3.6.2.2).
+    ///
+    /// Under Annex F there is no speed here to pick: the modem's MPh exchange
+    /// settled the primary channel's rate before the DIS was sent, and a DCS
+    /// names none (Note 33 of Table 2). Only the terms of the page are left.
     fn choose_rate(&mut self) -> bool {
+        if self.v34 {
+            self.attempts = 0;
+            self.choose_terms();
+            return true;
+        }
         let mut ladder = self.ladder();
         if ladder.is_empty() {
             self.bow_out("nothing in common with the far end");
@@ -1228,6 +1535,12 @@ impl Call {
         self.rate = first.bits_per_second;
         self.fallback = ladder;
         self.attempts = 0;
+        self.choose_terms();
+        true
+    }
+
+    /// The terms a page goes on, from what the far end said it can do.
+    fn choose_terms(&mut self) {
         // The page's own resolution if the far end can print it, and standard
         // if not. And the two-dimensional coding whenever the far end reads
         // it, since on anything with lines in it the page comes out smaller.
@@ -1238,11 +1551,15 @@ impl Call {
             } else {
                 Resolution::Standard
             };
-            self.ecm = self.error_correction_offered && caps.error_correction;
+            // Mandatory over V.34, whatever either end says (F.3, 6.1).
+            self.ecm = self.v34 || (self.error_correction_offered && caps.error_correction);
             // The smallest coding the far end reads, since the page is the
-            // same page in any of them: MMR where error correction allows it,
-            // Modified READ, and Modified Huffman, which every machine reads.
-            self.coding = if self.ecm && caps.t6_coding {
+            // same page in any of them: JBIG and then MMR where error
+            // correction allows them, Modified READ, and Modified Huffman,
+            // which every machine reads.
+            self.coding = if self.ecm && self.jbig_offered && caps.jbig {
+                Coding::Jbig
+            } else if self.ecm && caps.t6_coding {
                 Coding::Mmr
             } else if caps.two_dimensional {
                 Coding::ModifiedRead
@@ -1250,7 +1567,47 @@ impl Call {
                 Coding::ModifiedHuffman
             };
         }
-        true
+    }
+
+    /// The far end could not read the page (RTN), which is not the end of the
+    /// call.
+    ///
+    /// 5.3.6.1.7: RTN says the page was not received well, "however, further
+    /// receptions may be possible, provided training is retransmitted", and
+    /// Figure 5-2 takes the sender back through the command and the training
+    /// check -- after an EOP, by way of "capable re-xmit?", and this end still
+    /// has the page. It used to disconnect at the first one. Without error
+    /// correction RTN is the only thing a machine can say about a page a slip
+    /// on the line spoiled after its training check went through clean, so
+    /// that was a failed call for what a second try usually mends.
+    ///
+    /// So the page goes again, a rung down the ladder where there is one --
+    /// the rate the check passed at did not carry the page -- and at the same
+    /// rate where there is not. Twice; after that the far end is not going to
+    /// read this page, and the next one, if there is one, is tried instead.
+    fn page_refused(&mut self) {
+        if self.ecm || self.page.is_none() {
+            self.bow_out("the far end could not read the page");
+            return;
+        }
+        let sheet = self.sheet;
+        if self.refused < PAGE_RESENDS {
+            self.refused += 1;
+        } else if let Some(next) = self.more.pop_front() {
+            self.trouble = Some(format!("the far end could not read page {sheet}"));
+            self.page = Some(next);
+            self.sheet += 1;
+            self.refused = 0;
+        } else {
+            self.bow_out(&format!("the far end could not read page {sheet}"));
+            return;
+        }
+        self.attempts = 0;
+        if self.fallback.is_empty() {
+            self.pause_then(Phase::Commanding);
+        } else {
+            self.step_down();
+        }
     }
 
     /// Try the next speed down after a failure to train (6.2.7).
@@ -1271,15 +1628,42 @@ impl Call {
         let tsi = Message::new(Frame::Tsi, true)
             .and_more()
             .with_fif(&t30::identification_field(&self.identification));
-        let dcs = Message::new(Frame::Dcs, true).with_fif(&t30::command(Command {
+        let command = Command {
             modulation: self.modulation,
             bits_per_second: self.rate,
             fine: self.resolution == Resolution::Fine,
             scan_line_field: self.scan_line_field,
             coding: self.coding,
+            optional_l0: self.jbig_stripe() != jbig::BASIC_STRIPE,
             error_correction: self.ecm,
-        }));
-        self.sender.send(&[tsi, dcs]);
+        };
+        let fif = if self.v34 {
+            t30::v34_command(command)
+        } else {
+            t30::command(command)
+        };
+        let dcs = Message::new(Frame::Dcs, true).with_fif(&fif);
+        self.queue(&[tsi, dcs]);
+    }
+
+    /// Lines to a stripe of a JBIG page.
+    ///
+    /// T.85's basic 128 (Table 1, Note 4), unless the far end said it takes
+    /// any (bit 79). Then about the eight millimetres of paper T.82 suggests
+    /// (Intro. 2): 32 lines at 3.85 lines/mm and 64 at 7.7, some 35 stripes to
+    /// an A4 page. Annex C looks for a better place for the AT pixel once a
+    /// stripe, and calls that reasonable "if the number of stripes per image
+    /// is not appreciably smaller than the suggested number, 35" (C.2); at 128
+    /// an A4 page has 9 or 18, and a picture on it waits a stripe of three
+    /// centimetres at standard resolution before its grain is found. The cost
+    /// is a flush and an ESC SDNORM a stripe, a handful of bytes.
+    fn jbig_stripe(&self) -> u32 {
+        let optional = self.capabilities.as_ref().is_some_and(|caps| caps.jbig_optional_l0);
+        match (optional, self.resolution) {
+            (false, _) => jbig::BASIC_STRIPE,
+            (true, Resolution::Standard) => 32,
+            (true, Resolution::Fine) => 64,
+        }
     }
 
     fn send_training_check(&mut self) {
@@ -1321,7 +1705,16 @@ impl Call {
             }
             _ => &page.lines,
         };
-        self.coding.encode(lines, self.resolution, min_bits)
+        match self.coding {
+            Coding::Jbig => coding::jbig_bits(
+                lines,
+                jbig::Options {
+                    stripe: self.jbig_stripe(),
+                    ..jbig::Options::FAX
+                },
+            ),
+            coding => coding.encode(lines, self.resolution, min_bits),
+        }
     }
 
     fn send_page(&mut self) {
@@ -1370,7 +1763,7 @@ impl Call {
             // procedure after the last (5.3.6.1.6). The pages go at the terms
             // already agreed, so there is never an end of message.
             let frame = if more { Frame::Mps } else { Frame::Eop };
-            self.sender.send(&[Message::new(frame, true)]);
+            self.queue(&[Message::new(frame, true)]);
             return;
         }
         let frames = self.ecm_block_frames().len();
@@ -1395,13 +1788,14 @@ impl Call {
                     fine: self.resolution == Resolution::Fine,
                     scan_line_field: self.scan_line_field,
                     coding: self.coding,
+                    optional_l0: self.jbig_stripe() != jbig::BASIC_STRIPE,
                     error_correction: true,
                 });
                 Message::new(Frame::Ctc, true).with_fif(&dcs[..2])
             }
             EcmCommand::Rr => Message::new(Frame::Rr, true),
         };
-        self.sender.send(&[message]);
+        self.queue(&[message]);
     }
 
     /// The block in hand has arrived, or been given up on: on to the next,
@@ -1412,8 +1806,9 @@ impl Call {
         self.ecm_pprs = 0;
         self.ecm_command = EcmCommand::Pps;
         self.attempts = 0;
+        self.renegotiated = false;
         if self.ecm_block < self.ecm_blocks() {
-            self.pause_then(Phase::Sending);
+            self.on_to_the_page();
         } else if let Some(next) = self.more.pop_front() {
             // A new page is a new page count in the PPS, and its own frames
             // from its own first block.
@@ -1422,9 +1817,20 @@ impl Call {
             self.ecm_frames.clear();
             self.ecm_block = 0;
             self.ecm_page = self.ecm_page.wrapping_add(1);
-            self.pause_then(Phase::Sending);
+            self.on_to_the_page();
         } else {
             self.pause_then(Phase::Ending);
+        }
+    }
+
+    /// On to the page, now that the far end has let it go: straight onto the
+    /// high-speed carrier, or under Annex F, the ones that turn the line round
+    /// first (F.3.2.3, F.3.4.5).
+    fn on_to_the_page(&mut self) {
+        if self.v34 {
+            self.enter(Phase::TurningAround);
+        } else {
+            self.pause_then(Phase::Sending);
         }
     }
 
@@ -1441,7 +1847,9 @@ impl Call {
         self.ecm_pprs += 1;
         self.attempts = 0;
         if self.ecm_pprs < ecm::PPRS_BEFORE_GIVING_WAY {
-            self.pause_then(Phase::Sending);
+            self.on_to_the_page();
+        } else if self.v34 {
+            self.fourth_ppr();
         } else if !self.fallback.is_empty() {
             // "The modem speed may fall back or continue at the same speed in
             // accordance with the decision of the transmitting terminal." A
@@ -1466,18 +1874,28 @@ impl Call {
         let csi = Message::new(Frame::Csi, false)
             .and_more()
             .with_fif(&t30::identification_field(&self.identification));
-        let dis = Message::new(Frame::Dis, false).with_fif(&t30::our_capabilities(&self.offer, self.error_correction_offered));
-        self.sender.send(&[csi, dis]);
+        let fif = if self.v34 {
+            t30::v34_capabilities(&self.offer, self.jbig_offered)
+        } else {
+            let mut fif =
+                t30::our_capabilities(&self.offer, self.error_correction_offered, self.jbig_offered);
+            if self.v8_capable {
+                t30::say_v8_capable(&mut fif);
+            }
+            fif
+        };
+        let dis = Message::new(Frame::Dis, false).with_fif(&fif);
+        self.queue(&[csi, dis]);
     }
 
     fn send_confirmation(&mut self) {
         let frame = if self.accepted { Frame::Cfr } else { Frame::Ftt };
-        self.sender.send(&[Message::new(frame, false)]);
+        self.queue(&[Message::new(frame, false)]);
     }
 
     fn send_acknowledgement(&mut self) {
         if let Some(message) = self.response.take() {
-            self.sender.send(&[message]);
+            self.queue(&[message]);
         }
     }
 
@@ -1711,15 +2129,32 @@ impl Call {
     // ---- both -------------------------------------------------------------
 
     fn send_disconnect(&mut self) {
-        self.sender
-            .send(&[Message::new(Frame::Dcn, self.role == Role::Caller)]);
+        self.queue(&[Message::new(Frame::Dcn, self.role == Role::Caller)]);
+    }
+
+    /// Queue a burst of frames on the control channel: a second of flags
+    /// ahead of it on V.21, and F.3.1.4's two, and a few, on V.34's.
+    fn queue(&mut self, messages: &[Message]) {
+        self.exchange
+            .extend(messages.iter().map(|m| Exchanged { frame: m.frame, ours: true }));
+        if self.v34 {
+            self.sender.send_flagged(messages, crate::frames::V34_FLAGS);
+            self.burst = messages.to_vec();
+            self.burst_started = false;
+        } else {
+            self.sender.send(messages);
+        }
     }
 
     /// A burst of frames has finished leaving the line.
     fn control_burst_ended(&mut self) {
         match self.phase {
+            // F.3.2.1: no TCF under Annex F. The source sends flags and waits.
+            Phase::Commanding if self.v34 => self.enter(Phase::AwaitingConfirm),
             Phase::Commanding => self.pause_then(Phase::Training),
             Phase::Identifying => self.enter(Phase::AwaitingCommand),
+            // F.3.2.2: after CFR, flags until the source's ones.
+            Phase::Confirming if self.v34 => self.enter(Phase::TurningAround),
             Phase::Confirming => {
                 if self.accepted {
                     self.pause_then(Phase::Receiving);
@@ -1729,12 +2164,20 @@ impl Call {
                 }
             }
             Phase::Acknowledging => match self.after_answering {
+                // F.3.4.4: after the last response between messages, flags
+                // until the source's ones, and only then silence.
+                Phase::Receiving if self.v34 => self.enter(Phase::TurningAround),
                 // The sender turns its carrier round and trains; the settling
                 // gap is this end's half of that.
                 Phase::Receiving => self.pause_then(Phase::Receiving),
                 next => self.enter(next),
             },
-            Phase::EndingPage => self.enter(Phase::AwaitingReceipt),
+            Phase::EndingPage => {
+                // The control channel is back, so whatever start of it a new
+                // rate was wanted at has been and gone.
+                self.new_rate = false;
+                self.enter(Phase::AwaitingReceipt);
+            }
             _ => {}
         }
     }
@@ -1753,6 +2196,21 @@ impl Call {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ecm_progress_goes_by_frames_so_a_short_last_block_is_short() {
+        let full = ecm::BLOCK_FRAMES;
+        // Two full blocks and ten frames.
+        let frames = 2 * full + 10;
+        assert_eq!(ecm_progress(frames, 0, 0.0), 0.0);
+        let middle = ecm_progress(frames, 1, 0.5);
+        let want = 1.5 * full as f64 / frames as f64;
+        assert!((middle - want).abs() < 1e-9, "{middle} against {want}");
+        assert!(middle > 0.7, "half way through the second block is most of the page");
+        assert!((ecm_progress(frames, 2, 1.0) - 1.0).abs() < 1e-9);
+        // One block alone is the burst itself.
+        assert!((ecm_progress(40, 0, 0.25) - 0.25).abs() < 1e-9);
+    }
+
     use super::*;
     use crate::frames;
     use crate::t30::Frame;
@@ -2066,17 +2524,46 @@ mod tests {
     }
 
     #[test]
+    fn the_dis_says_v8_only_when_this_end_offers_it() {
+        // 6.1.3: an answering terminal that offers V.8 and heard no call menu
+        // sends its clause 5 DIS with bit 6 set, which is 6.1.4's invitation
+        // to a caller that can; one that does not offer V.8 sends the DIS
+        // every call before it sent, bit for bit.
+        let dis_of = |v8: bool| {
+            let mut call = Call::answer(FS, "1");
+            call.set_v8_capable(v8);
+            call.send_identity();
+            let mut reader = frames::Reader::new();
+            let mut dis = None;
+            while let Some(bit) = call.sender.next_bit() {
+                if let Some(m) = reader.feed(bit)
+                    && m.frame == Frame::Dis
+                {
+                    dis = Some(m.fif);
+                }
+            }
+            dis.expect("no DIS went out")
+        };
+        let (with, without) = (dis_of(true), dis_of(false));
+        assert!(t30::bit(&with, 6), "bit 6 clear in the DIS of an end that offers V.8");
+        assert!(!t30::bit(&without, 6), "bit 6 set in the DIS of an end that does not");
+        let mut cleared = with.clone();
+        t30::set_bit(&mut cleared, 6, false);
+        assert_eq!(cleared, without, "bit 6 was not the only difference");
+    }
+
+    #[test]
     fn a_fine_page_is_commanded_as_fine() {
         // It was not: the end that dialled never took its resolution from the
         // page, so every page went out saying standard, and a fine page arrived
         // at twice its height.
-        let dcs = command_for(Some(fine_page(10)), &t30::our_capabilities(&OUR_MODULATIONS, true));
+        let dcs = command_for(Some(fine_page(10)), &t30::our_capabilities(&OUR_MODULATIONS, true, true));
         assert!(t30::bit(&dcs, 15), "a fine page was commanded as standard");
     }
 
     #[test]
     fn a_fine_page_to_a_standard_machine_is_sent_standard_and_halved() {
-        let mut fif = t30::our_capabilities(&OUR_MODULATIONS, true);
+        let mut fif = t30::our_capabilities(&OUR_MODULATIONS, true, true);
         t30::set_bit(&mut fif, 15, false);
         let page = fine_page(10);
         let dcs = command_for(Some(page.clone()), &fif);
@@ -2092,34 +2579,92 @@ mod tests {
 
     #[test]
     fn the_page_goes_in_the_smallest_coding_the_far_end_reads() {
-        // Bit 16 for Modified READ, bit 31 for MMR, and neither for Modified
-        // Huffman -- never both, since a page is in one coding.
+        // Bit 16 for Modified READ, bit 31 for MMR, bit 78 for JBIG, and none
+        // of them for Modified Huffman -- never two, since a page is in one
+        // coding. The last is bit 27, error correction.
         let coding_of = |dis: &[u8]| {
             let dcs = command_for(Some(fine_page(10)), dis);
-            (t30::bit(&dcs, 16), t30::bit(&dcs, 31), t30::bit(&dcs, 27))
+            [16, 31, 78, 27].map(|n| t30::bit(&dcs, n))
         };
-        // Another of these, with error correction: MMR.
-        let ours = t30::our_capabilities(&OUR_MODULATIONS, true);
-        assert_eq!(coding_of(&ours), (false, true, true));
-        // Without error correction T.4 4.3 rules MMR out, and Modified READ is
-        // next.
-        let plain = t30::our_capabilities(&OUR_MODULATIONS, false);
-        assert_eq!(coding_of(&plain), (true, false, false));
+        // Another of these, with error correction: JBIG.
+        let ours = t30::our_capabilities(&OUR_MODULATIONS, true, true);
+        assert_eq!(coding_of(&ours), [false, false, true, true]);
+        // One with error correction and not JBIG: MMR, which is what another
+        // of these got before it had JBIG to offer.
+        let older = t30::our_capabilities(&OUR_MODULATIONS, true, false);
+        assert_eq!(coding_of(&older), [false, true, false, true]);
+        // Without error correction T.4 4.3 and 4.4 rule both out, and Modified
+        // READ is next.
+        let plain = t30::our_capabilities(&OUR_MODULATIONS, false, true);
+        assert_eq!(coding_of(&plain), [true, false, false, false]);
         // A machine that says bit 31 without bit 27 has said nothing, as
-        // Note 9 has it.
+        // Note 9 has it, and bit 78 without it nothing either (Note 17).
         let mut odd = plain.clone();
-        t30::set_bit(&mut odd, 24, true);
+        t30::extend_to(&mut odd, 79);
         t30::set_bit(&mut odd, 31, true);
-        assert_eq!(coding_of(&odd), (true, false, false));
-        // The real machine's DIS, which offers neither.
-        assert_eq!(coding_of(&DIS), (false, false, false));
+        t30::set_bit(&mut odd, 78, true);
+        assert_eq!(coding_of(&odd), [true, false, false, false]);
+        // The real machine's DIS, which offers none of them.
+        assert_eq!(coding_of(&DIS), [false, false, false, false]);
     }
 
     #[test]
-    fn an_end_that_will_not_use_error_correction_does_not_send_mmr_either() {
+    fn an_end_that_will_not_send_jbig_sends_mmr() {
+        let mut call = Call::originate(FS, "1", Some(fine_page(10)));
+        call.set_jbig(false);
+        call.capabilities = Some(t30::capabilities(&t30::our_capabilities(&OUR_MODULATIONS, true, true)));
+        assert!(call.choose_rate());
+        assert!(call.error_correction());
+        assert_eq!(call.coding, Coding::Mmr);
+    }
+
+    #[test]
+    fn an_end_that_will_not_take_jbig_does_not_offer_it() {
+        let mut call = Call::answer(FS, "1");
+        call.set_jbig(false);
+        call.enter(Phase::Identifying);
+        let bits: Vec<bool> = std::iter::from_fn(|| call.next_control_bit()).collect();
+        let mut reader = Reader::new();
+        let dis = bits
+            .iter()
+            .filter_map(|b| reader.feed(*b))
+            .find(|m| m.frame == Frame::Dis)
+            .expect("no DIS");
+        let caps = t30::capabilities(&dis.fif);
+        assert!(caps.t6_coding && !caps.jbig, "{:02x?}", dis.fif);
+        assert_eq!(caps.octets, 4, "a DIS of four octets, as before JBIG");
+    }
+
+    #[test]
+    fn a_jbig_page_goes_in_basic_stripes_unless_the_far_end_takes_others() {
+        // Bit 79 in the far end's DIS says any L0; without it, 128.
+        let stripe_of = |dis: &[u8], page: Page| {
+            let dcs = command_for(Some(page.clone()), dis);
+            let mut call = Call::originate(FS, "1", Some(page));
+            call.frame_arrived(Message::new(Frame::Dis, false).with_fif(dis));
+            assert_eq!(call.coding, Coding::Jbig);
+            let octets = ecm::pack(&call.fast_out_page());
+            let bih: &[u8; jbig::Header::LEN] = octets[..jbig::Header::LEN].try_into().unwrap();
+            let (header, _) = jbig::Header::read(bih).unwrap();
+            (header.stripe, t30::bit(&dcs, 79))
+        };
+        let any = t30::our_capabilities(&OUR_MODULATIONS, true, true);
+        let mut basic = any.clone();
+        t30::set_bit(&mut basic, 79, false);
+        assert_eq!(stripe_of(&basic, fine_page(10)), (128, false));
+        assert_eq!(stripe_of(&any, fine_page(10)), (64, true), "eight millimetres at 7.7 lines/mm");
+        let standard = Page {
+            resolution: Resolution::Standard,
+            ..fine_page(10)
+        };
+        assert_eq!(stripe_of(&any, standard), (32, true), "eight millimetres at 3.85 lines/mm");
+    }
+
+    #[test]
+    fn an_end_that_will_not_use_error_correction_sends_neither_mmr_nor_jbig() {
         let mut call = Call::originate(FS, "1", Some(fine_page(10)));
         call.set_error_correction(false);
-        call.capabilities = Some(t30::capabilities(&t30::our_capabilities(&OUR_MODULATIONS, true)));
+        call.capabilities = Some(t30::capabilities(&t30::our_capabilities(&OUR_MODULATIONS, true, true)));
         assert!(call.choose_rate());
         assert!(!call.error_correction());
         assert_eq!(call.coding, Coding::ModifiedRead);
@@ -2135,6 +2680,14 @@ mod tests {
             (vec![16, 24, 27, 31], Coding::Mmr),
             // 31 without 27 is nothing.
             (vec![16, 24, 31], Coding::ModifiedRead),
+            // Bit 78, in a field extended to reach it, is JBIG; with 79 too,
+            // or with 31 beside it, still JBIG.
+            (vec![24, 27, 32, 40, 48, 56, 64, 72, 78], Coding::Jbig),
+            (vec![24, 27, 32, 40, 48, 56, 64, 72, 78, 79], Coding::Jbig),
+            (vec![24, 27, 31, 32, 40, 48, 56, 64, 72, 78], Coding::Jbig),
+            // Without 27, or in an octet the field never reached, it is not.
+            (vec![16, 24, 32, 40, 48, 56, 64, 72, 78], Coding::ModifiedRead),
+            (vec![24, 27, 31, 32, 40, 56, 64, 72, 78], Coding::Mmr),
         ] {
             let mut dcs = t30::command(Command {
                 modulation: Modulation::V29,
@@ -2142,6 +2695,7 @@ mod tests {
                 fine: false,
                 scan_line_field: 0b111,
                 coding: Coding::ModifiedHuffman,
+                optional_l0: false,
                 error_correction: false,
             });
             for bit in &bits {
@@ -2307,22 +2861,32 @@ mod tests {
         // The DIS this modem sends, read with the same reader that reads
         // everybody else's. A capability frame that cannot be read by its own
         // parser is one no far end will read either.
-        let caps = t30::capabilities(&t30::our_capabilities(&OUR_MODULATIONS, true));
+        let caps = t30::capabilities(&t30::our_capabilities(&OUR_MODULATIONS, true, true));
         assert!(caps.receives);
         assert!(!caps.can_be_polled, "there is nothing here to fetch");
         assert_eq!(caps.modulations, vec![Modulation::V27ter, Modulation::V29]);
         assert!(caps.fine_resolution);
         assert!(caps.two_dimensional, "T.4 4.2 is offered as well as 4.1");
         assert!(caps.error_correction, "T.30 Annex A is offered");
+        assert!(caps.t6_coding, "T.6 is offered");
+        assert!(caps.jbig && caps.jbig_optional_l0, "T.85 is offered, in stripes of any length");
         assert_eq!(caps.widths_mm, vec![215]);
         assert_eq!(caps.length, "unlimited");
         assert_eq!(caps.scan_line_ms, 0.0);
-        assert_eq!(caps.octets, 4, "bit 27 is in the fourth octet");
+        // Ten octets now that JBIG is offered, where it used to be four:
+        // bits 78 and 79 are in the tenth.
+        assert_eq!(caps.octets, 10, "bits 78 and 79 are in the tenth octet");
 
-        // And without it, the three octets of a DIS with no extension.
-        let plain = t30::our_capabilities(&OUR_MODULATIONS, false);
+        // Without JBIG, the four octets bit 27 needs; without error
+        // correction, the three octets of a DIS with no extension, and no
+        // JBIG either, which T.4 4.4 allows only with it.
+        let older = t30::our_capabilities(&OUR_MODULATIONS, true, false);
+        assert_eq!(older.len(), 4);
+        assert!(!t30::capabilities(&older).jbig);
+        let plain = t30::our_capabilities(&OUR_MODULATIONS, false, true);
         assert_eq!(plain.len(), 3);
         assert!(!t30::capabilities(&plain).error_correction);
+        assert!(!t30::capabilities(&plain).jbig);
         assert!(!t30::bit(&plain, 24), "an extension bit with nothing after it");
     }
 
@@ -2335,7 +2899,7 @@ mod tests {
             // Nothing at all is V.27 ter, which every machine must have.
             (vec![], vec![Modulation::V27ter]),
         ] {
-            let caps = t30::capabilities(&t30::our_capabilities(&offer, true));
+            let caps = t30::capabilities(&t30::our_capabilities(&offer, true, true));
             assert_eq!(caps.modulations, want, "offering {offer:?}");
         }
     }
@@ -2506,6 +3070,7 @@ mod tests {
             fine: false,
             scan_line_field: 0,
             coding: Coding::ModifiedHuffman,
+            optional_l0: false,
             error_correction: false,
         });
         call.frame_arrived(Message::new(Frame::Dcs, true).with_fif(&dcs));
@@ -2602,6 +3167,65 @@ mod tests {
         assert_eq!(call.phase(), Phase::AwaitingCommand, "{:?}", call.trouble);
     }
 
+    /// RTN is not the end of a call: 5.3.6.1.7 has further pages possible
+    /// "provided training is retransmitted". The same page goes again, a rung
+    /// down each time; after two more tries the far end is not going to read
+    /// it, and the next page goes instead.
+    #[test]
+    fn a_page_the_far_end_could_not_read_is_trained_for_and_sent_again() {
+        let first = blank_page(10, Resolution::Standard);
+        let second = blank_page(20, Resolution::Standard);
+        let mut call = Call::originate_pages(FS, "1", vec![first.clone(), second.clone()]);
+        call.capabilities = Some(t30::capabilities(&DIS));
+        assert!(call.choose_rate());
+        assert_eq!(call.rate(), 9600);
+
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            call.enter(Phase::AwaitingReceipt);
+            call.frame_arrived(Message::new(Frame::Rtn, false));
+            assert_eq!(call.phase(), Phase::Commanding, "{:?}", call.trouble);
+            seen.push((call.sheet(), call.rate(), call.page.as_ref().map(|p| p.lines.len())));
+        }
+        assert_eq!(
+            seen,
+            vec![
+                (1, 7200, Some(10)),
+                (1, 4800, Some(10)),
+                // Twice again is all it gets; the second page goes instead.
+                (2, 2400, Some(20)),
+                // And off the bottom of the ladder a page is tried again at
+                // the rate there is.
+                (2, 2400, Some(20)),
+            ]
+        );
+        assert_eq!(call.trouble.as_deref(), Some("the far end could not read page 1"));
+
+        // What goes out after it is the command, which is where training
+        // starts again.
+        let mut said = Vec::new();
+        carry_on(&mut call, &mut said, |c| c.phase() == Phase::Training);
+        assert_eq!(said, vec![Frame::Tsi, Frame::Dcs]);
+    }
+
+    /// And a page refused three times over with nothing after it is the end,
+    /// said as such.
+    #[test]
+    fn the_last_page_refused_three_times_ends_the_call() {
+        let mut call = Call::originate(FS, "1", Some(blank_page(10, Resolution::Standard)));
+        call.capabilities = Some(t30::capabilities(&DIS));
+        assert!(call.choose_rate());
+        for _ in 0..PAGE_RESENDS {
+            call.enter(Phase::AwaitingReceipt);
+            call.frame_arrived(Message::new(Frame::Rtn, false));
+            assert_eq!(call.phase(), Phase::Commanding);
+        }
+        call.enter(Phase::AwaitingReceipt);
+        call.frame_arrived(Message::new(Frame::Rtn, false));
+        assert_eq!(call.phase(), Phase::Ending);
+        assert_eq!(call.trouble.as_deref(), Some("the far end could not read page 1"));
+    }
+
     #[test]
     fn a_page_asked_for_again_is_phase_b_again() {
         let mut call = waiting_for_a_page();
@@ -2619,5 +3243,25 @@ mod tests {
         carry_on(&mut call, &mut said, |c| c.phase() == Phase::AwaitingCommand);
         assert_eq!(said, vec![Frame::Rtn]);
         assert_eq!(call.phase(), Phase::AwaitingCommand, "a page it refused is not followed by the next");
+    }
+
+    #[test]
+    fn every_phase_is_found_by_its_name_and_has_a_letter() {
+        for phase in Phase::ALL {
+            assert_eq!(Phase::named(phase.name()), Some(phase));
+            assert!(('A'..='E').contains(&phase.letter()));
+        }
+        assert_eq!(Phase::named("nothing of the kind"), None);
+        assert_eq!(Phase::Sending.letter(), 'C');
+        assert_eq!(Phase::AwaitingReceipt.letter(), 'D');
+    }
+
+    #[test]
+    fn the_frames_both_ends_send_are_kept_in_order() {
+        let mut call = Call::answer(FS, "61399990000");
+        call.frame_arrived(Message::new(Frame::Mps, true));
+        let exchange = call.take_exchange();
+        assert_eq!(exchange.first(), Some(&Exchanged { frame: Frame::Mps, ours: false }));
+        assert!(call.take_exchange().is_empty(), "handed over twice");
     }
 }

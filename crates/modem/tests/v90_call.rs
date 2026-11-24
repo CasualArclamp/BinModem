@@ -58,7 +58,7 @@ impl Server {
                 v8line::Status::Agreed(_) => {
                     assert_eq!(v8.pcm_role(), Some(PcmRole::Digital), "V.8 did not settle on V.90");
                     self.v8 = None;
-                    self.startup = Some(Digital::new(Self::info0d()));
+                    self.startup = Some(Digital::new(Self::info0d(), 0.0));
                 }
                 other => panic!("V.8 came to {other:?}"),
             }
@@ -128,6 +128,23 @@ impl Call {
     fn saw(&self) -> String {
         String::from_utf8_lossy(&self.said).into_owned()
     }
+
+    /// The same as [`Self::run`], taking the caller's line notes after every
+    /// sample, as the window does, each with how far into the call it came.
+    fn run_noting(&mut self, seconds: f64, notes: &mut Vec<(f64, String)>) {
+        for _ in 0..(seconds * NETWORK_FS) as usize {
+            let to_server = self.net.up(&self.up);
+            self.up.clear();
+            let from_server = self.server.step(to_server);
+            for x in self.net.down(from_server) {
+                self.up.push(self.caller.step(x));
+                self.said.extend(self.caller.take_dte());
+                for text in self.caller.take_line_notes() {
+                    notes.push((self.caller.call_seconds(), text));
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -177,6 +194,63 @@ fn dialling_a_v90_server_connects_at_pcm_rates_and_carries_text() {
     call.run(3.0);
     let got = String::from_utf8_lossy(&call.server.received).into_owned();
     assert!(got.contains("after the retrain"), "the server got {got:?}");
+}
+
+/// Phase 4 reaches the transcript as it happens, a line for each different
+/// thing and not one for every repetition of it: the CPt and CP this end
+/// sends, with the rate and drn, K, each interval's size and field, Sr, the
+/// look-ahead and the acknowledge bit (Table 14); the MP and MP' the server
+/// sends, with the type, the upstream drn, the acknowledge bit and whether it
+/// precodes (Table 16); E going up; and Ed and B1d coming down (8.6.1,
+/// 8.6.2). In the order 9.4.2 has them: CP after CPt (9.4.2.2), CP' after MP
+/// (9.4.2.3), E after CP' and after MP' or Ed (9.4.2.4), and B1d after Ed
+/// (9.4.2.6). MP' says the server has "received CP from far end", any CP,
+/// so it can come before this end's CP' as well as after.
+#[test]
+fn the_phase_4_exchange_reaches_the_transcript_a_line_for_each_step() {
+    let mut call = Call::new();
+    call.type_at("AT+MS=V90");
+    call.run(0.05);
+    call.type_at("ATD5551234");
+    let mut notes = Vec::new();
+    call.run_noting(20.0, &mut notes);
+    for (at, text) in &notes {
+        println!("{at:8.3}  {text}");
+    }
+    assert_eq!(call.caller.state(), State::Data, "not online: {:?}", call.saw());
+    let only = |start: &str| {
+        let found: Vec<&(f64, String)> = notes.iter().filter(|n| n.1.starts_with(start)).collect();
+        assert_eq!(found.len(), 1, "{start:?} told {} times", found.len());
+        found[0].clone()
+    };
+    let (cpt, cp, mp, cp_ack, mp_ack, e, ed, b1d) = (
+        only("sent CPt:"),
+        only("sent CP:"),
+        only("found MP:"),
+        only("sent CP':"),
+        only("found MP':"),
+        only("sent E:"),
+        only("found Ed:"),
+        only("found B1d:"),
+    );
+    assert!(cpt.0 < cp.0 && mp.0 < cp_ack.0 && mp.0 < mp_ack.0, "{notes:#?}");
+    assert!(cp_ack.0 < e.0 && mp_ack.0.min(ed.0) < e.0 && ed.0 < b1d.0, "{notes:#?}");
+    // Each says what it is asked to say.
+    for (line, words) in [
+        (&cpt.1, &["bit/s (drn", "K ", "sizes [", "on fields [0, 1, 2, 3, 4, 5]", "Sr ", "look-ahead ", "acknowledge 0"][..]),
+        (&cp.1, &["bit/s (drn", "K ", "sizes [", "on fields [0, 1, 2, 3, 4, 5]", "Sr ", "look-ahead ", "acknowledge 0"]),
+        (&cp_ack.1, &["acknowledge 1"]),
+        (&mp.1, &["type ", "upstream at most", "(drn ", "acknowledge 0", "precoding "]),
+        (&mp_ack.1, &["acknowledge 1"]),
+    ] {
+        for word in words {
+            assert!(line.contains(word), "{line:?} does not say {word:?}");
+        }
+    }
+    // And the rate CP asked for is the rate the terminal was told.
+    let down = call.caller.rate().expect("no rate");
+    assert!(cp.1.contains(&format!("CP: {down} bit/s")), "{} against {down}", cp.1);
+    assert!(notes.len() <= 10, "{} lines for one start-up", notes.len());
 }
 
 /// Both ends of a V.90 call are these modems: one dials, the other answers
@@ -297,8 +371,8 @@ fn two_of_these_connect_at_pcm_rates_when_the_codewords_reach_the_encoder() {
         rates.push((pair.caller.standard(), pair.caller.rate().unwrap_or(0)));
         // Each says which half of V.90 the other offered in V.8.
         let modulations = |m: &Modem| m.distant().into_iter().find(|r| r.0 == "modulations").map(|r| r.1).unwrap_or_default();
-        assert!(modulations(&pair.host).starts_with("V.90 analogue, V.34"), "{}", modulations(&pair.host));
-        assert!(modulations(&pair.caller).starts_with("V.90 digital, V.34"), "{}", modulations(&pair.caller));
+        assert!(modulations(&pair.host).starts_with("V.90/V.92 analogue, V.34"), "{}", modulations(&pair.host));
+        assert!(modulations(&pair.caller).starts_with("V.90/V.92 digital, V.34"), "{}", modulations(&pair.caller));
         // And the server's scope is sized for the hundreds of points coming
         // up, which reach well past one.
         if pair.host.standard() == "V.90" {
@@ -317,6 +391,14 @@ fn two_of_these_connect_at_pcm_rates_when_the_codewords_reach_the_encoder() {
         assert!(host_saw.contains("from the caller"), "phase {phase}: the server saw {host_saw:?}");
         let caller_saw = String::from_utf8_lossy(&pair.caller_said).into_owned();
         assert!(caller_saw.contains("from the server"), "phase {phase}: the caller saw {caller_saw:?}");
+        // Compressed, and said so. Both panels used to say "none offered"
+        // here while both ends ran V.44, which is where the README's "not
+        // offered correctly" came from.
+        for (who, m) in [("caller", &pair.caller), ("server", &pair.host)] {
+            assert_eq!(m.compression_name(), Some("V.44"), "phase {phase}: the {who}");
+            let running = m.distant().into_iter().find(|r| r.0 == "compression").map(|r| r.1).unwrap_or_default();
+            assert!(running.starts_with("V.44, "), "phase {phase}: the {who}'s panel said {running:?}");
+        }
     }
     rates.sort_by_key(|r| r.1);
     assert_eq!(rates[0], ("V.34", 33_600), "{rates:?}");
@@ -366,4 +448,43 @@ fn when_one_end_hangs_up_the_other_notices() {
         assert!(waited <= 4.0, "host hangs up {host_hangs_up}: {waited} s");
         assert!(said.contains("NO CARRIER"), "host hangs up {host_hangs_up}: {said:?}");
     }
+}
+
+/// A server offering U.S. Robotics x2 (S70=1) is still V.34's answer modem
+/// to a caller that offers V.34 and no PCM and is not an x2 client: the
+/// call is V.34, and carries data both ways.
+#[test]
+fn a_v34_caller_to_a_server_offering_x2_connects_as_v34() {
+    let mut pair = Pair::new(Network::new(Law::Mu, FS).with_delay(0.015, FS).with_noise(1e-5), 0);
+    pair.straight = Some(0);
+    Pair::type_at(&mut pair.host, "AT+MS=V90");
+    Pair::type_at(&mut pair.host, "ATS70=1");
+    Pair::type_at(&mut pair.caller, "AT+MS=V34");
+    pair.run(0.05);
+    assert!(pair.host.x2());
+    Pair::type_at(&mut pair.host, "ATA");
+    Pair::type_at(&mut pair.caller, "ATD5551234");
+    for _ in 0..40 {
+        pair.run(1.0);
+        if pair.caller.state() == State::Data && pair.host.state() == State::Data {
+            break;
+        }
+    }
+    let saw = String::from_utf8_lossy(&pair.caller_said).into_owned();
+    assert_eq!(pair.caller.state(), State::Data, "{saw:?}");
+    assert_eq!(pair.host.state(), State::Data);
+    assert_eq!(pair.host.standard(), "V.34");
+    assert_eq!(pair.caller.standard(), "V.34");
+    pair.run(2.0);
+    for b in b"from the caller" {
+        pair.caller.feed_dte(*b);
+    }
+    for b in b"from the server" {
+        pair.host.feed_dte(*b);
+    }
+    pair.run(3.0);
+    let host_saw = String::from_utf8_lossy(&pair.host_said).into_owned();
+    assert!(host_saw.contains("from the caller"), "the server saw {host_saw:?}");
+    let caller_saw = String::from_utf8_lossy(&pair.caller_said).into_owned();
+    assert!(caller_saw.contains("from the server"), "the caller saw {caller_saw:?}");
 }

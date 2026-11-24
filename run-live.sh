@@ -16,8 +16,8 @@ export PATH="$PATH:$HOME/.cargo/bin"
 
 carrier="${1:-V22B}"
 case "$carrier" in
-  B103|V22B|V32) ;;
-  *) echo "carrier must be B103, V22B or V32, not $carrier" >&2; exit 1 ;;
+  B103|V21|V22B|V32) ;;
+  *) echo "carrier must be B103, V21, V22B or V32, not $carrier" >&2; exit 1 ;;
 esac
 
 cargo build -p gui -p modem --release

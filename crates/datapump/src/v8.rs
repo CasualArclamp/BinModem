@@ -12,10 +12,12 @@
 
 use dsp::filter::OnePole;
 use dsp::Nco;
+use v8::quick::{AnspcmLevel, Kind, Qc, SYNC_QC};
 use v8::{Access, CallFunction, Decoder, Heard, Menu, Modulation, Modulations, Pcm, PcmRole, Protocol, Signal};
 
 use crate::bell103::{Bell103Rx, Bell103Tx};
 use crate::framing::AsyncBits;
+use crate::v92::anspcm::{AnspcmWatch, TONEQ_MINIMUM};
 
 /// V.8's signals are all at 300 bit/s (3.1, 3.4, 3.5, 3.6).
 pub const BAUD: f64 = 300.0;
@@ -77,7 +79,53 @@ pub mod timing {
 
     /// 8.2.2: "if not terminated by the receipt of CM or a suitable sigC,
     /// ANSam shall be transmitted for a period of 5 +/- 1 s".
+    ///
+    /// What an answering modem runs unless [`Modem::with_ansam_seconds`]
+    /// says otherwise. A fax does: T.30 6.1.1 cuts its ANSam to 2.6-4.0 s.
+    ///
+    /// [`Modem::with_ansam_seconds`]: super::Modem::with_ansam_seconds
     pub const ANSAM: f64 = 5.0;
+
+    /// How long the calling modem hears ANSam without a break before it
+    /// believes it. Not a figure from the Recommendation, which asks only that
+    /// ANSam "has been detected" (7.2) and leaves the detector to the modem.
+    ///
+    /// Long enough to outlast a transient. Note 1 to 7.2 warns of "transient
+    /// variations in the received answer-tone amplitude and phase that may be
+    /// generated occasionally by network equipment", and to a detector that
+    /// reads the modulation off the envelope a transient is a step in the
+    /// envelope. A step has some of every frequency in it, 15 Hz included, and
+    /// the detector's 0.4 s correlator reads a step the size of the tone as a
+    /// depth of up to 4/(2 pi 15 Hz 0.4 s), about 0.11 -- a larger step, more.
+    /// But what one step leaves in the correlator turns against it at 15 Hz
+    /// and passes through nothing every 67 ms, so it reads as modulated a few
+    /// tens of milliseconds at a time: a plain tone stepping up by 10 to 30 dB
+    /// read as ANSam for at most 50 ms at a stretch. A dropout is two steps,
+    /// and half a 15 Hz cycle apart they add into a reading that holds still
+    /// and decays back under the 0.08 that reads as modulated in about a
+    /// tenth of a second. The worst measured, a single dropout of anywhere
+    /// from 5 to 600 ms put anywhere against the reversals of a plain tone,
+    /// read as ANSam for 0.19 s. The hold is longer than that, and nearly four
+    /// cycles of the modulation itself.
+    ///
+    /// It does not outlast every transient. Two dropouts a cycle of the
+    /// modulation apart add as well, and a train of them is a 15 Hz modulation
+    /// of the envelope -- which is what ANSam is, and what no hold on this
+    /// detector can tell from it: two 20 ms dropouts 67 ms apart early in a
+    /// plain tone are believed, and so are three 60 ms apart, as packets n,
+    /// n+3 and n+6 of a 20 ms network would fall. Nothing like it has been
+    /// seen yet: no two of the short dropouts in the captures so far are
+    /// within 50 to 80 ms of each other.
+    ///
+    /// Short enough to fit between the reversals and inside ANSam. The
+    /// detector does not lose the tone at a phase reversal, but a hold shorter
+    /// than the 425 ms 7.2 allows between two of them would be found in the
+    /// gap even if it did. And 8.2.2 keeps ANSam up for as little as 4 s:
+    /// the quarter of a second the detector takes to settle, this, Te, two CM
+    /// sequences of about 0.3 s each, and the second and a half a packet
+    /// network takes to carry the tone here and the CM back come to about
+    /// 3.7 s of it.
+    pub const ANSAM_HELD: f64 = 0.25;
 
     /// How long a calling modem waits to hear anything at all before giving
     /// up. Not a figure from the Recommendation, which leaves this to the
@@ -111,14 +159,116 @@ pub enum Status {
     Negotiating,
     /// Both ends have a modulation in common and the line is clear for it.
     Agreed(Modulation),
-    /// The far end sent the plain answering tone of V.25. It does not do V.8,
-    /// and 8.1.1 sends the call on to the modulation's own procedure rather
-    /// than negotiating: "if ANS (rather than ANSam) is detected, the DCE
-    /// shall proceed in accordance with Annex A/V.32 bis, ITU-T T.30, or other
-    /// appropriate Recommendations."
+    /// Nothing was negotiated, and the call goes on the old way.
+    ///
+    /// From the calling end: the far end sent the plain answering tone of
+    /// V.25. It does not do V.8, and 8.1.1 sends the call on to the
+    /// modulation's own procedure rather than negotiating: "if ANS (rather
+    /// than ANSam) is detected, the DCE shall proceed in accordance with
+    /// Annex A/V.32 bis, ITU-T T.30, or other appropriate Recommendations."
+    ///
+    /// From the answering end: ANSam ran its time out with no call menu
+    /// heard, and 8.2.2 has the same list -- "continue in accordance with
+    /// Annex A/V.32 bis, or ITU-T T.30 or other appropriate Recommendation".
     NoNegotiation,
     /// Nothing in common, or nothing heard at all.
     Failed,
+    /// V.92's short Phase 1 took V.8's place (9.2/V.92): no menus were
+    /// exchanged, and the two ends are a V.92 pair going to Phase 2.
+    Quick(Quick),
+}
+
+/// What a quick connect settled, which is everything the menus would have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Quick {
+    /// Which half of the pair this end is.
+    pub role: PcmRole,
+    /// Whether both sequences set P (9.2.5/V.92): LAPM, with no ODP/ADP.
+    pub lapm: bool,
+    /// The Ucode QTS is built on, which the analogue modem's QC1a asked for
+    /// (Table 2/V.92).
+    pub uqts: u8,
+    /// The level the digital modem's QCA1d named for ANSpcm (Table 13/V.92).
+    pub level: AnspcmLevel,
+}
+
+/// The timings of V.92's short Phase 1, in seconds.
+pub mod quick_timing {
+    /// The longest two characters of a QC can be apart and still be one
+    /// frame after the other: a character is 33.3 ms at 300 bit/s.
+    pub const ADJACENT: f64 = 0.050;
+
+    /// The ten ONEs between a QC's two copies, as the gap they leave between
+    /// the end of one character and the end of the next but one: 66.7 ms,
+    /// give or take what a jitter buffer does to it. This gap is what makes
+    /// a QC of four octets that could otherwise be the inside of a CM.
+    pub const BETWEEN_COPIES: (f64, f64) = (0.055, 0.090);
+
+    /// How long ANSpcm has to have been gone before it is gone. Its phase
+    /// reversals dip a narrow detector for a couple of milliseconds each.
+    pub const ANSPCM_GONE: f64 = 0.012;
+
+    /// The quietest 2100 Hz worth calling ANSpcm, as a fraction of full
+    /// scale: the answer tone detector's own floor.
+    pub const AUDIBLE: f64 = 0.002;
+
+    /// How long 2100 Hz has to stand behind a QTS burst before it is
+    /// ANSpcm. Nothing else follows QTS-bar (Figure 3/V.92), so this is only
+    /// long enough not to be the burst's own splatter.
+    pub const ANSPCM_HELD: f64 = 0.050;
+
+    /// How long after the QTS reversal a 2100 Hz tone is ANSpcm whatever
+    /// the answer tone detector makes of it: the step from QTS into a tone
+    /// reads as modulated for a few hundred milliseconds.
+    pub const AFTER_QTS: f64 = 1.0;
+
+    /// How long the analogue modem waits after QCA1d for QTS and ANSpcm
+    /// before it sends CM anyway. The digital modem gives up after 2 s and
+    /// sends ANSam (9.2.4.3), which this end acts on when it hears it; this
+    /// is for the ANSam that never comes.
+    pub const WAIT: f64 = 3.0;
+
+    /// The longest TONEq goes on with ANSpcm still there. The digital modem
+    /// stops ANSpcm when it hears TONEq, so this is a far end that never
+    /// did.
+    pub const TONEQ: f64 = 2.0;
+}
+
+/// The ear for a QC or a QCA, on framed octets and when each arrived.
+///
+/// `v8::quick::BitWatcher` anchors a sequence to its ten ONEs, which a start-
+/// stop framer does not hand on: between characters it reports nothing. What
+/// it does give is when each character ended, and the ONEs are there as
+/// time: the second synchronisation ends two character times after the first
+/// information octet, not one. A `55` inside a CM has an octet hard behind
+/// it, so that gap is what a CM can never show.
+#[derive(Debug, Clone, Default)]
+struct QcEar {
+    /// The last four octets and when each ended, oldest first.
+    last: [(u8, f64); 4],
+    filled: usize,
+}
+
+impl QcEar {
+    fn feed(&mut self, octet: u8, at: f64) -> Option<Qc> {
+        self.last.rotate_left(1);
+        self.last[3] = (octet, at);
+        self.filled = (self.filled + 1).min(4);
+        if self.filled < 4 {
+            return None;
+        }
+        let [(a, ta), (b, tb), (c, tc), (d, td)] = self.last;
+        if a != SYNC_QC || c != SYNC_QC || b != d {
+            return None;
+        }
+        let (least, most) = quick_timing::BETWEEN_COPIES;
+        if tb - ta > quick_timing::ADJACENT || td - tc > quick_timing::ADJACENT || !(least..=most).contains(&(tc - tb)) {
+            return None;
+        }
+        let qc = Qc::from_octet(b)?;
+        self.filled = 0;
+        Some(qc)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,10 +285,19 @@ enum State {
     SendingCj,
     /// The answering modem's ANSam.
     Ansam,
+    /// An answering end that sends no ANSam, listening for a CM anyway.
+    Overhearing,
     /// Sending JM until CJ arrives.
     SendingJm,
     /// The 75 ms of nothing before the chosen modulation starts.
     Handover,
+    /// The digital modem's QCA1d, in answer to a QC1a (9.2.4.1/V.92).
+    SendingQca,
+    /// The analogue modem after a QCA1d: silent, listening for QTS and
+    /// ANSpcm (9.2.1.1/V.92).
+    QuickWait,
+    /// The analogue modem's TONEq, until ANSpcm stops (9.2.1.3/V.92).
+    QuickTone,
     Done(Status),
 }
 
@@ -146,6 +305,9 @@ enum State {
 #[derive(Debug)]
 pub struct Modem {
     role: Role,
+    /// Whether a digital modem's start-up takes the line at the start of the
+    /// handover silence. See [`Self::handing_over_early`].
+    early_digital: bool,
     /// What this end can do, and what the call is for.
     menu: Menu,
     tx: Bell103Tx,
@@ -154,6 +316,10 @@ pub struct Modem {
     decoder: Decoder,
     /// The calling modem's ear for the answering tone.
     answer: v8::AnswerTone,
+    /// Seconds it has said ANSam, and the plain tone of V.25, without a
+    /// break.
+    ansam_held: f64,
+    plain_held: f64,
     /// The answering modem's voice for it.
     tone: Nco,
     modulation: Nco,
@@ -191,8 +357,49 @@ pub struct Modem {
     outgoing: Vec<u8>,
     /// Zero octets of CJ seen so far (8.2.3 wants all three).
     cj: usize,
+    /// CI sequences heard for this end's own call function (7.1).
+    ci: u32,
     /// The JM this end answered with, to repeat as it was.
     sent_jm: Option<Menu>,
+    /// Whether this answering modem offers U.S. Robotics x2 to a caller that
+    /// offers V.34 and no PCM (see [`Self::offering_x2`]).
+    x2: bool,
+    /// The sign of the V.21 carrier: an x2 server turns it after each JM.
+    sign: f64,
+    /// A JM has been queued again, and the carrier turns as the first bit
+    /// of its run-in goes out.
+    turn_due: bool,
+    /// How long the answering end's ANSam runs when nothing ends it sooner.
+    ansam_seconds: f64,
+    /// Whether a call menu for any call function but this end's own goes
+    /// unanswered.
+    own_function_only: bool,
+    /// The QC1a a calling analogue modem sends ahead of its CM, if it is to
+    /// ask for a quick connect (see [`Self::offering_quick`]).
+    quick_offer: Option<Qc>,
+    /// The level an answering digital modem names for ANSpcm when a QC1a
+    /// arrives, if it is to answer one (see [`Self::answering_quick`]).
+    quick_answer: Option<AnspcmLevel>,
+    /// Whether a QC1a has gone out on this call.
+    quick_offered: bool,
+    qc_ear: QcEar,
+    /// What a quick connect settled, once one has.
+    quick: Option<Quick>,
+    /// The analogue modem's ear for QTS and ANSpcm.
+    anspcm: AnspcmWatch,
+    /// 2100 Hz as it is this instant, the most it has been, and how long it
+    /// has been gone: for the end of ANSpcm, which the answer tone
+    /// detector's averages report a third of a second late.
+    tone_now: dsp::ToneDetector,
+    tone_peak: f64,
+    tone_gone: f64,
+    tone_held: f64,
+    /// How long this end negotiates before it gives up (see
+    /// [`Self::resuming_at_cm`]).
+    patience: f64,
+    /// The longest TONEq goes on, if shorter than until ANSpcm stops (see
+    /// [`Self::with_toneq_cap`]).
+    toneq_cap: Option<f64>,
 }
 
 impl Modem {
@@ -210,6 +417,8 @@ impl Modem {
             bits: AsyncBits::new(8),
             decoder: Decoder::new(),
             answer: v8::AnswerTone::new(fs),
+            ansam_held: 0.0,
+            plain_held: 0.0,
             tone: Nco::new(v8::ansam::ANSWER_TONE, fs),
             modulation: Nco::new(v8::ansam::MODULATION_RATE, fs),
             reversals: 0.0,
@@ -223,14 +432,227 @@ impl Modem {
             repeats: 0,
             framing_errors: 0,
             torn: false,
+            early_digital: false,
             torn_in_a_row: 0,
             chosen: None,
             agreed: Protocol::Unstated,
             far_menu: None,
             outgoing: Vec::new(),
             cj: 0,
+            ci: 0,
             sent_jm: None,
+            x2: false,
+            sign: 1.0,
+            turn_due: false,
+            ansam_seconds: timing::ANSAM,
+            own_function_only: false,
+            quick_offer: None,
+            quick_answer: None,
+            quick_offered: false,
+            qc_ear: QcEar::default(),
+            quick: None,
+            anspcm: AnspcmWatch::new(fs),
+            tone_now: dsp::ToneDetector::new(v8::ansam::ANSWER_TONE, 300.0, fs),
+            tone_peak: 0.0,
+            tone_gone: 0.0,
+            tone_held: 0.0,
+            patience: timing::PATIENCE,
+            toneq_cap: None,
         }
+    }
+
+    /// As the calling analogue modem, ask for V.92's short Phase 1: QC1a
+    /// ahead of the CM, naming the Ucode QTS is wanted at (9.2.1.1/V.92).
+    ///
+    /// Safe to send to anything that answers with ANSam. Table 1/V.8 keeps
+    /// QC's synchronisation for V.92, so a modem that has never heard of it
+    /// ignores the sequence and reads the CM that follows; this end then
+    /// hears a JM and the call is V.8's as though nothing had been asked.
+    /// P is set when this end's menu asks for LAPM.
+    ///
+    /// Only for an end that also offers the analogue half of a PCM pair
+    /// ([`Self::offering_pcm`]): a QCA1d commits both ends to V.92. Call it
+    /// after [`Self::offering_lapm`].
+    pub fn offering_quick(mut self, uqts: v8::quick::Uqts) -> Self {
+        self.quick_offer = Some(Qc::qc1a(uqts, self.menu.protocol == Protocol::Lapm));
+        self
+    }
+
+    /// As the answering digital modem, answer a QC1a with QCA1d naming
+    /// `level` for ANSpcm (9.2.4.1/V.92), and leave V.8 there: the status is
+    /// then [`Status::Quick`], and QTS and ANSpcm are the pump's.
+    ///
+    /// P in the QCA1d is set when this end's menu asks for LAPM.
+    pub fn answering_quick(mut self, level: AnspcmLevel) -> Self {
+        self.quick_answer = Some(level);
+        self
+    }
+
+    /// Begin at ANSam, with no silence first and no quick connect: for a
+    /// digital modem whose ANSpcm went unanswered, which 9.2.4.3/V.92 sends
+    /// back to "transmit ANSam and proceed according to ITU-T V.8".
+    pub fn resuming_at_ansam(mut self) -> Self {
+        self.quick_answer = None;
+        self.state = State::Ansam;
+        self
+    }
+
+    /// As the calling modem, begin at CM with no QC1a ahead of it, and give
+    /// up after `patience` seconds without two JMs: for a calling analogue
+    /// modem whose quick connect led to a Phase 2 the far end never joined.
+    ///
+    /// V.92 has no procedure for that. 9.4.2.2.2's retrain needs the INFO0d
+    /// that never came, and a far end that sends neither INFO0d nor tone B
+    /// is not in Phase 2; the one other thing a digital modem is listening
+    /// for once short Phase 1 has gone wrong is CM (9.2.4.3 sends it back
+    /// to "transmit ANSam and proceed according to ITU-T V.8"). So CM, and
+    /// a full start-up if a JM comes back. Without the short patience a
+    /// far end that hears nothing at all would hold the call for
+    /// [`timing::PATIENCE`].
+    pub fn resuming_at_cm(mut self, patience: f64) -> Self {
+        self.quick_offer = None;
+        self.quick_answer = None;
+        self.patience = patience;
+        let cm = v8::sequence(Signal::Cm, &self.menu);
+        self.send_sequence(cm);
+        self.enter(State::SendingCm);
+        self
+    }
+
+    /// End TONEq after `seconds` even with ANSpcm still there, and go on
+    /// listening for ANSpcm to stop before the 75 ms of silence and Phase 2:
+    /// a test switch, not 9.2.1.3, which ends TONEq when ANSpcm stops.
+    ///
+    /// Over a long round trip the digital modem goes on hearing TONEq for
+    /// that round trip after it has stopped ANSpcm and gone to Phase 2
+    /// (9.2.4.3), which is one candidate for what a live server did not
+    /// survive (live-1795315036). Never shorter than 9.2.1.3's 50 ms.
+    #[must_use]
+    pub fn with_toneq_cap(mut self, seconds: Option<f64>) -> Self {
+        self.toneq_cap = seconds.map(|s| s.max(TONEQ_MINIMUM));
+        self
+    }
+
+    /// Whether this end asked for a quick connect and the far end went on
+    /// by V.8 instead: a QC1a was offered, and what came back was a JM or
+    /// nothing.
+    pub fn quick_declined(&self) -> bool {
+        self.quick_offered && self.quick.is_none()
+    }
+
+    /// An answering end that has sent, or is sending, some other answer tone,
+    /// listening for a call menu all the same.
+    ///
+    /// For a fax that does not do V.34. T.30 has it answer with its own plain
+    /// 2100 Hz tone (5.1.2, and 6.1.1 keeps ANSam for a terminal that does V.34),
+    /// and 7.2 forbids the calling end to send a CM "unless ANSam has been
+    /// detected" -- so in principle no CM ever arrives. One did: a V.34 fax
+    /// calling this end took its plain tone for ANSam and sent CM after CM,
+    /// for as long as the recording of the call ran, straight past the DIS
+    /// that was waiting for it. A caller in that state is waiting for a JM
+    /// and for nothing else.
+    ///
+    /// Silent until a CM for `function` has arrived twice the same (8.2.2),
+    /// and with no deadline of its own: whoever owns it decides how long to
+    /// keep listening. Then it answers as any answering modem does, with a JM
+    /// of what the two ends share, until CJ (8.2.3). A CM for some other
+    /// function is not answered at all.
+    pub fn overhearing(function: CallFunction, ours: Modulations, fs: f64) -> Self {
+        let mut modem = Self::new(Role::Answering, function, ours, fs);
+        modem.state = State::Overhearing;
+        modem.own_function_only = true;
+        modem
+    }
+
+    /// Run ANSam for `seconds` when nothing ends it sooner, in place of
+    /// 8.2.2's 5 +/- 1 s ([`timing::ANSAM`]).
+    ///
+    /// For a fax, whose Recommendation cuts it: T.30 6.1.1 has an answering
+    /// V.34 fax "transmit ANSam until a valid CM response is received or until
+    /// an ANSam time-out (2.6 to 4.0 s) has expired", the same window as its
+    /// plain called tone (4.1.1/T.30). The data modems keep V.8's figure.
+    #[must_use]
+    pub fn with_ansam_seconds(mut self, seconds: f64) -> Self {
+        self.ansam_seconds = seconds;
+        self
+    }
+
+    /// Answer only a call menu for this end's own call function, and leave any
+    /// other unanswered, as an end that overhears leaves it: ANSam goes on and
+    /// its time-out decides.
+    ///
+    /// 8.2.3 allows the other answer -- a JM naming "an available call
+    /// function different from CM", with every modulation bit zero -- but a
+    /// fax that answered a polling caller with one would be telling it there
+    /// is nothing to poll in the one form it cannot act on; the DIS after the
+    /// time-out says the same thing in the form it can (bit 9, Note 18 to
+    /// Table 2/T.30).
+    #[must_use]
+    pub fn answering_only_its_function(mut self) -> Self {
+        self.own_function_only = true;
+        self
+    }
+
+    /// Whether this end is the one using the line, so that whatever else its
+    /// owner might be doing with it has to wait.
+    ///
+    /// An answering end from its first sample -- 8.2's silence is its silence
+    /// -- until the handover after CJ, or until it gives up; one that is only
+    /// overhearing never, until its JM goes out. A calling end from the
+    /// moment it believes ANSam: before that it is silent and listening, and
+    /// its owner's call signal (CNG, for a fax) carries on around it; 8.1.1
+    /// has that stopped on ANSam, and Te and everything after are V.8's.
+    pub fn has_the_line(&self) -> bool {
+        match self.state {
+            State::Overhearing | State::Done(_) => false,
+            State::Quiet | State::Listening => self.role == Role::Answering,
+            State::Waiting
+            | State::SendingCm
+            | State::SendingCj
+            | State::Ansam
+            | State::SendingJm
+            | State::SendingQca
+            | State::QuickWait
+            | State::QuickTone
+            | State::Handover => true,
+        }
+    }
+
+    /// Whether the far end has sent CI for this end's call function, twice.
+    ///
+    /// Only an answering end whose ANSam ran out has a use for this: T.30
+    /// 6.1.4, "when an answer terminal, expecting a response to a DIS frame,
+    /// detects a CI signal, it shall enter the V.8 mode by resending the
+    /// answer tone ANSam" -- which is [`ansam_again`](Self::ansam_again).
+    /// Twice because a CI is two octets, a zero and the call function, and
+    /// two of them are asked for as two menus are; 7.1 sends at least three
+    /// in every burst.
+    pub fn heard_ci(&self) -> bool {
+        self.ci >= IDENTICAL
+    }
+
+    /// Send ANSam again, from the start, as though no call menu had ever been
+    /// waited for: T.30 6.1.4's answer to a CI (Figures F.5-8 and F.5-9).
+    ///
+    /// Whatever the last run heard is forgotten, and so is how long it has
+    /// been going: the caller has just asked for V.8, and gets all of it.
+    pub fn ansam_again(&mut self) {
+        self.last = None;
+        self.last_octets.clear();
+        self.repeats = 0;
+        self.torn = false;
+        self.torn_in_a_row = 0;
+        self.cj = 0;
+        self.ci = 0;
+        self.chosen = None;
+        self.agreed = Protocol::Unstated;
+        self.far_menu = None;
+        self.sent_jm = None;
+        self.outgoing.clear();
+        self.tx.set_transmitting(false);
+        self.reversals = 0.0;
+        self.total = 0.0;
+        self.enter(State::Ansam);
     }
 
     /// Ask for LAPM in the protocol category (Table 6).
@@ -245,6 +667,32 @@ impl Modem {
     /// LAPM has said so whether or not its ADP survives the line.
     pub fn offering_lapm(mut self) -> Self {
         self.menu.protocol = Protocol::Lapm;
+        self
+    }
+
+    /// As an answering server, offer U.S. Robotics x2 to a caller whose CM
+    /// offers V.34 and no PCM, as an I-modem does it (libv90modem's
+    /// `docs/history/x2-facts.md`, "Phase 1"): the JM carries the caller's
+    /// PSTN access category back with the digital network bit set, and the
+    /// V.21 carrier's sign is turned after each complete JM. A caller that
+    /// offers PCM gets the JM it would have had anyway.
+    pub fn offering_x2(mut self) -> Self {
+        self.x2 = true;
+        self
+    }
+
+    /// As the digital modem, hand the line over at the start of the handover
+    /// silence and not at its end.
+    ///
+    /// For a V.92 server, whose far ends were found to need its receiver
+    /// conditioned through the silence (9.2.1.1.1/V.90). Not for a plain
+    /// V.90 one: there, handing over early turned a V.90 call between two of
+    /// these over a 15 ms line into V.34, and two more never connected, and
+    /// handing over at the end of the silence is what every V.90 call
+    /// measured here was made with. The analogue end always listens from the
+    /// start of the silence, which costs nothing.
+    pub fn handing_over_early(mut self) -> Self {
+        self.early_digital = true;
         self
     }
 
@@ -285,7 +733,47 @@ impl Modem {
     pub fn status(&self) -> Status {
         match self.state {
             State::Done(s) => s,
+            // The menu is settled before the handover silence is over, and
+            // what follows it has to start then: its receiver belongs on the
+            // line from the beginning of the silence even though its
+            // transmitter must wait for the end. Whichever pump replaces this
+            // one is told how much of the silence is left.
+            // Only V.90 has something to do with the silence: 9.2.1.1.1
+            // conditions its receiver during it. Everything else is told at
+            // the end of the silence, as before.
+            // A quick connect's analogue modem listens through the silence
+            // too: the digital modem's Phase 2 begins when TONEq is heard,
+            // which is before this end has noticed ANSpcm stop.
+            State::Handover if self.quick.is_some() => self.quick.map_or(Status::Negotiating, Status::Quick),
+            State::Handover => match self.chosen {
+                Some(modulation)
+                    if self.pcm_role() == Some(PcmRole::Analogue)
+                        || (self.early_digital && self.pcm_role() == Some(PcmRole::Digital)) =>
+                {
+                    Status::Agreed(modulation)
+                }
+                _ => Status::Negotiating,
+            },
             _ => Status::Negotiating,
+        }
+    }
+
+    /// Whether a calling modem has heard an answer tone, of either kind, and
+    /// so has stopped merely listening. Until then it sends nothing, and a
+    /// V.8 bis transaction can have the line above it.
+    pub fn heard_answer(&self) -> bool {
+        !matches!(self.state, State::Quiet | State::Listening)
+    }
+
+    /// How much of V.8's handover silence is left to run, in seconds.
+    ///
+    /// Only nonzero while [`State::Handover`], which is no longer a state this
+    /// end is stepped in once the menu is agreed -- the pump takes the line
+    /// over and has to keep the silence itself.
+    pub fn handover_remaining(&self) -> f64 {
+        match self.state {
+            State::Handover => (timing::HANDOVER - self.elapsed).max(0.0),
+            _ => 0.0,
         }
     }
 
@@ -298,8 +786,12 @@ impl Modem {
             State::SendingCm => "CM",
             State::SendingCj => "CJ",
             State::Ansam => "ANSam",
+            State::Overhearing => "listening for CM",
             State::SendingJm => "JM",
             State::Handover => "handover",
+            State::SendingQca => "QCA1d",
+            State::QuickWait => "listening for ANSpcm",
+            State::QuickTone => "TONEq",
             State::Done(_) => "done",
         }
     }
@@ -319,6 +811,16 @@ impl Modem {
         self.far_menu
     }
 
+    /// The joint menu of 7.4, once there is one: what the two ends have in
+    /// common, whichever end this is. The JM this end sent, or the one it
+    /// received.
+    pub fn joint_menu(&self) -> Option<Menu> {
+        match self.role {
+            Role::Calling => self.far_menu,
+            Role::Answering => self.sent_jm,
+        }
+    }
+
     /// One sample in, one sample out.
     pub fn step(&mut self, line: f64) -> f64 {
         let dt = 1.0 / self.fs;
@@ -327,6 +829,24 @@ impl Modem {
         self.level.process(line.abs());
 
         self.answer.feed(line);
+        // What the detector says at one instant is not a decision. Its
+        // readings are averages, and an average can be anything for a moment
+        // while what it is averaging changes under it: the first moments of a
+        // plain tone, the step as a call is picked up and the line goes from
+        // noise to digital silence, the last moments of a tone. Every one of
+        // those has read as ANSam, or as the plain tone, for a few tens of
+        // milliseconds on a real call.
+        self.ansam_held = if self.answer.is_ansam() { self.ansam_held + dt } else { 0.0 };
+        self.plain_held = if self.answer.is_plain() { self.plain_held + dt } else { 0.0 };
+        if matches!(self.state, State::QuickWait | State::QuickTone) {
+            self.anspcm.feed(line);
+            self.tone_now.feed(line);
+            let now = self.tone_now.amplitude();
+            self.tone_peak = self.tone_peak.max(now);
+            let there = now > quick_timing::AUDIBLE && now >= 0.25 * self.tone_peak;
+            self.tone_gone = if there { 0.0 } else { self.tone_gone + dt };
+            self.tone_held = if there { self.tone_held + dt } else { 0.0 };
+        }
         let octet = self.rx.feed(line);
         // A character whose stop bit was not a mark. Clause 5 runs a sequence
         // octet against octet with nothing between them, so a framing error
@@ -340,11 +860,25 @@ impl Modem {
             self.torn = true;
         }
         if let Some(octet) = octet {
+            if Self::tracing() {
+                eprintln!("v8[{:?}]: octet {octet:02x} at {:.3}s",
+                          self.role, (self.total - 1.0) / self.fs);
+            }
+            if let Some(qc) = self.qc_ear.feed(octet, self.total) {
+                self.heard_quick(qc);
+            }
             self.heard(octet);
         }
 
         self.advance();
         self.transmit()
+    }
+
+    /// Whether V8_TRACE in the environment is set.
+    fn tracing() -> bool {
+        use std::sync::OnceLock;
+        static TRACE: OnceLock<bool> = OnceLock::new();
+        *TRACE.get_or_init(|| std::env::var_os("V8_TRACE").is_some())
     }
 
     /// An octet came off the line.
@@ -409,10 +943,87 @@ impl Modem {
                 self.last = Some(menu);
             }
             // 8.2.3: JM stops when "all 3 octets of CJ have been received".
-            Heard::Cj => self.cj = v8::CJ.len(),
-            Heard::Ci(_) => {}
+            Heard::Cj => {
+                if std::env::var_os("V8_TRACE").is_some() {
+                    eprintln!("v8[{:?}]: CJ at {:.3}s", self.role, self.total);
+                }
+                self.cj = v8::CJ.len();
+            }
+            // 7.1: a caller saying what its call is for, before or instead of
+            // any menu. Counted only for this end's own function, since that
+            // is the only one anything here would answer.
+            Heard::Ci(function) => {
+                if function == self.menu.function {
+                    self.ci += 1;
+                }
+            }
             Heard::Jm(_) => {}
         }
+    }
+
+    /// A QC or a QCA came off the line whole.
+    fn heard_quick(&mut self, qc: Qc) {
+        if std::env::var_os("V8_TRACE").is_some() {
+            eprintln!("v8[{:?}]: {} ({:02x}) at {:.3}s", self.role, qc.kind.name(), qc.octet(), self.total);
+        }
+        match (self.state, qc.kind, qc.field) {
+            // 9.2.4.1/V.92: "If QC1a is detected, the modem shall transmit
+            // QCA1d". Only for a QC1a that names a Ucode -- 1111 is a
+            // cleardown from a hold this end never granted -- and only from
+            // an end that is the digital half of a pair.
+            (State::Ansam, Kind::Qc1a, v8::quick::Field::Uqts(uqts)) => {
+                let (Some(level), Some(ucode)) = (self.quick_answer, uqts.ucode()) else { return };
+                if !self.menu.pcm.is_some_and(|p| p.digital) {
+                    return;
+                }
+                let ours = self.menu.protocol == Protocol::Lapm;
+                self.quick = Some(Quick { role: PcmRole::Digital, lapm: ours && qc.lapm, uqts: ucode, level });
+                self.outgoing.clear();
+                self.tx.abandon();
+                self.tx.set_transmitting(true);
+                self.tx.push_bits(&Qc::qca1d(level, ours).bits());
+                // One more mark, so that the queue running empty means the
+                // sequence's own last bit has gone and not merely begun.
+                self.tx.push_bits(&[true]);
+                self.enter(State::SendingQca);
+            }
+            // 9.2.1.1/V.92: "If QCA1d is detected, the modem shall stop
+            // transmitting CM without completing the current octet and
+            // transmit silence and condition itself to detect QTS and QTS-bar
+            // followed by ANSpcm".
+            (State::SendingCm, Kind::Qca1d, v8::quick::Field::Level(level)) => {
+                let Some(ours) = self.quick_offer else { return };
+                let v8::quick::Field::Uqts(uqts) = ours.field else { return };
+                let Some(ucode) = uqts.ucode() else { return };
+                self.quick = Some(Quick { role: PcmRole::Analogue, lapm: ours.lapm && qc.lapm, uqts: ucode, level });
+                self.outgoing.clear();
+                self.tx.abandon();
+                self.tx.set_transmitting(false);
+                self.anspcm.reset();
+                self.tone_peak = 0.0;
+                self.tone_gone = 0.0;
+                self.tone_held = 0.0;
+                self.enter(State::QuickWait);
+            }
+            // QCA1a is a second analogue modem, and 9.2.1.4 sends that call
+            // to V.34 by way of TONEq; QC1d is a digital modem calling.
+            // Neither is answered: the CM that is going out, or the one that
+            // follows the QC1d, carries the call on by V.8.
+            _ => {}
+        }
+    }
+
+    /// Back to V.8 from a quick connect nobody followed up: CM, as though
+    /// the QC1a had never been sent.
+    fn quick_abandoned(&mut self) {
+        self.quick = None;
+        self.quick_offer = None;
+        self.last = None;
+        self.last_octets.clear();
+        self.repeats = 0;
+        let cm = v8::sequence(Signal::Cm, &self.menu);
+        self.send_sequence(cm);
+        self.enter(State::SendingCm);
     }
 
     /// Whether the far end has said the same thing twice, as 7.4 and 8.1.2
@@ -422,6 +1033,12 @@ impl Modem {
     }
 
     fn enter(&mut self, state: State) {
+        if std::env::var_os("V8_TRACE").is_some() {
+            eprintln!(
+                "v8[{:?}]: {:?} -> {:?} at {:.3}s",
+                self.role, self.state, state, self.total
+            );
+        }
         self.state = state;
         self.elapsed = 0.0;
     }
@@ -458,7 +1075,15 @@ impl Modem {
 
     fn advance(&mut self) {
         // Nobody waits for ever. 8 gives no figure for this, so it is ours.
-        if self.total > timing::PATIENCE && !matches!(self.state, State::Done(_)) {
+        //
+        // Except an end that is only overhearing, which is not waiting for
+        // anything: its owner is getting on with the call and will stop
+        // listening when it has no more use for a CM. The clock starts when
+        // it answers one.
+        if self.state == State::Overhearing {
+            self.total = 0.0;
+        }
+        if self.total > self.patience && !matches!(self.state, State::Done(_)) {
             self.enter(State::Done(Status::Failed));
             return;
         }
@@ -481,16 +1106,17 @@ impl Modem {
             State::Listening => {
                 // 8.1.1. ANSam means the far end will negotiate; the plain
                 // answering tone of V.25 means it will not, and the call goes
-                // on without V.8 rather than failing.
-                if self.answer.is_ansam() {
+                // on without V.8 rather than failing. Each has to be heard
+                // without a break before it is believed: a CM sent to a modem
+                // that does not do V.8 is what 7.2 forbids, and giving up on a
+                // modem that does throws away everything V.8 could have found.
+                if self.ansam_held >= timing::ANSAM_HELD {
                     self.enter(State::Waiting);
-                } else if self.answer.is_plain()
-                    && self.elapsed > timing::TE
-                {
-                    // Held for a while before believing it: ANSam is a
-                    // modulated tone, and the modulation takes a moment to
-                    // measure. Deciding on the first instant of a tone would
-                    // call every ANSam a plain one.
+                } else if self.plain_held >= timing::TE {
+                    // Held for longer: ANSam is a modulated tone, and the
+                    // modulation takes a moment to measure. Deciding on the
+                    // first instant of a tone would call every ANSam a plain
+                    // one.
                     self.enter(State::Done(Status::NoNegotiation));
                 }
             }
@@ -498,6 +1124,14 @@ impl Modem {
             State::Waiting => {
                 // 8.1.1: silence for Te, "prior to transmitting signal CM".
                 if self.elapsed >= timing::TE {
+                    // 9.2.1.1/V.92: "the analogue modem shall transmit
+                    // signal QC1a followed by CM". The QC's sixty bits go
+                    // first and the CM's own ten ONEs close them.
+                    if let Some(qc) = self.quick_offer {
+                        self.tx.set_transmitting(true);
+                        self.tx.push_bits(&qc.bits());
+                        self.quick_offered = true;
+                    }
                     let cm = v8::sequence(Signal::Cm, &self.menu);
                     self.send_sequence(cm);
                     self.enter(State::SendingCm);
@@ -537,26 +1171,17 @@ impl Modem {
                 // 8.2.2: "upon receiving a minimum of 2 identical CM
                 // sequences, the DCE shall transmit JM".
                 if let Some(cm) = self.settled() {
-                    self.far_menu = Some(cm);
-                    let jm = match (self.menu.pcm, self.menu.access) {
-                        (Some(pcm), access) => {
-                            cm.joint_pcm(self.menu.modulations, self.menu.protocol, pcm, access.unwrap_or_default())
-                        }
-                        _ => cm.joint(self.menu.modulations, self.menu.protocol),
-                    };
-                    self.sent_jm = Some(jm);
-                    self.chosen = jm.chosen();
-                    self.agreed = jm.protocol;
-                    self.last = None;
-                    self.last_octets.clear();
-                    self.repeats = 0;
-                    let octets = v8::sequence(Signal::Jm, &jm);
-                    self.send_sequence(octets);
-                    self.enter(State::SendingJm);
-                } else if self.elapsed >= timing::ANSAM {
+                    self.consider(cm);
+                } else if self.elapsed >= self.ansam_seconds {
                     // "If neither CM nor a suitable sigC is detected during
                     // ANSam transmission" the call goes on without V.8.
                     self.enter(State::Done(Status::NoNegotiation));
+                }
+            }
+
+            State::Overhearing => {
+                if let Some(cm) = self.settled() {
+                    self.consider(cm);
                 }
             }
 
@@ -570,13 +1195,72 @@ impl Modem {
                     self.tx.set_transmitting(false);
                     self.enter(State::Handover);
                 } else if self.outgoing.is_empty() && self.tx.pending_bits() == 0 {
+                    // The last bit of a JM has only just begun here: the turn
+                    // waits for the next JM's first bit (see `transmit`).
+                    self.turn_due = self.x2 && self.sent_jm.is_some_and(|jm| jm.pcm.is_none());
                     let jm = self.last_jm();
                     self.send_sequence(jm);
                 }
             }
 
+            State::SendingQca => {
+                if self.tx.pending_bits() == 0 {
+                    self.tx.set_transmitting(false);
+                    let quick = self.quick.expect("set with the state");
+                    self.enter(State::Done(Status::Quick(quick)));
+                }
+            }
+
+            State::QuickWait => {
+                // Since the QTS reversal, if there has been one.
+                let since_qts = self
+                    .anspcm
+                    .qts_reversal()
+                    .map(|at| (self.anspcm.qts().at() as f64 - at) / self.fs);
+                let behind_qts = since_qts.is_some_and(|s| s <= quick_timing::AFTER_QTS);
+                if self.anspcm.is_anspcm() || (behind_qts && self.tone_held >= quick_timing::ANSPCM_HELD) {
+                    // 9.2.1.3/V.92: "if ANSam was already detected for 1 s
+                    // in 9.2.1.1, TONEq may be transmitted upon detection of
+                    // ANSpcm". V.21(L)'s mark is 980 Hz, so TONEq is this
+                    // channel with nothing to say.
+                    self.tx.abandon();
+                    self.tx.set_transmitting(true);
+                    self.enter(State::QuickTone);
+                } else if (self.elapsed >= 0.3 && !behind_qts && self.ansam_held >= timing::ANSAM_HELD)
+                    || self.elapsed >= quick_timing::WAIT
+                {
+                    // The digital modem gave up on TONEq and is sending
+                    // ANSam again (9.2.4.3/V.92).
+                    self.quick_abandoned();
+                }
+            }
+
+            State::QuickTone => {
+                // "When ANSpcm is no longer detected, the modem shall
+                // terminate TONEq and transmit silence for 75 +/- 5 ms and
+                // proceed to Phase 2" -- after "a minimum of 50 ms".
+                if self.elapsed >= TONEQ_MINIMUM && self.tone_gone >= quick_timing::ANSPCM_GONE {
+                    self.tx.set_transmitting(false);
+                    self.enter(State::Handover);
+                } else if self.toneq_cap.is_some_and(|cap| self.elapsed >= cap) {
+                    // See `with_toneq_cap`: silent, still waiting for ANSpcm
+                    // to stop.
+                    self.tx.set_transmitting(false);
+                    if self.elapsed >= quick_timing::TONEQ {
+                        self.quick_abandoned();
+                    }
+                } else if self.elapsed >= quick_timing::TONEQ {
+                    self.tx.set_transmitting(false);
+                    self.quick_abandoned();
+                }
+            }
+
             State::Handover => {
                 if self.elapsed >= timing::HANDOVER {
+                    if let Some(quick) = self.quick {
+                        self.enter(State::Done(Status::Quick(quick)));
+                        return;
+                    }
                     self.enter(State::Done(match self.chosen {
                         Some(m) => Status::Agreed(m),
                         // 8.1.2 and 8.2.3 both allow disconnecting when the
@@ -590,6 +1274,49 @@ impl Modem {
 
             State::Done(_) => {}
         }
+    }
+
+    /// A call menu has arrived twice the same. Answer it, unless it is for a
+    /// call this end does not take.
+    fn consider(&mut self, cm: Menu) {
+        if !self.own_function_only || cm.function == self.menu.function {
+            self.answer(cm);
+        } else {
+            // Not a call this end takes. Forgotten, so that a right one
+            // arriving later is counted from its own first copy rather than
+            // against this one.
+            self.last = None;
+            self.last_octets.clear();
+            self.repeats = 0;
+        }
+    }
+
+    /// Answer a call menu that has arrived twice the same: 8.2.2, "upon
+    /// receiving a minimum of 2 identical CM sequences, the DCE shall transmit
+    /// JM".
+    fn answer(&mut self, cm: Menu) {
+        self.far_menu = Some(cm);
+        let jm = match (self.menu.pcm, self.menu.access) {
+            (Some(pcm), access) => {
+                cm.joint_pcm(self.menu.modulations, self.menu.protocol, pcm, access.unwrap_or_default())
+            }
+            _ => cm.joint(self.menu.modulations, self.menu.protocol),
+        };
+        // An x2 server's JM: the CM's PSTN access octet back, with "DCE on
+        // digital network" set (an I-modem's `... 8d` to a Courier's `... 0d`).
+        let jm = match cm.access {
+            Some(access) if self.x2 && cm.pcm.is_none() => Menu { access: Some(Access { digital: true, ..access }), ..jm },
+            _ => jm,
+        };
+        self.sent_jm = Some(jm);
+        self.chosen = jm.chosen();
+        self.agreed = jm.protocol;
+        self.last = None;
+        self.last_octets.clear();
+        self.repeats = 0;
+        let octets = v8::sequence(Signal::Jm, &jm);
+        self.send_sequence(octets);
+        self.enter(State::SendingJm);
     }
 
     /// The JM to repeat, rebuilt from what was agreed.
@@ -627,7 +1354,16 @@ impl Modem {
             let bits = self.bits.encode(octet);
             self.tx.push_bits(&bits);
         }
-        self.tx.next_sample()
+        // An x2 server's JM: the carrier turns half way round between one
+        // whole JM and the next, on the bit boundary -- as the next JM's first
+        // run-in bit begins, and not as the last stop bit does. A Courier's
+        // V.8 classifier did not take the signature one bit early (the
+        // emulated Courier's x2 flags stayed clear, 2026-11-24).
+        if self.turn_due && self.tx.pending_bits() < v8::PREAMBLE_ONES {
+            self.turn_due = false;
+            self.sign = -self.sign;
+        }
+        MESSAGE_LEVEL * self.sign * self.tx.next_sample()
     }
 
     /// One sample of ANSam (7.2).
@@ -651,6 +1387,18 @@ impl Modem {
 /// rather than about numbers in a computer. This leaves the same headroom the
 /// data pumps are given.
 const ANSAM_LEVEL: f64 = 0.35;
+
+/// How loudly the V.21 signals of clause 8 (CI, CM, CJ, JM) go out.
+///
+/// These are messages between two terminals, not the payload, and they leave
+/// at the answer tone's level rather than at full scale. A receiver that has
+/// just set its gain on ANSam reads a message ten decibels louder than the
+/// tone it was listening to as a square wave with the corners clipped off:
+/// enough of the 300 bit/s sidebands is gone that the menu will not parse.
+/// The packet of JA/JM in V.8 is specified in terms of the same nominal
+/// power as the tones around it, so the same 0.35 as [`ANSAM_LEVEL`] is what
+/// the neighbouring signals lead to.
+const MESSAGE_LEVEL: f64 = 0.35;
 
 #[cfg(test)]
 mod tests {
@@ -980,6 +1728,218 @@ mod tests {
         assert!(out < 1.0e-6, "answered a modem that cannot hear it");
     }
 
+    /// One sample of an answering tone `t` seconds into it: ANSam at 7.2's
+    /// depth, or the plain tone of V.25.
+    fn answering_tone(ansam: bool, reversal_s: f64, level: f64, t: f64) -> f64 {
+        let flips = if reversal_s > 0.0 { (t / reversal_s) as u64 } else { 0 };
+        let sign = if flips.is_multiple_of(2) { 1.0 } else { -1.0 };
+        let depth = if ansam { v8::ansam::NOMINAL_DEPTH } else { 0.0 };
+        let envelope = 1.0 + depth * (std::f64::consts::TAU * v8::ansam::MODULATION_RATE * t).sin();
+        level * envelope * sign * (std::f64::consts::TAU * v8::ansam::ANSWER_TONE * t).sin()
+    }
+
+    /// The gain of a tone that stops at `stop`, cut off or faded out over
+    /// `fade` seconds.
+    fn ending(t: f64, stop: f64, fade: f64) -> f64 {
+        if t < stop {
+            1.0
+        } else if fade > 0.0 {
+            (1.0 - (t - stop) / fade).max(0.0)
+        } else {
+            0.0
+        }
+    }
+
+    /// Flat, deterministic noise between -1 and 1.
+    fn noise() -> impl FnMut() -> f64 {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+        }
+    }
+
+    /// What a calling modem made of a line: when it stopped listening and
+    /// what it went on to, and the loudest thing it sent.
+    struct Verdict {
+        left: Option<(f64, State)>,
+        loudest: f64,
+    }
+
+    /// Play `line`, a function of the time since the call was connected, at a
+    /// calling modem.
+    fn heard_by_a_caller(seconds: f64, mut line: impl FnMut(f64) -> f64) -> Verdict {
+        let mut calling = Modem::new(Role::Calling, CallFunction::Data, all(), FS);
+        let mut heard = Verdict { left: None, loudest: 0.0 };
+        for i in 0..(seconds * FS) as usize {
+            let t = i as f64 / FS;
+            heard.loudest = heard.loudest.max(calling.step(line(t)).abs());
+            if heard.left.is_none() && !matches!(calling.state, State::Quiet | State::Listening) {
+                heard.left = Some((t, calling.state));
+            }
+        }
+        heard
+    }
+
+    #[test]
+    fn a_noisy_line_that_falls_silent_has_not_answered() {
+        // `live-1790039606`: line noise until the far end picked up, and then
+        // the exact zeros of a digital network with nothing on it yet. The
+        // detector's averages decayed at their own rates, passed for a plain
+        // answering tone for 40 ms, and a single instant of that was taken
+        // for a far end that does not do V.8 -- two seconds before the far
+        // end sent its tone.
+        let mut hiss = noise();
+        let heard = heard_by_a_caller(6.0, |t| if t < 3.0 { 0.05 * hiss() } else { 0.0 });
+        assert!(heard.left.is_none(), "decided on silence: {:?}", heard.left);
+        assert!(heard.loudest < 1.0e-6, "transmitted into a silent line");
+    }
+
+    #[test]
+    fn the_end_of_a_plain_tone_is_taken_for_nothing() {
+        // A calling modem that begins listening late in a plain answering
+        // tone -- a handshake started again, a line connected late -- hears
+        // too little of it to call it plain, and then hears it stop. The step
+        // down to nothing read as modulation, and a single instant of it sent
+        // CM to a modem that had just said it has never heard of V.8; where
+        // it did not, the tone outlived itself on the silence and was called
+        // plain, on nothing at all, once the modem had listened for Te.
+        for fade in [0.0, 0.050] {
+            for reversal in [0.0, 0.450] {
+                let heard = heard_by_a_caller(5.0, |t| {
+                    ending(t, 1.1, fade) * answering_tone(false, reversal, 0.3, t)
+                });
+                assert!(
+                    heard.left.is_none(),
+                    "a plain tone faded over {fade} s ended in {:?}",
+                    heard.left
+                );
+                assert!(heard.loudest < 1.0e-6, "sent CM to a modem that cannot hear it");
+            }
+        }
+    }
+
+    #[test]
+    fn a_plain_tone_is_believed_only_once_it_has_been_held() {
+        // `live-1789614742`: a plain answering tone whose first 16 ms read as
+        // modulated, because the envelope stepping up from nothing is a step
+        // and a step has 15 Hz in it. Deciding on the first instant, the modem
+        // would have answered it with CM; and where the first instant happens
+        // to read as plain instead, it has decided on a tone that could as
+        // well have been the first instant of ANSam. Which of the two it reads
+        // as depends on what else is on the line while the detector settles,
+        // so the tone is played over a telephone line's noise and started at
+        // eight points across a cycle of the modulation.
+        for k in 0..8 {
+            let start = 2.0 + f64::from(k) / 8.0 / v8::ansam::MODULATION_RATE;
+            for reversal in [0.0, 0.450] {
+                let mut hiss = noise();
+                let heard = heard_by_a_caller(5.0, |t| {
+                    let tone =
+                        if t < start { 0.0 } else { answering_tone(false, reversal, 0.3, t - start) };
+                    tone + 0.07 * hiss()
+                });
+                let (when, state) = heard.left.expect("never decided");
+                assert_eq!(
+                    state,
+                    State::Done(Status::NoNegotiation),
+                    "a plain tone from {start:.4} s, at {when:.3} s"
+                );
+                assert!(
+                    (start + timing::TE..start + timing::TE + 0.5).contains(&when),
+                    "a plain tone from {start:.4} s decided at {when:.3} s"
+                );
+                assert!(heard.loudest < 1.0e-6, "sent CM to a modem that cannot hear it");
+            }
+        }
+    }
+
+    #[test]
+    fn a_plain_tone_with_a_gap_in_it_is_decided_a_second_after_the_gap() {
+        // `live-1790039606` again: 135 ms of exact zeros in the far end's
+        // answering tone, a second after it began, which is a packet network
+        // and not the far end. A tone that has stopped has stopped. Held
+        // without a break means held since it came back.
+        let (start, gap) = (2.0, (2.95, 3.085));
+        for reversal in [0.0, 0.450] {
+            let heard = heard_by_a_caller(6.0, |t| {
+                if t < start || (gap.0..gap.1).contains(&t) {
+                    0.0
+                } else {
+                    answering_tone(false, reversal, 0.3, t - start)
+                }
+            });
+            let (when, state) = heard.left.expect("never decided");
+            assert_eq!(state, State::Done(Status::NoNegotiation), "at {when:.3} s");
+            assert!(
+                (gap.1 + timing::TE..gap.1 + timing::TE + 0.1).contains(&when),
+                "decided at {when:.3} s"
+            );
+            assert!(heard.loudest < 1.0e-6, "sent CM to a modem that cannot hear it");
+        }
+    }
+
+    #[test]
+    fn ansam_is_still_found_at_every_level_a_network_delivers() {
+        // Everything above makes the calling modem slower to believe what it
+        // hears. None of it can be allowed to cost the real thing: ANSam with
+        // its reversals and without, from a short call and a long one, is
+        // believed a hold after the detector settles, and answered a Te after
+        // that.
+        let start = 2.0;
+        for db in [0.0, -10.0, -20.0, -30.0] {
+            let level = 0.3 * 10.0f64.powf(db / 20.0);
+            for reversal in [0.0, 0.450] {
+                let heard = heard_by_a_caller(4.0, |t| {
+                    if t < start { 0.0 } else { answering_tone(true, reversal, level, t - start) }
+                });
+                let (when, state) = heard.left.expect("ANSam never believed");
+                assert_eq!(state, State::Waiting, "ANSam at {db} dB, at {when:.3} s");
+                assert!(
+                    (start + timing::ANSAM_HELD..start + timing::ANSAM_HELD + 0.4).contains(&when),
+                    "ANSam at {db} dB believed at {when:.3} s"
+                );
+                assert!(heard.loudest > 0.1, "never sent CM to ANSam at {db} dB");
+            }
+        }
+    }
+
+    #[test]
+    fn both_tones_are_still_believed_just_above_the_detectors_floor() {
+        // -43 dB on the scale above: half a decibel over the 0.002 below which
+        // the detector hears nothing at all, and only a few decibels under the
+        // weakest answering tone yet recorded (`live-1789614742`, -51 dBFS). A
+        // reading held without a break is only as good as the readings are
+        // steady, and here they once were not: the tone was held to the floor
+        // at every instant, ANSam's troughs and reversals took it under, and
+        // neither tone was ever believed -- the modem listened out its minute
+        // and hung up on a far end that had answered. This close to the floor
+        // the detector's average takes a little over a second to rise past
+        // it, so both decisions come that much later than a loud tone's.
+        let start = 2.0;
+        let level = 0.3 * 10.0f64.powf(-43.0 / 20.0);
+        for reversal in [0.0, 0.450] {
+            for ansam in [true, false] {
+                let heard = heard_by_a_caller(6.0, |t| {
+                    if t < start { 0.0 } else { answering_tone(ansam, reversal, level, t - start) }
+                });
+                let what = if ansam { "ANSam" } else { "the plain tone" };
+                let (when, state) = heard.left.unwrap_or_else(|| panic!("{what} never believed"));
+                if ansam {
+                    assert_eq!(state, State::Waiting, "{what}, at {when:.3} s");
+                    assert!(when < start + 1.5 + timing::ANSAM_HELD, "{what} believed at {when:.3} s");
+                    assert!(heard.loudest > 0.1, "never sent CM to {what}");
+                } else {
+                    assert_eq!(state, State::Done(Status::NoNegotiation), "{what}, at {when:.3} s");
+                    assert!(when < start + 1.5 + timing::TE, "{what} believed at {when:.3} s");
+                    assert!(heard.loudest < 1.0e-6, "sent CM to a modem that cannot hear it");
+                }
+            }
+        }
+    }
+
     #[test]
     fn a_calling_modem_says_nothing_until_it_is_answered() {
         // 8.1.1 opens with a second of silence, and 7.2 forbids a CM before
@@ -1027,5 +1987,560 @@ mod tests {
             "sent a plain answering tone, depth {:.3}",
             ear.depth()
         );
+    }
+
+    /// What a group 3 fax offers over V.8: the three fax modulations.
+    fn fax() -> Modulations {
+        Modulations::of(&[Modulation::V17, Modulation::V29HalfDuplex, Modulation::V27ter])
+    }
+
+    /// The call menu the V.34 fax in `fax-v34-cm.wav` sent: sending a fax, and
+    /// V.34 half-duplex, V.17, V.29 and V.27 ter to do it with.
+    fn super_g3() -> Menu {
+        Menu {
+            function: CallFunction::TransmitFax,
+            modulations: Modulations::of(&[
+                Modulation::V34HalfDuplex,
+                Modulation::V17,
+                Modulation::V29HalfDuplex,
+                Modulation::V27ter,
+            ]),
+            protocol: Protocol::Unstated,
+            access: None,
+            pcm: None,
+        }
+    }
+
+    /// A calling end's low channel saying `menu` over and over, as 7.3 has it
+    /// sent: ten ONEs, the synchronisation, the body.
+    fn call_menus(menu: &Menu, times: usize) -> Bell103Tx {
+        let framing = AsyncBits::new(8);
+        let mut tx = Bell103Tx::with_tones(LOW.0, LOW.1, FS);
+        tx.set_transmitting(true);
+        for _ in 0..times {
+            let mut bits = vec![true; v8::PREAMBLE_ONES];
+            for octet in v8::sequence(Signal::Cm, menu) {
+                bits.extend(framing.encode(octet));
+            }
+            tx.push_bits(&bits);
+        }
+        tx
+    }
+
+    /// What an answering end's high channel carried, read back as V.8.
+    struct Ear {
+        rx: Bell103Rx,
+        decoder: Decoder,
+        heard: Vec<Heard>,
+    }
+
+    impl Ear {
+        fn new() -> Self {
+            Self { rx: Bell103Rx::with_tones(HIGH.0, HIGH.1, FS), decoder: Decoder::new(), heard: Vec::new() }
+        }
+
+        fn feed(&mut self, sample: f64) {
+            if let Some(octet) = self.rx.feed(sample)
+                && let Some(heard) = self.decoder.feed(octet)
+            {
+                self.heard.push(heard);
+            }
+        }
+    }
+
+    #[test]
+    fn an_overhearing_answerer_says_nothing_of_its_own() {
+        let mut modem = Modem::overhearing(CallFunction::TransmitFax, fax(), FS);
+        let mut loudest = 0.0f64;
+        // Longer than ANSam would last and longer than the patience of a
+        // modem that is negotiating: this one is doing neither.
+        for _ in 0..(FS * (timing::PATIENCE + 2.0)) as usize {
+            loudest = loudest.max(modem.step(0.0).abs());
+        }
+        assert!(loudest < 1.0e-6, "transmitted with nothing to answer");
+        assert_eq!(modem.status(), Status::Negotiating);
+        assert!(!modem.has_the_line());
+    }
+
+    /// The whole of the exchange an answering fax that does not do V.34 has
+    /// with a caller that does: a JM of what the two share, V.34 left out,
+    /// sent until CJ; then the handover, and an agreement on V.17.
+    #[test]
+    fn an_overhearing_answerer_answers_a_fax_call_menu() {
+        let mut modem = Modem::overhearing(CallFunction::TransmitFax, fax(), FS);
+        // Six call menus, and then CJ on the same carrier, as 8.1.2 has the
+        // caller send it once the JMs have been heard: "complete the current
+        // octet ... and then signal CJ shall be transmitted".
+        let mut caller = call_menus(&super_g3(), 6);
+        let framing = AsyncBits::new(8);
+        for octet in v8::CJ {
+            caller.push_bits(&framing.encode(octet));
+        }
+        let mut ear = Ear::new();
+        let mut answered = false;
+        while caller.pending_bits() > 0 {
+            ear.feed(modem.step(caller.next_sample()));
+            answered |= modem.has_the_line();
+        }
+        assert!(answered, "the call menu went unanswered: {}", modem.phase());
+        assert_eq!(modem.far_menu(), Some(super_g3()));
+        for _ in 0..(FS * 0.2) as usize {
+            ear.feed(modem.step(0.0));
+        }
+        assert_eq!(modem.status(), Status::Agreed(Modulation::V17));
+        assert!(!modem.has_the_line(), "still holding the line after the handover");
+        let joint = ear
+            .heard
+            .iter()
+            .find_map(|h| match h {
+                Heard::Cm(m) | Heard::Jm(m) => Some(*m),
+                _ => None,
+            })
+            .expect("no joint menu went out");
+        assert_eq!(joint.function, CallFunction::TransmitFax, "{joint:?}");
+        assert_eq!(joint.modulations, fax(), "V.34 offered by an end without it: {joint:?}");
+        assert_eq!(modem.joint_menu(), Some(joint), "the joint menu kept is not the one sent");
+    }
+
+    /// What a V.34 fax offers over V.8: the three fax modulations, and V.34
+    /// half-duplex alone -- never duplex, which 7.4's lowest item would pick.
+    fn super_g3_ours() -> Modulations {
+        let mut ours = fax();
+        ours.insert(Modulation::V34HalfDuplex);
+        ours
+    }
+
+    /// When an answering modem left alone gave up on ANSam, in seconds from
+    /// its first sample.
+    fn ansam_ran_out(mut modem: Modem) -> f64 {
+        for i in 0..(FS * 8.0) as usize {
+            modem.step(0.0);
+            if modem.status() != Status::Negotiating {
+                assert_eq!(modem.status(), Status::NoNegotiation);
+                return i as f64 / FS;
+            }
+        }
+        panic!("ANSam never ran out");
+    }
+
+    #[test]
+    fn an_answering_modems_ansam_lasts_as_long_as_it_is_told() {
+        // 8.2.2's 5 +/- 1 s unless told otherwise, after 8.2's 0.2 s of
+        // silence; and T.30 6.1.1's shorter figure for a fax, which is the
+        // owner's to give and changes nothing for a modem that does not.
+        let data = Modem::new(Role::Answering, CallFunction::Data, all(), FS);
+        let ran_out = ansam_ran_out(data);
+        let want = timing::ANSWER_QUIET + timing::ANSAM;
+        assert!((want..want + 0.01).contains(&ran_out), "ANSam ran out at {ran_out:.3} s");
+
+        let fax = Modem::new(Role::Answering, CallFunction::TransmitFax, super_g3_ours(), FS)
+            .with_ansam_seconds(3.0);
+        let ran_out = ansam_ran_out(fax);
+        let want = timing::ANSWER_QUIET + 3.0;
+        assert!((want..want + 0.01).contains(&ran_out), "ANSam ran out at {ran_out:.3} s");
+    }
+
+    #[test]
+    fn an_answering_modem_has_the_line_from_its_first_sample_and_a_calling_one_from_ansam() {
+        // The answering end's silence is 8.2's silence, and its ANSam is
+        // V.8's: nothing else of its owner's belongs on the line until V.8
+        // has given up or handed over.
+        let mut answering = Modem::new(Role::Answering, CallFunction::Data, all(), FS);
+        assert!(answering.has_the_line(), "not from the first sample");
+        for _ in 0..(FS * 0.1) as usize {
+            answering.step(0.0);
+            assert!(answering.has_the_line(), "not through the silence");
+        }
+        for _ in 0..(FS * 6.0) as usize {
+            answering.step(0.0);
+        }
+        assert_eq!(answering.status(), Status::NoNegotiation);
+        assert!(!answering.has_the_line(), "still holding a line it gave up on");
+
+        // The calling end's is silent until it believes ANSam, and its
+        // owner's call signal carries on around it; from ANSam, 8.1.1 has
+        // that stopped, and Te and the menus are V.8's.
+        let mut calling = Modem::new(Role::Calling, CallFunction::Data, all(), FS);
+        let start = 2.0;
+        let mut taken = None;
+        for i in 0..(FS * 4.0) as usize {
+            let t = i as f64 / FS;
+            let tone = if t < start { 0.0 } else { answering_tone(true, 0.450, 0.3, t - start) };
+            calling.step(tone);
+            if taken.is_none() && calling.has_the_line() {
+                taken = Some((t, calling.state));
+            }
+        }
+        let (when, state) = taken.expect("the calling end never took the line");
+        assert_eq!(state, State::Waiting, "took the line at {when:.3} s");
+        assert!(when > start + timing::ANSAM_HELD, "took the line at {when:.3} s, before ANSam");
+        assert!(when < start + 1.0, "took the line at {when:.3} s, long after ANSam");
+    }
+
+    #[test]
+    fn a_ci_after_ansam_ran_out_brings_ansam_back_and_the_menus_after_it() {
+        // T.30 6.1.4: an answering fax whose ANSam ran out has sent its DIS
+        // with bit 6 set; a caller that can may then send CI, and the
+        // answerer "shall enter the V.8 mode by resending the answer tone
+        // ANSam" (Figures F.5-8 and F.5-9). From there the exchange is the
+        // ordinary one.
+        let mut modem = Modem::new(Role::Answering, CallFunction::TransmitFax, super_g3_ours(), FS)
+            .with_ansam_seconds(1.5)
+            .answering_only_its_function();
+        for _ in 0..(FS * 2.0) as usize {
+            modem.step(0.0);
+        }
+        assert_eq!(modem.status(), Status::NoNegotiation);
+        assert!(!modem.has_the_line());
+        assert!(!modem.heard_ci(), "heard a CI in silence");
+
+        // 7.1: "at least 3 CI sequences" in a burst, each ten ONEs, the CI
+        // synchronisation and the call function octet.
+        let framing = AsyncBits::new(8);
+        let mut caller = Bell103Tx::with_tones(LOW.0, LOW.1, FS);
+        caller.set_transmitting(true);
+        for _ in 0..3 {
+            let mut bits = vec![true; v8::PREAMBLE_ONES];
+            for octet in v8::sequence(Signal::Ci, &super_g3()) {
+                bits.extend(framing.encode(octet));
+            }
+            caller.push_bits(&bits);
+        }
+        while caller.pending_bits() > 0 {
+            modem.step(caller.next_sample());
+        }
+        assert!(modem.heard_ci(), "the CI went unheard");
+        assert_eq!(modem.status(), Status::NoNegotiation, "a CI is not a menu");
+
+        modem.ansam_again();
+        assert!(modem.has_the_line(), "ANSam again, and the line not taken");
+        let mut tone = v8::AnswerTone::new(FS);
+        for _ in 0..(FS * 0.8) as usize {
+            tone.feed(modem.step(0.0));
+        }
+        assert!(tone.is_ansam(), "no ANSam after the CI: depth {:.3}", tone.depth());
+        assert_eq!(modem.status(), Status::Negotiating);
+
+        // And the call menus it was all for, answered with V.34 half-duplex.
+        let mut caller = call_menus(&super_g3(), 6);
+        for octet in v8::CJ {
+            caller.push_bits(&framing.encode(octet));
+        }
+        let mut ear = Ear::new();
+        while caller.pending_bits() > 0 {
+            ear.feed(modem.step(caller.next_sample()));
+        }
+        for _ in 0..(FS * 0.2) as usize {
+            ear.feed(modem.step(0.0));
+        }
+        assert_eq!(modem.status(), Status::Agreed(Modulation::V34HalfDuplex));
+        let joint = modem.joint_menu().expect("no joint menu");
+        assert!(joint.modulations.contains(Modulation::V34HalfDuplex), "{joint:?}");
+        assert!(
+            ear.heard.iter().any(|h| matches!(h, Heard::Cm(m) | Heard::Jm(m) if *m == joint)),
+            "the joint menu kept was never sent: {:?}",
+            ear.heard
+        );
+    }
+
+    #[test]
+    fn an_answering_fax_leaves_a_polling_call_menu_unanswered() {
+        // A fax answering a call receives on it, and a caller asking to
+        // receive (Table 4/T.30's other code) is asking for something it has
+        // not got. Told to answer only its own function, the modem lets ANSam
+        // run out instead; a modem not told keeps 8.2.3's answer, since that
+        // is what the data modems have always done.
+        let polling = Menu { function: CallFunction::ReceiveFax, ..super_g3() };
+        for (strict, answers) in [(true, false), (false, true)] {
+            let mut modem = Modem::new(Role::Answering, CallFunction::TransmitFax, super_g3_ours(), FS)
+                .with_ansam_seconds(2.0);
+            if strict {
+                modem = modem.answering_only_its_function();
+            }
+            for _ in 0..(FS * 0.3) as usize {
+                modem.step(0.0);
+            }
+            let mut caller = call_menus(&polling, 8);
+            let mut ear = Ear::new();
+            while caller.pending_bits() > 0 {
+                ear.feed(modem.step(caller.next_sample()));
+            }
+            for _ in 0..(FS * 1.5) as usize {
+                ear.feed(modem.step(0.0));
+            }
+            let answered = ear.heard.iter().any(|h| matches!(h, Heard::Cm(_) | Heard::Jm(_)));
+            assert_eq!(answered, answers, "strict {strict}: {:?}", ear.heard);
+            if strict {
+                assert_eq!(modem.status(), Status::NoNegotiation, "ANSam should have run out");
+            } else {
+                assert_eq!(modem.far_menu(), Some(polling));
+            }
+        }
+    }
+
+    #[test]
+    fn an_overhearing_answerer_leaves_a_data_call_alone() {
+        let data = Menu { function: CallFunction::Data, modulations: all(), ..super_g3() };
+        let mut modem = Modem::overhearing(CallFunction::TransmitFax, fax(), FS);
+        let mut caller = call_menus(&data, 6);
+        let mut loudest = 0.0f64;
+        while caller.pending_bits() > 0 {
+            loudest = loudest.max(modem.step(caller.next_sample()).abs());
+        }
+        assert!(loudest < 1.0e-6, "answered a call that was not for a fax");
+        assert!(!modem.has_the_line());
+        assert_eq!(modem.status(), Status::Negotiating);
+    }
+
+    // ---------------------------------------------------------------------
+    // V.92's short Phase 1 (9.2/V.92)
+    // ---------------------------------------------------------------------
+
+    use crate::v90::server::{self, Line};
+    use v8::quick::Uqts;
+
+    fn quick_caller(ask: bool) -> Modem {
+        let m = Modem::new(Role::Calling, CallFunction::Data, Modulations::of(&[Modulation::V34Duplex]), FS)
+            .offering_lapm()
+            .offering_pcm(Pcm::ANALOGUE);
+        if ask { m.offering_quick(Uqts::from_ucode(79).unwrap()) } else { m }
+    }
+
+    fn quick_answerer(answer: bool) -> Modem {
+        let m = Modem::new(Role::Answering, CallFunction::Data, Modulations::of(&[Modulation::V34Duplex]), FS)
+            .offering_lapm()
+            .offering_pcm_on(Pcm { digital: true, ..Pcm::default() }, Access { digital: true, ..Access::default() });
+        if answer { m.answering_quick(AnspcmLevel::Minus12) } else { m }
+    }
+
+    /// What a quick connect came to: the caller's status and when it had it,
+    /// the answerer's, when the digital modem's Phase 2 had the line, and
+    /// whether the digital modem gave up.
+    struct QuickRun {
+        calling: Status,
+        calling_at: f64,
+        answering: Status,
+        phase2_at: Option<f64>,
+        gave_up: bool,
+    }
+
+    /// The two ends against each other, the answering one handing the line
+    /// to the digital pump on [`Status::Quick`] as the modem above does. With
+    /// `deaf`, nothing the pump sends reaches the caller, so no TONEq comes
+    /// back and the answerer has to go back to ANSam.
+    fn quick_call(mut calling: Modem, mut answering: Modem, deaf: bool, seconds: f64) -> QuickRun {
+        let mut pump: Option<Line> = None;
+        let (mut to_calling, mut to_answering) = (0.0, 0.0);
+        let mut run = QuickRun {
+            calling: Status::Negotiating,
+            calling_at: 0.0,
+            answering: Status::Negotiating,
+            phase2_at: None,
+            gave_up: false,
+        };
+        for n in 0..(seconds * FS) as usize {
+            let t = n as f64 / FS;
+            let from_calling = if run.calling == Status::Negotiating {
+                let out = calling.step(to_calling);
+                run.calling = calling.status();
+                run.calling_at = t;
+                out
+            } else {
+                0.0
+            };
+            let from_answering = match pump.as_mut() {
+                Some(line) => {
+                    let out = line.step(to_answering);
+                    if run.phase2_at.is_none() && !line.modem().in_quick() {
+                        run.phase2_at = Some(t);
+                    }
+                    if line.modem().quick_gave_up() {
+                        // 9.2.4.3: ANSam again, and V.8.
+                        run.gave_up = true;
+                        pump = None;
+                        answering = quick_answerer(true).resuming_at_ansam();
+                    }
+                    if deaf { 0.0 } else { out }
+                }
+                None => {
+                    let out = answering.step(to_answering);
+                    run.answering = answering.status();
+                    if let Status::Quick(q) = run.answering {
+                        assert_eq!(q.role, PcmRole::Digital);
+                        pump = Some(Line::new(FS, server::ours(), timing::HANDOVER).after_quick(q.uqts, q.level));
+                    }
+                    out
+                }
+            };
+            to_calling = from_answering;
+            to_answering = from_calling;
+        }
+        run
+    }
+
+    /// QC1a, QCA1d, QTS, ANSpcm and TONEq, and both ends at Phase 2 well
+    /// inside the time a CM and a JM would have taken.
+    #[test]
+    fn a_quick_connect_takes_both_ends_to_phase_2() {
+        let run = quick_call(quick_caller(true), quick_answerer(true), false, 6.0);
+        let Status::Quick(far) = run.answering else { panic!("answerer: {:?}", run.answering) };
+        let Status::Quick(near) = run.calling else { panic!("caller: {:?}", run.calling) };
+        assert_eq!((near.role, far.role), (PcmRole::Analogue, PcmRole::Digital));
+        assert_eq!((near.uqts, far.uqts), (79, 79));
+        assert_eq!((near.level, far.level), (AnspcmLevel::Minus12, AnspcmLevel::Minus12));
+        assert!(near.lapm && far.lapm, "both sequences set P");
+        assert!(!run.gave_up);
+        let phase2 = run.phase2_at.expect("the digital modem never heard TONEq");
+        // The caller is told at the start of its 75 ms of silence, and the
+        // digital modem's own silence began when it heard TONEq, a little
+        // before: the two Phase 2s begin within a few tens of milliseconds.
+        assert!((run.calling_at - phase2).abs() < 0.060, "caller {:.3} s, digital {phase2:.3} s", run.calling_at);
+        // ANSam is believed at about 0.45 s and Te is a second; after that a
+        // quick connect is a QC1a, a QCA1d, QTS and as much ANSpcm as the
+        // answer tone detector takes to call it one.
+        assert!(run.calling_at < 3.2, "took {:.3} s", run.calling_at);
+    }
+
+    /// A caller that asks nothing gets V.8 from an answerer that would have
+    /// answered, and a caller that asks gets V.8 from one that does not
+    /// answer: the QC1a is ignored and the CM behind it is read.
+    #[test]
+    fn a_quick_connect_only_one_end_wants_is_plain_v8() {
+        for (ask, answer) in [(false, true), (true, false)] {
+            let caller = quick_caller(ask);
+            let run = quick_call(caller, quick_answerer(answer), false, 8.0);
+            assert_eq!(run.calling, Status::Agreed(Modulation::V34Duplex), "ask {ask} answer {answer}");
+            assert_eq!(run.answering, Status::Agreed(Modulation::V34Duplex), "ask {ask} answer {answer}");
+        }
+    }
+
+    /// 9.2.4.3: no TONEq in two seconds, and the digital modem sends ANSam
+    /// and goes on by V.8; the analogue modem hears it and sends its CM.
+    #[test]
+    fn an_unanswered_anspcm_goes_back_to_v8() {
+        let run = quick_call(quick_caller(true), quick_answerer(true), true, 14.0);
+        assert!(run.gave_up, "the digital modem never gave up");
+        assert_eq!(run.calling, Status::Agreed(Modulation::V34Duplex));
+        assert_eq!(run.answering, Status::Agreed(Modulation::V34Duplex));
+    }
+
+    /// After a quick connect nobody followed into Phase 2: CM straight away,
+    /// with no QC1a ahead of it, and V.8 agreed with an answerer that is
+    /// back at ANSam.
+    #[test]
+    fn resuming_at_cm_sends_cm_and_reaches_v8() {
+        let mut calling = quick_caller(true).resuming_at_cm(6.0);
+        let mut answering = quick_answerer(true).resuming_at_ansam();
+        assert_eq!(calling.phase(), "CM");
+        let (mut to_calling, mut to_answering) = (0.0, 0.0);
+        let mut loud_at = None;
+        for n in 0..(6.0 * FS) as usize {
+            let from_calling = calling.step(to_calling);
+            if loud_at.is_none() && from_calling.abs() > 0.01 {
+                loud_at = Some(n as f64 / FS);
+            }
+            let from_answering = answering.step(to_answering);
+            to_calling = from_answering;
+            to_answering = from_calling;
+        }
+        assert!(loud_at.is_some_and(|t| t < 0.01), "CM began at {loud_at:?}");
+        assert_eq!(calling.status(), Status::Agreed(Modulation::V34Duplex));
+        assert_eq!(answering.status(), Status::Agreed(Modulation::V34Duplex));
+        assert!(!calling.quick_declined(), "no QC1a went out to be declined");
+    }
+
+    /// And into silence it gives up at its own patience, not V.8's minute.
+    #[test]
+    fn resuming_at_cm_gives_up_at_its_patience() {
+        let mut calling = quick_caller(true).resuming_at_cm(4.85);
+        let mut stopped = None;
+        for n in 0..(10.0 * FS) as usize {
+            calling.step(0.0);
+            if calling.status() != Status::Negotiating {
+                stopped = Some(n as f64 / FS);
+                break;
+            }
+        }
+        let at = stopped.expect("CM went on");
+        assert!((4.84..4.9).contains(&at), "gave up at {at:.3} s");
+        assert_eq!(calling.status(), Status::Failed);
+    }
+
+    /// The TONEq test switch: TONEq stops at the cap with ANSpcm still on,
+    /// and the hand-over still waits for ANSpcm to stop -- over a round trip
+    /// of 0.85 s, as on the live route, so that ANSpcm outlasts the cap.
+    #[test]
+    fn a_toneq_cap_ends_toneq_and_still_waits_for_anspcm() {
+        use std::collections::VecDeque;
+        let mut calling = quick_caller(true).with_toneq_cap(Some(0.150));
+        let mut answering = quick_answerer(true);
+        let mut pump: Option<Line> = None;
+        let one_way = (0.425 * FS) as usize;
+        let mut wire_to_calling = VecDeque::from(vec![0.0; one_way]);
+        let mut wire_to_answering = VecDeque::from(vec![0.0; one_way]);
+        let (mut to_calling, mut to_answering) = (0.0, 0.0);
+        let (mut toneq_from, mut toneq_to, mut quick_at) = (None, None, None);
+        let mut pump_from = None;
+        for n in 0..(8.0 * FS) as usize {
+            let t = n as f64 / FS;
+            let from_calling = if quick_at.is_none() { calling.step(to_calling) } else { 0.0 };
+            if quick_at.is_none() {
+                let toneq = calling.phase() == "TONEq" && from_calling.abs() > 1e-3;
+                if toneq && toneq_from.is_none() {
+                    toneq_from = Some(t);
+                }
+                if toneq {
+                    toneq_to = Some(t);
+                }
+                if let Status::Quick(_) = calling.status() {
+                    quick_at = Some(t);
+                }
+            }
+            let from_answering = match pump.as_mut() {
+                Some(line) => {
+                    let out = line.step(to_answering);
+                    if pump_from.is_none() && !line.modem().in_quick() {
+                        pump_from = Some(t);
+                    }
+                    out
+                }
+                None => {
+                    let out = answering.step(to_answering);
+                    if let Status::Quick(q) = answering.status() {
+                        pump = Some(Line::new(FS, server::ours(), timing::HANDOVER).after_quick(q.uqts, q.level));
+                    }
+                    out
+                }
+            };
+            wire_to_calling.push_back(from_answering);
+            wire_to_answering.push_back(from_calling);
+            to_calling = wire_to_calling.pop_front().unwrap_or(0.0);
+            to_answering = wire_to_answering.pop_front().unwrap_or(0.0);
+        }
+        let (from, to) = (toneq_from.expect("no TONEq"), toneq_to.unwrap());
+        assert!((0.14..0.16).contains(&(to - from)), "TONEq for {:.3} s", to - from);
+        assert!(pump_from.is_some(), "the digital modem never heard TONEq");
+        let quick = quick_at.expect("the caller never handed over");
+        assert!(quick > to, "handed over at {quick:.3} s, TONEq ended {to:.3} s");
+    }
+
+    /// A `55` inside a menu is an octet among octets, and four octets of a
+    /// CM are never a QC however they read.
+    #[test]
+    fn a_qc_is_told_from_a_menu_by_its_ones() {
+        let mut ear = QcEar::default();
+        let char_time = 10.0 / BAUD;
+        // 55 q 55 q hard against each other, as a menu would carry them.
+        for (n, octet) in [0x55u8, 0x84, 0x55, 0x84].into_iter().enumerate() {
+            assert!(ear.feed(octet, n as f64 * char_time).is_none());
+        }
+        // The same with the ten ONEs between the copies.
+        let mut ear = QcEar::default();
+        let times = [1.0, 2.0, 4.0, 5.0].map(|c| c * char_time);
+        let mut found = None;
+        for (octet, at) in [0x55u8, 0x84, 0x55, 0x84].into_iter().zip(times) {
+            found = ear.feed(octet, at);
+        }
+        assert_eq!(found, Some(Qc::qc1a(Uqts::from_ucode(62).unwrap(), true)));
     }
 }

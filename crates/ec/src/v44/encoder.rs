@@ -216,6 +216,7 @@ impl Encoder {
             }
             self.settle_owed();
             self.step(out);
+            debug_assert!(self.at <= usize::from(self.params.n8), "history past N8");
             self.consider_mode(out);
         }
     }
@@ -282,7 +283,13 @@ impl Encoder {
             Some(found) => {
                 self.at += found.used;
                 self.put_codeword(N5 + found.node, out);
-                let room = usize::from(self.params.n7).saturating_sub(found.used);
+                // Bounded by the string length and by what is left of the
+                // history: 7.11.4 has the history end at N8, so an extension
+                // that ran past it would build characters the far end has
+                // nowhere to keep.
+                let room = usize::from(self.params.n7)
+                    .saturating_sub(found.used)
+                    .min(self.history_left());
                 let extension = self.extension(&found, room);
                 if extension > 0 {
                     // 6.3.2: the index is "the position in the history of the
@@ -332,7 +339,16 @@ impl Encoder {
 
     /// The longest string match starting at the first pending character
     /// (6.3.1), or nothing if the match fails at the top.
+    ///
+    /// Never longer than what is left of the history. A string that started
+    /// below N8 and ended above it put the history past the size the far end
+    /// agreed to keep, and a far end that checks says so: Netstalgia's server,
+    /// answering P3R 4096, released the link after about 4 kB of upstream
+    /// (issue 64). The string is cut where the history ends instead, and the
+    /// next step finds the history full and sends REINIT, so the history
+    /// reaches N8 exactly and goes no further.
     fn find(&self) -> Option<Match> {
+        let limit = self.history_left();
         let first = self.history[self.at];
         let mut level = self.root[usize::from(first)]?;
         let mut used = 1usize;
@@ -345,7 +361,7 @@ impl Encoder {
                 let seg = &self.history[n.at as usize..n.at as usize + usize::from(n.len)];
                 let have = &self.history[(self.at + used).min(self.history.len())..];
                 let same = seg.iter().zip(have).take_while(|(a, b)| a == b).count();
-                if same == seg.len() && same > 0 {
+                if same == seg.len() && same > 0 && used + same <= limit {
                     best = Some(index);
                     break;
                 }
@@ -367,6 +383,11 @@ impl Encoder {
         // 6.3.1: the match fails if "no second-level node matches the second
         // character", which is a match that never got past the root.
         last.map(|node| Match { node, used })
+    }
+
+    /// How many more characters the history takes before it is full (N8).
+    fn history_left(&self) -> usize {
+        usize::from(self.params.n8).saturating_sub(self.at)
     }
 
     /// Whether the node-tree has room for another string-segment.
@@ -531,6 +552,15 @@ impl Encoder {
     /// The order matters and the clause gives it: reinitialise, then the
     /// ESCAPE, then ECM. A far end that reinitialised at a different moment
     /// would build a different dictionary from the same characters.
+    ///
+    /// The ESCAPE itself is not part of the dictionary and is left where it
+    /// is. 7.14 assigns it 0 "at initialization of the data compression
+    /// function" -- 7.5's C-INIT -- and moves it on by 51 at each EID, and
+    /// 7.5.1's initial state of the dictionary does not mention it. It was set
+    /// back to 0 here, and in the decoder at the same moment, so two of these
+    /// agreed with each other and not with a far end reading the clause: after
+    /// an EID in one stretch of transparent mode, the next stretch started
+    /// from a different ESCAPE at each end.
     pub fn enter_compressed(&mut self, out: &mut Vec<u8>) {
         if self.mode == Mode::Compressed {
             return;
@@ -539,6 +569,5 @@ impl Encoder {
         out.push(self.escape);
         out.push(super::command::ECM);
         self.mode = Mode::Compressed;
-        self.escape = 0;
     }
 }

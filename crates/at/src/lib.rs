@@ -292,6 +292,18 @@ pub struct Config {
     pub report_error_control: bool,
     /// +DR — report the compression that was negotiated (V.250 6.6.3).
     pub report_compression: bool,
+    /// +VARC — what a single-carrier V.ARC call is to be asked for by hand:
+    /// the baud, the code as a percentage of each word that is data, and
+    /// the bits a symbol. Nought leaves each to the modem. Not V.250's.
+    pub varc: (u32, u8, u8),
+    /// +VARCBIS — whether a V.8 bis transaction says this modem has V.ARC,
+    /// and which: nought not at all, one the multicarrier mode, two QAM,
+    /// three PCM; and whether on one pair of wires. Not V.250's.
+    pub varc_bis: (u8, bool),
+    /// +VARCZ — what a V.ARC call may compress its stream with: 0 nothing,
+    /// 1 V.42bis and V.44 as `+DS` and `+DS44` allow them, 2 those and the
+    /// long-history compressor of its own as well.
+    pub varc_z: u8,
 }
 
 impl Default for Config {
@@ -308,6 +320,9 @@ impl Default for Config {
             // that wants to be told asks to be told.
             report_error_control: false,
             report_compression: false,
+            varc: (0, 0, 0),
+            varc_bis: (0, false),
+            varc_z: 2,
         }
     }
 }
@@ -350,6 +365,8 @@ pub struct Interpreter {
     pub v44: V44,
     /// What `+FCLASS` last selected: a modem or a fax.
     pub service_class: ServiceClass,
+    /// `+A8E`'s `<v8b>`: whether V.8 bis runs in front of V.8.
+    pub v8bis: bool,
     state: LineState,
     body: Vec<u8>,
     last_body: Vec<u8>,
@@ -373,16 +390,22 @@ impl Interpreter {
             identity: Identity::default(),
             // What this DCE can originate. Plain V.22 is absent because
             // V.22bis at 1200 bit/s *is* V.22, and answering to both names
-            // would be two entries for one thing. V.21 is absent because the
-            // tones implemented are Bell 103's, and a modem that claimed V.21
-            // and whistled at 1270 Hz would be lying to whoever asked.
+            // would be two entries for one thing. V.21 and Bell 103 are one
+            // modem on two sets of tones, and both sets are there.
+            // B212 is Bell 212A, with a Bell 103 inside it; B202 is Bell 202,
+            // which V.250 has no name for and which takes the one others use.
             // V.32 and V.32bis are separate names because V.250 makes them
             // separate carriers, and the difference is real: V32 tops out at
             // 9600 and V32B at 14 400. A far end that will not hold the faster
             // rates is asked for the slower carrier and gets exactly it. V90 is
             // the analogue half of V.90 only: this modem dials a server, and
-            // is not one.
-            modulations: ["V90", "V34", "V32B", "V32", "V22B", "B103"]
+            // is not one. V92 is V.90 with V.92's phase 2 in it, and with PCM
+            // upstream when the far end offers it (V.92 9.3).
+            //
+            // The last three are no Recommendation's: V.ARC, this modem's
+            // own mode for a sound card wired to another one, as its
+            // multicarrier, QAM and baseband modulations.
+            modulations: ["V92", "V90", "V34", "V32B", "V32", "V22B", "V21", "B103", "B212", "B202", "VARC", "VARCQ", "VARCP", "VARC2W", "VARCQ2W", "VARCP2W"]
                 .iter()
                 .map(|s| (*s).to_owned())
                 .collect(),
@@ -391,6 +414,7 @@ impl Interpreter {
             compression: Compression::default(),
             v44: V44::default(),
             service_class: ServiceClass::default(),
+            v8bis: false,
             state: LineState::Idle,
             body: Vec::new(),
             last_body: Vec::new(),
@@ -773,6 +797,47 @@ impl Interpreter {
         }
     }
 
+    /// `+A8E=<v8o>,<v8a>,<v8cf>,<v8b>`: V.8 and V.8 bis operation controls.
+    ///
+    /// The command is V.251's, which V.8 bis clause 11 names as where the
+    /// DTE's side of it is specified. Only `<v8b>` is acted on: 0 for no
+    /// V.8 bis and 1 for V.8 bis run by the DCE. The others are taken at the
+    /// values this DCE already works at -- V.8 originating and answering
+    /// both under the DCE's control, which is 1 and 1 -- and anything else in
+    /// them is refused rather than accepted and ignored. V.8 itself is
+    /// turned off with `+MS`'s automode, as it always was.
+    fn v8_controls(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
+        match op {
+            ExtOp::Read => {
+                let text = format!("+A8E: 1,1,0,{}", u8::from(self.v8bis));
+                self.fmt.info(&text, &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Test => {
+                self.fmt.info("+A8E: (1),(1),(0),(0,1)", &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Set(value) => {
+                let mut parts = value.split(',').map(str::trim);
+                let fixed = |p: Option<&str>, only: &str| matches!(p, None | Some("")) || p == Some(only);
+                if !fixed(parts.next(), "1") || !fixed(parts.next(), "1") {
+                    return Err(ResultCode::Error);
+                }
+                // <v8cf> is the call function, which for this DCE is always
+                // data; whatever is there is left alone.
+                parts.next();
+                match parts.next() {
+                    None | Some("") => {}
+                    Some("0") => self.v8bis = false,
+                    Some("1") => self.v8bis = true,
+                    Some(_) => return Err(ResultCode::Error),
+                }
+                Ok(None)
+            }
+            ExtOp::Execute => Err(ResultCode::Error),
+        }
+    }
+
     /// `+ER` and `+DR` — reporting parameters (V.250 6.5.5, 6.6.3).
     ///
     /// Identical in shape: one numeric parameter, 0 or 1, off by default. What
@@ -890,6 +955,102 @@ impl Interpreter {
     }
 
     /// `+DS44` — V.44 data compression (V.250 6.6.2, Table 28).
+    /// `+VARC=<baud>,<code>,<bits>`: this modem's own, for its own mode.
+    ///
+    /// What a V.ARC/QAM or V.ARC/PCM call asks the far end to send with,
+    /// where somebody wants to choose and not have the receiver choose:
+    /// the baud, the code as the percentage of each codeword that is data,
+    /// and the bits a symbol. Nought, or leaving one out of a first
+    /// setting, leaves that one to the modem.
+    fn varc_select(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
+        match op {
+            ExtOp::Read | ExtOp::Execute => {
+                let (baud, code, bits) = self.config.varc;
+                self.fmt.info(&format!("+VARC: {baud},{code},{bits}"), &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Test => {
+                self.fmt.info("+VARC: (0,250-128000),(0,25,33,50,75,93),(0-24)", &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Set(value) => {
+                let mut parts = value.split(',');
+                let mut field = |was: u32, most: u32| -> Result<u32, ResultCode> {
+                    match parts.next().map(str::trim) {
+                        // 5.4.2.1: an omitted subparameter keeps its value.
+                        None | Some("") => Ok(was),
+                        Some(v) => v.parse::<u32>().ok().filter(|n| *n <= most).ok_or(ResultCode::Error),
+                    }
+                };
+                let (was_baud, was_code, was_bits) = self.config.varc;
+                let baud = field(was_baud, 128_000)?;
+                let code = field(u32::from(was_code), 99)?;
+                let bits = field(u32::from(was_bits), 24)?;
+                self.config.varc = (baud, code as u8, bits as u8);
+                Ok(None)
+            }
+        }
+    }
+
+    /// `+VARCBIS=<mode>,<wires>`: this modem's own.
+    ///
+    /// Whether an ordinary call's V.8 bis transaction lists V.ARC, in the
+    /// non-standard field, beside whatever `+MS` allows. Two modems that
+    /// both do go to V.ARC and not to V.8; with one that does not, the call
+    /// is what it would have been. `<mode>` is nought for no, one for the
+    /// multicarrier mode, two for QAM and three for PCM; `<wires>` is one
+    /// for a line that is one pair of wires and has an echo to cancel.
+    fn varc_bis_select(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
+        match op {
+            ExtOp::Read | ExtOp::Execute => {
+                let (mode, two_wire) = self.config.varc_bis;
+                self.fmt.info(&format!("+VARCBIS: {mode},{}", u8::from(two_wire)), &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Test => {
+                self.fmt.info("+VARCBIS: (0-3),(0,1)", &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Set(value) => {
+                let mut parts = value.split(',');
+                let mut field = |was: u32, most: u32| -> Result<u32, ResultCode> {
+                    match parts.next().map(str::trim) {
+                        // 5.4.2.1: an omitted subparameter keeps its value.
+                        None | Some("") => Ok(was),
+                        Some(v) => v.parse::<u32>().ok().filter(|n| *n <= most).ok_or(ResultCode::Error),
+                    }
+                };
+                let (was_mode, was_wires) = self.config.varc_bis;
+                let mode = field(u32::from(was_mode), 3)?;
+                let wires = field(u32::from(was_wires), 1)?;
+                self.config.varc_bis = (mode as u8, wires == 1);
+                Ok(None)
+            }
+        }
+    }
+
+    /// `+VARCZ=<n>`: this modem's own. Compression of a V.ARC call's
+    /// stream, which has no V.42 under it for `+DS` to be about.
+    fn varc_z_select(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
+        match op {
+            ExtOp::Read | ExtOp::Execute => {
+                self.fmt.info(&format!("+VARCZ: {}", self.config.varc_z), &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Test => {
+                self.fmt.info("+VARCZ: (0-2)", &self.regs, &mut self.out);
+                Ok(None)
+            }
+            ExtOp::Set(value) => {
+                self.config.varc_z = match value.trim() {
+                    "" => self.config.varc_z,
+                    v => v.parse::<u8>().ok().filter(|n| *n <= 2).ok_or(ResultCode::Error)?,
+                };
+                Ok(None)
+            }
+        }
+    }
+
     fn v44_select(&mut self, op: &ExtOp) -> Result<Option<Action>, ResultCode> {
         match op {
             ExtOp::Read => {
@@ -995,6 +1156,10 @@ impl Interpreter {
             "ES" => return self.error_control_select(op),
             "DS" => return self.compression_select(op),
             "DS44" => return self.v44_select(op),
+            "VARC" => return self.varc_select(op),
+            "VARCBIS" => return self.varc_bis_select(op),
+            "VARCZ" => return self.varc_z_select(op),
+            "A8E" => return self.v8_controls(op),
             // V.250 6.5.5 and 6.6.3. The same parameter twice over: one bit,
             // defaulting to off, saying whether the DCE should report what it
             // negotiated with the far end before it says CONNECT.

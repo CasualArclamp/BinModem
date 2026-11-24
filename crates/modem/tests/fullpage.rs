@@ -43,7 +43,7 @@ fn a_whole_page_crosses() {
 
         let mut caller = Modem::new(FS);
         caller.fax_identification = "61399990000".to_owned();
-        caller.fax_page = Some(page.clone());
+        caller.fax_pages = vec![page.clone()];
         for line in ["AT+FCLASS=1\r", "ATD61388880000\r"] {
             for b in line.bytes() {
                 caller.feed_dte(b);

@@ -110,6 +110,32 @@ fn projection(zeta: f64) -> f64 {
     1.0 + zeta / 6.0 + zeta * zeta / 120.0
 }
 
+/// 9.7's non-linear encoder as a receiver sees it: points in grid units bent
+/// out by phi of their own energy over the mapper's mean, and back.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Warp {
+    theta: f64,
+    energy: f64,
+}
+
+impl Warp {
+    /// A grid point where the far end put it.
+    pub fn bend(&self, point: Complex) -> Complex {
+        point.scale(projection(self.theta * point.norm_sqr() / self.energy))
+    }
+
+    /// A received point back on the straight grid: by fixed-point iteration,
+    /// since a point bent out by phi of its own energy is brought back by phi
+    /// of the unbent one's.
+    pub fn unbend(&self, point: Complex) -> Complex {
+        let mut x = point;
+        for _ in 0..3 {
+            x = point.scale(1.0 / projection(self.theta * x.norm_sqr() / self.energy));
+        }
+        x
+    }
+}
+
 /// The nearest multiple of `step` to `value`, halfway going to the smaller
 /// magnitude (9.6.2 items 2 and 3).
 fn round_to(value: i64, step: i64) -> i64 {
@@ -392,6 +418,21 @@ pub fn peak(params: &Params) -> f64 {
         .fold(1.0, f64::max)
 }
 
+/// The largest coordinate any point of a direction's constellation reaches at
+/// the unit mean power symbols travel at -- out of the encoder, down the line
+/// and into the decoder -- which is what a scope drawing them has to be
+/// scaled to.
+///
+/// [`peak`] is in grid units, and at the higher rates those run to tens: a
+/// scope sized by it draws every point of a page within a few hundredths of
+/// its centre. This divides by the root of the mean energy, as
+/// [`Decoder::peak`] does, for whoever has the parameters and no decoder.
+pub fn unit_peak(params: &Params) -> f64 {
+    let shell = Shell::new(params.framing.m);
+    let (_, bent) = energies(params, &shell);
+    peak(params) / bent.sqrt()
+}
+
 /// The label of each point of the quarter superconstellation, by position.
 fn quarter_label(point: Point) -> Option<usize> {
     static LABELS: std::sync::OnceLock<std::collections::HashMap<Point, usize>> = std::sync::OnceLock::new();
@@ -439,12 +480,7 @@ fn to_grid(params: &Params, energy: f64, scale: f64, symbol: Complex) -> Complex
     if !params.nonlinear {
         return point;
     }
-    let theta = params.theta();
-    let mut x = point;
-    for _ in 0..3 {
-        x = point.scale(1.0 / projection(theta * x.norm_sqr() / energy));
-    }
-    x
+    Warp { theta: params.theta(), energy }.unbend(point)
 }
 
 /// For two received 2D symbols, the nearest pair of points in each 4D subset
@@ -560,6 +596,12 @@ impl Decoder {
         self.scale
     }
 
+    /// The far end's non-linear encoding, for the receiver's slicer: None
+    /// when it uses none.
+    pub fn warp(&self) -> Option<Warp> {
+        self.params.nonlinear.then_some(Warp { theta: self.params.theta(), energy: self.energy })
+    }
+
     /// The largest coordinate a point of the constellation reaches, at the
     /// unit mean power symbols are fed in at.
     pub fn peak(&self) -> f64 {
@@ -606,8 +648,8 @@ impl Decoder {
         let n = code.states();
         let mut next = vec![f64::MAX; n];
         let mut back = vec![(0u8, 0u8, 0u8); n];
-        for state in 0..n {
-            if self.metrics[state] == f64::MAX {
+        for (state, &metric) in self.metrics.iter().enumerate().take(n) {
+            if metric == f64::MAX {
                 continue;
             }
             let y0 = usize::from(code.output(state as u8) ^ inversion);
@@ -617,7 +659,7 @@ impl Decoder {
                     continue;
                 }
                 let to = code.next(state as u8, y) as usize;
-                let total = self.metrics[state] + d;
+                let total = metric + d;
                 if total < next[to] {
                     next[to] = total;
                     back[to] = (state as u8, pair.0, pair.1);
@@ -1265,5 +1307,133 @@ mod tests {
         let wrong = sent.iter().zip(&got).skip(23).filter(|(a, b)| a != b).count();
         assert!(got.len() > 1000);
         assert_eq!(wrong, 0);
+    }
+
+    /// Bits through an encoder and into the receiving end as V.34 lays it
+    /// out, rather than through our own decoder's shortcut: the non-linear
+    /// encoding taken back out of what arrives by phi of the average energy
+    /// of x (9-35), the noise-whitening filter 1 + h(1) z^-1 + h(2) z^-2 +
+    /// h(3) z^-3 that MP's coefficients were fitted for giving y back, and
+    /// only then the trellis. `energy` is what the receiver takes the average
+    /// energy of x to be, as a share of the mapper's; None measures it off
+    /// what was sent. The count of wrong bits, and of bits back.
+    fn through_a_receiver(p: Params, symbols: usize, snr_db: f64, energy: Option<f64>) -> (usize, usize) {
+        let mut encoder = Encoder::new(p);
+        let mut decoder = Decoder::new(Params { nonlinear: false, ..p });
+        let h: Vec<Complex> = p.precoding.iter().map(|&(re, im)| Complex::new(f64::from(re), f64::from(im)).scale(1.0 / 16384.0)).collect();
+        let mut seed = 0x1234_5678_u32;
+        let mut sent = Vec::new();
+        let sent_symbols: Vec<Complex> = (0..symbols)
+            .map(|_| {
+                encoder.next_symbol(&mut || {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    sent.push(seed & 1 == 1);
+                    seed & 1 == 1
+                })
+            })
+            .collect();
+        let unit = encoder.grid_scale();
+        let theta = p.theta();
+        let unbend = |w: Complex, e: f64| {
+            let mut x = w;
+            for _ in 0..8 {
+                x = w.scale(1.0 / projection(theta * x.norm_sqr() / e));
+            }
+            x
+        };
+        let mapper = encoder.energy;
+        let measured = sent_symbols.iter().map(|z| unbend(z.scale(unit), mapper).norm_sqr()).sum::<f64>() / symbols as f64;
+        let e = energy.map_or(measured, |share| share * mapper);
+        let mut noise_seed = 0x2545_f491_u32;
+        let sigma = 10f64.powf(-snr_db / 20.0) / 2f64.sqrt();
+        let mut gauss = move || {
+            let mut u = || {
+                noise_seed ^= noise_seed << 13;
+                noise_seed ^= noise_seed >> 17;
+                noise_seed ^= noise_seed << 5;
+                f64::from(noise_seed) / f64::from(u32::MAX)
+            };
+            let (a, b) = (u().max(1e-12), u());
+            (-2.0 * a.ln()).sqrt() * (std::f64::consts::TAU * b).cos()
+        };
+        let mut past = VecDeque::from(vec![Complex::ZERO; 3]);
+        for z in &sent_symbols {
+            let x = unbend((*z + Complex::new(gauss() * sigma, gauss() * sigma)).scale(unit), e);
+            let mut y = x;
+            for (xp, hp) in past.iter().zip(&h) {
+                y += *xp * *hp;
+            }
+            past.pop_back();
+            past.push_front(x);
+            decoder.feed(y.scale(1.0 / decoder.grid_scale()));
+        }
+        let got = decoder.take_bits();
+        let wrong = sent.iter().zip(&got).skip(23).filter(|(a, b)| a != b).count();
+        (wrong, got.len())
+    }
+
+    /// The upstream a NetZero V.90 server asked for in every MP of a live call
+    /// (live-1795315554): precoding, non-linear encoding, expanded shaping and
+    /// the 16-state code, at 16 800 and 19 200 bit/s, with three of the sets
+    /// of coefficients it sent. The server lost frames on that call, and this
+    /// is what says it was not this end's arithmetic: the receiving end as
+    /// V.34 lays it out reads every bit, whichever way it takes 9-35's
+    /// "average energy of the signal x(n)" -- the mapper's, which is what the
+    /// encoder bends by, or the precoded signal's, which the precoder's
+    /// corrections make a percent or two more.
+    #[test]
+    fn a_servers_precoded_non_linear_upstream_decodes_clean() {
+        let taps = [
+            [(-571, 4034), (-59, -469), (-967, -142)],
+            [(-3691, -255), (353, 1128), (-1589, -549)],
+            [(1511, -831), (759, 1573), (777, -95)],
+        ];
+        for rate in [SymbolRate::S3200, SymbolRate::S3000, SymbolRate::S2400] {
+            for primary in [16_800, 19_200] {
+                for h in taps {
+                    let mut p = params(rate, primary, Code::States16, true, true);
+                    p.precoding = h;
+                    for energy in [Some(1.0), None] {
+                        let (wrong, got) = through_a_receiver(p, 6000, 32.0, energy);
+                        assert!(got > 20_000, "{rate:?} at {primary}: {got} bits");
+                        assert_eq!(wrong, 0, "{rate:?} at {primary}, h {h:?}, energy {energy:?}: {wrong} of {got} wrong");
+                    }
+                }
+            }
+        }
+    }
+
+    /// A scope's range is the unit-power peak, not the grid's: what the
+    /// encoder sends reaches it and never passes it, and it is the decoder's
+    /// own figure. Sized by the grid-unit [`peak`] instead, a half-duplex fax
+    /// window drew every point of a real 33 600 page as one dot at the centre.
+    #[test]
+    fn the_unit_peak_is_as_far_as_the_symbols_reach() {
+        for (rate, primary) in [(SymbolRate::S3429, 33_600), (SymbolRate::S3200, 28_800), (SymbolRate::S2400, 9_600)] {
+            for nonlinear in [false, true] {
+                let p = params(rate, primary, Code::States16, false, nonlinear);
+                let unit = unit_peak(&p);
+                assert!((unit - Decoder::new(p).peak()).abs() < 1e-12, "{primary}: not the decoder's peak");
+                assert!(peak(&p) > 3.0 * unit, "{primary}: grid units and unit power agree, so this test proves nothing");
+                let mut encoder = Encoder::new(p);
+                let mut seed = 0x9e37_79b9_u32;
+                let mut reach = 0.0f64;
+                for _ in 0..20_000 {
+                    let symbol = encoder.next_symbol(&mut || {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 17;
+                        seed ^= seed << 5;
+                        seed & 1 == 1
+                    });
+                    reach = reach.max(symbol.re.abs()).max(symbol.im.abs());
+                }
+                assert!(
+                    reach <= unit * (1.0 + 1e-9) && reach > 0.5 * unit,
+                    "{primary}, non-linear {nonlinear}: symbols reach {reach:.3} against a peak of {unit:.3}"
+                );
+            }
+        }
     }
 }

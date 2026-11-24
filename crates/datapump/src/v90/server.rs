@@ -28,6 +28,7 @@ use std::collections::VecDeque;
 use dsp::Resampler;
 
 use crate::v34::info::{Info0, Info0d};
+use crate::v34::phase2::V92Wish;
 
 use super::digital;
 use super::startup::{Digital, Status};
@@ -50,6 +51,23 @@ pub fn ours() -> Info0d {
     }
 }
 
+/// What this server wants of V.92, for [`Line::with_v92`]: capable, and PCM
+/// upstream if the analogue modem asks for it with a Table 18 INFO1a.
+///
+/// Short phase 2 is not asked for here; [`wish_short`] is the one that does.
+pub fn wish(pcm_upstream: bool) -> V92Wish {
+    V92Wish { capable: true, short_phase2: false, pcm_upstream, ..V92Wish::default() }
+}
+
+/// The same, asking for V.92's short phase 2 (9.4) as well when PCM upstream
+/// is on offer: the short one built here ends in a Table 18 INFO1a and no
+/// other, so there is nothing to shorten for a caller that could not send
+/// one. It runs only if the analogue modem asks too, which it does on a
+/// connection it has a memo of.
+pub fn wish_short(pcm_upstream: bool) -> V92Wish {
+    V92Wish { short_phase2: pcm_upstream, ..wish(pcm_upstream) }
+}
+
 /// The digital modem, at the line's rate.
 #[derive(Debug, Clone)]
 pub struct Line {
@@ -59,19 +77,88 @@ pub struct Line {
     arrived: Vec<f64>,
     made: Vec<f64>,
     out: VecDeque<f64>,
+    /// The levels the digital modem chose, at the network's own rate and not
+    /// yet taken: what a line that *is* the network wants instead of `out`
+    /// (see [`Line::take_exact`]).
+    exact: Vec<f64>,
+    /// What the network delivered, at its own rate and not yet used: see
+    /// [`Line::give_exact`].
+    exact_in: VecDeque<f64>,
 }
 
 impl Line {
     /// From the end of V.8, with INFO0d saying `info0d`.
-    pub fn new(fs: f64, info0d: Info0d) -> Self {
+    pub fn new(fs: f64, info0d: Info0d, lead_in: f64) -> Self {
         Self {
-            modem: Digital::new(info0d),
+            modem: Digital::new(info0d, lead_in),
             down: Resampler::new(fs, digital::FS),
             up: Resampler::new(digital::FS, fs),
             arrived: Vec::with_capacity(4),
             made: Vec::with_capacity(8),
             out: VecDeque::from(vec![0.0; SLACK]),
+            exact: Vec::new(),
+            exact_in: VecDeque::new(),
         }
+    }
+
+    /// From the end of V.8, as V.34's answer modem with U.S. Robotics x2 on
+    /// offer (see [`Digital::x2`]).
+    pub fn x2(fs: f64, lead_in: f64) -> Self {
+        Self { modem: Digital::x2(lead_in), ..Self::new(fs, ours(), lead_in) }
+    }
+
+    /// What the network delivered, one level for every 8000 Hz sample, for
+    /// the samples [`Line::step`] is about to be given.
+    ///
+    /// The other half of [`Line::take_exact`]. The samples `step` takes are
+    /// the network's put up to the line's rate, and it brings them down again
+    /// with a filter of its own; on a line that carries G.711 itself that is
+    /// two filters between the codec and a receiver whose signal is the
+    /// codec's levels, and the second of them takes the top of the band with
+    /// it. Given these, `step` keeps its own conversion for the clock alone
+    /// and hands the digital modem the level that arrived. It also lets the
+    /// V.92 receiver see that what it hears are codewords, which is how it
+    /// knows there is an A/D converter's rounding to allow for.
+    pub fn give_exact(&mut self, levels: &[f64]) {
+        self.exact_in.extend(levels.iter().copied());
+        // The conversion's own delay is all that should ever stand here.
+        while self.exact_in.len() > 4096 {
+            self.exact_in.pop_front();
+        }
+    }
+
+    /// The digital modem's own levels since the last call, one for every
+    /// 8000 Hz sample it has made, appended to `into`.
+    ///
+    /// The samples [`Line::step`] returns are these put through a rate
+    /// conversion, for a line that runs at some other rate and has a
+    /// softphone's encoder beyond it. A line that carries G.711 itself has no
+    /// use for the conversion and every reason to avoid it: taken down to
+    /// 8000 Hz again by a second filter, the levels come back a little short
+    /// of what they were at the top of the band, which is where a PCM signal
+    /// keeps half of what it has to say. Handed these, the encoder turns each
+    /// level into exactly the codeword it was chosen to be.
+    pub fn take_exact(&mut self, into: &mut Vec<f64>) {
+        into.append(&mut self.exact);
+    }
+
+    /// Offer V.92 from this server: INFO0d's capability bits and what this
+    /// end wants of PCM upstream (see [`Digital::with_v92`]).
+    ///
+    /// A V.92 digital modem is a V.90 one with more to say in phase 2 --
+    /// "the digital modem ... is as defined in clause 5 of V.90" (5/V.92) --
+    /// so everything here stays as it was and only what is *said* changes.
+    pub fn with_v92(mut self, wish: V92Wish) -> Self {
+        self.modem = self.modem.with_v92(wish);
+        self
+    }
+
+    /// Begin with the rest of short Phase 1 after this end's QCA1d (see
+    /// [`Digital::after_quick`]). Build the line with V.8's handover silence
+    /// as its lead-in: it is the silence that follows TONEq.
+    pub fn after_quick(mut self, uqts: u8, level: v8::quick::AnspcmLevel) -> Self {
+        self.modem = self.modem.after_quick(uqts, level);
+        self
     }
 
     pub fn modem(&self) -> &Digital {
@@ -87,7 +174,13 @@ impl Line {
         self.arrived.clear();
         self.down.process(line, &mut self.arrived);
         for i in 0..self.arrived.len() {
-            let level = self.modem.step(self.arrived[i]);
+            let arrived = self.exact_in.pop_front().unwrap_or(self.arrived[i]);
+            let level = self.modem.step(arrived);
+            self.exact.push(level);
+            // Nobody taking them is the ordinary case on a sound card.
+            if self.exact.len() > 4096 {
+                self.exact.drain(..2048);
+            }
             self.made.clear();
             self.up.process(level, &mut self.made);
             self.out.extend(self.made.iter().copied());

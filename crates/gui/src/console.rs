@@ -216,6 +216,38 @@ pub struct View {
     pub mouse: Vec<Mouse>,
 }
 
+/// The largest font at which the whole screen fits in `room`, to the half
+/// point.
+///
+/// A terminal is a fixed grid, so at a fixed font it is a fixed size, and in
+/// a window of any other size that leaves a margin of nothing down one side
+/// and along the bottom. Sizing the type to the room spends that margin on
+/// the letters. Half points because every size is its own set of glyphs to
+/// rasterise, and a window being dragged would otherwise ask for hundreds.
+pub fn fit(ui: &Ui, term: &Terminal, room: eframe::egui::Vec2) -> f32 {
+    const SMALLEST: f32 = 8.0;
+    let (cols, rows) = term.size();
+    let measure = |size: f32| {
+        let font = FontId::monospace(size);
+        ui.ctx().fonts_mut(|f| {
+            (f.glyph_width(&font, 'M') * cols as f32, f.row_height(&font) * rows as f32)
+        })
+    };
+    // Near enough in proportion for a first guess; glyphs are placed on
+    // whole pixels, so the guess is then walked down until it really fits.
+    let (w, h) = measure(16.0);
+    let guess = 16.0 * (room.x / w).min(room.y / h);
+    let mut size = ((guess * 2.0).floor() / 2.0).clamp(SMALLEST, 40.0);
+    while size > SMALLEST {
+        let (w, h) = measure(size);
+        if w <= room.x && h <= room.y {
+            break;
+        }
+        size -= 0.5;
+    }
+    size
+}
+
 /// Paint a terminal, returning the response so the caller can manage focus.
 pub fn view(ui: &mut Ui, term: &Terminal, font_size: f32) -> View {
     let font = FontId::monospace(font_size);

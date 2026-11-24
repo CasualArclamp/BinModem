@@ -782,6 +782,47 @@ fn a_bell_103_call_carries_a_bbs_session() {
 }
 
 #[test]
+fn a_v21_call_carries_a_bbs_session() {
+    // Bell 103's call with V.21's tones, which is how the same board was
+    // reached from anywhere outside North America. The difference that shows
+    // from here is the time: the answering end goes through V.25 before its
+    // carrier, two seconds of silence and three of 2100 Hz.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "AT+MS=V21");
+    Pair::type_at(&mut p.caller, "AT+MS=V21");
+    p.run(0.01);
+    assert!(p.caller_saw().contains("OK"), "{:?}", p.caller_saw());
+
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(8.0);
+
+    assert_eq!(p.caller.state(), State::Data, "the V.21 caller never connected");
+    assert_eq!(p.host.state(), State::Data, "the V.21 host never connected");
+    assert_eq!(p.caller.standard(), "V.21");
+    assert_eq!(p.caller.rate(), Some(300));
+    assert!(!p.caller.error_controlled());
+
+    let banner = "\r\nThe Dead Zone BBS\r\nLogin: ";
+    for b in banner.bytes() {
+        p.host.feed_dte(b);
+    }
+    Pair::type_at(&mut p.caller, "guest");
+    p.run(3.0);
+
+    assert!(
+        p.caller_saw().contains(banner),
+        "the banner did not come through: {:?}",
+        p.caller_saw()
+    );
+    assert!(
+        p.host_saw().contains("guest\r"),
+        "the login did not go down the line: {:?}",
+        p.host_saw()
+    );
+}
+
+#[test]
 fn a_scope_can_see_what_the_modem_is_doing() {
     // Everything the live window puts on screen comes through these, and none
     // of it is visible from the terminal side, which sees a CONNECT and a rate
@@ -1182,6 +1223,44 @@ fn the_reports_come_out_in_the_order_v250_gives_them() {
     let connect = saw.find("CONNECT").expect("never connected");
     assert!(er < dr, "+DR should follow +ER");
     assert!(dr < connect, "CONNECT is the final result code and comes last");
+}
+
+/// The far-end panel says what a call is compressing with.
+///
+/// Its compression row read whichever XID had arrived last, and only that
+/// XID's V.42bis half. V.44 7.3 has an answer name one algorithm, so once two
+/// of these agreed V.44 the last XID named nothing else, and both panels said
+/// "none offered" on a call compressing both ways -- which is where the
+/// README's "compression between two of these in V.90 is not offered
+/// correctly" came from. It was offered, and agreed; the panel could not say
+/// so.
+#[test]
+fn the_panel_says_which_compression_the_call_is_running() {
+    let row = |m: &Modem, name: &str| {
+        m.distant().into_iter().find(|(k, _)| *k == name).map(|(_, v)| v).unwrap_or_default()
+    };
+
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(20.0);
+    for (who, modem) in [("caller", &p.caller), ("host", &p.host)] {
+        assert_eq!(modem.compression_name(), Some("V.44"), "{who}");
+        let running = row(modem, "compression");
+        assert!(running.starts_with("V.44, "), "{who}: {running:?}");
+        let offered = row(modem, "compression offered");
+        assert!(offered.contains("V.42bis") && offered.contains("V.44"), "{who}: {offered:?}");
+    }
+
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "AT+DS44=0");
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(20.0);
+    let running = row(&p.host, "compression");
+    assert!(running.starts_with("V.42bis, "), "{running:?}");
+    let offered = row(&p.host, "compression offered");
+    assert!(offered.starts_with("V.42bis") && !offered.contains("V.44"), "{offered:?}");
 }
 
 #[test]
@@ -1767,7 +1846,7 @@ fn one_modem_faxes_a_page_to_another_over_at_commands() {
     let mut caller = Modem::new(FS);
     caller.fax_identification = "61399990000".to_owned();
     let page = a_test_page(10);
-    caller.fax_page = Some(page.clone());
+    caller.fax_pages = vec![page.clone()];
     Pair::type_at(&mut caller, "AT+FCLASS=1");
     Pair::type_at(&mut caller, "ATD61388880000");
 
@@ -1820,6 +1899,9 @@ fn a_fax_that_answers_does_not_go_looking_for_v8() {
     // V.8 negotiation must never be started on a fax call. This is the same
     // rule the dialling side already follows, from the other end.
     let mut answerer = Modem::new(FS);
+    // The plain fax's tone: with V.34 offered the called tone is ANSam
+    // (6.1.1/T.30), which has the reversals on purpose.
+    answerer.fax_v34 = false;
     Pair::type_at(&mut answerer, "AT+FCLASS=1");
     Pair::type_at(&mut answerer, "ATA");
     let seconds = 2.0;
@@ -1860,6 +1942,7 @@ struct Faxed {
     page: Option<fax::page::Page>,
     rate: u32,
     error_correction: bool,
+    coding: fax::coding::Coding,
 }
 
 fn fax_between(caller: &mut Modem, answerer: &mut Modem) -> Faxed {
@@ -1867,6 +1950,7 @@ fn fax_between(caller: &mut Modem, answerer: &mut Modem) -> Faxed {
     let mut arrived = None;
     let mut rate = 0;
     let mut error_correction = false;
+    let mut coding = fax::coding::Coding::default();
     for _ in 0..(FS * 40.0) as usize {
         let from_caller = caller.step(to_caller);
         let from_answerer = answerer.step(to_answerer);
@@ -1879,6 +1963,7 @@ fn fax_between(caller: &mut Modem, answerer: &mut Modem) -> Faxed {
         {
             rate = call.rate();
             error_correction = call.error_correction();
+            coding = call.coding();
         }
         if arrived.is_none() {
             arrived = answerer.take_received_page().map(|(_, page)| page);
@@ -1893,6 +1978,7 @@ fn fax_between(caller: &mut Modem, answerer: &mut Modem) -> Faxed {
         page: arrived,
         rate,
         error_correction,
+        coding,
     }
 }
 
@@ -1900,15 +1986,18 @@ fn fax_between(caller: &mut Modem, answerer: &mut Modem) -> Faxed {
 fn a_fax_goes_at_9600_unless_it_is_told_not_to() {
     // Two of these offer V.29 and V.27 ter to each other, so the page goes at
     // V.29's 9600. Told to use V.27 ter alone -- the box in the window -- the
-    // same call goes at 4800, and the page arrives just the same.
+    // same call goes at 4800, and the page arrives just the same. With the
+    // V.34 box unticked at one end, since two of these with it ticked go to
+    // V.34 instead.
     for (offer, want) in [
         (fax::call::OUR_MODULATIONS.to_vec(), 9600),
         (vec![fax::t30::Modulation::V27ter], 4800),
     ] {
         let page = a_test_page(6);
         let mut caller = Modem::new(FS);
-        caller.fax_page = Some(page.clone());
+        caller.fax_pages = vec![page.clone()];
         caller.fax_offer = offer.clone();
+        caller.fax_v34 = false;
         Pair::type_at(&mut caller, "AT+FCLASS=1");
         Pair::type_at(&mut caller, "ATD1");
         let mut answerer = Modem::new(FS);
@@ -1926,14 +2015,17 @@ fn a_fax_goes_at_9600_unless_it_is_told_not_to() {
 fn a_fax_uses_error_correction_unless_either_end_is_told_not_to() {
     // On at both ends by default, so two of these use it. Turned off at
     // either end -- the box in the window -- the call goes without, since it
-    // takes both ends offering it, and the page arrives just the same.
+    // takes both ends offering it, and the page arrives just the same. On
+    // clause 5, that is: under V.34 error correction is not a choice (F.3),
+    // so the V.34 box is unticked at the caller.
     for (at_caller, at_answerer, want) in
         [(true, true, true), (false, true, false), (true, false, false)]
     {
         let page = a_test_page(6);
         let mut caller = Modem::new(FS);
-        caller.fax_page = Some(page.clone());
+        caller.fax_pages = vec![page.clone()];
         caller.fax_error_correction = at_caller;
+        caller.fax_v34 = false;
         Pair::type_at(&mut caller, "AT+FCLASS=1");
         Pair::type_at(&mut caller, "ATD1");
         let mut answerer = Modem::new(FS);
@@ -1946,5 +2038,186 @@ fn a_fax_uses_error_correction_unless_either_end_is_told_not_to() {
         let got = faxed.page.unwrap_or_else(|| panic!("{case}: no page arrived"));
         assert_eq!(got.lines, page.lines, "{case}");
         assert_eq!(faxed.error_correction, want, "{case}");
+    }
+}
+
+#[test]
+fn a_fax_goes_in_jbig_unless_either_end_is_told_not_to() {
+    // The same for JBIG, the box beside the one for error correction: on at
+    // both ends by default, and the page goes in it; off at either, and it
+    // goes in MMR, the next smallest both have.
+    use fax::coding::Coding;
+    for (at_caller, at_answerer, want) in [
+        (true, true, Coding::Jbig),
+        (false, true, Coding::Mmr),
+        (true, false, Coding::Mmr),
+    ] {
+        let page = a_test_page(6);
+        let mut caller = Modem::new(FS);
+        caller.fax_pages = vec![page.clone()];
+        caller.fax_jbig = at_caller;
+        Pair::type_at(&mut caller, "AT+FCLASS=1");
+        Pair::type_at(&mut caller, "ATD1");
+        let mut answerer = Modem::new(FS);
+        answerer.fax_jbig = at_answerer;
+        Pair::type_at(&mut answerer, "AT+FCLASS=1");
+        Pair::type_at(&mut answerer, "ATA");
+
+        let faxed = fax_between(&mut caller, &mut answerer);
+        let case = format!("caller {at_caller}, answerer {at_answerer}");
+        let got = faxed.page.unwrap_or_else(|| panic!("{case}: no page arrived"));
+        assert_eq!(got.lines, page.lines, "{case}");
+        assert!(faxed.error_correction, "{case}");
+        assert_eq!(faxed.coding, want, "{case}");
+    }
+}
+
+/// What each end's line said, as the window's transcript would have it.
+fn line_notes(p: &mut Pair) -> (Vec<String>, Vec<String>) {
+    (p.caller.take_line_notes(), p.host.take_line_notes())
+}
+
+#[test]
+fn v8_bis_chooses_the_mode_and_v8_follows_it() {
+    // +A8E's <v8b> puts a V.8 bis transaction in front of V.8 (V.8 bis 10.2):
+    // the answering end asks with CRe, the calling end asks back with CRd, is
+    // sent the answerer's list, chooses with MS and is acknowledged --
+    // transaction 12 of Table 7. Then ANSam and V.8 as ever (9.9.1), and the
+    // call is the one the MS named.
+    let mut p = Pair::new();
+    for modem in [&mut p.caller, &mut p.host] {
+        Pair::type_at(modem, "AT+MS=V34");
+        Pair::type_at(modem, "AT+A8E=,,,1");
+    }
+    p.run(0.05);
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    let (mut caller, mut host) = (Vec::new(), Vec::new());
+    for _ in 0..30 {
+        p.run(1.0);
+        let (c, h) = line_notes(&mut p);
+        caller.extend(c);
+        host.extend(h);
+        if p.caller.state() == State::Data && p.host.state() == State::Data {
+            break;
+        }
+    }
+    println!("caller: {caller:#?}\nhost: {host:#?}");
+    let bis = |notes: &[String]| -> Vec<String> {
+        notes
+            .iter()
+            .filter_map(|n| n.strip_prefix("V.8 bis: "))
+            .map(|n| n.split(" (").next().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(bis(&host), ["sent CRe", "heard CRd", "sent CL", "heard MS", "sent ACK(1)"]);
+    assert_eq!(bis(&caller), ["heard CRe", "sent CRd", "heard CL", "sent MS", "heard ACK(1)"]);
+    assert_eq!((p.caller.state(), p.host.state()), (State::Data, State::Data));
+    assert_eq!(p.caller.standard(), "V.34");
+    assert!(p.caller.error_controlled() && p.host.error_controlled());
+}
+
+#[test]
+fn a_caller_with_v8_bis_still_reaches_an_answerer_without_it() {
+    // 10.2.1: an answer tone before any V.8 bis signal, and the caller goes
+    // on with V.8 as though it had never been listening for anything else.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "AT+A8E=,,,1");
+    p.run(0.05);
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(12.0);
+    let (caller, _) = line_notes(&mut p);
+    assert_eq!((p.caller.state(), p.host.state()), (State::Data, State::Data), "{caller:?}");
+    assert!(caller.iter().any(|n| n.contains("no V.8 bis")), "{caller:?}");
+}
+
+#[test]
+fn an_answerer_with_v8_bis_still_takes_a_caller_without_it() {
+    // 10.2.2: nothing answers CRe, and the answering end gets on with its
+    // answer tone. The caller has waited through three requests, three
+    // seconds of quiet after each, and V.8 goes ahead from there.
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.host, "AT+A8E=,,,1");
+    p.run(0.05);
+    Pair::type_at(&mut p.host, "ATA");
+    Pair::type_at(&mut p.caller, "ATD5551234");
+    p.run(26.0);
+    let (_, host) = line_notes(&mut p);
+    assert_eq!((p.caller.state(), p.host.state()), (State::Data, State::Data), "{host:?}");
+    assert!(host.iter().any(|n| n.contains("nothing at the far end answered")), "{host:?}");
+    assert_eq!(host.iter().filter(|n| n.ends_with("sent CRe")).count(), 3, "{host:?}");
+}
+
+#[test]
+fn the_v8_bis_switch_reads_back_and_refuses_what_it_cannot_do() {
+    let mut p = Pair::new();
+    Pair::type_at(&mut p.caller, "AT+A8E?");
+    p.run(0.01);
+    assert!(p.caller_saw().contains("+A8E: 1,1,0,0"), "{:?}", p.caller_saw());
+    Pair::type_at(&mut p.caller, "AT+A8E=,,,1");
+    Pair::type_at(&mut p.caller, "AT+A8E?");
+    p.run(0.01);
+    assert!(p.caller_saw().contains("+A8E: 1,1,0,1"), "{:?}", p.caller_saw());
+    // V.8 originating under the DTE's control is not something this does.
+    p.at_caller.clear();
+    Pair::type_at(&mut p.caller, "AT+A8E=6,,,1");
+    p.run(0.01);
+    assert!(p.caller_saw().contains("ERROR"), "{:?}", p.caller_saw());
+}
+
+/// V.32bis Annex A automode, calling: a caller left on V.92, dialling an
+/// answerer from before V.8, is to hear what it is and become one of those.
+/// Before this, V.22bis, V.21 and Bell answerers were never recognised: the
+/// caller sat in V.32's AA or in V.8 waiting for ANSam.
+#[test]
+fn an_automode_caller_finds_an_answerer_without_v8() {
+    for (ms, want, rate) in [
+        ("V32B", "V.32bis", 14_400),
+        ("V32", "V.32", 9600),
+        ("V22B", "V.22bis", 2400),
+        ("B212", "Bell 212A", 1200),
+        ("B103", "Bell 103", 300),
+        ("V21", "V.21", 300),
+    ] {
+        let mut p = Pair::new();
+        Pair::type_at(&mut p.host, &format!("AT+MS={ms},0"));
+        Pair::type_at(&mut p.caller, "AT+MS=V92");
+        p.run(0.01);
+        Pair::type_at(&mut p.host, "ATA");
+        Pair::type_at(&mut p.caller, "ATD5551234");
+        p.run(30.0);
+        assert_eq!(p.caller.state(), State::Data, "an answering {ms}: caller never connected");
+        assert_eq!(p.host.state(), State::Data, "an answering {ms}: never connected");
+        assert_eq!(p.caller.standard(), want, "an answering {ms}");
+        assert_eq!(p.caller.rate(), Some(rate), "an answering {ms}");
+    }
+}
+
+/// And answering: callers from before V.8 say nothing until they hear their
+/// own answer, so after ANSam an automode answerer offers V.32bis, V.22bis,
+/// Bell and V.21 in turn. A Bell 212A caller takes V.22bis's offer at 1200,
+/// which is the same DPSK, as it does with any V.22 answerer.
+#[test]
+fn an_automode_answerer_finds_a_caller_without_v8() {
+    for (ms, want, rate) in [
+        ("V32B", "V.32bis", 14_400),
+        ("V32", "V.32", 9600),
+        ("V22B", "V.22bis", 2400),
+        ("B212", "Bell 212A", 1200),
+        ("B103", "Bell 103", 300),
+        ("V21", "V.21", 300),
+    ] {
+        let mut p = Pair::new();
+        Pair::type_at(&mut p.caller, &format!("AT+MS={ms},0"));
+        Pair::type_at(&mut p.host, "AT+MS=V92");
+        p.run(0.01);
+        Pair::type_at(&mut p.host, "ATA");
+        Pair::type_at(&mut p.caller, "ATD5551234");
+        p.run(30.0);
+        assert_eq!(p.caller.state(), State::Data, "a calling {ms}: never connected");
+        assert_eq!(p.host.state(), State::Data, "a calling {ms}: the answerer never connected");
+        assert_eq!(p.caller.standard(), want, "a calling {ms}");
+        assert_eq!(p.host.rate(), Some(rate), "a calling {ms}");
     }
 }
