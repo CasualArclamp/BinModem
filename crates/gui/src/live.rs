@@ -493,6 +493,9 @@ impl LineNoise {
 #[derive(Debug, Clone, Default)]
 pub struct LineState {
     pub open: bool,
+    /// What the modem's `+MS` holds, whoever set it: the window, or a
+    /// command typed at the terminal. None until the modem has said.
+    pub selected: Option<at::Modulation>,
     pub input: String,
     pub output: String,
     /// Rates the two devices are actually running at, which are rarely the
@@ -2118,6 +2121,11 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             }
             if let Ok(mut state) = session.state.lock() {
                 state.recording = recording_now.then(|| recording.len() as f64 / 2.0 / FS);
+                // A SIP line with no call on it brings no samples, and that
+                // is when most commands are typed.
+                if state.selected.as_ref() != Some(modem.selected()) {
+                    state.selected = Some(modem.selected().clone());
+                }
             }
             thread::sleep(Duration::from_millis(2));
             continue;
@@ -2623,6 +2631,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
             if let Ok(mut state) = session.state.lock() {
                 state.dropped = dropped;
                 state.underruns = underruns;
+                if state.selected.as_ref() != Some(modem.selected()) {
+                    state.selected = Some(modem.selected().clone());
+                }
                 state.tx_peak = tx_peak;
                 state.tx_rms = tx_rms;
                 state.rx_rms = rx_rms;
