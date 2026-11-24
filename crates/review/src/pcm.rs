@@ -212,6 +212,12 @@ impl Upstream {
         // The receiver hunts in whatever is on the line, the other end's
         // echo included: an S cannot have begun before the line came up.
         let from = heard.max(self.since.unwrap_or(heard)).min(when);
+        // S lasts 128 symbols at the least. A turn with no S before it is
+        // the tail of something else: the end of INFO1a, as often as not.
+        if when - from < 0.01 && self.stage == UpStage::AwaitS {
+            self.rx.hunt();
+            return;
+        }
         let layer = if matches!(self.stage, UpStage::AfterJa(1)) { Layer::Phase4 } else { Layer::Phase3 };
         self.events.push(self.event(from, when, layer, "S").summary(format!("S for {:.0} ms", 1000.0 * (when - from))));
         self.events.push(self.event(when, when + bar, layer, "S-bar").summary("S-bar: S turned over, 16 symbols".to_owned()));
@@ -701,7 +707,7 @@ pub fn follow(
     let mut shared = Shared::default();
     let mut up = Upstream::new(Band::new(asked.upstream, high), analogue.1, fs);
     let mut down = Downstream::new(law, asked.uinfo, digital.1, fs);
-    let first = ((from - 0.05).max(0.0) * fs) as usize;
+    let first = ((from + 0.01) * fs) as usize;
     let last = analogue.0.len().min(digital.0.len());
     for n in first..last {
         up.feed(n, analogue.0[n] as f64, &mut shared);
