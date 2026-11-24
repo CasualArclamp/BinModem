@@ -72,6 +72,12 @@ pub struct Decoder {
     escape: u8,
     /// Transparent mode: whether the octet just read was the ESCAPE.
     awaiting_command: bool,
+    /// The most the history has held since the start, against N8.
+    ///
+    /// Not enforced: 7.15 does not list a history past N8 among the
+    /// decoder's errors, and refusing a far end that runs a character over
+    /// costs the call. Kept so a test, or a log, can see that ours does not.
+    longest_history: usize,
 }
 
 impl std::fmt::Debug for Decoder {
@@ -100,11 +106,17 @@ impl Decoder {
             stepping_up: false,
             escape: 0,
             awaiting_command: false,
+            longest_history: 0,
         }
     }
 
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// The most characters the history has held at once (see the field).
+    pub fn longest_history(&self) -> usize {
+        self.longest_history
     }
 
 
@@ -347,6 +359,7 @@ impl Decoder {
             Code::Control(_) => unreachable!("handled above"),
         };
 
+        self.longest_history = self.longest_history.max(self.history.len());
         self.create(code, at, produced);
         self.prev = match code {
             Code::Ordinal(c) => Prev::Ordinal(c),

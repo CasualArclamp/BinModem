@@ -492,6 +492,28 @@ fn a_call_survives_the_round_trip_a_packet_network_adds() {
     }
 }
 
+/// The far hybrid is found where it is however long the round trip.
+///
+/// libv90modem found a modem behind an ATA with a jitter buffer put the echo
+/// more than 160 ms back, past where its search looked (its 0.5.0 echo delay
+/// fix). This search runs from the near taps to the round trip measured in
+/// 5.4, so it has no such reach of its own -- which only a call at those round
+/// trips that finds the echo where it is shows.
+#[test]
+fn the_far_hybrid_is_placed_past_160_ms_of_round_trip() {
+    for round_trip_ms in [200.0, 300.0, 400.0] {
+        let one_way = (round_trip_ms / 2.0 / 1000.0 * FS) as usize;
+        let (calling, answering, _) = custom_call(30.0, one_way, ECHO, FAR);
+        for (name, modem) in [("calling", &calling), ("answering", &answering)] {
+            let found = modem
+                .reflection()
+                .unwrap_or_else(|| panic!("at {round_trip_ms:.0} ms the {name} end found no far hybrid"));
+            let off = found.delay as i64 - 2 * one_way as i64;
+            assert!(off.abs() <= 8, "at {round_trip_ms:.0} ms the {name} end put it {off} samples out");
+        }
+    }
+}
+
 #[test]
 fn a_call_survives_an_echo_as_loud_as_what_was_sent() {
     // What one virtual cable returns, measured on a recorded call: our own

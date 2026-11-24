@@ -787,6 +787,14 @@ impl Stack {
         self.compression.as_ref().map(Compressor::name)
     }
 
+    /// V.44's settled sizes, transmit then receive, while V.44 is running.
+    pub fn v44_params(&self) -> Option<(v44::Params, v44::Params)> {
+        match &self.compression.as_ref()?.codec {
+            Codec::V44(c) => Some((c.transmit, c.receive)),
+            Codec::V42bis(_) => None,
+        }
+    }
+
     /// Whether an unnegotiated switch to compressed data should be followed.
     ///
     /// Only where this end offered to receive it and the far end never
@@ -1328,7 +1336,10 @@ impl Stack {
         // the two, so a far end that named neither leaves this alone and the
         // call carries on uncompressed.
         if let Some(offer) = agreed.v44 {
-            self.trace("XID enabling V.44");
+            self.trace(&format!(
+                "XID enabling V.44 transmit {:?} receive {:?}",
+                offer.transmit, offer.receive
+            ));
             self.enable_v44(offer.transmit, offer.receive);
         } else if let Some(params) = agreed.v42bis_params() {
             self.trace(&format!("XID enabling V.42bis {params:?}"));
@@ -2106,6 +2117,26 @@ mod tests {
         a.send(b"plain");
         settle(&mut a, &mut b, 200_000, |_, bit| bit);
         assert_eq!(b.take_received(), b"plain");
+    }
+
+    /// Issue 64: Netstalgia's server answers P3T and P3R 4096 to our 6144.
+    /// 7.4 takes the lesser, both ways and at both ends, whichever end
+    /// called; then a long upload through it arrives whole.
+    #[test]
+    fn a_far_end_that_keeps_less_history_gets_its_own_size() {
+        let small = v44::Params { n2: 2048, n7: 255, n8: 4096 };
+        for small_end_calls in [false, true] {
+            let (mut a, mut b) = negotiated_pair();
+            b.offer_v44_limits(small, small);
+            if small_end_calls {
+                b.connect();
+            } else {
+                a.connect();
+            }
+            settle(&mut a, &mut b, 40_000, |_, bit| bit);
+            assert_eq!(a.v44_params(), Some((small, small)), "calling end small: {small_end_calls}");
+            assert_eq!(b.v44_params(), Some((small, small)), "calling end small: {small_end_calls}");
+        }
     }
 
     #[test]
