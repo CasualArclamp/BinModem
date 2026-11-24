@@ -860,13 +860,29 @@ pub fn symbol_scope(
     } else {
         (radius / 180.0).clamp(1.0, 2.5) * if crowded { 1.0 } else { 1.7 }
     };
+    // A dot is a whole number of the screen's own pixels, on the screen's
+    // own grid. A square a pixel and a half across, wherever its symbol
+    // happened to fall, is spread over two or three pixels at whatever
+    // brightness the overlap comes to: thousands of them were a field of
+    // blobs of every size, and no two levels a pixel apart could be told
+    // from one. And where there are thousands, one pixel each is the most
+    // that leaves the shape they make to be seen.
+    let pixels = ui.ctx().pixels_per_point();
+    let across = if many || crowded { 1.0 } else { (side * pixels).round().max(1.0) };
+    let dot = |centre: Pos2| {
+        let corner = pos2(
+            (centre.x * pixels - across / 2.0).round() / pixels,
+            (centre.y * pixels - across / 2.0).round() / pixels,
+        );
+        Rect::from_min_size(corner, vec2(across / pixels, across / pixels))
+    };
     let colour = Color32::from_rgba_unmultiplied(120, 220, 160, if few { 255 } else if crowded { 110 } else { 150 });
     match pcm {
         Some(PcmView::Ladder) => {
             // Oldest on the left; the level is the second of each pair.
             let span = (constellation.len().max(2) - 1) as f32;
             for (i, &(_, level)) in constellation.iter().enumerate() {
-                mesh.add_colored_rect(Rect::from_center_size(at(2.0 * i as f32 / span - 1.0, level), vec2(side, side)), colour);
+                mesh.add_colored_rect(dot(at(2.0 * i as f32 / span - 1.0, level)), colour);
             }
         }
         Some(PcmView::Error) => {
@@ -879,17 +895,14 @@ pub fn symbol_scope(
                 let ideal = (2.0 * nearest - steps) / steps;
                 let miss = (level - ideal) * steps;
                 mesh.add_colored_rect(
-                    Rect::from_center_size(
-                        pos2(centre.x + ideal * radius, centre.y - miss.clamp(-1.0, 1.0) * radius),
-                        vec2(side, side),
-                    ),
+                    dot(pos2(centre.x + ideal * radius, centre.y - miss.clamp(-1.0, 1.0) * radius)),
                     colour,
                 );
             }
         }
         _ => {
             for &(re, im) in constellation {
-                mesh.add_colored_rect(Rect::from_center_size(at(re, im), vec2(side, side)), colour);
+                mesh.add_colored_rect(dot(at(re, im)), colour);
             }
         }
     }
