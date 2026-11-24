@@ -449,3 +449,42 @@ fn when_one_end_hangs_up_the_other_notices() {
         assert!(said.contains("NO CARRIER"), "host hangs up {host_hangs_up}: {said:?}");
     }
 }
+
+/// A server offering U.S. Robotics x2 (S70=1) is still V.34's answer modem
+/// to a caller that offers V.34 and no PCM and is not an x2 client: the
+/// call is V.34, and carries data both ways.
+#[test]
+fn a_v34_caller_to_a_server_offering_x2_connects_as_v34() {
+    let mut pair = Pair::new(Network::new(Law::Mu, FS).with_delay(0.015, FS).with_noise(1e-5), 0);
+    pair.straight = Some(0);
+    Pair::type_at(&mut pair.host, "AT+MS=V90");
+    Pair::type_at(&mut pair.host, "ATS70=1");
+    Pair::type_at(&mut pair.caller, "AT+MS=V34");
+    pair.run(0.05);
+    assert!(pair.host.x2());
+    Pair::type_at(&mut pair.host, "ATA");
+    Pair::type_at(&mut pair.caller, "ATD5551234");
+    for _ in 0..40 {
+        pair.run(1.0);
+        if pair.caller.state() == State::Data && pair.host.state() == State::Data {
+            break;
+        }
+    }
+    let saw = String::from_utf8_lossy(&pair.caller_said).into_owned();
+    assert_eq!(pair.caller.state(), State::Data, "{saw:?}");
+    assert_eq!(pair.host.state(), State::Data);
+    assert_eq!(pair.host.standard(), "V.34");
+    assert_eq!(pair.caller.standard(), "V.34");
+    pair.run(2.0);
+    for b in b"from the caller" {
+        pair.caller.feed_dte(*b);
+    }
+    for b in b"from the server" {
+        pair.host.feed_dte(*b);
+    }
+    pair.run(3.0);
+    let host_saw = String::from_utf8_lossy(&pair.host_said).into_owned();
+    assert!(host_saw.contains("from the caller"), "the server saw {host_saw:?}");
+    let caller_saw = String::from_utf8_lossy(&pair.caller_said).into_owned();
+    assert!(caller_saw.contains("from the server"), "the caller saw {caller_saw:?}");
+}

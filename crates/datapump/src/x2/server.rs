@@ -113,6 +113,33 @@ pub struct Modem {
     s_watch: SWatch,
     retrain_watch: RetrainWatch,
     trace: bool,
+    watch: UpstreamWatch,
+}
+
+/// For the trace: what the upstream's bits look like, a second at a time.
+#[derive(Debug, Clone, Default)]
+struct UpstreamWatch {
+    shift: u8,
+    bits: u32,
+    ones: u32,
+    flags: u32,
+    since: u64,
+}
+
+impl UpstreamWatch {
+    fn bit(&mut self, bit: bool, now: u64) {
+        self.shift = (self.shift >> 1) | if bit { 0x80 } else { 0 };
+        self.bits += 1;
+        self.ones += u32::from(bit);
+        self.flags += u32::from(self.shift == 0x7e);
+        if now >= self.since + FS as u64 {
+            eprintln!(
+                "[x2 {:8.3}] upstream: {} bits, {} ones, {} flags",
+                now as f64 / FS, self.bits, self.ones, self.flags
+            );
+            *self = Self { since: now, shift: self.shift, ..Self::default() };
+        }
+    }
 }
 
 impl Modem {
@@ -147,6 +174,7 @@ impl Modem {
             s_watch: SWatch::default(),
             retrain_watch: RetrainWatch::new(Role::Answer, FS),
             trace: std::env::var_os("X2_TRACE").is_some(),
+            watch: UpstreamWatch::default(),
         }
     }
 
@@ -349,6 +377,9 @@ impl Modem {
                             self.b1_left -= 1;
                         } else {
                             self.received.push(bit);
+                            if self.trace {
+                                self.watch.bit(bit, self.now);
+                            }
                         }
                     }
                     return;
