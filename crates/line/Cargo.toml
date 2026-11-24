@@ -15,7 +15,10 @@ dsp  = { path = "../dsp" }
 # opens the hardware itself, which takes the device away from PipeWire or
 # PulseAudio and from every other program for as long as it is open; its
 # PulseAudio host talks to the server instead (PipeWire answers the same
-# protocol), in Rust with nothing more to install, and cpal falls back to ALSA
-# on a machine with no server. See `line::host`.
+# protocol), and cpal falls back to ALSA on a machine with no server. See
+# `line::host`. Its native PipeWire host (PR 1, SarahRoseLives) lists
+# PipeWire's own nodes, virtual loopbacks among them, beside the hardware; it
+# needs libpipewire's development files (`libpipewire-0.3-dev`) and libclang
+# to build.
 [target.'cfg(target_os = "linux")'.dependencies]
-cpal = { version = "0.18.2", features = ["pulseaudio"] }
+cpal = { version = "0.18.2", features = ["pulseaudio", "pipewire"] }

@@ -348,7 +348,7 @@ later), a C linker, and ALSA's headers for the sound card. The window comes up
 on X11 or Wayland through OpenGL, which a desktop install already has.
 
 ```bash
-sudo apt install build-essential pkg-config libasound2-dev libxkbcommon0 libgl1
+sudo apt install build-essential pkg-config libasound2-dev libpipewire-0.3-dev libclang-dev libxkbcommon0 libgl1
 ```
 
 ```bash
