@@ -29,6 +29,8 @@ pub struct Settled {
     pub upstream_high_carrier: Option<bool>,
     /// When the last INFO1 ended, in seconds: phase 3 starts after it.
     pub ended: Option<f64>,
+    /// When the first INFO sequence of this phase 2 began.
+    pub began: Option<f64>,
 }
 
 impl Settled {
@@ -39,6 +41,10 @@ impl Settled {
         take!(info0_call, info0_answer, info0d, info1c, info1a, info1a_pcm, info1a_pcm_up, upstream_high_carrier);
         self.ended = match (self.ended, other.ended) {
             (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+        self.began = match (self.began, other.began) {
+            (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
     }
@@ -291,9 +297,11 @@ pub fn listen(
     who: End,
     pcm_call: bool,
     from: f64,
-) -> (Vec<Event>, Settled) {
+) -> (Vec<Event>, Vec<Settled>) {
     let mut events: Vec<Event> = Vec::new();
     let mut settled = Settled::default();
+    // A call has a phase 2 for its start-up and another for every retrain.
+    let mut rounds: Vec<Settled> = Vec::new();
     let carrier = side.carrier();
     let (tone_tag, tone_name) = if side == Side::Call { ("B", "tone B") } else { ("A", "tone A") };
 
@@ -350,7 +358,14 @@ pub fn listen(
             }
         }
         if let Some(info) = heard {
+            // An INFO0 after an INFO1 is a retrain's: a new phase 2.
+            if matches!(info, Info::Info0(_) | Info::Info0d(_)) && settled.ended.is_some() {
+                rounds.push(std::mem::take(&mut settled));
+            }
             let event = info_event(&info, side, who, now, pcm_call, &mut settled);
+            if settled.began.is_none() {
+                settled.began = Some(event.start);
+            }
             let points = points_between(&dpsk, (event.start * fs) as usize, n);
             let peak = points.iter().map(|(re, im)| re.hypot(*im)).fold(1e-9f32, f32::max);
             let scaled: Vec<(f32, f32)> = points.iter().map(|(re, im)| (re / peak, im / peak)).collect();
@@ -491,7 +506,8 @@ pub fn listen(
     for (a, b, level) in combs {
         probe_events(samples, fs, a, b, level, who, &mut events);
     }
-    (events, settled)
+    rounds.push(settled);
+    (events, rounds)
 }
 
 /// L1 and L2 between samples `a` and `b`, with what the probing shows of the

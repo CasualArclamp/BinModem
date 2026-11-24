@@ -16,11 +16,13 @@
 //! and nothing after it can: there the two are told apart only by each end
 //! subtracting what it sent, and a tap sent nothing.
 
+pub mod link;
 pub mod model;
 pub mod pcm;
 pub mod phase2;
 pub mod picture;
 pub mod setup;
+pub mod v34;
 
 use line::wav::Wav;
 
@@ -71,28 +73,79 @@ pub fn analyse(wav: &Wav, name: &str) -> Report {
         );
         (Tap::Summed, found.into_iter().flatten().map(|f| f.event).collect())
     };
-    let settled = second_phase(&streams, fs, tap, &mut events);
+    let rounds = second_phase(&streams, fs, tap, &mut events);
+    let length = streams.first().map_or(0.0, |s| s.len() as f64 / fs);
     let mut pcm = None;
+    let mut v34_outcome: Option<v34::Outcome> = None;
     if let Tap::Split { caller } = tap {
-        // The analogue modem is the one that sent INFO1a.
-        let analogue = events.iter().find(|e| e.tag == "INFO1a").map(|e| e.from);
-        if let Some(who) = analogue {
+        // The modem on the answering side of phase 2 is the one that sent
+        // INFO1a: the answer modem of a V.34 call, the analogue one of V.90.
+        let answering = events.iter().find(|e| e.tag == "INFO1a").map(|e| e.from);
+        if let Some(who) = answering {
             let channel = |end: End| if end == End::Caller { caller } else { 1 - caller };
-            if let Some((found, outcome)) = pcm::follow(
-                (&streams[channel(who)], who),
-                (&streams[channel(who.other())], who.other()),
-                fs,
-                &settled,
-            ) {
-                events.extend(found);
-                pcm = Some(outcome);
+            for (index, settled) in rounds.iter().enumerate() {
+                // As far as the next phase 2, if a retrain brought one.
+                let until = rounds.get(index + 1).and_then(|next| next.began).map_or(length, |began| began - 0.3);
+                if let Some((found, outcome)) = pcm::follow(
+                    (&streams[channel(who)], who),
+                    (&streams[channel(who.other())], who.other()),
+                    fs,
+                    settled,
+                    until,
+                ) {
+                    events.extend(found);
+                    pcm = Some(outcome);
+                }
+                if let Some((found, outcome)) = v34::follow(
+                    (&streams[channel(who.other())], who.other()),
+                    (&streams[channel(who)], who),
+                    fs,
+                    settled,
+                    until,
+                ) {
+                    events.extend(found);
+                    v34_outcome = Some(match v34_outcome.take() {
+                        None => outcome,
+                        Some(mut all) => {
+                            // The same call, after a retrain: its data goes
+                            // on the end of what came before.
+                            for (whole, more) in all.streams.iter_mut().zip(outcome.streams) {
+                                let shift = whole.bits.len();
+                                whole.marks.extend(more.marks.into_iter().map(|(bits, at)| (bits + shift, at)));
+                                whole.bits.extend(more.bits);
+                                whole.bps = more.bps.or(whole.bps);
+                            }
+                            all.renegotiations += outcome.renegotiations;
+                            all
+                        }
+                    });
+                }
             }
         }
-    } else if settled.info1a_pcm.is_some() {
+    } else if rounds.first().is_some_and(|r| r.info1a_pcm.is_some()) {
         caveats.push(
             "a V.90 call on one channel: past phase 2 the server's signal covers the modem's, and neither is followed"
                 .to_owned(),
         );
+    }
+    let retrains = rounds.len().saturating_sub(1);
+    // What the data was: frames, and what was in them.
+    let mut links: Vec<(End, link::Summary)> = Vec::new();
+    if let Some(outcome) = &v34_outcome {
+        for stream in &outcome.streams {
+            let (found, summary) = link::read(stream);
+            events.extend(found);
+            if let Some(from) = stream.from {
+                links.push((from, summary));
+            }
+        }
+        // Either end asking for compression and the other taking it means
+        // the octets in the frames are not the octets that were sent.
+        if links.len() == 2 && links.iter().all(|(_, s)| s.compressed) {
+            caveats.push(
+                "the two ends agreed to compress: the frames are read, and what is in them is not expanded yet".to_owned(),
+            );
+        }
     }
     events.sort_by(|a, b| a.start.total_cmp(&b.start));
 
@@ -137,11 +190,40 @@ pub fn analyse(wav: &Wav, name: &str) -> Report {
             if outcome.reached_data { "reached".to_owned() } else { "not reached on the recording".to_owned() },
         ));
     }
+    if let Some(outcome) = &v34_outcome {
+        for stream in &outcome.streams {
+            if let (Some(from), Some(bps)) = (stream.from, stream.bps) {
+                report.verdict.push((format!("from the {}", from.label()), format!("{bps} bit/s, {} bits read", stream.bits.len())));
+            }
+        }
+        if outcome.renegotiations > 0 {
+            report.verdict.push(("rate renegotiations".to_owned(), outcome.renegotiations.to_string()));
+        }
+    }
+    if retrains > 0 {
+        report.verdict.push(("retrains".to_owned(), retrains.to_string()));
+    }
+    for (from, summary) in &links {
+        let what = if summary.frames > 0 {
+            format!(
+                "V.42: {} frames, {} with data, {} octets{}",
+                summary.frames,
+                summary.information,
+                summary.octets,
+                if summary.damaged > 0 { format!(", {} damaged", summary.damaged) } else { String::new() }
+            )
+        } else if summary.octets > 0 {
+            format!("no error control: {} characters", summary.octets)
+        } else {
+            "nothing read".to_owned()
+        };
+        report.verdict.push((format!("{} sent", from.label()), what));
+    }
     report
 }
 
 /// Phase 2, on whichever channel each end is.
-fn second_phase(streams: &[Vec<f32>], fs: f64, tap: Tap, events: &mut Vec<Event>) -> phase2::Settled {
+fn second_phase(streams: &[Vec<f32>], fs: f64, tap: Tap, events: &mut Vec<Event>) -> Vec<phase2::Settled> {
     use datapump::v34::dpsk::Side;
     // Nothing of phase 2 comes before V.8 is over.
     let from = events
@@ -163,7 +245,16 @@ fn second_phase(streams: &[Vec<f32>], fs: f64, tap: Tap, events: &mut Vec<Event>
 
     let run = |caller_side: Side, pcm: bool| {
         let mut found = Vec::new();
-        let mut settled = phase2::Settled::default();
+        let mut settled: Vec<phase2::Settled> = Vec::new();
+        // Each listener's first phase 2 with the other's first, and so on.
+        let join = |all: &mut Vec<phase2::Settled>, more: Vec<phase2::Settled>| {
+            for (index, round) in more.into_iter().enumerate() {
+                match all.get_mut(index) {
+                    Some(have) => have.merge(round),
+                    None => all.push(round),
+                }
+            }
+        };
         let other = |s: Side| if s == Side::Call { Side::Answer } else { Side::Call };
         match tap {
             Tap::Split { caller } => {
@@ -175,14 +266,14 @@ fn second_phase(streams: &[Vec<f32>], fs: f64, tap: Tap, events: &mut Vec<Event>
                     };
                     let (e, s) = phase2::listen(samples, fs, side, who, pcm, from);
                     found.extend(e);
-                    settled.merge(s);
+                    join(&mut settled, s);
                 }
             }
             Tap::Summed => {
                 for (side, who) in [(caller_side, End::Caller), (other(caller_side), End::Answerer)] {
                     let (e, s) = phase2::listen(&streams[0], fs, side, who, pcm, from);
                     found.extend(e);
-                    settled.merge(s);
+                    join(&mut settled, s);
                 }
             }
         }

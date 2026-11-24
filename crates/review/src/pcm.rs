@@ -781,6 +781,7 @@ pub fn follow(
     digital: (&[f32], End),
     fs: f64,
     settled: &Settled,
+    until: f64,
 ) -> Option<(Vec<Event>, Outcome)> {
     let asked = settled.info1a_pcm?;
     let from = settled.ended?;
@@ -796,7 +797,7 @@ pub fn follow(
     let mut up = Upstream::new(Band::new(asked.upstream, high), analogue.1, fs);
     let mut down = Downstream::new(law, asked.uinfo, digital.1, fs);
     let first = ((from + 0.01) * fs) as usize;
-    let last = analogue.0.len().min(digital.0.len());
+    let last = analogue.0.len().min(digital.0.len()).min((until * fs) as usize);
     for n in first..last {
         up.feed(n, analogue.0[n] as f64, &mut shared);
         down.feed(n as f64 / fs, digital.0[n] as f64, &mut shared);

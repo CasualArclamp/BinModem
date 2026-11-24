@@ -2430,6 +2430,7 @@ dependencies = [
  "dsp",
  "ec",
  "line",
+ "modem",
  "ppp",
  "v8",
 ]
