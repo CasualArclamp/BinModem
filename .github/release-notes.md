@@ -1,10 +1,12 @@
-One file. Download `binmodem.exe` and run it. There is nothing to install, and no Visual C++ redistributable is needed because the C runtime is linked in.
+Download `binmodem.exe` and run it; `dialsnoop.exe` beside it is the call reader on its own. There is nothing to install, and no Visual C++ redistributable is needed because the C runtime is linked in.
 
 ```
 binmodem.exe                  a modem on a real line
 binmodem.exe --devices        what audio this machine has
 binmodem.exe --telnet         a board over a socket
 binmodem.exe --capture        replay the golden capture
+binmodem.exe --review         read a recording of a call
+dialsnoop.exe                 the same reader, as a program of its own
 ```
 
 [docs/usage.md](https://github.com/CasualArclamp/BinModem/blob/main/docs/usage.md) has the setup.
@@ -17,7 +19,7 @@ A V.92 or V.90 server here also offers x2 when `ATS70=1` is set, or the new **x2
 
 ### A Review tab, and DialSnoop
 
-Open a WAV of someone else's call and read it: a waterfall with a box on each signal, and everything decoded from the one you click. That covers V.8 and V.8 bis, phase 2, V.34 and V.90 training both ways, data mode, V.42 frames, and PPP or text above them. It uses the modem's own receivers. `binmodem --review file.wav` opens on the tab.
+Open a WAV of someone else's call and read it: a waterfall with a box on each signal, and everything decoded from the one you click. That covers V.8 and V.8 bis, phase 2, V.34 and V.90 training both ways, data mode, V.42 frames, and PPP or text above them. It uses the modem's own receivers. `binmodem --review file.wav` opens on the tab, and `dialsnoop.exe`, now in the release beside `binmodem.exe`, is the same reader on its own.
 
 ### HST
 
