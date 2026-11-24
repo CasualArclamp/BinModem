@@ -104,7 +104,7 @@ pub fn markers(modulation: &str) -> &'static [(f64, &'static str, Color32)] {
 /// Black through blue, cyan, green, yellow to red: the palette every ham
 /// waterfall uses, chosen because weak signals stay visible against the noise
 /// floor while strong ones saturate distinctly.
-fn heat(v: f32) -> Color32 {
+pub(crate) fn heat(v: f32) -> Color32 {
     let v = v.clamp(0.0, 1.0);
     let (r, g, b) = if v < 0.25 {
         let t = v / 0.25;

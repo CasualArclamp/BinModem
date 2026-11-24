@@ -1152,6 +1152,7 @@ dependencies = [
  "modem",
  "ppp",
  "proxy",
+ "review",
  "rfd",
  "sip",
  "telemetry",
