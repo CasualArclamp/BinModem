@@ -18,14 +18,16 @@ use datapump::v34::data::{Decoder as UpDecoder, Params};
 use datapump::v34::frame::Framing;
 use datapump::v34::info::SymbolRate;
 use datapump::v34::mp::Mp;
-use datapump::v34::trellis::Code;
 use datapump::v34::qam::Band;
 use datapump::v34::receiver::{Heard as UpHeard, Receiver as V34Rx, Reference};
 use datapump::v34::signals::{self, Reader, Size};
-use datapump::v90::dil::Analysis;
+use datapump::v34::trellis::Code;
 use datapump::v90::digital::upstream_rate;
+use datapump::v90::dil::Analysis;
 use datapump::v90::pcm::{Heard as DownHeard, Receiver as PcmRx};
-use datapump::v90::sequences::{self, Cp, CpFinder, Descriptor, DescriptorFinder, JD_BITS, JD_PRIME_BITS, Jd};
+use datapump::v90::sequences::{
+    self, Cp, CpFinder, Descriptor, DescriptorFinder, JD_BITS, JD_PRIME_BITS, Jd,
+};
 use datapump::v90::ucode::{self, Law};
 use dsp::Resampler;
 
@@ -163,7 +165,10 @@ impl Upstream {
             rate,
             decoder: None,
             b1_left: 0,
-            stream: Stream { from: Some(who), ..Stream::default() },
+            stream: Stream {
+                from: Some(who),
+                ..Stream::default()
+            },
             seen: Vec::new(),
             events: Vec::new(),
             outcome: Outcome::default(),
@@ -203,10 +208,10 @@ impl Upstream {
                         self.loud = self.power;
                         let pp = signals::PP_SYMBOLS as f64 / self.band.baud();
                         let from = self.trn_from;
-                        self.events.push(
-                            self.event(from, from + pp, Layer::Phase3, "PP")
-                                .summary("PP: the sequence the far equaliser is first fitted to".to_owned()),
-                        );
+                        self.events
+                            .push(self.event(from, from + pp, Layer::Phase3, "PP").summary(
+                                "PP: the sequence the far equaliser is first fitted to".to_owned(),
+                            ));
                         self.trn_from = from + pp;
                     }
                 }
@@ -220,7 +225,8 @@ impl Upstream {
                 }
                 UpHeard::Symbol(symbol) => {
                     if self.seen.len() < HELD {
-                        self.seen.push((symbol.point.re as f32, symbol.point.im as f32));
+                        self.seen
+                            .push((symbol.point.re as f32, symbol.point.im as f32));
                     }
                     self.symbol(now, symbol.decided, symbol.point, shared);
                 }
@@ -250,7 +256,10 @@ impl Upstream {
         // `at` is in half symbols, and so is the receiver's own count.
         let when = now - self.rx.halves().saturating_sub(at) as f64 / (2.0 * baud);
         let bar = signals::S_BAR_SYMBOLS as f64 / baud;
-        let heard = self.s_from.take().unwrap_or(when - signals::S_SYMBOLS as f64 / baud);
+        let heard = self
+            .s_from
+            .take()
+            .unwrap_or(when - signals::S_SYMBOLS as f64 / baud);
         // The receiver hunts in whatever is on the line, the other end's
         // echo included: an S cannot have begun before the line came up.
         let from = heard.max(self.since.unwrap_or(heard)).min(when);
@@ -260,10 +269,20 @@ impl Upstream {
             self.rx.hunt();
             return;
         }
-        let layer = if matches!(self.stage, UpStage::AfterJa(1)) { Layer::Phase4 } else { Layer::Phase3 };
+        let layer = if matches!(self.stage, UpStage::AfterJa(1)) {
+            Layer::Phase4
+        } else {
+            Layer::Phase3
+        };
         self.seen.clear();
-        self.events.push(self.event(from, when, layer, "S").summary(format!("S for {:.0} ms", 1000.0 * (when - from))));
-        self.events.push(self.event(when, when + bar, layer, "S-bar").summary("S-bar: S turned over, 16 symbols".to_owned()));
+        self.events.push(
+            self.event(from, when, layer, "S")
+                .summary(format!("S for {:.0} ms", 1000.0 * (when - from))),
+        );
+        self.events.push(
+            self.event(when, when + bar, layer, "S-bar")
+                .summary("S-bar: S turned over, 16 symbols".to_owned()),
+        );
         match self.stage {
             UpStage::AwaitS => {
                 self.rx.train(Reference::PpThenTrn, Mode::Answer, at);
@@ -280,7 +299,11 @@ impl Upstream {
                 shared.dil_over = Some(when);
                 // CPt follows the S-bar straight away, read with the
                 // equaliser phase 3 left.
-                self.size = if shared.jd.is_some_and(|jd| jd.sixteen_in_training) { Size::Sixteen } else { Size::Four };
+                self.size = if shared.jd.is_some_and(|jd| jd.sixteen_in_training) {
+                    Size::Sixteen
+                } else {
+                    Size::Four
+                };
                 self.rx.resume(at + 2 * signals::S_BAR_SYMBOLS as u64);
                 self.rx.set_size(self.size);
                 self.cps = CpFinder::default();
@@ -323,7 +346,10 @@ impl Upstream {
                             ))
                             .field("symbol rate", format!("{:.0} symbols/s", self.band.baud()))
                             .field("carrier", format!("{:.0} Hz", self.band.carrier()))
-                            .field("signal to noise after training", format!("{:.1} dB", self.trained_db)),
+                            .field(
+                                "signal to noise after training",
+                                format!("{:.1} dB", self.trained_db),
+                            ),
                     );
                 }
                 for bit in self.reader.differential(decided, Size::Four) {
@@ -339,10 +365,17 @@ impl Upstream {
             UpStage::Phase4 => {
                 for bit in self.reader.differential(decided, self.size) {
                     self.ones = if bit { self.ones + 1 } else { 0 };
-                    if self.ones >= signals::E_BITS && self.last_cp.as_ref().is_some_and(|cp| cp.data_mode) {
+                    if self.ones >= signals::E_BITS
+                        && self.last_cp.as_ref().is_some_and(|cp| cp.data_mode)
+                    {
                         self.events.push(
-                            self.event(now - signals::E_BITS as f64 / self.band.baud() / 2.0, now, Layer::Phase4, "E")
-                                .summary("E: twenty ones, and data mode follows".to_owned()),
+                            self.event(
+                                now - signals::E_BITS as f64 / self.band.baud() / 2.0,
+                                now,
+                                Layer::Phase4,
+                                "E",
+                            )
+                            .summary("E: twenty ones, and data mode follows".to_owned()),
                         );
                         self.cp_run = None;
                         self.stage = UpStage::Data;
@@ -392,13 +425,24 @@ impl Upstream {
     fn begin_data(&mut self, now: f64, shared: &Shared) -> Event {
         let event = self.event(now, now, Layer::Data, "data");
         let (Some(mp), Some(cp)) = (shared.mp, self.last_cp.as_ref()) else {
-            return event.summary("data mode, V.34 modulation: the digital modem's MP was not read, so symbols only".to_owned());
+            return event.summary(
+                "data mode, V.34 modulation: the digital modem's MP was not read, so symbols only"
+                    .to_owned(),
+            );
         };
         let rate = u32::from(upstream_rate(cp, &mp)) * 2400;
         let Some(framing) = Framing::new(self.rate, rate, false, mp.expanded_shaping) else {
-            return event.summary(format!("data mode, V.34 modulation: no framing for {rate} bit/s at this symbol rate"));
+            return event.summary(format!(
+                "data mode, V.34 modulation: no framing for {rate} bit/s at this symbol rate"
+            ));
         };
-        let params = Params { framing, code: Code::States16, nonlinear: mp.non_linear, precoding: [(0, 0); 3], mode: Mode::Answer };
+        let params = Params {
+            framing,
+            code: Code::States16,
+            nonlinear: mp.non_linear,
+            precoding: [(0, 0); 3],
+            mode: Mode::Answer,
+        };
         let decoder = UpDecoder::new(params);
         self.rx.set_grid(decoder.grid_scale(), decoder.extent());
         self.b1_left = framing.n;
@@ -409,13 +453,25 @@ impl Upstream {
             .field("rate", format!("{rate} bit/s"))
             .field("symbol rate", format!("{:.0} symbols/s", self.band.baud()))
             .field("points in the constellation", framing.l.to_string())
-            .field("non-linear encoding", if mp.non_linear { "yes" } else { "no" })
-            .field("shaping", if mp.expanded_shaping { "expanded" } else { "minimum" })
+            .field(
+                "non-linear encoding",
+                if mp.non_linear { "yes" } else { "no" },
+            )
+            .field(
+                "shaping",
+                if mp.expanded_shaping {
+                    "expanded"
+                } else {
+                    "minimum"
+                },
+            )
     }
 
     fn end_ja(&mut self, now: f64, shared: &mut Shared) {
         let points = std::mem::take(&mut self.seen);
-        let mut event = self.event(self.ja_from, now, Layer::Phase3, "Ja").qam(&points, 4);
+        let mut event = self
+            .event(self.ja_from, now, Layer::Phase3, "Ja")
+            .qam(&points, 4);
         event = match &shared.descriptor {
             Some(d) => event
                 .summary(format!(
@@ -447,7 +503,11 @@ impl Upstream {
             }
             let times = event.fields.iter_mut().find(|(name, _)| name == "sent");
             if let Some((_, value)) = times {
-                let n: usize = value.split(' ').next().and_then(|v| v.parse().ok()).unwrap_or(1);
+                let n: usize = value
+                    .split(' ')
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1);
                 *value = format!("{} times", n + 1);
             }
             return;
@@ -457,7 +517,8 @@ impl Upstream {
             (true, false) => "CP",
             (true, true) => "CP'",
         };
-        let bits = cp.frame_bits() as f64 / (self.band.baud() * if self.size == Size::Sixteen { 4.0 } else { 2.0 });
+        let bits = cp.frame_bits() as f64
+            / (self.band.baud() * if self.size == Size::Sixteen { 4.0 } else { 2.0 });
         let rate = if cp.data_mode {
             sequences::data_rate(cp.drn)
         } else {
@@ -470,7 +531,9 @@ impl Upstream {
                 format!("{tag}: {rate} bit/s downstream")
             }
             (true, None) if cp.drn == 0 => format!("{tag}: cleardown"),
-            (false, Some(rate)) => format!("{tag}: training constellations, {rate} bit/s in phase 4"),
+            (false, Some(rate)) => {
+                format!("{tag}: training constellations, {rate} bit/s in phase 4")
+            }
             _ => format!("{tag}: rate number {}", cp.drn),
         };
         let points = std::mem::take(&mut self.seen);
@@ -488,17 +551,33 @@ impl Upstream {
 
 fn descriptor_fields(d: &Descriptor) -> Vec<(String, String)> {
     let run = |list: &[u8]| list.iter().map(u8::to_string).collect::<Vec<_>>().join(" ");
-    let bits = |list: &[bool]| list.iter().map(|b| if *b { '1' } else { '0' }).collect::<String>();
+    let bits = |list: &[bool]| {
+        list.iter()
+            .map(|b| if *b { '1' } else { '0' })
+            .collect::<String>()
+    };
     let training: Vec<u8> = d.ucodes.clone();
-    let (low, high) = (training.iter().min().copied().unwrap_or(0), training.iter().max().copied().unwrap_or(0));
+    let (low, high) = (
+        training.iter().min().copied().unwrap_or(0),
+        training.iter().max().copied().unwrap_or(0),
+    );
     vec![
         ("segments".to_owned(), d.ucodes.len().to_string()),
-        ("length".to_owned(), format!("{} symbols, {:.2} s", d.len(), d.len() as f64 / 8000.0)),
+        (
+            "length".to_owned(),
+            format!("{} symbols, {:.2} s", d.len(), d.len() as f64 / 8000.0),
+        ),
         ("Ucodes asked for".to_owned(), format!("{low} to {high}")),
         ("segment lengths H".to_owned(), run(&d.h)),
         ("reference Ucodes".to_owned(), run(&d.refs)),
-        ("sign pattern".to_owned(), format!("{} bits: {}", d.signs.len(), bits(&d.signs))),
-        ("training pattern".to_owned(), format!("{} bits: {}", d.training.len(), bits(&d.training))),
+        (
+            "sign pattern".to_owned(),
+            format!("{} bits: {}", d.signs.len(), bits(&d.signs)),
+        ),
+        (
+            "training pattern".to_owned(),
+            format!("{} bits: {}", d.training.len(), bits(&d.training)),
+        ),
         ("Ucodes in order".to_owned(), run(&d.ucodes)),
     ]
 }
@@ -506,22 +585,51 @@ fn descriptor_fields(d: &Descriptor) -> Vec<(String, String)> {
 fn cp_fields(cp: &Cp) -> Vec<(String, String)> {
     let mut fields = Vec::new();
     let mut add = |name: &str, value: String| fields.push((name.to_owned(), value));
-    add("kind", if cp.data_mode { "CP: data mode" } else { "CPt: phase 4 training" }.to_owned());
+    add(
+        "kind",
+        if cp.data_mode {
+            "CP: data mode"
+        } else {
+            "CPt: phase 4 training"
+        }
+        .to_owned(),
+    );
     add("rate number", cp.drn.to_string());
     if cp.data_mode
         && let Some(rate) = sequences::data_rate(cp.drn)
     {
         add("downstream rate", format!("{rate} bit/s"));
     }
-    add("acknowledges MP", if cp.acknowledge { "yes" } else { "no" }.to_owned());
-    add("codec", if cp.a_law { "A-law" } else { "mu-law" }.to_owned());
+    add(
+        "acknowledges MP",
+        if cp.acknowledge { "yes" } else { "no" }.to_owned(),
+    );
+    add(
+        "codec",
+        if cp.a_law { "A-law" } else { "mu-law" }.to_owned(),
+    );
     add("sign redundancy Sr", format!("{:?}", cp.redundancy));
     add("shaper look-ahead", cp.lookahead.to_string());
-    add("silence asked for", if cp.silence { "yes" } else { "no" }.to_owned());
-    let ups: Vec<String> =
-        (0..13).filter(|bit| cp.upstream_rates >> bit & 1 == 1).map(|bit| (4800 + 2400 * bit).to_string()).collect();
-    add("upstream rates enabled", if ups.is_empty() { "none".to_owned() } else { ups.join(", ") });
-    add("TRN1d level ratio", format!("{:.3}", f64::from(cp.trn1d_ratio) / 8192.0));
+    add(
+        "silence asked for",
+        if cp.silence { "yes" } else { "no" }.to_owned(),
+    );
+    let ups: Vec<String> = (0..13)
+        .filter(|bit| cp.upstream_rates >> bit & 1 == 1)
+        .map(|bit| (4800 + 2400 * bit).to_string())
+        .collect();
+    add(
+        "upstream rates enabled",
+        if ups.is_empty() {
+            "none".to_owned()
+        } else {
+            ups.join(", ")
+        },
+    );
+    add(
+        "TRN1d level ratio",
+        format!("{:.3}", f64::from(cp.trn1d_ratio) / 8192.0),
+    );
     add(
         "shaping filter",
         format!(
@@ -534,13 +642,30 @@ fn cp_fields(cp: &Cp) -> Vec<(String, String)> {
     );
     let sizes: Vec<String> = (0..6).map(|i| cp.points(i).len().to_string()).collect();
     add("points in each interval", sizes.join(" "));
-    add("constellation of each interval", cp.intervals.iter().map(u8::to_string).collect::<Vec<_>>().join(" "));
+    add(
+        "constellation of each interval",
+        cp.intervals
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(" "),
+    );
     add("constellations", cp.constellations.len().to_string());
     for i in 0..6 {
         let points = cp.points(i);
-        add(&format!("interval {i} Ucodes"), points.iter().map(u8::to_string).collect::<Vec<_>>().join(" "));
+        add(
+            &format!("interval {i} Ucodes"),
+            points
+                .iter()
+                .map(u8::to_string)
+                .collect::<Vec<_>>()
+                .join(" "),
+        );
     }
-    add("codec constellations given", if cp.codec.is_some() { "yes" } else { "no" }.to_owned());
+    add(
+        "codec constellations given",
+        if cp.codec.is_some() { "yes" } else { "no" }.to_owned(),
+    );
     fields
 }
 
@@ -657,11 +782,15 @@ impl Downstream {
                     self.reversal = Some(now);
                     shared.s_bar_d = Some(now);
                     let from = self.since.unwrap_or(now - 0.02).min(now);
-                    self.events.push(
-                        self.event(from, now, "Sd").summary(format!("Sd for {:.0} ms: the digital modem's S", 1000.0 * (now - from))),
-                    );
                     self.events
-                        .push(self.event(now, now + 0.001, "S-bar-d").summary("S-bar-d: Sd turned over, 8 symbols".to_owned()));
+                        .push(self.event(from, now, "Sd").summary(format!(
+                            "Sd for {:.0} ms: the digital modem's S",
+                            1000.0 * (now - from)
+                        )));
+                    self.events.push(
+                        self.event(now, now + 0.001, "S-bar-d")
+                            .summary("S-bar-d: Sd turned over, 8 symbols".to_owned()),
+                    );
                 }
             }
             DownHeard::Trained { snr_db, inverted } => self.trained = Some((snr_db, inverted)),
@@ -687,7 +816,11 @@ impl Downstream {
                 }
                 let sign = s.positive();
                 let before = self.descrambler.clone();
-                let mut bit = self.descrambler.descramble(if self.differential { sign ^ self.previous } else { sign });
+                let mut bit = self.descrambler.descramble(if self.differential {
+                    sign ^ self.previous
+                } else {
+                    sign
+                });
                 if !self.differential && !bit {
                     // TRN1d is over: Jd is differential from this symbol on.
                     self.differential = true;
@@ -714,10 +847,23 @@ impl Downstream {
                         self.events.push(
                             self.event(from, first, "TRN1d")
                                 .pcm(&levels)
-                                .summary(format!("TRN1d, {:.2} s: trained a receiver to {snr:.0} dB", first - from))
+                                .summary(format!(
+                                    "TRN1d, {:.2} s: trained a receiver to {snr:.0} dB",
+                                    first - from
+                                ))
                                 .field("signal to noise after training", format!("{snr:.1} dB"))
-                                .field("signal turned over on the way", if inverted { "yes" } else { "no" })
-                                .field("coding", if self.law == Law::A { "A-law" } else { "mu-law" }),
+                                .field(
+                                    "signal turned over on the way",
+                                    if inverted { "yes" } else { "no" },
+                                )
+                                .field(
+                                    "coding",
+                                    if self.law == Law::A {
+                                        "A-law"
+                                    } else {
+                                        "mu-law"
+                                    },
+                                ),
                         );
                     }
                     shared.jd = Some(jd);
@@ -727,7 +873,9 @@ impl Downstream {
                 // the DIL straight after.
                 if let Some((end, at, jd)) = self.jd
                     && s.index + 1 == end + JD_PRIME_BITS as u64
-                    && self.bits[self.bits.len() - JD_PRIME_BITS..].iter().all(|b| !*b)
+                    && self.bits[self.bits.len() - JD_PRIME_BITS..]
+                        .iter()
+                        .all(|b| !*b)
                 {
                     let first = self.jd_first.unwrap_or(at);
                     let levels = std::mem::take(&mut self.seen);
@@ -742,8 +890,15 @@ impl Downstream {
                             .fields(jd_fields(&jd))
                             .field("sent", format!("{} times", self.jd_times)),
                     );
-                    self.events.push(self.event(at, now, "J'd").summary("J'd: twelve zeros, and the DIL follows".to_owned()));
-                    let levels: Vec<(u8, bool)> = shared.descriptor.as_ref().map(|d| d.symbols().collect()).unwrap_or_default();
+                    self.events.push(
+                        self.event(at, now, "J'd")
+                            .summary("J'd: twelve zeros, and the DIL follows".to_owned()),
+                    );
+                    let levels: Vec<(u8, bool)> = shared
+                        .descriptor
+                        .as_ref()
+                        .map(|d| d.symbols().collect())
+                        .unwrap_or_default();
                     // J'd ends on a frame boundary, so the DIL's first symbol
                     // is in interval 0, whatever a slip did on the way.
                     let first = s.raw + 1;
@@ -782,7 +937,12 @@ impl Downstream {
         // The receiver goes on expecting the DIL, as the modem's own does,
         // until R is heard under it.
         let route = self.analysis.route();
-        self.fourth = Some(Fourth::new(self.who, ucode::level(self.law, self.uinfo), route.clone(), now));
+        self.fourth = Some(Fourth::new(
+            self.who,
+            ucode::level(self.law, self.uinfo),
+            route.clone(),
+            now,
+        ));
         let noise = route.noise();
         // The reference level is what the DIL's loudest codewords come to,
         // which is near enough the power data mode is sent at.
@@ -790,10 +950,17 @@ impl Downstream {
         let mut event = self
             .event(from, now, "DIL")
             .pcm(&levels)
-            .summary(format!("DIL for {:.2} s: {} symbols read", now - from, self.dil_read))
+            .summary(format!(
+                "DIL for {:.2} s: {} symbols read",
+                now - from,
+                self.dil_read
+            ))
             .field("symbols read", self.dil_read.to_string());
         if self.dil_read > 0 && noise > 0.0 {
-            event = event.field("spread of a codeword", format!("{:.1} of the 16-bit scale", noise * 32768.0));
+            event = event.field(
+                "spread of a codeword",
+                format!("{:.1} of the 16-bit scale", noise * 32768.0),
+            );
             // How far each interval's levels are from the mean of the six:
             // a robbed bit or a pad that is not the same in every frame
             // shows as one or two intervals standing apart.
@@ -812,7 +979,12 @@ impl Downstream {
             if gains.len() == 6 {
                 event = event.field(
                     "level in each interval",
-                    gains.iter().map(|g| format!("{g:+.2}")).collect::<Vec<_>>().join(" ") + " dB",
+                    gains
+                        .iter()
+                        .map(|g| format!("{g:+.2}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        + " dB",
                 );
             }
         }
@@ -821,7 +993,10 @@ impl Downstream {
 }
 
 fn jd_fields(jd: &Jd) -> Vec<(String, String)> {
-    let rates: Vec<u32> = (1..=22u8).filter(|&drn| jd.enables(drn)).filter_map(sequences::data_rate).collect();
+    let rates: Vec<u32> = (1..=22u8)
+        .filter(|&drn| jd.enables(drn))
+        .filter_map(sequences::data_rate)
+        .collect();
     vec![
         (
             "downstream rates enabled".to_owned(),
@@ -830,9 +1005,18 @@ fn jd_fields(jd: &Jd) -> Vec<(String, String)> {
                 _ => "none".to_owned(),
             },
         ),
-        ("phase 4 training".to_owned(), format!("{}-point", if jd.sixteen_in_training { 16 } else { 4 })),
-        ("renegotiation".to_owned(), format!("{}-point", if jd.sixteen_in_renegotiation { 16 } else { 4 })),
-        ("shaper look-ahead it can do".to_owned(), jd.lookahead.to_string()),
+        (
+            "phase 4 training".to_owned(),
+            format!("{}-point", if jd.sixteen_in_training { 16 } else { 4 }),
+        ),
+        (
+            "renegotiation".to_owned(),
+            format!("{}-point", if jd.sixteen_in_renegotiation { 16 } else { 4 }),
+        ),
+        (
+            "shaper look-ahead it can do".to_owned(),
+            jd.lookahead.to_string(),
+        ),
     ]
 }
 
@@ -854,12 +1038,25 @@ pub fn follow(
         (None, Some(c)) => c.probed[asked.upstream.index() as usize].high_carrier,
         (None, None) => false,
     };
-    let law = if settled.info0d.is_some_and(|d| d.a_law) { Law::A } else { Law::Mu };
+    let law = if settled.info0d.is_some_and(|d| d.a_law) {
+        Law::A
+    } else {
+        Law::Mu
+    };
     let mut shared = Shared::default();
-    let mut up = Upstream::new(Band::new(asked.upstream, high), asked.upstream, analogue.1, fs);
+    let mut up = Upstream::new(
+        Band::new(asked.upstream, high),
+        asked.upstream,
+        analogue.1,
+        fs,
+    );
     let mut down = Downstream::new(law, asked.uinfo, digital.1, fs);
     let first = ((from + 0.01) * fs) as usize;
-    let last = analogue.0.len().min(digital.0.len()).min((until * fs) as usize);
+    let last = analogue
+        .0
+        .len()
+        .min(digital.0.len())
+        .min((until * fs) as usize);
     for n in first..last {
         up.feed(n, analogue.0[n] as f64, &mut shared);
         down.feed(n as f64 / fs, digital.0[n] as f64, &mut shared);

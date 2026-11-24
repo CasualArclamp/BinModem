@@ -123,7 +123,10 @@ fn slicer_for(levels: &Levels) -> Slicer {
 }
 
 fn nearest(levels: &[(f64, u8, bool)], value: f64) -> (u8, bool) {
-    levels.iter().min_by(|a, b| (a.0 - value).abs().total_cmp(&(b.0 - value).abs())).map_or((0, false), |l| (l.1, l.2))
+    levels
+        .iter()
+        .min_by(|a, b| (a.0 - value).abs().total_cmp(&(b.0 - value).abs()))
+        .map_or((0, false), |l| (l.1, l.2))
 }
 
 /// The frames from TRN2d on.
@@ -182,7 +185,10 @@ impl Fourth {
             over: false,
             seen: Vec::new(),
             events: Vec::new(),
-            stream: Stream { from: Some(who), ..Stream::default() },
+            stream: Stream {
+                from: Some(who),
+                ..Stream::default()
+            },
         }
     }
 
@@ -190,7 +196,13 @@ impl Fourth {
         Event::new(start, end.max(start), self.who, layer, tag)
     }
 
-    pub(crate) fn symbol(&mut self, now: f64, symbol: &Symbol, rx: &mut Receiver, shared: &mut Shared) {
+    pub(crate) fn symbol(
+        &mut self,
+        now: f64,
+        symbol: &Symbol,
+        rx: &mut Receiver,
+        shared: &mut Shared,
+    ) {
         if self.over {
             return;
         }
@@ -221,7 +233,9 @@ impl Fourth {
             }
             return;
         }
-        let Some(frames) = self.frames.as_mut() else { return };
+        let Some(frames) = self.frames.as_mut() else {
+            return;
+        };
         if symbol.index + 1 == frames.from {
             // TRN2d's first symbol is next: decide against CPt's levels.
             rx.set_slicer(slicer_for(&frames.levels));
@@ -243,20 +257,34 @@ impl Fourth {
         };
         frames.read += 1;
         let possible = frames.decoder.could_have_sent(&frame);
-        frames.bad = if possible { frames.bad.saturating_sub(1) } else { frames.bad + 2 };
+        frames.bad = if possible {
+            frames.bad.saturating_sub(1)
+        } else {
+            frames.bad + 2
+        };
         // A scrambler does not give the same frame twice running; a line
         // that has stopped changing gives nothing else.
         let repeated = frames.last_frame.replace(frame) == Some(frame);
-        let bits: Vec<bool> = frames.decoder.frame(frame).into_iter().map(|b| frames.descrambler.descramble(b)).collect();
+        let bits: Vec<bool> = frames
+            .decoder
+            .frame(frame)
+            .into_iter()
+            .map(|b| frames.descrambler.descramble(b))
+            .collect();
 
         if let Some(index) = frames.data {
-            if self.stream.bits.len() / 256 != (self.stream.bits.len() + bits.len()) / 256 || self.stream.marks.is_empty() {
+            if self.stream.bits.len() / 256 != (self.stream.bits.len() + bits.len()) / 256
+                || self.stream.marks.is_empty()
+            {
                 self.stream.marks.push((self.stream.bits.len(), now));
             }
             self.stream.bits.extend(bits);
             self.events[index].end = now;
             if frames.bad > 120 {
-                self.end_data(now, "the frames stopped being ones this constellation could make");
+                self.end_data(
+                    now,
+                    "the frames stopped being ones this constellation could make",
+                );
             }
             return;
         }
@@ -270,7 +298,10 @@ impl Fourth {
                 return;
             }
             let from = frames.b1d_from;
-            let rate = shared.cp.as_ref().and_then(|cp| sequences::data_rate(cp.drn));
+            let rate = shared
+                .cp
+                .as_ref()
+                .and_then(|cp| sequences::data_rate(cp.drn));
             frames.bad = 0;
             let levels = std::mem::take(&mut self.seen);
             self.events.push(
@@ -282,12 +313,15 @@ impl Fourth {
             data = match rate {
                 Some(rate) => {
                     self.stream.bps = Some(rate);
-                    data.summary(format!("data mode, PCM at {rate} bit/s")).field("rate", format!("{rate} bit/s"))
+                    data.summary(format!("data mode, PCM at {rate} bit/s"))
+                        .field("rate", format!("{rate} bit/s"))
                 }
                 None => data.summary("data mode, PCM".to_owned()),
             };
             if let Some(cp) = &shared.cp {
-                let sizes: Vec<String> = (0..INTERVALS).map(|i| cp.points(i).len().to_string()).collect();
+                let sizes: Vec<String> = (0..INTERVALS)
+                    .map(|i| cp.points(i).len().to_string())
+                    .collect();
                 data = data
                     .field("points in each interval", sizes.join(" "))
                     .field("sign redundancy Sr", format!("{:?}", cp.redundancy))
@@ -310,18 +344,27 @@ impl Fourth {
             let levels = std::mem::take(&mut self.seen);
             self.events.push(
                 self.event(from, now - FRAME, Layer::Phase4, "TRN2d")
-                    .summary(format!("TRN2d, {:.0} ms: ones at the training constellation CPt asked for", 1000.0 * (now - from)))
+                    .summary(format!(
+                        "TRN2d, {:.0} ms: ones at the training constellation CPt asked for",
+                        1000.0 * (now - from)
+                    ))
                     .pcm(&levels),
             );
         }
-        let Some(frames) = self.frames.as_mut() else { return };
+        let Some(frames) = self.frames.as_mut() else {
+            return;
+        };
         // Ed is two frames of scrambled zeros (8.6.2). It comes after the
         // digital modem has acknowledged a CP with an MP', so not before
         // either has been read; and a frame the constellation could not
         // have made is a frame read wrong, whatever it decodes to.
         let zeros = bits.iter().all(|b| !*b);
         let due = frames.mp.is_some_and(|mp| mp.acknowledge) && shared.cp.is_some();
-        frames.zero_frames = if zeros && !repeated && possible && due { frames.zero_frames + 1 } else { 0 };
+        frames.zero_frames = if zeros && !repeated && possible && due {
+            frames.zero_frames + 1
+        } else {
+            0
+        };
         if frames.zero_frames == 2 {
             frames.ed = true;
             frames.b1d_left = B1D_FRAMES;
@@ -329,7 +372,10 @@ impl Fourth {
             frames.mp_run = None;
             // B1d and data are at data mode's constellation, the coding
             // started afresh.
-            let data = shared.cp.as_ref().and_then(|cp| Mapping::from_cp(cp).map(|m| (m, cp.clone())));
+            let data = shared
+                .cp
+                .as_ref()
+                .and_then(|cp| Mapping::from_cp(cp).map(|m| (m, cp.clone())));
             self.seen.clear();
             self.events.push(
                 Event::new(now - 2.0 * FRAME, now, self.who, Layer::Phase4, "Ed")
@@ -342,7 +388,9 @@ impl Fourth {
                     rx.set_slicer(slicer_for(&frames.levels));
                 }
                 None => {
-                    self.failed = Some("no CP was read from the analogue modem to read data mode by".to_owned());
+                    self.failed = Some(
+                        "no CP was read from the analogue modem to read data mode by".to_owned(),
+                    );
                     self.frames = None;
                 }
             }
@@ -357,8 +405,14 @@ impl Fourth {
                 {
                     let event = &mut self.events[*index];
                     event.end = now;
-                    if let Some((_, value)) = event.fields.iter_mut().find(|(name, _)| name == "sent") {
-                        let n: usize = value.split(' ').next().and_then(|v| v.parse().ok()).unwrap_or(1);
+                    if let Some((_, value)) =
+                        event.fields.iter_mut().find(|(name, _)| name == "sent")
+                    {
+                        let n: usize = value
+                            .split(' ')
+                            .next()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(1);
                         *value = format!("{} times", n + 1);
                     }
                     continue;
@@ -366,7 +420,10 @@ impl Fourth {
                 let tag = if mp.acknowledge { "MP'" } else { "MP" };
                 let levels = std::mem::take(&mut self.seen);
                 let event = Event::new(now - 0.03, now, self.who, Layer::Phase4, tag)
-                    .summary(format!("{tag}: at most {} bit/s upstream", u32::from(mp.answer_to_call) * 2400))
+                    .summary(format!(
+                        "{tag}: at most {} bit/s upstream",
+                        u32::from(mp.answer_to_call) * 2400
+                    ))
                     .fields(mp_fields(&mp))
                     .field("sent", "1 times")
                     .pcm(&levels);
@@ -382,13 +439,20 @@ impl Fourth {
         let levels = std::mem::take(&mut self.seen);
         self.events.push(
             self.event(ri_from, turn, Layer::Phase4, "Ri")
-                .summary(format!("Ri for {:.0} ms: + + + - - - at the reference level", 1000.0 * (turn - ri_from)))
+                .summary(format!(
+                    "Ri for {:.0} ms: + + + - - - at the reference level",
+                    1000.0 * (turn - ri_from)
+                ))
                 .pcm(&levels),
         );
         self.events.push(
-            self.event(turn, turn + 4.0 * FRAME, Layer::Phase4, "R-bar-i").summary("R-bar-i: Ri turned over, 24 symbols".to_owned()),
+            self.event(turn, turn + 4.0 * FRAME, Layer::Phase4, "R-bar-i")
+                .summary("R-bar-i: Ri turned over, 24 symbols".to_owned()),
         );
-        let training = shared.cpt.as_ref().and_then(|cpt| Mapping::from_cp(cpt).map(|m| (m, cpt.clone())));
+        let training = shared
+            .cpt
+            .as_ref()
+            .and_then(|cpt| Mapping::from_cp(cpt).map(|m| (m, cpt.clone())));
         match training {
             Some((mapping, cpt)) => {
                 self.frames = Some(Frames {
@@ -412,14 +476,19 @@ impl Fourth {
                     bad: 0,
                 });
             }
-            None => self.failed = Some("no CPt was read from the analogue modem to read phase 4 by".to_owned()),
+            None => {
+                self.failed =
+                    Some("no CPt was read from the analogue modem to read phase 4 by".to_owned())
+            }
         }
     }
 
     fn end_data(&mut self, now: f64, why: &str) {
         self.over = true;
         self.stream.marks.push((self.stream.bits.len(), now));
-        let Some(index) = self.frames.as_ref().and_then(|f| f.data) else { return };
+        let Some(index) = self.frames.as_ref().and_then(|f| f.data) else {
+            return;
+        };
         let levels = std::mem::take(&mut self.seen);
         let event = &mut self.events[index];
         event.end = now.max(event.start);
@@ -440,12 +509,23 @@ impl Fourth {
         // Whatever was not read is still there to be looked at.
         let levels = std::mem::take(&mut self.seen);
         let (from, what) = match (&self.frames, &self.failed) {
-            (Some(frames), _) => (frames.started, "phase 4 from the digital modem, which did not reach data mode on the recording".to_owned()),
-            (None, Some(why)) => (self.began, format!("phase 4 from the digital modem, symbols only: {why}")),
+            (Some(frames), _) => (
+                frames.started,
+                "phase 4 from the digital modem, which did not reach data mode on the recording"
+                    .to_owned(),
+            ),
+            (None, Some(why)) => (
+                self.began,
+                format!("phase 4 from the digital modem, symbols only: {why}"),
+            ),
             (None, None) => (self.began, "after the DIL: no Ri was found".to_owned()),
         };
         if !levels.is_empty() {
-            self.events.push(self.event(from, now, Layer::Phase4, "phase 4").summary(what).pcm(&levels));
+            self.events.push(
+                self.event(from, now, Layer::Phase4, "phase 4")
+                    .summary(what)
+                    .pcm(&levels),
+            );
         }
     }
 }

@@ -13,7 +13,9 @@ fn main() -> ExitCode {
         match arg.as_str() {
             "--fields" => fields = true,
             "-h" | "--help" => {
-                println!("modem-review [--fields] <recording.wav>...\n\n  --fields   everything read out of each signal, not just a line for it");
+                println!(
+                    "modem-review [--fields] <recording.wav>...\n\n  --fields   everything read out of each signal, not just a line for it"
+                );
                 return ExitCode::SUCCESS;
             }
             _ => paths.push(arg),
@@ -38,5 +40,9 @@ fn main() -> ExitCode {
             }
         }
     }
-    if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+    if failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }

@@ -32,7 +32,8 @@ fn slower_at_done(caller: &mut Modem, done: &mut bool) {
     if !*done {
         *done = true;
         for b in b"And this is at the slower rate.
-" {
+"
+        {
             caller.feed_dte(*b);
         }
     }
@@ -46,17 +47,33 @@ fn main() {
     };
     let carrier = args.get(1).map_or("V34", String::as_str);
     let seconds: f64 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(30.0);
-    let at = |n: usize| args.get(n).and_then(|s| s.parse::<f64>().ok()).filter(|t| *t > 0.0);
+    let at = |n: usize| {
+        args.get(n)
+            .and_then(|s| s.parse::<f64>().ok())
+            .filter(|t| *t > 0.0)
+    };
     let (retrain_at, slower_at) = (at(3), at(4));
     let mut slowed = false;
 
     if carrier.eq_ignore_ascii_case("V90") {
         let call = pcm_pair::record(seconds, true);
-        eprintln!("the server received {:?}", String::from_utf8_lossy(&call.server_received));
-        eprintln!("the caller's terminal saw {:?}", String::from_utf8_lossy(&call.caller_saw));
-        eprintln!("the analogue modem reported {:?} bit/s down and up", call.rates);
-        line::wav::write_channels(path, &call.samples, 2, 8000).expect("could not write the recording");
-        eprintln!("{path}: {seconds} s at 8000 Hz, the analogue modem on channel 1, the digital one on channel 2");
+        eprintln!(
+            "the server received {:?}",
+            String::from_utf8_lossy(&call.server_received)
+        );
+        eprintln!(
+            "the caller's terminal saw {:?}",
+            String::from_utf8_lossy(&call.caller_saw)
+        );
+        eprintln!(
+            "the analogue modem reported {:?} bit/s down and up",
+            call.rates
+        );
+        line::wav::write_channels(path, &call.samples, 2, 8000)
+            .expect("could not write the recording");
+        eprintln!(
+            "{path}: {seconds} s at 8000 Hz, the analogue modem on channel 1, the digital one on channel 2"
+        );
         return;
     }
     let mut caller = Modem::new(FS);
@@ -93,7 +110,10 @@ fn main() {
         let up = caller.state() == State::Data && host.state() == State::Data;
         if up && up_at.is_none() {
             up_at = Some(now);
-            eprintln!("{now:8.3} both in data mode, caller at {:?} bit/s", caller.rate());
+            eprintln!(
+                "{now:8.3} both in data mode, caller at {:?} bit/s",
+                caller.rate()
+            );
         }
         if let Some(at) = up_at {
             if !spoken && now > at + 1.5 {

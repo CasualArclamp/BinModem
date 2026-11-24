@@ -31,7 +31,11 @@ pub struct Summary {
 }
 
 fn hex(octets: &[u8]) -> String {
-    octets.iter().map(|o| format!("{o:02X}")).collect::<Vec<_>>().join(" ")
+    octets
+        .iter()
+        .map(|o| format!("{o:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Octets as a reader would want them in a line of text.
@@ -62,7 +66,10 @@ fn xid_fields(xid: &Xid) -> Vec<(String, String)> {
     if let Some(k) = xid.window_receive {
         add("window it takes", format!("{k} frames"));
     }
-    add("32-bit check sequence", if xid.fcs32 { "asked for" } else { "no" }.to_owned());
+    add(
+        "32-bit check sequence",
+        if xid.fcs32 { "asked for" } else { "no" }.to_owned(),
+    );
     add(
         "selective reject",
         match (xid.srej_single, xid.srej_multiple) {
@@ -72,14 +79,19 @@ fn xid_fields(xid: &Xid) -> Vec<(String, String)> {
         }
         .to_owned(),
     );
-    add("loop-back test", if xid.test_frame { "yes" } else { "no" }.to_owned());
+    add(
+        "loop-back test",
+        if xid.test_frame { "yes" } else { "no" }.to_owned(),
+    );
     match xid.compression {
         Some(way) => add(
             "V.42 bis",
             format!(
                 "{way:?}, {} codewords, strings to {}",
-                xid.codewords.map_or_else(|| "?".to_owned(), |c| c.to_string()),
-                xid.max_string.map_or_else(|| "?".to_owned(), |c| c.to_string())
+                xid.codewords
+                    .map_or_else(|| "?".to_owned(), |c| c.to_string()),
+                xid.max_string
+                    .map_or_else(|| "?".to_owned(), |c| c.to_string())
             ),
         ),
         None => add("V.42 bis", "not mentioned".to_owned()),
@@ -92,8 +104,12 @@ fn xid_fields(xid: &Xid) -> Vec<(String, String)> {
 }
 
 fn compresses(xid: &Xid) -> bool {
-    xid.compression.is_some_and(|c| c != ec::Compression::Neither)
-        || xid.v44.as_ref().is_some_and(|offer| offer.compression != ec::Compression::Neither)
+    xid.compression
+        .is_some_and(|c| c != ec::Compression::Neither)
+        || xid
+            .v44
+            .as_ref()
+            .is_some_and(|offer| offer.compression != ec::Compression::Neither)
 }
 
 /// A PPP packet in a line, and its particulars.
@@ -124,7 +140,10 @@ fn ppp_event(protocol: u16, payload: &[u8]) -> (String, String, Vec<(String, Str
                 fields.push(("identifier".to_owned(), message.id.to_string()));
                 let configure = matches!(
                     message.code,
-                    Code::ConfigureRequest | Code::ConfigureAck | Code::ConfigureNak | Code::ConfigureReject
+                    Code::ConfigureRequest
+                        | Code::ConfigureAck
+                        | Code::ConfigureNak
+                        | Code::ConfigureReject
                 );
                 if configure && let Some(options) = ConfigOption::parse_all(&message.data) {
                     for option in &options {
@@ -138,7 +157,15 @@ fn ppp_event(protocol: u16, payload: &[u8]) -> (String, String, Vec<(String, Str
             None => format!("{name}, {} octets", payload.len()),
         },
         p::IP if payload.len() >= 20 => {
-            let ip = |at: usize| format!("{}.{}.{}.{}", payload[at], payload[at + 1], payload[at + 2], payload[at + 3]);
+            let ip = |at: usize| {
+                format!(
+                    "{}.{}.{}.{}",
+                    payload[at],
+                    payload[at + 1],
+                    payload[at + 2],
+                    payload[at + 3]
+                )
+            };
             let carried = match payload[9] {
                 1 => "ICMP".to_owned(),
                 6 => "TCP".to_owned(),
@@ -148,7 +175,12 @@ fn ppp_event(protocol: u16, payload: &[u8]) -> (String, String, Vec<(String, Str
             fields.push(("from".to_owned(), ip(12)));
             fields.push(("to".to_owned(), ip(16)));
             fields.push(("carries".to_owned(), carried.clone()));
-            format!("IP {} to {}, {carried}, {} octets", ip(12), ip(16), payload.len())
+            format!(
+                "IP {} to {}, {carried}, {} octets",
+                ip(12),
+                ip(16),
+                payload.len()
+            )
         }
         _ => format!("{name} {protocol:04X}, {} octets", payload.len()),
     };
@@ -168,7 +200,14 @@ struct Carried {
 
 impl Carried {
     fn new(who: End) -> Self {
-        Self { who, deframer: Deframer::new(), ppp: false, line: Vec::new(), line_from: 0.0, events: Vec::new() }
+        Self {
+            who,
+            deframer: Deframer::new(),
+            ppp: false,
+            line: Vec::new(),
+            line_from: 0.0,
+            events: Vec::new(),
+        }
     }
 
     fn feed(&mut self, octets: &[u8], start: f64, end: f64) {
@@ -209,11 +248,17 @@ impl Carried {
             return;
         }
         self.events.push(
-            Event::new(self.line_from, end.max(self.line_from), self.who, Layer::Payload, "text")
-                .summary(printable(&line))
-                .field("text", printable(&line))
-                .field("octets", hex(&line))
-                .octets(&line),
+            Event::new(
+                self.line_from,
+                end.max(self.line_from),
+                self.who,
+                Layer::Payload,
+                "text",
+            )
+            .summary(printable(&line))
+            .field("text", printable(&line))
+            .field("octets", hex(&line))
+            .octets(&line),
         );
     }
 }
@@ -222,13 +267,19 @@ impl Carried {
 pub fn read(stream: &Stream) -> (Vec<Event>, Summary) {
     let mut events = Vec::new();
     let mut summary = Summary::default();
-    let Some(who) = stream.from else { return (events, summary) };
+    let Some(who) = stream.from else {
+        return (events, summary);
+    };
     if stream.bits.is_empty() {
         return (events, summary);
     }
     // A frame sent by the caller is one the answerer receives, and the
     // command and response bit is the receiver's to read.
-    let receiver = if who == End::Caller { Role::Answerer } else { Role::Originator };
+    let receiver = if who == End::Caller {
+        Role::Answerer
+    } else {
+        Role::Originator
+    };
     let mut hdlc = Decoder::new(Fcs::Bits16);
     hdlc.accept_either();
     let mut carried = Carried::new(who);
@@ -236,7 +287,9 @@ pub fn read(stream: &Stream) -> (Vec<Event>, Summary) {
     let mut last_end = 0usize;
 
     for (index, &bit) in stream.bits.iter().enumerate() {
-        let Some(frame) = hdlc.feed(bit) else { continue };
+        let Some(frame) = hdlc.feed(bit) else {
+            continue;
+        };
         let body = match frame {
             Ok(body) => body,
             Err(_) => {
@@ -256,7 +309,11 @@ pub fn read(stream: &Stream) -> (Vec<Event>, Summary) {
             continue;
         };
         summary.frames += 1;
-        let event = |tag: &str| Event::new(start, end, who, Layer::Link, tag).field("octets", hex(&body)).octets(&body);
+        let event = |tag: &str| {
+            Event::new(start, end, who, Layer::Link, tag)
+                .field("octets", hex(&body))
+                .octets(&body)
+        };
         let flag = |on: bool| if on { "yes" } else { "no" }.to_owned();
         let made = match &frame {
             Frame::I { ns, nr, poll, info } => {
@@ -284,30 +341,62 @@ pub fn read(stream: &Stream) -> (Vec<Event>, Summary) {
                     .field("information", format!("{} octets", info.len()))
                     .field("as text", printable(info))
             }
-            Frame::Rr { nr, pf } => event("RR").summary(format!("receive ready, next wanted {nr}")).field("N(R)", nr.to_string()).field("poll or final", flag(*pf)),
-            Frame::Rnr { nr, pf } => event("RNR").summary(format!("receive not ready, next wanted {nr}")).field("N(R)", nr.to_string()).field("poll or final", flag(*pf)),
-            Frame::Rej { nr, pf } => event("REJ").summary(format!("reject: send again from {nr}")).field("N(R)", nr.to_string()).field("poll or final", flag(*pf)),
-            Frame::Srej { nr } => event("SREJ").summary(format!("selective reject: send {nr} again")).field("N(R)", nr.to_string()),
+            Frame::Rr { nr, pf } => event("RR")
+                .summary(format!("receive ready, next wanted {nr}"))
+                .field("N(R)", nr.to_string())
+                .field("poll or final", flag(*pf)),
+            Frame::Rnr { nr, pf } => event("RNR")
+                .summary(format!("receive not ready, next wanted {nr}"))
+                .field("N(R)", nr.to_string())
+                .field("poll or final", flag(*pf)),
+            Frame::Rej { nr, pf } => event("REJ")
+                .summary(format!("reject: send again from {nr}"))
+                .field("N(R)", nr.to_string())
+                .field("poll or final", flag(*pf)),
+            Frame::Srej { nr } => event("SREJ")
+                .summary(format!("selective reject: send {nr} again"))
+                .field("N(R)", nr.to_string()),
             Frame::Sabme { poll } => {
                 expected = None;
-                event("SABME").summary("set asynchronous balanced mode: the link is to start".to_owned()).field("poll", flag(*poll))
+                event("SABME")
+                    .summary("set asynchronous balanced mode: the link is to start".to_owned())
+                    .field("poll", flag(*poll))
             }
-            Frame::Disc { poll } => event("DISC").summary("disconnect".to_owned()).field("poll", flag(*poll)),
-            Frame::Ua { final_bit } => event("UA").summary("unnumbered acknowledgement".to_owned()).field("final", flag(*final_bit)),
-            Frame::Dm { final_bit } => event("DM").summary("disconnected mode".to_owned()).field("final", flag(*final_bit)),
-            Frame::Frmr { final_bit, info } => event("FRMR").summary(format!("frame reject: {}", hex(info))).field("final", flag(*final_bit)),
-            Frame::Ui { info, .. } => event("UI").summary(format!("unnumbered information, {} octets", info.len())),
-            Frame::Test { info, .. } => event("TEST").summary(format!("loop-back test, {} octets", info.len())),
+            Frame::Disc { poll } => event("DISC")
+                .summary("disconnect".to_owned())
+                .field("poll", flag(*poll)),
+            Frame::Ua { final_bit } => event("UA")
+                .summary("unnumbered acknowledgement".to_owned())
+                .field("final", flag(*final_bit)),
+            Frame::Dm { final_bit } => event("DM")
+                .summary("disconnected mode".to_owned())
+                .field("final", flag(*final_bit)),
+            Frame::Frmr { final_bit, info } => event("FRMR")
+                .summary(format!("frame reject: {}", hex(info)))
+                .field("final", flag(*final_bit)),
+            Frame::Ui { info, .. } => {
+                event("UI").summary(format!("unnumbered information, {} octets", info.len()))
+            }
+            Frame::Test { info, .. } => {
+                event("TEST").summary(format!("loop-back test, {} octets", info.len()))
+            }
             Frame::Xid { pf, info } => match Xid::decode(info) {
                 Ok(xid) => {
                     let fields = xid_fields(&xid);
                     // Compression that is named and set to neither way is
                     // a refusal, not an offer.
                     let mut what = Vec::new();
-                    if xid.compression.is_some_and(|c| c != ec::Compression::Neither) {
+                    if xid
+                        .compression
+                        .is_some_and(|c| c != ec::Compression::Neither)
+                    {
                         what.push("V.42 bis");
                     }
-                    if xid.v44.as_ref().is_some_and(|offer| offer.compression != ec::Compression::Neither) {
+                    if xid
+                        .v44
+                        .as_ref()
+                        .is_some_and(|offer| offer.compression != ec::Compression::Neither)
+                    {
                         what.push("V.44");
                     }
                     summary.compressed = summary.compressed || compresses(&xid);
@@ -315,7 +404,11 @@ pub fn read(stream: &Stream) -> (Vec<Event>, Summary) {
                     event("XID")
                         .summary(format!(
                             "XID: what this end proposes for the link{}",
-                            if what.is_empty() { String::new() } else { format!(", with {}", what.join(" and ")) }
+                            if what.is_empty() {
+                                String::new()
+                            } else {
+                                format!(", with {}", what.join(" and "))
+                            }
                         ))
                         .field("poll or final", flag(*pf))
                         .fields(fields)
@@ -345,7 +438,14 @@ pub fn read(stream: &Stream) -> (Vec<Event>, Summary) {
         // What a person or a protocol sent is mostly printable, or is PPP.
         let text: Vec<&Event> = plain.events.iter().filter(|e| e.tag == "text").collect();
         let (shown, all) = text.iter().fold((0usize, 0usize), |(shown, all), e| {
-            (shown + e.octets.iter().filter(|o| matches!(o, 0x20..=0x7e | 0x09 | 0x0a | 0x0d)).count(), all + e.octets.len())
+            (
+                shown
+                    + e.octets
+                        .iter()
+                        .filter(|o| matches!(o, 0x20..=0x7e | 0x09 | 0x0a | 0x0d))
+                        .count(),
+                all + e.octets.len(),
+            )
         });
         let sense = plain.ppp || (all > 0 && shown * 10 >= all * 8);
         if any > 0 && sense {
@@ -372,7 +472,11 @@ pub fn read(stream: &Stream) -> (Vec<Event>, Summary) {
                 last.end = event.end;
                 match last.fields.iter_mut().find(|(name, _)| name == "sent") {
                     Some((_, value)) => {
-                        let n: usize = value.split(' ').next().and_then(|v| v.parse().ok()).unwrap_or(1);
+                        let n: usize = value
+                            .split(' ')
+                            .next()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(1);
                         *value = format!("{} times", n + 1);
                     }
                     None => last.fields.push(("sent".to_owned(), "2 times".to_owned())),

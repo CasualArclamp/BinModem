@@ -177,7 +177,11 @@ impl Event {
     /// Constellation points, of a constellation of `points` points.
     pub fn qam(mut self, symbols: &[(f32, f32)], points: usize) -> Self {
         self.symbols = thinned(symbols);
-        self.plot = if self.symbols.is_empty() { Plot::None } else { Plot::Qam(points) };
+        self.plot = if self.symbols.is_empty() {
+            Plot::None
+        } else {
+            Plot::Qam(points)
+        };
         self
     }
 
@@ -185,7 +189,11 @@ impl Event {
     pub fn pcm(mut self, levels: &[f32]) -> Self {
         let pairs: Vec<(f32, f32)> = levels.windows(2).map(|w| (w[0], w[1])).collect();
         self.symbols = thinned(&pairs);
-        self.plot = if self.symbols.is_empty() { Plot::None } else { Plot::Pcm };
+        self.plot = if self.symbols.is_empty() {
+            Plot::None
+        } else {
+            Plot::Pcm
+        };
         self
     }
 
@@ -193,15 +201,25 @@ impl Event {
     pub fn fsk(mut self, margins: &[f32]) -> Self {
         let pairs: Vec<(f32, f32)> = margins.iter().map(|m| (0.0, *m)).collect();
         self.symbols = thinned(&pairs);
-        self.plot = if self.symbols.is_empty() { Plot::None } else { Plot::Fsk };
+        self.plot = if self.symbols.is_empty() {
+            Plot::None
+        } else {
+            Plot::Fsk
+        };
         self
     }
 
     /// A tone's phasor, sampled; scaled here so the loudest is at one.
     pub fn phasor(mut self, points: &[(f32, f32)]) -> Self {
-        let peak = points.iter().map(|(re, im)| re.hypot(*im)).fold(0.0f32, f32::max);
+        let peak = points
+            .iter()
+            .map(|(re, im)| re.hypot(*im))
+            .fold(0.0f32, f32::max);
         if peak > 0.0 {
-            let scaled: Vec<(f32, f32)> = points.iter().map(|(re, im)| (re / peak, im / peak)).collect();
+            let scaled: Vec<(f32, f32)> = points
+                .iter()
+                .map(|(re, im)| (re / peak, im / peak))
+                .collect();
             self.symbols = thinned(&scaled);
             self.plot = Plot::Phasor;
         }
@@ -223,7 +241,9 @@ fn thinned(symbols: &[(f32, f32)]) -> Vec<(f32, f32)> {
     if symbols.len() <= SYMBOLS_KEPT {
         return symbols.to_vec();
     }
-    (0..SYMBOLS_KEPT).map(|i| symbols[i * symbols.len() / SYMBOLS_KEPT]).collect()
+    (0..SYMBOLS_KEPT)
+        .map(|i| symbols[i * symbols.len() / SYMBOLS_KEPT])
+        .collect()
 }
 
 /// How a recording's channels relate to the call.
@@ -301,7 +321,10 @@ pub struct Report {
 impl Report {
     /// The verdict line of that name, if the call got that far.
     pub fn verdict(&self, name: &str) -> Option<&str> {
-        self.verdict.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+        self.verdict
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_str())
     }
 
     /// The first event with that tag.
@@ -317,7 +340,11 @@ impl Report {
             Tap::Summed => "both ends on one channel".to_owned(),
             Tap::Split { caller } => format!("an end a channel, caller on {}", caller + 1),
         };
-        let _ = writeln!(out, "{}: {:.1} s at {} Hz, {tap}", self.name, self.seconds, self.sample_rate);
+        let _ = writeln!(
+            out,
+            "{}: {:.1} s at {} Hz, {tap}",
+            self.name, self.seconds, self.sample_rate
+        );
         for (name, value) in &self.verdict {
             let _ = writeln!(out, "  {name:<22} {value}");
         }

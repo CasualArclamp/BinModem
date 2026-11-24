@@ -59,7 +59,9 @@ impl Stream {
     pub fn time_of(&self, index: usize) -> f64 {
         let after = self.marks.partition_point(|(bits, _)| *bits <= index);
         match (self.marks.get(after.wrapping_sub(1)), self.marks.get(after)) {
-            (Some(&(b0, t0)), Some(&(b1, t1))) if b1 > b0 => t0 + (t1 - t0) * (index - b0) as f64 / (b1 - b0) as f64,
+            (Some(&(b0, t0)), Some(&(b1, t1))) if b1 > b0 => {
+                t0 + (t1 - t0) * (index - b0) as f64 / (b1 - b0) as f64
+            }
             (Some(&(_, t)), _) | (None, Some(&(_, t))) => t,
             (None, None) => 0.0,
         }
@@ -119,6 +121,10 @@ struct Direction {
     acquirer: Option<Acquirer>,
     params: Option<Params>,
     slips: u32,
+    /// Searches for the framing since it was last found, and times it was
+    /// found again.
+    searches: usize,
+    relocked: usize,
     b1_left: usize,
     s_watch: SWatch,
     /// Symbols the trellis has been paying dearly for, running.
@@ -166,13 +172,18 @@ impl Direction {
             acquirer: None,
             params: None,
             slips: 0,
+            searches: 0,
+            relocked: 0,
             b1_left: 0,
             s_watch: SWatch::default(),
             bad: 0,
             data_event: None,
             seen: Vec::new(),
             events: Vec::new(),
-            stream: Stream { from: Some(who), ..Stream::default() },
+            stream: Stream {
+                from: Some(who),
+                ..Stream::default()
+            },
             renegotiations: 0,
         }
     }
@@ -224,8 +235,10 @@ impl Direction {
                             let pp = signals::PP_SYMBOLS as f64 / self.band.baud();
                             let from = self.trn_from;
                             self.events.push(
-                                self.event(from, from + pp, Layer::Phase3, "PP")
-                                    .summary("PP: the sequence the far equaliser is first fitted to".to_owned()),
+                                self.event(from, from + pp, Layer::Phase3, "PP").summary(
+                                    "PP: the sequence the far equaliser is first fitted to"
+                                        .to_owned(),
+                                ),
                             );
                             self.begin_trn(Size::Four, from + pp);
                             self.stage = Stage::Phase3;
@@ -249,7 +262,8 @@ impl Direction {
                 }
                 Heard::Symbol(symbol) => {
                     if self.seen.len() < HELD {
-                        self.seen.push((symbol.point.re as f32, symbol.point.im as f32));
+                        self.seen
+                            .push((symbol.point.re as f32, symbol.point.im as f32));
                     }
                     self.symbol(now, symbol.decided, symbol.point, shared);
                 }
@@ -277,13 +291,20 @@ impl Direction {
         let baud = self.band.baud();
         let when = now - self.rx.halves().saturating_sub(at) as f64 / (2.0 * baud);
         let bar = signals::S_BAR_SYMBOLS as f64 / baud;
-        let heard = self.s_from.take().unwrap_or(when - signals::S_SYMBOLS as f64 / baud);
+        let heard = self
+            .s_from
+            .take()
+            .unwrap_or(when - signals::S_SYMBOLS as f64 / baud);
         let from = heard.max(self.since.unwrap_or(heard)).min(when);
         if when - from < 0.01 {
             self.rx.hunt();
             return;
         }
-        let layer = if self.stage == Stage::AwaitS4 { Layer::Phase4 } else { Layer::Phase3 };
+        let layer = if self.stage == Stage::AwaitS4 {
+            Layer::Phase4
+        } else {
+            Layer::Phase3
+        };
         match self.stage {
             Stage::AwaitS => {
                 self.rx.train(Reference::PpThenTrn, self.mode, at);
@@ -298,8 +319,14 @@ impl Direction {
             _ => return,
         }
         self.trn_from = when + bar;
-        self.events.push(self.event(from, when, layer, "S").summary(format!("S for {:.0} ms", 1000.0 * (when - from))));
-        self.events.push(self.event(when, when + bar, layer, "S-bar").summary("S-bar: S turned over, 16 symbols".to_owned()));
+        self.events.push(
+            self.event(from, when, layer, "S")
+                .summary(format!("S for {:.0} ms", 1000.0 * (when - from))),
+        );
+        self.events.push(
+            self.event(when, when + bar, layer, "S-bar")
+                .summary("S-bar: S turned over, 16 symbols".to_owned()),
+        );
     }
 
     fn end_j(&mut self, now: f64) {
@@ -308,8 +335,13 @@ impl Direction {
         let asks = if j == Size::Sixteen { 16 } else { 4 };
         self.events.push(
             self.event(self.j_from, now, Layer::Phase3, "J")
-                .summary(format!("J: asks to be trained with {asks} points in phase 4"))
-                .field("asks for", format!("{asks}-point TRN and MP from the other end"))
+                .summary(format!(
+                    "J: asks to be trained with {asks} points in phase 4"
+                ))
+                .field(
+                    "asks for",
+                    format!("{asks}-point TRN and MP from the other end"),
+                )
                 .qam(&points, 4),
         );
     }
@@ -360,7 +392,14 @@ impl Direction {
             self.trn = false;
             let now = now - 2.0 / self.band.baud();
             let points = std::mem::take(&mut self.seen);
-            let (layer, size) = (if self.stage == Stage::Phase3 { Layer::Phase3 } else { Layer::Phase4 }, self.size);
+            let (layer, size) = (
+                if self.stage == Stage::Phase3 {
+                    Layer::Phase3
+                } else {
+                    Layer::Phase4
+                },
+                self.size,
+            );
             let count = if size == Size::Sixteen { 16 } else { 4 };
             let from = self.trn_from;
             self.events.push(
@@ -372,7 +411,10 @@ impl Direction {
                     ))
                     .field("symbol rate", format!("{:.0} symbols/s", self.band.baud()))
                     .field("carrier", format!("{:.0} Hz", self.band.carrier()))
-                    .field("signal to noise after training", format!("{:.1} dB", self.trained_db))
+                    .field(
+                        "signal to noise after training",
+                        format!("{:.1} dB", self.trained_db),
+                    )
                     .qam(&points, count),
             );
             self.j_from = now;
@@ -416,7 +458,8 @@ impl Direction {
             let prime = 16.0 / (2.0 * self.band.baud());
             self.end_j(now - prime);
             self.events.push(
-                self.event(now - prime, now, Layer::Phase3, "J'").summary("J': J is over, and phase 4 follows".to_owned()),
+                self.event(now - prime, now, Layer::Phase3, "J'")
+                    .summary("J': J is over, and phase 4 follows".to_owned()),
             );
             let size = shared.j[1].unwrap_or(Size::Four);
             self.rx.set_size(size);
@@ -437,7 +480,11 @@ impl Direction {
             let event = &mut self.events[*index];
             event.end = now;
             if let Some((_, value)) = event.fields.iter_mut().find(|(name, _)| name == "sent") {
-                let n: usize = value.split(' ').next().and_then(|v| v.parse().ok()).unwrap_or(1);
+                let n: usize = value
+                    .split(' ')
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(1);
                 *value = format!("{} times", n + 1);
             }
             let more = std::mem::take(&mut self.seen);
@@ -452,11 +499,17 @@ impl Direction {
         let points = std::mem::take(&mut self.seen);
         let event = self
             .event(now - 0.06, now, Layer::Phase4, tag)
-            .summary(format!(
-                "{tag}: at most {} bit/s from the caller, {} from the answerer",
-                bps(mp.call_to_answer),
-                bps(mp.answer_to_call)
-            ))
+            .summary(if mp.call_to_answer == 0 && mp.answer_to_call == 0 {
+                // Rates of nothing either way are how a V.34 call is ended
+                // (11.7).
+                format!("{tag}: cleardown, the call is being ended")
+            } else {
+                format!(
+                    "{tag}: at most {} bit/s from the caller, {} from the answerer",
+                    bps(mp.call_to_answer),
+                    bps(mp.answer_to_call)
+                )
+            })
             .fields(mp_fields(&mp))
             .field("sent", "1 times")
             .qam(&points, size);
@@ -466,8 +519,10 @@ impl Direction {
 
     fn heard_e(&mut self, now: f64, shared: &mut Shared) {
         let e = signals::E_BITS as f64 / (self.size.bits() as f64 * self.band.baud());
-        self.events
-            .push(self.event(now - e, now, Layer::Phase4, "E").summary("E: twenty ones, and data mode follows".to_owned()));
+        self.events.push(
+            self.event(now - e, now, Layer::Phase4, "E")
+                .summary("E: twenty ones, and data mode follows".to_owned()),
+        );
         self.mp_run = None;
         self.seen.clear();
         self.stage = Stage::Data;
@@ -482,7 +537,13 @@ impl Direction {
             (Some(call), Some(answer), Some(theirs)) => {
                 let (up, down) = negotiate(&call, &answer);
                 let rate = if self.me == 0 { up } else { down };
-                Framing::new(self.rate, u32::from(rate) * 2400, false, theirs.expanded_shaping).map(|framing| Params {
+                Framing::new(
+                    self.rate,
+                    u32::from(rate) * 2400,
+                    false,
+                    theirs.expanded_shaping,
+                )
+                .map(|framing| Params {
                     framing,
                     code: match theirs.trellis {
                         Trellis::States16 => Code::States16,
@@ -511,12 +572,24 @@ impl Direction {
                     .field("symbol rate", format!("{:.0} symbols/s", self.band.baud()))
                     .field("points in the constellation", params.framing.l.to_string())
                     .field("trellis", format!("{} states", params.code.states()))
-                    .field("non-linear encoding", if params.nonlinear { "yes" } else { "no" })
-                    .field("shaping", if params.framing.expanded { "expanded" } else { "minimum" });
+                    .field(
+                        "non-linear encoding",
+                        if params.nonlinear { "yes" } else { "no" },
+                    )
+                    .field(
+                        "shaping",
+                        if params.framing.expanded {
+                            "expanded"
+                        } else {
+                            "minimum"
+                        },
+                    );
                 self.decoder = Some(decoder);
             }
             None => {
-                data = data.summary("data mode, but the other end's MP was not read: symbols only".to_owned());
+                data = data.summary(
+                    "data mode, but the other end's MP was not read: symbols only".to_owned(),
+                );
             }
         }
         self.events.push(data);
@@ -551,11 +624,25 @@ impl Direction {
         if let Some(acquirer) = self.acquirer.as_mut() {
             match acquirer.feed(point) {
                 Acquired::Found(decoder) => {
+                    self.searches = 0;
+                    self.relocked += 1;
                     self.acquirer = None;
                     self.b1_left = 0;
                     self.decoder = Some(*decoder);
                 }
-                Acquired::Nothing => self.end_data(now, "the framing was lost and not found again"),
+                Acquired::Nothing => {
+                    // Not found this time. The modem itself goes on looking
+                    // for as long as there is a signal, and so does this.
+                    self.searches += 1;
+                    match self.params {
+                        Some(params) if self.searches < 40 => {
+                            let again = Acquirer::new(params);
+                            self.rx.set_grid(again.grid_scale(), again.extent());
+                            self.acquirer = Some(again);
+                        }
+                        _ => self.end_data(now, "the framing was lost and not found again"),
+                    }
+                }
                 Acquired::Searching => {}
             }
             return;
@@ -579,12 +666,19 @@ impl Direction {
         }
         // The trellis pays a little for noise and a great deal for a signal
         // that is not this code at all: a retrain's tones, or silence.
-        self.bad = if decoder.path_cost() > 4.0 { self.bad + 1 } else { 0 };
+        self.bad = if decoder.path_cost() > 4.0 {
+            self.bad + 1
+        } else {
+            0
+        };
         if let Some(index) = self.data_event {
             self.events[index].end = now;
         }
         if self.bad > 1500 {
-            self.end_data(now - 1500.0 / self.band.baud(), "what followed was not this data mode");
+            self.end_data(
+                now - 1500.0 / self.band.baud(),
+                "what followed was not this data mode",
+            );
         }
     }
 
@@ -595,6 +689,12 @@ impl Direction {
             let event = &mut self.events[index];
             event.end = now.max(event.start);
             event.fields.push(("ended".to_owned(), why.to_owned()));
+            if self.relocked > 0 {
+                event.fields.push((
+                    "framing lost and found again".to_owned(),
+                    format!("{} times", self.relocked),
+                ));
+            }
             let done = event.clone().qam(&points, count);
             self.events[index] = done;
         }
@@ -610,21 +710,39 @@ impl Direction {
 /// What an MP says, as fields.
 pub fn mp_fields(mp: &Mp) -> Vec<(String, String)> {
     let bps = |n: u8| u32::from(n) * 2400;
-    let rates: Vec<String> = (1..=14).filter(|r| mp.rates >> (r - 1) & 1 == 1).map(|r| (r * 2400).to_string()).collect();
+    let rates: Vec<String> = (1..=14)
+        .filter(|r| mp.rates >> (r - 1) & 1 == 1)
+        .map(|r| (r * 2400).to_string())
+        .collect();
     let precoding = mp.precoding.map_or_else(
         || "none sent".to_owned(),
         |h| {
             h.iter()
-                .map(|(re, im)| format!("{:+.3}{:+.3}j", f64::from(*re) / 16384.0, f64::from(*im) / 16384.0))
+                .map(|(re, im)| {
+                    format!(
+                        "{:+.3}{:+.3}j",
+                        f64::from(*re) / 16384.0,
+                        f64::from(*im) / 16384.0
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("  ")
         },
     );
     let flag = |on: bool, yes: &str, no: &str| if on { yes } else { no }.to_owned();
     vec![
-        ("most from the caller".to_owned(), format!("{} bit/s", bps(mp.call_to_answer))),
-        ("most from the answerer".to_owned(), format!("{} bit/s", bps(mp.answer_to_call))),
-        ("acknowledges the other's MP".to_owned(), flag(mp.acknowledge, "yes", "no")),
+        (
+            "most from the caller".to_owned(),
+            format!("{} bit/s", bps(mp.call_to_answer)),
+        ),
+        (
+            "most from the answerer".to_owned(),
+            format!("{} bit/s", bps(mp.answer_to_call)),
+        ),
+        (
+            "acknowledges the other's MP".to_owned(),
+            flag(mp.acknowledge, "yes", "no"),
+        ),
         (
             "trellis it wants to receive".to_owned(),
             match mp.trellis {
@@ -634,12 +752,24 @@ pub fn mp_fields(mp: &Mp) -> Vec<(String, String)> {
             }
             .to_owned(),
         ),
-        ("non-linear encoding".to_owned(), flag(mp.non_linear, "yes", "no")),
-        ("shaping".to_owned(), flag(mp.expanded_shaping, "expanded", "minimum")),
+        (
+            "non-linear encoding".to_owned(),
+            flag(mp.non_linear, "yes", "no"),
+        ),
+        (
+            "shaping".to_owned(),
+            flag(mp.expanded_shaping, "expanded", "minimum"),
+        ),
         ("precoding h(1) h(2) h(3)".to_owned(), precoding),
         ("rates enabled".to_owned(), rates.join(", ")),
-        ("different rates each way".to_owned(), flag(mp.asymmetric, "allowed", "not allowed")),
-        ("auxiliary channel".to_owned(), flag(mp.auxiliary, "yes", "no")),
+        (
+            "different rates each way".to_owned(),
+            flag(mp.asymmetric, "allowed", "not allowed"),
+        ),
+        (
+            "auxiliary channel".to_owned(),
+            flag(mp.auxiliary, "yes", "no"),
+        ),
     ]
 }
 
@@ -686,5 +816,11 @@ pub fn follow(
     let renegotiations = caller.renegotiations.max(answerer.renegotiations);
     let mut events = caller.events;
     events.extend(answerer.events);
-    Some((events, Outcome { streams: [caller.stream, answerer.stream], renegotiations }))
+    Some((
+        events,
+        Outcome {
+            streams: [caller.stream, answerer.stream],
+            renegotiations,
+        },
+    ))
 }

@@ -10,7 +10,7 @@ use datapump::bell103::Bell103Rx;
 use datapump::v8::{HIGH, LOW};
 use datapump::v8bis::{self, Ear, Side};
 use datapump::v21;
-use datapump::v92::anspcm::{AnswerSignal, AnspcmWatch};
+use datapump::v92::anspcm::{AnspcmWatch, AnswerSignal};
 use dsp::{ReversalDetector, ToneDetector};
 use ec::hdlc::{Decoder as Hdlc, Fcs};
 use v8::quick::{BitWatcher, Channel as QcChannel, Field, Qc};
@@ -40,7 +40,12 @@ struct Span {
 
 impl Span {
     fn new(blink_secs: f64, fs: f64) -> Self {
-        Self { blink: (blink_secs * fs) as usize, start: None, last: 0, peak: 0.0 }
+        Self {
+            blink: (blink_secs * fs) as usize,
+            start: None,
+            last: 0,
+            peak: 0.0,
+        }
     }
 
     /// The span that has just ended, as (first, last, peak level).
@@ -128,7 +133,12 @@ impl Plain {
             return;
         }
         let event = Event::new(start, end, self.from, Layer::Tone, self.tag)
-            .summary(format!("{}, {:.0} Hz for {:.2} s", self.what, self.hz, end - start))
+            .summary(format!(
+                "{}, {:.0} Hz for {:.2} s",
+                self.what,
+                self.hz,
+                end - start
+            ))
             .field("frequency", format!("{:.0} Hz", self.hz))
             .field("level", db(peak))
             .phasor(&self.phasors)
@@ -187,7 +197,8 @@ impl Answer {
             }
             self.deepest = self.deepest.max(tone.depth());
             if turned && self.span.start.is_some() {
-                self.turned.push(n.saturating_sub(self.reversals.latency() as usize));
+                self.turned
+                    .push(n.saturating_sub(self.reversals.latency() as usize));
             }
         }
         let level = tone.amplitude();
@@ -218,8 +229,15 @@ impl Answer {
             Some(AnswerSignal::Ans) => ("ANS", "V.25 answer tone, 2100 Hz"),
             None => ("2100 Hz", "2100 Hz, too short to say which answer tone"),
         };
-        let gaps: Vec<f64> = turned.windows(2).map(|w| (w[1] - w[0]) as f64 / fs).collect();
-        let every = if gaps.is_empty() { None } else { Some(gaps.iter().sum::<f64>() / gaps.len() as f64) };
+        let gaps: Vec<f64> = turned
+            .windows(2)
+            .map(|w| (w[1] - w[0]) as f64 / fs)
+            .collect();
+        let every = if gaps.is_empty() {
+            None
+        } else {
+            Some(gaps.iter().sum::<f64>() / gaps.len() as f64)
+        };
         let mut summary = format!("{what}, {:.2} s", end - start);
         if !turned.is_empty() {
             summary.push_str(&format!(", {} phase reversals", turned.len()));
@@ -244,17 +262,27 @@ impl Answer {
 
 /// What a menu says, as fields.
 pub fn menu_fields(menu: &Menu) -> Vec<(String, String)> {
-    let mut fields = vec![("call function".to_owned(), words(&format!("{:?}", menu.function)))];
+    let mut fields = vec![(
+        "call function".to_owned(),
+        words(&format!("{:?}", menu.function)),
+    )];
     let modulations: Vec<&str> = menu.modulations.iter().map(|m| m.name()).collect();
     fields.push((
         "modulations".to_owned(),
-        if modulations.is_empty() { "none".to_owned() } else { modulations.join(", ") },
+        if modulations.is_empty() {
+            "none".to_owned()
+        } else {
+            modulations.join(", ")
+        },
     ));
-    fields.push(("protocol".to_owned(), match menu.protocol {
-        v8::Protocol::Lapm => "LAPM (V.42)".to_owned(),
-        v8::Protocol::Unstated => "not stated".to_owned(),
-        v8::Protocol::Extended => "by extension octet".to_owned(),
-    }));
+    fields.push((
+        "protocol".to_owned(),
+        match menu.protocol {
+            v8::Protocol::Lapm => "LAPM (V.42)".to_owned(),
+            v8::Protocol::Unstated => "not stated".to_owned(),
+            v8::Protocol::Extended => "by extension octet".to_owned(),
+        },
+    ));
     if let Some(pcm) = menu.pcm {
         let mut can = Vec::new();
         if pcm.analogue {
@@ -266,7 +294,14 @@ pub fn menu_fields(menu: &Menu) -> Vec<(String, String)> {
         if pcm.v91 {
             can.push("V.91");
         }
-        fields.push(("PCM modem".to_owned(), if can.is_empty() { "none".to_owned() } else { can.join(", ") }));
+        fields.push((
+            "PCM modem".to_owned(),
+            if can.is_empty() {
+                "none".to_owned()
+            } else {
+                can.join(", ")
+            },
+        ));
     }
     if let Some(access) = menu.access {
         let mut says = Vec::new();
@@ -279,7 +314,14 @@ pub fn menu_fields(menu: &Menu) -> Vec<(String, String)> {
         if access.answer_cellular {
             says.push("answering end cellular");
         }
-        fields.push(("network access".to_owned(), if says.is_empty() { "analogue".to_owned() } else { says.join(", ") }));
+        fields.push((
+            "network access".to_owned(),
+            if says.is_empty() {
+                "analogue".to_owned()
+            } else {
+                says.join(", ")
+            },
+        ));
     }
     fields
 }
@@ -309,7 +351,11 @@ fn menu_line(menu: &Menu) -> String {
 }
 
 fn hex(octets: &[u8]) -> String {
-    octets.iter().map(|o| format!("{o:02X}")).collect::<Vec<_>>().join(" ")
+    octets
+        .iter()
+        .map(|o| format!("{o:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// One of V.8's two channels, and a run of the same sequence on it.
@@ -334,7 +380,11 @@ fn keep(margins: &mut Vec<(f64, f32)>, now: f64, reading: Option<f64>) {
 
 /// The readings between two times.
 fn between(margins: &[(f64, f32)], start: f64, end: f64) -> Vec<f32> {
-    margins.iter().filter(|(t, _)| *t >= start && *t <= end).map(|m| m.1).collect()
+    margins
+        .iter()
+        .filter(|(t, _)| *t >= start && *t <= end)
+        .map(|m| m.1)
+        .collect()
 }
 
 struct Run {
@@ -366,7 +416,11 @@ impl V8Ear {
         if let Some(octet) = octet
             && let Some(heard) = self.decoder.feed(octet)
         {
-            let heard = if self.answerer { V8Decoder::heard_as_jm(heard) } else { heard };
+            let heard = if self.answerer {
+                V8Decoder::heard_as_jm(heard)
+            } else {
+                heard
+            };
             // CM belongs to the low channel and JM to the high. A CM on the
             // high one has been renamed already; a CI or CJ there is noise.
             if self.answerer && !matches!(heard, Heard::Jm(_)) {
@@ -380,7 +434,11 @@ impl V8Ear {
             let took = (octets.len() + 2) as f64 * 10.0 / 300.0;
             let level = self.rx.amplitude();
             // CI comes in bursts with silence between; the menus back to back.
-            let gap = if matches!(heard, Heard::Ci(_)) { 2.5 } else { 0.5 };
+            let gap = if matches!(heard, Heard::Ci(_)) {
+                2.5
+            } else {
+                0.5
+            };
             match &mut self.run {
                 Some(run) if run.heard == heard && now - run.last < gap => {
                     run.last = now;
@@ -389,7 +447,14 @@ impl V8Ear {
                 }
                 _ => {
                     self.flush(out);
-                    self.run = Some(Run { heard, octets, first: now - took, last: now, times: 1, level });
+                    self.run = Some(Run {
+                        heard,
+                        octets,
+                        first: now - took,
+                        last: now,
+                        times: 1,
+                        level,
+                    });
                 }
             }
         }
@@ -400,16 +465,32 @@ impl V8Ear {
 
     fn flush(&mut self, out: &mut Vec<Found>) {
         let Some(run) = self.run.take() else { return };
-        let (low, high) = if self.answerer { (1650.0, 1850.0) } else { (980.0, 1180.0) };
-        let from = if self.answerer { End::Answerer } else { End::Caller };
+        let (low, high) = if self.answerer {
+            (1650.0, 1850.0)
+        } else {
+            (980.0, 1180.0)
+        };
+        let from = if self.answerer {
+            End::Answerer
+        } else {
+            End::Caller
+        };
         let (tag, summary, fields) = match &run.heard {
             Heard::Ci(function) => {
                 let what = words(&format!("{function:?}"));
-                ("CI", format!("call indicator: {what}"), vec![("call function".to_owned(), what)])
+                (
+                    "CI",
+                    format!("call indicator: {what}"),
+                    vec![("call function".to_owned(), what)],
+                )
             }
             Heard::Cm(menu) => ("CM", menu_line(menu), menu_fields(menu)),
             Heard::Jm(menu) => ("JM", menu_line(menu), menu_fields(menu)),
-            Heard::Cj => ("CJ", "CM terminator: the joint menu is taken".to_owned(), Vec::new()),
+            Heard::Cj => (
+                "CJ",
+                "CM terminator: the joint menu is taken".to_owned(),
+                Vec::new(),
+            ),
         };
         // A menu is only believed once it has come the same twice running,
         // which is the rule the modems themselves go by (V.8 7.3), and a CI
@@ -431,7 +512,10 @@ impl V8Ear {
         if matches!(run.heard, Heard::Cj) {
             event.fields.retain(|(name, _)| name != "sent");
         }
-        out.push(Found { event, level: run.level });
+        out.push(Found {
+            event,
+            level: run.level,
+        });
     }
 }
 
@@ -446,8 +530,18 @@ struct QcEar {
 
 impl QcEar {
     fn new(channel: QcChannel, fs: f64) -> Self {
-        let tones = if channel == QcChannel::High { HIGH } else { LOW };
-        Self { channel, rx: v21::Receiver::on(tones, fs), watcher: BitWatcher::new(), last: None, margins: Vec::new() }
+        let tones = if channel == QcChannel::High {
+            HIGH
+        } else {
+            LOW
+        };
+        Self {
+            channel,
+            rx: v21::Receiver::on(tones, fs),
+            watcher: BitWatcher::new(),
+            last: None,
+            margins: Vec::new(),
+        }
     }
 
     fn feed(&mut self, n: usize, x: f64, fs: f64, out: &mut Vec<Found>) {
@@ -456,34 +550,70 @@ impl QcEar {
         let reading = self.rx.take_symbol();
         keep(&mut self.margins, now, reading);
         let Some(bit) = bit else { return };
-        let Some(qc) = self.watcher.feed(bit) else { return };
+        let Some(qc) = self.watcher.feed(bit) else {
+            return;
+        };
         if qc.kind.channel() != self.channel || !qc.consistent() {
             return;
         }
         // The repeat of one already reported.
-        if self.last.is_some_and(|(was, at)| was == qc && now - at < 1.0) {
+        if self
+            .last
+            .is_some_and(|(was, at)| was == qc && now - at < 1.0)
+        {
             return;
         }
         self.last = Some((qc, now));
         let bits = qc.bits().len() as f64;
-        let (low, high) = if self.channel == QcChannel::High { (1650.0, 1850.0) } else { (980.0, 1180.0) };
-        let from = if self.channel == QcChannel::High { End::Answerer } else { End::Caller };
+        let (low, high) = if self.channel == QcChannel::High {
+            (1650.0, 1850.0)
+        } else {
+            (980.0, 1180.0)
+        };
+        let from = if self.channel == QcChannel::High {
+            End::Answerer
+        } else {
+            End::Caller
+        };
         let field = match qc.field {
             Field::Uqts(uqts) => ("U_QTS".to_owned(), format!("{uqts:?}")),
-            Field::Level(level) => ("ANSpcm level".to_owned(), format!("{:.0} dBm0", level.dbm0())),
+            Field::Level(level) => (
+                "ANSpcm level".to_owned(),
+                format!("{:.0} dBm0", level.dbm0()),
+            ),
         };
-        let asks = if qc.kind.acknowledgement() { "acknowledges a quick connect" } else { "asks for a quick connect" };
-        let who = if qc.kind.digital() { "digital modem" } else { "analogue modem" };
-        let event = Event::new((now - bits / 300.0).max(0.0), now, from, Layer::V8, qc.kind.name())
-            .summary(format!("{who} {asks}{}", if qc.lapm { ", LAPM" } else { "" }))
-            .field("sent by", who)
-            .field("LAPM without detection", if qc.lapm { "yes" } else { "no" })
-            .field(field.0, field.1)
-            .field("octet", format!("{:02X}", qc.octet()))
-            .octets(&[qc.octet()])
-            .fsk(&between(&self.margins, now - bits / 300.0 - 0.01, now))
-            .band(low - 60.0, high + 60.0);
-        out.push(Found { event, level: self.rx.band_level() });
+        let asks = if qc.kind.acknowledgement() {
+            "acknowledges a quick connect"
+        } else {
+            "asks for a quick connect"
+        };
+        let who = if qc.kind.digital() {
+            "digital modem"
+        } else {
+            "analogue modem"
+        };
+        let event = Event::new(
+            (now - bits / 300.0).max(0.0),
+            now,
+            from,
+            Layer::V8,
+            qc.kind.name(),
+        )
+        .summary(format!(
+            "{who} {asks}{}",
+            if qc.lapm { ", LAPM" } else { "" }
+        ))
+        .field("sent by", who)
+        .field("LAPM without detection", if qc.lapm { "yes" } else { "no" })
+        .field(field.0, field.1)
+        .field("octet", format!("{:02X}", qc.octet()))
+        .octets(&[qc.octet()])
+        .fsk(&between(&self.margins, now - bits / 300.0 - 0.01, now))
+        .band(low - 60.0, high + 60.0);
+        out.push(Found {
+            event,
+            level: self.rx.band_level(),
+        });
     }
 }
 
@@ -503,7 +633,11 @@ struct BisEar {
 
 impl BisEar {
     fn new(side: Side, fs: f64) -> Self {
-        let channel = if side == Side::Initiating { v21::CHANNEL_1 } else { v21::CHANNEL_2 };
+        let channel = if side == Side::Initiating {
+            v21::CHANNEL_1
+        } else {
+            v21::CHANNEL_2
+        };
         Self {
             side,
             rx: v21::Receiver::on(channel, fs),
@@ -541,32 +675,60 @@ impl BisEar {
         }
         let Some(since) = self.carrier else { return };
         let Some(bit) = bit else { return };
-        let Some(frame) = self.hdlc.feed(bit) else { return };
-        let Some(octets) = v8bis::information(frame, &self.hdlc) else { return };
+        let Some(frame) = self.hdlc.feed(bit) else {
+            return;
+        };
+        let Some(octets) = v8bis::information(frame, &self.hdlc) else {
+            return;
+        };
         let (start, end) = (since as f64 / fs, n as f64 / fs);
         let fsk = between(&self.margins, start, end);
         // The next message on this carrier starts here.
         self.carrier = Some(n);
-        let (low, high) = if self.side == Side::Initiating { (980.0, 1180.0) } else { (1650.0, 1850.0) };
-        let station = if self.side == Side::Initiating { "initiating" } else { "responding" };
+        let (low, high) = if self.side == Side::Initiating {
+            (980.0, 1180.0)
+        } else {
+            (1650.0, 1850.0)
+        };
+        let station = if self.side == Side::Initiating {
+            "initiating"
+        } else {
+            "responding"
+        };
         let channel = format!("V.21 {low:.0}/{high:.0} Hz, 300 bit/s, HDLC");
 
         // T.30 uses the same channel and the same framing: an address of all
         // ones and a control field that says whether more frames follow.
-        if self.side == Side::Responding && octets.len() >= 3 && octets[0] == 0xFF && (octets[1] & 0xEF) == 0x03 {
+        if self.side == Side::Responding
+            && octets.len() >= 3
+            && octets[0] == 0xFF
+            && (octets[1] & 0xEF) == 0x03
+        {
             let event = Event::new(start, end, End::Line, Layer::Fax, "T.30")
-                .summary(format!("T.30 frame, control field {:02X}, {} octets", octets[2], octets.len()))
+                .summary(format!(
+                    "T.30 frame, control field {:02X}, {} octets",
+                    octets[2],
+                    octets.len()
+                ))
                 .field("facsimile control field", format!("{:02X}", octets[2]))
-                .field("final frame", if octets[1] & 0x10 != 0 { "yes" } else { "no" })
+                .field(
+                    "final frame",
+                    if octets[1] & 0x10 != 0 { "yes" } else { "no" },
+                )
                 .field("octets", hex(&octets))
                 .field("channel", channel)
                 .octets(&octets)
                 .fsk(&fsk)
                 .band(low - 60.0, high + 60.0);
-            out.push(Found { event, level: self.peak });
+            out.push(Found {
+                event,
+                level: self.peak,
+            });
             return;
         }
-        let Some(message) = v8::bis::Message::decode(&octets) else { return };
+        let Some(message) = v8::bis::Message::decode(&octets) else {
+            return;
+        };
         let mut event = Event::new(start, end, End::Line, Layer::V8bis, message.kind.name())
             .field("station", station)
             .field("revision", message.revision.to_string());
@@ -574,7 +736,10 @@ impl BisEar {
             let can = v8bis::capabilities(&message);
             event = event.field("capabilities", can.clone());
             let id = message.identify();
-            event = event.field("V.8 after the transaction", if id.v8 { "yes" } else { "no" });
+            event = event.field(
+                "V.8 after the transaction",
+                if id.v8 { "yes" } else { "no" },
+            );
             if !message.non_standard.is_empty() {
                 event = event.field("non-standard field", hex(&message.non_standard));
             }
@@ -589,7 +754,10 @@ impl BisEar {
             .octets(&octets)
             .fsk(&fsk)
             .band(low - 60.0, high + 60.0);
-        out.push(Found { event, level: self.peak });
+        out.push(Found {
+            event,
+            level: self.peak,
+        });
     }
 }
 
@@ -602,9 +770,15 @@ pub fn listen(samples: &[f32], fs: f64) -> Vec<Found> {
         Plain::new(1300.0, "CT", "V.25 calling tone", End::Caller, 0.3, fs),
     ];
     let mut v8 = [V8Ear::new(false, fs), V8Ear::new(true, fs)];
-    let mut qc = [QcEar::new(QcChannel::Low, fs), QcEar::new(QcChannel::High, fs)];
+    let mut qc = [
+        QcEar::new(QcChannel::Low, fs),
+        QcEar::new(QcChannel::High, fs),
+    ];
     let mut bis_tones = Ear::new(fs);
-    let mut bis = [BisEar::new(Side::Initiating, fs), BisEar::new(Side::Responding, fs)];
+    let mut bis = [
+        BisEar::new(Side::Initiating, fs),
+        BisEar::new(Side::Responding, fs),
+    ];
     let alpha = 1.0 - (-1.0 / (0.02 * fs)).exp();
     let mut power = 0.0f64;
 
@@ -625,14 +799,30 @@ pub fn listen(samples: &[f32], fs: f64) -> Vec<Found> {
         if let Some((signal, side)) = bis_tones.feed(x) {
             let now = n as f64 / fs;
             let (a, b) = side.pair();
-            let station = if side == Side::Initiating { "initiating" } else { "responding" };
-            let event = Event::new((now - 0.45).max(0.0), now + 0.07, End::Line, Layer::V8bis, signal.name())
-                .summary(format!("V.8 bis signal {} from the {station} station", signal.name()))
-                .field("station", station)
-                .field("first segment", format!("{a:.0} + {b:.0} Hz"))
-                .field("second segment", format!("{:.0} Hz", signal.segment_2()))
-                .band(signal.segment_2().min(a) - 60.0, b + 60.0);
-            out.push(Found { event, level: rms * std::f64::consts::SQRT_2 });
+            let station = if side == Side::Initiating {
+                "initiating"
+            } else {
+                "responding"
+            };
+            let event = Event::new(
+                (now - 0.45).max(0.0),
+                now + 0.07,
+                End::Line,
+                Layer::V8bis,
+                signal.name(),
+            )
+            .summary(format!(
+                "V.8 bis signal {} from the {station} station",
+                signal.name()
+            ))
+            .field("station", station)
+            .field("first segment", format!("{a:.0} + {b:.0} Hz"))
+            .field("second segment", format!("{:.0} Hz", signal.segment_2()))
+            .band(signal.segment_2().min(a) - 60.0, b + 60.0);
+            out.push(Found {
+                event,
+                level: rms * std::f64::consts::SQRT_2,
+            });
         }
         for ear in &mut bis {
             ear.feed(n, x, fs, &mut out);

@@ -33,8 +33,23 @@ impl Server {
             8000.0,
         )
         .offering_lapm()
-        .offering_pcm_on(Pcm { digital: true, ..Pcm::default() }, Access { digital: true, ..Access::default() });
-        Self { v8: Some(v8), startup: None, ec: None, received: Vec::new(), ticks: 0 }
+        .offering_pcm_on(
+            Pcm {
+                digital: true,
+                ..Pcm::default()
+            },
+            Access {
+                digital: true,
+                ..Access::default()
+            },
+        );
+        Self {
+            v8: Some(v8),
+            startup: None,
+            ec: None,
+            received: Vec::new(),
+            ticks: 0,
+        }
     }
 
     fn step(&mut self, input: f64) -> f64 {
@@ -46,7 +61,10 @@ impl Server {
             if let datapump::v8::Status::Agreed(_) = v8.status() {
                 self.v8 = None;
                 let info0d = Info0d {
-                    v34: Info0 { constellation_1664: true, ..Info0::default() },
+                    v34: Info0 {
+                        constellation_1664: true,
+                        ..Info0::default()
+                    },
                     nominal_power: 4,
                     max_power: 23,
                     power_at_codec: true,
@@ -57,12 +75,16 @@ impl Server {
             }
             return out;
         }
-        let Some(startup) = self.startup.as_mut() else { return 0.0 };
+        let Some(startup) = self.startup.as_mut() else {
+            return 0.0;
+        };
         let out = startup.step(input);
         if let Status::Connected { transmit, receive } = startup.status() {
             let stack = self.ec.get_or_insert_with(|| {
-                let params =
-                    ec::Params { t401_ms: ec::lapm::t401_for_line(transmit.min(receive), 60), ..ec::Params::default() };
+                let params = ec::Params {
+                    t401_ms: ec::lapm::t401_for_line(transmit.min(receive), 60),
+                    ..ec::Params::default()
+                };
                 ec::stack::Stack::new(ec::Role::Answerer, params).over_a_round_trip(60)
             });
             for bit in startup.take_bits() {
@@ -101,7 +123,9 @@ pub fn record(seconds: f64, say: bool) -> Recorded {
     use datapump::v90::network::Network;
     use datapump::v90::ucode::Law;
 
-    let mut net = Network::new(Law::Mu, FS).with_delay(0.015, FS).with_noise(1e-5);
+    let mut net = Network::new(Law::Mu, FS)
+        .with_delay(0.015, FS)
+        .with_noise(1e-5);
     let mut caller = Modem::new(FS);
     let mut server = Server::new();
     type_at(&mut caller, "AT+MS=V90");
@@ -144,5 +168,10 @@ pub fn record(seconds: f64, say: bool) -> Recorded {
             }
         }
     }
-    Recorded { samples, server_received: server.received, caller_saw, rates }
+    Recorded {
+        samples,
+        server_received: server.received,
+        caller_saw,
+        rates,
+    }
 }

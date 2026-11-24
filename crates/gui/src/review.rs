@@ -51,7 +51,7 @@ fn colour(end: End) -> Color32 {
 fn part(layer: Layer) -> (usize, &'static str) {
     match layer {
         Layer::Tone | Layer::V8bis | Layer::V8 => (0, "phase 1  set-up"),
-        Layer::Startup => (1, "start-up"),
+        Layer::Startup => (2, "training and rates"),
         Layer::Phase2 => (1, "phase 2  probing"),
         Layer::Phase3 => (2, "phase 3  training"),
         Layer::Phase4 => (3, "phase 4  parameters"),
