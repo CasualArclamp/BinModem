@@ -8,6 +8,7 @@ pub mod detect;
 pub mod frame;
 pub mod hdlc;
 pub mod lapm;
+pub mod mnp;
 pub mod stack;
 pub mod v42bis;
 pub mod v44;

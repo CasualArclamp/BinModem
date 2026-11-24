@@ -36,11 +36,21 @@ const FS: f64 = 16_000.0;
 /// well above its own average, and a clipped handshake is a failed one.
 const LEVEL: f32 = 0.45;
 
+/// After a board hangs up, the least and the most time the modem gives its
+/// last screen to reach the caller before hanging up too, in milliseconds.
+const CLOSING_LEAST_MS: u32 = 500;
+const CLOSING_MOST_MS: u32 = 10_000;
+
 /// What is running above the modem on the call.
 enum Above {
     Nothing,
     Login(Box<Server>),
     Ppp { link: Box<Link>, announced: bool },
+    /// The caller put through to a board over telnet (`--bbs`).
+    Bbs(Box<crate::bbs::Bridge>),
+    /// The board has hung up, and its last words are still on their way to
+    /// the caller: milliseconds waited so far.
+    Closing(u32),
 }
 
 /// Run the answering modem. `args` is what followed `--answer`.
@@ -56,6 +66,9 @@ pub fn run(args: Vec<String>) -> ExitCode {
     // up, the two things that say whether it is the line or the modem.
     let mut stats = false;
     let mut record: Option<String> = None;
+    // `--bbs`: put callers through to a board over telnet, WWIV or any
+    // other, instead of the login prompt.
+    let mut bbs: Option<String> = None;
 
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -68,13 +81,15 @@ pub fn run(args: Vec<String>) -> ExitCode {
             "--no-v8bis" => v8bis = false,
             "--stats" => stats = true,
             "--record" => record = Some(value()),
+            "--bbs" => bbs = Some(value()),
             "--banner" => banner = value(),
             "--user" => account.name = value(),
             "--password" => account.password = value(),
             "--help" | "-h" => {
                 println!(
                     "binmodem --answer --in <device> --out <device> \
-                     [--carrier B103|B212|B202|V21|V22B|V32|V34|V90|V92] [--no-v8bis] [--banner <text>]\n\
+                     [--carrier B103|B212|B202|V21|V22B|V32|V34|V90|V92|HST|HST96] [--no-v8bis] [--banner <text>]\n\
+                     \x20                [--bbs <host[:port]>]\n\
                      \x20                [--stats] [--record <file of f32 samples>]\n\
                      \x20                [--user <name>] [--password <password>]\n\
                      \n\
@@ -82,7 +97,11 @@ pub fn run(args: Vec<String>) -> ExitCode {
                      `binmodem --live` on the same cable has something to dial.\n\
                      Log in as the user (guest, with no password, unless told\n\
                      otherwise) and type ppp, or start PPP straight away and give\n\
-                     the same account over PAP. Both devices must be named."
+                     the same account over PAP. Both devices must be named.\n\
+                     \n\
+                     With --bbs, each caller is put through to the board at that\n\
+                     address over telnet instead -- WWIV's wwivd, or any board that\n\
+                     takes telnet callers -- and the call ends when the board hangs up."
                 );
                 return ExitCode::SUCCESS;
             }
@@ -106,8 +125,15 @@ pub fn run(args: Vec<String>) -> ExitCode {
         }
     };
     println!(
-        "out: {} at {} Hz\nin:  {} at {} Hz\nanswering as {carrier}, logins as {}; ctrl-c to stop",
-        audio.output_device, audio.output_rate, audio.input_device, audio.input_rate, account.name
+        "out: {} at {} Hz\nin:  {} at {} Hz\nanswering as {carrier}, {}; ctrl-c to stop",
+        audio.output_device,
+        audio.output_rate,
+        audio.input_device,
+        audio.input_rate,
+        match &bbs {
+            Some(board) => format!("callers put through to {board}"),
+            None => format!("logins as {}", account.name),
+        }
     );
 
     let mut host = Modem::new(FS);
@@ -238,12 +264,33 @@ pub fn run(args: Vec<String>) -> ExitCode {
                     host.error_control_detail(),
                     host.compression_name().unwrap_or("off")
                 );
-                let mut server = Box::new(Server::new(config.clone()));
-                print_notes(&mut server, stamp());
-                above = Above::Login(server);
+                if let Some(board) = bbs.as_deref() {
+                    match crate::bbs::Bridge::connect(board) {
+                        Ok(bridge) => {
+                            println!("[{:>6.2}s put through to {board}]", stamp());
+                            above = Above::Bbs(Box::new(bridge));
+                        }
+                        Err(e) => {
+                            println!("[{:>6.2}s the board is not answering: {e}; hanging up]", stamp());
+                            host.hang_up();
+                        }
+                    }
+                } else {
+                    let mut server = Box::new(Server::new(config.clone()));
+                    print_notes(&mut server, stamp());
+                    above = Above::Login(server);
+                }
             }
             (Above::Nothing, _) => {}
             (_, State::Command) => {
+                if let Above::Bbs(bridge) = &above {
+                    println!(
+                        "[{:>6.2}s {} octets to the board, {} from it]",
+                        stamp(),
+                        bridge.sent,
+                        bridge.received
+                    );
+                }
                 println!("\n[{:>6.2}s the call ended]", stamp());
                 above = Above::Nothing;
                 for b in b"ATA\r" {
@@ -282,6 +329,24 @@ pub fn run(args: Vec<String>) -> ExitCode {
                         host.hang_up();
                     }
                     None => {}
+                }
+            }
+            (Above::Bbs(bridge), _) => match bridge.pump(&mut host, &heard) {
+                Ok(()) => {}
+                Err(crate::bbs::Gone::Closed) => {
+                    println!("\n[{:>6.2}s the board hung up; the modem follows once its last screen is out]", stamp());
+                    above = Above::Closing(0);
+                }
+                Err(crate::bbs::Gone::Failed(e)) => {
+                    println!("\n[{:>6.2}s lost the board: {e}; hanging up]", stamp());
+                    host.hang_up();
+                }
+            },
+            (Above::Closing(waited), _) => {
+                // Everything delivered and acknowledged, or long enough.
+                *waited += ms;
+                if (host.queued() == 0 && *waited >= CLOSING_LEAST_MS) || *waited >= CLOSING_MOST_MS {
+                    host.hang_up();
                 }
             }
             (Above::Ppp { link, announced }, _) => {

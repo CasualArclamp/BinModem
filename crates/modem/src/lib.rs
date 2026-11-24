@@ -27,6 +27,7 @@ use datapump::AsyncBits;
 use datapump::bell103;
 use datapump::bell202;
 use datapump::bell212;
+use datapump::hst;
 use datapump::v21;
 use datapump::v22bis;
 use datapump::v32;
@@ -91,6 +92,26 @@ fn v92_quick_connect_wanted() -> QuickConnect {
         Ok("always" | "2") => QuickConnect::Always,
         _ => QuickConnect::Recognized,
     }
+}
+
+/// What an HST call is doing, for a front panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HstStatus {
+    /// The forward channel's rate and the back channel's, in bit/s.
+    pub forward: u32,
+    pub back: u32,
+    /// Whether this end is sending on the forward channel just now.
+    pub sending_fast: bool,
+    /// Whether the session is past the answer tone.
+    pub started: bool,
+    /// Whether MNP is up.
+    pub linked: bool,
+    /// Whether the forward channel is training or being handed over.
+    pub training: bool,
+    /// Frames this end has had to send again, so far.
+    pub retransmitted: u64,
+    /// Where the call has got, in words.
+    pub phase: &'static str,
 }
 
 /// `BINMODEM_V92_TONEQ_MS` when a call is placed: end TONEq after that many
@@ -1301,6 +1322,11 @@ pub struct Modem {
     varc_wait: usize,
     /// Why the last call could not be run on this line at all, until asked.
     call_refused: Option<String>,
+    /// An HST call, which like V.ARC is none of the above: no V.8, no V.42,
+    /// its own answer tone and MNP over its own two channels.
+    hst: Option<hst::call::Call>,
+    /// An HST call on its way down after `ATH`: how long its LD has had.
+    hst_closing_ms: Option<u32>,
 }
 
 impl Modem {
@@ -1370,6 +1396,8 @@ impl Modem {
             varc_spent: false,
             varc_wait: 0,
             call_refused: None,
+            hst: None,
+            hst_closing_ms: None,
         }
     }
 
@@ -1394,7 +1422,12 @@ impl Modem {
     /// ending a session it has already said goodbye to has no reason to wait
     /// for that, and nothing it sends after the goodbye would be data.
     pub fn hang_up(&mut self) {
-        if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some() {
+        if self.hst_linked() {
+            self.hst_say_goodbye();
+            self.at.emit(ResultCode::Ok);
+            return;
+        }
+        if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some() || self.hst.is_some() {
             self.end_call(Ended::LocalRequest);
         }
     }
@@ -1412,7 +1445,7 @@ impl Modem {
     /// carrier to lose -- the call ends in a BYE, somewhere above the samples
     /// -- so the thing that knows has to say so.
     pub fn carrier_lost(&mut self) {
-        if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some() {
+        if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some() || self.hst.is_some() {
             self.end_call(Ended::CarrierLost);
         }
     }
@@ -1460,6 +1493,9 @@ impl Modem {
         }
         if let Some(fax) = self.fax.as_ref() {
             return fax.phase_name();
+        }
+        if let Some(call) = self.hst.as_ref() {
+            return call.phase_name();
         }
         if let Some(bis) = self.bis.as_ref() {
             return bis.phase();
@@ -1654,6 +1690,13 @@ impl Modem {
         if let Some(fax) = self.fax.as_ref() {
             return fax.standard();
         }
+        if self.hst.is_some() || self.pump.is_none() {
+            match self.at.modulation.carrier.as_str() {
+                "HST" => return "HST",
+                "HST96" => return "HST 9600",
+                _ => {}
+            }
+        }
         if self.bis.is_some() {
             return "V.8 bis";
         }
@@ -1681,7 +1724,7 @@ impl Modem {
         // the far end picks up, and a front panel that showed the lamp out
         // until a pump existed would show it out for the loudest three seconds
         // of the call.
-        self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some()
+        self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some() || self.hst.is_some()
     }
 
     /// Whether the modem is a fax rather than a modem just now (V.250 6.1.10).
@@ -1695,7 +1738,52 @@ impl Modem {
 
     /// Whether the far end's carrier is present.
     pub fn carrier(&self) -> bool {
-        self.pump.as_ref().is_some_and(Pump::carrier) || self.varc.as_ref().is_some_and(varc::Call::hearing)
+        self.pump.as_ref().is_some_and(Pump::carrier)
+            || self.varc.as_ref().is_some_and(varc::Call::hearing)
+            || self.hst_session().is_some_and(hst::Session::hearing)
+    }
+
+    fn hst_session(&self) -> Option<&hst::Session> {
+        if self.hst_closing_ms.is_some() {
+            return None;
+        }
+        self.hst.as_ref().and_then(hst::call::Call::session)
+    }
+
+    fn hst_linked(&self) -> bool {
+        self.hst_session().is_some_and(hst::Session::is_connected)
+    }
+
+    /// Hang up an HST call the way MNP does: an LD, which the far end hangs
+    /// up on at once rather than waiting out the silence. The line is held
+    /// long enough for it to go, and the modem is back in command state
+    /// straight away.
+    fn hst_say_goodbye(&mut self) {
+        if let Some(s) = self.hst.as_mut().and_then(hst::call::Call::session_mut) {
+            s.hang_up();
+        }
+        self.hst_closing_ms = Some(0);
+        self.rate = 0;
+        self.transmit_rate = 0;
+        self.outbound.clear();
+        self.escape.reset();
+        self.state = State::Command;
+    }
+
+    /// What an HST call is doing, while there is one.
+    pub fn hst_status(&self) -> Option<HstStatus> {
+        let call = self.hst.as_ref().filter(|_| self.hst_closing_ms.is_none())?;
+        let s = call.session();
+        Some(HstStatus {
+            forward: s.map_or(0, |s| s.rate().bits_per_second()),
+            back: s.map_or(450, |s| back_bps(s.back_rate())),
+            sending_fast: s.is_some_and(|s| s.holding() == hst::Holding::Forward),
+            started: s.is_some(),
+            linked: s.is_some_and(hst::Session::is_connected),
+            training: s.is_some_and(hst::Session::training),
+            retransmitted: s.map_or(0, hst::Session::retransmitted),
+            phase: call.phase_name(),
+        })
     }
 
     /// Whether this end placed the call or took it.
@@ -1750,7 +1838,9 @@ impl Modem {
         // frames are checked and sent again underneath. What the terminal
         // and the window want to know is whether octets can arrive wrong,
         // and they cannot.
-        self.ec.as_ref().is_some_and(Stack::is_connected) || (self.varc.is_some() && self.rate > 0)
+        self.ec.as_ref().is_some_and(Stack::is_connected)
+            || (self.varc.is_some() && self.rate > 0)
+            || self.hst_session().is_some_and(hst::Session::is_connected)
     }
 
     /// Everything the far end has said about itself, as label and value.
@@ -2014,7 +2104,9 @@ impl Modem {
     /// earlier position, everything in that queue is already stale and still
     /// has to be sent before anything new is heard.
     pub fn queued(&self) -> usize {
-        self.outbound.len() + self.ec.as_ref().map_or(0, Stack::queued)
+        self.outbound.len()
+            + self.ec.as_ref().map_or(0, Stack::queued)
+            + self.hst_session().map_or(0, hst::Session::backlog)
     }
 
     /// Compressed streams that arrived intact and would not decode.
@@ -2049,6 +2141,12 @@ impl Modem {
     /// Bytes for the terminal.
     pub fn take_dte(&mut self) -> Vec<u8> {
         let mut out = self.at.take_output();
+        if self.state == State::Data
+            && let Some(session) = self.hst.as_mut().and_then(hst::call::Call::session_mut)
+        {
+            out.extend(session.read());
+            return out;
+        }
         if self.state == State::Data {
             out.append(&mut self.recovered);
             match self.ec.as_mut() {
@@ -2188,6 +2286,10 @@ impl Modem {
 
         if self.fax.is_some() {
             return self.carry_fax(line);
+        }
+
+        if self.hst.is_some() {
+            return self.carry_hst(line);
         }
 
         if self.pre_v8_ear.is_some()
@@ -3346,8 +3448,9 @@ impl Modem {
                     self.varc_spent = false;
                     self.place_call(Role::Answering);
                 }
+                Action::HangUp if self.hst_linked() => self.hst_say_goodbye(),
                 Action::HangUp => {
-                    if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some() {
+                    if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some() || self.hst.is_some() {
                         self.drop_call();
                     }
                 }
@@ -3367,7 +3470,7 @@ impl Modem {
                     // so nothing from before it survives. Anything on the
                     // line goes, because a fax call and a data call have no
                     // state in common to carry across.
-                    if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some() {
+                    if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some() || self.hst.is_some() {
                         self.drop_call();
                     }
                 }
@@ -3376,7 +3479,7 @@ impl Modem {
                 Action::SelectModulation(_) | Action::SelectCompression(_) | Action::SelectV44(_) => {}
                 Action::SelectErrorControl(e) => self.want_error_control = e.wanted(),
                 Action::ResetProfile(_) | Action::FactoryDefaults(_) => {
-                    if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some() {
+                    if self.pump.is_some() || self.negotiation.is_some() || self.bis.is_some() || self.fax.is_some() || self.varc.is_some() || self.hst.is_some() {
                         self.drop_call();
                     }
                 }
@@ -3387,6 +3490,12 @@ impl Modem {
     fn place_call(&mut self, role: Role) {
         self.role = role;
         self.varc = None;
+        self.hst = None;
+        self.hst_closing_ms = None;
+        if matches!(self.at.modulation.carrier.as_str(), "HST" | "HST96") && self.at.service_class != at::ServiceClass::Fax {
+            self.place_hst_call(role);
+            return;
+        }
         if let Some(mode) = VarcMode::from_carrier(&self.at.modulation.carrier)
             && self.at.service_class != at::ServiceClass::Fax
         {
@@ -4263,6 +4372,131 @@ impl Modem {
     }
 
     /// End the call and tell the terminal why.
+    /// Start an HST call: the answer tone from the end that answers, the
+    /// session once it has been heard and is over at the end that called.
+    ///
+    /// `+MS`'s minimum and maximum rates choose which forward rates are
+    /// offered in the link request; zero in either is no limit (V.250 6.4.1).
+    fn place_hst_call(&mut self, role: Role) {
+        let (lo, hi) = (self.at.modulation.min_rate, self.at.modulation.max_rate);
+        let fits = |r: &hst::Rate| {
+            let bps = r.bits_per_second();
+            bps >= lo && (hi == 0 || bps <= hi)
+        };
+        let first = HST_RATES.iter().position(fits);
+        let last = HST_RATES.iter().rposition(fits);
+        let rates: &'static [hst::Rate] = match (first, last) {
+            (Some(a), Some(b)) => &HST_RATES[a..=b],
+            _ => &HST_RATES,
+        };
+        self.since_dial_ms = 0;
+        self.call_samples = 0;
+        self.line_notes.clear();
+        self.rate = 0;
+        self.transmit_rate = 0;
+        self.ec = None;
+        self.pump = None;
+        self.negotiation = None;
+        self.bis = None;
+        self.announce = None;
+        self.far_menu = None;
+        self.v34_report = None;
+        self.far_ec.clear();
+        self.recovered.clear();
+        self.outbound.clear();
+        self.state = State::Handshaking;
+        let side = match role {
+            Role::Calling => hst::Side::Caller,
+            Role::Answering => hst::Side::Answerer,
+        };
+        // The original Courier HST of 1986: one forward rate and the slower
+        // back channel, which is what it had before 14 400 and 450 came.
+        let cfg = if self.at.modulation.carrier == "HST96" {
+            hst::Config { rates: &HST_RATES[1..2], back: hst::BackRate::B300, ..hst::Config::default() }
+        } else {
+            hst::Config { rates, ..hst::Config::default() }
+        };
+        self.hst = Some(hst::call::Call::new(self.fs, side, cfg));
+    }
+
+    /// One sample of an HST call.
+    fn carry_hst(&mut self, line: f64) -> f64 {
+        let Some(call) = self.hst.as_mut() else { return 0.0 };
+        if let Some(ms) = self.hst_closing_ms.as_mut() {
+            // The terminal has been told OK already; this is only the LD
+            // getting out before the line goes on hook.
+            let out = call.step(line);
+            while call.poll_event().is_some() {}
+            *ms += 1;
+            if f64::from(*ms) >= HST_LD_MS * self.fs / 1000.0 {
+                self.hst = None;
+                self.hst_closing_ms = None;
+            }
+            return out;
+        }
+        let was = call.phase_name();
+        let out = call.step(line);
+        let now = call.phase_name();
+        if now != was {
+            self.line_notes.push(format!("HST: {now}"));
+        }
+        if matches!(self.state, State::Data | State::OnlineCommand)
+            && !self.outbound.is_empty()
+            && let Some(session) = call.session_mut()
+            && session.backlog() < HST_BACKLOG
+        {
+            session.send(&std::mem::take(&mut self.outbound));
+        }
+        while let Some(event) = self.hst.as_mut().and_then(hst::call::Call::poll_event) {
+            match event {
+                hst::session::Event::Connected { rate, back } => {
+                    let bps = rate.bits_per_second();
+                    self.rate = bps;
+                    self.transmit_rate = bps;
+                    self.line_notes.push(format!("HST: MNP up, {bps} forward, {} back", back_bps(back)));
+                    self.state = State::Data;
+                    self.escape.reset();
+                    // V.250 Table 24: MNP is V.42 Annex A's alternative protocol.
+                    if self.at.config.report_error_control {
+                        self.at.emit(ResultCode::Extended("+ER: ALT".to_owned()));
+                    }
+                    // What a Courier said: the rate, ARQ for error control
+                    // and the modulation.
+                    let code = if self.at.config.x == 0 {
+                        ResultCode::Connect
+                    } else {
+                        ResultCode::ConnectText(format!("{bps}/ARQ/HST"))
+                    };
+                    self.at.emit(code);
+                }
+                hst::session::Event::Rate(rate) => {
+                    let bps = rate.bits_per_second();
+                    if self.rate != 0 {
+                        self.rate = bps;
+                        self.transmit_rate = bps;
+                    }
+                    self.line_notes.push(format!("HST: forward channel retraining at {bps}"));
+                }
+                hst::session::Event::Holding(which) => {
+                    let what = match which {
+                        hst::Holding::Forward => "sending on the forward channel",
+                        hst::Holding::Back => "sending on the back channel",
+                    };
+                    self.line_notes.push(format!("HST: {what}"));
+                }
+                hst::session::Event::Disconnected => {
+                    self.end_call(Ended::CarrierLost);
+                    return out;
+                }
+            }
+        }
+        if self.state == State::Handshaking && self.since_dial_ms > HST_WAIT_MS {
+            let heard = self.hst.as_ref().is_some_and(hst::call::Call::started);
+            self.end_call(if heard { Ended::CarrierLost } else { Ended::NoAnswer });
+        }
+        out
+    }
+
     fn end_call(&mut self, why: Ended) {
         if std::env::var_os("MODEM_TRACE").is_some() {
             eprintln!("[modem] end_call: {why:?} in {:?}", self.state);
@@ -4299,6 +4533,13 @@ impl Modem {
         }
         self.pump = None;
         self.varc = None;
+        if let Some(session) = self.hst.as_mut().and_then(hst::call::Call::session_mut) {
+            // MNP's LD, for whatever it is worth with the line going down
+            // under it: the far end's link notices the silence regardless.
+            session.hang_up();
+        }
+        self.hst = None;
+        self.hst_closing_ms = None;
         self.negotiation = None;
         self.quick_rescue = false;
         self.bis = None;
@@ -4311,6 +4552,24 @@ impl Modem {
         self.outbound.clear();
         self.escape.reset();
         self.state = State::Command;
+    }
+}
+
+/// The forward rates an HST call may offer, slowest first.
+static HST_RATES: [hst::Rate; 4] = [hst::Rate::R7200, hst::Rate::R9600, hst::Rate::R12000, hst::Rate::R14400];
+/// How long an HST call may take from going off hook to MNP being up.
+const HST_WAIT_MS: u32 = 60_000;
+/// Octets an HST call holds unacknowledged before it stops taking more from
+/// the terminal.
+const HST_BACKLOG: usize = 4096;
+/// How long the line is held after `ATH` for MNP's LD to get out, in
+/// milliseconds: the frame at 450 bit/s with a flag either side, and margin.
+const HST_LD_MS: f64 = 1000.0;
+
+fn back_bps(back: hst::BackRate) -> u32 {
+    match back {
+        hst::BackRate::B450 => 450,
+        hst::BackRate::B300 => 300,
     }
 }
 

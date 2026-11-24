@@ -402,10 +402,15 @@ impl Interpreter {
             // is not one. V92 is V.90 with V.92's phase 2 in it, and with PCM
             // upstream when the far end offers it (V.92 9.3).
             //
+            // HST is USRobotics' own: the Courier's asymmetric 14 400/450
+            // modulation with MNP over it, and nobody's Recommendation.
+            // HST96 is the first of them, the 1986 Courier HST: 9600 one
+            // way and 300 back, and nothing else.
+            //
             // The last three are no Recommendation's: V.ARC, this modem's
             // own mode for a sound card wired to another one, as its
             // multicarrier, QAM and baseband modulations.
-            modulations: ["V92", "V90", "V34", "V32B", "V32", "V22B", "V21", "B103", "B212", "B202", "VARC", "VARCQ", "VARCP", "VARC2W", "VARCQ2W", "VARCP2W"]
+            modulations: ["V92", "V90", "V34", "V32B", "V32", "V22B", "V21", "B103", "B212", "B202", "HST", "HST96", "VARC", "VARCQ", "VARCP", "VARC2W", "VARCQ2W", "VARCP2W"]
                 .iter()
                 .map(|s| (*s).to_owned())
                 .collect(),

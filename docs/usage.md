@@ -97,6 +97,56 @@ binmodem --answer --in "<input device>" --out "<output device>" --carrier V22B -
 Everything the caller is shown is printed there too, along with who logged in,
 the addresses PPP handed out and every ping that arrived.
 
+### Answering for a real board
+
+`--bbs` puts each caller through to a bulletin board that takes telnet
+callers, in place of the login prompt: WWIV's `wwivd`, Synchronet, Mystic,
+or anything else listening on a port. The board gets the caller's
+keystrokes and the caller gets the board's ANSI, exactly as with a serial
+port to a board in 1989.
+
+```powershell
+binmodem --answer --carrier HST --bbs localhost:2323 --in "<input device>" --out "<output device>"
+```
+
+Dial it from the window with HST (or HST 9600) chosen and `ATD1`. When the
+board logs the caller off, the modem waits for the board's last screen to
+reach the caller and then hangs up. A port left off means telnet's 23. A
+board that is not answering when a call comes in gets the caller hung up on,
+and the answering modem goes back to waiting.
+
+### A modem on a COM port, for DOSBox
+
+`--com` puts the modem behind a TCP port that DOSBox's serial port connects
+to, so a DOS terminal or BBS on COM1 drives it with `AT` commands as it did a
+Courier: `ATDT`, `CONNECT 14400/ARQ/HST`, `+++`, `ATH`. With `--in` and
+`--out` it dials and answers over that sound-card line.
+
+```bash
+binmodem --com 5000 --telnet-in 2323 --carrier HST --in "<input device>" --out "<output device>"
+```
+
+In `dosbox.conf`:
+
+```ini
+[serial]
+serial1=nullmodem server:127.0.0.1 port:5000
+```
+
+DOSBox's nullmodem carries RTS and DTR as well as data, so the DOS program
+sees carrier detect when there is a call, CTS drop while the modem's buffer
+is full, and dropping DTR hangs up -- which is how most BBS software ends a
+call. With `transparent:1` in DOSBox, add `--transparent` here and carrier
+detect is lost.
+
+`--telnet-in` takes calls from the internet too. Someone who telnets to that
+port rings the DOS program: `RING` every six seconds, answered with `ATA` or
+by itself after the rings `ATS0=` set. A DOS BBS such as WWIV 4 in DOSBox
+answers them as it answered modem callers. A second caller while one is on
+gets `BUSY`. The COM port listens on this machine only; `--bind 0.0.0.0` if
+DOSBox is elsewhere. Without `--in` and `--out` there is no line, and telnet
+calls are the only calls.
+
 ## Trying V.34
 
 **33600** in the rate row, or `AT+MS=V34`, offers V.34 in V.8 alongside

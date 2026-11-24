@@ -1335,6 +1335,9 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
     let (mut errors_before, mut errors_at) = (0u64, Instant::now());
     let mut typed_recently = Instant::now() - Duration::from_secs(1);
     let mut heard_recently = typed_recently;
+    // An HST call's retransmissions so far, and when the count last moved:
+    // the ARQ lamp flickers for a moment after each.
+    let mut hst_resent = (0u64, typed_recently);
     let mut last_state = State::Command;
     // Where inside a start-up the call has got to, logged as it changes. A
     // call that will not come up is always stuck somewhere particular, and a
@@ -2121,6 +2124,7 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                         ec: modem.error_controlled(),
                     };
                     f.rx_level_db = -120.0;
+                    f.hst = None;
                     f.spectrum_db.fill(-120.0);
                     f.waveform.fill(0.0);
                     f.constellation.clear();
@@ -2628,6 +2632,23 @@ fn run(tx: Publisher, control: Arc<Control>, session: Arc<Session>, sink: Arc<Au
                 f.symbols.extend(symbols.iter().copied());
                 f.constellation.clear();
                 f.constellation.extend(points.iter().copied());
+                f.hst = modem.hst_status().map(|h| {
+                    if h.retransmitted > hst_resent.0 {
+                        hst_resent.1 = Instant::now();
+                    }
+                    hst_resent.0 = h.retransmitted;
+                    telemetry::HstFace {
+                        forward: h.forward,
+                        back: h.back,
+                        sending_fast: h.sending_fast,
+                        started: h.started,
+                        linked: h.linked,
+                        training: h.training,
+                        retransmitting: hst_resent.1.elapsed() < Duration::from_millis(400),
+                        answering: modem.role() == Role::Answering,
+                        phase: h.phase,
+                    }
+                });
                 f.leds = Leds {
                     mr: true,
                     tr: true,
