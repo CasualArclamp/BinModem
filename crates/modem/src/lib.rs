@@ -1398,6 +1398,11 @@ impl Modem {
         &self.at.modulation.carrier
     }
 
+    /// All of what `+MS` last selected: what `AT+MS?` would answer.
+    pub fn selected(&self) -> &at::Modulation {
+        &self.at.modulation
+    }
+
     /// Which step of the handshake the line is on.
     /// The V.34 phase 2 stage under a V.90 server, for bring-up against
     /// another maker's modem: the phase name above is coarse, and a stall in

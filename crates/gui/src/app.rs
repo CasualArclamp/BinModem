@@ -263,6 +263,27 @@ impl Modulation {
     }
 }
 
+/// What the mode box should change to, when the modem's `+MS` has changed.
+///
+/// `seen` is what the modem held a frame ago and `now` what it holds. Nothing
+/// when it has not changed, when it changed to what the window already shows
+/// (the window's own command arriving), or when it names a carrier the box
+/// has no entry for.
+fn follow(
+    seen: Option<&at::Modulation>,
+    now: &at::Modulation,
+    carrier: usize,
+    held: Modulation,
+) -> Option<(usize, Modulation)> {
+    if seen == Some(now) {
+        return None;
+    }
+    let index = ScopeApp::CARRIERS.iter().position(|(name, _)| *name == now.carrier)?;
+    let modulation =
+        Modulation { automode: now.automode, min_rate: now.min_rate, max_rate: now.max_rate };
+    (index != carrier || modulation != held).then_some((index, modulation))
+}
+
 /// Which view fills the lower panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tab {
@@ -472,6 +493,9 @@ pub struct ScopeApp {
     receive_dir: String,
     /// Whether the line was open on the last frame, for noticing when it opens.
     line_was_open: bool,
+    /// What the modem's `+MS` held on the last frame, for noticing when a
+    /// command changes it.
+    selected_seen: Option<at::Modulation>,
     /// Where a telnet connection is aimed.
     host: String,
     tab: Tab,
@@ -701,6 +725,7 @@ impl ScopeApp {
             answer_as: None,
             transfer_open: false,
             line_was_open: false,
+            selected_seen: None,
             send_path: String::new(),
             receive_dir: "downloads".to_owned(),
             tab: Tab::Terminal,
@@ -1151,6 +1176,21 @@ impl ScopeApp {
         if state.open && !self.line_was_open {
             self.assert_settings(&session);
         }
+        // And after that the window follows the modem. `AT+MS=V34` typed at
+        // the terminal changes what the next call is, and a mode box still
+        // showing the old one is the drift the paragraph above is about.
+        // Only on a line that was already open: what a modem holds before the
+        // window has told it anything is a default, not somebody's choice.
+        if state.open
+            && self.line_was_open
+            && let Some(now) = &state.selected
+            && let Some((carrier, modulation)) =
+                follow(self.selected_seen.as_ref(), now, self.carrier, self.modulation)
+        {
+            self.carrier = carrier;
+            self.modulation = modulation;
+        }
+        self.selected_seen.clone_from(&state.selected);
         self.line_was_open = state.open;
 
         self.masthead(ui, Some(&state));
@@ -6518,7 +6558,7 @@ const _: () = assert!(FFT_SIZE / 2 == SPECTRUM_BINS);
 
 #[cfg(test)]
 mod modulation_tests {
-    use super::{Modulation, ScopeApp};
+    use super::{Modulation, ScopeApp, follow};
 
     /// The rate lists are indexed by the same number the carrier box is, so
     /// the two orders have to stay together. Nothing else enforces it.
@@ -6573,6 +6613,34 @@ mod modulation_tests {
         let mut listed: Vec<usize> = ScopeApp::MODES.iter().map(|m| m.0).collect();
         listed.sort_unstable();
         assert_eq!(listed, (0..ScopeApp::CARRIERS.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn the_mode_box_follows_a_typed_ms() {
+        let ms = |carrier: &str, automode, min_rate, max_rate| at::Modulation {
+            carrier: carrier.into(),
+            automode,
+            min_rate,
+            max_rate,
+        };
+        let held = Modulation::default();
+        let v22b = ms("V22B", true, 0, 0);
+        // AT+MS=V34 typed under a box showing V.22bis: the box moves.
+        let typed = ms("V34", true, 0, 0);
+        assert_eq!(follow(Some(&v22b), &typed, 1, held), Some((4, held)));
+        // A ceiling typed with it comes too.
+        let capped = ms("V22B", false, 1200, 1200);
+        assert_eq!(
+            follow(Some(&v22b), &capped, 1, held),
+            Some((1, Modulation { automode: false, min_rate: 1200, max_rate: 1200 }))
+        );
+        // Nothing changed at the modem, so whatever the window is composing
+        // is left alone.
+        assert_eq!(follow(Some(&typed), &typed, 1, held), None);
+        // The window's own command arriving is not news to it.
+        assert_eq!(follow(Some(&v22b), &typed, 4, held), None);
+        // A name the box has no entry for moves nothing.
+        assert_eq!(follow(Some(&v22b), &ms("V23C", true, 0, 0), 1, held), None);
     }
 
     #[test]
