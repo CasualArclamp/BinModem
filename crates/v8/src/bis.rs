@@ -613,6 +613,22 @@ impl Data {
         one
     }
 
+    /// The protocols both lists have, and no modulation at all: the data
+    /// half of an MS answering a list that named data and V.8 but no
+    /// modulation, which leaves the modulation for V.8 to settle.
+    ///
+    /// Netstalgia's V.92 server sends exactly that: a Revision 1 CL whose
+    /// data block is one octet, V.42, with "V.8 after the transaction" set.
+    pub fn protocols_with(&self, far: &Self) -> Self {
+        Self {
+            transparent: self.transparent && far.transparent,
+            v42: self.v42 && far.v42,
+            v42bis: self.v42bis && far.v42bis,
+            v14: self.v14 && far.v14,
+            ..Self::default()
+        }
+    }
+
     /// The one modulation an MS names: the fastest set, which in an MS is the
     /// only one.
     pub fn selected(&self) -> Option<Modulation> {
@@ -886,6 +902,20 @@ impl Message {
         let mut id = ours.identify();
         id.more = false;
         Self::data(Kind::Ms, id, data)
+    }
+
+    /// An MS for data with the modulation left to V.8: for a far end whose
+    /// list named data and the V.8 start-up but no modulation. None where
+    /// either end does not do V.8 after the transaction, since then nothing
+    /// would ever choose one.
+    pub fn select_by_v8(ours: &Self, far: &Self) -> Option<Self> {
+        let mut id = ours.identify();
+        if !id.v8 || !far.identify().v8 {
+            return None;
+        }
+        let data = ours.data_mode()?.protocols_with(&far.data_mode()?);
+        id.more = false;
+        Some(Self::data(Kind::Ms, id, data))
     }
 }
 
