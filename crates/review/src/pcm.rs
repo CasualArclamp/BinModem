@@ -70,6 +70,8 @@ pub(crate) struct Shared {
 pub struct Outcome {
     pub downstream_bps: Option<u32>,
     pub upstream_rates: Option<u16>,
+    /// The upstream rate itself, where it is PCM and CPd said it.
+    pub upstream_bps: Option<u32>,
     pub reached_data: bool,
     /// The analogue modem's data, and the digital modem's.
     pub streams: Vec<Stream>,

@@ -97,9 +97,6 @@ pub fn analyse(wav: &Wav, name: &str) -> Report {
         // out of its channel, where there is one.
         let mut cleaned: Vec<Option<Vec<f32>>> = vec![None, None];
         for index in 0..2 {
-            if std::env::var_os("REVIEW_NO_ECHO").is_some() {
-                continue;
-            }
             if let Some(done) = echo::cancel(&streams[index], &streams[1 - index], fs) {
                 let end = if index == caller {
                     End::Caller
@@ -262,11 +259,16 @@ pub fn analyse(wav: &Wav, name: &str) -> Report {
     verdict(&mut report);
     if let Some(outcome) = pcm {
         if let Some(rate) = outcome.downstream_bps {
+            let from = if outcome.upstream_bps.is_some() { "CPu" } else { "CP" };
             report
                 .verdict
-                .push(("downstream".to_owned(), format!("{rate} bit/s, from CP")));
+                .push(("downstream".to_owned(), format!("{rate} bit/s, from {from}")));
         }
-        if let Some(mask) = outcome.upstream_rates {
+        if let Some(rate) = outcome.upstream_bps {
+            report
+                .verdict
+                .push(("upstream".to_owned(), format!("{rate} bit/s PCM, from CPd")));
+        } else if let Some(mask) = outcome.upstream_rates {
             let top = (0..13)
                 .rev()
                 .find(|bit| mask >> bit & 1 == 1)

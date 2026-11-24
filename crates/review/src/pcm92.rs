@@ -14,16 +14,18 @@
 //! the second S-bar-u is stepped by Jp's epsilon and data mode is sent
 //! through the CPd. Each was said before it was needed, so the two channels
 //! are read in step, a symbol of each at a time, and what one has read is
-//! there for the other. The one exception is the upstream's data-mode fit,
-//! which is made on TRN2u before the CPd that shapes it has come down: so
-//! the call is read twice, and the second time the upstream has the CPd the
-//! first one found.
+//! there for the other.
+//!
+//! Data mode going up is not read through the digital modem's receiver,
+//! whose design delay is its own and is not in CPd. B1u is known to the
+//! symbol once CPd is, so an equaliser is fitted to it from the line, and the
+//! prefilter and the precoder are undone from there with no decisions.
 //!
 //! Both are read at the network's 8000 symbols a second. A downstream
 //! recorded faster is read on whichever sample of each symbol Sd says is the
 //! codec's; an upstream recorded faster is brought down to 8000 a second,
 //! where the instants are not known, so both half-symbol phases are tried and
-//! the better kept.
+//! the better kept; its data mode is read at the recording's own rate.
 
 use std::collections::VecDeque;
 
@@ -84,9 +86,6 @@ const B1U_ACQUIRE_FRAMES: usize = 18;
 /// read, in symbols.
 const B1U_WAIT: u64 = 16_000;
 
-/// How many symbols either side of the one after E2u B1u is looked for.
-const SPREAD: usize = 3;
-
 /// The line's levels kept from before B1u is placed: the receiver's own
 /// delay is somewhere inside it.
 const RECENT: usize = 256;
@@ -96,6 +95,11 @@ const AHEAD: usize = 2000;
 
 /// The equaliser fitted on B1u.
 const EQ_TAPS: usize = 24;
+
+/// The same at the recording's own rate, in its samples, and how far either
+/// side of where the resampled fit put B1u it is looked for.
+const NATIVE_TAPS: usize = 48;
+const NATIVE_SEARCH: usize = 96;
 
 /// Bits of what is left of B1u each delay is judged on.
 const JUDGED: usize = 1500;
@@ -574,6 +578,17 @@ struct Up {
     /// How far through `raw` the data has been read.
     done: usize,
     fit_db: f64,
+    /// The recording itself where its rate is a whole number of samples a
+    /// symbol, with that number, and how many samples of lead the 8000 a
+    /// second it is otherwise read at was made with.
+    native: Option<(Vec<f64>, usize)>,
+    lead: usize,
+    /// Symbols fed, and the one `raw` starts at.
+    count: u64,
+    raw_base: u64,
+    /// An equaliser fitted on B1u at the recording's own rate, and the sample
+    /// B1u's first symbol is centred on.
+    native_fit: Option<(Vec<f64>, usize)>,
     restorer: Option<Restorer>,
     /// B1u's first symbol is taken to be at each of a few places either side
     /// of the symbol after E2u, and each is read.
@@ -585,12 +600,10 @@ struct Up {
     levels: Vec<f32>,
     stream: Stream,
     bps: Option<u32>,
-    /// The CPd from an earlier reading of the call.
-    known_cpd: Option<Cpd>,
 }
 
 impl Up {
-    fn new(who: End, md: u8, known_cpd: Option<Cpd>) -> Self {
+    fn new(who: End, md: u8) -> Self {
         let mut rx = Receiver::new();
         rx.expect_ru();
         rx.expect_step(0.0);
@@ -631,6 +644,11 @@ impl Up {
             taps: None,
             done: 0,
             fit_db: 0.0,
+            native: None,
+            lead: 0,
+            count: 0,
+            raw_base: 0,
+            native_fit: None,
             restorer: None,
             candidates: Vec::new(),
             chosen: None,
@@ -639,7 +657,6 @@ impl Up {
             levels: Vec::new(),
             stream: Stream { from: Some(who), ..Stream::default() },
             bps: None,
-            known_cpd,
         }
     }
 
@@ -648,6 +665,7 @@ impl Up {
     }
 
     fn feed(&mut self, now: f64, level: f64, shared: &mut Shared) {
+        self.count += 1;
         if self.stage == UpStage::Data {
             self.raw_symbol(now, level);
             return;
@@ -895,8 +913,7 @@ impl Up {
 
     /// The CPd the analogue modem sends with, as the wire carried it.
     fn parameters(&self, shared: &Shared) -> Option<Parameters> {
-        let cpd = shared.cpd.as_ref().or(self.known_cpd.as_ref())?;
-        Parameters::try_from(cpd).ok()
+        Parameters::try_from(shared.cpd.as_ref()?).ok()
     }
 
     fn phase4_symbol(&mut self, now: f64, value: f64, shared: &mut Shared) {
@@ -1001,14 +1018,11 @@ impl Up {
         let Some(restorer) = Restorer::new(&parameters) else { return };
         let Ok(mut encoder) = UpEncoder::new(&parameters) else { return };
         self.b1u = encoder.b1u().iter().map(|symbol| symbol.out).collect();
-        if let Some(path) = std::env::var_os("REVIEW_V92_B1U") {
-            let text: String = self.b1u.iter().map(|v| format!("{v}
-")).collect();
-            let _ = std::fs::write(path, text);
-        }
         // What the receiver has been given and not yet put out is in here
         // too: B1u's first symbol is some way back.
         self.raw = self.recent.drain(..).collect();
+        self.raw_base = self.count - self.raw.len() as u64;
+        self.native_fit = None;
         self.taps = None;
         self.done = 0;
         self.candidates = (-1..=1)
@@ -1039,7 +1053,8 @@ impl Up {
             if self.raw.len() < RECENT + AHEAD + self.b1u.len() + EQ_TAPS {
                 return;
             }
-            let Some((taps, start, db)) = fit_b1u(&self.raw, &self.b1u) else {
+            let starts = EQ_TAPS / 2..RECENT + AHEAD;
+            let Some((taps, start, db)) = fit_b1u(&self.raw, &self.b1u, starts, 1, EQ_TAPS) else {
                 self.stage = UpStage::Phase4;
                 self.candidates.clear();
                 return;
@@ -1047,6 +1062,38 @@ impl Up {
             self.fit_db = db;
             self.done = start;
             self.taps = Some((taps, start));
+            // At the recording's own rate there is no resampler between the
+            // line and the equaliser, and a fit two samples a symbol reads
+            // B1u far better than one at 8000 a second can.
+            if let Some((native, per)) = self.native.as_ref() {
+                let per = *per;
+                let symbol = self.raw_base as usize + start;
+                let guess = (symbol * per).saturating_sub(self.lead);
+                let from = guess.saturating_sub(NATIVE_SEARCH).max(NATIVE_TAPS / 2);
+                let starts = from..guess + NATIVE_SEARCH;
+                if let Some((taps, at, db)) = fit_b1u(native, &self.b1u, starts, per, NATIVE_TAPS)
+                    && db > self.fit_db
+                {
+                    self.fit_db = db;
+                    self.native_fit = Some((taps, at));
+                    self.done = 0;
+                }
+            }
+        }
+        if let (Some((taps, at)), Some((native, per))) = (self.native_fit.as_ref(), self.native.as_ref()) {
+            // Every symbol whose span the recording has reached, by now.
+            let reached = (self.count as usize * *per).min(native.len());
+            let mut values = Vec::new();
+            while at + per * self.done + NATIVE_TAPS / 2 <= reached {
+                let centre = at + per * self.done;
+                let row = &native[centre - NATIVE_TAPS / 2..centre + NATIVE_TAPS / 2];
+                values.push(taps.iter().zip(row).map(|(t, x)| t * x).sum::<f64>());
+                self.done += 1;
+            }
+            for value in values {
+                self.data_symbol(now, value);
+            }
+            return;
         }
         // Every level the equaliser has its whole span of.
         while self.done + EQ_TAPS / 2 < self.raw.len() {
@@ -1088,12 +1135,12 @@ impl Up {
             if self.chosen.is_none() {
                 // What is left of B1u is ones: count them in the first bits
                 // each reads, and keep what it read for the one chosen.
-                for &bit in &bits {
+                for bit in bits {
                     if candidate.held.len() < JUDGED {
                         candidate.ones += usize::from(bit);
                     }
+                    candidate.held.push(bit);
                 }
-                candidate.held.extend(bits);
                 continue;
             }
             if self.chosen == Some(k) && !bits.is_empty() {
@@ -1107,14 +1154,6 @@ impl Up {
         // one.
         if self.chosen.is_none() && self.candidates.iter().all(|c| c.held.len() >= JUDGED) {
             let best = self.candidates.iter().enumerate().max_by_key(|(_, c)| c.ones).map_or(0, |(k, _)| k);
-            if std::env::var_os("REVIEW_V92").is_some() {
-                eprintln!(
-                    "V92 B1u ones by offset: {:?}, delay {}, fit {:.1} dB",
-                    self.candidates.iter().map(|c| (c.offset, c.ones)).collect::<Vec<_>>(),
-                    self.restorer.as_ref().map_or(0, |r| r.delay),
-                    self.fit_db
-                );
-            }
             let held = std::mem::take(&mut self.candidates[best].held);
             self.stream.marks.push((0, now));
             self.stream.bits.extend(held);
@@ -1148,76 +1187,38 @@ impl Up {
     }
 }
 
-fn self_check(parameters: &Parameters) {
-    let Ok(mut encoder) = datapump::v92::upstream::UpEncoder::new(parameters) else {
-        eprintln!("V92 check: no encoder");
-        return;
-    };
-    let mut symbols = encoder.b1u();
-    for _ in 0..40_000 {
-        symbols.push(encoder.next_symbol(|| true));
-    }
-    let Some(mut restorer) = Restorer::new(parameters) else { return };
-    let mut precoder = Precoder::new(&parameters.filters);
-    let mut decoder = UpDecoder::new(parameters);
-    let (mut worst_x, mut worst_u) = (0.0f64, 0.0f64);
-    let mut ones = 0;
-    let mut bits = 0;
-    for (n, symbol) in symbols.iter().enumerate() {
-        let x = restorer.step(symbol.out);
-        let Some(m) = n.checked_sub(restorer.delay) else { continue };
-        let sent = &symbols[m];
-        if m > 2000 {
-            worst_x = worst_x.max((x - sent.x).abs());
-        }
-        let u = x - precoder.tail();
-        precoder.accept(u, x);
-        if m > 2000 {
-            worst_u = worst_u.max((u - sent.u).abs());
-        }
-        if m >= 216 {
-            decoder.feed(u * parameters.gain);
-            for b in decoder.take_bits() {
-                ones += usize::from(b);
-                bits += 1;
-            }
-        }
-    }
-    eprintln!(
-        "V92 check: rms out {:.4}, delay {}, worst x error {worst_x:.4}, worst u error {worst_u:.4}, {ones} ones of {bits}, gain {}, first outs {:?}",
-        (symbols.iter().map(|s| s.out * s.out).sum::<f64>() / symbols.len() as f64).sqrt(),
-        restorer.delay,
-        parameters.gain,
-        symbols.iter().take(6).map(|s| (s.u, s.x, s.v, s.out)).collect::<Vec<_>>()
-    );
-}
-
-/// An equaliser from the line's levels to B1u as it was sent: the place in
-/// `raw` B1u begins at, the taps that make it, and how well they do, in
-/// decibels. The place is looked for where the receiver's own delay could
-/// have put it, which is somewhere in the levels held from before.
-fn fit_b1u(raw: &[f64], b1u: &[f64]) -> Option<(Vec<f64>, usize, f64)> {
+/// An equaliser from the line's levels to B1u as it was sent, `step` samples
+/// a symbol and `span` samples long: the sample in `raw` B1u's first symbol
+/// is centred on, the taps, and how well they do in decibels. Each of
+/// `starts` is tried.
+fn fit_b1u(
+    raw: &[f64],
+    b1u: &[f64],
+    starts: std::ops::Range<usize>,
+    step: usize,
+    span: usize,
+) -> Option<(Vec<f64>, usize, f64)> {
     let mut best: Option<(f64, Vec<f64>, usize)> = None;
     let energy: f64 = b1u.iter().map(|b| b * b).sum();
-    for start in EQ_TAPS / 2..RECENT + AHEAD {
-        if start + b1u.len() + EQ_TAPS / 2 > raw.len() {
-            break;
+    for start in starts {
+        if start < span / 2 || start + step * b1u.len() + span / 2 > raw.len() {
+            continue;
         }
-        let row = |k: usize| &raw[start + k - EQ_TAPS / 2..start + k + EQ_TAPS / 2];
-        let mut a = vec![Complex::ZERO; EQ_TAPS * EQ_TAPS];
-        let mut b = vec![Complex::ZERO; EQ_TAPS];
+        let row = |k: usize| &raw[start + step * k - span / 2..start + step * k + span / 2];
+        let mut a = vec![Complex::ZERO; span * span];
+        let mut b = vec![Complex::ZERO; span];
         for (k, &target) in b1u.iter().enumerate() {
             let r = row(k);
-            for i in 0..EQ_TAPS {
+            for i in 0..span {
                 b[i].re += r[i] * target;
-                for j in 0..EQ_TAPS {
-                    a[i * EQ_TAPS + j].re += r[i] * r[j];
+                for j in 0..span {
+                    a[i * span + j].re += r[i] * r[j];
                 }
             }
         }
-        let trace: f64 = (0..EQ_TAPS).map(|i| a[i * EQ_TAPS + i].re).sum();
-        for i in 0..EQ_TAPS {
-            a[i * EQ_TAPS + i].re += 1e-9 * trace;
+        let trace: f64 = (0..span).map(|i| a[i * span + i].re).sum();
+        for i in 0..span {
+            a[i * span + i].re += 1e-9 * trace;
         }
         let Some(w) = dsp::complex::solve_hermitian(&a, &b) else { continue };
         let w: Vec<f64> = w.iter().map(|c| c.re).collect();
@@ -1227,9 +1228,6 @@ fn fit_b1u(raw: &[f64], b1u: &[f64]) -> Option<(Vec<f64>, usize, f64)> {
         }
     }
     let (left, taps, start) = best?;
-    if std::env::var_os("REVIEW_V92").is_some() {
-        eprintln!("V92 B1u found {} symbols after the held levels began", start);
-    }
     let db = 10.0 * (energy / left.max(1e-30)).log10();
     Some((taps, start, db))
 }
@@ -1415,8 +1413,7 @@ fn to_network(samples: &[f32], first: usize, last: usize, fs: f64, lead: usize) 
 struct Reading {
     events: Vec<Event>,
     streams: Vec<Stream>,
-    cpd: Option<Cpd>,
-    upstream_rates: Option<u32>,
+    upstream_bps: Option<u32>,
     downstream_bps: Option<u32>,
     reached_data: bool,
     trn1u_snr: f64,
@@ -1433,7 +1430,6 @@ fn read(
     until: f64,
     settled: &Settled,
     lead: usize,
-    known_cpd: Option<Cpd>,
 ) -> Option<Reading> {
     let up_info = settled.info1a_pcm_up?;
     let law = if settled.info0d.is_some_and(|d| d.a_law) { Law::A } else { Law::Mu };
@@ -1455,7 +1451,14 @@ fn read(
     let start = first as f64 / fs;
     let mut shared = Shared::default();
     let mut down = Down::new(digital.1, law, up_info.uinfo);
-    let mut up = Up::new(analogue.1, up_info.md_length, known_cpd);
+    let mut up = Up::new(analogue.1, up_info.md_length);
+    up.lead = lead;
+    if let Some(per) = per
+        && per > 1
+    {
+        let slice = &analogue.0[first.min(analogue.0.len())..last.min(analogue.0.len())];
+        up.native = Some((slice.iter().map(|&x| f64::from(x)).collect(), per));
+    }
     let symbols = down_levels.len().min(up_levels.len());
     for k in 0..symbols {
         let now = start + k as f64 / BAUD;
@@ -1472,8 +1475,7 @@ fn read(
     Some(Reading {
         events,
         streams: vec![up.stream, down.stream],
-        cpd: shared.cpd,
-        upstream_rates: shared.upstream_rates,
+        upstream_bps: up.bps,
         downstream_bps: down.bps,
         reached_data,
         trn1u_snr: up.trn1u_snr.unwrap_or(f64::NEG_INFINITY),
@@ -1497,12 +1499,7 @@ pub fn follow(
     let leads: &[usize] = if (fs - BAUD).abs() < 1.0 { &[0] } else { &[0, (fs / BAUD / 2.0).round() as usize] };
     let mut best: Option<Reading> = None;
     for &lead in leads {
-        let Some(first) = read(analogue, digital, fs, from, until, settled, lead, None) else { continue };
-        // The upstream's data fit wants the CPd before it has come down.
-        let reading = match first.cpd.clone() {
-            Some(cpd) => read(analogue, digital, fs, from, until, settled, lead, Some(cpd)).unwrap_or(first),
-            None => first,
-        };
+        let Some(reading) = read(analogue, digital, fs, from, until, settled, lead) else { continue };
         let better = best.as_ref().is_none_or(|b| {
             (reading.up_bits, (reading.trn1u_snr * 10.0) as i64) > (b.up_bits, (b.trn1u_snr * 10.0) as i64)
         });
@@ -1513,9 +1510,69 @@ pub fn follow(
     let reading = best?;
     let outcome = Outcome {
         downstream_bps: reading.downstream_bps,
-        upstream_rates: reading.upstream_rates.map(|r| r as u16),
+        upstream_rates: None,
+        upstream_bps: reading.upstream_bps,
         reached_data: reading.reached_data,
         streams: reading.streams,
     };
     Some((reading.events, outcome))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datapump::v92::{CONSTELLATION_FRAME, Filters, Trellis, up_bits};
+
+    /// A chain that filters: B1u and data of ones from the encoder, at G v(n),
+    /// come back through the restorer and the decoder as ones.
+    #[test]
+    fn the_prefilter_and_precoder_are_undone_without_decisions() {
+        let drn = 7;
+        let parameters = Parameters {
+            drn,
+            trellis: Trellis::Sixteen,
+            extend_e2u: false,
+            gain: 0.01,
+            moduli: [1u8 << (up_bits(drn) / UP_INTERVALS as u32); UP_INTERVALS],
+            filters: Filters {
+                z2: vec![0.0, 0.0, 1.0, -0.45, 0.2, -0.05],
+                p1: vec![0.3, -0.12, 0.04],
+                ..Filters::default()
+            },
+            sets: vec![(0..64).map(|index| (2 * index + 1) as u16).collect()],
+            indices: [0; CONSTELLATION_FRAME],
+        };
+        let mut encoder = UpEncoder::new(&parameters).expect("a chain that can be built");
+        let mut symbols = encoder.b1u();
+        for _ in 0..6000 {
+            symbols.push(encoder.next_symbol(|| true));
+        }
+        let mut restorer = Restorer::new(&parameters).expect("a prefilter to undo");
+        let mut precoder = Precoder::new(&parameters.filters);
+        let mut decoder = UpDecoder::new(&parameters);
+        let (mut ones, mut bits, mut worst) = (0, 0, 0.0f64);
+        for (n, symbol) in symbols.iter().enumerate() {
+            let x = restorer.step(symbol.out);
+            let Some(m) = n.checked_sub(restorer.delay) else { continue };
+            let u = x - precoder.tail();
+            precoder.accept(u, x);
+            if m > 100 {
+                worst = worst.max((u - symbols[m].u).abs());
+            }
+            if m >= B1U_ACQUIRE_FRAMES * UP_INTERVALS {
+                decoder.feed(u * parameters.gain);
+                // The descrambler, started part way, and the trellis take
+                // the first few bits to fall into step.
+                for bit in decoder.take_bits() {
+                    bits += 1;
+                    if bits > 64 {
+                        ones += usize::from(bit);
+                    }
+                }
+            }
+        }
+        assert!(worst < 0.05, "u came back {worst} out");
+        assert!(bits > 10_000, "{bits} bits");
+        assert_eq!(ones, bits - 64, "every bit of B1u and the data was a one");
+    }
 }
