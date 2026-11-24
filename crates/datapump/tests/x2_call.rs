@@ -113,3 +113,40 @@ fn the_upstream_has_no_errors_from_e_on() {
     assert!(bits.len() > 28_000, "{} bits", bits.len());
     assert_eq!(bits.iter().filter(|&&b| !b).count(), 0, "zeros in {} bits of idle", bits.len());
 }
+
+/// Two ends at the network's rate, with 10 ms each way.
+fn exchange(seconds: f64, server: &mut datapump::v90::startup::Digital, mut client: impl FnMut(f64) -> f64, done: impl Fn(&datapump::v90::startup::Digital) -> bool) {
+    let mut to_server: std::collections::VecDeque<f64> = vec![0.0; DELAY].into();
+    let mut to_client: std::collections::VecDeque<f64> = vec![0.0; DELAY].into();
+    for _ in 0..(seconds * 8000.0) as usize {
+        let s = server.step(to_server.pop_front().unwrap());
+        let c = client(to_client.pop_front().unwrap());
+        to_client.push_back(s);
+        to_server.push_back(c);
+        if done(server) {
+            return;
+        }
+    }
+}
+
+#[test]
+fn an_x2_client_gets_x2_from_the_server_from_phase_2_on() {
+    use datapump::v90::startup::{Digital, Status as ServerStatus};
+    let mut server = Digital::x2(0.0);
+    let mut client = Client::from_phase2();
+    exchange(30.0, &mut server, |x| client.step(x), |s| matches!(s.status(), ServerStatus::Connected { .. } | ServerStatus::Failed(_)));
+    assert!(server.is_x2(), "not x2: {}", server.phase());
+    assert_eq!(server.status(), ServerStatus::Connected { transmit: 32_000, receive: 28_800 }, "{}", server.phase());
+}
+
+#[test]
+fn a_v34_caller_gets_v34_from_a_server_offering_x2() {
+    use datapump::v34::phase2::Role;
+    use datapump::v34::startup::Modem as V34;
+    use datapump::v90::startup::{Digital, Status as ServerStatus};
+    let mut server = Digital::x2(0.0);
+    let mut caller = V34::new(Role::Call, 8000.0);
+    exchange(30.0, &mut server, |x| caller.step(x), |s| matches!(s.status(), ServerStatus::Connected { .. } | ServerStatus::Failed(_)));
+    assert!(!server.is_x2());
+    assert!(matches!(server.status(), ServerStatus::Connected { .. }), "{:?} at {}", server.status(), server.phase());
+}

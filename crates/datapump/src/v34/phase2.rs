@@ -626,8 +626,11 @@ impl Modem {
     /// taken up to 800 ms after L1 ends, as D-Modem's server does; with none,
     /// phase 2 goes on as V.34's, and a V.34 caller sees nothing but the two
     /// INFO0a bits, both of which V.34 allows.
-    pub fn answering_x2(fs: f64) -> Self {
+    ///
+    /// `lead_in` is V.8's handover silence still to run, as [`Self::v90`]'s.
+    pub fn answering_x2(fs: f64, lead_in: f64) -> Self {
         let mut modem = Self::blank(Role::Answer, fs);
+        modem.silent_until = (lead_in * fs).round() as u64;
         modem.x2 = true;
         modem.ours.asymmetry = 4;
         modem.ours.cme = true;
@@ -1871,7 +1874,7 @@ pub(crate) mod tests {
     /// the marker with `body`, then quiet again.
     fn x2_client(line: &mut Line, body: u8, after: f64, seconds: f64) -> Modem {
         let mut caller = Modem::new(Role::Call, FS);
-        let mut answerer = Modem::answering_x2(FS);
+        let mut answerer = Modem::answering_x2(FS, 0.0);
         let mut marker = dpsk::Transmitter::new(Side::Call, FS);
         let mut sent = false;
         let mut quiet = false;
@@ -1935,7 +1938,7 @@ pub(crate) mod tests {
     #[test]
     fn a_v34_caller_meets_an_x2_server_as_it_meets_any() {
         let mut line = Line::new(0.010, 10.0, f64::INFINITY, 70.0);
-        let (caller, answerer) = run(&mut line, 12.0, Modem::new(Role::Call, FS), Modem::answering_x2(FS));
+        let (caller, answerer) = run(&mut line, 12.0, Modem::new(Role::Call, FS), Modem::answering_x2(FS, 0.0));
         assert_eq!(caller.status(), Status::Done, "call modem stuck at {}", caller.phase());
         assert_eq!(answerer.status(), Status::Done, "answer modem stuck at {}", answerer.phase());
         assert!(answerer.x2_marker().is_none());

@@ -178,6 +178,25 @@ impl Modem {
         self.rx.last_point().map(Into::into)
     }
 
+    /// The largest coordinate the upstream's points reach, as
+    /// [`Self::last_point`] gives them.
+    pub fn upstream_peak(&self) -> f64 {
+        match self.decoder.as_ref() {
+            Some(decoder) => decoder.peak(),
+            None if self.size == Size::Sixteen => 3.0 / 10f64.sqrt(),
+            None => std::f64::consts::FRAC_1_SQRT_2,
+        }
+    }
+
+    /// Points the upstream is read against.
+    pub fn upstream_points(&self) -> usize {
+        match self.decoder.as_ref() {
+            Some(decoder) => decoder.params().framing.l,
+            None if self.size == Size::Sixteen => 16,
+            None => 4,
+        }
+    }
+
     pub fn snr_db(&self) -> f64 {
         self.rx.snr_db()
     }

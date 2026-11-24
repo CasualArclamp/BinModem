@@ -20,7 +20,9 @@ use crate::v32::{Mode, Scrambler};
 use crate::v34::constellation::Point;
 use crate::v34::data::{Encoder, Params};
 use crate::v34::frame::Framing;
-use crate::v34::info::SymbolRate;
+use crate::v34::dpsk;
+use crate::v34::info::{SymbolRate, X2Marker};
+use crate::v34::phase2::{self, Role};
 use crate::v34::qam::{Band, Transmitter};
 use crate::v34::receiver;
 use crate::v34::signals::{self, Sender, Size};
@@ -215,9 +217,26 @@ enum Down {
     Change(usize),
 }
 
+/// Phase 2 as an x2 client has it: V.34's call modem up to the server's L1,
+/// then its marker in place of L1, L2 and INFO1c.
+#[derive(Debug, Clone)]
+struct Front {
+    v34: phase2::Modem,
+    marker: dpsk::Transmitter,
+    now: u64,
+    /// When the server's L1 began, as this end heard it.
+    probe_at: Option<u64>,
+    sent: bool,
+    quiet: u64,
+}
+
+/// The server's L1 lasts 160 ms; the marker follows 10 to 100 ms after it.
+const MARKER_AFTER_PROBE: f64 = 0.190;
+
 /// The simulated client.
 #[derive(Debug, Clone)]
 pub struct Client {
+    front: Option<Front>,
     tx: Transmitter,
     upstream: Upstream,
     gain: f64,
@@ -254,6 +273,7 @@ impl Client {
         };
         upstream.then(&[Up::S, Up::SBar, Up::Pp, Up::Trn(PHASE3_TRN, Size::Four), Up::J]);
         Self {
+            front: None,
             tx: Transmitter::new(band, 0, 0, FS),
             upstream,
             gain: 0.25,
@@ -268,6 +288,58 @@ impl Client {
             records_heard: 0,
             bad_frames: 0,
         }
+    }
+
+    /// From the start of phase 2: V.34's call modem until the server's L1,
+    /// then the marker (`4d`), then phase 3.
+    pub fn from_phase2() -> Self {
+        let mut c = Self::new();
+        c.upstream.after.push_front(c.upstream.up);
+        c.upstream.up = Up::Silence;
+        c.front = Some(Front {
+            v34: phase2::Modem::new(Role::Call, FS),
+            marker: dpsk::Transmitter::new(dpsk::Side::Call, FS),
+            now: 0,
+            probe_at: None,
+            sent: false,
+            quiet: 0,
+        });
+        c
+    }
+
+    /// Whether phase 2 is over for it.
+    pub fn past_phase2(&self) -> bool {
+        self.front.is_none()
+    }
+
+    fn front_step(&mut self, input: f64) -> Option<f64> {
+        let f = self.front.as_mut()?;
+        f.now += 1;
+        let v34 = f.v34.step(input);
+        if f.probe_at.is_none() && f.v34.phase() == "V.34 reading the probe" {
+            f.probe_at = Some(f.now);
+        }
+        if !f.sent && f.probe_at.is_some_and(|at| f.now >= at + (MARKER_AFTER_PROBE * FS) as u64) {
+            let mut bits = vec![true, true];
+            bits.extend(X2Marker::from_body(0x4d).to_bits());
+            f.marker.send(&bits);
+            f.marker.silence();
+            f.sent = true;
+        }
+        if !f.sent {
+            // Quiet once the server's L1 is in: no L1, L2 or tone of its own.
+            return Some(if f.probe_at.is_some() { 0.0 } else { v34 });
+        }
+        if f.marker.is_sending() {
+            return Some(f.marker.next_sample());
+        }
+        f.quiet += 1;
+        if f.quiet < (0.075 * FS) as u64 {
+            return Some(0.0);
+        }
+        self.front = None;
+        self.upstream.next_up();
+        None
     }
 
     pub fn send_bits(&mut self, bits: &[bool]) {
@@ -299,6 +371,9 @@ impl Client {
 
     /// One network sample in (the server's level), one out.
     pub fn step(&mut self, input: f64) -> f64 {
+        if let Some(out) = self.front_step(input) {
+            return out;
+        }
         let (u, negative) = ucode::nearest(Law::Mu, (input * 32768.0).round() as i32);
         self.octet(ucode::octet(Law::Mu, u, negative));
         let upstream = &mut self.upstream;
